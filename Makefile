@@ -1,6 +1,6 @@
 .PHONY: dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
-        seed-mock-data clean pre-commit run-ai-local check-docs grpc-dev-certs
+        seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -24,6 +24,13 @@ lint:
 
 check-docs:
 	@bash scripts/check-doc-refs.sh
+
+# M1.5 gate (docs/superpowers/specs/2026-09-14-rust-data-plane-design.md §16):
+# zero flask_core.database/pydal occurrences under the App Bundle directories.
+# Expected to fail until the parallel svc_action/svc_process DAL migration
+# branches land -- a gate that cannot fail is not a gate.
+check-bundle-dal:
+	@bash scripts/check-bundle-dal-imports.sh
 
 test:
 	@$(MAKE) test-unit
