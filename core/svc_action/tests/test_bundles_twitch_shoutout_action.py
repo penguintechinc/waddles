@@ -11,12 +11,12 @@ import fakeredis
 import httpx
 import pytest
 from flask_core import (
+    AsyncDAL,
     PlatformEvent,
     StageEnvelope,
     reset_bundle_dal_for_tests,
     set_bundle_dal,
 )
-from penguin_dal import AsyncDB, Field
 from waddle_transports import NonRetryableTransportError, RetryableTransportError
 from waddle_transports.transports.irc_relay import outbound_queue_key
 
@@ -105,49 +105,62 @@ class _FakeHelix:
 
 
 @pytest.fixture
-async def dal(tmp_path: Path) -> AsyncIterator[AsyncDB]:
-    """Real sqlite `penguin_dal.AsyncDB` -- `tenants`/`communities`/shoutout tables created.
+async def dal(tmp_path: Path) -> AsyncIterator[AsyncDAL]:
+    """Real sqlite `AsyncDAL` -- `tenants`/`communities`/shoutout tables physically created.
 
     Production (`_ensure_shoutout_tables`) always defines `shoutout_config`/
     `shoutout_history` with `migrate=False` (schema owned by migration 046,
     assumed to already exist against real Postgres) -- a throwaway sqlite
     file has no such table until something actually creates it, so this
-    fixture defines the identical column set first (same two-tier
-    convention `test_dispatch_log.py`'s own `dal` fixture uses for
-    `action_dispatch_log`). `_ensure_shoutout_tables`'s own `if
-    "shoutout_config" not in dal.tables` guard then finds both tables
+    fixture defines the identical column set with `migrate=True` first
+    (same two-tier convention `test_dispatch_log.py`'s own `dal` fixture
+    uses for `action_dispatch_log`). `_ensure_shoutout_tables`'s own
+    `if "shoutout_config" not in dal.tables` guard then finds both tables
     already registered and is a no-op when the bundle runs.
     """
-    async_dal = AsyncDB(f"sqlite+aiosqlite:///{tmp_path}/shoutout_test.db", pool_size=1)
-    await async_dal.define_table("tenants", migrate=False)
-    await async_dal.define_table(
-        "communities", Field("tenant_id", "reference tenants"), migrate=False
-    )
-    await async_dal.define_table(
+    async_dal = AsyncDAL(f"sqlite://{tmp_path}/shoutout_test.db", pool_size=1, migrate=True)
+    d = async_dal.dal
+    d.define_table("tenants", migrate=True)
+    d.define_table("communities", d.Field("tenant_id", "reference tenants"), migrate=True)
+    d.define_table(
         "shoutout_config",
-        Field("community_id", "reference communities", notnull=True),
-        Field("cooldown_minutes", "integer", default=60),
-        migrate=False,
+        d.Field("community_id", "reference communities", notnull=True),
+        d.Field("cooldown_minutes", "integer", default=60),
+        migrate=True,
     )
-    await async_dal.define_table(
+    d.define_table(
         "shoutout_history",
-        Field("community_id", "reference communities", notnull=True),
-        Field("platform", "string", notnull=True),
-        Field("target_username", "string", notnull=True),
-        Field("shoutout_type", "string", default="text"),
-        Field("triggered_by_username", "string"),
-        Field("trigger_type", "string", default="manual"),
-        Field("created_at", "datetime", default=datetime.utcnow),
-        migrate=False,
+        d.Field("community_id", "reference communities", notnull=True),
+        d.Field("platform", "string", notnull=True),
+        d.Field("target_username", "string", notnull=True),
+        d.Field("shoutout_type", "string", default="text"),
+        d.Field("triggered_by_username", "string"),
+        d.Field("trigger_type", "string", default="manual"),
+        d.Field("created_at", "datetime", default=datetime.utcnow),
+        migrate=True,
     )
-    await async_dal.tenants.async_insert()
-    await async_dal.communities.async_insert(tenant_id=1)
+    d.tenants.insert()
+    d.communities.insert(tenant_id=1)
+    d.commit()
     set_bundle_dal(async_dal)
     try:
         yield async_dal
     finally:
         reset_bundle_dal_for_tests()
-        await async_dal.close()
+        # `close_async()` runs pydal's `DAL.close()` inside its own
+        # ThreadPoolExecutor, on a different thread than the one that
+        # created the DAL -- pydal's `close()` reads THREAD_LOCAL state
+        # only ever populated on the *creating* thread, so a cross-thread
+        # close can raise (the exact gotcha `app.py::shutdown` documents
+        # and defends against with this same try/except). `test_dispatch_
+        # log.py`'s own `dal` fixture sidesteps this entirely by never
+        # calling `close_async()` at all; this fixture calls it anyway
+        # (for pool/thread hygiene across many tests in one session) but
+        # never lets a cross-thread failure fail the test that already ran.
+        try:
+            await async_dal.close_async()
+        except Exception:  # noqa: BLE001, S110 -- known pydal cross-thread close gotcha
+            pass  # nosec B110 -- same rationale as the noqa above
 
 
 @pytest.fixture
@@ -212,7 +225,7 @@ class TestPayloadValidation:
 
 class TestTextShoutout:
     async def test_offline_target_renders_default_template_and_records_history(
-        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = _FakeHelix(
             user={"id": "999", "login": "shroud", "display_name": "Shroud"},
@@ -235,14 +248,14 @@ class TestTextShoutout:
         assert "they were last playing Chess!" in sent["text"]
         assert "LIVE" not in sent["text"]
 
-        history_rows = await dal(dal.shoutout_history.target_username == "shroud").select()
+        history_rows = dal.dal(dal.dal.shoutout_history.target_username == "shroud").select()
         assert len(history_rows) == 1
         assert history_rows[0].platform == "twitch"
         assert history_rows[0].shoutout_type == "text"
         assert history_rows[0].triggered_by_username == "alice"
 
     async def test_live_target_appends_viewer_count_suffix(
-        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = _FakeHelix(
             user={"id": "999", "login": "shroud", "display_name": "Shroud"},
@@ -263,7 +276,7 @@ class TestTextShoutout:
         assert not any(c.startswith("get_channel") for c in fake.calls)
 
     async def test_unknown_game_falls_back_to_default_text(
-        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = _FakeHelix(channel={})
         _patch_helix(monkeypatch, fake)
@@ -279,7 +292,7 @@ class TestTextShoutout:
 
 class TestVideoShoutout:
     async def test_video_with_clip_pushes_media_overlay(
-        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("PRESENTATION_URL", "http://8.8.8.8:8207")
         fake = _FakeHelix(
@@ -312,11 +325,11 @@ class TestVideoShoutout:
         assert body["video_url"] == "https://clips.twitch.tv/embed?clip=clip1"
         assert body["duration_s"] == 30
 
-        history_rows = await dal(dal.shoutout_history.target_username == "shroud").select()
+        history_rows = dal.dal(dal.dal.shoutout_history.target_username == "shroud").select()
         assert history_rows[0].shoutout_type == "video"
 
     async def test_video_duration_s_config_override(
-        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("PRESENTATION_URL", "http://8.8.8.8:8207")
         clip = {"id": "c1", "thumbnail_url": None, "embed_url": None, "url": "https://x"}
@@ -340,7 +353,7 @@ class TestVideoShoutout:
         assert json.loads(captured["body"])["video_url"] == "https://x"
 
     async def test_video_with_no_clip_skips_push_but_still_replies(
-        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = _FakeHelix(channel={"game_name": "Chess"}, clip=None)
         _patch_helix(monkeypatch, fake)
@@ -359,7 +372,7 @@ class TestVideoShoutout:
         assert push_called is False
 
     async def test_overlay_push_failure_does_not_fail_the_shoutout(
-        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("PRESENTATION_URL", "http://8.8.8.8:8207")
         fake = _FakeHelix(
@@ -380,16 +393,16 @@ class TestVideoShoutout:
             result = await shoutout(_envelope({"kind": "video"}), _config(), http_client=client)
 
         assert result.transport == "irc_relay"
-        history_rows = await dal(dal.shoutout_history.target_username == "shroud").select()
+        history_rows = dal.dal(dal.dal.shoutout_history.target_username == "shroud").select()
         assert len(history_rows) == 1
 
 
 class TestCooldown:
     async def test_within_cooldown_blocks_and_replies_without_calling_helix(
-        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        await _ensure_shoutout_tables(dal)
-        await dal.shoutout_history.async_insert(
+        _ensure_shoutout_tables(dal)
+        dal.dal.shoutout_history.insert(
             community_id=_COMMUNITY_ID,
             platform="twitch",
             target_username="shroud",
@@ -398,6 +411,7 @@ class TestCooldown:
             trigger_type="manual",
             created_at=datetime.utcnow() - timedelta(minutes=5),
         )
+        dal.dal.commit()
 
         fake = _FakeHelix()
         _patch_helix(monkeypatch, fake)
@@ -413,11 +427,11 @@ class TestCooldown:
         assert fake.calls == []  # never reached Helix
 
     async def test_cooldown_respects_per_community_override(
-        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        await _ensure_shoutout_tables(dal)
-        await dal.shoutout_config.async_insert(community_id=_COMMUNITY_ID, cooldown_minutes=5)
-        await dal.shoutout_history.async_insert(
+        _ensure_shoutout_tables(dal)
+        dal.dal.shoutout_config.insert(community_id=_COMMUNITY_ID, cooldown_minutes=5)
+        dal.dal.shoutout_history.insert(
             community_id=_COMMUNITY_ID,
             platform="twitch",
             target_username="shroud",
@@ -426,6 +440,7 @@ class TestCooldown:
             trigger_type="manual",
             created_at=datetime.utcnow() - timedelta(minutes=10),
         )
+        dal.dal.commit()
 
         fake = _FakeHelix(channel={"game_name": "Chess"})
         _patch_helix(monkeypatch, fake)
@@ -437,10 +452,10 @@ class TestCooldown:
         assert any(c.startswith("get_user") for c in fake.calls)
 
     async def test_expired_cooldown_allows_a_new_shoutout(
-        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        await _ensure_shoutout_tables(dal)
-        await dal.shoutout_history.async_insert(
+        _ensure_shoutout_tables(dal)
+        dal.dal.shoutout_history.insert(
             community_id=_COMMUNITY_ID,
             platform="twitch",
             target_username="shroud",
@@ -449,6 +464,7 @@ class TestCooldown:
             trigger_type="manual",
             created_at=datetime.utcnow() - timedelta(minutes=61),
         )
+        dal.dal.commit()
 
         fake = _FakeHelix(channel={"game_name": "Chess"})
         _patch_helix(monkeypatch, fake)
@@ -457,13 +473,13 @@ class TestCooldown:
             await shoutout(_envelope(), _config(), http_client=client)
 
         assert any(c.startswith("get_user") for c in fake.calls)
-        history_rows = await dal(dal.shoutout_history.target_username == "shroud").select()
+        history_rows = dal.dal(dal.dal.shoutout_history.target_username == "shroud").select()
         assert len(history_rows) == 2  # the seeded row + this new one
 
 
 class TestHelixFailure:
     async def test_helix_error_becomes_a_friendly_reply_and_records_no_history(
-        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = _FakeHelix(raise_error=TwitchHelixError("twitch user 'ghost' not found"))
         _patch_helix(monkeypatch, fake)
@@ -476,13 +492,13 @@ class TestHelixFailure:
         import json
 
         assert json.loads(raw)["text"] == "shoutout failed: twitch user 'ghost' not found"
-        history_rows = await dal(dal.shoutout_history.target_username == "ghost").select()
+        history_rows = dal.dal(dal.dal.shoutout_history.target_username == "ghost").select()
         assert len(history_rows) == 0
 
 
 class TestReplyDispatch:
     async def test_no_resolvable_channel_is_non_retryable(
-        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = _FakeHelix(channel={"game_name": "Chess"})
         _patch_helix(monkeypatch, fake)
@@ -496,7 +512,7 @@ class TestReplyDispatch:
                 )
 
     async def test_transport_retryable_error_propagates_unchanged(
-        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = _FakeHelix(channel={"game_name": "Chess"})
         _patch_helix(monkeypatch, fake)
@@ -511,7 +527,7 @@ class TestReplyDispatch:
                 await shoutout(_envelope(), _config(), http_client=client)
 
     async def test_discord_reply_sends_rendered_text(
-        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("TEST_DISCORD_BOT_TOKEN", "fake-bot-token")
         fake = _FakeHelix(channel={"game_name": "Chess"})
@@ -542,7 +558,7 @@ class TestReplyDispatch:
 
 class TestHistoryWriteFailureTolerated:
     async def test_history_write_failure_does_not_raise(
-        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDAL, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         fake = _FakeHelix(channel={"game_name": "Chess"})
         _patch_helix(monkeypatch, fake)

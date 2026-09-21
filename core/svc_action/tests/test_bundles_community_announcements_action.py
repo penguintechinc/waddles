@@ -4,19 +4,18 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
 import httpx
 import pytest
 from flask_core import (
+    AsyncDAL,
     PlatformEvent,
     StageEnvelope,
     reset_bundle_dal_for_tests,
     set_bundle_dal,
 )
-from penguin_dal import AsyncDB, Field
 from waddle_transports import NonRetryableTransportError, RetryableTransportError
 
 from bundles.community_announcements_action import broadcast_announcement
@@ -80,91 +79,125 @@ def _client(handler) -> httpx.AsyncClient:  # noqa: ANN001
     return httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
 
 
-def _mock_dal(
-    tables: tuple[str, ...] = ("community_servers", "announcement_broadcasts"),
-) -> mock.MagicMock:
-    """Build a `MagicMock` standing in for `penguin_dal`'s `AsyncDB`.
+class _FakeDalQuery:
+    """Fake query object supporting chaining."""
 
-    `dal(query)` is sync (it returns an `AsyncQuerySet`), so the DAL
-    itself must be a `MagicMock`, not an `AsyncMock`. `tables` is
-    pre-populated so `_ensure_announcement_tables`'s idempotent
-    `"x" not in dal.tables` guard is a no-op -- without it, a bare
-    `MagicMock()` would try to `await` its own auto-created (non-async)
-    `.define_table(...)` attribute and raise `TypeError`.
-    """
-    dal = mock.MagicMock()
-    dal.tables = tables
-    dal.return_value.select = mock.AsyncMock(return_value=[])
-    return dal
+    def __init__(self, parent_dal: Any) -> None:
+        self._parent_dal = parent_dal
+        self._community_id: int | None = None
+        self._platforms: list[str] | None = None
 
+    def __and__(self, other: Any) -> Any:
+        """Support & operator for combining queries."""
+        # other should be a platform filter, extract info if possible
+        return self
 
-class _FakeQuery:
-    """Minimal fake `penguin_dal.Query` -- combinable via `&`, carries its own row predicate."""
+    def __eq__(self, other: int) -> Any:
+        """Support == comparison for community_id."""
+        self._parent_dal._query_community_id = other
+        return self
 
-    def __init__(self, predicate: Any) -> None:
-        self._predicate = predicate
+    def select(self) -> list[Any]:
+        """Return servers matching the query."""
+        if self._parent_dal._query_community_id is None:
+            return []
+        result = []
+        for s in self._parent_dal._servers:
+            if s["community_id"] != self._parent_dal._query_community_id:
+                continue
+            if self._parent_dal._query_platforms:
+                if s["platform"] not in self._parent_dal._query_platforms:
+                    continue
+            result.append(type("Server", (), s)())
+        return result
 
-    def __and__(self, other: _FakeQuery) -> _FakeQuery:
-        return _FakeQuery(lambda row: self._predicate(row) and other._predicate(row))
+    async def __aenter__(self):
+        """Support async context manager pattern if needed."""
+        return self
 
-
-class _FakeField:
-    """Minimal fake `penguin_dal.FieldProxy` -- only `==`/`.belongs()`, this bundle's own surface."""
-
-    def __init__(self, name: str) -> None:
-        self._name = name
-
-    def __eq__(self, other: object) -> _FakeQuery:  # type: ignore[override]
-        return _FakeQuery(lambda row: getattr(row, self._name, None) == other)
-
-    def belongs(self, values: list[Any]) -> _FakeQuery:
-        return _FakeQuery(lambda row: getattr(row, self._name, None) in values)
-
-
-class _FakeTable:
-    """Minimal fake `penguin_dal.TableProxy` -- field access (queries) + `.async_insert()`."""
-
-    def __init__(self, parent: _FakeDal, records: list[Any]) -> None:
-        self._parent = parent
-        self._records = records
-
-    def __getattr__(self, name: str) -> _FakeField:
-        return _FakeField(name)
-
-    async def async_insert(self, **kwargs: object) -> int:
-        self._records.append(SimpleNamespace(**kwargs))
-        return len(self._records)
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Support async context manager pattern if needed."""
+        pass
 
 
-class _FakeQuerySet:
-    """Minimal fake `penguin_dal.AsyncQuerySet` -- only `.select()`, this bundle's own surface."""
+class _FakeDalTable:
+    """Fake table object supporting community_servers and announcement_broadcasts access."""
 
-    def __init__(self, records: list[Any], query: _FakeQuery | None) -> None:
-        self._records = records
-        self._query = query
+    def __init__(self, parent_dal: Any) -> None:
+        self._parent_dal = parent_dal
 
-    async def select(self) -> list[Any]:
-        if self._query is None:
-            return list(self._records)
-        return [r for r in self._records if self._query._predicate(r)]
+    def __getattr__(self, name: str) -> Any:
+        """Support attribute access like community_id or platform."""
+        if name == "community_id":
+            return self
+        elif name == "platform":
+            return self
+        return self
+
+    def __eq__(self, other: int) -> Any:
+        """Support == comparison."""
+        self._parent_dal._query_community_id = other
+        return _FakeDalQuery(self._parent_dal)
+
+    def belongs(self, platforms: list[str]) -> Any:
+        """Support .belongs() filter."""
+        self._parent_dal._query_platforms = platforms
+        return self
+
+    def __and__(self, other: Any) -> Any:
+        """Support & operator."""
+        return self
 
 
 class _FakeDal:
-    """In-memory stand-in for `penguin_dal.AsyncDB` -- implements only this bundle's own surface."""
+    """In-memory stand-in for AsyncDAL -- implements only the surface this bundle uses."""
 
     def __init__(self) -> None:
-        self._servers: list[Any] = []
-        self._broadcasts: list[Any] = []
+        self._servers: list[dict[str, Any]] = []
+        self._query_community_id: int | None = None
+        self._query_platforms: list[str] | None = None
+        self.community_servers = _FakeDalTable(self)
+        self.announcement_broadcasts = self
+        # `dal.dal(query)` (the real `AsyncDAL.dal` raw-pydal-DAL attribute)
+        # resolves to this same fake's own `__call__` -- and `.tables`
+        # pre-populated so `_ensure_announcement_tables`'s idempotent
+        # `"x" not in dal.tables` guard is a no-op against this fake.
+        self.dal = self
         self.tables = ("community_servers", "announcement_broadcasts")
-        self.community_servers = _FakeTable(self, self._servers)
-        self.announcement_broadcasts = _FakeTable(self, self._broadcasts)
 
-    def __call__(self, query: _FakeQuery) -> _FakeQuerySet:
-        return _FakeQuerySet(self._servers, query)
+    def __call__(self, query: Any) -> Any:
+        """Support the query pattern dal(dal.community_servers.community_id == id)."""
+        return query if hasattr(query, "select") else self
+
+    def insert(self, **kwargs: object) -> None:
+        """Record a broadcast attempt."""
+        if not hasattr(self, "_broadcasts"):
+            self._broadcasts: list[Any] = []
+        self._broadcasts.append(kwargs)
+
+    def commit(self) -> None:
+        """No-op for test."""
+        pass
+
+    async def select_async(self, query: Any) -> list[Any]:
+        """Async version of select - delegates to sync select if query has it."""
+        if hasattr(query, "select"):
+            result = query.select()
+            return result
+        # For complex queries, return empty (tests will use mocks for complex cases)
+        return []
+
+    async def insert_async(self, table: Any, **kwargs: object) -> None:
+        """Async version of insert - delegates to sync insert."""
+        self.insert(**kwargs)
 
     def add_server(self, id: int, platform: str, community_id: int = 1) -> None:
         """Add a test server."""
-        self._servers.append(SimpleNamespace(id=id, platform=platform, community_id=community_id))
+        self._servers.append({
+            "id": id,
+            "platform": platform,
+            "community_id": community_id,
+        })
 
     def set_servers_empty(self) -> None:
         """Clear all servers."""
@@ -203,15 +236,17 @@ class TestBroadcastAnnouncement:
         assert result.transport == "bundle"
         assert "1/1" in result.detail
 
+    @pytest.mark.asyncio
     async def test_broadcasts_to_multiple_platforms(self) -> None:
         """Test broadcasting to multiple platforms."""
-        mock_dal = _mock_dal()
+        mock_dal = mock.MagicMock()
         mock_discord_server = mock.MagicMock(id=1, platform="discord", community_id=1)
         mock_twitch_server = mock.MagicMock(id=2, platform="twitch", community_id=1)
-        mock_dal.return_value.select = mock.AsyncMock(return_value=[
+        mock_dal.select_async = mock.AsyncMock(return_value=[
             mock_discord_server,
             mock_twitch_server,
         ])
+        mock_dal.insert_async = mock.AsyncMock()
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200)
@@ -236,12 +271,13 @@ class TestBroadcastAnnouncement:
         assert result.transport == "bundle"
         assert "2/2" in result.detail
 
+    @pytest.mark.asyncio
     async def test_records_broadcast_results_in_db(self) -> None:
         """Test that broadcast attempts are recorded in announcement_broadcasts."""
-        mock_dal = _mock_dal()
+        mock_dal = mock.MagicMock()
         mock_server = mock.MagicMock(id=1, platform="discord", community_id=1)
-        mock_dal.return_value.select = mock.AsyncMock(return_value=[mock_server])
-        mock_dal.announcement_broadcasts.async_insert = mock.AsyncMock()
+        mock_dal.select_async = mock.AsyncMock(return_value=[mock_server])
+        mock_dal.insert_async = mock.AsyncMock()
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200)
@@ -260,24 +296,30 @@ class TestBroadcastAnnouncement:
                     await broadcast_announcement(_envelope(), _config(), http_client=client)
 
         # Verify insert was called with correct parameters
-        mock_dal.announcement_broadcasts.async_insert.assert_called()
-        call_args = mock_dal.announcement_broadcasts.async_insert.call_args
+        mock_dal.insert_async.assert_called()
+        call_args = mock_dal.insert_async.call_args
         assert call_args[1]["announcement_id"] == 42
         assert call_args[1]["community_server_id"] == 1
         assert call_args[1]["platform"] == "discord"
         assert call_args[1]["status"] == "sent"
 
+    @pytest.mark.asyncio
     async def test_handles_partial_platform_failure(self) -> None:
         """Test when some platforms succeed and others fail."""
-        mock_dal = _mock_dal()
+        mock_dal = mock.MagicMock()
         mock_discord_server = mock.MagicMock(id=1, platform="discord", community_id=1)
         mock_twitch_server = mock.MagicMock(id=2, platform="twitch", community_id=1)
-        mock_dal.return_value.select = mock.AsyncMock(return_value=[
+        mock_dal.select_async = mock.AsyncMock(return_value=[
             mock_discord_server,
             mock_twitch_server,
         ])
+        mock_dal.insert_async = mock.AsyncMock()
+
+        call_count = 0
 
         def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
             if "discord" in request.url.host or "8070" in str(request.url):
                 return httpx.Response(200)
             else:
@@ -301,11 +343,13 @@ class TestBroadcastAnnouncement:
                             http_client=client,
                         )
 
+    @pytest.mark.asyncio
     async def test_all_failures_is_retryable(self) -> None:
         """Test that all platforms failing is retryable (network issue)."""
-        mock_dal = _mock_dal()
+        mock_dal = mock.MagicMock()
         mock_server = mock.MagicMock(id=1, platform="discord", community_id=1)
-        mock_dal.return_value.select = mock.AsyncMock(return_value=[mock_server])
+        mock_dal.select_async = mock.AsyncMock(return_value=[mock_server])
+        mock_dal.insert_async = mock.AsyncMock()
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(500)
@@ -324,6 +368,7 @@ class TestBroadcastAnnouncement:
                     with pytest.raises(RetryableTransportError, match="all .* servers failed"):
                         await broadcast_announcement(_envelope(), _config(), http_client=client)
 
+    @pytest.mark.asyncio
     async def test_missing_announcement_data_is_non_retryable(self) -> None:
         """Test that missing announcement dict is non-retryable."""
         async with _client(lambda r: httpx.Response(200)) as client:
@@ -334,6 +379,7 @@ class TestBroadcastAnnouncement:
                     http_client=client,
                 )
 
+    @pytest.mark.asyncio
     async def test_missing_target_platforms_is_non_retryable(self) -> None:
         """Test that missing target_platforms is non-retryable."""
         async with _client(lambda r: httpx.Response(200)) as client:
@@ -344,6 +390,7 @@ class TestBroadcastAnnouncement:
                     http_client=client,
                 )
 
+    @pytest.mark.asyncio
     async def test_missing_announcement_id_is_non_retryable(self) -> None:
         """Test that missing announcement_id is non-retryable."""
         async with _client(lambda r: httpx.Response(200)) as client:
@@ -354,6 +401,7 @@ class TestBroadcastAnnouncement:
                     http_client=client,
                 )
 
+    @pytest.mark.asyncio
     async def test_missing_community_id_is_non_retryable(self) -> None:
         """Test that missing community_id is non-retryable."""
         envelope = _envelope()
@@ -370,10 +418,11 @@ class TestBroadcastAnnouncement:
             with pytest.raises(NonRetryableTransportError, match="community_id"):
                 await broadcast_announcement(envelope, _config(), http_client=client)
 
+    @pytest.mark.asyncio
     async def test_no_servers_found_is_non_retryable(self) -> None:
         """Test that no matching servers is non-retryable."""
-        mock_dal = _mock_dal()
-        mock_dal.return_value.select = mock.AsyncMock(return_value=[])
+        mock_dal = mock.MagicMock()
+        mock_dal.select_async = mock.AsyncMock(return_value=[])
 
         async with _client(lambda r: httpx.Response(200)) as client:
             with mock.patch(
@@ -383,11 +432,13 @@ class TestBroadcastAnnouncement:
                 with pytest.raises(NonRetryableTransportError, match="no active servers"):
                     await broadcast_announcement(_envelope(), _config(), http_client=client)
 
+    @pytest.mark.asyncio
     async def test_network_timeout_is_retryable(self) -> None:
         """Test that network timeouts are retryable."""
-        mock_dal = _mock_dal()
+        mock_dal = mock.MagicMock()
         mock_server = mock.MagicMock(id=1, platform="discord", community_id=1)
-        mock_dal.return_value.select = mock.AsyncMock(return_value=[mock_server])
+        mock_dal.select_async = mock.AsyncMock(return_value=[mock_server])
+        mock_dal.insert_async = mock.AsyncMock()
 
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.TimeoutException("timeout")
@@ -406,11 +457,13 @@ class TestBroadcastAnnouncement:
                     with pytest.raises(RetryableTransportError, match="all .* servers failed"):
                         await broadcast_announcement(_envelope(), _config(), http_client=client)
 
+    @pytest.mark.asyncio
     async def test_preserves_announcement_data(self) -> None:
         """Test that announcement data is correctly passed to endpoint."""
-        mock_dal = _mock_dal()
+        mock_dal = mock.MagicMock()
         mock_server = mock.MagicMock(id=1, platform="discord", community_id=1)
-        mock_dal.return_value.select = mock.AsyncMock(return_value=[mock_server])
+        mock_dal.select_async = mock.AsyncMock(return_value=[mock_server])
+        mock_dal.insert_async = mock.AsyncMock()
 
         captured_body = {}
 
@@ -442,6 +495,7 @@ class TestBroadcastAnnouncement:
 class TestEdgeCases:
     """Test edge cases and error handling."""
 
+    @pytest.mark.asyncio
     async def test_missing_platform_endpoint_returns_false(self) -> None:
         """Test that missing platform endpoint is handled gracefully."""
         from bundles.community_announcements_action import _post_to_platform
@@ -452,6 +506,7 @@ class TestEdgeCases:
         assert result[0] is False
         assert "No action endpoint configured" in result[1]
 
+    @pytest.mark.asyncio
     async def test_generic_exception_in_post_returns_error(self) -> None:
         """Test that generic exceptions are caught and returned as errors."""
         from bundles.community_announcements_action import _post_to_platform
@@ -475,62 +530,66 @@ class TestEdgeCases:
 
 
 @pytest.fixture
-async def real_dal(tmp_path: Path) -> AsyncIterator[AsyncDB]:
-    """Real sqlite `penguin_dal.AsyncDB` -- `tenants`/`communities`/`community_servers` created.
+async def real_dal(tmp_path: Path) -> AsyncIterator[AsyncDAL]:
+    """Real sqlite `AsyncDAL` -- `tenants`/`communities`/`community_servers` physically created.
 
     `_ensure_announcement_tables` always binds `community_servers`/
     `announcement_broadcasts` with `migrate=False` (schema owned by
     `000_create_base_schema.sql`, assumed to already exist against real
     Postgres) -- a throwaway sqlite file has no such table until
-    something actually creates it, so this fixture defines the identical
-    column set first (same two-tier convention `test_bundles_twitch_
-    shoutout_action.py`'s own `dal` fixture uses). `_ensure_announcement_
-    tables`'s own `if "community_servers" not in dal.tables` guard then
-    finds both tables already registered and is a no-op when the bundle
-    runs.
+    something actually creates it, so this fixture defines the
+    identical column set with `migrate=True` first (same two-tier
+    convention `test_bundles_twitch_shoutout_action.py`'s own `dal`
+    fixture uses). `_ensure_announcement_tables`'s own `if "community_
+    servers" not in dal.tables` guard then finds both tables already
+    registered and is a no-op when the bundle runs.
     """
-    async_dal = AsyncDB(f"sqlite+aiosqlite:///{tmp_path}/announcements_test.db", pool_size=1)
-    await async_dal.define_table("tenants", migrate=False)
-    await async_dal.define_table(
-        "communities", Field("tenant_id", "reference tenants"), migrate=False
-    )
-    await async_dal.define_table(
+    async_dal = AsyncDAL(f"sqlite://{tmp_path}/announcements_test.db", pool_size=1, migrate=True)
+    d = async_dal.dal
+    d.define_table("tenants", migrate=True)
+    d.define_table("communities", d.Field("tenant_id", "reference tenants"), migrate=True)
+    d.define_table(
         "community_servers",
-        Field("community_id", "reference communities", notnull=True),
-        Field("platform", "string", notnull=True),
-        migrate=False,
+        d.Field("community_id", "reference communities", notnull=True),
+        d.Field("platform", "string", notnull=True),
+        migrate=True,
     )
-    await async_dal.define_table(
+    d.define_table(
         "announcement_broadcasts",
-        Field("announcement_id", "integer", notnull=True),
-        Field("community_server_id", "integer"),
-        Field("platform", "string", notnull=True),
-        Field("status", "string", default="pending"),
-        Field("error_message", "string"),
-        Field("broadcasted_at", "datetime"),
-        Field("created_at", "datetime"),
-        migrate=False,
+        d.Field("announcement_id", "integer", notnull=True),
+        d.Field("community_server_id", "integer"),
+        d.Field("platform", "string", notnull=True),
+        d.Field("status", "string", default="pending"),
+        d.Field("error_message", "string"),
+        d.Field("broadcasted_at", "datetime"),
+        d.Field("created_at", "datetime"),
+        migrate=True,
     )
-    await async_dal.tenants.async_insert()
-    await async_dal.communities.async_insert(tenant_id=1)
+    d.tenants.insert()
+    d.communities.insert(tenant_id=1)
+    d.commit()
     set_bundle_dal(async_dal)
     try:
         yield async_dal
     finally:
         reset_bundle_dal_for_tests()
-        await async_dal.close()
+        try:
+            await async_dal.close_async()
+        except Exception:  # noqa: BLE001, S110 -- known pydal cross-thread close gotcha
+            pass  # nosec B110
 
 
-class TestRealDal:
-    """Real-DB smoke (gh-298): exercises the actual `penguin_dal` query path, not a fake/mock."""
+class TestRealPydal:
+    """Real-DB smoke (gh-298): exercises the actual pydal query path, not a fake/mock."""
 
     async def test_broadcast_against_real_sqlite_inserts_and_records(
-        self, real_dal: AsyncDB
+        self, real_dal: AsyncDAL
     ) -> None:
-        # regression: gh-298
-        """Insert one community_server, broadcast, read back the audit row via `penguin_dal`."""
-        d = real_dal
-        server_id = await d.community_servers.async_insert(community_id=1, platform="discord")
+        # regression: gh-298 real-pydal
+        """`dal.dal(query)` fix: insert one community_server, broadcast, read back the audit row."""
+        d = real_dal.dal
+        server_id = d.community_servers.insert(community_id=1, platform="discord")
+        d.commit()
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"success": True})
@@ -547,7 +606,7 @@ class TestRealDal:
         assert result.transport == "bundle"
         assert "1/1" in result.detail
 
-        broadcasts = await d(d.announcement_broadcasts.community_server_id == server_id).select()
+        broadcasts = d(d.announcement_broadcasts.community_server_id == server_id).select()
         assert len(broadcasts) == 1
         assert broadcasts[0].platform == "discord"
         assert broadcasts[0].status == "sent"

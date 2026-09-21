@@ -372,12 +372,14 @@ class TestRouter:
 
     async def test_reputation_dispatches_to_the_real_reputation_bundle(self) -> None:
         """`!reputation` routes to `community_reputation_process.transform` with real DB data."""
-        set_bundle_dal(_ReputationFoundDal())
+        dal = await _reputation_dal(seeded=True)
+        set_bundle_dal(dal)
         try:
             with bundle_context(tenant="acme", community="4", app_id="waddles.bot.twitch.default"):
                 result = await transform(_event("!reputation", actor="penguinzplays"))
         finally:
             reset_bundle_dal_for_tests()
+            await dal.close()
         assert result is not None
         assert result.payload["text"] == (
             "\U0001f427 penguinzplays — Global: 600 (Trusted) · waddlebot: 720 (Respected)"
@@ -385,23 +387,27 @@ class TestRouter:
 
     async def test_rep_alias_dispatches_to_the_same_reputation_bundle(self) -> None:
         """`!rep` is a second command word routed to the same reputation module."""
-        set_bundle_dal(_ReputationFoundDal())
+        dal = await _reputation_dal(seeded=True)
+        set_bundle_dal(dal)
         try:
             with bundle_context(tenant="acme", community="4", app_id="waddles.bot.twitch.default"):
                 result = await transform(_event("!rep", actor="penguinzplays"))
         finally:
             reset_bundle_dal_for_tests()
+            await dal.close()
         assert result is not None
         assert "waddlebot: 720 (Respected)" in result.payload["text"]
 
     async def test_reputation_dispatch_graceful_when_member_not_found(self) -> None:
         """No matching `community_members` row -- both scores default to the 600 baseline."""
-        set_bundle_dal(_ReputationEmptyDal())
+        dal = await _reputation_dal(seeded=False)
+        set_bundle_dal(dal)
         try:
             with bundle_context(tenant="acme", community="4", app_id="waddles.bot.twitch.default"):
                 result = await transform(_event("!reputation", actor="stranger"))
         finally:
             reset_bundle_dal_for_tests()
+            await dal.close()
         assert result is not None
         assert result.payload["text"] == (
             "\U0001f427 stranger — Global: 600 (Trusted) · community 4: 600 (Trusted)"
@@ -602,29 +608,40 @@ async def _empty_chat_dal() -> AsyncDB:
     return db
 
 
-class _ReputationFoundDal:
-    """Minimal AsyncDAL stand-in -- `community_reputation_process` finds a seeded member.
+async def _reputation_dal(*, seeded: bool) -> AsyncDB:
+    """Real in-memory `penguin_dal.AsyncDB` for `community_reputation_process`.
 
-    Routes by SQL substring like `_FakeDal` in
-    `test_bundles_community_reputation_process.py`: the member lookup (either
-    the `platform_user_id` or `display_name` clause) returns a row carrying
-    `hub_user_id`, the community label query returns a label, and the
-    `reputation_global` query returns that hub user's global score.
+    Seeded or empty depending on the case under test. The bundle's three
+    queries go through `raw_sql_rows()` (D21a), which needs a real
+    SQLAlchemy engine -- an `.execute()` stand-in no longer suffices. Mirrors
+    the fixture in `test_bundles_community_reputation_process.py`.
     """
-
-    async def execute(self, sql: str, params: list[object]) -> list[dict[str, object]]:
-        if "reputation_global" in sql:
-            return [{"score": 600}]
-        if "FROM communities" in sql:
-            return [{"label": "waddlebot"}]
-        return [{"display_name": "penguinzplays", "reputation": 720, "hub_user_id": "42"}]
-
-
-class _ReputationEmptyDal:
-    """Minimal AsyncDAL stand-in -- `community_reputation_process` finds no member row."""
-
-    async def execute(self, sql: str, params: list[object]) -> list[dict[str, object]]:
-        return []
+    db = AsyncDB("sqlite://", pool_size=1, echo=False)
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            sa_text(
+                "CREATE TABLE community_members ("
+                "community_id INTEGER, platform TEXT, platform_user_id TEXT, "
+                "display_name TEXT, reputation INTEGER, user_id TEXT)"
+            )
+        )
+        await conn.execute(
+            sa_text("CREATE TABLE communities (id INTEGER, display_name TEXT, name TEXT)")
+        )
+        await conn.execute(
+            sa_text("CREATE TABLE reputation_global (hub_user_id TEXT, score INTEGER)")
+        )
+        if seeded:
+            await conn.execute(
+                sa_text(
+                    "INSERT INTO community_members VALUES "
+                    "(4, 'twitch', 'penguinzplays', 'penguinzplays', 720, '42')"
+                )
+            )
+            await conn.execute(sa_text("INSERT INTO communities VALUES (4, 'waddlebot', 'wb')"))
+            await conn.execute(sa_text("INSERT INTO reputation_global VALUES ('42', 600)"))
+    await db.reflect()
+    return db
 
 
 class _BoomDal:
