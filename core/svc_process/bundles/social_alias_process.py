@@ -54,7 +54,6 @@ own runtime path onto this table) -- imported dynamically via `importlib`
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import importlib
 import inspect
@@ -64,6 +63,8 @@ from datetime import UTC, datetime
 
 from flask_core import BundleContext, PlatformEvent, get_bundle_context, get_bundle_dal
 from flask_core.feature_flags import feature_enabled
+
+from bundles._dal_sql import raw_sql_rows
 
 logger = logging.getLogger(__name__)
 
@@ -105,10 +106,12 @@ _TOO_LONG_MSG = "alias expansion is too long (max 200 characters)"
 
 _ROLE_BY_PLATFORM_SQL = (
     "SELECT role FROM community_members "
-    "WHERE community_id = $1 AND platform = $2 AND platform_user_id = $3 LIMIT 1"
+    "WHERE community_id = :community_id AND platform = :platform "
+    "AND platform_user_id = :platform_user_id LIMIT 1"
 )
 _ROLE_BY_DISPLAY_NAME_SQL = (
-    "SELECT role FROM community_members WHERE community_id = $1 AND display_name = $2 LIMIT 1"
+    "SELECT role FROM community_members "
+    "WHERE community_id = :community_id AND display_name = :display_name LIMIT 1"
 )
 
 
@@ -301,18 +304,14 @@ async def _cmd_list_aliases(ctx: BundleContext) -> str:
 async def _lookup_alias(community_id: int, alias_name: str) -> str | None:
     """Return the active `target_command` for `alias_name`, or `None` if not found."""
     dal = get_bundle_dal()
-
-    def _query() -> str | None:
-        query = (
-            (dal.command_aliases.community_id == community_id)
-            & (dal.command_aliases.alias == alias_name)
-            & (dal.command_aliases.deleted_at.is_null())
-        )
-        rows = dal.select(query)
-        row = rows.first()
-        return str(row.target_command) if row is not None else None
-
-    return await asyncio.to_thread(_query)
+    query = (
+        (dal.command_aliases.community_id == community_id)
+        & (dal.command_aliases.alias == alias_name)
+        & (dal.command_aliases.deleted_at == None)  # noqa: E711 -- penguin_dal FieldProxy.__eq__(None) => IS NULL
+    )
+    rows = await dal(query).select()
+    row = rows.first()
+    return str(row.target_command) if row is not None else None
 
 
 async def _upsert_alias(
@@ -326,66 +325,52 @@ async def _upsert_alias(
     must UPDATE that row (reviving it), never blind-INSERT into it.
     """
     dal = get_bundle_dal()
-
-    def _write() -> None:
-        query = (dal.command_aliases.community_id == community_id) & (
-            dal.command_aliases.alias == alias_name
+    query = (dal.command_aliases.community_id == community_id) & (
+        dal.command_aliases.alias == alias_name
+    )
+    rows = await dal(query).select()
+    existing = rows.first()
+    if existing is not None:
+        await dal(dal.command_aliases.id == existing.id).update(
+            target_command=target_command,
+            deleted_at=None,
+            created_by=created_by or "unknown",
         )
-        rows = dal.select(query)
-        existing = rows.first()
-        if existing is not None:
-            dal.update(
-                dal.command_aliases.id == existing.id,
-                target_command=target_command,
-                deleted_at=None,
-                created_by=created_by or "unknown",
-            )
-        else:
-            dal.insert_async(
-                dal.command_aliases,
-                community_id=community_id,
-                alias=alias_name,
-                target_command=target_command,
-                created_by=created_by or "unknown",
-            )
-
-    await asyncio.to_thread(_write)
+    else:
+        await dal.command_aliases.async_insert(
+            community_id=community_id,
+            alias=alias_name,
+            target_command=target_command,
+            created_by=created_by or "unknown",
+        )
 
 
 async def _soft_delete_alias(community_id: int, alias_name: str) -> bool:
     """Soft-delete an active alias by name. Returns `False` if none was found."""
     dal = get_bundle_dal()
-
-    def _delete() -> bool:
-        query = (
-            (dal.command_aliases.community_id == community_id)
-            & (dal.command_aliases.alias == alias_name)
-            & (dal.command_aliases.deleted_at.is_null())
-        )
-        rows = dal.select(query)
-        row = rows.first()
-        if row is None:
-            return False
-        dal.update(dal.command_aliases.id == row.id, deleted_at=datetime.now(UTC))
-        return True
-
-    return await asyncio.to_thread(_delete)
+    query = (
+        (dal.command_aliases.community_id == community_id)
+        & (dal.command_aliases.alias == alias_name)
+        & (dal.command_aliases.deleted_at == None)  # noqa: E711 -- penguin_dal FieldProxy.__eq__(None) => IS NULL
+    )
+    rows = await dal(query).select()
+    row = rows.first()
+    if row is None:
+        return False
+    await dal(dal.command_aliases.id == row.id).update(deleted_at=datetime.now(UTC))
+    return True
 
 
 async def _list_aliases(community_id: int) -> list[tuple[str, str]]:
     """Return `(alias, target_command)` pairs for every active alias, sorted by alias name."""
     dal = get_bundle_dal()
-
-    def _query() -> list[tuple[str, str]]:
-        query = (dal.command_aliases.community_id == community_id) & (
-            dal.command_aliases.deleted_at.is_null()
-        )
-        rows = dal.select(query)
-        return sorted(
-            ((str(row.alias), str(row.target_command)) for row in rows), key=lambda pair: pair[0]
-        )
-
-    return await asyncio.to_thread(_query)
+    query = (dal.command_aliases.community_id == community_id) & (
+        dal.command_aliases.deleted_at == None  # noqa: E711 -- penguin_dal FieldProxy.__eq__(None) => IS NULL
+    )
+    rows = await dal(query).select()
+    return sorted(
+        ((str(row.alias), str(row.target_command)) for row in rows), key=lambda pair: pair[0]
+    )
 
 
 async def _caller_is_moderator_or_admin(event: PlatformEvent, community_id: int) -> bool:
@@ -405,13 +390,23 @@ async def _caller_is_moderator_or_admin(event: PlatformEvent, community_id: int)
 
     try:
         if platform_user_id:
-            rows = await dal.execute(
-                _ROLE_BY_PLATFORM_SQL, [community_id, event.platform, platform_user_id]
+            rows = await raw_sql_rows(
+                dal,
+                _ROLE_BY_PLATFORM_SQL,
+                {
+                    "community_id": community_id,
+                    "platform": event.platform,
+                    "platform_user_id": platform_user_id,
+                },
             )
             if rows:
                 return str(rows[0]["role"]).lower() in _ADMIN_ROLES
         if event.actor:
-            rows = await dal.execute(_ROLE_BY_DISPLAY_NAME_SQL, [community_id, event.actor])
+            rows = await raw_sql_rows(
+                dal,
+                _ROLE_BY_DISPLAY_NAME_SQL,
+                {"community_id": community_id, "display_name": event.actor},
+            )
             if rows:
                 return str(rows[0]["role"]).lower() in _ADMIN_ROLES
     except Exception as exc:  # noqa: BLE001 -- permission check must fail closed, never crash

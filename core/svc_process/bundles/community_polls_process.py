@@ -16,6 +16,8 @@ import re
 
 from flask_core import PlatformEvent, get_bundle_context, get_bundle_dal
 
+from bundles._dal_sql import raw_sql_rows, raw_sql_write
+
 _COMMAND_PREFIX = "!poll"
 
 
@@ -97,16 +99,14 @@ async def _handle_poll_create(event: PlatformEvent, args: str) -> PlatformEvent 
         community_id = int(ctx.community)
 
         # Create poll in database, scoped to community
-        sql = """
-            INSERT INTO community_polls
-            (community_id, created_by, title, is_active, created_at, updated_at)
-            VALUES ($1, $2, $3, TRUE, NOW(), NOW())
-            RETURNING id
-        """
-        # Use actor (username) as created_by since we don't have direct user ID mapping
         creator_id = event.actor or "unknown"
-
-        result = await dal.execute(sql, [community_id, creator_id, title])
+        result = await raw_sql_write(
+            dal,
+            "INSERT INTO community_polls "
+            "(community_id, created_by, title, is_active, created_at, updated_at) "
+            "VALUES (:community_id, :created_by, :title, TRUE, NOW(), NOW()) RETURNING id",
+            {"community_id": community_id, "created_by": creator_id, "title": title},
+        )
         poll_id = result[0]["id"] if result else None
 
         if not poll_id:
@@ -115,11 +115,12 @@ async def _handle_poll_create(event: PlatformEvent, args: str) -> PlatformEvent 
 
         # Create poll options
         for idx, option_text in enumerate(options):
-            opt_sql = """
-                INSERT INTO poll_options (poll_id, option_text, sort_order)
-                VALUES ($1, $2, $3)
-            """
-            await dal.execute(opt_sql, [poll_id, option_text, idx])
+            await raw_sql_write(
+                dal,
+                "INSERT INTO poll_options (poll_id, option_text, sort_order) "
+                "VALUES (:poll_id, :option_text, :sort_order)",
+                {"poll_id": poll_id, "option_text": option_text, "sort_order": idx},
+            )
 
         reply_text = f"Poll created! ID: {poll_id}\nTitle: {title}\nOptions:\n"
         for idx, opt in enumerate(options):
@@ -164,18 +165,22 @@ async def _handle_poll_vote(event: PlatformEvent, args: str) -> PlatformEvent | 
         community_id = int(ctx.community)
 
         # Fetch poll to verify it exists and belongs to this community (IDOR fix)
-        poll_sql = (
-            "SELECT id, title FROM community_polls WHERE id = $1 AND community_id = $2 "
-            "AND is_active = TRUE"
+        poll_result = await raw_sql_rows(
+            dal,
+            "SELECT id, title FROM community_polls "
+            "WHERE id = :poll_id AND community_id = :community_id AND is_active = TRUE",
+            {"poll_id": poll_id, "community_id": community_id},
         )
-        poll_result = await dal.execute(poll_sql, [poll_id, community_id])
         if not poll_result:
             reply_text = f"Poll {poll_id} not found or is closed."
             return dataclasses.replace(event, payload={**event.payload, "text": reply_text})
 
         # Fetch poll options (safe because we already scoped to community via poll)
-        opts_sql = "SELECT id FROM poll_options WHERE poll_id = $1 ORDER BY sort_order"
-        opts_result = await dal.execute(opts_sql, [poll_id])
+        opts_result = await raw_sql_rows(
+            dal,
+            "SELECT id FROM poll_options WHERE poll_id = :poll_id ORDER BY sort_order",
+            {"poll_id": poll_id},
+        )
         num_opts = len(opts_result) if opts_result else 0
         if not opts_result or option_number < 1 or option_number > len(opts_result):
             reply_text = f"Invalid option number. Poll {poll_id} has {num_opts} options."
@@ -184,15 +189,14 @@ async def _handle_poll_vote(event: PlatformEvent, args: str) -> PlatformEvent | 
         option_id = opts_result[option_number - 1]["id"]
 
         # Record vote using actor (username) as voter identifier
-        vote_sql = """
-            INSERT INTO poll_votes (poll_id, option_id, user_id, voted_at)
-            VALUES ($1, $2, $3, NOW())
-            ON CONFLICT (poll_id, option_id, user_id) DO UPDATE
-            SET voted_at = NOW()
-        """
         voter_id = event.actor or "unknown"
-
-        await dal.execute(vote_sql, [poll_id, option_id, voter_id])
+        await raw_sql_write(
+            dal,
+            "INSERT INTO poll_votes (poll_id, option_id, user_id, voted_at) "
+            "VALUES (:poll_id, :option_id, :user_id, NOW()) "
+            "ON CONFLICT (poll_id, option_id, user_id) DO UPDATE SET voted_at = NOW()",
+            {"poll_id": poll_id, "option_id": option_id, "user_id": voter_id},
+        )
 
         reply_text = f"Vote recorded for option {option_number} on poll {poll_id}!"
         return dataclasses.replace(event, payload={**event.payload, "text": reply_text})
@@ -223,8 +227,12 @@ async def _handle_poll_close(event: PlatformEvent, args: str) -> PlatformEvent |
         community_id = int(ctx.community)
 
         # Fetch poll to verify it exists and belongs to this community (IDOR fix)
-        sql = "SELECT id, title FROM community_polls WHERE id = $1 AND community_id = $2"
-        result = await dal.execute(sql, [poll_id, community_id])
+        result = await raw_sql_rows(
+            dal,
+            "SELECT id, title FROM community_polls "
+            "WHERE id = :poll_id AND community_id = :community_id",
+            {"poll_id": poll_id, "community_id": community_id},
+        )
         if not result:
             reply_text = f"Poll {poll_id} not found."
             return dataclasses.replace(event, payload={**event.payload, "text": reply_text})
@@ -232,21 +240,21 @@ async def _handle_poll_close(event: PlatformEvent, args: str) -> PlatformEvent |
         poll = result[0]
 
         # Close poll, scoped to community
-        close_sql = (
-            "UPDATE community_polls SET is_active = FALSE WHERE id = $1 AND community_id = $2"
+        await raw_sql_write(
+            dal,
+            "UPDATE community_polls SET is_active = FALSE "
+            "WHERE id = :poll_id AND community_id = :community_id",
+            {"poll_id": poll_id, "community_id": community_id},
         )
-        await dal.execute(close_sql, [poll_id, community_id])
 
         # Fetch results
-        results_sql = """
-            SELECT po.option_text, COUNT(pv.id) as vote_count
-            FROM poll_options po
-            LEFT JOIN poll_votes pv ON po.id = pv.option_id
-            WHERE po.poll_id = $1
-            GROUP BY po.id, po.option_text
-            ORDER BY po.sort_order
-        """
-        results = await dal.execute(results_sql, [poll_id])
+        results = await raw_sql_rows(
+            dal,
+            "SELECT po.option_text, COUNT(pv.id) as vote_count "
+            "FROM poll_options po LEFT JOIN poll_votes pv ON po.id = pv.option_id "
+            "WHERE po.poll_id = :poll_id GROUP BY po.id, po.option_text ORDER BY po.sort_order",
+            {"poll_id": poll_id},
+        )
 
         reply_text = f"Poll {poll_id} closed: {poll['title']}\n\nResults:\n"
         for row in results or []:
@@ -267,13 +275,12 @@ async def _handle_poll_list(event: PlatformEvent) -> PlatformEvent | None:
         dal = get_bundle_dal()
         community_id = int(ctx.community) if ctx.community else 0
 
-        sql = """
-            SELECT id, title FROM community_polls
-            WHERE community_id = $1 AND is_active = TRUE
-            ORDER BY created_at DESC
-            LIMIT 10
-        """
-        results = await dal.execute(sql, [community_id])
+        results = await raw_sql_rows(
+            dal,
+            "SELECT id, title FROM community_polls WHERE community_id = :community_id "
+            "AND is_active = TRUE ORDER BY created_at DESC LIMIT 10",
+            {"community_id": community_id},
+        )
 
         if not results:
             reply_text = "No active polls in this community."
@@ -309,8 +316,12 @@ async def _handle_poll_view(event: PlatformEvent, args: str) -> PlatformEvent | 
         community_id = int(ctx.community)
 
         # Fetch poll, scoped to community (IDOR fix)
-        sql = "SELECT id, title, is_active FROM community_polls WHERE id = $1 AND community_id = $2"
-        result = await dal.execute(sql, [poll_id, community_id])
+        result = await raw_sql_rows(
+            dal,
+            "SELECT id, title, is_active FROM community_polls "
+            "WHERE id = :poll_id AND community_id = :community_id",
+            {"poll_id": poll_id, "community_id": community_id},
+        )
         if not result:
             reply_text = f"Poll {poll_id} not found."
             return dataclasses.replace(event, payload={**event.payload, "text": reply_text})
@@ -319,15 +330,13 @@ async def _handle_poll_view(event: PlatformEvent, args: str) -> PlatformEvent | 
         status = "Active" if poll["is_active"] else "Closed"
 
         # Fetch options and vote counts
-        opts_sql = """
-            SELECT po.id, po.option_text, COUNT(pv.id) as vote_count
-            FROM poll_options po
-            LEFT JOIN poll_votes pv ON po.id = pv.option_id
-            WHERE po.poll_id = $1
-            GROUP BY po.id, po.option_text
-            ORDER BY po.sort_order
-        """
-        options = await dal.execute(opts_sql, [poll_id])
+        options = await raw_sql_rows(
+            dal,
+            "SELECT po.id, po.option_text, COUNT(pv.id) as vote_count "
+            "FROM poll_options po LEFT JOIN poll_votes pv ON po.id = pv.option_id "
+            "WHERE po.poll_id = :poll_id GROUP BY po.id, po.option_text ORDER BY po.sort_order",
+            {"poll_id": poll_id},
+        )
 
         reply_text = f"Poll {poll_id}: {poll['title']} [{status}]\n\n"
         for idx, opt in enumerate(options or []):

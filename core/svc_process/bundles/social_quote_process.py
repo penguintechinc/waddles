@@ -14,6 +14,8 @@ import re
 
 from flask_core import PlatformEvent, get_bundle_dal
 
+from bundles._dal_sql import raw_sql_rows
+
 _COMMAND_PREFIX = "!quote"
 
 
@@ -89,12 +91,12 @@ async def _fetch_quote(quote_id: int) -> str | None:
     """Fetch a quote by ID and return formatted text, or None if not found."""
     try:
         dal = get_bundle_dal()
-        sql = """
-            SELECT id, quote_text, quoted_username, created_at
-            FROM quotes
-            WHERE id = %s AND deleted_at IS NULL
-        """
-        result = await dal.execute(sql, [quote_id])
+        result = await raw_sql_rows(
+            dal,
+            "SELECT id, quote_text, quoted_username, created_at FROM quotes "
+            "WHERE id = :quote_id AND deleted_at IS NULL",
+            {"quote_id": quote_id},
+        )
         if not result:
             return None
 
@@ -109,14 +111,11 @@ async def _fetch_random_quote() -> str | None:
     """Fetch a random approved quote and return formatted text, or None if none found."""
     try:
         dal = get_bundle_dal()
-        sql = """
-            SELECT id, quote_text, quoted_username
-            FROM quotes
-            WHERE deleted_at IS NULL AND is_approved = TRUE
-            ORDER BY RANDOM()
-            LIMIT 1
-        """
-        result = await dal.execute(sql, [])
+        result = await raw_sql_rows(
+            dal,
+            "SELECT id, quote_text, quoted_username FROM quotes "
+            "WHERE deleted_at IS NULL AND is_approved = TRUE ORDER BY RANDOM() LIMIT 1",
+        )
         if not result:
             return None
 

@@ -5,7 +5,8 @@ welcomed, and generates a welcome response (AI-personalized if flagged, else
 template). Returns None for repeat visitors or if another coroutine already
 claimed the welcome.
 
-Uses flask_core.bundle_runtime (get_bundle_dal, get_bundle_context) to access
+Uses flask_core (get_bundle_dal, get_bundle_context) and the local
+`bundles._dal_sql` raw-SQL shim (M1.5 stopgap, see that module's docstring) to access
 the process-wide AsyncDAL and envelope scope (tenant/community) -- the frozen
 API for stateful process bundles.
 """
@@ -16,6 +17,8 @@ import dataclasses
 import logging
 
 from flask_core import PlatformEvent, get_bundle_context, get_bundle_dal
+
+from bundles._dal_sql import raw_sql_rows, raw_sql_write
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +44,16 @@ async def _is_first_time(platform: str, platform_user_id: str) -> bool:
     """
     ctx = get_bundle_context()
     dal = get_bundle_dal()
-    rows = await dal.execute(
+    rows = await raw_sql_rows(
+        dal,
         "SELECT id FROM activity_message_events "
-        "WHERE community_id = $1 AND platform = $2 AND platform_user_id = $3 "
-        "LIMIT 1",
-        [int(ctx.community) if ctx.community else None, platform, platform_user_id],
+        "WHERE community_id = :community_id AND platform = :platform "
+        "AND platform_user_id = :platform_user_id LIMIT 1",
+        {
+            "community_id": int(ctx.community) if ctx.community else None,
+            "platform": platform,
+            "platform_user_id": platform_user_id,
+        },
     )
     return len(rows) == 0
 
@@ -70,13 +78,18 @@ async def _try_mark_welcomed(platform: str, platform_user_id: str) -> bool:
     """
     ctx = get_bundle_context()
     dal = get_bundle_dal()
-    rows = await dal.execute(
+    rows = await raw_sql_write(
+        dal,
         "INSERT INTO community_welcomed_users "
         "(community_id, platform, platform_user_id) "
-        "VALUES ($1, $2, $3) "
+        "VALUES (:community_id, :platform, :platform_user_id) "
         "ON CONFLICT (community_id, platform, platform_user_id) DO NOTHING "
         "RETURNING id",
-        [int(ctx.community) if ctx.community else None, platform, platform_user_id],
+        {
+            "community_id": int(ctx.community) if ctx.community else None,
+            "platform": platform,
+            "platform_user_id": platform_user_id,
+        },
     )
     return len(rows) == 1
 

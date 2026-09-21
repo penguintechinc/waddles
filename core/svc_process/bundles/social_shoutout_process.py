@@ -42,12 +42,13 @@ PERMISSION: `shoutout_config.so_permission`/`vso_permission`
 (`config/postgres/migrations/046_add_remaining_admin_tables.sql:73-118`,
 same table `hub_api/services/bot_shoutout.py` serves the admin UI from)
 gates who may issue each command -- one of `admin_only`, `mod`, `vip`,
-`subscriber`, `everyone`. Read directly here via `flask_core.AsyncDAL.
-execute()` (same raw-SQL access model as `services/moderation_config.py`/
-`services/community_context_store.py`); no reader of `shoutout_config`
-exists anywhere in svc-process today, so a missing table/row/connection
-error all degrade to the column's own default, `"mod"` (`_shoutout_
-permission`), logged at DEBUG rather than raised or denied outright.
+`subscriber`, `everyone`. Read directly here via `penguin_dal`'s
+`raw_sql_rows()` escape hatch (D21a; `bundles._dal_sql`, same raw-SQL
+access model as `services/moderation_config.py`/`services/
+community_context_store.py`); no reader of `shoutout_config` exists
+anywhere in svc-process today, so a missing table/row/connection error all
+degrade to the column's own default, `"mod"` (`_shoutout_permission`),
+logged at DEBUG rather than raised or denied outright.
 
 Caller role evaluation replicates `social_music_process.
 _caller_is_moderator_or_admin`'s `community_members` lookup convention
@@ -85,6 +86,8 @@ import re
 
 from flask_core import PROCESS_TARGET_APP_ID_KEY, PlatformEvent, get_bundle_context, get_bundle_dal
 from flask_core.feature_flags import feature_enabled
+
+from bundles._dal_sql import raw_sql_rows
 
 logger = logging.getLogger(__name__)
 
@@ -136,14 +139,17 @@ _MOD_OR_ABOVE_ROLES = frozenset(
 )
 
 _SHOUTOUT_CONFIG_SQL = (
-    "SELECT so_permission, vso_permission FROM shoutout_config WHERE community_id = $1 LIMIT 1"
+    "SELECT so_permission, vso_permission FROM shoutout_config "
+    "WHERE community_id = :community_id LIMIT 1"
 )
 _ROLE_BY_PLATFORM_SQL = (
     "SELECT role FROM community_members "
-    "WHERE community_id = $1 AND platform = $2 AND platform_user_id = $3 LIMIT 1"
+    "WHERE community_id = :community_id AND platform = :platform "
+    "AND platform_user_id = :platform_user_id LIMIT 1"
 )
 _ROLE_BY_DISPLAY_NAME_SQL = (
-    "SELECT role FROM community_members WHERE community_id = $1 AND display_name = $2 LIMIT 1"
+    "SELECT role FROM community_members "
+    "WHERE community_id = :community_id AND display_name = :display_name LIMIT 1"
 )
 
 
@@ -182,7 +188,7 @@ async def _shoutout_permission(community_id: int | None, kind: str) -> str:
     column = "so_permission" if kind == "text" else "vso_permission"
     try:
         dal = get_bundle_dal()
-        rows = await dal.execute(_SHOUTOUT_CONFIG_SQL, [community_id])
+        rows = await raw_sql_rows(dal, _SHOUTOUT_CONFIG_SQL, {"community_id": community_id})
     except Exception as exc:  # noqa: BLE001 -- must never block a shoutout, only degrade
         logger.debug("social_shoutout_process.permission_lookup_failed error=%s", exc)
         return _DEFAULT_PERMISSION
@@ -216,13 +222,23 @@ async def _caller_role(event: PlatformEvent, community_id: int | None) -> str | 
 
     try:
         if platform_user_id:
-            rows = await dal.execute(
-                _ROLE_BY_PLATFORM_SQL, [community_id, event.platform, platform_user_id]
+            rows = await raw_sql_rows(
+                dal,
+                _ROLE_BY_PLATFORM_SQL,
+                {
+                    "community_id": community_id,
+                    "platform": event.platform,
+                    "platform_user_id": platform_user_id,
+                },
             )
             if rows:
                 return str(rows[0]["role"]).lower()
         if event.actor:
-            rows = await dal.execute(_ROLE_BY_DISPLAY_NAME_SQL, [community_id, event.actor])
+            rows = await raw_sql_rows(
+                dal,
+                _ROLE_BY_DISPLAY_NAME_SQL,
+                {"community_id": community_id, "display_name": event.actor},
+            )
             if rows:
                 return str(rows[0]["role"]).lower()
     except Exception as exc:  # noqa: BLE001 -- permission check must fail closed, never crash

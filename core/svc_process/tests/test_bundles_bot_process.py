@@ -15,6 +15,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from flask_core import PlatformEvent, bundle_context, reset_bundle_dal_for_tests, set_bundle_dal
+from penguin_dal import AsyncDB
+from sqlalchemy import text as sa_text
 
 import bundles.bot_process as bot_process
 from bundles.bot_process import transform
@@ -344,23 +346,27 @@ class TestRouter:
 
     async def test_chat_history_dispatches_to_the_real_community_chat_bundle(self) -> None:
         """`!chat-history` routes to `community_chat_process.transform`."""
-        set_bundle_dal(_EmptyChatDal())
+        dal = await _empty_chat_dal()
+        set_bundle_dal(dal)
         try:
             with bundle_context(tenant="acme", community="4", app_id="waddles.bot.twitch.default"):
                 result = await transform(_event("!chat-history"))
         finally:
             reset_bundle_dal_for_tests()
+            await dal.close()
         assert result is not None
         assert result.payload["text"] == "(no messages found)"
 
     async def test_channels_dispatches_to_the_real_community_chat_bundle(self) -> None:
         """`!channels` routes to `community_chat_process.transform`."""
-        set_bundle_dal(_EmptyChatDal())
+        dal = await _empty_chat_dal()
+        set_bundle_dal(dal)
         try:
             with bundle_context(tenant="acme", community="4", app_id="waddles.bot.twitch.default"):
                 result = await transform(_event("!channels"))
         finally:
             reset_bundle_dal_for_tests()
+            await dal.close()
         assert result is not None
         assert "general" in result.payload["text"]
 
@@ -569,11 +575,31 @@ class _EmptyQuoteDal:
         return []
 
 
-class _EmptyChatDal:
-    """Minimal AsyncDAL stand-in -- `community_chat_process` finds no chat history/channels."""
+async def _empty_chat_dal() -> AsyncDB:
+    """Real in-memory `penguin_dal.AsyncDB` with empty tables.
 
-    async def execute(self, sql: str, params: list[object]) -> list[dict[str, object]]:
-        return []
+    `community_chat_process` finds no chat history/channels.
+
+    `community_chat_process`'s two queries go through `raw_sql_rows()`
+    (D21a), which needs a real SQLAlchemy engine -- a bare `.execute()`
+    stand-in no longer suffices once the bundle-side call site changed.
+    """
+    db = AsyncDB("sqlite://", pool_size=1, echo=False)
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            sa_text("CREATE TABLE communities (id INTEGER PRIMARY KEY, tenant_id TEXT)")
+        )
+        await conn.execute(sa_text("CREATE TABLE tenants (id TEXT PRIMARY KEY)"))
+        await conn.execute(
+            sa_text(
+                "CREATE TABLE hub_chat_messages ("
+                "id INTEGER PRIMARY KEY, community_id INTEGER, channel_name TEXT, "
+                "sender_username TEXT, message_content TEXT, message_type TEXT, "
+                "created_at TEXT)"
+            )
+        )
+    await db.reflect()
+    return db
 
 
 class _ReputationFoundDal:
