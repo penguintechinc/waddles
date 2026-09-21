@@ -88,4 +88,4 @@ class TestActionConfigDatabaseUrl:
     ) -> None:
         _env(monkeypatch, DB_TYPE="sqlite", DB_NAME="memory")
         config = ActionConfig.from_env()
-        assert config.database_url == "sqlite:memory"
+        assert config.database_url == "sqlite:memory:"

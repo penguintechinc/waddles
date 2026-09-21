@@ -22,19 +22,18 @@ results independently; the runner's own `action_dispatch_log` provides
 a parallel record of transport-level outcomes.
 
 `community_servers`/`announcement_broadcasts` are never bound anywhere
-else on this service's `dal` (svc-action's own startup only binds
-`tenants`/`communities`/`app_catalog`/`action_dispatch_log` --
-`reference_tables.py`, `flask_core.app_bundle_tables`,
-`services/dispatch_log.py`), so this bundle binds its own minimal
-stubs (`_ensure_announcement_tables`, idempotent, `migrate=False` --
-schema owned by `config/postgres/migrations/000_create_base_schema.sql`),
-same "bind only the columns this bundle actually touches" convention
-`twitch_shoutout_action.py::_ensure_shoutout_tables` already
-establishes. `select_async` runs `query.select()`/`query.db.commit()`
-directly (`flask_core/database.py`) -- it requires a pydal `Set`
-(`dal.dal(query)`), not a bare `Query` (gh #298, matching
-`runner.py::_resolve_tenant_id`'s own `dal.dal(query)` call shape); a
-bare `Query` has no `.select()`/`.db` in this pydal version.
+else on this service's `dal` (svc-action's own startup binds the real
+tables via `await async_dal.reflect()`, discovering all existing tables
+from the live schema), so this bundle binds its own minimal stubs
+(`_ensure_announcement_tables`, idempotent, `migrate=False` -- schema
+owned by `config/postgres/migrations/000_create_base_schema.sql`), same
+"bind only the columns this bundle actually touches" convention
+`twitch_shoutout_action.py::_ensure_shoutout_tables` already establishes.
+`select_async` runs `query.select()`/`query.db.commit()` directly
+(`flask_core/database.py`) -- it requires a pydal `Set` (`dal.dal(query)`),
+not a bare `Query` (gh #298, matching `runner.py::_resolve_tenant_id`'s own
+`dal.dal(query)` call shape); a bare `Query` has no `.select()`/`.db` in
+this pydal version.
 """
 
 from __future__ import annotations
@@ -60,7 +59,7 @@ def _ensure_announcement_tables(dal: Any) -> None:
     "minimal stub, no DDL" convention -- `migrate=False` throughout,
     schema owned by `000_create_base_schema.sql`. Must run on a `dal`
     that already has `communities` defined (svc-action's own `app.py`
-    startup binds it via `bind_minimal_reference_tables` before
+    startup discovers it via `await async_dal.reflect()` before
     `set_bundle_dal()`).
     """
     if "community_servers" not in dal.tables:

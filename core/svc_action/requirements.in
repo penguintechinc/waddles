@@ -13,6 +13,13 @@ hypercorn>=0.16.0
 pydal>=20240906.1,<20250101
 psycopg2-binary>=2.9.9
 
+# penguin-dal (App Bundle DB access, D21a) -- async Postgres via asyncpg;
+# aiosqlite is test-only (in-memory bundle test harness, penguin-dal's own
+# tests/test_async_db.py fixture pattern).
+penguin-dal==0.4.0
+asyncpg==0.30.0
+aiosqlite==0.20.0
+
 # Valkey/Redis (process -> action queue)
 redis>=5.0.1
 hiredis>=2.3.2

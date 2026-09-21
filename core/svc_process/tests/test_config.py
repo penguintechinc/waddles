@@ -113,7 +113,7 @@ class TestConfigDatabaseUrl:
         import config
 
         importlib.reload(config)
-        assert config.Config.DATABASE_URL == "sqlite:memory"
+        assert config.Config.DATABASE_URL == "sqlite:memory:"
 
     def test_db_pool_size_defaults_and_is_overridable(
         self, monkeypatch: pytest.MonkeyPatch

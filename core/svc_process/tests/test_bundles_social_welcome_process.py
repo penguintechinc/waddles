@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
-from unittest.mock import AsyncMock
-
 import pytest
 from flask_core import PlatformEvent, bundle_context, reset_bundle_dal_for_tests, set_bundle_dal
+from penguin_dal import AsyncDB
+from sqlalchemy import text as sa_text
 
 from bundles.social_welcome_process import (
     _build_welcome,
@@ -35,18 +34,31 @@ def _event(
     )
 
 
-def _mock_executor(**rows_by_query: object) -> AsyncMock:
-    """Create a mock SQL executor."""
-    executor = AsyncMock()
-
-    async def execute_side_effect(sql: str, params: list | None = None) -> list[dict[str, Any]]:
-        for query_fragment, rows in rows_by_query.items():
-            if query_fragment in sql:
-                return rows if isinstance(rows, list) else []
-        return []
-
-    executor.execute.side_effect = execute_side_effect
-    return executor
+@pytest.fixture
+async def dal():
+    """In-memory penguin_dal.AsyncDB with the two real tables this bundle touches."""
+    db = AsyncDB("sqlite://", pool_size=1, echo=False)
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            sa_text(
+                "CREATE TABLE activity_message_events ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "community_id INTEGER, platform TEXT, platform_user_id TEXT)"
+            )
+        )
+        await conn.execute(
+            sa_text(
+                "CREATE TABLE community_welcomed_users ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "community_id INTEGER, platform TEXT, platform_user_id TEXT, "
+                "UNIQUE(community_id, platform, platform_user_id))"
+            )
+        )
+    await db.reflect()
+    set_bundle_dal(db)
+    yield db
+    reset_bundle_dal_for_tests()
+    await db.close()
 
 
 @pytest.fixture(autouse=True)
@@ -59,66 +71,75 @@ def reset_bundle_dal() -> None:
 class TestIsFirstTime:
     """Tests for _is_first_time."""
 
-    async def test_returns_true_if_no_prior_events(self) -> None:
+    async def test_returns_true_if_no_prior_events(self, dal) -> None:
         """User with no prior activity_message_events is a first-timer."""
-        executor = _mock_executor(activity_message_events=[])
-        set_bundle_dal(executor)
         with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
             result = await _is_first_time("discord", "user123")
         assert result is True
 
-    async def test_returns_false_if_prior_events_exist(self) -> None:
+    async def test_returns_false_if_prior_events_exist(self, dal) -> None:
         """User with prior events is not a first-timer."""
-        executor = _mock_executor(activity_message_events=[{"id": 1}])
-        set_bundle_dal(executor)
+        async with dal.engine.begin() as conn:
+            await conn.execute(
+                sa_text(
+                    "INSERT INTO activity_message_events "
+                    "(community_id, platform, platform_user_id) VALUES (42, 'discord', 'user123')"
+                )
+            )
         with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
             result = await _is_first_time("discord", "user123")
         assert result is False
 
-    async def test_parameterized_query(self) -> None:
-        """Query is parameterized with correct community, platform, user."""
-        executor = AsyncMock()
-        executor.execute.return_value = []
-        set_bundle_dal(executor)
+    async def test_scopes_by_community_platform_and_user(self, dal) -> None:
+        """A row for a different community/platform/user must not count as a prior event."""
+        async with dal.engine.begin() as conn:
+            await conn.execute(
+                sa_text(
+                    "INSERT INTO activity_message_events "
+                    "(community_id, platform, platform_user_id) "
+                    "VALUES (99, 'twitch', 'someone_else')"
+                )
+            )
         with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
-            await _is_first_time("twitch", "user789")
-        executor.execute.assert_called_once()
-        call_args = executor.execute.call_args
-        assert "activity_message_events" in call_args[0][0]
-        assert [42, "twitch", "user789"] == call_args[0][1]
+            result = await _is_first_time("discord", "user123")
+        assert result is True
 
 
 class TestTryMarkWelcomed:
     """Tests for _try_mark_welcomed."""
 
-    async def test_returns_true_if_insert_succeeded(self) -> None:
+    async def test_returns_true_if_insert_succeeded(self, dal) -> None:
         """Returning a row means this call won the race."""
-        executor = _mock_executor(community_welcomed_users=[{"id": 999}])
-        set_bundle_dal(executor)
         with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
             result = await _try_mark_welcomed("discord", "user123")
         assert result is True
 
-    async def test_returns_false_if_conflict_prevented_insert(self) -> None:
+    async def test_returns_false_if_conflict_prevented_insert(self, dal) -> None:
         """No returned row means a concurrent insert already claimed the welcome."""
-        executor = _mock_executor(community_welcomed_users=[])
-        set_bundle_dal(executor)
+        async with dal.engine.begin() as conn:
+            await conn.execute(
+                sa_text(
+                    "INSERT INTO community_welcomed_users "
+                    "(community_id, platform, platform_user_id) VALUES (42, 'discord', 'user123')"
+                )
+            )
         with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
             result = await _try_mark_welcomed("discord", "user123")
         assert result is False
 
-    async def test_parameterized_query(self) -> None:
-        """Query is parameterized with community, platform, user."""
-        executor = AsyncMock()
-        executor.execute.return_value = []
-        set_bundle_dal(executor)
+    async def test_scopes_conflict_by_community_platform_and_user(self, dal) -> None:
+        """A conflicting row for a DIFFERENT community/platform/user must not block this insert."""
+        async with dal.engine.begin() as conn:
+            await conn.execute(
+                sa_text(
+                    "INSERT INTO community_welcomed_users "
+                    "(community_id, platform, platform_user_id) "
+                    "VALUES (99, 'twitch', 'someone_else')"
+                )
+            )
         with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
-            await _try_mark_welcomed("twitch", "user789")
-        executor.execute.assert_called_once()
-        call_args = executor.execute.call_args
-        assert "community_welcomed_users" in call_args[0][0]
-        assert "ON CONFLICT" in call_args[0][0]
-        assert [42, "twitch", "user789"] == call_args[0][1]
+            result = await _try_mark_welcomed("discord", "user123")
+        assert result is True
 
 
 class TestBuildWelcome:
@@ -142,69 +163,66 @@ class TestBuildWelcome:
 class TestTransform:
     """Tests for transform entrypoint."""
 
-    async def test_missing_text_raises_valueerror(self) -> None:
+    async def test_missing_text_raises_valueerror(self, dal) -> None:
         """Missing 'text' in payload raises ValueError."""
         event = _event(text="")
         event.payload.pop("text", None)
-        set_bundle_dal(_mock_executor())
         with pytest.raises(ValueError, match="text"):
             with bundle_context(
                 tenant="acme", community="42", app_id="waddles.social.welcome.default"
             ):
                 await transform(event)
 
-    async def test_missing_author_id_raises_valueerror(self) -> None:
+    async def test_missing_author_id_raises_valueerror(self, dal) -> None:
         """Missing 'author_id' in payload raises ValueError."""
         event = _event()
         event.payload.pop("author_id", None)
-        set_bundle_dal(_mock_executor())
         with pytest.raises(ValueError, match="author_id"):
             with bundle_context(
                 tenant="acme", community="42", app_id="waddles.social.welcome.default"
             ):
                 await transform(event)
 
-    async def test_missing_actor_raises_valueerror(self) -> None:
+    async def test_missing_actor_raises_valueerror(self, dal) -> None:
         """Missing event.actor raises ValueError."""
         event = _event(actor="")
-        set_bundle_dal(_mock_executor())
         with pytest.raises(ValueError, match="event.actor"):
             with bundle_context(
                 tenant="acme", community="42", app_id="waddles.social.welcome.default"
             ):
                 await transform(event)
 
-    async def test_repeat_visitor_returns_none(self) -> None:
+    async def test_repeat_visitor_returns_none(self, dal) -> None:
         """Event from a repeat visitor returns None (no welcome)."""
         event = _event()
-        executor = _mock_executor(activity_message_events=[{"id": 1}])
-        set_bundle_dal(executor)
+        async with dal.engine.begin() as conn:
+            await conn.execute(
+                sa_text(
+                    "INSERT INTO activity_message_events "
+                    "(community_id, platform, platform_user_id) VALUES (42, 'discord', 'user123')"
+                )
+            )
         with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
             result = await transform(event)
         assert result is None
 
-    async def test_race_condition_returns_none(self) -> None:
+    async def test_race_condition_returns_none(self, dal) -> None:
         """If another process already marked user as welcomed, return None."""
         event = _event()
-        executor = AsyncMock()
-        executor.execute.side_effect = [
-            [],  # _is_first_time returns empty (first-timer)
-            [],  # _try_mark_welcomed returns empty (lost race)
-        ]
-        set_bundle_dal(executor)
+        async with dal.engine.begin() as conn:
+            await conn.execute(
+                sa_text(
+                    "INSERT INTO community_welcomed_users "
+                    "(community_id, platform, platform_user_id) VALUES (42, 'discord', 'user123')"
+                )
+            )
         with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
             result = await transform(event)
         assert result is None
 
-    async def test_welcome_claims_and_modifies_event(self) -> None:
+    async def test_welcome_claims_and_modifies_event(self, dal) -> None:
         """On successful first-message claim, return event with welcome text."""
         event = _event(text="hello world")
-        executor = AsyncMock()
-        executor.execute.side_effect = [
-            [],  # _is_first_time returns empty (first-timer)
-            [{"id": 999}],  # _try_mark_welcomed succeeds
-        ]
-        set_bundle_dal(executor)
         with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
             result = await transform(event)
         assert isinstance(result, PlatformEvent)
@@ -212,46 +230,40 @@ class TestTransform:
         assert "Welcome" in result.payload["text"]
         assert result.payload["channel_id"] == event.payload["channel_id"]
 
-    async def test_non_string_text_raises_valueerror(self) -> None:
+    async def test_non_string_text_raises_valueerror(self, dal) -> None:
         """Non-string 'text' in payload raises ValueError."""
         event = _event()
         event.payload["text"] = 123
-        set_bundle_dal(_mock_executor())
         with pytest.raises(ValueError, match="text"):
             with bundle_context(
                 tenant="acme", community="42", app_id="waddles.social.welcome.default"
             ):
                 await transform(event)
 
-    async def test_non_string_author_id_raises_valueerror(self) -> None:
+    async def test_non_string_author_id_raises_valueerror(self, dal) -> None:
         """Non-string 'author_id' raises ValueError."""
         event = _event()
         event.payload["author_id"] = 123
-        set_bundle_dal(_mock_executor())
         with pytest.raises(ValueError, match="author_id"):
             with bundle_context(
                 tenant="acme", community="42", app_id="waddles.social.welcome.default"
             ):
                 await transform(event)
 
-    async def test_empty_author_id_raises_valueerror(self) -> None:
+    async def test_empty_author_id_raises_valueerror(self, dal) -> None:
         """Empty 'author_id' raises ValueError."""
         event = _event()
         event.payload["author_id"] = ""
-        set_bundle_dal(_mock_executor())
         with pytest.raises(ValueError, match="author_id"):
             with bundle_context(
                 tenant="acme", community="42", app_id="waddles.social.welcome.default"
             ):
                 await transform(event)
 
-    async def test_welcome_preserves_payload_fields(self) -> None:
+    async def test_welcome_preserves_payload_fields(self, dal) -> None:
         """Modified event preserves original payload fields except text."""
         event = _event(text="hello")
         event.payload["extra_field"] = "should be preserved"
-        executor = AsyncMock()
-        executor.execute.side_effect = [[], [{"id": 999}]]
-        set_bundle_dal(executor)
         with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
             result = await transform(event)
         assert result is not None

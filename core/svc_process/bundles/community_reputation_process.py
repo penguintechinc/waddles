@@ -44,6 +44,7 @@ import dataclasses
 import logging
 
 from flask_core import PlatformEvent, get_bundle_context, get_bundle_dal
+from flask_core.bundle_runtime import raw_sql_rows
 
 logger = logging.getLogger(__name__)
 
@@ -55,18 +56,24 @@ _GUARD_REPLY = "reputation lookup is unavailable right now -- try again in a bit
 #: .reputation`'s.
 _DEFAULT_SCORE = 600
 
-_MEMBER_SQL = (
+_MEMBER_BY_PLATFORM_SQL = (
     "SELECT cm.display_name, cm.reputation, cm.user_id AS hub_user_id "
     "FROM community_members cm "
-    "WHERE cm.community_id = $1 AND {clause} "
-    "LIMIT 1"
+    "WHERE cm.community_id = :community_id AND cm.platform = :platform "
+    "AND cm.platform_user_id = :platform_user_id LIMIT 1"
+)
+_MEMBER_BY_DISPLAY_NAME_SQL = (
+    "SELECT cm.display_name, cm.reputation, cm.user_id AS hub_user_id "
+    "FROM community_members cm "
+    "WHERE cm.community_id = :community_id AND cm.display_name = :display_name LIMIT 1"
 )
 
 _COMMUNITY_LABEL_SQL = (
-    "SELECT COALESCE(display_name, name) AS label FROM communities WHERE id = $1 LIMIT 1"
+    "SELECT COALESCE(display_name, name) AS label FROM communities "
+    "WHERE id = :community_id LIMIT 1"
 )
 
-_GLOBAL_SCORE_SQL = "SELECT score FROM reputation_global WHERE hub_user_id = $1"
+_GLOBAL_SCORE_SQL = "SELECT score FROM reputation_global WHERE hub_user_id = :hub_user_id"
 
 
 #: Ascending `(exclusive_upper_bound, label)` cut points -- MUST stay
@@ -100,7 +107,7 @@ async def _fetch_community_label(community_id: int) -> str:
     reply, not just a bare score.
     """
     dal = get_bundle_dal()
-    rows = await dal.execute(_COMMUNITY_LABEL_SQL, [community_id])
+    rows = await raw_sql_rows(dal, _COMMUNITY_LABEL_SQL, {"community_id": community_id})
     if rows and rows[0]["label"]:
         return str(rows[0]["label"])
     return f"community {community_id}"
@@ -124,9 +131,14 @@ async def _fetch_member(
     dal = get_bundle_dal()
 
     if platform_user_id:
-        rows = await dal.execute(
-            _MEMBER_SQL.format(clause="cm.platform = $2 AND cm.platform_user_id = $3"),
-            [community_id, platform, platform_user_id],
+        rows = await raw_sql_rows(
+            dal,
+            _MEMBER_BY_PLATFORM_SQL,
+            {
+                "community_id": community_id,
+                "platform": platform,
+                "platform_user_id": platform_user_id,
+            },
         )
         if rows:
             row = rows[0]
@@ -138,9 +150,8 @@ async def _fetch_member(
             )
 
     if actor:
-        rows = await dal.execute(
-            _MEMBER_SQL.format(clause="cm.display_name = $2"),
-            [community_id, actor],
+        rows = await raw_sql_rows(
+            dal, _MEMBER_BY_DISPLAY_NAME_SQL, {"community_id": community_id, "display_name": actor}
         )
         if rows:
             row = rows[0]
@@ -170,7 +181,7 @@ async def _fetch_global_score(hub_user_id: str | None) -> int:
         return _DEFAULT_SCORE
 
     dal = get_bundle_dal()
-    rows = await dal.execute(_GLOBAL_SCORE_SQL, [parsed_id])
+    rows = await raw_sql_rows(dal, _GLOBAL_SCORE_SQL, {"hub_user_id": parsed_id})
     if rows and rows[0]["score"] is not None:
         return int(rows[0]["score"])
     return _DEFAULT_SCORE

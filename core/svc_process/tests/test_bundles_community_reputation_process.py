@@ -4,50 +4,38 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from typing import Any
 
 import pytest
 from flask_core import PlatformEvent, bundle_context, reset_bundle_dal_for_tests, set_bundle_dal
+from penguin_dal import AsyncDB
+from sqlalchemy import text as sa_text
 
 from bundles.community_reputation_process import REPUTATION_TIERS, _reputation_label, transform
 
 
-class _FakeDal:
-    """In-memory stand-in for `AsyncDAL` -- routes by distinctive SQL substrings.
-
-    Three query shapes this bundle issues, distinguished the same way the
-    production SQL is distinguished by table/clause:
-    - `community_members` by `(platform, platform_user_id)`
-    - `community_members` by `display_name`
-    - `communities` label lookup
-    - `reputation_global` score lookup
-    """
-
-    def __init__(self, *, raise_on_execute: bool = False) -> None:
-        self._raise_on_execute = raise_on_execute
-        self.by_platform_id: dict[str, dict[str, Any]] = {}
-        self.by_display_name: dict[str, dict[str, Any]] = {}
-        self.community_labels: dict[int, dict[str, Any]] = {}
-        self.global_scores: dict[int, dict[str, Any]] = {}
-
-    async def execute(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
-        if self._raise_on_execute:
-            raise RuntimeError("simulated DB outage")
-        if "reputation_global" in sql:
-            (hub_user_id,) = params
-            row = self.global_scores.get(hub_user_id)
-            return [row] if row else []
-        if "FROM communities" in sql:
-            (community_id,) = params
-            row = self.community_labels.get(community_id)
-            return [row] if row else []
-        if "cm.platform_user_id" in sql:
-            _community_id, _platform, platform_user_id = params
-            row = self.by_platform_id.get(platform_user_id)
-            return [row] if row else []
-        _community_id, actor = params
-        row = self.by_display_name.get(actor)
-        return [row] if row else []
+@pytest.fixture
+async def dal():
+    """In-memory penguin_dal.AsyncDB with the three tables this bundle reads."""
+    db = AsyncDB("sqlite://", pool_size=1, echo=False)
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            sa_text(
+                "CREATE TABLE community_members ("
+                "community_id INTEGER, platform TEXT, platform_user_id TEXT, "
+                "display_name TEXT, reputation INTEGER, user_id TEXT)"
+            )
+        )
+        await conn.execute(
+            sa_text("CREATE TABLE communities (id INTEGER, display_name TEXT, name TEXT)")
+        )
+        await conn.execute(
+            sa_text("CREATE TABLE reputation_global (hub_user_id TEXT, score INTEGER)")
+        )
+    await db.reflect()
+    set_bundle_dal(db)
+    yield db
+    reset_bundle_dal_for_tests()
+    await db.close()
 
 
 def _event(
@@ -65,88 +53,103 @@ def _event(
     )
 
 
-async def _run(dal: _FakeDal, text: str, **event_kwargs: object) -> PlatformEvent | None:
-    set_bundle_dal(dal)
-    try:
-        with bundle_context(tenant="acme", community="4", app_id="waddles.bot.twitch.default"):
-            return await transform(_event(text, **event_kwargs))  # type: ignore[arg-type]
-    finally:
-        reset_bundle_dal_for_tests()
+async def _run(dal: AsyncDB, text: str, **event_kwargs: object) -> PlatformEvent | None:
+    with bundle_context(tenant="acme", community="4", app_id="waddles.bot.twitch.default"):
+        return await transform(_event(text, **event_kwargs))  # type: ignore[arg-type]
 
 
 class TestRouting:
-    async def test_non_command_text_returns_none(self) -> None:
+    async def test_non_command_text_returns_none(self, dal: AsyncDB) -> None:
         assert await transform(_event("just chatting")) is None
 
-    async def test_malformed_event_raises_value_error(self) -> None:
+    async def test_malformed_event_raises_value_error(self, dal: AsyncDB) -> None:
         event = PlatformEvent(
             platform="twitch", event_type="message", actor="p", payload={}, occurred_at="x"
         )
         with pytest.raises(ValueError, match="text"):
             await transform(event)
 
-    async def test_bare_bang_returns_none(self) -> None:
+    async def test_bare_bang_returns_none(self, dal: AsyncDB) -> None:
         assert await transform(_event("!")) is None
 
 
 class TestLookup:
-    async def test_reply_shows_both_global_and_community_with_labels(self) -> None:
-        dal = _FakeDal()
-        dal.by_platform_id["u-123"] = {
-            "display_name": "penguinzplays",
-            "reputation": 720,
-            "hub_user_id": "42",
-        }
-        dal.community_labels[4] = {"label": "Waddlebot HQ"}
-        dal.global_scores[42] = {"score": 600}
+    async def test_reply_shows_both_global_and_community_with_labels(self, dal: AsyncDB) -> None:
+        async with dal.engine.begin() as conn:
+            await conn.execute(
+                sa_text(
+                    "INSERT INTO community_members "
+                    "(community_id, platform, platform_user_id, display_name, reputation, user_id) "
+                    "VALUES (4, 'twitch', 'u-123', 'penguinzplays', 720, '42')"
+                )
+            )
+            await conn.execute(
+                sa_text(
+                    "INSERT INTO communities (id, display_name, name) "
+                    "VALUES (4, 'Waddlebot HQ', 'waddlebot_hq')"
+                )
+            )
+            await conn.execute(
+                sa_text("INSERT INTO reputation_global (hub_user_id, score) " "VALUES ('42', 600)")
+            )
         result = await _run(dal, "!reputation", author_id="u-123")
         assert result is not None
         assert result.payload["text"] == (
             "\U0001f427 penguinzplays — Global: 600 (Trusted) · " "Waddlebot HQ: 720 (Respected)"
         )
 
-    async def test_falls_back_to_display_name_when_no_author_id(self) -> None:
-        dal = _FakeDal()
-        dal.by_display_name["penguinzplays"] = {
-            "display_name": "penguinzplays",
-            "reputation": 655,
-            "hub_user_id": None,
-        }
-        dal.community_labels[4] = {"label": "Waddlebot HQ"}
+    async def test_falls_back_to_display_name_when_no_author_id(self, dal: AsyncDB) -> None:
+        async with dal.engine.begin() as conn:
+            await conn.execute(
+                sa_text(
+                    "INSERT INTO community_members "
+                    "(community_id, platform, platform_user_id, display_name, reputation, user_id) "
+                    "VALUES (4, 'twitch', NULL, 'penguinzplays', 655, NULL)"
+                )
+            )
+            await conn.execute(
+                sa_text(
+                    "INSERT INTO communities (id, display_name, name) "
+                    "VALUES (4, 'Waddlebot HQ', 'waddlebot_hq')"
+                )
+            )
         result = await _run(dal, "!rep")
         assert result is not None
         assert "Waddlebot HQ: 655 (Trusted)" in result.payload["text"]
         assert "Global: 600 (Trusted)" in result.payload["text"]
 
-    async def test_new_user_defaults_both_sides_to_600(self) -> None:
+    async def test_new_user_defaults_both_sides_to_600(self, dal: AsyncDB) -> None:
         """No `community_members` row and no `reputation_global` row -> 600 (Trusted) both sides."""
-        dal = _FakeDal()
-        dal.community_labels[4] = {"label": "Waddlebot HQ"}
+        async with dal.engine.begin() as conn:
+            await conn.execute(
+                sa_text(
+                    "INSERT INTO communities (id, display_name, name) "
+                    "VALUES (4, 'Waddlebot HQ', 'waddlebot_hq')"
+                )
+            )
         result = await _run(dal, "!reputation", actor="stranger")
         assert result is not None
         assert result.payload["text"] == (
             "\U0001f427 stranger — Global: 600 (Trusted) · Waddlebot HQ: 600 (Trusted)"
         )
 
-    async def test_community_without_display_name_falls_back_to_id(self) -> None:
-        dal = _FakeDal()  # no community_labels entry at all
+    async def test_community_without_display_name_falls_back_to_id(self, dal: AsyncDB) -> None:
+        # No rows inserted - dal is empty
         result = await _run(dal, "!reputation", actor="stranger")
         assert result is not None
         assert "community 4: 600 (Trusted)" in result.payload["text"]
 
-    async def test_missing_community_context_is_graceful(self) -> None:
-        set_bundle_dal(_FakeDal())
-        try:
-            with bundle_context(tenant="acme", community=None, app_id="waddles.bot.twitch.default"):
-                result = await transform(_event("!reputation"))
-        finally:
-            reset_bundle_dal_for_tests()
+    async def test_missing_community_context_is_graceful(self, dal: AsyncDB) -> None:
+        with bundle_context(tenant="acme", community=None, app_id="waddles.bot.twitch.default"):
+            result = await transform(_event("!reputation"))
         assert result is not None
         assert "unavailable" in result.payload["text"]
 
-    async def test_db_failure_is_swallowed_gracefully(self) -> None:
+    async def test_db_failure_is_swallowed_gracefully(self, dal: AsyncDB) -> None:
         """GUARDED: a DB error inside the bundle's own guard never crashes the bot."""
-        result = await _run(_FakeDal(raise_on_execute=True), "!reputation")
+        # Close the DB to cause an error when querying
+        await dal.close()
+        result = await _run(dal, "!reputation")
         assert result is not None
         assert "unavailable" in result.payload["text"]
 
@@ -170,10 +173,10 @@ class TestReputationLabel:
             (850, "Legend"),  # REPUTATION_MAX
         ],
     )
-    def test_boundaries(self, score: int, expected: str) -> None:
+    def test_boundaries(self, dal: AsyncDB, score: int, expected: str) -> None:
         assert _reputation_label(score) == expected
 
-    def test_tier_table_matches_hub_api(self) -> None:
+    def test_tier_table_matches_hub_api(self, dal: AsyncDB) -> None:
         """Parses `hub_api`'s source directly (no import -- see module docstring) for parity.
 
         `hub_api` and this service are independently deployed processes

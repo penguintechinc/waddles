@@ -19,7 +19,6 @@ from typing import cast
 import httpx
 import redis.asyncio as redis
 from flask_core import (
-    AsyncDAL,
     create_health_blueprint,
     install_security_headers,
     set_bundle_dal,
@@ -27,12 +26,11 @@ from flask_core import (
 )
 from flask_core.auth import create_jwt_token
 from flask_core.stage_runner import BundlePoller
+from penguin_dal import AsyncDB
 from quart import Quart
 
 from config import ActionConfig
 from runner import ActionRunner
-from services.dispatch_log import init_action_dispatch_log_table
-from services.reference_tables import bind_minimal_reference_tables
 
 app = Quart(__name__)
 # security.md A05 hardening -- JSON-only service, default deny-everything CSP.
@@ -77,9 +75,11 @@ async def startup() -> None:
         follow_redirects=False, http2=True, timeout=_config.http_timeout_seconds
     )
     redis_client = redis.from_url(_config.valkey_url, encoding="utf-8", decode_responses=True)
-    async_dal = AsyncDAL(_config.database_url, pool_size=_config.db_pool_size, migrate=False)
-    bind_minimal_reference_tables(async_dal.dal)
-    init_action_dispatch_log_table(async_dal.dal)
+    # penguin-dal (D21a): reflect() discovers the whole live schema, so the
+    # old bind_minimal_reference_tables() pydal-stub pattern (tenants/
+    # communities/app_catalog/action_dispatch_log) is redundant -- delete it.
+    async_dal = AsyncDB(_config.database_url, pool_size=_config.db_pool_size)
+    await async_dal.reflect()
     # Bind for `get_bundle_dal()` -- an action bundle needing DB access
     # beyond the audit log (e.g. fetching a stored quote) reaches this same
     # DAL from inside its own entrypoint body. See docs/

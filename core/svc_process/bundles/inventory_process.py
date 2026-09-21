@@ -41,6 +41,7 @@ import logging
 from typing import Any
 
 from flask_core import PlatformEvent, get_bundle_context, get_bundle_dal
+from flask_core.bundle_runtime import raw_sql_rows, raw_sql_write
 
 logger = logging.getLogger(__name__)
 
@@ -132,22 +133,28 @@ async def _handle_add(event: PlatformEvent, args: str) -> PlatformEvent | None:
             return dataclasses.replace(event, payload={**event.payload, "text": reply_text})
 
         dal = get_bundle_dal()
-        existing = await dal.execute(
+        existing = await raw_sql_rows(
+            dal,
             "SELECT id FROM inventory_items "
-            "WHERE community_id = $1 AND name = $2 AND deleted_at IS NULL "
-            "LIMIT 1",
-            [community_id, name],
+            "WHERE community_id = :community_id AND name = :name AND deleted_at IS NULL LIMIT 1",
+            {"community_id": community_id, "name": name},
         )
         if existing:
             reply_text = f"'{name}' already exists in inventory."
         else:
             metadata = {"tags": flags.get("-t"), "owner": flags.get("-o")}
-            await dal.execute(
+            await raw_sql_write(
+                dal,
                 "INSERT INTO inventory_items "
                 "(community_id, name, item_type, quantity, available_quantity, "
                 "metadata, created_at, updated_at) "
-                "VALUES ($1, $2, 'general', 1, 1, $3::jsonb, NOW(), NOW())",
-                [community_id, name, metadata],
+                "VALUES (:community_id, :name, 'general', 1, 1, "
+                "CAST(:metadata AS jsonb), NOW(), NOW())",
+                {
+                    "community_id": community_id,
+                    "name": name,
+                    "metadata": json.dumps(metadata),
+                },
             )
             reply_text = f"\U0001f4e6 added '{name}' to inventory."
     except Exception as exc:  # noqa: BLE001 -- a bad insert must never crash the bot
@@ -172,11 +179,12 @@ async def _handle_remove(event: PlatformEvent, args: str) -> PlatformEvent | Non
             return dataclasses.replace(event, payload={**event.payload, "text": reply_text})
 
         dal = get_bundle_dal()
-        result = await dal.execute(
+        result = await raw_sql_write(
+            dal,
             "UPDATE inventory_items SET deleted_at = NOW(), updated_at = NOW() "
-            "WHERE community_id = $1 AND name = $2 AND deleted_at IS NULL "
+            "WHERE community_id = :community_id AND name = :name AND deleted_at IS NULL "
             "RETURNING id",
-            [community_id, name],
+            {"community_id": community_id, "name": name},
         )
         reply_text = (
             f"\U0001f5d1 removed '{name}' from inventory."
@@ -199,11 +207,11 @@ async def _handle_list(event: PlatformEvent) -> PlatformEvent | None:
             return dataclasses.replace(event, payload={**event.payload, "text": reply_text})
 
         dal = get_bundle_dal()
-        rows = await dal.execute(
+        rows = await raw_sql_rows(
+            dal,
             "SELECT name, quantity, available_quantity, metadata FROM inventory_items "
-            "WHERE community_id = $1 AND deleted_at IS NULL "
-            "ORDER BY name LIMIT 20",
-            [community_id],
+            "WHERE community_id = :community_id AND deleted_at IS NULL ORDER BY name LIMIT 20",
+            {"community_id": community_id},
         )
         reply_text = _format_list(rows)
     except Exception as exc:  # noqa: BLE001 -- a bad read must never crash the bot

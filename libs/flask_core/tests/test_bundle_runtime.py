@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import Boolean, Column, Integer, MetaData, String, Table, text
+
+from penguin_dal import AsyncDB
 
 
 def _load_bundle_runtime_module() -> Any:
@@ -163,3 +166,105 @@ class TestBundleContext:
             _run("tenant-b", "2"),
         )
         assert seen == {"tenant-a": "tenant-a", "tenant-b": "tenant-b"}
+
+
+def _create_widgets_table(conn):  # pragma: no cover
+    metadata = MetaData()
+    Table(
+        "widgets",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("name", String(255), nullable=False),
+        Column("active", Boolean, default=True),
+    )
+    metadata.create_all(conn)
+
+
+@pytest.fixture
+async def dal():
+    """An in-memory penguin_dal.AsyncDB with one seeded `widgets` table."""
+    db = AsyncDB("sqlite://", pool_size=1, echo=False)
+    async with db.engine.begin() as conn:
+        await conn.run_sync(_create_widgets_table)
+        await conn.execute(
+            text("INSERT INTO widgets (name, active) VALUES ('a', 1), ('b', 0)")
+        )
+    await db.reflect()
+    # Use importlib to get the module (matching test pattern above)
+    bundle_runtime = _load_bundle_runtime_module()
+    bundle_runtime.set_bundle_dal(db)
+    yield db
+    bundle_runtime.reset_bundle_dal_for_tests()
+    await db.close()
+
+
+class TestGetSetBundleDalRetyped:
+    async def test_get_bundle_dal_returns_asyncdb(self, dal: AsyncDB) -> None:
+        bundle_runtime = _load_bundle_runtime_module()
+        assert bundle_runtime.get_bundle_dal() is dal
+        assert isinstance(bundle_runtime.get_bundle_dal(), AsyncDB)
+
+    async def test_bundle_can_query_via_penguin_dal_query_builder(
+        self, dal: AsyncDB
+    ) -> None:
+        bundle_runtime = _load_bundle_runtime_module()
+        rows = await bundle_runtime.get_bundle_dal()(
+            bundle_runtime.get_bundle_dal().widgets.active == True  # noqa: E712
+        ).select()
+        assert len(rows) == 1
+        assert rows.first().name == "a"
+
+
+class TestRawSqlRows:
+    async def test_returns_rows_object_with_first_and_dict_access(
+        self, dal: AsyncDB
+    ) -> None:
+        bundle_runtime = _load_bundle_runtime_module()
+        rows = await bundle_runtime.raw_sql_rows(
+            dal, "SELECT id, name FROM widgets WHERE name = :n", {"n": "a"}
+        )
+        assert len(rows) == 1
+        row = rows.first()
+        assert row is not None
+        assert row["name"] == "a"
+        assert row.name == "a"
+
+    async def test_empty_result_returns_empty_rows(self, dal: AsyncDB) -> None:
+        bundle_runtime = _load_bundle_runtime_module()
+        rows = await bundle_runtime.raw_sql_rows(
+            dal, "SELECT id FROM widgets WHERE name = :n", {"n": "nope"}
+        )
+        assert len(rows) == 0
+        assert rows.first() is None
+
+    async def test_no_params_defaults_to_empty_dict(self, dal: AsyncDB) -> None:
+        bundle_runtime = _load_bundle_runtime_module()
+        rows = await bundle_runtime.raw_sql_rows(dal, "SELECT id FROM widgets")
+        assert len(rows) == 2
+
+
+class TestRawSqlWrite:
+    async def test_insert_commits_and_returns_empty_rows_without_returning(
+        self, dal: AsyncDB
+    ) -> None:
+        bundle_runtime = _load_bundle_runtime_module()
+        rows = await bundle_runtime.raw_sql_write(
+            dal, "INSERT INTO widgets (name, active) VALUES (:n, 1)", {"n": "c"}
+        )
+        assert len(rows) == 0
+        check = await bundle_runtime.raw_sql_rows(
+            dal, "SELECT COUNT(*) AS n FROM widgets"
+        )
+        assert check.first()["n"] == 3
+
+    async def test_write_persists_across_a_new_connection(
+        self, dal: AsyncDB
+    ) -> None:
+        bundle_runtime = _load_bundle_runtime_module()
+        await bundle_runtime.raw_sql_write(
+            dal, "UPDATE widgets SET active = 0 WHERE name = :n", {"n": "a"}
+        )
+        rows = await bundle_runtime.raw_sql_rows(
+            dal, "SELECT active FROM widgets WHERE name = :n", {"n": "a"}
+        )
+        assert rows.first()["active"] == 0

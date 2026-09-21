@@ -37,17 +37,19 @@ ever reads, via `get_bundle_dal()`/`get_bundle_context()`.
 from __future__ import annotations
 
 import contextvars
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from penguin_dal import Row, Rows
+from sqlalchemy import text
 
 if TYPE_CHECKING:
-    # Type-only -- avoids a runtime `import pydal` (via .database) so this
-    # stays a lightweight leaf module, same rationale as stream_pipeline.py/
-    # stage_runner.py (module docstrings) not depending on the heavy
-    # pydal/quart/authlib stack `flask_core/__init__.py` eagerly imports.
-    from .database import AsyncDAL
+    # Type-only -- penguin_dal is a real runtime import (Task 2 pin), but
+    # kept TYPE_CHECKING-guarded here too, matching this module's existing
+    # "stay a lightweight leaf module" rationale (module docstring).
+    from penguin_dal import AsyncDB
 
 
 class BundleRuntimeError(RuntimeError):
@@ -60,32 +62,32 @@ class BundleRuntimeError(RuntimeError):
     """
 
 
-_dal: AsyncDAL | None = None
+_dal: AsyncDB | None = None
 
 
-def set_bundle_dal(dal: AsyncDAL) -> None:
+def set_bundle_dal(dal: AsyncDB) -> None:
     """Bind the process-wide DAL every `get_bundle_dal()` call will return.
 
     Called exactly once, by a stage runner's own startup (e.g.
     `core/svc_process/app.py`'s `before_serving` hook, mirroring
-    `core/svc_action/app.py`'s existing `AsyncDAL` construction) --
+    `core/svc_action/app.py`'s existing `AsyncDB` construction) --
     never by a bundle itself.
 
     Args:
-        dal: The `flask_core.AsyncDAL` this process's bundles will share.
+        dal: The `penguin_dal.AsyncDB` this process's bundles will share.
     """
     global _dal
     _dal = dal
 
 
-def get_bundle_dal() -> AsyncDAL:
+def get_bundle_dal() -> AsyncDB:
     """Return the DAL bound by `set_bundle_dal()`.
 
     A bundle calls this from inside its own `transform()`/action-entrypoint
     body -- the frozen entrypoint signatures carry no DAL parameter.
 
     Returns:
-        The `AsyncDAL` instance the current stage runner bound at startup.
+        The `penguin_dal.AsyncDB` instance the current stage runner bound at startup.
 
     Raises:
         BundleRuntimeError: No runner has ever called `set_bundle_dal()` in
@@ -207,3 +209,58 @@ def bundle_context(
         yield ctx
     finally:
         _context.reset(token)
+
+
+async def raw_sql_rows(
+    dal: "AsyncDB", sql: str, params: "Mapping[str, Any] | None" = None
+) -> "Rows":
+    """Run a read-only raw SQL query, for the joins/`GROUP BY`/`RANDOM()` cases
+    `penguin_dal`'s single-table `Query` builder cannot express.
+
+    `penguin_dal.AsyncDB.engine` is a public SQLAlchemy async engine; this
+    wraps `sqlalchemy.text()` execution back into `penguin_dal.Row`/`Rows`
+    so callers get the exact same `row["x"]`/`row.x`/`rows.first()`
+    ergonomics as `dal(query).select()` (Pattern A), regardless of which
+    path produced the rows -- see docs/APP_BUNDLE_AUTHORING.md's DAL
+    section for when to reach for this over the query builder.
+
+    Args:
+        dal: The bound `penguin_dal.AsyncDB` (from `get_bundle_dal()`).
+        sql: SQL text with named `:param` placeholders.
+        params: Bind parameter values, or `None` for a parameterless query.
+
+    Returns:
+        A `penguin_dal.Rows` of the result set (empty if no rows matched).
+    """
+    async with dal.engine.connect() as conn:
+        result = await conn.execute(text(sql), params or {})
+        return Rows([Row(dict(mapping)) for mapping in result.mappings().all()])
+
+
+async def raw_sql_write(
+    dal: "AsyncDB", sql: str, params: "Mapping[str, Any] | None" = None
+) -> "Rows":
+    """Run a raw SQL write (INSERT/UPDATE/DELETE, optionally `RETURNING`) in a
+    committed transaction, for the `ON CONFLICT`/multi-row cases
+    `penguin_dal`'s single-table `Query` builder cannot express.
+
+    Commits on success (via `AsyncDB.engine.begin()`'s own transaction
+    scope) and rolls back on any exception raised inside the block. A
+    statement with no `RETURNING` clause returns an empty `Rows`, never
+    raises for that reason alone.
+
+    Args:
+        dal: The bound `penguin_dal.AsyncDB` (from `get_bundle_dal()`).
+        sql: SQL text with named `:param` placeholders.
+        params: Bind parameter values, or `None` for a parameterless statement.
+
+    Returns:
+        A `penguin_dal.Rows` of any `RETURNING` rows (empty otherwise).
+    """
+    async with dal.engine.begin() as conn:
+        result = await conn.execute(text(sql), params or {})
+        try:
+            mappings = result.mappings().all()
+        except Exception:  # noqa: BLE001 -- driver raises when the statement has no result set (no RETURNING)
+            mappings = []
+        return Rows([Row(dict(mapping)) for mapping in mappings])
