@@ -9,9 +9,19 @@
 quart>=0.19.0
 hypercorn>=0.16.0
 
-# Database (flask_core.AsyncDAL wraps pydal directly)
+# Database (flask_core.AsyncDAL wraps pydal directly -- still used by
+# app.py/runner.py/services/* for the audit-log + reference tables).
 pydal>=20240906.1,<20250101
 psycopg2-binary>=2.9.9
+
+# penguin-dal -- the public DAL API these bundles' DB-access lines were
+# migrated to (docs/superpowers/specs/2026-09-14-rust-data-plane-design.md
+# D21a / M1.5): bundles/community_forums_action.py,
+# community_announcements_action.py, twitch_shoutout_action.py,
+# streaming_stream_action.py, social_quote_action.py. `asyncpg`/
+# `sqlite-async` extras pull the async drivers `penguin_dal.db.AsyncDB`
+# needs for Postgres (prod) and sqlite (tests).
+penguin-dal[asyncpg,sqlite-async]>=0.4.1,<0.5.0
 
 # Valkey/Redis (process -> action queue)
 redis>=5.0.1

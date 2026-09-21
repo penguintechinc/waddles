@@ -19,6 +19,16 @@ its own minimal stubs (`_ensure_streaming_tables`, idempotent,
 000_create_base_schema.sql`/`004_add_missing_tables.sql`), same "bind
 only the columns this bundle actually touches" convention
 `twitch_shoutout_action.py::_ensure_shoutout_tables` establishes.
+
+DB access is `penguin-dal`'s public API (docs/superpowers/specs/
+2026-09-14-rust-data-plane-design.md D21a / M1.5), replacing the legacy
+DAL wrapper this module used before. The `community_servers JOIN
+coordination` filter (`_build_join_query`) is the one query in this
+bundle set that compares two tables' columns to each other rather than a
+table's column to a literal -- `penguin_dal.field_proxy.FieldProxy`'s
+comparison operators build a bind-parameter `Query` for that shape, so
+the join condition is built from the raw SQLAlchemy `.column` on each
+side instead and wrapped back into a `penguin_dal.Query`.
 """
 
 from __future__ import annotations
@@ -31,47 +41,50 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 from flask_core import StageEnvelope, get_bundle_context, get_bundle_dal
+from penguin_dal import Field, Query
 from waddle_transports import NonRetryableTransportError, TransportResult
 
 if TYPE_CHECKING:
-    from flask_core import AsyncDAL
+    from penguin_dal import AsyncDB
 
 #: Live streams platform filter -- node hardcoded this; port verbatim.
 _LIVE_PLATFORM = "twitch"
 
 
-def _ensure_streaming_tables(async_dal: Any) -> None:
+async def _ensure_streaming_tables(async_dal: Any) -> None:
     """Idempotently bind `community_servers`/`coordination` -- only the columns this bundle reads.
 
     Mirrors `twitch_shoutout_action.py::_ensure_shoutout_tables`'s own
     "minimal stub, no DDL" convention, `migrate=False` throughout. Must
     run on a `dal` that already has `communities` defined (svc-action's
     own `app.py` startup binds it before `set_bundle_dal()`).
+    `penguin_dal.db.AsyncDB.define_table()` is async, so this helper is
+    awaited from its call site.
     """
     if "community_servers" not in async_dal.tables:
-        async_dal.define_table(
+        await async_dal.define_table(
             "community_servers",
-            async_dal.Field("community_id", "reference communities", notnull=True),
-            async_dal.Field("platform", "string", notnull=True),
-            async_dal.Field("platform_server_id", "string", notnull=True),
-            async_dal.Field("status", "string", default="pending"),
+            Field("community_id", "reference communities", notnull=True),
+            Field("platform", "string", notnull=True),
+            Field("platform_server_id", "string", notnull=True),
+            Field("status", "string", default="pending"),
             migrate=False,
         )
     if "coordination" not in async_dal.tables:
-        async_dal.define_table(
+        await async_dal.define_table(
             "coordination",
-            async_dal.Field("entity_id", "string", notnull=True),
-            async_dal.Field("platform", "string", notnull=True),
-            async_dal.Field("server_id", "string"),
-            async_dal.Field("channel_id", "string"),
-            async_dal.Field("channel_name", "string"),
-            async_dal.Field("is_live", "boolean", default=False),
-            async_dal.Field("viewer_count", "integer", default=0),
-            async_dal.Field("live_since", "datetime"),
-            async_dal.Field("stream_title", "string"),
-            async_dal.Field("game_name", "string"),
-            async_dal.Field("thumbnail_url", "string"),
-            async_dal.Field("last_updated", "datetime"),
+            Field("entity_id", "string", notnull=True),
+            Field("platform", "string", notnull=True),
+            Field("server_id", "string"),
+            Field("channel_id", "string"),
+            Field("channel_name", "string"),
+            Field("is_live", "boolean", default=False),
+            Field("viewer_count", "integer", default=0),
+            Field("live_since", "datetime"),
+            Field("stream_title", "string"),
+            Field("game_name", "string"),
+            Field("thumbnail_url", "string"),
+            Field("last_updated", "datetime"),
             migrate=False,
         )
 
@@ -134,7 +147,7 @@ async def list_streams(
     # Get tenant/community from the frozen API (per APP_BUNDLE_AUTHORING.md §5).
     # Never read from payload -- context comes from the envelope's isolation boundary.
     async_dal = get_bundle_dal()
-    _ensure_streaming_tables(async_dal)
+    await _ensure_streaming_tables(async_dal)
     ctx = get_bundle_context()
 
     # Reject if payload supplies a community_id that differs from context (IDOR guard).
@@ -191,38 +204,35 @@ async def list_streams(
     )
 
 
-async def _get_live_streams(async_dal: AsyncDAL, community_id: int) -> list[LiveStreamDTO]:
+async def _get_live_streams(async_dal: AsyncDB, community_id: int) -> list[LiveStreamDTO]:
     """Port of v2 `get_live_streams` -- all live streams ordered by viewer count DESC."""
-    dal = async_dal.dal
-    query = _build_join_query(dal, community_id)
-    rows = await async_dal.select_async(
-        dal(query),
-        dal.coordination.ALL,
-        orderby=~dal.coordination.viewer_count,
+    query = _build_join_query(async_dal, community_id)
+    rows = await async_dal(query).select(
+        async_dal.coordination.table,
+        orderby=~async_dal.coordination.viewer_count,
     )
     return [_stream_dto(row) for row in rows]
 
 
-async def _get_featured_streams(async_dal: AsyncDAL, community_id: int) -> list[LiveStreamDTO]:
+async def _get_featured_streams(async_dal: AsyncDB, community_id: int) -> list[LiveStreamDTO]:
     """Port of v2 `get_featured_streams` -- top 5 live streams by viewer count."""
-    dal = async_dal.dal
-    query = _build_join_query(dal, community_id)
-    rows = await async_dal.select_async(
-        dal(query),
-        dal.coordination.ALL,
-        orderby=~dal.coordination.viewer_count,
+    query = _build_join_query(async_dal, community_id)
+    rows = await async_dal(query).select(
+        async_dal.coordination.table,
+        orderby=~async_dal.coordination.viewer_count,
         limitby=(0, 5),
     )
     return [_stream_dto(row) for row in rows]
 
 
 async def _get_stream_details(
-    async_dal: AsyncDAL, community_id: int, entity_id: str
+    async_dal: AsyncDB, community_id: int, entity_id: str
 ) -> StreamDetailsDTO:
     """Port of v2 `get_stream_details` -- one stream by entity_id, raises 404 if not found."""
-    dal = async_dal.dal
-    query = _build_join_query(dal, community_id) & (dal.coordination.entity_id == entity_id)
-    rows = await async_dal.select_async(dal(query), dal.coordination.ALL)
+    query = _build_join_query(async_dal, community_id) & (
+        async_dal.coordination.entity_id == entity_id
+    )
+    rows = await async_dal(query).select(async_dal.coordination.table)
     if not rows:
         raise NonRetryableTransportError(
             f"streaming bundle: no live stream found for entity_id={entity_id!r} "
@@ -246,19 +256,32 @@ async def _get_stream_details(
     )
 
 
-def _build_join_query(dal: Any, community_id: int) -> Any:
+def _build_join_query(dal: Any, community_id: int) -> Query:
     """Port of v2's shared `coordination JOIN community_servers` WHERE clause.
 
     Filters to: approved community servers matching the coordination's
     platform/server_id pair, where coordination.is_live == True.
+
+    The two column-to-column comparisons (`platform`, `platform_server_id`
+    vs `server_id`) can't go through `FieldProxy.__eq__` -- it treats its
+    `other` argument as a bind-parameter value, not a second column -- so
+    those two are built from the raw SQLAlchemy `.column` on each side and
+    wrapped back into a `penguin_dal.Query` before joining the rest with
+    the normal `&` operator (module docstring).
     """
+    cs = dal.community_servers
+    coord = dal.coordination
+    platform_match = Query(cs.platform.column == coord.platform.column, table=cs.table)
+    server_id_match = Query(
+        cs.platform_server_id.column == coord.server_id.column, table=cs.table
+    )
     return (
-        (dal.community_servers.community_id == community_id)
-        & (dal.community_servers.status == "approved")
-        & (dal.community_servers.platform == dal.coordination.platform)
-        & (dal.community_servers.platform_server_id == dal.coordination.server_id)
-        & (dal.coordination.platform == _LIVE_PLATFORM)
-        & (dal.coordination.is_live == True)  # noqa: E712 - pydal Field comparison
+        (cs.community_id == community_id)
+        & (cs.status == "approved")
+        & platform_match
+        & server_id_match
+        & (coord.platform == _LIVE_PLATFORM)
+        & (coord.is_live == True)  # noqa: E712 - FieldProxy comparison, matches SQLAlchemy idiom
     )
 
 

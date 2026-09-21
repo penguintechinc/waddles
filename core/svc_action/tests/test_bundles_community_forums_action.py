@@ -9,12 +9,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from flask_core import (
-    AsyncDAL,
     PlatformEvent,
     StageEnvelope,
     reset_bundle_dal_for_tests,
     set_bundle_dal,
 )
+from penguin_dal import AsyncDB, Field
 from waddle_transports import NonRetryableTransportError, TransportResult
 
 from bundles.community_forums_action import create_forum_post, create_forum_reply
@@ -26,7 +26,7 @@ def _envelope(action: str, *, community: str = "42", **payload_overrides: object
     No `channel_id` in the default payload -- a `!forum` chat command never
     carries one; the target channel comes from `config`, not the payload.
     `community` defaults to the mock-DAL tests' fixed `"42"` -- the
-    real-pydal test overrides it to match the row it actually inserted.
+    real-DAL test overrides it to match the row it actually inserted.
     """
     payload: dict[str, object] = {
         "author_id": 456,
@@ -60,6 +60,26 @@ def _config(**overrides: object) -> dict:
 async def _client() -> httpx.AsyncClient:
     """Create a test httpx client."""
     return httpx.AsyncClient()
+
+
+def _mock_dal(
+    tables: tuple[str, ...] = ("hub_channels", "hub_forum_posts", "hub_forum_replies"),
+) -> MagicMock:
+    """Build a `MagicMock` standing in for `penguin_dal`'s `AsyncDB`.
+
+    `dal(query)` is sync (it returns an `AsyncQuerySet`), so the DAL
+    itself must be a `MagicMock`, not an `AsyncMock` -- only the
+    queryset's own `.select()`/`.update()` and each table proxy's
+    `.async_insert()` are actually async. `dal(query)` ignores its
+    argument and always returns the same `.return_value` queryset, which
+    matches every real call site in `community_forums_action.py` (never
+    more than one open queryset in flight at a time).
+    """
+    dal = MagicMock()
+    dal.tables = tables
+    dal.return_value.select = AsyncMock(return_value=[])
+    dal.return_value.update = AsyncMock()
+    return dal
 
 
 class TestCreateForumPostValidation:
@@ -105,10 +125,9 @@ class TestCreateForumPostSuccess:
         mock_channel.id = 123
         mock_channel.community_server_channel_id = None
 
-        mock_dal = AsyncMock()
-        mock_dal.tables = ("hub_channels", "hub_forum_posts", "hub_forum_replies")
-        mock_dal.select_async = AsyncMock(return_value=[mock_channel])
-        mock_dal.insert_async = AsyncMock(return_value=999)
+        mock_dal = _mock_dal()
+        mock_dal.return_value.select = AsyncMock(return_value=[mock_channel])
+        mock_dal.hub_forum_posts.async_insert = AsyncMock(return_value=999)
 
         with patch("bundles.community_forums_action.get_bundle_dal", return_value=mock_dal):
             result = await create_forum_post(
@@ -121,8 +140,8 @@ class TestCreateForumPostSuccess:
         assert result.transport == "bundle"
         assert result.http_status == 201
         assert "post_id=999" in result.detail
-        mock_dal.insert_async.assert_called_once()
-        assert mock_dal.insert_async.call_args.kwargs["hub_channel_id"] == 123
+        mock_dal.hub_forum_posts.async_insert.assert_called_once()
+        assert mock_dal.hub_forum_posts.async_insert.call_args.kwargs["hub_channel_id"] == 123
 
     async def test_includes_tags_in_creation(self) -> None:
         """Forum post creation should include tags from payload."""
@@ -130,10 +149,9 @@ class TestCreateForumPostSuccess:
         mock_channel.id = 123
         mock_channel.community_server_channel_id = None
 
-        mock_dal = AsyncMock()
-        mock_dal.tables = ("hub_channels", "hub_forum_posts", "hub_forum_replies")
-        mock_dal.select_async = AsyncMock(return_value=[mock_channel])
-        mock_dal.insert_async = AsyncMock(return_value=1)
+        mock_dal = _mock_dal()
+        mock_dal.return_value.select = AsyncMock(return_value=[mock_channel])
+        mock_dal.hub_forum_posts.async_insert = AsyncMock(return_value=1)
 
         with patch("bundles.community_forums_action.get_bundle_dal", return_value=mock_dal):
             await create_forum_post(
@@ -142,14 +160,13 @@ class TestCreateForumPostSuccess:
                 http_client=await _client(),
             )
 
-        call_args = mock_dal.insert_async.call_args
+        call_args = mock_dal.hub_forum_posts.async_insert.call_args
         assert call_args.kwargs["tags"] == ["tag1", "tag2"]
 
     async def test_channel_not_found_raises_non_retryable(self) -> None:
         """Post to a configured but non-existent channel should raise NonRetryableTransportError."""
-        mock_dal = AsyncMock()
-        mock_dal.tables = ("hub_channels", "hub_forum_posts", "hub_forum_replies")
-        mock_dal.select_async = AsyncMock(return_value=[])
+        mock_dal = _mock_dal()
+        mock_dal.return_value.select = AsyncMock(return_value=[])
 
         with patch("bundles.community_forums_action.get_bundle_dal", return_value=mock_dal):
             with pytest.raises(NonRetryableTransportError, match="channel.*not found"):
@@ -166,9 +183,8 @@ class TestCreateForumPostSuccess:
         0006_forum_posts_channel_nullable -- and no channel lookup/relay is
         attempted when no channel was configured.
         """
-        mock_dal = AsyncMock()
-        mock_dal.tables = ("hub_channels", "hub_forum_posts", "hub_forum_replies")
-        mock_dal.insert_async = AsyncMock(return_value=1)
+        mock_dal = _mock_dal()
+        mock_dal.hub_forum_posts.async_insert = AsyncMock(return_value=1)
 
         with patch("bundles.community_forums_action.get_bundle_dal", return_value=mock_dal):
             result = await create_forum_post(
@@ -178,9 +194,9 @@ class TestCreateForumPostSuccess:
             )
 
         assert result.http_status == 201
-        mock_dal.select_async.assert_not_called()  # no channel lookup without a configured channel
-        mock_dal.insert_async.assert_called_once()
-        assert mock_dal.insert_async.call_args.kwargs["hub_channel_id"] is None
+        mock_dal.return_value.select.assert_not_called()  # no lookup without a configured channel
+        mock_dal.hub_forum_posts.async_insert.assert_called_once()
+        assert mock_dal.hub_forum_posts.async_insert.call_args.kwargs["hub_channel_id"] is None
 
 
 class TestCreateForumReplyValidation:
@@ -242,15 +258,13 @@ class TestCreateForumReplySuccess:
         mock_post.is_locked = False
         mock_post.reply_count = 0
 
-        mock_dal = AsyncMock()
-        mock_dal.tables = ("hub_channels", "hub_forum_posts", "hub_forum_replies")
-        # Mock select_async to return post for post query, channel for channel query
-        mock_dal.select_async = AsyncMock(side_effect=[
-            [mock_post],  # First call: fetch post
-            [mock_channel],  # Second call: fetch channel
+        mock_dal = _mock_dal()
+        # Fetch post for post query, then channel for channel query.
+        mock_dal.return_value.select = AsyncMock(side_effect=[
+            [mock_post],
+            [mock_channel],
         ])
-        mock_dal.insert_async = AsyncMock(return_value=777)
-        mock_dal.update_async = AsyncMock()
+        mock_dal.hub_forum_replies.async_insert = AsyncMock(return_value=777)
 
         with patch("bundles.community_forums_action.get_bundle_dal", return_value=mock_dal):
             result = await create_forum_reply(
@@ -266,9 +280,8 @@ class TestCreateForumReplySuccess:
 
     async def test_post_not_found_raises_non_retryable(self) -> None:
         """Reply to non-existent post should raise NonRetryableTransportError."""
-        mock_dal = AsyncMock()
-        mock_dal.tables = ("hub_channels", "hub_forum_posts", "hub_forum_replies")
-        mock_dal.select_async = AsyncMock(return_value=[])
+        mock_dal = _mock_dal()
+        mock_dal.return_value.select = AsyncMock(return_value=[])
 
         with patch("bundles.community_forums_action.get_bundle_dal", return_value=mock_dal):
             with pytest.raises(NonRetryableTransportError, match="post.*not found"):
@@ -284,9 +297,8 @@ class TestCreateForumReplySuccess:
         mock_post.id = 42
         mock_post.is_locked = True
 
-        mock_dal = AsyncMock()
-        mock_dal.tables = ("hub_channels", "hub_forum_posts", "hub_forum_replies")
-        mock_dal.select_async = AsyncMock(return_value=[mock_post])
+        mock_dal = _mock_dal()
+        mock_dal.return_value.select = AsyncMock(return_value=[mock_post])
 
         with patch("bundles.community_forums_action.get_bundle_dal", return_value=mock_dal):
             with pytest.raises(NonRetryableTransportError, match="locked"):
@@ -302,10 +314,9 @@ class TestErrorHandling:
 
     async def test_forum_post_generic_error_wrapping(self) -> None:
         """Test that generic exceptions are wrapped as NonRetryableTransportError."""
-        mock_dal = AsyncMock()
-        mock_dal.tables = ("hub_channels", "hub_forum_posts", "hub_forum_replies")
-        # select_async returns empty list (channel not found), triggering an exception
-        mock_dal.select_async = AsyncMock(return_value=[])
+        mock_dal = _mock_dal()
+        # select() returns empty list (channel not found), triggering an exception.
+        mock_dal.return_value.select = AsyncMock(return_value=[])
 
         with patch("bundles.community_forums_action.get_bundle_dal", return_value=mock_dal):
             with pytest.raises(NonRetryableTransportError, match="channel.*not found"):
@@ -317,9 +328,8 @@ class TestErrorHandling:
 
     async def test_forum_reply_generic_error_wrapping(self) -> None:
         """Test that generic exceptions in reply creation are wrapped."""
-        mock_dal = AsyncMock()
-        mock_dal.tables = ("hub_channels", "hub_forum_posts", "hub_forum_replies")
-        mock_dal.select_async = AsyncMock(return_value=[])  # No post found
+        mock_dal = _mock_dal()
+        mock_dal.return_value.select = AsyncMock(return_value=[])  # No post found
 
         with patch("bundles.community_forums_action.get_bundle_dal", return_value=mock_dal):
             with pytest.raises(NonRetryableTransportError, match="post.*not found"):
@@ -340,10 +350,9 @@ class TestRegression:
         mock_channel.id = 123
         mock_channel.community_server_channel_id = 456  # Has relay config
 
-        mock_dal = AsyncMock()
-        mock_dal.tables = ("hub_channels", "hub_forum_posts", "hub_forum_replies")
-        mock_dal.select_async = AsyncMock(return_value=[mock_channel])
-        mock_dal.insert_async = AsyncMock(return_value=1)
+        mock_dal = _mock_dal()
+        mock_dal.return_value.select = AsyncMock(return_value=[mock_channel])
+        mock_dal.hub_forum_posts.async_insert = AsyncMock(return_value=1)
 
         with patch("bundles.community_forums_action.get_bundle_dal", return_value=mock_dal):
             result = await create_forum_post(
@@ -366,15 +375,13 @@ class TestRegression:
         mock_post.is_locked = False
         mock_post.reply_count = 5
 
-        mock_dal = AsyncMock()
-        mock_dal.tables = ("hub_channels", "hub_forum_posts", "hub_forum_replies")
-        # Mock select_async to return post for post query, channel for channel query
-        mock_dal.select_async = AsyncMock(side_effect=[
-            [mock_post],  # First call: fetch post
-            [mock_channel],  # Second call: fetch channel
+        mock_dal = _mock_dal()
+        # Fetch post for post query, then channel for channel query.
+        mock_dal.return_value.select = AsyncMock(side_effect=[
+            [mock_post],
+            [mock_channel],
         ])
-        mock_dal.insert_async = AsyncMock(return_value=1)
-        mock_dal.update_async = AsyncMock()
+        mock_dal.hub_forum_replies.async_insert = AsyncMock(return_value=1)
 
         with patch("bundles.community_forums_action.get_bundle_dal", return_value=mock_dal):
             await create_forum_reply(
@@ -384,8 +391,8 @@ class TestRegression:
             )
 
         # Verify that update was called with reply_count incremented
-        mock_dal.update_async.assert_called_once()
-        update_call_args = mock_dal.update_async.call_args
+        mock_dal.return_value.update.assert_called_once()
+        update_call_args = mock_dal.return_value.update.call_args
         # Check that reply_count was incremented by 1
         assert update_call_args.kwargs["reply_count"] == 6  # 5 + 1
 
@@ -433,9 +440,8 @@ class TestRegression:
             ts="2026-09-04T00:00:00Z",
         )
 
-        mock_dal = AsyncMock()
-        mock_dal.tables = ("hub_channels", "hub_forum_posts", "hub_forum_replies")
-        mock_dal.insert_async = AsyncMock(return_value=1)
+        mock_dal = _mock_dal()
+        mock_dal.hub_forum_posts.async_insert = AsyncMock(return_value=1)
 
         with patch("bundles.community_forums_action.get_bundle_dal", return_value=mock_dal):
             result = await create_forum_post(
@@ -445,8 +451,8 @@ class TestRegression:
             )
 
         assert result.http_status == 201
-        mock_dal.insert_async.assert_called_once()
-        call_kwargs = mock_dal.insert_async.call_args.kwargs
+        mock_dal.hub_forum_posts.async_insert.assert_called_once()
+        call_kwargs = mock_dal.hub_forum_posts.async_insert.call_args.kwargs
         assert call_kwargs["community_id"] == envelope.community == "42"
         assert call_kwargs["title"] == "My Title"
         assert call_kwargs["body"] == "body"
@@ -490,97 +496,95 @@ class TestRegression:
         mock_post.is_locked = False
         mock_post.reply_count = 0
 
-        mock_dal = AsyncMock()
-        mock_dal.tables = ("hub_channels", "hub_forum_posts", "hub_forum_replies")
-        mock_dal.select_async = AsyncMock(side_effect=[[mock_post], []])
-        mock_dal.insert_async = AsyncMock(return_value=1)
-        mock_dal.update_async = AsyncMock()
+        mock_dal = _mock_dal()
+        mock_dal.return_value.select = AsyncMock(side_effect=[[mock_post], []])
+        mock_dal.hub_forum_replies.async_insert = AsyncMock(return_value=1)
 
         with patch("bundles.community_forums_action.get_bundle_dal", return_value=mock_dal):
             result = await create_forum_reply(envelope, _config(), http_client=await _client())
 
         assert result.http_status == 201
-        mock_dal.insert_async.assert_called_once()
-        assert mock_dal.insert_async.call_args.kwargs["post_id"] == 42
-        assert mock_dal.insert_async.call_args.kwargs["content"] == "Great post!"
-        mock_dal.update_async.assert_called_once()
-        assert mock_dal.update_async.call_args.kwargs["reply_count"] == 1
+        mock_dal.hub_forum_replies.async_insert.assert_called_once()
+        assert mock_dal.hub_forum_replies.async_insert.call_args.kwargs["post_id"] == 42
+        assert mock_dal.hub_forum_replies.async_insert.call_args.kwargs["content"] == "Great post!"
+        mock_dal.return_value.update.assert_called_once()
+        assert mock_dal.return_value.update.call_args.kwargs["reply_count"] == 1
 
 
 @pytest.fixture
-async def real_dal(tmp_path: Path) -> AsyncIterator[AsyncDAL]:
-    """Real sqlite `AsyncDAL` -- `tenants`/`communities`/forum tables physically created.
+async def real_dal(tmp_path: Path) -> AsyncIterator[AsyncDB]:
+    """Real sqlite `penguin_dal.AsyncDB` -- `tenants`/`communities`/forum tables physically created.
 
     Same two-tier convention as `test_bundles_twitch_shoutout_action.py`'s
     own `dal` fixture: `_ensure_forum_tables` always binds with
     `migrate=False` (schema owned by `057_community_interaction.sql`), so
-    this fixture defines the identical column set with `migrate=True`
-    first; `_ensure_forum_tables`'s own guard then finds the tables
-    already registered and is a no-op when the bundle runs.
+    this fixture defines the identical column set first; `_ensure_forum_
+    tables`'s own guard then finds the tables already registered and is a
+    no-op when the bundle runs. `AsyncDB.define_table()` is async and
+    registers the table into its own metadata directly, so no separate
+    `.reflect()` call is needed once every table this test touches is
+    defined here in FK-dependency order (tenants -> communities ->
+    everything referencing communities).
     """
-    async_dal = AsyncDAL(f"sqlite://{tmp_path}/forums_test.db", pool_size=1, migrate=True)
-    d = async_dal.dal
-    d.define_table("tenants", migrate=True)
-    d.define_table("communities", d.Field("tenant_id", "reference tenants"), migrate=True)
-    d.define_table(
+    async_dal = AsyncDB(f"sqlite+aiosqlite:///{tmp_path}/forums_test.db", pool_size=1)
+    await async_dal.define_table("tenants", migrate=False)
+    await async_dal.define_table(
+        "communities", Field("tenant_id", "reference tenants"), migrate=False
+    )
+    await async_dal.define_table(
         "hub_channels",
-        d.Field("community_id", "reference communities", notnull=True),
-        d.Field("community_server_channel_id", "integer"),
-        migrate=True,
+        Field("community_id", "reference communities", notnull=True),
+        Field("community_server_channel_id", "integer"),
+        migrate=False,
     )
-    d.define_table(
+    await async_dal.define_table(
         "hub_forum_posts",
-        d.Field("hub_channel_id", "integer"),
-        d.Field("community_id", "reference communities", notnull=True),
-        d.Field("title", "string", notnull=True),
-        d.Field("body", "text"),
-        d.Field("tags", "json", default=[]),
-        d.Field("author_hub_user_id", "integer"),
-        d.Field("author_platform", "string"),
-        d.Field("author_username", "string"),
-        d.Field("author_avatar_url", "string"),
-        d.Field("is_locked", "boolean", default=False),
-        d.Field("reply_count", "integer", default=0),
-        d.Field("last_reply_at", "datetime"),
-        d.Field("created_at", "datetime"),
-        d.Field("updated_at", "datetime"),
-        migrate=True,
+        Field("hub_channel_id", "integer"),
+        Field("community_id", "reference communities", notnull=True),
+        Field("title", "string", notnull=True),
+        Field("body", "text"),
+        Field("tags", "json", default=[]),
+        Field("author_hub_user_id", "integer"),
+        Field("author_platform", "string"),
+        Field("author_username", "string"),
+        Field("author_avatar_url", "string"),
+        Field("is_locked", "boolean", default=False),
+        Field("reply_count", "integer", default=0),
+        Field("last_reply_at", "datetime"),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        migrate=False,
     )
-    d.define_table(
+    await async_dal.define_table(
         "hub_forum_replies",
-        d.Field("post_id", "reference hub_forum_posts", notnull=True),
-        d.Field("author_hub_user_id", "integer"),
-        d.Field("author_platform", "string"),
-        d.Field("author_username", "string"),
-        d.Field("author_avatar_url", "string"),
-        d.Field("content", "text", notnull=True),
-        d.Field("created_at", "datetime"),
-        migrate=True,
+        Field("post_id", "reference hub_forum_posts", notnull=True),
+        Field("author_hub_user_id", "integer"),
+        Field("author_platform", "string"),
+        Field("author_username", "string"),
+        Field("author_avatar_url", "string"),
+        Field("content", "text", notnull=True),
+        Field("created_at", "datetime"),
+        migrate=False,
     )
-    d.tenants.insert()
-    d.communities.insert(tenant_id=1)
-    d.commit()
+    await async_dal.tenants.async_insert()
+    await async_dal.communities.async_insert(tenant_id=1)
     set_bundle_dal(async_dal)
     try:
         yield async_dal
     finally:
         reset_bundle_dal_for_tests()
-        try:
-            await async_dal.close_async()
-        except Exception:  # noqa: BLE001, S110 -- known pydal cross-thread close gotcha
-            pass  # nosec B110
+        await async_dal.close()
 
 
-class TestRealPydal:
-    """Real-DB smoke (gh-298): exercises the actual pydal query path, not a mock."""
+class TestRealDal:
+    """Real-DB smoke (gh-298): exercises the actual `penguin_dal` query path, not a mock."""
 
-    async def test_create_post_and_reply_against_real_sqlite(self, real_dal: AsyncDAL) -> None:
-        # regression: gh-298 real-pydal
-        """`dal.dal(query)` fix: create a post, then a reply, reading each back from sqlite."""
-        d = real_dal.dal
-        community_id = d.communities.insert(tenant_id=1)
-        channel_id = d.hub_channels.insert(community_id=community_id)
-        d.commit()
+    async def test_create_post_and_reply_against_real_sqlite(self, real_dal: AsyncDB) -> None:
+        # regression: gh-298
+        """Create a post, then a reply, reading each back from sqlite via `penguin_dal`."""
+        d = real_dal
+        community_id = await d.communities.async_insert(tenant_id=1)
+        channel_id = await d.hub_channels.async_insert(community_id=community_id)
 
         # `community_id` is a real FK -- envelope.community must match the
         # row actually inserted above, not the fixed "42" `_envelope()`
@@ -596,7 +600,7 @@ class TestRealPydal:
             http_client=await _client(),
         )
         assert post_result.http_status == 201
-        posts = d(d.hub_forum_posts.hub_channel_id == channel_id).select()
+        posts = await d(d.hub_forum_posts.hub_channel_id == channel_id).select()
         assert len(posts) == 1
         post_id = posts[0].id
         assert posts[0].title == "Real Title"
@@ -612,9 +616,9 @@ class TestRealPydal:
             http_client=await _client(),
         )
         assert reply_result.http_status == 201
-        replies = d(d.hub_forum_replies.post_id == post_id).select()
+        replies = await d(d.hub_forum_replies.post_id == post_id).select()
         assert len(replies) == 1
         assert replies[0].content == "Real reply"
 
-        refreshed_post = d(d.hub_forum_posts.id == post_id).select().first()
-        assert refreshed_post.reply_count == 1
+        refreshed_posts = await d(d.hub_forum_posts.id == post_id).select()
+        assert refreshed_posts.first().reply_count == 1

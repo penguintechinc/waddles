@@ -64,18 +64,23 @@ def _client(handler) -> httpx.AsyncClient:  # noqa: ANN001
     return httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
 
 
+class _FakeQuotesTable:
+    """Minimal fake `penguin_dal.TableProxy` -- only `.async_insert()`, this bundle's own surface."""
+
+    def __init__(self, counter_start: int = 100) -> None:
+        self._counter = counter_start
+
+    async def async_insert(self, **kwargs: Any) -> int:
+        """Mock insert for quote creation -- returns the new row's id, like the real TableProxy."""
+        self._counter += 1
+        return self._counter
+
+
 class _FakeDal:
-    """In-memory stand-in for AsyncDAL -- implements only the .execute() surface."""
+    """In-memory stand-in for `penguin_dal.AsyncDB` -- implements only the `.quotes` surface."""
 
     def __init__(self) -> None:
-        self._quote_id_counter = 100
-
-    async def execute(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
-        """Mock execute for quote insertion."""
-        if "INSERT INTO quotes" in sql:
-            self._quote_id_counter += 1
-            return [{"id": self._quote_id_counter}]
-        return []
+        self.quotes = _FakeQuotesTable()
 
 
 @pytest.fixture(autouse=True)
@@ -258,8 +263,8 @@ class TestQuoteAddIntent:
     ) -> None:
         """Database error on quote add returns error message."""
         monkeypatch.setenv("TEST_DISCORD_TOKEN", "s3cr3t")
-        mock_dal = AsyncMock()
-        mock_dal.execute = AsyncMock(side_effect=Exception("DB error"))
+        mock_dal = MagicMock()
+        mock_dal.quotes.async_insert = AsyncMock(side_effect=Exception("DB error"))
         set_bundle_dal(mock_dal)
 
         def handler(request: httpx.Request) -> httpx.Response:

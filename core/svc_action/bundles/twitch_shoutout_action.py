@@ -54,6 +54,7 @@ from typing import Any
 
 import httpx
 from flask_core import StageEnvelope, get_bundle_dal
+from penguin_dal import Field
 from waddle_transports import NonRetryableTransportError, RetryableTransportError, TransportResult
 from waddle_transports.signing import SecretResolutionError, resolve_secret
 from waddle_transports.transports.irc_relay import RelayOutboundIrcTransport
@@ -111,7 +112,7 @@ def _get_helix_client(http_client: httpx.AsyncClient) -> TwitchHelixClient:
     return _helix_client
 
 
-def _ensure_shoutout_tables(dal: Any) -> None:
+async def _ensure_shoutout_tables(dal: Any) -> None:
     """Idempotently bind `shoutout_config`/`shoutout_history` -- only the columns this bundle uses.
 
     Mirrors `services/reference_tables.bind_minimal_reference_tables`'s own
@@ -120,25 +121,27 @@ def _ensure_shoutout_tables(dal: Any) -> None:
     `communities` defined (svc-action's own `app.py` startup binds it via
     `bind_minimal_reference_tables` before `set_bundle_dal()`, same
     ordering `flask_core.app_bundle_tables`'s own module docstring
-    documents for any `reference communities` field).
+    documents for any `reference communities` field). `penguin_dal.db.
+    AsyncDB.define_table()` is async, so this helper is awaited from every
+    call site.
     """
     if "shoutout_config" not in dal.tables:
-        dal.define_table(
+        await dal.define_table(
             "shoutout_config",
-            dal.Field("community_id", "reference communities", notnull=True),
-            dal.Field("cooldown_minutes", "integer", default=_DEFAULT_COOLDOWN_MINUTES),
+            Field("community_id", "reference communities", notnull=True),
+            Field("cooldown_minutes", "integer", default=_DEFAULT_COOLDOWN_MINUTES),
             migrate=False,
         )
     if "shoutout_history" not in dal.tables:
-        dal.define_table(
+        await dal.define_table(
             "shoutout_history",
-            dal.Field("community_id", "reference communities", notnull=True),
-            dal.Field("platform", "string", notnull=True),
-            dal.Field("target_username", "string", notnull=True),
-            dal.Field("shoutout_type", "string", default="text"),
-            dal.Field("triggered_by_username", "string"),
-            dal.Field("trigger_type", "string", default="manual"),
-            dal.Field("created_at", "datetime", default=datetime.utcnow),
+            Field("community_id", "reference communities", notnull=True),
+            Field("platform", "string", notnull=True),
+            Field("target_username", "string", notnull=True),
+            Field("shoutout_type", "string", default="text"),
+            Field("triggered_by_username", "string"),
+            Field("trigger_type", "string", default="manual"),
+            Field("created_at", "datetime", default=datetime.utcnow),
             migrate=False,
         )
 
@@ -146,13 +149,13 @@ def _ensure_shoutout_tables(dal: Any) -> None:
 async def _get_shoutout_config_row(dal: Any, community_id: int) -> Any | None:
     """The community's `shoutout_config` row, or `None` if it has never been provisioned.
 
-    `select_async` expects a pydal `Set` (`dal.dal(query)`), not a bare
-    `Query` -- a bare `Query` object has no `.select()`/`.db` of its own in
-    this pydal version, matching `runner.py::_resolve_tenant_id`'s own
-    `self._dal.dal(self._dal.dal.tenants.slug == tenant_slug)` call shape.
+    `penguin_dal`'s `dal(query).select()` runs directly against the
+    `Query` a `FieldProxy` comparison returns -- no intermediate
+    Set-conversion step, matching `runner.py::_resolve_tenant_id`'s own
+    migrated call shape.
     """
-    query = dal.dal.shoutout_config.community_id == community_id
-    rows = await dal.select_async(dal.dal(query), limitby=(0, 1))
+    query = dal.shoutout_config.community_id == community_id
+    rows = await dal(query).select(limitby=(0, 1))
     return rows[0] if rows else None
 
 
@@ -161,12 +164,12 @@ async def _last_shoutout_at(
 ) -> datetime | None:
     """Most recent `shoutout_history.created_at` for this `(community, platform, target)` triple."""
     query = (
-        (dal.dal.shoutout_history.community_id == community_id)
-        & (dal.dal.shoutout_history.platform == platform)
-        & (dal.dal.shoutout_history.target_username == target_login)
+        (dal.shoutout_history.community_id == community_id)
+        & (dal.shoutout_history.platform == platform)
+        & (dal.shoutout_history.target_username == target_login)
     )
-    rows = await dal.select_async(
-        dal.dal(query), orderby=~dal.dal.shoutout_history.created_at, limitby=(0, 1)
+    rows = await dal(query).select(
+        orderby=~dal.shoutout_history.created_at, limitby=(0, 1)
     )
     if not rows:
         return None
@@ -184,8 +187,7 @@ async def _record_history(
     triggered_by: str | None,
 ) -> None:
     """Insert one `shoutout_history` row. Raises on a DB write failure -- caller decides."""
-    await dal.insert_async(
-        dal.shoutout_history,
+    await dal.shoutout_history.async_insert(
         community_id=community_id,
         platform=platform,
         target_username=target_login,
@@ -431,7 +433,7 @@ async def shoutout(
     platform = envelope.event.platform.lower() if envelope.event.platform else "twitch"
 
     dal = get_bundle_dal()
-    _ensure_shoutout_tables(dal)
+    await _ensure_shoutout_tables(dal)
 
     config_row = await _get_shoutout_config_row(dal, community_id)
     cooldown_minutes = _DEFAULT_COOLDOWN_MINUTES

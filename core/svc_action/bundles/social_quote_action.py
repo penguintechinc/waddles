@@ -190,21 +190,23 @@ async def send_message(
 
 
 async def _add_quote_to_db(quote_text: str, actor: str | None) -> int | None:
-    """Add a quote to the database and return the quote ID, or None on failure."""
+    """Add a quote to the database and return the quote ID, or None on failure.
+
+    Uses `penguin-dal`'s `TableProxy.async_insert()` (docs/superpowers/
+    specs/2026-09-14-rust-data-plane-design.md D21a / M1.5) -- it returns
+    the inserted primary key directly, the same value the legacy raw-SQL
+    `INSERT ... RETURNING id` produced.
+    """
     try:
         dal = get_bundle_dal()
-        sql = """
-            INSERT INTO quotes
-            (quote_text, quoted_username, is_approved, created_at, updated_at)
-            VALUES (%s, %s, TRUE, %s, %s)
-            RETURNING id
-        """
         now = datetime.now(UTC).isoformat()
-        result = await dal.execute(sql, [quote_text, actor or "unknown", now, now])
-        if not result:
-            return None
-        row = result[0]
-        raw_id = row.get("id") if isinstance(row, dict) else None
-        return raw_id if isinstance(raw_id, int) else None
+        quote_id = await dal.quotes.async_insert(
+            quote_text=quote_text,
+            quoted_username=actor or "unknown",
+            is_approved=True,
+            created_at=now,
+            updated_at=now,
+        )
+        return quote_id if isinstance(quote_id, int) else None
     except Exception:
         return None

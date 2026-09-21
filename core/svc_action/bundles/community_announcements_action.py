@@ -13,7 +13,9 @@ in `announcement_broadcasts`, and returns a single `TransportResult`.
 
 DB access uses `flask_core.get_bundle_dal()` per docs/APP_BUNDLE_AUTHORING.md
 Accessing the database / shared state. The runner binds the DAL at startup
-via `set_bundle_dal()`.
+via `set_bundle_dal()`; the DAL itself is `penguin-dal`'s public API
+(docs/superpowers/specs/2026-09-14-rust-data-plane-design.md D21a / M1.5),
+replacing the legacy DAL wrapper this module used before.
 
 Deliberately does **not** implement retry/sleep loops -- `retry_with_
 backoff` in `runner.py::_handle_envelope` owns all backoff timing on
@@ -30,11 +32,13 @@ stubs (`_ensure_announcement_tables`, idempotent, `migrate=False` --
 schema owned by `config/postgres/migrations/000_create_base_schema.sql`),
 same "bind only the columns this bundle actually touches" convention
 `twitch_shoutout_action.py::_ensure_shoutout_tables` already
-establishes. `select_async` runs `query.select()`/`query.db.commit()`
-directly (`flask_core/database.py`) -- it requires a pydal `Set`
-(`dal.dal(query)`), not a bare `Query` (gh #298, matching
-`runner.py::_resolve_tenant_id`'s own `dal.dal(query)` call shape); a
-bare `Query` has no `.select()`/`.db` in this pydal version.
+establishes. `penguin_dal.db.AsyncDB.define_table()` is async, so
+`_ensure_announcement_tables` is awaited from its call site. Query
+building keeps the same `dal.table.column == value` shape the legacy
+wrapper used, but `dal(query).select()` runs directly against the
+`Query` `penguin_dal` returns -- no intermediate Set-conversion step
+(gh #298, matching `runner.py::_resolve_tenant_id`'s own migrated call
+shape).
 """
 
 from __future__ import annotations
@@ -47,13 +51,14 @@ from typing import Any
 
 import httpx
 from flask_core import StageEnvelope, get_bundle_dal
+from penguin_dal import Field
 from waddle_transports import NonRetryableTransportError, RetryableTransportError, TransportResult
 from waddle_transports.url_guard import SSRFError, guarded_request
 
 logger = logging.getLogger(__name__)
 
 
-def _ensure_announcement_tables(dal: Any) -> None:
+async def _ensure_announcement_tables(dal: Any) -> None:
     """Idempotently bind `community_servers`/`announcement_broadcasts` -- only the columns used.
 
     Mirrors `twitch_shoutout_action.py::_ensure_shoutout_tables`'s own
@@ -64,22 +69,22 @@ def _ensure_announcement_tables(dal: Any) -> None:
     `set_bundle_dal()`).
     """
     if "community_servers" not in dal.tables:
-        dal.define_table(
+        await dal.define_table(
             "community_servers",
-            dal.Field("community_id", "reference communities", notnull=True),
-            dal.Field("platform", "string", notnull=True),
+            Field("community_id", "reference communities", notnull=True),
+            Field("platform", "string", notnull=True),
             migrate=False,
         )
     if "announcement_broadcasts" not in dal.tables:
-        dal.define_table(
+        await dal.define_table(
             "announcement_broadcasts",
-            dal.Field("announcement_id", "integer", notnull=True),
-            dal.Field("community_server_id", "integer"),
-            dal.Field("platform", "string", notnull=True),
-            dal.Field("status", "string", default="pending"),
-            dal.Field("error_message", "string"),
-            dal.Field("broadcasted_at", "datetime"),
-            dal.Field("created_at", "datetime", default=lambda: datetime.now(UTC)),
+            Field("announcement_id", "integer", notnull=True),
+            Field("community_server_id", "integer"),
+            Field("platform", "string", notnull=True),
+            Field("status", "string", default="pending"),
+            Field("error_message", "string"),
+            Field("broadcasted_at", "datetime"),
+            Field("created_at", "datetime", default=lambda: datetime.now(UTC)),
             migrate=False,
         )
 
@@ -168,7 +173,7 @@ async def broadcast_announcement(
         raise NonRetryableTransportError("envelope event.payload missing 'announcement_id' int")
 
     dal = get_bundle_dal()
-    _ensure_announcement_tables(dal)
+    await _ensure_announcement_tables(dal)
 
     # Look up community_servers matching the target platforms
     community_id = envelope.community
@@ -180,9 +185,7 @@ async def broadcast_announcement(
             (dal.community_servers.community_id == int(community_id))
             & (dal.community_servers.platform.belongs(target_platforms))
         )
-        # select_async runs query.select()/query.db.commit() directly --
-        # requires a pydal Set (dal.dal(query)), not a bare Query.
-        servers = await dal.select_async(dal.dal(query))
+        servers = await dal(query).select()
 
         if not servers:
             raise NonRetryableTransportError(
@@ -200,8 +203,7 @@ async def broadcast_announcement(
 
             # Record broadcast attempt in database
             try:
-                await dal.insert_async(
-                    dal.announcement_broadcasts,
+                await dal.announcement_broadcasts.async_insert(
                     announcement_id=announcement_id,
                     community_server_id=server.id,
                     platform=platform,
