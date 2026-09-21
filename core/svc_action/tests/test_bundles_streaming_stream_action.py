@@ -6,18 +6,18 @@ import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
 from flask_core import (
-    AsyncDAL,
     PlatformEvent,
     StageEnvelope,
     bundle_context,
     reset_bundle_dal_for_tests,
     set_bundle_dal,
 )
+from penguin_dal import AsyncDB, Field
 from waddle_transports import NonRetryableTransportError
 
 from bundles.streaming_stream_action import (
@@ -75,21 +75,77 @@ def _ctx(community: str | None = "1") -> Any:
     )
 
 
+class _FakeQuery:
+    """Minimal fake `penguin_dal.Query` -- combinable via `&`; the fake DAL ignores its content."""
+
+    def __and__(self, other: object) -> _FakeQuery:
+        return self
+
+
+class _FakeField:
+    """Minimal fake `penguin_dal.FieldProxy` -- `==`/`.column`/`~`/`.belongs()`, ignored downstream.
+
+    `_FakeDal.__call__` never inspects the query it's given (it always
+    returns the fixture-configured `select_result`), so every operator
+    here just needs to not raise -- it doesn't need to build a real
+    predicate the way `test_bundles_community_announcements_action.py`'s
+    fakes do.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    @property
+    def column(self) -> _FakeField:
+        return self
+
+    def __eq__(self, other: object) -> _FakeQuery:  # type: ignore[override]
+        return _FakeQuery()
+
+    def belongs(self, values: list[Any]) -> _FakeQuery:
+        return _FakeQuery()
+
+    def __invert__(self) -> _FakeField:
+        return self
+
+
+class _FakeTable:
+    """Minimal fake `penguin_dal.TableProxy` -- field access + `.table` (unused select column)."""
+
+    def __getattr__(self, name: str) -> _FakeField:
+        return _FakeField(name)
+
+    @property
+    def table(self) -> str:
+        return "FAKE_TABLE"
+
+
+class _FakeQuerySet:
+    """Minimal fake `penguin_dal.AsyncQuerySet` -- `.select()` returns the parent's canned result."""
+
+    def __init__(self, parent: _FakeDal) -> None:
+        self._parent = parent
+
+    async def select(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN002, ANN003
+        return self._parent.select_result
+
+
 class _FakeDal:
-    """In-memory stand-in for `AsyncDAL` -- only the `.select_async()` surface this bundle uses."""
+    """In-memory stand-in for `penguin_dal.AsyncDB` -- only the query-building surface this uses."""
 
     def __init__(self) -> None:
-        self.dal = MagicMock()
         # `.tables` pre-populated so `_ensure_streaming_tables`'s idempotent
         # `"x" not in async_dal.tables` guard is a no-op against this fake.
         self.tables = ("community_servers", "coordination")
+        self.community_servers = _FakeTable()
+        self.coordination = _FakeTable()
+        self.select_result: Any = []
 
-    def define_table(self, *args: object, **kwargs: object) -> None:
+    async def define_table(self, *args: object, **kwargs: object) -> None:
         """No-op -- `.tables` above already short-circuits `_ensure_streaming_tables`."""
 
-    async def select_async(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN002, ANN003
-        """Mock select_async returning a list of mock rows."""
-        return []
+    def __call__(self, query: _FakeQuery) -> _FakeQuerySet:
+        return _FakeQuerySet(self)
 
 
 @pytest.fixture(autouse=True)
@@ -105,9 +161,7 @@ async def test_get_live_streams_success(_dal: _FakeDal) -> None:
     """Test `get_live_streams` query returns all streams ordered by viewer count."""
     row1 = _mock_row(entity_id="stream-1", viewer_count=500)
     row2 = _mock_row(entity_id="stream-2", viewer_count=100)
-    mock_rows = [row1, row2]
-
-    _dal.select_async = AsyncMock(return_value=mock_rows)  # type: ignore[method-assign]
+    _dal.select_result = [row1, row2]
 
     async with httpx.AsyncClient() as client:
         with _ctx():
@@ -129,7 +183,7 @@ async def test_get_featured_streams_returns_top_5(_dal: _FakeDal) -> None:
     """Test `get_featured_streams` query returns top 5 by viewer count."""
     # Return more than 5 rows; runner limits to 5
     rows = [_mock_row(entity_id=f"stream-{i}", viewer_count=100 - i) for i in range(7)]
-    _dal.select_async = AsyncMock(return_value=rows)  # type: ignore[method-assign]
+    _dal.select_result = rows
 
     async with httpx.AsyncClient() as client:
         with _ctx():
@@ -141,8 +195,8 @@ async def test_get_featured_streams_returns_top_5(_dal: _FakeDal) -> None:
 
     dtos = json.loads(result.detail)
     assert isinstance(dtos, list)
-    # The limitby is applied by the mock's select_async call
-    assert len(dtos) == 7  # mock returns all rows; real DB would limit to 5
+    # The limitby is applied by the fake's select() call
+    assert len(dtos) == 7  # fake returns all rows; real DB would limit to 5
 
 
 async def test_get_stream_details_success(_dal: _FakeDal) -> None:
@@ -152,7 +206,7 @@ async def test_get_stream_details_success(_dal: _FakeDal) -> None:
     mock_rows.first = MagicMock(return_value=row)
     mock_rows.__len__ = MagicMock(return_value=1)
     mock_rows.__bool__ = MagicMock(return_value=True)
-    _dal.select_async = AsyncMock(return_value=mock_rows)  # type: ignore[method-assign]
+    _dal.select_result = mock_rows
 
     async with httpx.AsyncClient() as client:
         with _ctx():
@@ -206,7 +260,7 @@ async def test_get_stream_details_not_found_is_non_retryable(_dal: _FakeDal) -> 
     """Test get_stream_details with no matching row raises NonRetryableTransportError."""
     mock_rows = MagicMock()
     mock_rows.__bool__ = MagicMock(return_value=False)  # empty result set
-    _dal.select_async = AsyncMock(return_value=mock_rows)  # type: ignore[method-assign]
+    _dal.select_result = mock_rows
 
     async with httpx.AsyncClient() as client:
         with _ctx():
@@ -309,69 +363,66 @@ async def test_missing_context_community_is_rejected() -> None:
 
 
 @pytest.fixture
-async def real_dal(tmp_path: Path) -> AsyncIterator[AsyncDAL]:
-    """Real sqlite `AsyncDAL` -- `tenants`/`communities`/`community_servers`/`coordination` created.
+async def real_dal(tmp_path: Path) -> AsyncIterator[AsyncDB]:
+    """Real sqlite `penguin_dal.AsyncDB` -- `tenants`/`communities`/`community_servers`/`coordination`.
 
     Same two-tier convention as `test_bundles_twitch_shoutout_action.py`'s
     own `dal` fixture: `_ensure_streaming_tables` always binds with
     `migrate=False`, so this fixture defines the identical column set
-    with `migrate=True` first; `_ensure_streaming_tables`'s own guard
-    then finds the tables already registered and is a no-op.
+    first; `_ensure_streaming_tables`'s own guard then finds the tables
+    already registered and is a no-op.
     """
-    async_dal = AsyncDAL(f"sqlite://{tmp_path}/streaming_test.db", pool_size=1, migrate=True)
-    d = async_dal.dal
-    d.define_table("tenants", migrate=True)
-    d.define_table("communities", d.Field("tenant_id", "reference tenants"), migrate=True)
-    d.define_table(
+    async_dal = AsyncDB(f"sqlite+aiosqlite:///{tmp_path}/streaming_test.db", pool_size=1)
+    await async_dal.define_table("tenants", migrate=False)
+    await async_dal.define_table(
+        "communities", Field("tenant_id", "reference tenants"), migrate=False
+    )
+    await async_dal.define_table(
         "community_servers",
-        d.Field("community_id", "reference communities", notnull=True),
-        d.Field("platform", "string", notnull=True),
-        d.Field("platform_server_id", "string", notnull=True),
-        d.Field("status", "string", default="pending"),
-        migrate=True,
+        Field("community_id", "reference communities", notnull=True),
+        Field("platform", "string", notnull=True),
+        Field("platform_server_id", "string", notnull=True),
+        Field("status", "string", default="pending"),
+        migrate=False,
     )
-    d.define_table(
+    await async_dal.define_table(
         "coordination",
-        d.Field("entity_id", "string", notnull=True),
-        d.Field("platform", "string", notnull=True),
-        d.Field("server_id", "string"),
-        d.Field("channel_id", "string"),
-        d.Field("channel_name", "string"),
-        d.Field("is_live", "boolean", default=False),
-        d.Field("viewer_count", "integer", default=0),
-        d.Field("live_since", "datetime"),
-        d.Field("stream_title", "string"),
-        d.Field("game_name", "string"),
-        d.Field("thumbnail_url", "string"),
-        d.Field("last_updated", "datetime"),
-        migrate=True,
+        Field("entity_id", "string", notnull=True),
+        Field("platform", "string", notnull=True),
+        Field("server_id", "string"),
+        Field("channel_id", "string"),
+        Field("channel_name", "string"),
+        Field("is_live", "boolean", default=False),
+        Field("viewer_count", "integer", default=0),
+        Field("live_since", "datetime"),
+        Field("stream_title", "string"),
+        Field("game_name", "string"),
+        Field("thumbnail_url", "string"),
+        Field("last_updated", "datetime"),
+        migrate=False,
     )
-    d.tenants.insert()
-    d.communities.insert(tenant_id=1)
-    d.commit()
+    await async_dal.tenants.async_insert()
+    await async_dal.communities.async_insert(tenant_id=1)
     set_bundle_dal(async_dal)
     try:
         yield async_dal
     finally:
         reset_bundle_dal_for_tests()
-        try:
-            await async_dal.close_async()
-        except Exception:  # noqa: BLE001, S110 -- known pydal cross-thread close gotcha
-            pass  # nosec B110
+        await async_dal.close()
 
 
-async def test_get_live_streams_against_real_sqlite(real_dal: AsyncDAL) -> None:
-    # regression: gh-298 real-pydal
+async def test_get_live_streams_against_real_sqlite(real_dal: AsyncDB) -> None:
+    # regression: gh-298
     """`dal(query)` join query works end-to-end: insert server+coordination, list, read back."""
-    d = real_dal.dal
-    community_id = d.communities.insert(tenant_id=1)
-    d.community_servers.insert(
+    d = real_dal
+    community_id = await d.communities.async_insert(tenant_id=1)
+    await d.community_servers.async_insert(
         community_id=community_id,
         platform="twitch",
         platform_server_id="srv-1",
         status="approved",
     )
-    d.coordination.insert(
+    await d.coordination.async_insert(
         entity_id="twitch-real-1",
         platform="twitch",
         server_id="srv-1",
@@ -383,7 +434,6 @@ async def test_get_live_streams_against_real_sqlite(real_dal: AsyncDAL) -> None:
         game_name="Just Chatting",
         thumbnail_url="https://example.com/real.jpg",
     )
-    d.commit()
 
     async with httpx.AsyncClient() as client:
         with bundle_context(

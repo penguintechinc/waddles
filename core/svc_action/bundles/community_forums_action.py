@@ -6,10 +6,14 @@ writes to hub_forum_posts/hub_forum_replies tables, and notifies relay
 service for cross-platform propagation.
 
 DB access uses `flask_core.get_bundle_dal()` per docs/APP_BUNDLE_AUTHORING.md
-Accessing the database / shared state -- the runner binds the real,
-env-sourced DAL at startup via `set_bundle_dal()` (`core/svc_action/app.py`),
-same as every other action bundle (`community_announcements_action.py`,
-`social_quote_action.py`).
+Accessing the database / shared state -- that accessor is the one
+sanctioned side channel and is unaffected by this migration. The DAL it
+returns is expected to be `penguin-dal`'s public API (docs/superpowers/
+specs/2026-09-14-rust-data-plane-design.md D21a / M1.5), replacing the
+legacy DAL wrapper this module used before, same as every other migrated
+action bundle (`community_announcements_action.py`,
+`social_quote_action.py`, `twitch_shoutout_action.py`,
+`streaming_stream_action.py`).
 
 `hub_channels`/`hub_forum_posts`/`hub_forum_replies` are never bound
 anywhere else on this service's `dal` (svc-action's own startup only
@@ -18,10 +22,13 @@ this bundle binds its own minimal stubs (`_ensure_forum_tables`,
 idempotent, `migrate=False` -- schema owned by `config/postgres/
 migrations/057_community_interaction.sql`), same convention
 `twitch_shoutout_action.py::_ensure_shoutout_tables` establishes.
-`select_async` runs `query.select()`/`query.db.commit()` directly
-(`flask_core/database.py`) -- it requires a pydal `Set`
-(`dal.dal(query)`), not a bare `Query` (gh #298); a bare `Query` has no
-`.select()`/`.db` in this pydal version.
+`penguin_dal.db.AsyncDB.define_table()` is async (unlike the legacy
+wrapper's sync `define_table`), so `_ensure_forum_tables` is awaited from
+every call site. Query building keeps the same `dal.table.column ==
+value` shape the legacy wrapper used (`penguin_dal.field_proxy.FieldProxy`
+supports the same comparison operators) -- but `dal(query).select()`/
+`.update()` runs directly against the `Query` `penguin_dal` returns;
+there is no intermediate Set-conversion step anymore.
 """
 
 from __future__ import annotations
@@ -33,12 +40,13 @@ from typing import Any
 
 import httpx
 from flask_core import StageEnvelope, get_bundle_dal
+from penguin_dal import Field
 from waddle_transports import NonRetryableTransportError, TransportResult
 
 logger = logging.getLogger(__name__)
 
 
-def _ensure_forum_tables(dal: Any) -> None:
+async def _ensure_forum_tables(dal: Any) -> None:
     """Idempotently bind `hub_channels`/`hub_forum_posts`/`hub_forum_replies`.
 
     Only the columns this bundle actually touches -- mirrors
@@ -49,44 +57,44 @@ def _ensure_forum_tables(dal: Any) -> None:
     `set_bundle_dal()`).
     """
     if "hub_channels" not in dal.tables:
-        dal.define_table(
+        await dal.define_table(
             "hub_channels",
-            dal.Field("community_id", "reference communities", notnull=True),
+            Field("community_id", "reference communities", notnull=True),
             # Plain integer, not "reference community_server_channels" --
             # that table is never bound here, only this column's presence
             # (relay target) is ever read.
-            dal.Field("community_server_channel_id", "integer"),
+            Field("community_server_channel_id", "integer"),
             migrate=False,
         )
     if "hub_forum_posts" not in dal.tables:
-        dal.define_table(
+        await dal.define_table(
             "hub_forum_posts",
-            dal.Field("hub_channel_id", "integer"),
-            dal.Field("community_id", "reference communities", notnull=True),
-            dal.Field("title", "string", notnull=True),
-            dal.Field("body", "text"),
-            dal.Field("tags", "json", default=[]),
-            dal.Field("author_hub_user_id", "integer"),
-            dal.Field("author_platform", "string"),
-            dal.Field("author_username", "string"),
-            dal.Field("author_avatar_url", "string"),
-            dal.Field("is_locked", "boolean", default=False),
-            dal.Field("reply_count", "integer", default=0),
-            dal.Field("last_reply_at", "datetime"),
-            dal.Field("created_at", "datetime", default=lambda: datetime.now(UTC)),
-            dal.Field("updated_at", "datetime", default=lambda: datetime.now(UTC)),
+            Field("hub_channel_id", "integer"),
+            Field("community_id", "reference communities", notnull=True),
+            Field("title", "string", notnull=True),
+            Field("body", "text"),
+            Field("tags", "json", default=[]),
+            Field("author_hub_user_id", "integer"),
+            Field("author_platform", "string"),
+            Field("author_username", "string"),
+            Field("author_avatar_url", "string"),
+            Field("is_locked", "boolean", default=False),
+            Field("reply_count", "integer", default=0),
+            Field("last_reply_at", "datetime"),
+            Field("created_at", "datetime", default=lambda: datetime.now(UTC)),
+            Field("updated_at", "datetime", default=lambda: datetime.now(UTC)),
             migrate=False,
         )
     if "hub_forum_replies" not in dal.tables:
-        dal.define_table(
+        await dal.define_table(
             "hub_forum_replies",
-            dal.Field("post_id", "reference hub_forum_posts", notnull=True),
-            dal.Field("author_hub_user_id", "integer"),
-            dal.Field("author_platform", "string"),
-            dal.Field("author_username", "string"),
-            dal.Field("author_avatar_url", "string"),
-            dal.Field("content", "text", notnull=True),
-            dal.Field("created_at", "datetime", default=lambda: datetime.now(UTC)),
+            Field("post_id", "reference hub_forum_posts", notnull=True),
+            Field("author_hub_user_id", "integer"),
+            Field("author_platform", "string"),
+            Field("author_username", "string"),
+            Field("author_avatar_url", "string"),
+            Field("content", "text", notnull=True),
+            Field("created_at", "datetime", default=lambda: datetime.now(UTC)),
             migrate=False,
         )
 
@@ -144,23 +152,19 @@ async def create_forum_post(
     channel_id_int = _resolve_channel_id(config)
 
     dal = get_bundle_dal()
-    _ensure_forum_tables(dal)
+    await _ensure_forum_tables(dal)
     try:
         # Fetch the channel to verify it exists and get relay info -- only
         # when a channel was actually configured for this activation.
         channel = None
         if channel_id_int is not None:
-            channel_query = dal.hub_channels.id == channel_id_int
-            # select_async requires a pydal Set (dal.dal(query)), not a
-            # bare Query -- see module docstring.
-            channels = await dal.select_async(dal.dal(channel_query))
+            channels = await dal(dal.hub_channels.id == channel_id_int).select()
             channel = channels[0] if channels else None
             if not channel:
                 raise NonRetryableTransportError(f"channel {channel_id_int} not found")
 
         # Create the forum post
-        post_id = await dal.insert_async(
-            dal.hub_forum_posts,
+        post_id = await dal.hub_forum_posts.async_insert(
             hub_channel_id=channel_id_int,
             community_id=envelope.community,
             title=title,
@@ -220,13 +224,10 @@ async def create_forum_reply(
         raise NonRetryableTransportError("forum reply requires 'forum_content'")
 
     dal = get_bundle_dal()
-    _ensure_forum_tables(dal)
+    await _ensure_forum_tables(dal)
     try:
         # Verify post exists and check if locked
-        post_query = dal.hub_forum_posts.id == post_id
-        # select_async requires a pydal Set (dal.dal(query)), not a bare
-        # Query -- see module docstring.
-        posts = await dal.select_async(dal.dal(post_query))
+        posts = await dal(dal.hub_forum_posts.id == post_id).select()
         post = posts[0] if posts else None
         if not post:
             raise NonRetryableTransportError(f"post {post_id} not found")
@@ -234,8 +235,7 @@ async def create_forum_reply(
             raise NonRetryableTransportError(f"post {post_id} is locked")
 
         # Create the reply
-        reply_id = await dal.insert_async(
-            dal.hub_forum_replies,
+        reply_id = await dal.hub_forum_replies.async_insert(
             post_id=post_id,
             author_hub_user_id=payload.get("author_id"),
             author_platform="hub",
@@ -246,19 +246,14 @@ async def create_forum_reply(
         )
 
         # Update post's reply counter and last_reply_at
-        update_query = dal.hub_forum_posts.id == post_id
-        await dal.update_async(
-            update_query,
+        await dal(dal.hub_forum_posts.id == post_id).update(
             reply_count=post.reply_count + 1,
             last_reply_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
         )
 
         # Relay to bridged channels if configured
-        channel_query = dal.hub_channels.id == post.hub_channel_id
-        # select_async requires a pydal Set (dal.dal(query)), not a bare
-        # Query -- see module docstring.
-        channels = await dal.select_async(dal.dal(channel_query))
+        channels = await dal(dal.hub_channels.id == post.hub_channel_id).select()
         channel = channels[0] if channels else None
         # FLAG: relay_message async helper not yet implemented -- logged so
         # the gap is visible, never raised (best-effort, don't fail dispatch).
