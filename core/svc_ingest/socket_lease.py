@@ -221,7 +221,10 @@ class LeasedReceiver:
             ttl_s=self.ttl_s,
         )
 
-    async def _guarded(self, awaitable: Awaitable[Any]) -> Any:  # noqa: ANN401 - mirrors the raw SET/EVAL reply shape SocketLease itself already returns Any for
+    async def _guarded(
+        self,
+        awaitable: Awaitable[Any],  # noqa: ANN401
+    ) -> Any:  # noqa: ANN401 - mirrors the raw SET/EVAL reply shape SocketLease already returns Any for
         """Bound one lease Redis call to `claim_timeout_s`; raises `TimeoutError` if it's exceeded.
 
         `asyncio.shield()`-wrapped so a timeout here (or this coroutine's

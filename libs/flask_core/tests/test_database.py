@@ -47,7 +47,7 @@ if "flask_core" not in sys.modules:
     _stub.__path__ = [str(_PKG_DIR)]
     sys.modules["flask_core"] = _stub
 
-from flask_core.database import AsyncDAL, db_operation, install_db_resilience
+from flask_core.database import AsyncDAL, db_operation, install_db_resilience  # noqa: E402
 
 
 @pytest.fixture

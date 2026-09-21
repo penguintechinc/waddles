@@ -10,7 +10,7 @@ RUN apt-get update && \
 # Shared library -- JWT verification + require_scope for the
 # /api/v1/credentials/* routes (SECURITY C6 fix: these were unauthenticated).
 COPY libs/flask_core /app/libs/flask_core
-RUN cd /app/libs/flask_core && pip install --no-cache-dir .
+RUN pip install --no-cache-dir /app/libs/flask_core
 
 # Copy and install Python dependencies
 COPY core/credential_manager_module/requirements.txt .

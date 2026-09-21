@@ -166,7 +166,7 @@ async def require_admin(
     membership_query = dal(
         (dal.community_members.community_id == community_id)
         & (dal.community_members.user_id == str(user_id))
-        & (dal.community_members.is_active == True)
+        & (dal.community_members.is_active == True)  # noqa: E712 - pydal Field comparison
         & (dal.community_members.role.belongs(_ADMIN_ROLES))
     )
     rows = await async_dal.select_async(membership_query, dal.community_members.id)
@@ -195,7 +195,7 @@ async def require_member(
     membership_query = dal(
         (dal.community_members.community_id == community_id)
         & (dal.community_members.user_id == str(user_id))
-        & (dal.community_members.is_active == True)
+        & (dal.community_members.is_active == True)  # noqa: E712 - pydal Field comparison
     )
     rows = await async_dal.select_async(membership_query, dal.community_members.id)
     if not rows:

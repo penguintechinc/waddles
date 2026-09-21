@@ -273,7 +273,7 @@ async def _load_config(
     if cached is not None:
         if cached == _MISS_VALUE:
             return _DEFAULT_CONFIG
-        fields = json.loads(cached[len(_HIT_PREFIX) :])
+        fields = json.loads(cached[len(_HIT_PREFIX) :])  # noqa: E203 - ruff-format's slice spacing
         return _RaidShoutoutConfig(**fields)
 
     rows = await dal.execute(_SHOUTOUT_CONFIG_SQL, [community_id])

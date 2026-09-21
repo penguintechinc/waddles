@@ -133,7 +133,9 @@ class DrainRedisLike(Protocol):
     why `async def` doesn't match `redis-py`'s own stub return type).
     """
 
-    def brpop(self, keys: Any, timeout: Any) -> Awaitable[Any]:  # noqa: ASYNC109 - mirrors redis.asyncio.Redis.brpop's own signature, not an internal cancellation timeout
+    def brpop(  # noqa: ASYNC109 - mirrors redis.asyncio.Redis.brpop's own signature, not a cancellation timeout
+        self, keys: Any, timeout: Any
+    ) -> Awaitable[Any]:
         """BRPOP across `keys`; returns `(key, value)` or `None` on timeout."""
         ...
 

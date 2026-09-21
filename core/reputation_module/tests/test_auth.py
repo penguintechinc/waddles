@@ -35,10 +35,10 @@ import flask_core  # noqa: F401 - must import before `app`; see module docstring
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
-import pytest_asyncio
-from flask_core.auth import create_jwt_token
-from flask_core.community_access import bind_shared_read_tables
+import pytest  # noqa: E402
+import pytest_asyncio  # noqa: E402
+from flask_core.auth import create_jwt_token  # noqa: E402
+from flask_core.community_access import bind_shared_read_tables  # noqa: E402
 
 _SECRET_KEY = "change-me-in-production"
 _TENANT_SLUG = "acme-corp"

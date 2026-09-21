@@ -37,12 +37,12 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-import pytest
+import pytest  # noqa: E402
 
-from config import Config
-from services.reputation_service import ReputationService, _round_half_away_from_zero
-from services.weight_manager import WeightManager
-from tests.conftest import NullLogger
+from config import Config  # noqa: E402
+from services.reputation_service import ReputationService, _round_half_away_from_zero  # noqa: E402
+from services.weight_manager import WeightManager  # noqa: E402
+from tests.conftest import NullLogger  # noqa: E402
 
 
 class _InMemoryReputationDal:

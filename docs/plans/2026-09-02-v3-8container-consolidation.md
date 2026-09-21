@@ -56,8 +56,8 @@ Bundles** (or, for the 5 persistent-socket receivers, as supervised tasks inside
 |---|---|---|---|---|
 | 1 | `svc-ingest` | Webhook/poll-based platform receivers + generic inbound webhooks; bundles' `ingest` stage | Real runner, poll-only, no receivers feed it yet | `core/svc_ingest/runner.py` |
 | 2 | `svc-process` | Event bus, command routing, workflow; bundles' `process` stage | Real runner | `core/svc_process/runner.py` |
-| 3 | `svc-action` | Outbound actions/interactions/3rd-party calls; bundles' `action` stage + 5 generic target adapters | Real runner + adapters, **zero bundles** | `core/svc_action/services/runner.py`, `core/svc_action/services/adapters/` |
-| 4 | `svc-core` | Identity, security, credentials, entitlement — synchronous gRPC | **Does not exist as app code** — Helm skeleton only (`svc-core.yaml:37-41`), no `core/svc_core/` directory | `docs/ARCHITECTURE.md:225-228` |
+| 3 | `svc-action` | Outbound actions/interactions/3rd-party calls; bundles' `action` stage + 5 generic target adapters | Real runner + adapters, **zero bundles** | `core/svc_action/runner.py`, `libs/waddle_transports/waddle_transports/transports/` |
+| 4 | `svc-core` | Identity, security, credentials, entitlement — synchronous gRPC | **Does not exist as app code** — Helm skeleton only (`svc-core.yaml:37-41`), no core/svc_core/ directory | `docs/ARCHITECTURE.md:225-228` |
 | 5 | `hub-api` | Admin, tenancy, marketplace, billing, AI routing, distribution — control plane | Real `app.py`, many services incl. `distribution_service.py`; bulk of the 55-controller admin/marketplace surface still Node (separate P1 port, ≈39K LOC) | `hub_api/app.py`, `docs/plans/2026-08-31-hubapi-node-to-quart-migration.md` |
 | 6 | `hub-webui` | SPA static-serve + `/api` proxy | Only Node container; real | `admin/hub_module/Dockerfile.webui` (legacy source) |
 | 7 | `svc-presentation` | Core overlays + Music Station + bundles' `presentation` component | Real Dockerfile, newest container (2026-08-31) | `core/svc_presentation/` |
@@ -210,12 +210,12 @@ The bundle **rails** are real and complete. The bundle **inventory** is almost e
   distribution endpoint, exponential backoff, degrades to last-known bundle set) and
   `load_entrypoint` (resolves a bundle's `module:function` via `importlib`, never `exec()`).
 - `core/svc_ingest/runner.py:39-138` (`IngestRunner`), `core/svc_process/runner.py:30-125`
-  (`ProcessRunner`), `core/svc_action/services/runner.py:49-289` (`ActionRunner`) — all three
+  (`ProcessRunner`), `core/svc_action/runner.py:49-289` (`ActionRunner`) — all three
   are working poll/RPOP/LPUSH loops with retry and audit logging, not stubs.
-- `core/svc_action/services/adapters/` — 5 generic target adapters (`webhook.py`,
-  `rest_api.py`, `message_queue.py`, `overlay.py`, `email.py`), dispatched by `target.type` in
-  `__init__.py:26-73`. None reference Discord/Slack/Twitch — they're HTTP/SMTP/Redis-shaped,
-  not platform-specific.
+- `libs/waddle_transports/waddle_transports/transports/` — 5 generic target adapters
+  (`http.py`, `message_queue.py`, `irc.py`, `overlay.py`, `email.py`), resolved by
+  `transport_type` via `waddle_transports/registry.py:25-65`'s `get_transport()`. None
+  reference Discord/Slack/Twitch — they're HTTP/SMTP/Redis-shaped, not platform-specific.
 - `libs/flask_core/flask_core/app_binding.py:1-60` — resolves which App is bound to a
   `(feature, tenant, community)` slot; `resolve_apps()` returns the full coexistence set per
   the App Bundle SDK spec §5.2/§7.
@@ -322,7 +322,7 @@ library work, not per-module porting — one team, in order.
 - Land the bundle 3-tier tables (`app_catalog`/`app_tenant_availability`/
   `app_activations`) — this is program-plan P2, an external dependency this roadmap does not
   own but cannot start Wave 3+ without. **Flag to the P2 owner as a hard blocker.**
-- Start `svc-core` real app code (`core/svc_core/` doesn't exist yet) — at minimum a working
+- Start `svc-core` real app code (core/svc_core/ doesn't exist yet) — at minimum a working
   gRPC skeleton on port 50203 that Wave 5's identity/security/credential folds can land into.
 
 **Dependencies:** none (this is the root of the tree). **Risks:** if P2 (3-tier tables) slips,

@@ -162,7 +162,10 @@ def upgrade() -> None:
         f"""
         INSERT INTO app_tenant_availability (tenant_id, app_id, available, config_defaults)
         SELECT t.id, '{YOUTUBE_APP_ID}', TRUE,
-            '{{"api_key_ref": "YOUTUBE_API_KEY", "client_id_ref": "YOUTUBE_CLIENT_ID", "client_secret_ref": "YOUTUBE_CLIENT_SECRET", "refresh_token_ref": "YOUTUBE_REFRESH_TOKEN"}}'::jsonb
+            '{{"api_key_ref": "YOUTUBE_API_KEY",
+               "client_id_ref": "YOUTUBE_CLIENT_ID",
+               "client_secret_ref": "YOUTUBE_CLIENT_SECRET",
+               "refresh_token_ref": "YOUTUBE_REFRESH_TOKEN"}}'::jsonb
         FROM tenants t
         WHERE t.slug = '{TENANT_SLUG}'
         ON CONFLICT (tenant_id, app_id) DO UPDATE SET

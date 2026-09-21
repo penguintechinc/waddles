@@ -20,8 +20,8 @@ except ImportError:
     googlechat_action_pb2_grpc = None
 
 from services.googlechat_service import GoogleChatService
-from services.grpc_auth_interceptor import AuthInterceptor
-from services.grpc_tls import bind_secure_port, default_server_options
+from services.grpc_auth_interceptor import AuthInterceptor  # noqa: E402
+from services.grpc_tls import bind_secure_port, default_server_options  # noqa: E402
 
 
 logger = logging.getLogger(__name__)

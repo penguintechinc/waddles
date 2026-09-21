@@ -9,9 +9,9 @@
 # that is a conversation, not an edit.
 #
 # Seeded 2026-08-26 on release/v3.0.X.
-flake8=2058
+flake8=2000
 shellcheck=5700
-hadolint=121
+hadolint=120
 golangci-lint=27
 zizmor=21
 
@@ -38,4 +38,4 @@ gitleaks=420
 
 # Documentation reference gate (scripts/check-doc-refs.sh). Dead repo paths
 # referenced in docs/**/*.md. Seeded 2026-08-29; lower as docs are corrected.
-doc-refs=27
+doc-refs=23

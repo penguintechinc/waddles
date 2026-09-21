@@ -1,8 +1,6 @@
 """Unit tests for gRPC TLS setup logic in reputation_module app.py"""
 import os
-import sys
-import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch
 from config import Config
 
 
@@ -22,7 +20,9 @@ class TestGrpcTlsLogic:
             cfg = config_module.Config
 
             assert cfg.DEPLOYMENT_TIER == 'alpha'
-            grpc_tls_insecure_flag = os.getenv('GRPC_TLS_INSECURE_DEV', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+            grpc_tls_insecure_flag = (
+                os.getenv('GRPC_TLS_INSECURE_DEV', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+            )
             dev_tiers = {'development', 'alpha', 'local', 'test'}
             use_insecure = grpc_tls_insecure_flag and cfg.DEPLOYMENT_TIER in dev_tiers
 
@@ -40,7 +40,9 @@ class TestGrpcTlsLogic:
             cfg = config_module.Config
 
             assert cfg.DEPLOYMENT_TIER == 'production'
-            grpc_tls_insecure_flag = os.getenv('GRPC_TLS_INSECURE_DEV', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+            grpc_tls_insecure_flag = (
+                os.getenv('GRPC_TLS_INSECURE_DEV', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+            )
             dev_tiers = {'development', 'alpha', 'local', 'test'}
             use_insecure = grpc_tls_insecure_flag and cfg.DEPLOYMENT_TIER in dev_tiers
 
@@ -56,7 +58,9 @@ class TestGrpcTlsLogic:
             # Ensure GRPC_TLS_INSECURE_DEV is not set
             os.environ.pop('GRPC_TLS_INSECURE_DEV', None)
 
-            grpc_tls_insecure_flag = os.getenv('GRPC_TLS_INSECURE_DEV', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+            grpc_tls_insecure_flag = (
+                os.getenv('GRPC_TLS_INSECURE_DEV', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+            )
             dev_tiers = {'development', 'alpha', 'local', 'test'}
             use_insecure = grpc_tls_insecure_flag and Config.DEPLOYMENT_TIER in dev_tiers
 

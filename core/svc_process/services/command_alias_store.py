@@ -234,7 +234,7 @@ async def resolve_alias(
                 return None
             return CommandAlias(
                 alias=alias,
-                target_command=cached[len(_HIT_PREFIX) :],
+                target_command=cached[len(_HIT_PREFIX) :],  # noqa: E203 - ruff-format's slice spacing
                 community_id=community_id,
             )
 

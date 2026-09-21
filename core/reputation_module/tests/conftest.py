@@ -29,7 +29,7 @@ sys.path.insert(
     os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "..", "libs", "flask_core"),
 )
 
-from pydal import DAL
+from pydal import DAL  # noqa: E402
 
 
 def _test_database_url() -> str | None:

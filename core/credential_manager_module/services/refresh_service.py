@@ -314,7 +314,8 @@ class RefreshService:
         encrypted_refresh_token = encrypt_value(new_tokens["refresh_token"])
 
         async with self._pool.acquire() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 UPDATE platform_integrations
                 SET access_token = $1,
                     refresh_token = $2,
@@ -324,7 +325,7 @@ class RefreshService:
                     is_encrypted = TRUE,
                     updated_at = NOW()
                 WHERE id = $6
-            """,
+                """,
                 encrypted_access_token,
                 encrypted_refresh_token,
                 new_tokens.get("token_type", "Bearer"),
