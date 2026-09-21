@@ -26,9 +26,13 @@ CHECKS_MISSING_NAMES=""
 
 # Paths every check must ignore. `.worktrees/` holds full checkouts of other
 # branches; scanning them reports another branch's problems against this one.
+# `.claude/worktrees/` is the same thing under a different root (agent-session
+# worktrees), and is pruned for the same reason -- without it the denominators
+# and finding counts include tens of thousands of other branches' files.
 CHECK_PRUNE_ARGS=(
   -not -path "./.git/*"
   -not -path "./.worktrees/*"
+  -not -path "./.claude/worktrees/*"
   -not -path "*/node_modules/*"
   -not -path "*/venv/*"
   -not -path "*/.venv/*"

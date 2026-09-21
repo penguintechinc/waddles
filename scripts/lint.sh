@@ -21,7 +21,7 @@ py_files=$(discover -name "*.py")
 py_count=$(count_lines "$py_files")
 count_flake8() {
   flake8 . --max-line-length=120 \
-    --exclude=.git,__pycache__,venv,.venv,node_modules,.worktrees,vendor \
+    --exclude=.git,__pycache__,venv,.venv,node_modules,.worktrees,.claude/worktrees,vendor \
     2>/dev/null | grep -c . || true
 }
 run_counted_check "flake8" flake8 "$py_count" count_flake8

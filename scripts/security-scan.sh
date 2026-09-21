@@ -29,8 +29,13 @@ run_bandit() {
   # HIGH severity + HIGH confidence only. The MEDIUM backlog is real but
   # pre-existing; gating on it now would mean the gate is switched off again
   # within a week. Ratchet down deliberately, never up.
+  # `./.venv,./venv` only match the repo-root venvs -- each service carries its
+  # own (core/svc_*/.venv, hub_api/.venv), and `.claude/worktrees/` holds agent
+  # worktrees, i.e. other branches' checkouts. Left unexcluded, all 384 HIGH/HIGH
+  # findings came from vendored site-packages and other branches; zero were
+  # first-party. Same omission as CHECK_PRUNE_ARGS in scripts/lib/checks.sh.
   bandit -r . -lll -iii --quiet \
-    --exclude ./node_modules,./.worktrees,./tests,./.venv,./venv,./mobile,./.git
+    --exclude ./node_modules,./.worktrees,./.claude,./tests,./.venv,./venv,./mobile,./.git,*/.venv/*,*/site-packages/*
 }
 run_check "bandit" bandit "$py_count" run_bandit
 
