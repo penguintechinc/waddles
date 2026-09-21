@@ -1,4 +1,11 @@
-"""Tests for `bundles.community_chat_process.transform`."""
+"""Tests for `bundles.community_chat_process.transform`.
+
+`transform`'s two DB-backed commands go through `raw_sql_rows()` (D21a)
+against the bound `penguin_dal.AsyncDB` (`get_bundle_dal()`), so the fixture
+below is a real in-memory SQLite `AsyncDB` with the two tables/columns the
+bundle's raw SQL touches (`hub_chat_messages`, `communities`, `tenants`)
+seeded per test, rather than a bare `.execute()` mock.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +18,8 @@ from flask_core import (
     reset_bundle_dal_for_tests,
     set_bundle_dal,
 )
+from penguin_dal import AsyncDB
+from sqlalchemy import text as sa_text
 
 from bundles.community_chat_process import (
     ChatChannel,
@@ -20,39 +29,71 @@ from bundles.community_chat_process import (
     transform,
 )
 
-
-class _FakeDal:
-    """In-memory stand-in for `AsyncDAL` -- implements `.execute()` for chat queries."""
-
-    def __init__(self) -> None:
-        self._messages: list[dict[str, Any]] = []
-        self._channels: dict[str, dict[str, Any]] = {}
-
-    async def execute(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
-        """Execute a mock query and return results based on stored data."""
-        if "hub_chat_messages" in sql and "GROUP BY" in sql:
-            # Channels query
-            return list(self._channels.values())
-        else:
-            # History query - return messages in reverse chronological order
-            return sorted(self._messages, key=lambda m: m["created_at"] or "", reverse=True)
-
-    def add_message(self, **kwargs: object) -> None:
-        """Add a test message to the fake store."""
-        self._messages.append(kwargs)  # type: ignore[arg-type]
-
-    def add_channel(self, name: str, **kwargs: object) -> None:
-        """Add a test channel to the fake store."""
-        self._channels[name] = {"channel_name": name, **kwargs}  # type: ignore[arg-type]
+TENANT_ID = "tenant-1"
+COMMUNITY_ID = 1
 
 
-@pytest.fixture(autouse=True)
-def _dal() -> Any:
-    """Set up and tear down fake DAL for each test."""
-    fake = _FakeDal()
-    set_bundle_dal(fake)
-    yield fake
+async def _add_message(
+    dal: AsyncDB,
+    *,
+    id: int,  # matches the row's own column name
+    community_id: int = COMMUNITY_ID,
+    channel_name: str | None = "general",
+    sender_username: str | None,
+    message_content: str,
+    message_type: str = "text",
+    created_at: str | None,
+) -> None:
+    """Insert one `hub_chat_messages` row, seeding `communities`/`tenants` if missing."""
+    async with dal.engine.begin() as conn:
+        await conn.execute(
+            sa_text("INSERT OR IGNORE INTO communities (id, tenant_id) VALUES (:cid, :tid)"),
+            {"cid": community_id, "tid": TENANT_ID},
+        )
+        await conn.execute(
+            sa_text("INSERT OR IGNORE INTO tenants (id) VALUES (:tid)"), {"tid": TENANT_ID}
+        )
+        await conn.execute(
+            sa_text(
+                "INSERT INTO hub_chat_messages "
+                "(id, community_id, channel_name, sender_username, message_content, "
+                "message_type, created_at) "
+                "VALUES (:id, :cid, :channel, :sender, :content, :mtype, :created_at)"
+            ),
+            {
+                "id": id,
+                "cid": community_id,
+                "channel": channel_name,
+                "sender": sender_username,
+                "content": message_content,
+                "mtype": message_type,
+                "created_at": created_at,
+            },
+        )
+
+
+@pytest.fixture
+async def dal() -> Any:
+    """In-memory `penguin_dal.AsyncDB` with `hub_chat_messages`/`communities`/`tenants`."""
+    db = AsyncDB("sqlite://", pool_size=1, echo=False)
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            sa_text("CREATE TABLE communities (id INTEGER PRIMARY KEY, tenant_id TEXT)")
+        )
+        await conn.execute(sa_text("CREATE TABLE tenants (id TEXT PRIMARY KEY)"))
+        await conn.execute(
+            sa_text(
+                "CREATE TABLE hub_chat_messages ("
+                "id INTEGER PRIMARY KEY, community_id INTEGER, channel_name TEXT, "
+                "sender_username TEXT, message_content TEXT, message_type TEXT, "
+                "created_at TEXT)"
+            )
+        )
+    await db.reflect()
+    set_bundle_dal(db)
+    yield db
     reset_bundle_dal_for_tests()
+    await db.close()
 
 
 def _event(text: str, **payload_overrides: object) -> PlatformEvent:
@@ -71,19 +112,17 @@ def _event(text: str, **payload_overrides: object) -> PlatformEvent:
 class TestTransform:
     """Tests for the transform entrypoint."""
 
-    async def test_chat_history_command_returns_reply(self, _dal: _FakeDal) -> None:
+    async def test_chat_history_command_returns_reply(self, dal: AsyncDB) -> None:
         """!chat-history command triggers a reply."""
-        _dal.add_message(
+        await _add_message(
+            dal,
             id=1,
-            community_id=1,
-            channel_name="general",
             sender_username="alice",
             message_content="hello",
-            message_type="text",
             created_at="2026-01-01T12:00:00Z",
         )
         with bundle_context(
-            tenant="tenant-1", community="1", app_id="waddles.community.chat.default"
+            tenant=TENANT_ID, community=str(COMMUNITY_ID), app_id="waddles.community.chat.default"
         ):
             result = await transform(_event("!chat-history"))
         assert isinstance(result, PlatformEvent)
@@ -91,11 +130,17 @@ class TestTransform:
         assert "Chat History" in result.payload["text"]
         assert "alice" in result.payload["text"]
 
-    async def test_channels_command_returns_reply(self, _dal: _FakeDal) -> None:
+    async def test_channels_command_returns_reply(self, dal: AsyncDB) -> None:
         """!channels command triggers a reply."""
-        _dal.add_channel("general", message_count=5, last_message_at="2026-01-01T12:00:00Z")
+        await _add_message(
+            dal,
+            id=1,
+            sender_username="alice",
+            message_content="hello",
+            created_at="2026-01-01T12:00:00Z",
+        )
         with bundle_context(
-            tenant="tenant-1", community="1", app_id="waddles.community.chat.default"
+            tenant=TENANT_ID, community=str(COMMUNITY_ID), app_id="waddles.community.chat.default"
         ):
             result = await transform(_event("!channels"))
         assert isinstance(result, PlatformEvent)
@@ -103,64 +148,66 @@ class TestTransform:
         assert "Chat Channels" in result.payload["text"]
         assert "general" in result.payload["text"]
 
-    async def test_case_insensitive_commands(self, _dal: _FakeDal) -> None:
+    async def test_case_insensitive_commands(self, dal: AsyncDB) -> None:
         """Commands are case-insensitive."""
-        _dal.add_message(
+        await _add_message(
+            dal,
             id=1,
-            community_id=1,
-            channel_name="general",
             sender_username="alice",
             message_content="hello",
-            message_type="text",
             created_at="2026-01-01T12:00:00Z",
         )
         with bundle_context(
-            tenant="tenant-1", community="1", app_id="waddles.community.chat.default"
+            tenant=TENANT_ID, community=str(COMMUNITY_ID), app_id="waddles.community.chat.default"
         ):
             for cmd in ["!CHAT-HISTORY", "!Chat-History", "!CHANNELS", "!Channels"]:
                 result = await transform(_event(cmd))
                 assert result is not None, f"Command '{cmd}' should return a reply"
                 assert isinstance(result, PlatformEvent)
 
-    async def test_ordinary_chatter_returns_none(self, _dal: _FakeDal) -> None:
+    async def test_ordinary_chatter_returns_none(self, dal: AsyncDB) -> None:
         """Non-command messages return None (no reply)."""
         with bundle_context(
-            tenant="tenant-1", community="1", app_id="waddles.community.chat.default"
+            tenant=TENANT_ID, community=str(COMMUNITY_ID), app_id="waddles.community.chat.default"
         ):
             for text in ["hello", "just chatting", "what's up?", "tell me a story"]:
                 result = await transform(_event(text))
                 assert result is None, f"Text '{text}' should return None"
 
-    async def test_preserves_channel_id_on_reply(self, _dal: _FakeDal) -> None:
+    async def test_preserves_channel_id_on_reply(self, dal: AsyncDB) -> None:
         """Response preserves the original channel_id in payload."""
-        _dal.add_message(
+        await _add_message(
+            dal,
             id=1,
-            community_id=1,
-            channel_name="general",
             sender_username="alice",
             message_content="hello",
-            message_type="text",
             created_at="2026-01-01T12:00:00Z",
         )
         with bundle_context(
-            tenant="tenant-1", community="1", app_id="waddles.community.chat.default"
+            tenant=TENANT_ID, community=str(COMMUNITY_ID), app_id="waddles.community.chat.default"
         ):
             result = await transform(_event("!chat-history"))
         assert result is not None
         assert result.payload["channel_id"] == "chan-1"
 
-    async def test_preserves_other_payload_fields(self, _dal: _FakeDal) -> None:
+    async def test_preserves_other_payload_fields(self, dal: AsyncDB) -> None:
         """Response preserves non-text payload fields."""
-        _dal.add_channel("general", message_count=5, last_message_at="2026-01-01T12:00:00Z")
+        await _add_message(
+            dal,
+            id=1,
+            sender_username="alice",
+            message_content="hello",
+            created_at="2026-01-01T12:00:00Z",
+        )
         with bundle_context(
-            tenant="tenant-1", community="1", app_id="waddles.community.chat.default"
+            tenant=TENANT_ID, community=str(COMMUNITY_ID), app_id="waddles.community.chat.default"
         ):
             result = await transform(_event("!channels", author_id="123"))
         assert result is not None
         assert result.payload.get("author_id") == "123"
         assert result.payload["channel_id"] == "chan-1"
 
-    async def test_missing_text_returns_none(self, _dal: _FakeDal) -> None:
+    async def test_missing_text_returns_none(self, dal: AsyncDB) -> None:
         """Event without 'text' in payload returns None."""
         event = PlatformEvent(
             platform="discord",
@@ -170,24 +217,24 @@ class TestTransform:
             occurred_at="2026-01-01T00:00:00+00:00",
         )
         with bundle_context(
-            tenant="tenant-1", community="1", app_id="waddles.community.chat.default"
+            tenant=TENANT_ID, community=str(COMMUNITY_ID), app_id="waddles.community.chat.default"
         ):
             result = await transform(event)
         assert result is None
 
-    async def test_empty_text_returns_none(self, _dal: _FakeDal) -> None:
+    async def test_empty_text_returns_none(self, dal: AsyncDB) -> None:
         """Empty or whitespace-only text returns None."""
         with bundle_context(
-            tenant="tenant-1", community="1", app_id="waddles.community.chat.default"
+            tenant=TENANT_ID, community=str(COMMUNITY_ID), app_id="waddles.community.chat.default"
         ):
             for text in ["", "   ", "\t", "\n"]:
                 result = await transform(_event(text))
-                assert result is None, f"Text '{repr(text)}' should return None"
+                assert result is None, f"Text '{text!r}' should return None"
 
-    async def test_non_string_text_returns_none(self, _dal: _FakeDal) -> None:
+    async def test_non_string_text_returns_none(self, dal: AsyncDB) -> None:
         """Non-string 'text' in payload returns None."""
         with bundle_context(
-            tenant="tenant-1", community="1", app_id="waddles.community.chat.default"
+            tenant=TENANT_ID, community=str(COMMUNITY_ID), app_id="waddles.community.chat.default"
         ):
             event = PlatformEvent(
                 platform="discord",
@@ -209,37 +256,41 @@ class TestTransform:
             result2 = await transform(event2)
             assert result2 is None
 
-    async def test_text_with_whitespace_stripped(self, _dal: _FakeDal) -> None:
+    async def test_text_with_whitespace_stripped(self, dal: AsyncDB) -> None:
         """Whitespace is stripped before command detection."""
-        _dal.add_message(
+        await _add_message(
+            dal,
             id=1,
-            community_id=1,
-            channel_name="general",
             sender_username="alice",
             message_content="hello",
-            message_type="text",
             created_at="2026-01-01T12:00:00Z",
         )
         with bundle_context(
-            tenant="tenant-1", community="1", app_id="waddles.community.chat.default"
+            tenant=TENANT_ID, community=str(COMMUNITY_ID), app_id="waddles.community.chat.default"
         ):
             result = await transform(_event("   !chat-history   "))
         assert result is not None
         assert isinstance(result, PlatformEvent)
 
-    async def test_command_in_middle_of_text_no_reply(self, _dal: _FakeDal) -> None:
+    async def test_command_in_middle_of_text_no_reply(self, dal: AsyncDB) -> None:
         """Command word in the middle of text does not trigger reply."""
         with bundle_context(
-            tenant="tenant-1", community="1", app_id="waddles.community.chat.default"
+            tenant=TENANT_ID, community=str(COMMUNITY_ID), app_id="waddles.community.chat.default"
         ):
             result = await transform(_event("please !chat-history for me"))
         assert result is None
 
-    async def test_reply_preserves_platform_metadata(self, _dal: _FakeDal) -> None:
+    async def test_reply_preserves_platform_metadata(self, dal: AsyncDB) -> None:
         """Response preserves platform, event_type, actor, occurred_at."""
-        _dal.add_channel("general", message_count=5, last_message_at="2026-01-01T12:00:00Z")
+        await _add_message(
+            dal,
+            id=1,
+            sender_username="alice",
+            message_content="hello",
+            created_at="2026-01-01T12:00:00Z",
+        )
         with bundle_context(
-            tenant="tenant-1", community="1", app_id="waddles.community.chat.default"
+            tenant=TENANT_ID, community=str(COMMUNITY_ID), app_id="waddles.community.chat.default"
         ):
             result = await transform(_event("!channels"))
         assert result is not None

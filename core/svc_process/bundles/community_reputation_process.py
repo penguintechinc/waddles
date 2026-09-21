@@ -69,8 +69,7 @@ _MEMBER_BY_DISPLAY_NAME_SQL = (
 )
 
 _COMMUNITY_LABEL_SQL = (
-    "SELECT COALESCE(display_name, name) AS label FROM communities "
-    "WHERE id = :community_id LIMIT 1"
+    "SELECT COALESCE(display_name, name) AS label FROM communities WHERE id = :community_id LIMIT 1"
 )
 
 _GLOBAL_SCORE_SQL = "SELECT score FROM reputation_global WHERE hub_user_id = :hub_user_id"

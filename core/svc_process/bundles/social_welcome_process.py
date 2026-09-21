@@ -5,7 +5,8 @@ welcomed, and generates a welcome response (AI-personalized if flagged, else
 template). Returns None for repeat visitors or if another coroutine already
 claimed the welcome.
 
-Uses flask_core.bundle_runtime (get_bundle_dal, get_bundle_context) to access
+Uses flask_core (get_bundle_dal, get_bundle_context) and the local
+`flask_core.bundle_runtime`'s `raw_sql_rows()`/`raw_sql_write()` helpers to access
 the process-wide AsyncDAL and envelope scope (tenant/community) -- the frozen
 API for stateful process bundles.
 """

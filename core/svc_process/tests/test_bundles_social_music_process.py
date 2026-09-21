@@ -12,6 +12,8 @@ from flask_core import (
     reset_bundle_dal_for_tests,
     set_bundle_dal,
 )
+from penguin_dal import AsyncDB
+from sqlalchemy import text as sa_text
 
 import bundles.social_music_process as social_music_process
 from bundles.social_music_process import (
@@ -31,6 +33,7 @@ from bundles.social_music_process import (
 
 TENANT = "global"
 COMMUNITY = "42"
+COMMUNITY_ID = 42
 APP_ID = "waddles.bot.discord.default"
 
 #: Default test actor -- seeded as `moderator` in `_FakeDal` so ordinary
@@ -58,40 +61,50 @@ def _event(text: str, *, actor: str = MOD_ACTOR, **payload_overrides: object) ->
     )
 
 
-class _FakeDal:
-    """Minimal `AsyncDAL` stand-in -- answers `_caller_is_moderator_or_admin`'s raw `execute()`.
-
-    Same shape as `social_alias_process`'s own test `_FakeDal.execute()`
-    (matched by whether `platform_user_id` appears in the SQL text).
-    """
-
-    def __init__(self) -> None:
-        self.should_error_on_role_lookup = False
-        self.roles_by_display_name: dict[str, str] = {MOD_ACTOR: "moderator"}
-        self.roles_by_platform_user_id: dict[str, str] = {}
-        self._execute_count = 0
-
-    async def execute(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
-        self._execute_count += 1
-        if self.should_error_on_role_lookup:
-            raise RuntimeError("simulated permission lookup outage")
-
-        if "platform_user_id" in sql:
-            _community_id, _platform, platform_user_id = params
-            role = self.roles_by_platform_user_id.get(platform_user_id)
-        else:
-            _community_id, display_name = params
-            role = self.roles_by_display_name.get(display_name)
-        return [{"role": role}] if role is not None else []
+async def _seed_role_by_platform(dal: AsyncDB, platform_user_id: str, role: str) -> None:
+    """Seed a `community_members` row matched by `(platform, platform_user_id)`."""
+    async with dal.engine.begin() as conn:
+        await conn.execute(
+            sa_text(
+                "INSERT INTO community_members "
+                "(community_id, platform, platform_user_id, display_name, role) "
+                "VALUES (:cid, 'discord', :puid, NULL, :role)"
+            ),
+            {"cid": COMMUNITY_ID, "puid": platform_user_id, "role": role},
+        )
 
 
 @pytest.fixture(autouse=True)
-def _dal() -> Any:
-    """Set up a fake DAL (seeded with `MOD_ACTOR` as moderator) for all tests."""
-    fake = _FakeDal()
-    set_bundle_dal(fake)
-    yield fake
+async def _dal() -> Any:
+    """In-memory `penguin_dal.AsyncDB` -- `community_members`, `MOD_ACTOR` seeded as moderator.
+
+    `_caller_is_moderator_or_admin`'s `raw_sql_rows()` calls (D21a) need a
+    real SQLAlchemy engine, matched by `(platform, platform_user_id)` or
+    `display_name`, same lookup convention `social_alias_process`'s own
+    fixture uses.
+    """
+    db = AsyncDB("sqlite://", pool_size=1, echo=False)
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            sa_text(
+                "CREATE TABLE community_members ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, community_id INTEGER, "
+                "platform TEXT, platform_user_id TEXT, display_name TEXT, role TEXT)"
+            )
+        )
+        await conn.execute(
+            sa_text(
+                "INSERT INTO community_members "
+                "(community_id, platform, platform_user_id, display_name, role) "
+                "VALUES (:cid, NULL, NULL, :name, 'moderator')"
+            ),
+            {"cid": COMMUNITY_ID, "name": MOD_ACTOR},
+        )
+    await db.reflect()
+    set_bundle_dal(db)
+    yield db
     reset_bundle_dal_for_tests()
+    await db.close()
 
 
 async def _flag_on(*_args: Any, **_kwargs: Any) -> bool:
@@ -458,15 +471,20 @@ class TestSetYoutubeLabelsPermission:
         assert result.payload["text"] != _SET_PERMISSION_DENIED_REPLY
         assert result.payload[PROCESS_TARGET_APP_ID_KEY] == _MUSIC_APP_ID
 
-    async def test_allowed_by_platform_user_id_match(self, _dal: Any) -> None:
-        _dal.roles_by_platform_user_id["platform-user-1"] = "admin"
+    async def test_allowed_by_platform_user_id_match(self, _dal: AsyncDB) -> None:
+        await _seed_role_by_platform(_dal, "platform-user-1", "admin")
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!sr set youtube-labels music", actor=NON_MOD_ACTOR))
         assert isinstance(result, PlatformEvent)
         assert result.payload[PROCESS_TARGET_APP_ID_KEY] == _MUSIC_APP_ID
 
-    async def test_role_lookup_error_fails_closed(self, _dal: Any) -> None:
-        _dal.should_error_on_role_lookup = True
+    async def test_role_lookup_error_fails_closed(
+        self, _dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _raise(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("simulated permission lookup outage")
+
+        monkeypatch.setattr("bundles.social_music_process.raw_sql_rows", _raise)
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!sr set youtube-labels music"))
         assert isinstance(result, PlatformEvent)
@@ -583,15 +601,20 @@ class TestTransformPauseResume:
         assert result.payload["text"] == _PAUSE_RESUME_PERMISSION_DENIED_REPLY
         assert PROCESS_TARGET_APP_ID_KEY not in result.payload
 
-    async def test_pause_allowed_by_platform_user_id_match(self, _dal: Any) -> None:
-        _dal.roles_by_platform_user_id["platform-user-1"] = "admin"
+    async def test_pause_allowed_by_platform_user_id_match(self, _dal: AsyncDB) -> None:
+        await _seed_role_by_platform(_dal, "platform-user-1", "admin")
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!sr pause", actor=NON_MOD_ACTOR))
         assert isinstance(result, PlatformEvent)
         assert result.payload[PROCESS_TARGET_APP_ID_KEY] == _MUSIC_APP_ID
 
-    async def test_pause_role_lookup_error_fails_closed(self, _dal: Any) -> None:
-        _dal.should_error_on_role_lookup = True
+    async def test_pause_role_lookup_error_fails_closed(
+        self, _dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _raise(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("simulated permission lookup outage")
+
+        monkeypatch.setattr("bundles.social_music_process.raw_sql_rows", _raise)
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!sr pause"))
         assert isinstance(result, PlatformEvent)
