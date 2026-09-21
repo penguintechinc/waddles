@@ -47,10 +47,10 @@ from pydal import DAL
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from config import Config
-from services.reputation_service import ReputationService
-from services.weight_manager import WeightManager
-from tests.conftest import NullLogger
+from config import Config  # noqa: E402
+from services.reputation_service import ReputationService  # noqa: E402
+from services.weight_manager import WeightManager  # noqa: E402
+from tests.conftest import NullLogger  # noqa: E402
 
 
 async def test_global_reputation_round_trip(dal: DAL, seeded_ids: tuple[int, int]) -> None:

@@ -53,6 +53,7 @@ def _running_under_pytest() -> bool:
     """
     return "pytest" in sys.modules
 
+
 #: Explicit, dev-only plaintext escape hatch. Never the implicit default --
 #: TLS is used unless this is set AND the resolved posture is non-production.
 _INSECURE_DEV_ENV = "GRPC_TLS_INSECURE_DEV"

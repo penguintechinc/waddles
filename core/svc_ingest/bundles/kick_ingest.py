@@ -74,7 +74,9 @@ from fanout import RedisLike, fan_out_event
 # copy of the literal string (`receivers/kick_pusher.py` is where every
 # other ingest bundle's own receiver module defines its CONSUMES_TAG --
 # see e.g. `receivers/twitch_irc.py`/`receivers/slack_socket.py`).
-from receivers.kick_pusher import CONSUMES_TAG as CONSUMES_TAG
+from receivers.kick_pusher import (  # noqa: F401 - re-exported for test imports
+    CONSUMES_TAG as CONSUMES_TAG,
+)
 
 logger = logging.getLogger(__name__)
 

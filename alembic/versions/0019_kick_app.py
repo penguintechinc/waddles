@@ -104,7 +104,10 @@ def upgrade() -> None:
         f"""
         INSERT INTO app_tenant_availability (tenant_id, app_id, available, config_defaults)
         SELECT t.id, '{KICK_APP_ID}', TRUE,
-            '{{"access_token_ref": "KICK_ACCESS_TOKEN", "client_id_ref": "KICK_CLIENT_ID", "client_secret_ref": "KICK_CLIENT_SECRET", "webhook_secret_ref": "KICK_WEBHOOK_SECRET"}}'::jsonb
+            '{{"access_token_ref": "KICK_ACCESS_TOKEN",
+               "client_id_ref": "KICK_CLIENT_ID",
+               "client_secret_ref": "KICK_CLIENT_SECRET",
+               "webhook_secret_ref": "KICK_WEBHOOK_SECRET"}}'::jsonb
         FROM tenants t
         WHERE t.slug = '{TENANT_SLUG}'
         ON CONFLICT (tenant_id, app_id) DO UPDATE SET

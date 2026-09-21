@@ -399,7 +399,7 @@ Rationale for the split: a hook that must run for every event regardless of acti
 4. Adopt `penguin-licensing` for flag/entitlement checks.
 5. No spine, no executor, no bundles — media stays fully isolated from the chat pipeline, as today.
 
-### 4.5 `core/bundle_executor` — binary `bundle-executor`
+### 4.5 core/bundle_executor (M2, not yet built) — binary `bundle-executor`
 
 **Responsibility.** Hold a wasmtime engine and an instance pool, accept `Invoke` frames from its stage over one mTLS connection, run the bundle's exported function under a per-call epoch deadline and memory cap, and issue host-call frames back to the stage for every capability the bundle imports. **Holds no stage credentials, no Valkey or Postgres access, and can reach exactly two network destinations: its stage's host-API port and the artifact bucket.**
 
@@ -409,7 +409,7 @@ Rationale for the split: a hook that must run for every event regardless of acti
 
 **Dependencies.** `wasmtime` (component model + WASI 0.2, exact pinned version), `tokio` (`net`, `rt-multi-thread`, `io-util`), `rustls` + `tokio-rustls` (mTLS client), `object_store` (bucket reads), `serde`/`serde_json`, `penguin-bundle-host` (shared frame types), `penguin-logging` (log frames are forwarded to the stage, never written directly). No `redis`, no `sea-orm`, no `sqlx` — the dependency set is itself part of the security argument and is asserted by a test (§14.6).
 
-### 4.6 `core/bundle_compiler` — binary `bundle-compiler`
+### 4.6 core/bundle_compiler (M2, not yet built) — binary `bundle-compiler`
 
 **Responsibility.** One gVisor-sandboxed run per uploaded bundle version: validate the manifest, scan the source, compile it to a WASI 0.2 component (or validate an uploaded prebuilt one), content-address it, and write the component plus a signed metadata sidecar to the bucket. Exits non-zero with a machine-readable reason on any failure.
 

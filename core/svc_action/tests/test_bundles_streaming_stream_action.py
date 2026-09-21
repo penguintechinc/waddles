@@ -174,8 +174,6 @@ async def test_get_stream_details_success(_dal: _FakeDal) -> None:
     assert dto["lastActivity"] == "2026-09-04T11:00:00"
 
 
-
-
 async def test_unknown_query_type_is_non_retryable() -> None:
     """Test unknown query type raises NonRetryableTransportError."""
     async with httpx.AsyncClient() as client:

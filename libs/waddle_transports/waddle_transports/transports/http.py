@@ -419,7 +419,7 @@ def _unframe_grpc(body: bytes) -> bytes | None:
     if len(body) < 5:
         return None
     length = int.from_bytes(body[1:5], "big")
-    return body[5 : 5 + length]
+    return body[5:5 + length]
 
 
 def _raise_for_http_status(status_code: int, label: str) -> None:

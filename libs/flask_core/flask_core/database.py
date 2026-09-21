@@ -27,9 +27,9 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 # Field is exported via DAL but imported here for module users
-from pydal import (
+from pydal import (  # noqa: F401
     DAL,
-    Field,  # noqa: F401
+    Field,
 )
 
 logger = logging.getLogger(__name__)

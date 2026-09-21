@@ -24,7 +24,7 @@ FROM node:20-bookworm-slim@sha256:1e85773c98c31d4fe5b545e4cb17379e617b348832fb37
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    dumb-init curl \
+    dumb-init=1.2.5-2 curl=7.88.1-10+deb12u15 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
