@@ -37,6 +37,7 @@ from quart_schema import Info, QuartSchema
 from blueprints import register_blueprints
 from config import HubAPIConfig
 from openapi.routes import register_openapi_docs
+from services.bundle_install_dal import build_install_dal
 from services.rate_limiting import install_rate_limiting
 from services.schema import (
     bind_ai_routing_tables,
@@ -222,6 +223,14 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         _bind_reference_tables(dal)
         app.config["async_dal"] = async_dal
         app.config["dal"] = dal
+        # penguin-dal (R52): a SEPARATE AsyncDB/pool against the same
+        # DATABASE_URL, reflecting the ingest_sources/workstreams/
+        # workstream_usage_hourly tables migrations 0020-0021 create
+        # (spec Sec5.11/Sec5.12, D30/D31) -- see bundle_install_dal.py's
+        # own docstring for why this coexists with the pydal DAL above
+        # rather than replacing it.
+        install_dal = await build_install_dal(cfg.database_url, pool_size=cfg.db_pool_size)
+        app.config["install_dal"] = install_dal
         logger.system("hub-api started", action="startup", result="SUCCESS")
 
     @app.after_serving
@@ -245,6 +254,12 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
                 await async_dal.close_async()
             except Exception as exc:  # noqa: BLE001 - shutdown must not raise
                 logger.warning(f"Error closing DAL on shutdown: {exc}")
+        install_dal = app.config.get("install_dal")
+        if install_dal is not None:
+            try:
+                await install_dal.close()
+            except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+                logger.warning(f"Error closing install_dal on shutdown: {exc}")
         try:
             await rate_limiter.disconnect()
         except Exception as exc:  # noqa: BLE001 - shutdown must not raise

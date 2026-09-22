@@ -1,0 +1,325 @@
+# config/postgres/rbac-matrix.yaml
+#
+# Normative role x table x privilege matrix (spec D28 / Sec11.10.1).
+# Grants are generated FROM this file by scripts/db/rbac_matrix.py --
+# nobody writes a GRANT by hand. Every role and every table this
+# milestone (M2b) touches has an explicit row, including "no privilege"
+# rows, so the live-grants CI test (hub_api/tests/test_rbac_live_grants.py)
+# can assert set equality rather than only checking presence.
+#
+# Appended to, never rewritten, by later milestones (M3/M4/M5/M6) as
+# their own services/tables land -- each appends its own role/table
+# rows to this same file and adds its own migration that re-renders
+# grants scoped to its own new rows.
+version: 1
+roles:
+  - hub_api
+  - waddles_publisher
+  - svc_ingest
+  - svc_process
+  - svc_action
+  - svc_streaming
+  - webui
+  - migration_runner
+tables:
+  - app_versions
+  - app_active_versions
+  - app_version_uploads
+  - app_install_approvals
+  - app_stream_grants
+  - custom_platforms
+  - ingest_sources
+  - platform_settings
+  - app_versions_audit_log
+  - workstreams
+  - workstream_usage_hourly
+grants:
+  # app_versions: exactly two writers (spec Sec6.10). Every other role
+  # gets zero privileges -- listed explicitly so the equality check
+  # sees an intentional absence, not an unexamined gap.
+  - role: waddles_publisher
+    table: app_versions
+    privileges: [INSERT, UPDATE, DELETE]
+  - role: hub_api
+    table: app_versions
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: svc_ingest
+    table: app_versions
+    privileges: []
+  - role: svc_process
+    table: app_versions
+    privileges: []
+  - role: svc_action
+    table: app_versions
+    privileges: []
+  - role: svc_streaming
+    table: app_versions
+    privileges: []
+  - role: webui
+    table: app_versions
+    privileges: []
+  - role: migration_runner
+    table: app_versions
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # app_active_versions: hub-api-owned pointer table. Only hub_api writes.
+  - role: hub_api
+    table: app_active_versions
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: app_active_versions
+    privileges: []
+  - role: svc_ingest
+    table: app_active_versions
+    privileges: []
+  - role: svc_process
+    table: app_active_versions
+    privileges: []
+  - role: svc_action
+    table: app_active_versions
+    privileges: []
+  - role: svc_streaming
+    table: app_active_versions
+    privileges: []
+  - role: webui
+    table: app_active_versions
+    privileges: []
+  - role: migration_runner
+    table: app_active_versions
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # app_versions_audit_log: written only by the trigger (SECURITY DEFINER);
+  # hub_api gets read access to display history, nobody else touches it.
+  - role: hub_api
+    table: app_versions_audit_log
+    privileges: [SELECT]
+  - role: waddles_publisher
+    table: app_versions_audit_log
+    privileges: []
+  - role: svc_ingest
+    table: app_versions_audit_log
+    privileges: []
+  - role: svc_process
+    table: app_versions_audit_log
+    privileges: []
+  - role: svc_action
+    table: app_versions_audit_log
+    privileges: []
+  - role: svc_streaming
+    table: app_versions_audit_log
+    privileges: []
+  - role: webui
+    table: app_versions_audit_log
+    privileges: []
+  - role: migration_runner
+    table: app_versions_audit_log
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # Hub-api-exclusive control-plane tables (Task 3's migration). Every
+  # other role gets zero privileges on every one of them.
+  - role: hub_api
+    table: app_version_uploads
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: app_version_uploads
+    privileges: []
+  - role: svc_ingest
+    table: app_version_uploads
+    privileges: []
+  - role: svc_process
+    table: app_version_uploads
+    privileges: []
+  - role: svc_action
+    table: app_version_uploads
+    privileges: []
+  - role: svc_streaming
+    table: app_version_uploads
+    privileges: []
+  - role: webui
+    table: app_version_uploads
+    privileges: []
+  - role: migration_runner
+    table: app_version_uploads
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: app_install_approvals
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: app_install_approvals
+    privileges: []
+  - role: svc_ingest
+    table: app_install_approvals
+    privileges: []
+  - role: svc_process
+    table: app_install_approvals
+    privileges: []
+  - role: svc_action
+    table: app_install_approvals
+    privileges: []
+  - role: svc_streaming
+    table: app_install_approvals
+    privileges: []
+  - role: webui
+    table: app_install_approvals
+    privileges: []
+  - role: migration_runner
+    table: app_install_approvals
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: app_stream_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: app_stream_grants
+    privileges: []
+  - role: svc_ingest
+    table: app_stream_grants
+    privileges: []
+  - role: svc_process
+    table: app_stream_grants
+    privileges: []
+  - role: svc_action
+    table: app_stream_grants
+    privileges: []
+  - role: svc_streaming
+    table: app_stream_grants
+    privileges: []
+  - role: webui
+    table: app_stream_grants
+    privileges: []
+  - role: migration_runner
+    table: app_stream_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: custom_platforms
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: custom_platforms
+    privileges: []
+  - role: svc_ingest
+    table: custom_platforms
+    privileges: []
+  - role: svc_process
+    table: custom_platforms
+    privileges: []
+  - role: svc_action
+    table: custom_platforms
+    privileges: []
+  - role: svc_streaming
+    table: custom_platforms
+    privileges: []
+  - role: webui
+    table: custom_platforms
+    privileges: []
+  - role: migration_runner
+    table: custom_platforms
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: ingest_sources
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: ingest_sources
+    privileges: []
+  - role: svc_ingest
+    table: ingest_sources
+    privileges: []
+  - role: svc_process
+    table: ingest_sources
+    privileges: []
+  - role: svc_action
+    table: ingest_sources
+    privileges: []
+  - role: svc_streaming
+    table: ingest_sources
+    privileges: []
+  - role: webui
+    table: ingest_sources
+    privileges: []
+  - role: migration_runner
+    table: ingest_sources
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: platform_settings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: platform_settings
+    privileges: []
+  - role: svc_ingest
+    table: platform_settings
+    privileges: []
+  - role: svc_process
+    table: platform_settings
+    privileges: []
+  - role: svc_action
+    table: platform_settings
+    privileges: []
+  - role: svc_streaming
+    table: platform_settings
+    privileges: []
+  - role: webui
+    table: platform_settings
+    privileges: []
+  - role: migration_runner
+    table: platform_settings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # workstreams (D30): hub-api-owned, 1:1 with ingest_sources. Only hub_api writes.
+  - role: hub_api
+    table: workstreams
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: workstreams
+    privileges: []
+  - role: svc_ingest
+    table: workstreams
+    privileges: []
+  - role: svc_process
+    table: workstreams
+    privileges: []
+  - role: svc_action
+    table: workstreams
+    privileges: []
+  - role: svc_streaming
+    table: workstreams
+    privileges: []
+  - role: webui
+    table: workstreams
+    privileges: []
+  - role: migration_runner
+    table: workstreams
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # workstream_usage_hourly (D31): append-only. hub_api gets SELECT/INSERT
+  # only -- no UPDATE/DELETE for anyone, including hub_api (spec Sec11.10.1,
+  # Sec5.12 literal wording: "no UPDATE/DELETE for anyone"). migration_runner
+  # keeps this matrix's uniform DDL-time-only grant (never used at runtime,
+  # matching every other table's migration_runner row) so a future column
+  # migration on this table is not a special case.
+  - role: hub_api
+    table: workstream_usage_hourly
+    privileges: [SELECT, INSERT]
+  - role: waddles_publisher
+    table: workstream_usage_hourly
+    privileges: []
+  - role: svc_ingest
+    table: workstream_usage_hourly
+    privileges: []
+  - role: svc_process
+    table: workstream_usage_hourly
+    privileges: []
+  - role: svc_action
+    table: workstream_usage_hourly
+    privileges: []
+  - role: svc_streaming
+    table: workstream_usage_hourly
+    privileges: []
+  - role: webui
+    table: workstream_usage_hourly
+    privileges: []
+  - role: migration_runner
+    table: workstream_usage_hourly
+    privileges: [SELECT, INSERT, UPDATE, DELETE]

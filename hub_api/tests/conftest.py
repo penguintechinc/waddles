@@ -53,7 +53,21 @@ from typing import Any
 import pytest
 from flask_core.auth import create_jwt_token
 from flask_core.database import AsyncDAL
+from penguin_dal import AsyncDB
 from pydal import DAL, Field
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    Integer,
+    LargeBinary,
+    MetaData,
+    String,
+    Table,
+)
 
 from services.schema import (
     bind_admin_tables,
@@ -1157,3 +1171,133 @@ def seed_token_balance(
         community_id=community_id, product_id=product_id, balance=balance
     )
     dal.commit()
+
+
+# ---------------------------------------------------------------------------
+# M2b workstreams/usage-metering group (spec Sec5.11/Sec5.12, D30/D31)
+# ---------------------------------------------------------------------------
+#
+# R52 (coordinator ruling): "we aren't using pydal anymore for new
+# tables... instead we are running penguin-dal." `ingest_sources`,
+# `workstreams`, and `workstream_usage_hourly` (migrations 0020-0021) are
+# this slice's own new tables, queried through `install_dal:
+# penguin_dal.AsyncDB` (`services/bundle_install_dal.py`), never a new
+# pydal binder. `bundle_install_db` supplies the one pydal table
+# (`tenants`) these fixtures' tests need to insert against; Alembic owns
+# the real DDL in production, `_create_bundle_install_tables()`
+# reproduces the same three tables as sqlite-compatible SQLAlchemy Core
+# schema for the unit-test fixture (no Alembic run in a unit test).
+
+BUNDLE_TENANT_ID = 1
+BUNDLE_COMMUNITY_ID = 1
+
+
+@pytest.fixture
+def bundle_install_db(tmp_path: Any) -> Any:
+    """File-backed pydal `AsyncDAL` with a narrow `tenants` table.
+
+    Mirrors `distribution_db`'s own narrow-tenants shape above -- the
+    M2b workstreams/usage-metering slice's tests only ever need a real
+    tenant row to insert `ingest_sources`/`workstreams`/
+    `workstream_usage_hourly` rows against, never `communities`/
+    `app_catalog`/etc, so this fixture stays intentionally smaller than
+    `distribution_db`.
+    """
+    async_dal = AsyncDAL(f"sqlite://{tmp_path / 'bundle_install_test.db'}", pool_size=1)
+    dal = async_dal.dal
+    dal.define_table(
+        "tenants",
+        Field("slug", unique=True),
+        Field("display_name"),
+        Field("is_active", "boolean", default=True),
+    )
+    dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
+    dal.commit()
+    yield async_dal
+    dal.close()
+
+
+def _create_bundle_install_tables(conn: Any) -> None:
+    """Synchronous SQLAlchemy Core DDL for the M2b workstreams/usage-metering tables.
+
+    Run via `conn.run_sync()` inside `install_dal`'s `engine.begin()`
+    block below. Alembic owns this DDL in real Postgres (migrations
+    0020-0021); a unit test has no Alembic run, so this reproduces the
+    same column set as a sqlite-compatible SQLAlchemy Core schema --
+    plain generic types, no native UUID/JSONB.
+
+    `workstream_usage_hourly.workstream_id` is a `String(36)` column
+    here, not an integer FK -- the real Postgres column is `UUID`, while
+    `workstreams.id` in this sqlite fixture stays an autoincrement
+    integer (sqlite has no native UUID type). Every service function
+    treats `workstream_id` as an opaque string on both backends, so
+    `String(36)` holds either representation without a type mismatch.
+    """
+    metadata = MetaData()
+    Table(
+        "ingest_sources",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer),
+        Column("platform", String(50), nullable=False),
+        Column("source_id", String(255), nullable=False),
+        Column("label", String(255), nullable=False),
+        Column("secret_ciphertext", LargeBinary),
+        Column("secret_iv", LargeBinary),
+        Column("mapping", JSON),
+        Column("enabled", Boolean, server_default="1"),
+        Column("created_at", DateTime),
+        Column("updated_at", DateTime),
+    )
+    Table(
+        "workstreams",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer),
+        Column("ingest_source_id", BigInteger),
+        Column("platform", String(50), nullable=False),
+        Column("source_id", String(255), nullable=False),
+        Column("created_at", DateTime),
+        Column("disabled_at", DateTime),
+    )
+    Table(
+        "workstream_usage_hourly",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer),
+        Column("workstream_id", String(36), nullable=False),
+        Column("stage", String(20), nullable=False),
+        Column("app_id", String(255)),
+        Column("hour", DateTime, nullable=False),
+        Column("events", BigInteger, server_default="0"),
+        Column("invocations", BigInteger, server_default="0"),
+        Column("host_calls", BigInteger, server_default="0"),
+        Column("actions_delivered", BigInteger, server_default="0"),
+        Column("fuel_ms", BigInteger, server_default="0"),
+        Column("outbound_bytes", BigInteger, server_default="0"),
+        Column("media_minutes", Float),
+        Column("recorded_at", DateTime),
+    )
+    metadata.create_all(conn)
+
+
+@pytest.fixture
+async def install_dal(bundle_install_db: Any) -> Any:
+    """`penguin_dal.AsyncDB` for every M2b workstreams/usage-metering test.
+
+    Points at the exact same sqlite file as `bundle_install_db`
+    (`bundle_install_db.uri`) so both fixtures see each other's rows in
+    the same test -- `bundle_install_db` (pydal) seeds `tenants`; this
+    fixture creates the three new M2b tables directly via
+    `_create_bundle_install_tables()` and then calls `await install_dal.
+    reflect()`, which discovers both.
+    """
+    install_dal = AsyncDB(bundle_install_db.uri, pool_size=1, echo=False)
+    async with install_dal.engine.begin() as conn:
+        await conn.run_sync(_create_bundle_install_tables)
+    await install_dal.reflect()
+    yield install_dal
+    await install_dal.close()

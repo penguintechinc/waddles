@@ -8,7 +8,8 @@ RUN pip install --no-cache-dir \
     sqlalchemy>=2.0 \
     psycopg2-binary \
     flask-sqlalchemy \
-    flask-security-too
+    flask-security-too \
+    "PyYAML>=6.0.2,<7.0.0"
 
 # Copy Alembic configuration
 COPY alembic.ini .
@@ -21,6 +22,11 @@ RUN touch libs/__init__.py libs/flask_core/__init__.py
 
 # Copy legacy SQL migrations (used by baseline migration)
 COPY config/postgres/migrations/ config/postgres/migrations/
+
+# RBAC matrix (spec D28) -- the normative source the Sec6.10/Sec11.10
+# migrations generate GRANT/REVOKE statements from at migration-run time.
+COPY config/postgres/rbac-matrix.yaml config/postgres/rbac-matrix.yaml
+COPY scripts/db/ scripts/db/
 
 # Copy migration runner
 COPY migrations/run-alembic.sh ./run.sh
