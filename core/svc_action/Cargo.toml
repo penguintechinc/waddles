@@ -1,0 +1,66 @@
+[package]
+name = "svc-action"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Waddles ACTION stage-runner -- terminal pipeline stage: dispatch outcomes to platform senders, retry-with-backoff, audit to action_dispatch_log."
+
+[lib]
+name = "svc_action"
+path = "src/lib.rs"
+
+[[bin]]
+name = "svc-action"
+path = "src/main.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- see rules/critical-rules.md
+# Dependency Pinning. Cargo.lock is committed alongside this file. Versions
+# match core/svc_streaming's Cargo.toml exactly (the reference template,
+# already vetted) for every dependency the two crates share -- see that
+# crate's Cargo.toml for the `aws_lc_rs`/rustls rationale this inherits.
+[dependencies]
+tokio = { version = "=1.53.1", features = ["full"] }
+axum = "=0.8.9"
+tower-http = { version = "=0.7.1", features = ["trace"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
+opentelemetry = "=0.32.0"
+opentelemetry-otlp = { version = "=0.32.0", features = ["grpc-tonic"] }
+opentelemetry_sdk = { version = "=0.32.1", features = ["rt-tokio"] }
+tracing-opentelemetry = "=0.33.0"
+prometheus = "=0.14.0"
+thiserror = "=2.0.20"
+anyhow = "=1.0.104"
+clap = { version = "=4.6.6", features = ["derive", "env"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+# This service owns `action_dispatch_log` (config/postgres/migrations/074) --
+# see `rules/backend-database.md` Per-Service Database Accounts. No other
+# tables are queried by this crate.
+sea-orm = { version = "=2.0.2", default-features = false, features = [
+    "sqlx-postgres",
+    "sqlx-sqlite",
+    "runtime-tokio-rustls",
+    "macros",
+    "with-chrono",
+] }
+
+[dev-dependencies]
+# `test-util` (already-declared `tokio` crate, dev-only feature) unlocks
+# `tokio::time::{pause,advance}` for future retry-backoff tests (M3
+# executor-integration wave) -- included now so that wave doesn't need a
+# Cargo.toml touch just to gain it. Never linked into the release binary.
+tokio = { version = "=1.53.1", features = ["test-util"] }
+# `ServiceExt::oneshot` -- drives a request through the full `http::router`
+# (middleware included) in tests without binding a real socket. Test-only;
+# never linked into the release binary.
+tower = { version = "=0.5.3", features = ["util"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

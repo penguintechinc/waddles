@@ -1,0 +1,113 @@
+//! Typed API error surface for axum handlers. Every handler returns
+//! `Result<T, ApiError>` so the HTTP boundary never leaks a bare
+//! `anyhow::Error` -- see `rules/security.md` Output Validation, which
+//! applies equally to error bodies as to success bodies.
+//!
+//! Variant set is intentionally smaller than `core/svc_streaming`'s: this
+//! skeleton exposes no authenticated `/api/v1/*` surface yet (no
+//! `Unauthorized`/`Forbidden`), only health/metrics. TODO(M3): executor
+//! integration -- blocked on M2 -- will add the dispatch-facing variants
+//! (and, if a host-API-adjacent authenticated surface is needed, the auth
+//! variants back).
+
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde::Serialize;
+use thiserror::Error;
+
+/// The single error type returned by every axum handler in this service.
+/// Each variant maps to a specific HTTP status; internal error detail is
+/// logged via `tracing` and never echoed back to the caller.
+#[derive(Debug, Error)]
+pub enum ApiError {
+    /// Resource does not exist -- maps to 404.
+    #[error("not found: {0}")]
+    NotFound(String),
+    /// Caller input failed validation -- maps to 400.
+    #[error("bad request: {0}")]
+    BadRequest(String),
+    /// Route/feature exists but a later chunk owns the implementation --
+    /// maps to 501. Used by the module stubs in this scaffold.
+    #[error("not yet implemented: {0}")]
+    Unimplemented(String),
+    /// Anything else -- maps to 500, detail is logged not returned.
+    #[error("internal error")]
+    Internal(#[from] anyhow::Error),
+}
+
+/// JSON error body shape returned for every non-2xx response.
+#[derive(Debug, Serialize)]
+struct ErrorBody {
+    error: &'static str,
+    message: String,
+}
+
+impl ApiError {
+    fn status_and_code(&self) -> (StatusCode, &'static str) {
+        match self {
+            ApiError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+            ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
+            ApiError::Unimplemented(_) => (StatusCode::NOT_IMPLEMENTED, "not_implemented"),
+            ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let (status, code) = self.status_and_code();
+        let message = match &self {
+            ApiError::Internal(err) => {
+                tracing::error!(error = %err, "internal error");
+                "an internal error occurred".to_string()
+            }
+            other => other.to_string(),
+        };
+        (
+            status,
+            Json(ErrorBody {
+                error: code,
+                message,
+            }),
+        )
+            .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn not_found_maps_to_404() {
+        let resp = ApiError::NotFound("action route".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["error"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn internal_error_hides_detail() {
+        let resp =
+            ApiError::Internal(anyhow::anyhow!("db connection string leaked")).into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["message"], "an internal error occurred");
+    }
+
+    #[tokio::test]
+    async fn unimplemented_maps_to_501() {
+        let resp = ApiError::Unimplemented("dispatch engine".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn bad_request_maps_to_400() {
+        let resp = ApiError::BadRequest("bad envelope".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+}
