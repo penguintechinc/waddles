@@ -1,24 +1,43 @@
 #!/usr/bin/env bash
 # =============================================================================
-# WaddleBot Alpha Deployment Script
-# Local MicroK8s Deployment via Kustomize
+# Waddles Alpha Deployment Script
+# Local MicroK8s Deployment via Helm
+#
+# Helm is the only supported deployment path (alpha through production) --
+# Kustomize and Docker Compose are deprecated. This script builds each
+# pipeline service's image, pushes it to the local MicroK8s registry, and
+# deploys the whole stack in one `helm upgrade --install` using
+# k8s/helm/waddlebot/values-alpha.yaml. That values file renders a complete
+# working stack on its own; the only thing this script supplies on top is
+# secrets (see Environment below), which are never committed.
 #
 # Usage:
 #   ./scripts/deploy-alpha.sh [OPTIONS]
 #
 # Options:
-#   --build               Build Docker images and import into MicroK8s (default)
-#   --skip-build          Skip Docker build, use existing images
+#   --build               Build Docker images and push to the local registry (default)
+#   --skip-build          Skip Docker build/push, deploy with images already in the registry
 #   --tag TAG             Image tag to use (default: alpha)
-#   --service SERVICE     Build/deploy specific service only
-#   --dry-run             Show what would be deployed without applying
-#   --rollback            Rollback deployments to previous revision
+#   --service SERVICE     Build/push a single service only (the full chart is still deployed)
+#   --dry-run             helm upgrade --install --dry-run — render and validate, apply nothing
+#   --rollback            helm rollback to the previous release revision
 #   --help                Show this help message
 #
 # Environment:
-#   KUBE_CONTEXT          Kubernetes context (default: local-alpha)
-#   NAMESPACE             Target namespace (default: waddlebot-alpha)
-#   APP_HOST              Application hostname (default: waddlebot.localhost.local)
+#   KUBE_CONTEXT    Kubernetes context (default: local-alpha)
+#   NAMESPACE       Target namespace (default: waddlebot)
+#   APP_HOST        Application hostname (default: waddlebot.localhost.local)
+#   HELM_CHART      Path to the Helm chart (default: k8s/helm/waddlebot)
+#
+#   Required secrets — never defaulted, never committed, never passed as CLI
+#   args (see docs/SECRETS_SETUP.md and ~/.claude/rules/critical-rules.md
+#   Token & Secret Hygiene). The script fails loudly if any is unset:
+#     WADDLEBOT_ALPHA_JWT_SECRET
+#     WADDLEBOT_ALPHA_MODULE_SECRET_KEY
+#     WADDLEBOT_ALPHA_SERVICE_API_KEY
+#     WADDLEBOT_ALPHA_ADMIN_PASSWORD
+#     WADDLEBOT_ALPHA_MINIO_ROOT_USER
+#     WADDLEBOT_ALPHA_MINIO_ROOT_PASSWORD
 #
 # =============================================================================
 
@@ -35,58 +54,77 @@ readonly APP_NAME="${APP_NAME:-waddlebot}"
 readonly KUBE_CONTEXT="${KUBE_CONTEXT:-local-alpha}"
 readonly NAMESPACE="${NAMESPACE:-waddlebot}"
 readonly APP_HOST="${APP_HOST:-waddlebot.localhost.local}"
-readonly OVERLAY_PATH="${OVERLAY_PATH:-k8s/kustomize/overlays/alpha}"
+readonly HELM_CHART="${HELM_CHART:-k8s/helm/waddlebot}"
 
-# Services with their build context paths (relative to PROJECT_ROOT)
-declare -A SERVICE_PATHS=(
-    # Admin/Hub
-    ["hub-api"]="admin/hub_module"
-    ["hub-webui"]="admin/hub_module"
-    # Core
-    ["core-router"]="processing/router_module"
-    ["core-identity"]="core/identity_core"
-    ["core-labels"]="core/labels_core"
-    ["core-browser-source"]="core/browser_source_core"
-    ["core-reputation"]="core/reputation"
-    ["core-community"]="core/community"
-    ["core-ai-researcher"]="core/ai_researcher"
-    ["core-video-proxy"]="core/video_proxy"
-    ["core-engagement"]="core/engagement"
-    ["core-module-rtc"]="core/module_rtc"
-    # Collectors/Triggers
-    ["collector-twitch"]="trigger/receiver/twitch"
-    ["collector-discord"]="trigger/receiver/discord"
-    ["collector-slack"]="trigger/receiver/slack"
-    ["collector-youtube-live"]="trigger/receiver/youtube_live"
-    ["collector-kick"]="trigger/receiver/kick_module_flask"
-    # Interactive
-    ["interactive-ai"]="action/interactive/ai"
-    ["interactive-alias"]="action/interactive/alias"
-    ["interactive-shoutout"]="action/interactive/shoutout"
-    ["interactive-inventory"]="action/interactive/inventory"
-    ["interactive-calendar"]="action/interactive/calendar"
-    ["interactive-memories"]="action/interactive/memories"
-    ["interactive-youtube-music"]="action/interactive/youtube_music"
-    ["interactive-spotify"]="action/interactive/spotify"
-    ["interactive-loyalty"]="action/interactive/loyalty"
-    # Action/Pushing
-    ["action-discord"]="action/pushing/discord"
-    ["action-slack"]="action/pushing/slack"
-    ["action-twitch"]="action/pushing/twitch"
-    ["action-youtube"]="action/pushing/youtube"
-    # Migrations
-    ["waddlebot-migrations"]="migrations"
+# Local MicroK8s registry root. MUST match global.imageRegistry in
+# k8s/helm/waddlebot/values-alpha.yaml -- this script pushes here, the chart
+# pulls from here. imagePullPolicy stays IfNotPresent (values-alpha.yaml) --
+# never Never -- images are pushed to this registry, not side-loaded via
+# `ctr images import`.
+readonly REGISTRY="localhost:32000/waddlebot"
+
+# Services to build/push, in build order. Keys are the bare repository name
+# appended to REGISTRY (e.g. localhost:32000/waddlebot/hub-api) -- the exact
+# convention values-alpha.yaml and templates/_helpers.tpl's
+# waddlebot.legacyModuleImage/waddlebot.dbMigrateInitContainer render. Only
+# services actually enabled in values-alpha.yaml are listed here; svc-core
+# and svc-rtc have no Dockerfile yet and are left on the chart's shared
+# base-image skeleton (disabled in alpha).
+readonly SERVICE_ORDER=(
+    "hub-api"
+    "hub-webui"
+    "svc-ingest"
+    "svc-process"
+    "svc-action"
+    "svc-presentation"
+    "svc-streaming"
+    "reputation-module"
+    "waddlebot-migrations"
 )
 
-# Services that use a non-default Dockerfile name.
-# Key: service name, Value: Dockerfile filename within the service path.
-# Services not listed here fall back to Dockerfile.notests (if present) then Dockerfile.
-declare -A SERVICE_DOCKERFILES=(
-    ["hub-webui"]="Dockerfile.webui"
+# Build context, relative to PROJECT_ROOT. Every service except svc-streaming
+# builds from the repo root because its Dockerfile COPYs shared libs/*
+# (flask_core, waddle_transports, moderation_module). svc-streaming is a
+# self-contained Rust crate (core/svc_streaming/Cargo.toml) with no shared
+# libs to pull in -- see core/svc_streaming/Dockerfile.rust's own header.
+declare -A SERVICE_CONTEXT=(
+    ["hub-api"]="."
+    ["hub-webui"]="."
+    ["svc-ingest"]="."
+    ["svc-process"]="."
+    ["svc-action"]="."
+    ["svc-presentation"]="."
+    ["svc-streaming"]="core/svc_streaming"
+    ["reputation-module"]="."
+    ["waddlebot-migrations"]="."
 )
 
-# Image name prefix (used for docker build tags)
-readonly IMAGE_PREFIX="${APP_NAME}"
+# Dockerfile path, relative to PROJECT_ROOT (or relative to the context above
+# for svc-streaming, which docker build handles identically either way here
+# since -f accepts a path relative to CWD, not the context).
+declare -A SERVICE_DOCKERFILE=(
+    ["hub-api"]="hub_api/Dockerfile"
+    ["hub-webui"]="admin/hub_module/Dockerfile.webui"
+    ["svc-ingest"]="core/svc_ingest/Dockerfile"
+    ["svc-process"]="core/svc_process/Dockerfile"
+    ["svc-action"]="core/svc_action/Dockerfile"
+    ["svc-presentation"]="core/svc_presentation/Dockerfile"
+    ["svc-streaming"]="core/svc_streaming/Dockerfile.rust"
+    ["reputation-module"]="core/reputation_module/Dockerfile"
+    ["waddlebot-migrations"]="migrations/Dockerfile"
+)
+
+# Required secret env vars. Mirrors the five ad-hoc --set overrides the live
+# alpha release was actually deployed with; none of these may ever be
+# defaulted or committed (critical-rules.md Token & Secret Hygiene).
+readonly REQUIRED_SECRET_VARS=(
+    "WADDLEBOT_ALPHA_JWT_SECRET"
+    "WADDLEBOT_ALPHA_MODULE_SECRET_KEY"
+    "WADDLEBOT_ALPHA_SERVICE_API_KEY"
+    "WADDLEBOT_ALPHA_ADMIN_PASSWORD"
+    "WADDLEBOT_ALPHA_MINIO_ROOT_USER"
+    "WADDLEBOT_ALPHA_MINIO_ROOT_PASSWORD"
+)
 
 # Defaults
 declare TAG="alpha"
@@ -94,6 +132,7 @@ declare SERVICE_FILTER=""
 declare SKIP_BUILD=false
 declare DRY_RUN=false
 declare DO_ROLLBACK=false
+declare SECRETS_VALUES_FILE=""
 
 # =============================================================================
 # Color output helpers
@@ -130,6 +169,17 @@ kctl() {
 }
 
 # =============================================================================
+# Secrets file cleanup (always runs -- success, failure, or Ctrl-C)
+# =============================================================================
+
+cleanup_secrets_file() {
+    if [[ -n "${SECRETS_VALUES_FILE}" && -f "${SECRETS_VALUES_FILE}" ]]; then
+        rm -f "${SECRETS_VALUES_FILE}"
+    fi
+}
+trap cleanup_secrets_file EXIT
+
+# =============================================================================
 # Prerequisite checks
 # =============================================================================
 
@@ -137,7 +187,7 @@ check_prerequisites() {
     print_info "Checking prerequisites..."
     local missing=()
 
-    for cmd in kubectl docker microk8s; do
+    for cmd in kubectl docker helm; do
         if ! command -v "${cmd}" &>/dev/null; then
             missing+=("${cmd}")
         fi
@@ -163,9 +213,13 @@ check_prerequisites() {
         exit 1
     fi
 
-    # Verify overlay exists
-    if [[ ! -d "${PROJECT_ROOT}/${OVERLAY_PATH}" ]]; then
-        print_error "Kustomize overlay not found: ${OVERLAY_PATH}"
+    # Verify the Helm chart and its alpha values file exist
+    if [[ ! -d "${PROJECT_ROOT}/${HELM_CHART}" ]]; then
+        print_error "Helm chart not found: ${HELM_CHART}"
+        exit 1
+    fi
+    if [[ ! -f "${PROJECT_ROOT}/${HELM_CHART}/values-alpha.yaml" ]]; then
+        print_error "Missing ${HELM_CHART}/values-alpha.yaml"
         exit 1
     fi
 
@@ -173,144 +227,150 @@ check_prerequisites() {
 }
 
 # =============================================================================
-# Docker build and MicroK8s import
+# Required secrets -- env vars only, never CLI args, never a committed
+# default (critical-rules.md Token & Secret Hygiene). Fails loudly and lists
+# every missing var before doing anything else.
 # =============================================================================
 
-build_and_import() {
+check_required_secrets() {
+    local missing=()
+    local var
+
+    for var in "${REQUIRED_SECRET_VARS[@]}"; do
+        if [[ -z "${!var:-}" ]]; then
+            missing+=("${var}")
+        fi
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        print_error "Missing required secret environment variable(s):"
+        for var in "${missing[@]}"; do
+            echo "    ${var}" >&2
+        done
+        cat >&2 <<'EOF'
+
+These are never defaulted and never committed. Set them before deploying, e.g.:
+
+    export WADDLEBOT_ALPHA_JWT_SECRET="$(openssl rand -hex 32)"
+    export WADDLEBOT_ALPHA_MODULE_SECRET_KEY="$(openssl rand -hex 32)"
+    export WADDLEBOT_ALPHA_SERVICE_API_KEY="$(openssl rand -hex 32)"
+    export WADDLEBOT_ALPHA_ADMIN_PASSWORD="$(openssl rand -base64 24)"
+    export WADDLEBOT_ALPHA_MINIO_ROOT_USER="waddlebot-alpha"
+    export WADDLEBOT_ALPHA_MINIO_ROOT_PASSWORD="$(openssl rand -hex 16)"
+
+See docs/SECRETS_SETUP.md.
+EOF
+        exit 1
+    fi
+
+    # Write an ephemeral, mode-600 values file so secrets never appear as a
+    # CLI arg (ps/shell history) or in Helm's own --set logging. Removed by
+    # the trap above on every exit path.
+    umask 077
+    SECRETS_VALUES_FILE="$(mktemp "${TMPDIR:-/tmp}/waddlebot-alpha-secrets-XXXXXX.yaml")"
+    cat > "${SECRETS_VALUES_FILE}" <<EOF
+global:
+  jwtSecret: "${WADDLEBOT_ALPHA_JWT_SECRET}"
+  moduleSecretKey: "${WADDLEBOT_ALPHA_MODULE_SECRET_KEY}"
+  serviceApiKey: "${WADDLEBOT_ALPHA_SERVICE_API_KEY}"
+  initialAdmin:
+    password: "${WADDLEBOT_ALPHA_ADMIN_PASSWORD}"
+infrastructure:
+  minio:
+    rootUser: "${WADDLEBOT_ALPHA_MINIO_ROOT_USER}"
+    rootPassword: "${WADDLEBOT_ALPHA_MINIO_ROOT_PASSWORD}"
+EOF
+
+    print_success "Required secrets present"
+}
+
+# =============================================================================
+# Local registry reachability
+# =============================================================================
+
+check_registry_reachable() {
+    local registry_host="${REGISTRY%%/*}"
+    if command -v curl &>/dev/null; then
+        if ! curl -sf --max-time 3 "http://${registry_host}/v2/" &>/dev/null; then
+            print_error "Local registry not reachable at http://${registry_host}/v2/"
+            print_error "Enable it first, e.g.: microk8s enable registry"
+            exit 1
+        fi
+    fi
+}
+
+# =============================================================================
+# Docker build and push to the local registry
+# =============================================================================
+
+build_and_push() {
     local service="$1"
     local tag="$2"
-    local service_path="${PROJECT_ROOT}/${SERVICE_PATHS[${service}]}"
-
-    if [[ ! -d "${service_path}" ]]; then
-        print_warning "Service directory not found: ${SERVICE_PATHS[${service}]} — skipping"
-        return 0
-    fi
-
-    # Determine Dockerfile to use:
-    #   1. SERVICE_DOCKERFILES entry (explicit override — e.g. hub-webui uses Dockerfile.webui)
-    #   2. Dockerfile.notests (faster alpha build, skip test layers)
-    #   3. Dockerfile (standard fallback)
-    local dockerfile
-    if [[ -n "${SERVICE_DOCKERFILES[${service}]+_}" ]]; then
-        dockerfile="${service_path}/${SERVICE_DOCKERFILES[${service}]}"
-        print_info "Using ${SERVICE_DOCKERFILES[${service}]} for ${service}"
-    elif [[ -f "${service_path}/Dockerfile.notests" ]]; then
-        dockerfile="${service_path}/Dockerfile.notests"
-        print_info "Using Dockerfile.notests for ${service} (faster alpha build)"
-    else
-        dockerfile="${service_path}/Dockerfile"
-    fi
+    local context="${PROJECT_ROOT}/${SERVICE_CONTEXT[${service}]}"
+    local dockerfile="${PROJECT_ROOT}/${SERVICE_DOCKERFILE[${service}]}"
 
     if [[ ! -f "${dockerfile}" ]]; then
-        print_warning "No Dockerfile found for ${service} — skipping"
+        print_warning "No Dockerfile found for ${service} (${SERVICE_DOCKERFILE[${service}]}) — skipping"
         return 0
     fi
 
-    local image_name="${IMAGE_PREFIX}/${service}:${tag}"
+    local image="${REGISTRY}/${service}:${tag}"
 
-    print_info "Building image: ${image_name}"
+    print_info "Building ${image} (dockerfile=${SERVICE_DOCKERFILE[${service}]})"
     if ! docker build \
         --file "${dockerfile}" \
-        --tag "${image_name}" \
+        --tag "${image}" \
         --label "environment=alpha" \
         --label "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        "${PROJECT_ROOT}"; then
+        "${context}"; then
         print_error "Failed to build ${service}"
         return 1
     fi
 
-    print_info "Importing ${image_name} into MicroK8s..."
-    # Use MicroK8s's bundled ctr binary directly against the containerd socket.
-    # This avoids the `microk8s ctr` wrapper which forces sudo even when the
-    # user is already in the microk8s group.
-    #
-    # IMPORTANT: Use file-based import (not pipe). Piping docker save directly
-    # into ctr silently produces a corrupt 276KB text/html manifest instead of
-    # the real OCI image because ctr reads from stdin before the pipe is fully
-    # buffered. Saving to a temp file first ensures all layer data is written
-    # before ctr reads it.
-    local mk8s_ctr="/snap/microk8s/current/bin/ctr"
-    local mk8s_sock="/var/snap/microk8s/common/run/containerd.sock"
-    local tmp_tar
-    tmp_tar="$(mktemp /tmp/microk8s-import-XXXXXX.tar)"
-    if ! docker save "${image_name}" -o "${tmp_tar}"; then
-        rm -f "${tmp_tar}"
-        print_error "Failed to save ${image_name} to tar"
+    print_info "Pushing ${image}..."
+    if ! docker push "${image}"; then
+        print_error "Failed to push ${image}"
         return 1
     fi
-    if ! "${mk8s_ctr}" --address "${mk8s_sock}" -n k8s.io images import "${tmp_tar}"; then
-        rm -f "${tmp_tar}"
-        print_error "Failed to import ${image_name} into MicroK8s"
-        return 1
-    fi
-    rm -f "${tmp_tar}"
 
-    print_success "Built and imported: ${image_name}"
+    print_success "Built and pushed: ${image}"
 }
 
 # =============================================================================
-# Kustomize deployment
+# Helm deployment
 # =============================================================================
 
 do_deploy() {
-    print_info "Deploying to local MicroK8s cluster..."
+    print_info "Deploying to local MicroK8s cluster via Helm..."
     print_info "  Context:   ${KUBE_CONTEXT}"
     print_info "  Namespace: ${NAMESPACE}"
-    print_info "  Overlay:   ${OVERLAY_PATH}"
-    print_info "  Host:      ${APP_HOST}"
+    print_info "  Chart:     ${HELM_CHART}"
+    print_info "  Tag:       ${TAG}"
 
-    # Create namespace if missing
-    if ! kctl get namespace "${NAMESPACE}" &>/dev/null; then
-        print_info "Creating namespace: ${NAMESPACE}"
-        kctl create namespace "${NAMESPACE}"
-    fi
+    local helm_args=(
+        upgrade --install "${APP_NAME}" "${PROJECT_ROOT}/${HELM_CHART}"
+        --kube-context "${KUBE_CONTEXT}"
+        --namespace "${NAMESPACE}"
+        --create-namespace
+        --values "${PROJECT_ROOT}/${HELM_CHART}/values-alpha.yaml"
+        --values "${SECRETS_VALUES_FILE}"
+        --set "global.imageTag=${TAG}"
+    )
 
-    # Render kustomize and fix env var service references.
-    # Kustomize namePrefix adds "alpha-" to resource names but not to
-    # env var values that reference those services (e.g. DB_HOST, REDIS_HOST).
-    # We post-process the rendered YAML to inject the prefix.
-    local name_prefix
-    name_prefix=$(grep 'namePrefix:' "${PROJECT_ROOT}/${OVERLAY_PATH}/kustomization.yaml" \
-        | awk '{print $2}' | tr -d '"' || echo "")
-
-    local rendered
-    rendered=$(kubectl kustomize "${PROJECT_ROOT}/${OVERLAY_PATH}")
-    if [[ -z "${rendered}" ]]; then
-        print_error "Failed to render kustomize overlay"
-        return 1
-    fi
-
-    if [[ -n "${name_prefix}" ]]; then
-        print_info "Fixing service references for namePrefix: ${name_prefix}"
-        # Kustomize renders unquoted values like: value: infra-postgres
-        rendered=$(echo "${rendered}" | sed \
-            -e "s|value: infra-postgres$|value: ${name_prefix}infra-postgres|g" \
-            -e "s|value: infra-redis$|value: ${name_prefix}infra-redis|g" \
-            -e "s|value: infra-minio|value: ${name_prefix}infra-minio|g" \
-            -e "s|value: infra-qdrant|value: ${name_prefix}infra-qdrant|g" \
-            -e "s|value: ai-ollama|value: ${name_prefix}ai-ollama|g" \
-            -e "s|value: core-router|value: ${name_prefix}core-router|g" \
-            -e "s|value: hub-api|value: ${name_prefix}hub-api|g" \
-            -e "s|value: interactive-translate|value: ${name_prefix}interactive-translate|g" \
-            -e "s|http://infra-|http://${name_prefix}infra-|g" \
-            -e "s|http://interactive-|http://${name_prefix}interactive-|g" \
-            -e "s|http://core-|http://${name_prefix}core-|g" \
-        )
-    fi
-
-    # Apply kustomize overlay
     if [[ "${DRY_RUN}" == "true" ]]; then
-        print_info "DRY-RUN: Rendering kustomize output..."
-        echo "${rendered}"
-        return 0
+        helm_args+=(--dry-run --debug)
     fi
 
-    if ! echo "${rendered}" | kctl apply -f -; then
-        print_error "Failed to apply kustomize overlay"
+    if ! helm "${helm_args[@]}"; then
+        print_error "Helm deployment failed"
         return 1
     fi
 
-    print_success "Kustomize manifests applied"
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        print_success "Dry-run complete — nothing applied"
+    else
+        print_success "Helm release applied"
+    fi
 }
 
 # =============================================================================
@@ -320,7 +380,6 @@ do_deploy() {
 wait_for_rollout() {
     print_info "Waiting for deployments to roll out..."
 
-    # Get all deployments in namespace
     local deployments
     deployments=$(kctl get deployments -n "${NAMESPACE}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
 
@@ -338,7 +397,6 @@ wait_for_rollout() {
         fi
     done
 
-    # Also check statefulsets
     local statefulsets
     statefulsets=$(kctl get statefulsets -n "${NAMESPACE}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
 
@@ -372,8 +430,9 @@ show_status() {
     print_info "Access URL: https://${APP_HOST}"
     echo ""
     print_info "Quick commands:"
+    echo "  Helm status: helm status ${APP_NAME} --kube-context ${KUBE_CONTEXT} -n ${NAMESPACE}"
     echo "  View pods:   kubectl --context ${KUBE_CONTEXT} get pods -n ${NAMESPACE}"
-    echo "  View logs:   kubectl --context ${KUBE_CONTEXT} logs -n ${NAMESPACE} -l environment=alpha -f"
+    echo "  View logs:   kubectl --context ${KUBE_CONTEXT} logs -n ${NAMESPACE} -l app.kubernetes.io/instance=${APP_NAME} -f"
     echo "  Describe:    kubectl --context ${KUBE_CONTEXT} describe pods -n ${NAMESPACE}"
 }
 
@@ -382,20 +441,12 @@ show_status() {
 # =============================================================================
 
 do_rollback() {
-    print_warning "Rolling back deployments in ${NAMESPACE}..."
+    print_warning "Rolling back Helm release '${APP_NAME}' in ${NAMESPACE}..."
 
-    local deployments
-    deployments=$(kctl get deployments -n "${NAMESPACE}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
-
-    if [[ -z "${deployments}" ]]; then
-        print_error "No deployments found in namespace ${NAMESPACE}"
+    if ! helm rollback "${APP_NAME}" --kube-context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}"; then
+        print_error "Helm rollback failed"
         return 1
     fi
-
-    for deploy in ${deployments}; do
-        print_info "Rolling back deployment/${deploy}..."
-        kctl rollout undo "deployment/${deploy}" -n "${NAMESPACE}"
-    done
 
     print_success "Rollback initiated"
     wait_for_rollout
@@ -409,80 +460,57 @@ show_help() {
     cat <<EOF
 Usage: $(basename "$0") [OPTIONS]
 
-Deploy ${APP_NAME} to local MicroK8s alpha environment using Kustomize.
+Deploy ${APP_NAME} to the local MicroK8s alpha environment using Helm.
 
 OPTIONS:
-    --build               Build images and import into MicroK8s (default)
-    --skip-build          Skip Docker build, use existing images
+    --build               Build images and push to the local registry (default)
+    --skip-build          Skip build/push, deploy with existing registry images
     --tag TAG             Image tag (default: alpha)
-    --service SERVICE     Build specific service only
-    --dry-run             Render manifests without applying
-    --rollback            Rollback deployments to previous revision
+    --service SERVICE     Build/push a single service only
+    --dry-run             helm upgrade --install --dry-run (render + validate, apply nothing)
+    --rollback            helm rollback to the previous release revision
     --help                Show this help message
 
 ENVIRONMENT:
     KUBE_CONTEXT:   ${KUBE_CONTEXT}
     NAMESPACE:      ${NAMESPACE}
     APP_HOST:       ${APP_HOST}
-    OVERLAY_PATH:   ${OVERLAY_PATH}
+    HELM_CHART:     ${HELM_CHART}
+    REGISTRY:       ${REGISTRY}
 
-SERVICES (Admin/Hub):
-    hub-api                (admin/hub_module — Dockerfile)
-    hub-webui              (admin/hub_module — Dockerfile.webui)
+REQUIRED SECRETS (env vars, never defaulted/committed — see docs/SECRETS_SETUP.md):
+    WADDLEBOT_ALPHA_JWT_SECRET
+    WADDLEBOT_ALPHA_MODULE_SECRET_KEY
+    WADDLEBOT_ALPHA_SERVICE_API_KEY
+    WADDLEBOT_ALPHA_ADMIN_PASSWORD
+    WADDLEBOT_ALPHA_MINIO_ROOT_USER
+    WADDLEBOT_ALPHA_MINIO_ROOT_PASSWORD
 
-SERVICES (Core):
-    core-router            (processing/router_module)
-    core-identity          (core/identity_core)
-    core-labels            (core/labels_core)
-    core-browser-source    (core/browser_source_core)
-    core-reputation        (core/reputation)
-    core-community         (core/community)
-    core-ai-researcher     (core/ai_researcher)
-    core-video-proxy       (core/video_proxy)
-    core-engagement        (core/engagement)
-    core-module-rtc        (core/module_rtc)
-
-SERVICES (Collectors/Triggers):
-    collector-twitch       (trigger/receiver/twitch)
-    collector-discord      (trigger/receiver/discord)
-    collector-slack        (trigger/receiver/slack)
-    collector-youtube-live (trigger/receiver/youtube_live)
-    collector-kick         (trigger/receiver/kick_module_flask)
-
-SERVICES (Interactive):
-    interactive-ai         (action/interactive/ai)
-    interactive-alias      (action/interactive/alias)
-    interactive-shoutout   (action/interactive/shoutout)
-    interactive-inventory  (action/interactive/inventory)
-    interactive-calendar   (action/interactive/calendar)
-    interactive-memories   (action/interactive/memories)
-    interactive-youtube-music (action/interactive/youtube_music)
-    interactive-spotify    (action/interactive/spotify)
-    interactive-loyalty    (action/interactive/loyalty)
-
-SERVICES (Action/Pushing):
-    action-discord         (action/pushing/discord)
-    action-slack           (action/pushing/slack)
-    action-twitch          (action/pushing/twitch)
-    action-youtube         (action/pushing/youtube)
-
-SERVICES (Migrations):
-    waddlebot-migrations   (migrations)
+SERVICES (built/pushed as ${REGISTRY}/<service>:<tag>):
+    hub-api                (hub_api/Dockerfile)
+    hub-webui              (admin/hub_module/Dockerfile.webui)
+    svc-ingest              (core/svc_ingest/Dockerfile)
+    svc-process             (core/svc_process/Dockerfile)
+    svc-action              (core/svc_action/Dockerfile)
+    svc-presentation        (core/svc_presentation/Dockerfile)
+    svc-streaming           (core/svc_streaming/Dockerfile.rust)
+    reputation-module       (core/reputation_module/Dockerfile)
+    waddlebot-migrations    (migrations/Dockerfile)
 
 EXAMPLES:
-    # Full build and deploy
+    # Full build, push, and deploy
     $(basename "$0")
 
     # Deploy without rebuilding images
     $(basename "$0") --skip-build
 
-    # Build and deploy only one service
+    # Build and push only one service, then deploy the full chart
     $(basename "$0") --service hub-api
 
-    # Preview what would be applied
+    # Preview what would change
     $(basename "$0") --skip-build --dry-run
 
-    # Rollback to previous deployment
+    # Roll back to the previous release revision
     $(basename "$0") --rollback
 EOF
 }
@@ -492,7 +520,6 @@ EOF
 # =============================================================================
 
 main() {
-    # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --build)
@@ -533,25 +560,27 @@ main() {
 
     echo ""
     print_info "=========================================="
-    print_info "  ${APP_NAME} — Alpha Deployment"
+    print_info "  ${APP_NAME} — Alpha Deployment (Helm)"
     print_info "=========================================="
     echo ""
 
     check_prerequisites
 
-    # Handle rollback
     if [[ "${DO_ROLLBACK}" == "true" ]]; then
-        do_rollback
+        local rollback_rc=0
+        do_rollback || rollback_rc=$?
         show_status
-        exit $?
+        exit "${rollback_rc}"
     fi
 
-    # Build images
+    check_required_secrets
+
     if [[ "${SKIP_BUILD}" != "true" ]]; then
-        print_info "Building and importing Docker images..."
-        for service in "${!SERVICE_PATHS[@]}"; do
+        check_registry_reachable
+        print_info "Building and pushing Docker images..."
+        for service in "${SERVICE_ORDER[@]}"; do
             if [[ -z "${SERVICE_FILTER}" ]] || [[ "${SERVICE_FILTER}" == "${service}" ]]; then
-                build_and_import "${service}" "${TAG}" || {
+                build_and_push "${service}" "${TAG}" || {
                     print_error "Failed to build ${service}"
                     exit 1
                 }
@@ -561,15 +590,12 @@ main() {
         print_info "Skipping build (--skip-build)"
     fi
 
-    # Deploy
     do_deploy || exit 1
 
     if [[ "${DRY_RUN}" != "true" ]]; then
         wait_for_rollout || print_warning "Some workloads did not roll out cleanly"
         show_status
         print_success "Alpha deployment complete!"
-    else
-        print_success "Dry-run complete!"
     fi
 }
 

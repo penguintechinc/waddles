@@ -45,7 +45,22 @@ spec:
         # Same image reference as waddlebot.dbMigrateInitContainer (_helpers.tpl) — one
         # migrations image, two call sites (this pre-install/pre-upgrade Job + the per-pod
         # initContainer). Replace once migrations has its own pinned CI-built digest.
-        image: "{{ .Values.global.imageRegistry }}/migrations:{{ .Values.global.imageTag }}"
+        #
+        # fix/alpha-helm-deploy -- this used to hardcode
+        # "{{ .Values.global.imageRegistry }}/migrations:{{ .Values.global.imageTag }}"
+        # with no empty-registry guard and a literal "migrations" repo name that didn't
+        # match dbMigrateInitContainer's .Values.modules.migrations.image, so an empty
+        # global.imageRegistry rendered the malformed "/migrations:alpha". Reuse the exact
+        # same guard + repository source as dbMigrateInitContainer so both call sites can
+        # never drift apart again.
+        {{- $registry := .Values.global.imageRegistry | default "" }}
+        {{- $repository := .Values.modules.migrations.image | default "waddlebot-migrations" }}
+        {{- $tag := .Values.global.imageTag }}
+        {{- if $registry }}
+        image: "{{ $registry }}/{{ $repository }}:{{ $tag }}"
+        {{- else }}
+        image: "{{ $repository }}:{{ $tag }}"
+        {{- end }}
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}

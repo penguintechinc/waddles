@@ -56,8 +56,9 @@ declare -A SERVICES=(
 )
 
 # Deployment tool by environment:
-#   Beta  (dal2-beta)      → Helm      (this script)
-#   Alpha (local/minikube) → Kustomize (see future deploy-alpha.sh)
+#   Beta  (dal2-beta)        → Helm (this script)
+#   Alpha (local MicroK8s)   → Helm (scripts/deploy-alpha.sh) -- Kustomize is deprecated,
+#                              see k8s/kustomize/ for the (unused) legacy overlays.
 
 # Default values — unique epoch tag per skill (never reuse beta-latest)
 TAG="${TAG:-beta-$(date +%s)}"
