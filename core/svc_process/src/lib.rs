@@ -1,28 +1,34 @@
 //! `svc-process`: the Waddles process-stage data-plane service.
 //!
-//! **M4 skeleton scope only.** This crate currently wires config loading,
-//! OTel/`tracing`/Prometheus telemetry, and the `/health` + `/healthz` +
-//! `/metrics` control-plane surface -- the same shape as
-//! `core/svc_streaming` (the M4 reference template), minus everything that
-//! service does for A/V. Per
+//! **M4 skeleton scope, now with the M1 penguin-libs crates wired in.**
+//! This crate wires config loading, sanitizing OTel/`tracing`/Prometheus
+//! telemetry via `penguin-logging` (`crate::telemetry`), the granted-
+//! ingest-stream `XREADGROUP` consumer via `penguin-spine`
+//! (`crate::spine`), and the `/health` + `/healthz` + `/metrics`
+//! control-plane surface -- the same shape as `core/svc_streaming` (the M4
+//! reference template), minus everything that service does for A/V. Per
 //! `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md` SS4.2 and
-//! the M4 milestone row (SS16), the following are explicitly **out of
-//! scope for this skeleton** and blocked on M2 (compiler/executor) and the
-//! M1 `penguin-spine`/`penguin-bundle-host`/`penguin-connectors` crates
-//! landing in parallel:
+//! the M4 milestone row (SS16), the following remain explicitly **out of
+//! scope for this skeleton**, blocked on M2 (compiler/executor) and the
+//! `penguin-bundle-host`/`penguin-connectors` crates:
 //!
 //! - Executor integration (invoking a bundle's `transform` over the
-//!   `bundle-executor` mTLS wire protocol)
+//!   `bundle-executor` mTLS wire protocol) -- see `crate::spine::run`'s doc
+//!   comment and its `handle_delivered` seam
 //! - Built-ins: the content-moderation gate, moderation-enforcement
 //!   routing, and cross-app `_target_app_id` routing
 //! - The DB host capability (parser allowlist + per-bundle role + RLS)
 //!   bundles use for their own `db` host calls
 //! - Hop verification (`binding.mac`, tenant/community/grant/approval
 //!   checks) and usage metering
+//! - The `GET /api/v1/distribution/bundles?stage=process` activation poll
+//!   that would resolve `PROCESS_APP_ID`'s granted-stream list instead of
+//!   the always-empty one `run_with_shutdown` passes today
 //!
 //! Each seam is marked `// TODO(M4): executor integration -- blocked on
-//! M2` at the point a later chunk plugs in, rather than stubbed with fake
-//! behavior.
+//! M2` (or, for `bundle-executor` specifically, `blocked on bundle-executor
+//! (Wave 2)`) at the point a later chunk plugs in, rather than stubbed with
+//! fake behavior.
 //!
 //! This crate is split into a library (this file) and a thin binary
 //! (`src/main.rs`) so integration tests under `tests/` can exercise the
@@ -31,9 +37,11 @@
 pub mod config;
 pub mod error;
 pub mod http;
+pub mod spine;
 pub mod telemetry;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::signal;
@@ -87,12 +95,11 @@ where
 
     let state = http::AppState::new(config.clone(), prom_registry);
 
-    // TODO(M4): executor integration -- blocked on M2. This is where the
-    // granted-stream consumption loop and the distribution-bundles poll
-    // would be `tokio::spawn`ed, reading `config.cli.hub_api_url` /
-    // `poll_interval_s` / `cache_host` / `cache_port` -- all already
-    // present on `config::CliConfig` so this function only grows, it does
-    // not need re-plumbing.
+    // TODO(M4): executor integration -- blocked on M2. The
+    // distribution-bundles poll that would resolve `PROCESS_APP_ID`'s
+    // granted-stream list is not wired yet, so the spine drain loop always
+    // runs with an empty grant list -- see `try_start_spine_drain`.
+    try_start_spine_drain(&config.cli);
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
     let metrics_addr = SocketAddr::new(config.cli.bind_addr, config.cli.metrics_port);
@@ -113,6 +120,63 @@ where
     )?;
 
     Ok(())
+}
+
+/// Attempts to start the `penguin-spine` drain loop as its own background
+/// task and returns immediately either way -- never blocks or fails
+/// `run_with_shutdown`'s caller. Split out from `run_with_shutdown` itself
+/// so it can be unit-tested directly, without also going through
+/// `telemetry::init` (a process-global one-time call: a test binary can
+/// only exercise one full `run_with_shutdown` call per process, see
+/// `tests::run_with_shutdown_binds_serves_and_stops_on_signal`).
+///
+/// Two independent reasons this never starts the drain loop, both logged
+/// and neither an error:
+/// - `cli.process_app_id` is empty (the default): no bundle assigned yet,
+///   multi-bundle scheduling is itself blocked on M2's distribution poll.
+/// - `penguin_spine::SpineConfig::from_env()` fails (e.g. `VALKEY_URL`/
+///   `REDIS_URL` unset): matches `rules/critical-rules.md` Observability's
+///   "a dead exporter never breaks the app" -- the same graceful-
+///   degradation contract applies to this dependency, so a missing or
+///   invalid spine config disables stream consumption rather than
+///   crashing the HTTP/metrics servers `run_with_shutdown` serves
+///   alongside it.
+fn try_start_spine_drain(cli: &config::CliConfig) {
+    if cli.process_app_id.is_empty() {
+        tracing::info!(
+            "PROCESS_APP_ID not set; spine drain loop not started (blocked on M2 distribution poll)"
+        );
+        return;
+    }
+
+    match penguin_spine::SpineConfig::from_env() {
+        Ok(spine_cfg) => {
+            let app_id = cli.process_app_id.clone();
+            let metrics: Arc<dyn penguin_spine::SpineMetrics> =
+                Arc::new(penguin_spine::NoopMetrics);
+            let (spine_shutdown_tx, spine_shutdown_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                shutdown_signal().await;
+                // Receiver may already be gone if the drain loop already
+                // exited on its own (e.g. a connect error); that is not
+                // this task's failure to report.
+                let _ = spine_shutdown_tx.send(());
+            });
+            tokio::spawn(async move {
+                if let Err(err) =
+                    spine::run(spine_cfg, app_id, Vec::new(), metrics, spine_shutdown_rx).await
+                {
+                    tracing::error!(error = %err, "process-stage spine drain loop exited");
+                }
+            });
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "spine config unavailable; process-stage stream consumption disabled"
+            );
+        }
+    }
 }
 
 /// Waits for SIGINT (Ctrl-C) or SIGTERM (Kubernetes pod termination) and
@@ -227,6 +291,77 @@ mod tests {
             .expect("run_with_shutdown must return promptly on an already-resolved shutdown future")
             .expect("task must not panic");
         assert!(result.is_ok(), "run_with_shutdown must succeed: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn try_start_spine_drain_noop_when_process_app_id_unset() {
+        // Deliberately does not call `telemetry::init` (a process-global
+        // one-time call -- see `run_with_shutdown_binds_serves_and_stops_
+        // on_signal`, the only test in this binary allowed to exercise
+        // it), which is exactly why this logic was split into its own
+        // function: `tracing::info!`/`warn!` are harmless no-ops without an
+        // installed subscriber.
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert_eq!(cli.process_app_id, "");
+        try_start_spine_drain(&cli);
+    }
+
+    #[tokio::test]
+    async fn try_start_spine_drain_degrades_gracefully_when_spine_unconfigured() {
+        // `PROCESS_APP_ID` set but `VALKEY_URL`/`REDIS_URL` unset must warn
+        // and return immediately rather than panicking or spawning
+        // anything -- the same graceful-degradation contract as a dead
+        // OTLP exporter (see `try_start_spine_drain`'s doc comment).
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by ENV_LOCK above.
+        unsafe {
+            std::env::remove_var("VALKEY_URL");
+            std::env::remove_var("REDIS_URL");
+        }
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--process-app-id",
+            "waddles.bot.commands.default",
+        ]);
+        try_start_spine_drain(&cli);
+    }
+
+    #[tokio::test]
+    async fn try_start_spine_drain_spawns_when_spine_config_is_valid() {
+        // `SpineConfig::from_env` succeeds (a syntactically valid,
+        // TLS-required URL plus a password satisfies `validate()`, spec
+        // Sec11.6.1) but nothing is actually listening on port 1 (a
+        // privileged port, refused immediately rather than timing out) --
+        // exercises the `Ok` branch's two `tokio::spawn`s end-to-end
+        // (including the shutdown-forwarder and the spawned drain task's
+        // own error-logging arm) without needing a live Valkey.
+        // Guard is dropped before the `.await` below (clippy
+        // `await_holding_lock`) -- `penguin_spine::SpineConfig::from_env`
+        // reads these env vars synchronously inside `try_start_spine_drain`
+        // itself, so they only need to be set for that one non-async call.
+        {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
+                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
+            }
+            let cli = CliConfig::parse_from([
+                "svc-process",
+                "--process-app-id",
+                "waddles.bot.commands.default",
+            ]);
+            try_start_spine_drain(&cli);
+            unsafe {
+                std::env::remove_var("VALKEY_URL");
+                std::env::remove_var("VALKEY_PASSWORD");
+            }
+        }
+        // Real (not paused) sleep: lets the spawned tasks above actually
+        // run on this same current-thread test runtime and reach their
+        // connect-failure log line before the runtime is torn down at the
+        // end of this test.
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 
     #[test]

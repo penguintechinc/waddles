@@ -20,6 +20,46 @@ path = "src/main.rs"
 # mirror core/svc_streaming/Cargo.toml (the M4 reference template) wherever
 # the same crate is used, so the workspace doesn't carry two pins of the
 # same dependency once these services share a Cargo workspace.
+#
+# THE penguin-libs DEPENDENCY PATTERN (established here, M4 -- copy this for
+# every other waddles Rust service/crate that needs a `penguin-libs` crate:
+# svc_action, svc_ingest, svc_streaming's future spine/logging adoption, the
+# bundle-executor/bundle-compiler binaries).
+#
+# `penguin-spine` and `penguin-logging` are NOT published to crates.io --
+# they live on their own per-crate release branches in the separate
+# `penguin-libs` repo (docs/superpowers/specs/2026-09-14-rust-data-plane-
+# design.md SS4.7/SS4.9/SS17: `release/rust-spine/v0.1.x`,
+# `release/rust-logging/v0.1.x`). Three ways to depend on an unpublished
+# crate in another repo, and why the other two are wrong here:
+#   1. `path = "../../penguin-libs/packages/rust-spine"` -- REJECTED. Only
+#      works if penguin-libs happens to be checked out at that exact
+#      relative location. CI clones ONLY `waddles`, so this fails closed
+#      the first time it runs anywhere but this machine -- exactly the
+#      failure mode this task exists to avoid shipping.
+#   2. `git = "...", branch = "release/rust-spine/v0.1.x"` -- REJECTED. A
+#      branch name is a mutable ref: the next commit merged to that branch
+#      silently changes what `cargo build` resolves to, with no diff in
+#      this file. Forbidden by rules/critical-rules.md Dependency Pinning
+#      ("Mutable refs (`latest`, `stable`, `main`, branch names) forbidden").
+#   3. `git = "...", rev = "<full 40-char commit sha>"` -- USED BELOW. Pins
+#      to one immutable commit, verified by Cargo against that exact sha
+#      (content-addressed, same trust model as a crates.io checksum) and
+#      re-recorded in `Cargo.lock`'s `[[package]].source` -- double pinning,
+#      same convention this repo already uses for GitHub Actions (`uses:
+#      actions/checkout@<full-sha>`). Bumping to a newer `penguin-spine`/
+#      `penguin-logging` release is a deliberate, reviewable one-line `rev`
+#      change, exactly like bumping a crates.io version pin.
+# `package = "penguin-spine"` is required alongside `git =` because
+# `penguin-libs` is a multi-crate repo with no root `Cargo.toml`/workspace
+# manifest -- Cargo locates the matching `[package] name` inside the
+# cloned tree (`packages/rust-spine/Cargo.toml`) itself; no `path =` key is
+# needed or wanted for a git dependency. Verified against a clean checkout
+# (no local `penguin-libs` clone anywhere in the build) before landing this
+# commit -- see the PR description.
+#
+# `deny.toml`'s `[sources]` `allow-git` must list this exact repository URL
+# or `cargo deny check` fails closed on `unknown-git` (see that file).
 [dependencies]
 tokio = { version = "=1.53.1", features = ["full"] }
 axum = "=0.8.9"
@@ -29,11 +69,19 @@ hyper = { version = "=1.11.1", features = ["full"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 tracing = "=0.1.44"
-tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
-opentelemetry = "=0.32.0"
-opentelemetry-otlp = { version = "=0.32.0", features = ["grpc-tonic"] }
-opentelemetry_sdk = { version = "=0.32.1", features = ["rt-tokio"] }
-tracing-opentelemetry = "=0.33.0"
+# `penguin-logging` owns the tracing-subscriber/OTel/OTLP stack internally
+# (spec SS4.9) -- this crate no longer depends on `tracing-subscriber`,
+# `opentelemetry`, `opentelemetry-otlp`, `opentelemetry_sdk`, or
+# `tracing-opentelemetry` directly; only the `tracing` macros crate is kept,
+# for `tracing::info!`/`tracing::error!` call sites throughout this service.
+# `version =` alongside `git =`/`rev =` is not redundant: it is what keeps
+# `cargo deny`'s `[bans] wildcards = "deny"` (deny.toml) from flagging this
+# as an unconstrained dependency -- Cargo additionally verifies the pinned
+# commit's own `Cargo.toml` actually satisfies this requirement.
+penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69e740ce5411d8cd005241fbd829c62e68efb96e", package = "penguin-logging", version = "=0.1.0" }
+# `penguin-spine` (spec SS4.7): the process-stage granted-ingest-stream
+# `XREADGROUP` consumer -- see `src/spine.rs`.
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "b30f5cb2b2465556e11678f67359702ae487d721", package = "penguin-spine", version = "=0.1.0" }
 prometheus = "=0.14.0"
 thiserror = "=2.0.20"
 anyhow = "=1.0.104"
