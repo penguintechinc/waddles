@@ -1,0 +1,24 @@
+{
+  "schema_version": "2",
+  "tenant": "global",
+  "community": null,
+  "app_id": "waddles.bot.commands.default",
+  "stage": "process",
+  "event": {
+    "platform": "twitch",
+    "event_type": "chat.message",
+    "actor": "some_user",
+    "payload": {"text": "!songrequest foo", "channel_id": "12345"},
+    "occurred_at": "2026-09-14T12:00:00.000Z"
+  },
+  "ts": "2026-09-14T12:00:00.123Z",
+  "target_app_id": null,
+  "workstream_id": "8f14e45f-ceea-467e-adde-3fb5c9752730",
+  "event_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "session_id": null,
+  "trace": null,
+  "binding": {
+    "kid": "2026-09",
+    "mac": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+  }
+}
