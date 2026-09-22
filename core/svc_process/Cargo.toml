@@ -1,0 +1,67 @@
+[package]
+name = "svc-process"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Waddles process-stage Rust data-plane service -- consumes each activated bundle's granted ingest-source Valkey streams, runs stage built-ins (moderation gate, enforcement routing, cross-app routing) around the bundle's `transform` call via bundle-executor, and enqueues the result onto the bundle's `:action` stream. M4 SKELETON ONLY: penguin-spine/penguin-bundle-host/penguin-connectors wiring, executor integration, built-ins, DB host capability and hop verification are TODO(M4), blocked on M1/M2 landing in parallel -- see docs/superpowers/specs/2026-09-14-rust-data-plane-design.md SS4.2, SS16."
+
+[lib]
+name = "svc_process"
+path = "src/lib.rs"
+
+[[bin]]
+name = "svc-process"
+path = "src/main.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- see rules/critical-rules.md
+# Dependency Pinning. Cargo.lock is committed alongside this file. Versions
+# mirror core/svc_streaming/Cargo.toml (the M4 reference template) wherever
+# the same crate is used, so the workspace doesn't carry two pins of the
+# same dependency once these services share a Cargo workspace.
+[dependencies]
+tokio = { version = "=1.53.1", features = ["full"] }
+axum = "=0.8.9"
+tower = { version = "=0.5.3", features = ["util"] }
+tower-http = { version = "=0.7.1", features = ["trace", "cors"] }
+hyper = { version = "=1.11.1", features = ["full"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
+opentelemetry = "=0.32.0"
+opentelemetry-otlp = { version = "=0.32.0", features = ["grpc-tonic"] }
+opentelemetry_sdk = { version = "=0.32.1", features = ["rt-tokio"] }
+tracing-opentelemetry = "=0.33.0"
+prometheus = "=0.14.0"
+thiserror = "=2.0.20"
+anyhow = "=1.0.104"
+clap = { version = "=4.6.6", features = ["derive", "env"] }
+# rustls-tls (never native-tls/openssl) -- used today only by
+# `run_healthcheck`'s loopback GET; will also carry the future `http` bundle
+# host-call capability (SS4.2) and the distribution-bundles poll client.
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+# Declared per SS4.2's dependency list ("Postgres via SeaORM for the
+# built-ins' own tables and for serving bundles' `db` host calls") but NOT
+# wired to a live connection in this skeleton -- see `config::Config`
+# (db_* fields, reported `configured` not `connected` by `/healthz`, same
+# pattern as core/svc_streaming) and `// TODO(M4)` markers in `lib.rs`.
+sea-orm = { version = "=2.0.2", default-features = false, features = [
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+    "macros",
+] }
+# TODO(M4): per-bundle/per-stream rate limiting once the executor and
+# granted-stream consumption loop land (SS4.2 dependency list names
+# `governor` explicitly) -- declared now, unused until that wiring exists.
+governor = "=0.8.1"
+
+[dev-dependencies]
+http-body-util = "=0.1.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
