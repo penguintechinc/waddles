@@ -1,0 +1,57 @@
+name: Rust svc-process (lint + test)
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/svc_process/**'
+      - '.github/workflows/rust-svc-process.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/svc_process/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    name: fmt + clippy + deny + coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core/svc_process
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Rust 1.97.1 (rustfmt, clippy, llvm-tools-preview)
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
+        with:
+          toolchain: "1.97.1"
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Install cargo-deny + cargo-llvm-cov
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2.87.12
+        with:
+          tool: cargo-deny@0.20.2,cargo-llvm-cov@0.9.1
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo deny check (advisories, licenses, bans, sources)
+        run: cargo deny check
+
+      - name: cargo test
+        run: cargo test
+
+      - name: cargo llvm-cov (>=90% line coverage gate)
+        # main.rs is a 3-line pass-through to `svc_process::run()`/
+        # `run_healthcheck()` (both fully unit-tested) -- excluded from the
+        # ratio the same way svc_streaming's binary entrypoint is, per its
+        # own module doc comment ("thin binary entrypoint").
+        run: cargo llvm-cov --fail-under-lines 90 --ignore-filename-regex 'main\.rs'

@@ -1,0 +1,50 @@
+# svc-process (Rust) -- Waddles process-stage data-plane service.
+#
+# Named `Dockerfile.rust` (not `Dockerfile`) while the Python control
+# plane + stage-runner at this same path (`Dockerfile`, `app.py`, ...) is
+# still the deployed build -- this becomes `Dockerfile` at M6 cut-over,
+# same pattern as `core/svc_streaming/Dockerfile.rust`.
+#
+# M4 skeleton: builds and serves /health, /healthz, /metrics only. No
+# executor, no bundle host, no Postgres/Valkey connection -- see
+# src/lib.rs `// TODO(M4)` markers.
+#
+# Build (context = this directory, not the repo root -- no shared libs to
+# pull in for a Rust crate):
+#   docker build -f Dockerfile.rust -t localhost:32000/waddlebot/svc-process:alpha-<epoch> .
+
+FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo build --release --locked
+
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
+
+# `ca-certificates` for rustls (webpki/native roots) on outbound TLS
+# (reqwest, sea-orm's runtime-tokio-rustls, OTLP).
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --system --gid 10001 appuser \
+    && useradd --system --uid 10001 --gid appuser --home-dir /nonexistent \
+       --shell /usr/sbin/nologin appuser
+
+COPY --from=builder --chown=appuser:appuser /build/target/release/svc-process /app/svc-process
+
+WORKDIR /app
+USER appuser
+
+ENV MODULE_PORT=8201 \
+    METRICS_PORT=9090
+
+# Native Rust healthcheck subcommand -- never curl (rules/client.md,
+# rules/general.md anti-patterns table).
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+    CMD ["/app/svc-process", "--healthcheck"]
+
+EXPOSE 8201 9090
+
+ENTRYPOINT ["/app/svc-process"]
