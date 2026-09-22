@@ -1,0 +1,222 @@
+// Normative copy. Source of truth: `waddle:bundle/stage@1.0.0`, spec
+// `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md` SS6.5.
+//
+// Every consumer (bundle-compiler's import-allowlist validator, the
+// executor, and all three Tier-1 SDKs) references this exact file by path
+// `wit/waddle-bundle/stage.wit` and never inlines a copy. On any conflict
+// between this file and the spec prose, the spec wins -- open a PR here to
+// reconcile, never silently diverge.
+package waddle:bundle@1.0.0;
+
+/// Values that cross the host boundary. WIT has no dynamic JSON value, so
+/// every open-ended structure is carried as canonical UTF-8 JSON text and
+/// validated on both sides.
+interface types {
+  record platform-event {
+    platform: string,
+    event-type: string,
+    actor: option<string>,
+    /// Canonical JSON object text. Never a scalar or array.
+    payload-json: string,
+    /// RFC 3339 UTC, millisecond precision.
+    occurred-at: string,
+  }
+
+  record stage-envelope {
+    tenant: string,
+    community: option<string>,
+    app-id: string,
+    stage: string,
+    event: platform-event,
+    ts: string,
+    target-app-id: option<string>,
+    /// W3C traceparent, when the stage had one.
+    trace-context: option<string>,
+  }
+
+  record transport-result {
+    ok: bool,
+    status: option<u16>,
+    detail: option<string>,
+    provider-message-id: option<string>,
+  }
+
+  record transport-error {
+    /// The single field the action stage branches on.
+    retryable: bool,
+    code: string,
+    message: string,
+    retry-after-ms: option<u32>,
+  }
+
+  /// Returned by a stage export the bundle does not implement.
+  record unsupported-stage {
+    stage: string,
+  }
+}
+
+/// Immutable, per-call scope. Capability: always granted.
+interface context {
+  record bundle-context {
+    tenant: string,
+    community: option<string>,
+    app-id: string,
+    feature: string,
+    version: string,
+    /// The Valkey stream entry id of the event being processed. Stable and
+    /// unique per delivery target; the de-duplication key a bundle records
+    /// to stay idempotent under at-least-once redelivery (spec SS5.4).
+    message-id: string,
+    /// Resolved 3-tier config (activation > tenant availability > bundle default),
+    /// as canonical JSON object text.
+    config-json: string,
+  }
+
+  get-context: func() -> bundle-context;
+}
+
+/// Guarded outbound HTTP. Capability: granted only when `egress` is non-empty.
+interface http {
+  record header { name: string, value: string }
+
+  record request {
+    method: string,
+    url: string,
+    headers: list<header>,
+    body: option<list<u8>>,
+    /// Header name -> secret reference name. The stage resolves the reference
+    /// and injects the header; the secret value never enters the component.
+    secret-refs: list<tuple<string, string>>,
+  }
+
+  record response {
+    status: u16,
+    headers: list<header>,
+    body: list<u8>,
+    truncated: bool,
+  }
+
+  variant error {
+    denied(string),
+    timeout,
+    too-large(u64),
+    rate-limited(u32),
+    transport(string),
+  }
+
+  send: func(req: request) -> result<response, error>;
+}
+
+/// Bundle-scoped key/value, stored under the bundle's own `...:state` key.
+/// Capability: always granted.
+interface kv {
+  variant error { too-large(u64), backend(string) }
+
+  get: func(key: string) -> result<option<list<u8>>, error>;
+  /// ttl-seconds = 0 means "no expiry"; the host clamps to KV_MAX_TTL_S.
+  set: func(key: string, value: list<u8>, ttl-seconds: u32) -> result<_, error>;
+  delete: func(key: string) -> result<_, error>;
+  increment: func(key: string, delta: s64, ttl-seconds: u32) -> result<s64, error>;
+}
+
+/// Parameterized SQL executed BY THE STAGE under the bundle's own Postgres
+/// role, restricted to the manifest's `data.tables` and row-level-security
+/// scoped to the envelope's tenant/community. Capability: granted only when
+/// `data.tables` is non-empty.
+interface db {
+  variant value {
+    null-value,
+    bool-value(bool),
+    int-value(s64),
+    float-value(f64),
+    text-value(string),
+    bytes-value(list<u8>),
+  }
+
+  record rows {
+    columns: list<string>,
+    rows: list<list<value>>,
+    rows-affected: u64,
+  }
+
+  variant error {
+    denied(string),
+    syntax(string),
+    conflict(string),
+    timeout,
+    backend(string),
+  }
+
+  /// Statement text with $1..$n placeholders. String interpolation of
+  /// parameters is impossible across this boundary by construction.
+  execute: func(statement: string, params: list<value>) -> result<rows, error>;
+}
+
+/// Push onto a provider-scoped outbound relay queue owned by svc-ingest.
+/// Capability: granted only to action-stage bundles.
+interface relay {
+  variant error { denied(string), backend(string) }
+
+  push: func(provider: string, message-json: string) -> result<_, error>;
+}
+
+/// PostHog flag + license entitlement, two-gate, cached, fail-open to the
+/// supplied default. Capability: always granted.
+///
+/// Named `%flags` because `flags` is a reserved WIT keyword (the `flags`
+/// bitset type); `%` is WIT's standard identifier-escape and does not
+/// change the interface's actual name -- it resolves to
+/// `waddle:bundle/flags@1.0.0`, matching the spec and wire protocol
+/// verbatim.
+interface %flags {
+  enabled: func(key: string, default-value: bool) -> bool;
+  /// "free" | "professional" | "enterprise"
+  tier: func() -> string;
+}
+
+/// Sanitized, levelled logging into the stage's OTel pipeline.
+/// Capability: always granted.
+interface log {
+  enum level { error, warn, info, debug }
+  /// `fields-json` is a canonical JSON object; the host sanitizes it with the
+  /// penguin logging SENSITIVE_KEYS rule before emission.
+  write: func(lvl: level, message: string, fields-json: string);
+}
+
+/// Capability: always granted.
+interface clock {
+  /// Milliseconds since the Unix epoch, as the stage sees it.
+  now-millis: func() -> u64;
+  /// RFC 3339 UTC, millisecond precision.
+  now-rfc3339: func() -> string;
+  /// Monotonic nanoseconds, for in-bundle duration measurement only.
+  monotonic-nanos: func() -> u64;
+}
+
+interface process-stage {
+  use types.{platform-event, unsupported-stage};
+  /// `none` means "no reply"; the event is dropped, exactly as v1's
+  /// `transform() -> PlatformEvent | None`.
+  transform: func(event: platform-event) -> result<option<platform-event>, unsupported-stage>;
+}
+
+interface action-stage {
+  use types.{stage-envelope, transport-result, transport-error};
+  /// `config` is canonical JSON object text (the resolved 3-tier config).
+  dispatch: func(envelope: stage-envelope, config: string)
+    -> result<transport-result, transport-error>;
+}
+
+world stage {
+  import context;
+  import http;
+  import kv;
+  import db;
+  import relay;
+  import %flags;
+  import log;
+  import clock;
+
+  export process-stage;
+  export action-stage;
+}
