@@ -201,6 +201,13 @@ convention = "google"
 # postcondition assert (`get_tenant_context` always non-None on the
 # success path) as blueprints/v2/platform.py above.
 "blueprints/v1/workstream_usage.py" = ["N815", "S101"]
+# M2a hub-api install hooks (spec Sec9.2, Sec9.7) -- camelCase DTO
+# fields (versionId, scanStatus, permissionHash, ...) match the wire
+# contract every other v1 blueprint's DTOs already use; S101 is the
+# same tenant_middleware postcondition assert as workstream_usage.py
+# above.
+"blueprints/v1/bundle_versions.py" = ["N815", "S101"]
+"blueprints/v1/bundle_approvals.py" = ["N815", "S101"]
 
 [tool.mypy]
 python_version = "3.13"
