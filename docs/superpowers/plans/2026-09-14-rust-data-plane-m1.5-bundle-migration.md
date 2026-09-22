@@ -4558,7 +4558,7 @@ EOF
 - Create: `libs/flask_core/tests/fixtures/spine/keys/*.json`
 - Create: `libs/flask_core/tests/test_golden_fixtures.py`
 
-**Interfaces:** Depends on: Task 22 (`PlatformEvent.source` must exist for the fixture set to be complete). **Canonical copy:** this repo (`waddlebot`) owns the fixtures under `libs/flask_core/tests/fixtures/spine/` — the `penguin-spine` Rust plan's own golden-test task copies these exact files into `penguin-libs` verbatim (byte-for-byte), never regenerates them independently, so both languages assert against one source of truth.
+**Interfaces:** Depends on: Task 22 (`PlatformEvent.source` must exist for the fixture set to be complete). **Canonical copy:** this repo (`waddlebot`) owns the fixtures under libs/flask_core/tests/fixtures/spine/ (created by this task, so not yet on disk) — the `penguin-spine` Rust plan's own golden-test task copies these exact files into `penguin-libs` verbatim (byte-for-byte), never regenerates them independently, so both languages assert against one source of truth.
 
 **Scope note:** per spec §14.1, the full fixture family also includes `dlq/*.json` and `entries/*.json` (stream-entry wrapping) — both require a `DLQ record`/stream-entry Python type that does not exist in this repo yet (that lands with M1's `penguin-spine`/`flask_core` alignment work, e.g. `trace_context` and a DLQ dataclass). This task ships the two families buildable **today** from what M1.5 itself adds (`envelopes/` and `keys/`); `dlq/`/`entries/` are M1's own follow-up once those types exist, tracked there rather than stubbed here with a fabricated type.
 
