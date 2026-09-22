@@ -71,7 +71,7 @@ class _BrpopRaises:
         self._inner = inner
         self._exc = exc
 
-    async def brpop(self, keys: Any, timeout: Any) -> Any:  # noqa: ASYNC109 - mirrors redis-py's own brpop signature, not an internal cancellation timeout
+    async def brpop(self, keys: Any, timeout: Any) -> Any:  # noqa: ASYNC109 - mirrors redis-py's own brpop signature
         raise self._exc
 
 
@@ -87,7 +87,7 @@ class _BrpopReturnsNoneThenBlocks:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def brpop(self, keys: Any, timeout: Any) -> Any:  # noqa: ASYNC109 - mirrors redis-py's own brpop signature, not an internal cancellation timeout
+    async def brpop(self, keys: Any, timeout: Any) -> Any:  # noqa: ASYNC109 - mirrors redis-py's own brpop signature
         self.calls += 1
         if self.calls == 1:
             return None

@@ -12,25 +12,19 @@ stage. Returns `None` for non-announcement commands (ordinary chatter, other
 bots) -- the process runner's own no-reply behavior prevents echoing.
 
 DB access uses `flask_core.get_bundle_dal()` and `get_bundle_context()` per
-docs/APP_BUNDLE_AUTHORING.md Accessing the database / shared state. The runner
-binds the DAL at startup via `set_bundle_dal()`, and wraps every invocation
-in `bundle_context()` to scope queries by tenant/community.
-
-`announcements` is never bound anywhere else on this service's `dal`
-(svc-process's own startup only binds `tenants`/`communities`/
-`app_catalog`/`live_activity_events`), so this bundle binds its own
-minimal stub (`_ensure_announcements_table`, idempotent, `migrate=False`
--- schema owned by `config/postgres/migrations/
-000_create_base_schema.sql`), same "bind only the columns this bundle
-actually touches" convention `svc_action/bundles/twitch_shoutout_action.
-py::_ensure_shoutout_tables` establishes. The lookup itself previously
-called `dal(query)` -- `dal` here is the `AsyncDAL` wrapper returned by
-`get_bundle_dal()`, which defines no `__call__` (`TypeError: 'AsyncDAL'
-object is not callable`) -- and ran `.select()` synchronously in this
-`async def`, blocking the event loop instead of offloading through
-`select_async`'s executor. The fix wraps the raw pydal DAL
-(`dal.dal(query)`, matching `runner.py::_resolve_tenant_id`'s own call
-shape) and awaits it via `select_async`.
+docs/APP_BUNDLE_AUTHORING.md Accessing the database / shared state, querying
+`announcements` through `penguin_dal`'s own query builder (D21a):
+`dal.announcements.<column>` (`FieldProxy`) composes a `Query`, and
+`dal(query).select()` executes it natively async -- no per-bundle table stub
+needed anymore. `penguin_dal.AsyncDB.reflect()` (called once by the stage
+runner at startup) discovers every real table, including `announcements`,
+from the live Postgres schema via SQLAlchemy `MetaData.reflect()`, which is
+why the old idempotent `_ensure_announcements_table()`/`dal.define_table()`
+stub (schema owned by `config/postgres/migrations/
+000_create_base_schema.sql`) is gone: there is nothing left for a bundle to
+bind, `dal.announcements` already resolves. The runner binds the DAL at
+startup via `set_bundle_dal()`, and wraps every invocation in
+`bundle_context()` to scope queries by tenant/community.
 """
 
 from __future__ import annotations
@@ -48,27 +42,6 @@ _ANNOUNCE_PREFIX_PATTERN = re.compile(r"^!announce\b", re.IGNORECASE)
 _ANNOUNCE_COMMAND_PATTERN = re.compile(r"^!announce\s+publish\s+(\d+)(?:\s+(.*))?$", re.IGNORECASE)
 
 _ANNOUNCE_USAGE = "Usage: !announce publish <announcement_id>"
-
-
-def _ensure_announcements_table(dal: Any) -> None:
-    """Idempotently bind `announcements` -- only the columns this bundle reads.
-
-    Mirrors `svc_action/bundles/twitch_shoutout_action.py::
-    _ensure_shoutout_tables`'s own "minimal stub, no DDL" convention,
-    `migrate=False` throughout. Must run on a `dal` that already has
-    `communities` defined.
-    """
-    if "announcements" not in dal.tables:
-        dal.define_table(
-            "announcements",
-            dal.Field("community_id", "reference communities", notnull=True),
-            dal.Field("title", "string", notnull=True),
-            dal.Field("content", "text", notnull=True),
-            dal.Field("announcement_type", "string", default="general"),
-            dal.Field("status", "string", default="published"),
-            dal.Field("broadcasted_platforms", "json", default=[]),
-            migrate=False,
-        )
 
 
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
@@ -98,7 +71,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     announcement_id = int(announcement_id_str)
 
     dal = get_bundle_dal()
-    _ensure_announcements_table(dal)
     ctx = get_bundle_context()
 
     try:
@@ -112,10 +84,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         query = (dal.announcements.id == announcement_id) & (
             dal.announcements.community_id == community_id
         )
-        # select_async runs query.select()/query.db.commit() directly and
-        # requires a pydal Set (dal.dal(query)) -- `dal` (the AsyncDAL
-        # wrapper) is not itself callable, unlike the raw pydal DAL.
-        rows = await dal.select_async(dal.dal(query))
+        rows = await dal(query).select()
         row = rows.first() if rows else None
         if row is None:
             return None  # Announcement not found in this community, skip

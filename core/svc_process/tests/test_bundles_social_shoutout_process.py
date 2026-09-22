@@ -1,11 +1,12 @@
 """Tests for `bundles.social_shoutout_process.transform` -- gh #316 process half.
 
 Mirrors `test_bundles_social_music_process.py`'s shape: one `_event()`
-factory, a substring-routed `_FakeDal` standing in for both
-`shoutout_config` and `community_members` reads, one class per behavioral
-group. `TestBotProcessFeatureModuleRegistration` at the bottom covers
-`bot_process._FEATURE_MODULES` registration + real dispatch, following
-that same sibling file's precedent for a bundle whose own
+factory, an in-memory `penguin_dal.AsyncDB` seeded per test standing in for
+both `shoutout_config` and `community_members` reads (D21a -- the bundle's
+`raw_sql_rows()` calls need a real SQLAlchemy engine, not a bare mock), one
+class per behavioral group. `TestBotProcessFeatureModuleRegistration` at the
+bottom covers `bot_process._FEATURE_MODULES` registration + real dispatch,
+following that same sibling file's precedent for a bundle whose own
 `test_bundles_bot_process.py` is scoped to another agent this round (see
 task scope) -- only the joke-reply assertions were touched there.
 """
@@ -22,6 +23,8 @@ from flask_core import (
     reset_bundle_dal_for_tests,
     set_bundle_dal,
 )
+from penguin_dal import AsyncDB
+from sqlalchemy import text as sa_text
 
 from bundles.social_shoutout_process import (
     _INVALID_LOGIN_REPLY,
@@ -35,10 +38,11 @@ from bundles.social_shoutout_process import (
 
 TENANT = "global"
 COMMUNITY = "42"
+COMMUNITY_ID = 42
 APP_ID = "waddles.bot.twitch.default"
 
-#: Default test actor -- seeded as `moderator` in `_FakeDal` so `mod`-gated
-#: tests don't have to opt into permission separately.
+#: Default test actor -- seeded as `moderator` in the `dal` fixture so
+#: `mod`-gated tests don't have to opt into permission separately.
 MOD_ACTOR = "test_user"
 NON_MOD_ACTOR = "rando"
 ADMIN_ACTOR = "the_owner"
@@ -63,64 +67,94 @@ def _event(
     )
 
 
-class _FakeDal:
-    """Minimal `AsyncDAL` stand-in for `shoutout_config` + `community_members` reads.
+async def _set_config(dal: AsyncDB, *, so_permission: str, vso_permission: str) -> None:
+    """Replace the seeded `shoutout_config` row for `COMMUNITY_ID`."""
+    async with dal.engine.begin() as conn:
+        await conn.execute(
+            sa_text("DELETE FROM shoutout_config WHERE community_id = :cid"),
+            {"cid": COMMUNITY_ID},
+        )
+        await conn.execute(
+            sa_text(
+                "INSERT INTO shoutout_config (community_id, so_permission, vso_permission) "
+                "VALUES (:cid, :so, :vso)"
+            ),
+            {"cid": COMMUNITY_ID, "so": so_permission, "vso": vso_permission},
+        )
 
-    Routes by SQL substring: a `shoutout_config` query returns the seeded
-    `so_permission`/`vso_permission` row (or no row at all, when
-    `has_config_row=False`); everything else is the same `community_members`
-    role lookup convention `test_bundles_social_music_process.py`'s own
-    `_FakeDal.execute()` uses (matched by whether `platform_user_id`
-    appears in the SQL text).
+
+async def _clear_config(dal: AsyncDB) -> None:
+    """Remove the seeded `shoutout_config` row -- simulates `has_config_row=False`."""
+    async with dal.engine.begin() as conn:
+        await conn.execute(
+            sa_text("DELETE FROM shoutout_config WHERE community_id = :cid"),
+            {"cid": COMMUNITY_ID},
+        )
+
+
+async def _seed_role_by_platform(dal: AsyncDB, platform_user_id: str, role: str) -> None:
+    """Seed a `community_members` row matched by `(platform, platform_user_id)`."""
+    async with dal.engine.begin() as conn:
+        await conn.execute(
+            sa_text(
+                "INSERT INTO community_members "
+                "(community_id, platform, platform_user_id, display_name, role) "
+                "VALUES (:cid, 'twitch', :puid, NULL, :role)"
+            ),
+            {"cid": COMMUNITY_ID, "puid": platform_user_id, "role": role},
+        )
+
+
+@pytest.fixture
+async def dal() -> Any:
+    """In-memory `penguin_dal.AsyncDB` with `shoutout_config`/`community_members`.
+
+    Seeds the default fixture roles (`MOD_ACTOR` -> moderator, `ADMIN_ACTOR`
+    -> admin, matched by `display_name`) and a `mod`/`mod` config row for
+    `COMMUNITY_ID`, matching the old `_FakeDal.__init__`'s defaults.
     """
-
-    def __init__(
-        self,
-        *,
-        so_permission: str = "mod",
-        vso_permission: str = "mod",
-        has_config_row: bool = True,
-    ) -> None:
-        self.so_permission = so_permission
-        self.vso_permission = vso_permission
-        self.has_config_row = has_config_row
-        self.should_error_on_config = False
-        self.should_error_on_role_lookup = False
-        self.roles_by_display_name: dict[str, str] = {
-            MOD_ACTOR: "moderator",
-            ADMIN_ACTOR: "admin",
-        }
-        self.roles_by_platform_user_id: dict[str, str] = {}
-        self.config_query_count = 0
-
-    async def execute(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
-        if "shoutout_config" in sql:
-            self.config_query_count += 1
-            if self.should_error_on_config:
-                raise RuntimeError("simulated shoutout_config outage")
-            if not self.has_config_row:
-                return []
-            return [{"so_permission": self.so_permission, "vso_permission": self.vso_permission}]
-
-        if self.should_error_on_role_lookup:
-            raise RuntimeError("simulated permission lookup outage")
-
-        if "platform_user_id" in sql:
-            _community_id, _platform, platform_user_id = params
-            role = self.roles_by_platform_user_id.get(platform_user_id)
-        else:
-            _community_id, display_name = params
-            role = self.roles_by_display_name.get(display_name)
-        return [{"role": role}] if role is not None else []
-
-
-@pytest.fixture(autouse=True)
-def _dal() -> Any:
-    """Set up a fake DAL (seeded with `MOD_ACTOR`/`ADMIN_ACTOR` roles) for all tests."""
-    fake = _FakeDal()
-    set_bundle_dal(fake)
-    yield fake
+    db = AsyncDB("sqlite://", pool_size=1, echo=False)
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            sa_text(
+                "CREATE TABLE shoutout_config ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, community_id INTEGER, "
+                "so_permission TEXT, vso_permission TEXT)"
+            )
+        )
+        await conn.execute(
+            sa_text(
+                "CREATE TABLE community_members ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, community_id INTEGER, "
+                "platform TEXT, platform_user_id TEXT, display_name TEXT, role TEXT)"
+            )
+        )
+        await conn.execute(
+            sa_text(
+                "INSERT INTO shoutout_config (community_id, so_permission, vso_permission) "
+                "VALUES (:cid, 'mod', 'mod')"
+            ),
+            {"cid": COMMUNITY_ID},
+        )
+        await conn.execute(
+            sa_text(
+                "INSERT INTO community_members (community_id, platform, platform_user_id, "
+                "display_name, role) VALUES (:cid, NULL, NULL, :name, 'moderator')"
+            ),
+            {"cid": COMMUNITY_ID, "name": MOD_ACTOR},
+        )
+        await conn.execute(
+            sa_text(
+                "INSERT INTO community_members (community_id, platform, platform_user_id, "
+                "display_name, role) VALUES (:cid, NULL, NULL, :name, 'admin')"
+            ),
+            {"cid": COMMUNITY_ID, "name": ADMIN_ACTOR},
+        )
+    await db.reflect()
+    set_bundle_dal(db)
+    yield db
     reset_bundle_dal_for_tests()
+    await db.close()
 
 
 async def _flag_on(*_args: Any, **_kwargs: Any) -> bool:
@@ -141,7 +175,7 @@ class TestTransformShoutout:
     """Valid `!so`/`!shoutout`/`!vso` parsing -- both commands, aliases, payload shape."""
 
     @pytest.mark.parametrize("cmd", ["!so", "!shoutout"])
-    async def test_text_shoutout_aliases_produce_kind_text(self, cmd: str) -> None:
+    async def test_text_shoutout_aliases_produce_kind_text(self, dal: AsyncDB, cmd: str) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event(f"{cmd} clubpenguinfan"))
         assert isinstance(result, PlatformEvent)
@@ -149,26 +183,26 @@ class TestTransformShoutout:
         assert result.payload["kind"] == "text"
         assert result.payload["target"] == "clubpenguinfan"
 
-    async def test_vso_produces_kind_video(self) -> None:
+    async def test_vso_produces_kind_video(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!vso clubpenguinfan"))
         assert isinstance(result, PlatformEvent)
         assert result.payload["kind"] == "video"
         assert result.payload["target"] == "clubpenguinfan"
 
-    async def test_strips_leading_at_and_lowercases(self) -> None:
+    async def test_strips_leading_at_and_lowercases(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so @ClubPenguinFan"))
         assert isinstance(result, PlatformEvent)
         assert result.payload["target"] == "clubpenguinfan"
 
-    async def test_command_prefix_is_case_insensitive(self) -> None:
+    async def test_command_prefix_is_case_insensitive(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!SO clubpenguinfan"))
         assert isinstance(result, PlatformEvent)
         assert result.payload["target"] == "clubpenguinfan"
 
-    async def test_sets_target_app_id_for_cross_app_routing(self) -> None:
+    async def test_sets_target_app_id_for_cross_app_routing(self, dal: AsyncDB) -> None:
         """Mirrors the forum/music bundles' gh #298 routing mechanism (see those bundles' tests)."""
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so clubpenguinfan"))
@@ -176,7 +210,7 @@ class TestTransformShoutout:
         assert result.payload[PROCESS_TARGET_APP_ID_KEY] == _SHOUTOUT_APP_ID
         assert _SHOUTOUT_APP_ID == "waddles.bot.shoutout.default"
 
-    async def test_preserves_tokenized_requester_identity_and_channel(self) -> None:
+    async def test_preserves_tokenized_requester_identity_and_channel(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so clubpenguinfan"))
         assert isinstance(result, PlatformEvent)
@@ -188,26 +222,26 @@ class TestTransformShoutout:
 class TestTransformUsageHint:
     """Missing/blank target -> usage-hint reply, never a crash; no cross-app routing."""
 
-    async def test_bare_so_returns_usage(self) -> None:
+    async def test_bare_so_returns_usage(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so"))
         assert isinstance(result, PlatformEvent)
         assert result.payload["text"] == _SO_USAGE
         assert PROCESS_TARGET_APP_ID_KEY not in result.payload
 
-    async def test_bare_shoutout_alias_also_uses_so_usage(self) -> None:
+    async def test_bare_shoutout_alias_also_uses_so_usage(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!shoutout"))
         assert isinstance(result, PlatformEvent)
         assert result.payload["text"] == _SO_USAGE
 
-    async def test_bare_vso_returns_vso_usage(self) -> None:
+    async def test_bare_vso_returns_vso_usage(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!vso"))
         assert isinstance(result, PlatformEvent)
         assert result.payload["text"] == _VSO_USAGE
 
-    async def test_whitespace_only_target_returns_usage(self) -> None:
+    async def test_whitespace_only_target_returns_usage(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so      "))
         assert isinstance(result, PlatformEvent)
@@ -217,32 +251,32 @@ class TestTransformUsageHint:
 class TestTransformInvalidLogin:
     """Target failing `^[a-z0-9_]{3,25}$` (post-normalization) -> invalid-login reply."""
 
-    async def test_too_short_is_invalid(self) -> None:
+    async def test_too_short_is_invalid(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so ab"))
         assert isinstance(result, PlatformEvent)
         assert result.payload["text"] == _INVALID_LOGIN_REPLY
         assert PROCESS_TARGET_APP_ID_KEY not in result.payload
 
-    async def test_too_long_is_invalid(self) -> None:
+    async def test_too_long_is_invalid(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event(f"!so {'a' * 26}"))
         assert isinstance(result, PlatformEvent)
         assert result.payload["text"] == _INVALID_LOGIN_REPLY
 
-    async def test_invalid_character_is_invalid(self) -> None:
+    async def test_invalid_character_is_invalid(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so club-penguin-fan"))
         assert isinstance(result, PlatformEvent)
         assert result.payload["text"] == _INVALID_LOGIN_REPLY
 
-    async def test_minimum_length_is_valid(self) -> None:
+    async def test_minimum_length_is_valid(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so abc"))
         assert isinstance(result, PlatformEvent)
         assert result.payload.get("target") == "abc"
 
-    async def test_maximum_length_is_valid(self) -> None:
+    async def test_maximum_length_is_valid(self, dal: AsyncDB) -> None:
         target = "a" * 25
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event(f"!so {target}"))
@@ -253,27 +287,27 @@ class TestTransformInvalidLogin:
 class TestTransformSelfShoutout:
     """`target == caller` (both normalized) -> denied regardless of permission level."""
 
-    async def test_self_shoutout_denied(self) -> None:
+    async def test_self_shoutout_denied(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event(f"!so {MOD_ACTOR}", actor=MOD_ACTOR))
         assert isinstance(result, PlatformEvent)
         assert result.payload["text"] == _SELF_SHOUTOUT_REPLY
         assert PROCESS_TARGET_APP_ID_KEY not in result.payload
 
-    async def test_self_shoutout_denied_case_and_at_insensitive(self) -> None:
+    async def test_self_shoutout_denied_case_and_at_insensitive(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so @Test_User", actor="test_user"))
         assert isinstance(result, PlatformEvent)
         assert result.payload["text"] == _SELF_SHOUTOUT_REPLY
 
-    async def test_self_shoutout_denied_even_for_admin(self, _dal: Any) -> None:
+    async def test_self_shoutout_denied_even_for_admin(self, dal: AsyncDB) -> None:
         """Self-shoutout is a flat rule -- not overridden by an elevated role."""
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event(f"!so {ADMIN_ACTOR}", actor=ADMIN_ACTOR))
         assert isinstance(result, PlatformEvent)
         assert result.payload["text"] == _SELF_SHOUTOUT_REPLY
 
-    async def test_different_target_is_not_self_shoutout(self) -> None:
+    async def test_different_target_is_not_self_shoutout(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so someone_else", actor=MOD_ACTOR))
         assert isinstance(result, PlatformEvent)
@@ -283,60 +317,58 @@ class TestTransformSelfShoutout:
 class TestTransformPermission:
     """`shoutout_config.so_permission`/`vso_permission` gates who may shout out."""
 
-    async def test_everyone_permission_allows_non_mod(self, _dal: Any) -> None:
-        _dal.so_permission = "everyone"
+    async def test_everyone_permission_allows_non_mod(self, dal: AsyncDB) -> None:
+        await _set_config(dal, so_permission="everyone", vso_permission="mod")
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so target_user", actor=NON_MOD_ACTOR))
         assert isinstance(result, PlatformEvent)
         assert result.payload[PROCESS_TARGET_APP_ID_KEY] == _SHOUTOUT_APP_ID
 
-    async def test_vip_permission_degrades_to_everyone(self, _dal: Any) -> None:
+    async def test_vip_permission_degrades_to_everyone(self, dal: AsyncDB) -> None:
         """No badge data on `PlatformEvent` -- `vip` is unenforceable, degrades to always-allow."""
-        _dal.so_permission = "vip"
+        await _set_config(dal, so_permission="vip", vso_permission="mod")
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so target_user", actor=NON_MOD_ACTOR))
         assert isinstance(result, PlatformEvent)
         assert result.payload[PROCESS_TARGET_APP_ID_KEY] == _SHOUTOUT_APP_ID
 
-    async def test_subscriber_permission_degrades_to_everyone(self, _dal: Any) -> None:
-        _dal.vso_permission = "subscriber"
+    async def test_subscriber_permission_degrades_to_everyone(self, dal: AsyncDB) -> None:
+        await _set_config(dal, so_permission="mod", vso_permission="subscriber")
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!vso target_user", actor=NON_MOD_ACTOR))
         assert isinstance(result, PlatformEvent)
         assert result.payload[PROCESS_TARGET_APP_ID_KEY] == _SHOUTOUT_APP_ID
 
-    async def test_mod_permission_denies_non_mod(self, _dal: Any) -> None:
-        _dal.so_permission = "mod"
+    async def test_mod_permission_denies_non_mod(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so target_user", actor=NON_MOD_ACTOR))
         assert isinstance(result, PlatformEvent)
         assert result.payload["text"] == _PERMISSION_DENIED_REPLY
         assert PROCESS_TARGET_APP_ID_KEY not in result.payload
 
-    async def test_mod_permission_allows_moderator(self, _dal: Any) -> None:
-        _dal.so_permission = "mod"
+    async def test_mod_permission_allows_moderator(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so target_user", actor=MOD_ACTOR))
         assert isinstance(result, PlatformEvent)
         assert result.payload[PROCESS_TARGET_APP_ID_KEY] == _SHOUTOUT_APP_ID
 
-    async def test_admin_only_permission_denies_moderator(self, _dal: Any) -> None:
+    async def test_admin_only_permission_denies_moderator(self, dal: AsyncDB) -> None:
         """`admin_only` is a stricter tier than `mod` -- a plain moderator is still denied."""
-        _dal.so_permission = "admin_only"
+        await _set_config(dal, so_permission="admin_only", vso_permission="mod")
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so target_user", actor=MOD_ACTOR))
         assert isinstance(result, PlatformEvent)
         assert result.payload["text"] == _PERMISSION_DENIED_REPLY
 
-    async def test_admin_only_permission_allows_admin(self, _dal: Any) -> None:
-        _dal.so_permission = "admin_only"
+    async def test_admin_only_permission_allows_admin(self, dal: AsyncDB) -> None:
+        await _set_config(dal, so_permission="admin_only", vso_permission="mod")
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so target_user", actor=ADMIN_ACTOR))
         assert isinstance(result, PlatformEvent)
         assert result.payload[PROCESS_TARGET_APP_ID_KEY] == _SHOUTOUT_APP_ID
 
-    async def test_unknown_permission_value_falls_back_to_mod_threshold(self, _dal: Any) -> None:
-        _dal.so_permission = "some_future_tier"
+    async def test_unknown_permission_value_falls_back_to_mod_threshold(self, dal: AsyncDB) -> None:
+        await _set_config(dal, so_permission="some_future_tier", vso_permission="mod")
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             denied = await transform(_event("!so target_user", actor=NON_MOD_ACTOR))
             allowed = await transform(_event("!so target_user", actor=MOD_ACTOR))
@@ -345,8 +377,8 @@ class TestTransformPermission:
         assert isinstance(allowed, PlatformEvent)
         assert allowed.payload[PROCESS_TARGET_APP_ID_KEY] == _SHOUTOUT_APP_ID
 
-    async def test_missing_config_row_defaults_to_mod(self, _dal: Any) -> None:
-        _dal.has_config_row = False
+    async def test_missing_config_row_defaults_to_mod(self, dal: AsyncDB) -> None:
+        await _clear_config(dal)
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             denied = await transform(_event("!so target_user", actor=NON_MOD_ACTOR))
             allowed = await transform(_event("!so target_user", actor=MOD_ACTOR))
@@ -355,28 +387,44 @@ class TestTransformPermission:
         assert isinstance(allowed, PlatformEvent)
         assert allowed.payload[PROCESS_TARGET_APP_ID_KEY] == _SHOUTOUT_APP_ID
 
-    async def test_config_lookup_error_defaults_to_mod(self, _dal: Any) -> None:
-        _dal.should_error_on_config = True
+    async def test_config_lookup_error_defaults_to_mod(
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _raise(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("simulated shoutout_config outage")
+
+        monkeypatch.setattr("bundles.social_shoutout_process.raw_sql_rows", _raise)
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so target_user", actor=NON_MOD_ACTOR))
         assert isinstance(result, PlatformEvent)
         assert result.payload["text"] == _PERMISSION_DENIED_REPLY
 
-    async def test_role_lookup_error_fails_closed(self, _dal: Any) -> None:
-        _dal.should_error_on_role_lookup = True
+    async def test_role_lookup_error_fails_closed(
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        original_raw_sql_rows = __import__(
+            "bundles.social_shoutout_process", fromlist=["raw_sql_rows"]
+        ).raw_sql_rows
+
+        async def _selective_raise(dal_param: Any, sql: str, params: Any = None) -> Any:
+            if "shoutout_config" in sql:
+                return await original_raw_sql_rows(dal_param, sql, params)
+            raise RuntimeError("simulated permission lookup outage")
+
+        monkeypatch.setattr("bundles.social_shoutout_process.raw_sql_rows", _selective_raise)
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so target_user", actor=MOD_ACTOR))
         assert isinstance(result, PlatformEvent)
         assert result.payload["text"] == _PERMISSION_DENIED_REPLY
 
-    async def test_allowed_by_platform_user_id_match(self, _dal: Any) -> None:
-        _dal.roles_by_platform_user_id["platform-user-1"] = "admin"
+    async def test_allowed_by_platform_user_id_match(self, dal: AsyncDB) -> None:
+        await _seed_role_by_platform(dal, "platform-user-1", "admin")
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             result = await transform(_event("!so target_user", actor=NON_MOD_ACTOR))
         assert isinstance(result, PlatformEvent)
         assert result.payload[PROCESS_TARGET_APP_ID_KEY] == _SHOUTOUT_APP_ID
 
-    async def test_no_community_defaults_to_mod_and_denies_by_default(self) -> None:
+    async def test_no_community_defaults_to_mod_and_denies_by_default(self, dal: AsyncDB) -> None:
         """A tenant-wide envelope (`community=None`) has no config/role to read -- fails closed."""
         with bundle_context(tenant=TENANT, community=None, app_id=APP_ID):
             result = await transform(_event("!so target_user", actor=NON_MOD_ACTOR))
@@ -388,20 +436,22 @@ class TestTransformFeatureFlag:
     """Flag OFF (or a flag/license outage, which `feature_enabled` itself degrades) -> `None`."""
 
     @pytest.mark.parametrize("cmd", ["!so", "!shoutout", "!vso"])
-    async def test_flag_off_returns_none(self, cmd: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_flag_off_returns_none(
+        self, dal: AsyncDB, cmd: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr("bundles.social_shoutout_process.feature_enabled", _flag_off)
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             assert await transform(_event(f"{cmd} clubpenguinfan")) is None
 
     async def test_flag_off_still_ignores_non_matching_messages(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr("bundles.social_shoutout_process.feature_enabled", _flag_off)
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             assert await transform(_event("hello")) is None
 
     async def test_flag_check_receives_tenant_and_community(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         captured: dict[str, Any] = {}
 
@@ -427,23 +477,23 @@ class TestTransformFeatureFlag:
 class TestTransformNonMatchingMessages:
     """Anything not `!so`/`!shoutout`/`!vso` returns `None` -- no echo."""
 
-    async def test_ordinary_chatter_returns_none(self) -> None:
+    async def test_ordinary_chatter_returns_none(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             assert await transform(_event("hello everyone")) is None
 
-    async def test_other_commands_return_none(self) -> None:
+    async def test_other_commands_return_none(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             assert await transform(_event("!forum create x | y")) is None
             assert await transform(_event("!sr some song")) is None
             assert await transform(_event("!ping")) is None
 
-    async def test_word_boundary_prevents_partial_match(self) -> None:
+    async def test_word_boundary_prevents_partial_match(self, dal: AsyncDB) -> None:
         """`!sox`/`!vsox` must not be treated as `!so`/`!vso` with a mangled arg."""
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             assert await transform(_event("!sox something")) is None
             assert await transform(_event("!vsox something")) is None
 
-    async def test_empty_text_returns_none(self) -> None:
+    async def test_empty_text_returns_none(self, dal: AsyncDB) -> None:
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             assert await transform(_event("")) is None
             assert await transform(_event("   ")) is None
@@ -452,7 +502,7 @@ class TestTransformNonMatchingMessages:
 class TestTransformErrorHandling:
     """Missing/non-string `text` raises -- caught per-event by the process runner."""
 
-    async def test_missing_text_field_raises(self) -> None:
+    async def test_missing_text_field_raises(self, dal: AsyncDB) -> None:
         event = PlatformEvent(
             platform="twitch",
             event_type="message",
@@ -464,7 +514,7 @@ class TestTransformErrorHandling:
             with pytest.raises(ValueError, match="text"):
                 await transform(event)
 
-    async def test_non_string_text_raises(self) -> None:
+    async def test_non_string_text_raises(self, dal: AsyncDB) -> None:
         event = PlatformEvent(
             platform="twitch",
             event_type="message",
@@ -501,7 +551,7 @@ class TestBotProcessFeatureModuleRegistration:
         assert "so" not in bot_process._BOT_COMMANDS
         assert "shoutout" not in bot_process._BOT_COMMANDS
 
-    async def test_so_dispatches_through_bot_process_router(self) -> None:
+    async def test_so_dispatches_through_bot_process_router(self, dal: AsyncDB) -> None:
         """`!so` routes through `bot_process.transform` to this bundle, not the removed joke."""
         import bundles.bot_process as bot_process
 

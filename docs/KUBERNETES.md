@@ -130,8 +130,8 @@ cd /home/penguin/code/Waddles/k8s
 [`QUICKSTART.md`](../QUICKSTART.md#deploy-with-helm). `k8s/kustomize/` exists in this repo but is
 deprecated (see [`ARCHITECTURE.md`](../ARCHITECTURE.md#build-status-caveats)); do not use it for
 new deployments. The install scripts below (`install-microk8s.sh`, `install-k8s.sh`) also expose a
-`--manifests` flag that applies `k8s/manifests/` via Kustomize — that directory does not exist in
-this repo today, so `--manifests` is non-functional. Use the default `--helm` deployment method.
+`--manifests` flag that applies k8s/manifests/ (not a real path — that directory does not exist in
+this repo today) via Kustomize, so `--manifests` is non-functional. Use the default `--helm` deployment method.
 
 | Environment | Tool |
 |---|---|

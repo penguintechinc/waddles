@@ -1,12 +1,24 @@
-"""Tests for `bundles.social_alias_process.transform` -- alias set/list/remove/invoke."""
+"""Tests for `bundles.social_alias_process.transform` -- alias set/list/remove/invoke.
+
+`_lookup_alias`/`_upsert_alias`/`_soft_delete_alias`/`_list_aliases` go
+through `penguin_dal`'s own query builder (D21a) and
+`_caller_is_moderator_or_admin` through `raw_sql_rows()`, so the fixture
+below is a real in-memory SQLite `penguin_dal.AsyncDB` with `command_aliases`
++ `community_members`, seeded per test, rather than a bare dict-backed mock.
+A SQLAlchemy `before_cursor_execute` engine listener replaces the old
+`_FakeDal._select_count` instrumentation for the "this code path never
+touches the DB at all" assertions.
+"""
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 import pytest
 from flask_core import PlatformEvent, bundle_context, reset_bundle_dal_for_tests, set_bundle_dal
+from penguin_dal import AsyncDB
+from sqlalchemy import event
+from sqlalchemy import text as sa_text
 
 import bundles.social_alias_process as social_alias_process
 import services.command_alias_store as command_alias_store_module
@@ -20,12 +32,13 @@ from bundles.social_alias_process import (
 
 TENANT = "acme"
 COMMUNITY = "1"
+COMMUNITY_ID = 1
 COMMUNITY_2 = "2"
 APP_ID = "waddles.social.alias.default"
 
-#: Default test actor -- seeded as `moderator` in `_FakeDal` so ordinary
-#: set/list/remove tests don't have to opt into permission separately;
-#: dedicated `TestPermissions` tests use a non-privileged actor instead.
+#: Default test actor -- seeded as `moderator` in the `dal` fixture so
+#: ordinary set/list/remove tests don't have to opt into permission
+#: separately; dedicated `TestPermissions` tests use a non-privileged actor.
 MOD_ACTOR = "penguin"
 NON_MOD_ACTOR = "rando"
 
@@ -47,180 +60,58 @@ def _event(
     )
 
 
-class _FakeRow:
-    """Mock row object that supports both dict and attribute access."""
-
-    def __init__(self, data: dict[str, Any]) -> None:
-        self._data = data
-
-    def __getitem__(self, key: str) -> Any:
-        return self._data[key]
-
-    def __getattr__(self, name: str) -> Any:
-        if name.startswith("_"):
-            return object.__getattribute__(self, name)
-        if name in self._data:
-            return self._data[name]
-        raise AttributeError(f"Row has no attribute {name}")
-
-    def __repr__(self) -> str:
-        return f"_FakeRow({self._data})"
+async def _get_alias(dal: AsyncDB, alias_id: int) -> dict[str, Any] | None:
+    """Fetch one `command_aliases` row by id as a plain dict, or `None`."""
+    async with dal.engine.connect() as conn:
+        result = await conn.execute(
+            sa_text("SELECT * FROM command_aliases WHERE id = :id"), {"id": alias_id}
+        )
+        row = result.mappings().first()
+        return dict(row) if row is not None else None
 
 
-class _FakeDal:
-    """In-memory stand-in for `AsyncDAL` -- pydal-style `command_aliases` + raw `execute()`.
-
-    `command_aliases` mirrors the original mock (`.select()`/`.update()`/
-    `.insert_async()`, generic over `community_id` so cross-community
-    isolation can be exercised). `execute()` is new: it answers the
-    `community_members.role` lookup `_caller_is_moderator_or_admin` issues,
-    same shape as `community_reputation_process`'s own `_FakeDal.execute()`.
-    """
-
-    def __init__(self) -> None:
-        self.command_aliases = _FakeTable()
-        self.should_error = False
-        self.error_message = "Test error"
-        self.should_error_on_role_lookup = False
-        self._aliases: dict[int, dict[str, Any]] = {
-            1: {
-                "id": 1,
-                "community_id": 1,
-                "alias": "greet",
-                "target_command": "hello {user} {args}",
-                "usage_count": 5,
-                "deleted_at": None,
-                "created_by": "penguin",
-            },
-        }
-        self._next_id = 2
-        self.roles_by_display_name: dict[str, str] = {MOD_ACTOR: "moderator"}
-        self.roles_by_platform_user_id: dict[str, str] = {}
-        self._last_query: Any = None
-        self._select_count = 0
-        self._execute_count = 0
-
-    def select(self, query: Any) -> _FakeRows:
-        if self.should_error:
-            raise Exception(self.error_message)
-
-        self._last_query = query
-        self._select_count += 1
-        query_str = str(query) if not isinstance(query, str) else query
-
-        community_match = re.search(r"community_id=(\d+)", query_str)
-        query_community_id = int(community_match.group(1)) if community_match else None
-
-        alias_match = re.search(r"alias=([\w-]+)", query_str)
-        query_alias_name = alias_match.group(1) if alias_match else None
-
-        require_undeleted = "IS NULL" in query_str
-
-        results = []
-        for alias in self._aliases.values():
-            if query_community_id is not None and alias.get("community_id") != query_community_id:
-                continue
-            if query_alias_name is not None and alias.get("alias") != query_alias_name:
-                continue
-            if require_undeleted and alias.get("deleted_at") is not None:
-                continue
-            results.append(_FakeRow(alias))
-        return _FakeRows(results)
-
-    def update(self, query: Any, **kwargs: object) -> None:
-        if self.should_error:
-            raise Exception(self.error_message)
-
-        query_str = str(query) if not isinstance(query, str) else query
-        id_match = re.search(r"\bid=(\d+)", query_str)
-        if id_match:
-            alias_id = int(id_match.group(1))
-            if alias_id in self._aliases:
-                self._aliases[alias_id].update(kwargs)
-
-    def insert_async(self, table: Any, **kwargs: object) -> None:
-        if self.should_error:
-            raise Exception(self.error_message)
-
-        new_id = self._next_id
-        self._next_id += 1
-        self._aliases[new_id] = {"id": new_id, "deleted_at": None, "usage_count": 0, **kwargs}
-
-    async def execute(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
-        self._execute_count += 1
-        if self.should_error_on_role_lookup:
-            raise RuntimeError("simulated permission lookup outage")
-
-        if "platform_user_id" in sql:
-            _community_id, _platform, platform_user_id = params
-            role = self.roles_by_platform_user_id.get(platform_user_id)
-        else:
-            _community_id, display_name = params
-            role = self.roles_by_display_name.get(display_name)
-        return [{"role": role}] if role is not None else []
+async def _clear_aliases(dal: AsyncDB) -> None:
+    """Delete every seeded `command_aliases` row (simulates `_aliases = {}`)."""
+    async with dal.engine.begin() as conn:
+        await conn.execute(sa_text("DELETE FROM command_aliases"))
 
 
-class _FakeTable:
-    """Mock table object."""
-
-    def __init__(self) -> None:
-        self.community_id = _FakeColumn("community_id")
-        self.alias = _FakeColumn("alias")
-        self.deleted_at = _FakeColumn("deleted_at")
-        self.id = _FakeColumn("id")
-        self.usage_count = _FakeColumn("usage_count")
-
-    def __and__(self, other: Any) -> Any:
-        if isinstance(other, _FakeQuery):
-            return other
-        return other
-
-
-class _FakeColumn:
-    """Mock column object for queries."""
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    def __eq__(self, other: Any) -> Any:
-        return _FakeQuery(f"{self.name}={other}")
-
-    def __and__(self, other: Any) -> Any:
-        return _FakeQuery(f"{self.name} AND {other}")
-
-    def is_null(self) -> Any:
-        return _FakeQuery(f"{self.name} IS NULL")
+async def _seed_aliases(dal: AsyncDB, rows: list[dict[str, Any]]) -> None:
+    """Replace all `command_aliases` rows with the given seed set."""
+    await _clear_aliases(dal)
+    async with dal.engine.begin() as conn:
+        for row in rows:
+            await conn.execute(
+                sa_text(
+                    "INSERT INTO command_aliases "
+                    "(id, community_id, alias, target_command, usage_count, deleted_at, "
+                    "created_by) "
+                    "VALUES (:id, :community_id, :alias, :target_command, :usage_count, "
+                    ":deleted_at, :created_by)"
+                ),
+                {
+                    "id": row["id"],
+                    "community_id": row["community_id"],
+                    "alias": row["alias"],
+                    "target_command": row["target_command"],
+                    "usage_count": row.get("usage_count", 0),
+                    "deleted_at": row.get("deleted_at"),
+                    "created_by": row.get("created_by", "penguin"),
+                },
+            )
 
 
-class _FakeQuery:
-    """Mock query object that can be combined with & operator."""
-
-    def __init__(self, expr: str) -> None:
-        self.expr = expr
-
-    def __and__(self, other: Any) -> _FakeQuery:
-        if isinstance(other, _FakeQuery):
-            return _FakeQuery(f"({self.expr}) AND ({other.expr})")
-        return _FakeQuery(f"({self.expr}) AND {other}")
-
-    def __str__(self) -> str:
-        return self.expr
-
-
-class _FakeRows:
-    """Mock rows collection."""
-
-    def __init__(self, rows: list[Any]) -> None:
-        self.rows = [r for r in rows if r is not None]
-
-    def __bool__(self) -> bool:
-        return len(self.rows) > 0
-
-    def __iter__(self) -> Any:
-        return iter(self.rows)
-
-    def first(self) -> Any:
-        return self.rows[0] if self.rows else None
+async def _seed_role_by_platform(dal: AsyncDB, platform_user_id: str, role: str) -> None:
+    """Seed a `community_members` row matched by `(platform, platform_user_id)`."""
+    async with dal.engine.begin() as conn:
+        await conn.execute(
+            sa_text(
+                "INSERT INTO community_members "
+                "(community_id, platform, platform_user_id, display_name, role) "
+                "VALUES (:cid, 'discord', :puid, NULL, :role)"
+            ),
+            {"cid": COMMUNITY_ID, "puid": platform_user_id, "role": role},
+        )
 
 
 async def _flag_on(*_args: Any, **_kwargs: Any) -> bool:
@@ -239,12 +130,71 @@ def _flag_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _dal() -> Any:
-    """Set up fake DAL for all tests."""
-    fake = _FakeDal()
-    set_bundle_dal(fake)
-    yield fake
+async def dal() -> Any:
+    """In-memory `penguin_dal.AsyncDB` -- `command_aliases` + `community_members`.
+
+    Seeds one active alias (`greet` -> `hello {user} {args}`, community 1)
+    and `MOD_ACTOR` as a moderator, matching the old `_FakeDal.__init__`'s
+    defaults. `select_count` (via an engine listener attached AFTER
+    seeding) replaces `_FakeDal._select_count`.
+    """
+    db = AsyncDB("sqlite://", pool_size=1, echo=False)
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            sa_text(
+                "CREATE TABLE command_aliases ("
+                "id INTEGER PRIMARY KEY, community_id INTEGER, alias TEXT, "
+                "target_command TEXT, usage_count INTEGER DEFAULT 0, deleted_at TEXT, "
+                "created_by TEXT)"
+            )
+        )
+        await conn.execute(
+            sa_text(
+                "CREATE TABLE community_members ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, community_id INTEGER, "
+                "platform TEXT, platform_user_id TEXT, display_name TEXT, role TEXT)"
+            )
+        )
+        await conn.execute(
+            sa_text(
+                "INSERT INTO command_aliases "
+                "(id, community_id, alias, target_command, usage_count, deleted_at, created_by) "
+                "VALUES (1, :cid, 'greet', 'hello {user} {args}', 5, NULL, 'penguin')"
+            ),
+            {"cid": COMMUNITY_ID},
+        )
+        await conn.execute(
+            sa_text(
+                "INSERT INTO community_members "
+                "(community_id, platform, platform_user_id, display_name, role) "
+                "VALUES (:cid, NULL, NULL, :name, 'moderator')"
+            ),
+            {"cid": COMMUNITY_ID, "name": MOD_ACTOR},
+        )
+        # Also a moderator in community 2 -- `TestCrossCommunityIsolation` tests
+        # alias-table isolation specifically, not permission-role isolation,
+        # so MOD_ACTOR needs standing in both communities.
+        await conn.execute(
+            sa_text(
+                "INSERT INTO community_members "
+                "(community_id, platform, platform_user_id, display_name, role) "
+                "VALUES (2, NULL, NULL, :name, 'moderator')"
+            ),
+            {"name": MOD_ACTOR},
+        )
+    await db.reflect()
+
+    db.select_count = 0
+
+    def _count(*_args: Any, **_kwargs: Any) -> None:
+        db.select_count += 1
+
+    event.listens_for(db.engine.sync_engine, "before_cursor_execute")(_count)
+
+    set_bundle_dal(db)
+    yield db
     reset_bundle_dal_for_tests()
+    await db.close()
 
 
 @pytest.fixture(autouse=True)
@@ -272,7 +222,7 @@ async def _run(
 
 class TestFeatureFlag:
     async def test_flag_off_returns_none_no_reply(
-        self, monkeypatch: pytest.MonkeyPatch, _dal: _FakeDal
+        self, monkeypatch: pytest.MonkeyPatch, dal: AsyncDB
     ) -> None:
         async def _flag_off(*_a: Any, **_kw: Any) -> bool:
             return False
@@ -280,7 +230,7 @@ class TestFeatureFlag:
         monkeypatch.setattr(social_alias_process, "feature_enabled", _flag_off)
         result = await _run("!alias list")
         assert result is None
-        assert _dal._select_count == 0
+        assert dal.select_count == 0
 
 
 class TestRoutingAndMalformedEvents:
@@ -291,15 +241,15 @@ class TestRoutingAndMalformedEvents:
         assert await _run("greet penguin") is None
 
     async def test_missing_text_raises(self) -> None:
-        event = PlatformEvent(
+        event_ = PlatformEvent(
             platform="discord", event_type="message", actor=None, payload={}, occurred_at="x"
         )
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             with pytest.raises(ValueError, match="text"):
-                await transform(event)
+                await transform(event_)
 
     async def test_empty_text_raises(self) -> None:
-        event = PlatformEvent(
+        event_ = PlatformEvent(
             platform="discord",
             event_type="message",
             actor=None,
@@ -308,10 +258,10 @@ class TestRoutingAndMalformedEvents:
         )
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             with pytest.raises(ValueError, match="text"):
-                await transform(event)
+                await transform(event_)
 
     async def test_text_is_not_string_raises(self) -> None:
-        event = PlatformEvent(
+        event_ = PlatformEvent(
             platform="discord",
             event_type="message",
             actor=None,
@@ -320,10 +270,10 @@ class TestRoutingAndMalformedEvents:
         )
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             with pytest.raises(ValueError, match="text"):
-                await transform(event)
+                await transform(event_)
 
     async def test_whitespace_only_text_raises(self) -> None:
-        event = PlatformEvent(
+        event_ = PlatformEvent(
             platform="discord",
             event_type="message",
             actor=None,
@@ -332,7 +282,7 @@ class TestRoutingAndMalformedEvents:
         )
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
             with pytest.raises(ValueError, match="text"):
-                await transform(event)
+                await transform(event_)
 
 
 class TestList:
@@ -351,74 +301,86 @@ class TestList:
         assert result is not None
         assert result.payload["text"] == "aliases: !greet → !hello {user} {args}"
 
-    async def test_list_empty_returns_no_aliases_message(self, _dal: _FakeDal) -> None:
-        _dal._aliases = {}
+    async def test_list_empty_returns_no_aliases_message(self, dal: AsyncDB) -> None:
+        await _clear_aliases(dal)
         result = await _run("!alias list")
         assert result is not None
         assert result.payload["text"] == _NO_ALIASES_MSG
 
-    async def test_list_sorted_and_truncated_past_15(self, _dal: _FakeDal) -> None:
-        _dal._aliases = {
-            i: {
-                "id": i,
-                "community_id": 1,
-                "alias": f"a{i:02d}",
-                "target_command": "ping",
-                "deleted_at": None,
-                "usage_count": 0,
-            }
-            for i in range(20)
-        }
+    async def test_list_sorted_and_truncated_past_15(self, dal: AsyncDB) -> None:
+        await _seed_aliases(
+            dal,
+            [
+                {
+                    "id": i,
+                    "community_id": COMMUNITY_ID,
+                    "alias": f"a{i:02d}",
+                    "target_command": "ping",
+                    "deleted_at": None,
+                    "usage_count": 0,
+                }
+                for i in range(20)
+            ],
+        )
         result = await _run("!alias list")
         assert result is not None
         text = result.payload["text"]
         assert text.startswith("aliases: !a00 → !ping, !a01 → !ping")
         assert text.endswith("…and 5 more")
 
-    async def test_list_without_community_returns_guard(self, _dal: _FakeDal) -> None:
+    async def test_list_without_community_returns_guard(self, dal: AsyncDB) -> None:
         result = await _run("!alias list", community=None)
         assert result is not None
         assert result.payload["text"] == _COMMUNITY_REQUIRED_MSG
-        assert _dal._select_count == 0
+        assert dal.select_count == 0
 
-    async def test_list_handles_db_error(self, _dal: _FakeDal) -> None:
-        _dal.should_error = True
+    async def test_list_handles_db_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _raise(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("Test error")
+
+        monkeypatch.setattr(social_alias_process, "_list_aliases", _raise)
         result = await _run("!alias list")
         assert result is not None
         assert "Failed to list aliases" in result.payload["text"]
 
 
 class TestSetAlias:
-    async def test_positional_set_success(
-        self, _dal: _FakeDal, _invalidate_calls: list[Any]
-    ) -> None:
+    async def test_positional_set_success(self, dal: AsyncDB, _invalidate_calls: list[Any]) -> None:
         result = await _run("!alias newcmd echo hi there")
         assert result is not None
         assert result.payload["text"] == "alias set: !newcmd → !echo hi there"
         assert _invalidate_calls == [(1, "newcmd")]
 
-    async def test_add_synonym_success(self, _dal: _FakeDal) -> None:
+    async def test_add_synonym_success(self, dal: AsyncDB) -> None:
         result = await _run("!alias add newcmd echo hi there")
         assert result is not None
         assert result.payload["text"] == "alias set: !newcmd → !echo hi there"
 
-    async def test_set_lowercases_name(self, _dal: _FakeDal) -> None:
+    async def test_set_lowercases_name(self, dal: AsyncDB) -> None:
         result = await _run("!alias NewCmd echo hi")
         assert result is not None
         assert result.payload["text"] == "alias set: !newcmd → !echo hi"
 
-    async def test_set_overwrites_existing_active_alias(self, _dal: _FakeDal) -> None:
+    async def test_set_overwrites_existing_active_alias(self, dal: AsyncDB) -> None:
         result = await _run("!alias greet echo hi")
         assert result is not None
         assert result.payload["text"] == "alias set: !greet → !echo hi"
-        assert _dal._aliases[1]["target_command"] == "echo hi"
+        row = await _get_alias(dal, 1)
+        assert row is not None
+        assert row["target_command"] == "echo hi"
 
-    async def test_set_revives_soft_deleted_alias(self, _dal: _FakeDal) -> None:
-        _dal._aliases[1]["deleted_at"] = "2026-01-01T00:00:00+00:00"
+    async def test_set_revives_soft_deleted_alias(self, dal: AsyncDB) -> None:
+        async with dal.engine.begin() as conn:
+            await conn.execute(
+                sa_text("UPDATE command_aliases SET deleted_at = :d WHERE id = 1"),
+                {"d": "2026-01-01T00:00:00+00:00"},
+            )
         result = await _run("!alias greet echo hi")
         assert result is not None
         assert result.payload["text"] == "alias set: !greet → !echo hi"
-        assert _dal._aliases[1]["deleted_at"] is None
+        row = await _get_alias(dal, 1)
+        assert row is not None
+        assert row["deleted_at"] is None
 
     async def test_missing_args_add_only_returns_usage(self) -> None:
         result = await _run("!alias add")
@@ -440,7 +402,7 @@ class TestSetAlias:
         assert result is not None
         assert "alias names are letters, numbers, - and _ (max 32)" in result.payload["text"]
 
-    async def test_name_allows_hyphen_and_underscore(self, _dal: _FakeDal) -> None:
+    async def test_name_allows_hyphen_and_underscore(self, dal: AsyncDB) -> None:
         result = await _run("!alias my-new_cmd echo hi")
         assert result is not None
         assert result.payload["text"] == "alias set: !my-new_cmd → !echo hi"
@@ -451,7 +413,7 @@ class TestSetAlias:
         assert result is not None
         assert "alias names are letters, numbers, - and _ (max 32)" in result.payload["text"]
 
-    async def test_name_at_max_length_accepted(self, _dal: _FakeDal) -> None:
+    async def test_name_at_max_length_accepted(self, dal: AsyncDB) -> None:
         max_name = "a" * 32
         result = await _run(f"!alias {max_name} echo hi")
         assert result is not None
@@ -482,12 +444,12 @@ class TestSetAlias:
         assert result is not None
         assert result.payload["text"] == "unknown command: totallymadeupword"
 
-    async def test_expansion_flattens_existing_alias(self, _dal: _FakeDal) -> None:
+    async def test_expansion_flattens_existing_alias(self, dal: AsyncDB) -> None:
         result = await _run("!alias b greet extra")
         assert result is not None
         assert result.payload["text"] == "alias set: !b → !hello {user} {args} extra"
 
-    async def test_expansion_flattens_existing_alias_no_trailing_args(self, _dal: _FakeDal) -> None:
+    async def test_expansion_flattens_existing_alias_no_trailing_args(self, dal: AsyncDB) -> None:
         """`!alias b greet` (no trailing args) flattens to `greet`'s own target verbatim."""
         result = await _run("!alias b greet")
         assert result is not None
@@ -499,40 +461,49 @@ class TestSetAlias:
         assert result is not None
         assert "too long" in result.payload["text"]
 
-    async def test_set_without_community_returns_guard(self, _dal: _FakeDal) -> None:
+    async def test_set_without_community_returns_guard(self, dal: AsyncDB) -> None:
         result = await _run("!alias newcmd echo hi", community=None)
         assert result is not None
         assert result.payload["text"] == _COMMUNITY_REQUIRED_MSG
-        assert 2 not in _dal._aliases
+        assert await _get_alias(dal, 2) is None
 
-    async def test_set_handles_db_error(self, _dal: _FakeDal) -> None:
-        _dal.should_error = True
+    async def test_set_handles_db_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _raise(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("Test error")
+
+        monkeypatch.setattr(social_alias_process, "_upsert_alias", _raise)
         result = await _run("!alias newcmd echo hi")
         assert result is not None
         assert "Failed to set alias" in result.payload["text"]
 
 
 class TestRemoveAlias:
-    async def test_unalias_success(self, _dal: _FakeDal, _invalidate_calls: list[Any]) -> None:
+    async def test_unalias_success(self, dal: AsyncDB, _invalidate_calls: list[Any]) -> None:
         result = await _run("!unalias greet")
         assert result is not None
         assert result.payload["text"] == "alias removed: !greet"
-        assert _dal._aliases[1]["deleted_at"] is not None
+        row = await _get_alias(dal, 1)
+        assert row is not None
+        assert row["deleted_at"] is not None
         assert _invalidate_calls == [(1, "greet")]
 
-    async def test_alias_delete_success(self, _dal: _FakeDal) -> None:
+    async def test_alias_delete_success(self, dal: AsyncDB) -> None:
         result = await _run("!alias delete greet")
         assert result is not None
         assert result.payload["text"] == "alias removed: !greet"
-        assert _dal._aliases[1]["deleted_at"] is not None
+        row = await _get_alias(dal, 1)
+        assert row is not None
+        assert row["deleted_at"] is not None
 
-    async def test_alias_remove_success(self, _dal: _FakeDal) -> None:
+    async def test_alias_remove_success(self, dal: AsyncDB) -> None:
         result = await _run("!alias remove greet")
         assert result is not None
         assert result.payload["text"] == "alias removed: !greet"
-        assert _dal._aliases[1]["deleted_at"] is not None
+        row = await _get_alias(dal, 1)
+        assert row is not None
+        assert row["deleted_at"] is not None
 
-    async def test_unalias_not_found(self, _dal: _FakeDal) -> None:
+    async def test_unalias_not_found(self) -> None:
         result = await _run("!unalias nosuchalias")
         assert result is not None
         assert result.payload["text"] == "no alias named !nosuchalias"
@@ -547,83 +518,95 @@ class TestRemoveAlias:
         assert result is not None
         assert result.payload["text"] == _ALIAS_USAGE
 
-    async def test_unalias_without_community_returns_guard(self, _dal: _FakeDal) -> None:
+    async def test_unalias_without_community_returns_guard(self, dal: AsyncDB) -> None:
         result = await _run("!unalias greet", community=None)
         assert result is not None
         assert result.payload["text"] == _COMMUNITY_REQUIRED_MSG
-        assert _dal._aliases[1]["deleted_at"] is None
+        row = await _get_alias(dal, 1)
+        assert row is not None
+        assert row["deleted_at"] is None
 
-    async def test_unalias_handles_db_error(self, _dal: _FakeDal) -> None:
-        _dal.should_error = True
+    async def test_unalias_handles_db_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def _raise(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("Test error")
+
+        monkeypatch.setattr(social_alias_process, "_soft_delete_alias", _raise)
         result = await _run("!unalias greet")
         assert result is not None
         assert "Failed to remove alias" in result.payload["text"]
 
 
 class TestPermissions:
-    async def test_set_denied_for_non_moderator(self, _dal: _FakeDal) -> None:
+    async def test_set_denied_for_non_moderator(self, dal: AsyncDB) -> None:
         result = await _run("!alias newcmd echo hi", actor=NON_MOD_ACTOR)
         assert result is not None
         assert result.payload["text"] == _PERMISSION_DENIED_MSG
-        assert 2 not in _dal._aliases
+        assert await _get_alias(dal, 2) is None
 
-    async def test_unalias_denied_for_non_moderator(self, _dal: _FakeDal) -> None:
+    async def test_unalias_denied_for_non_moderator(self, dal: AsyncDB) -> None:
         result = await _run("!unalias greet", actor=NON_MOD_ACTOR)
         assert result is not None
         assert result.payload["text"] == _PERMISSION_DENIED_MSG
-        assert _dal._aliases[1]["deleted_at"] is None
+        row = await _get_alias(dal, 1)
+        assert row is not None
+        assert row["deleted_at"] is None
 
-    async def test_set_denied_when_role_lookup_errors_fail_closed(self, _dal: _FakeDal) -> None:
-        _dal.should_error_on_role_lookup = True
+    async def test_set_denied_when_role_lookup_errors_fail_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _raise(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("simulated permission lookup outage")
+
+        monkeypatch.setattr("bundles.social_alias_process.raw_sql_rows", _raise)
         result = await _run("!alias newcmd echo hi")
         assert result is not None
         assert result.payload["text"] == _PERMISSION_DENIED_MSG
 
-    async def test_set_allowed_by_platform_user_id_match(self, _dal: _FakeDal) -> None:
-        _dal.roles_by_platform_user_id["plat-42"] = "admin"
+    async def test_set_allowed_by_platform_user_id_match(self, dal: AsyncDB) -> None:
+        await _seed_role_by_platform(dal, "plat-42", "admin")
         result = await _run("!alias newcmd echo hi", actor=NON_MOD_ACTOR, author_id="plat-42")
         assert result is not None
         assert result.payload["text"] == "alias set: !newcmd → !echo hi"
 
-    async def test_list_does_not_require_permission(self, _dal: _FakeDal) -> None:
+    async def test_list_does_not_require_permission(self) -> None:
         result = await _run("!alias list", actor=NON_MOD_ACTOR)
         assert result is not None
         assert result.payload["text"] != _PERMISSION_DENIED_MSG
 
 
 class TestInvocation:
-    async def test_bare_alias_invocation_returns_none_no_expansion(self, _dal: _FakeDal) -> None:
+    async def test_bare_alias_invocation_returns_none_no_expansion(self, dal: AsyncDB) -> None:
         """Bare `!greet alice` returns None -- expansion is handled by bot_process, not here."""
         result = await _run("!greet alice")
         assert result is None
         # Verify no database lookup occurred
-        assert _dal._select_count == 0
+        assert dal.select_count == 0
         # Verify usage count didn't increment (no DB access)
-        assert _dal._aliases[1]["usage_count"] == 5
+        row = await _get_alias(dal, 1)
+        assert row is not None
+        assert row["usage_count"] == 5
 
-    async def test_unknown_bang_word_returns_none_no_lookup(self, _dal: _FakeDal) -> None:
+    async def test_unknown_bang_word_returns_none_no_lookup(self, dal: AsyncDB) -> None:
         """Unknown bang-words like `!sr foo` return None with no DB lookup."""
         result = await _run("!sr foo")
         assert result is None
-        assert _dal._select_count == 0
+        assert dal.select_count == 0
 
     async def test_unknown_alias_returns_none(self) -> None:
         """Unknown alias `!notarealalias` returns None."""
         assert await _run("!notarealalias test") is None
 
-    async def test_invocation_without_community_returns_none_no_query(self, _dal: _FakeDal) -> None:
+    async def test_invocation_without_community_returns_none_no_query(self, dal: AsyncDB) -> None:
         """Bare invocation without community context returns None without query."""
         result = await _run("!greet alice", community=None)
         assert result is None
-        assert _dal._select_count == 0
+        assert dal.select_count == 0
 
-    async def test_bare_invocation_no_db_access_on_error(self, _dal: _FakeDal) -> None:
-        """Bare invocation doesn't access DB even if it errors, so DB error is never hit."""
-        _dal.should_error = True
+    async def test_bare_invocation_no_db_access(self, dal: AsyncDB) -> None:
+        """Bare invocation never touches the DB -- the early return happens before any query."""
         result = await _run("!greet alice")
-        # No DB access means no error can occur
         assert result is None
-        assert _dal._select_count == 0
+        assert dal.select_count == 0
 
     async def test_preserves_channel_id_on_response(self) -> None:
         result = await _run("!alias list", channel_id="chan-42")
@@ -636,11 +619,11 @@ class TestInvocation:
         assert result.payload["extra"] == "keep-me"
 
     async def test_original_event_not_mutated(self) -> None:
-        event = _event("!alias list")
+        event_ = _event("!alias list")
         with bundle_context(tenant=TENANT, community=COMMUNITY, app_id=APP_ID):
-            result = await transform(event)
-        assert result is not event
-        assert event.payload["text"] == "!alias list"
+            result = await transform(event_)
+        assert result is not event_
+        assert event_.payload["text"] == "!alias list"
 
     async def test_strips_leading_trailing_whitespace(self) -> None:
         result = await _run("  !alias list  ")
@@ -656,35 +639,37 @@ class TestInvocation:
 class TestCrossCommunityIsolation:
     """Regression: cross-community alias IDOR -- unchanged from prior behavior."""
 
-    async def test_alias_not_listed_from_other_community(self, _dal: _FakeDal) -> None:
+    async def test_alias_not_listed_from_other_community(self) -> None:
         # regression: cross-community alias IDOR
         result = await _run("!alias list", community=COMMUNITY_2)
         assert result is not None
         assert "greet" not in result.payload["text"]
         assert result.payload["text"] == _NO_ALIASES_MSG
 
-    async def test_alias_still_listed_from_its_own_community(self, _dal: _FakeDal) -> None:
+    async def test_alias_still_listed_from_its_own_community(self) -> None:
         # regression: cross-community alias IDOR
         result = await _run("!alias list", community=COMMUNITY)
         assert result is not None
         assert "greet" in result.payload["text"]
 
-    async def test_alias_not_expanded_from_other_community(self, _dal: _FakeDal) -> None:
+    async def test_alias_not_expanded_from_other_community(self) -> None:
         # regression: cross-community alias IDOR
         result = await _run("!greet penguin", community=COMMUNITY_2)
         assert result is None
 
-    async def test_alias_not_deletable_from_other_community(self, _dal: _FakeDal) -> None:
+    async def test_alias_not_deletable_from_other_community(self, dal: AsyncDB) -> None:
         # regression: cross-community alias IDOR
         result = await _run("!unalias greet", community=COMMUNITY_2)
         assert result is not None
         assert result.payload["text"] == "no alias named !greet"
-        assert _dal._aliases[1]["deleted_at"] is None
+        row = await _get_alias(dal, 1)
+        assert row is not None
+        assert row["deleted_at"] is None
 
 
 class TestInvalidateAliasCacheGuard:
     async def test_missing_module_logs_debug_and_write_still_succeeds(
-        self, _dal: _FakeDal, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """`import services.command_alias_store` failing must never block a write."""
 
@@ -697,7 +682,7 @@ class TestInvalidateAliasCacheGuard:
         assert result.payload["text"] == "alias set: !newcmd → !echo hi"
 
     async def test_invalidate_failure_logs_debug_and_write_still_succeeds(
-        self, _dal: _FakeDal, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async def _boom(*, community_id: int, alias: str, redis_client: Any = None) -> None:
             raise RuntimeError("redis unreachable")

@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 from flask_core import StageEnvelope, get_bundle_dal
+from flask_core.bundle_runtime import raw_sql_write
 from waddle_transports import NonRetryableTransportError, TransportResult
 from waddle_transports.transports.irc_relay import RelayOutboundIrcTransport
 
@@ -193,18 +194,21 @@ async def _add_quote_to_db(quote_text: str, actor: str | None) -> int | None:
     """Add a quote to the database and return the quote ID, or None on failure."""
     try:
         dal = get_bundle_dal()
-        sql = """
-            INSERT INTO quotes
-            (quote_text, quoted_username, is_approved, created_at, updated_at)
-            VALUES (%s, %s, TRUE, %s, %s)
-            RETURNING id
-        """
         now = datetime.now(UTC).isoformat()
-        result = await dal.execute(sql, [quote_text, actor or "unknown", now, now])
+        result = await raw_sql_write(
+            dal,
+            "INSERT INTO quotes (quote_text, quoted_username, is_approved, created_at, updated_at) "
+            "VALUES (:quote_text, :quoted_username, TRUE, :created_at, :updated_at) RETURNING id",
+            {
+                "quote_text": quote_text,
+                "quoted_username": actor or "unknown",
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
         if not result:
             return None
-        row = result[0]
-        raw_id = row.get("id") if isinstance(row, dict) else None
+        raw_id = result[0].get("id")
         return raw_id if isinstance(raw_id, int) else None
     except Exception:
         return None

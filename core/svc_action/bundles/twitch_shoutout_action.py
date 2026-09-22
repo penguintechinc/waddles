@@ -23,10 +23,9 @@ shoutout/*` for the admin UI, not a service-key-gated internal route this
 poller-driven bundle could call), so this bundle binds its own minimal
 `shoutout_config`/`shoutout_history` table stubs directly
 (`_ensure_shoutout_tables`, idempotent, `migrate=False` -- schema owned by
-`config/postgres/migrations/046_add_remaining_admin_tables.sql`), mirroring
-`services/reference_tables.py`'s established "bind only the columns this
-process actually touches" convention rather than the admin service's full
-column set.
+`config/postgres/migrations/046_add_remaining_admin_tables.sql`), following
+the "bind only the columns this bundle actually touches" convention rather
+than the admin service's full column set.
 
 Graceful degradation (task requirement, matching `social_music_action.py`'s
 own documented contract): a cooldown hit or a Helix/API failure NEVER
@@ -114,13 +113,11 @@ def _get_helix_client(http_client: httpx.AsyncClient) -> TwitchHelixClient:
 def _ensure_shoutout_tables(dal: Any) -> None:
     """Idempotently bind `shoutout_config`/`shoutout_history` -- only the columns this bundle uses.
 
-    Mirrors `services/reference_tables.bind_minimal_reference_tables`'s own
-    "minimal stub, no DDL" convention -- `migrate=False` throughout, schema
-    owned by migration 046. Must run on a `dal` that already has
-    `communities` defined (svc-action's own `app.py` startup binds it via
-    `bind_minimal_reference_tables` before `set_bundle_dal()`, same
-    ordering `flask_core.app_bundle_tables`'s own module docstring
-    documents for any `reference communities` field).
+    Follows this bundle's own "minimal stub, no DDL" convention --
+    `migrate=False` throughout, schema owned by migration 046. Must run on a
+    `dal` that already has `communities` defined (svc-action's own `app.py`
+    startup discovers it via `await async_dal.reflect()` before
+    `set_bundle_dal()`).
     """
     if "shoutout_config" not in dal.tables:
         dal.define_table(

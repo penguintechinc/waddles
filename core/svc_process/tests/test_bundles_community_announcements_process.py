@@ -1,140 +1,85 @@
-"""Tests for `bundles.community_announcements_process.transform`."""
+"""Tests for `bundles.community_announcements_process.transform`.
+
+`transform`'s announcement lookup goes through `penguin_dal`'s own query
+builder (`dal.announcements.<column>` / `dal(query).select()`, D21a), so the
+fixture below is a real in-memory SQLite `penguin_dal.AsyncDB` with an
+`announcements` table, seeded per test, rather than a hand-rolled fake
+mimicking pydal's query-chaining protocol.
+"""
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
 
 import pytest
 from flask_core import (
-    AsyncDAL,
     PlatformEvent,
     bundle_context,
     reset_bundle_dal_for_tests,
     set_bundle_dal,
 )
+from penguin_dal import AsyncDB
+from sqlalchemy import text as sa_text
 
 from bundles.community_announcements_process import _ANNOUNCE_USAGE, transform
 
 
-class _FakeDalQuery:
-    """Fake query object supporting chaining."""
+async def _add_announcement(
+    dal: AsyncDB,
+    *,
+    id: int,  # matches the row's own column name
+    title: str,
+    content: str,
+    community_id: int,
+    announcement_type: str = "general",
+    status: str = "published",
+    broadcasted_platforms: list[str] | None = None,
+) -> None:
+    """Insert one `announcements` row."""
+    import json as json_module
 
-    def __init__(self, parent_dal: Any) -> None:
-        self._parent_dal = parent_dal
-        self._community_id_filter: int | None = None
-
-    def __and__(self, other: Any) -> Any:
-        """Support & operator for combining queries.
-
-        When combining with another comparison (e.g., community_id == value),
-        extract and store the community_id filter.
-        """
-        # The other operand should be another comparison; extract its value
-        # For simplicity, just return self - the second comparison will have
-        # set _query_community_id on the DAL
-        return self
-
-    def select(self) -> Any:
-        """Return self to support chaining."""
-        return self
-
-    def first(self) -> Any:
-        """Return the stored announcement or None."""
-        if (
-            self._parent_dal._query_id is not None
-            and self._parent_dal._query_id in self._parent_dal._announcements
-        ):
-            ann = self._parent_dal._announcements[self._parent_dal._query_id]
-            # Check community filter if set
-            if self._parent_dal._query_community_id is not None:
-                if (
-                    not hasattr(ann, "community_id")
-                    or ann.community_id != self._parent_dal._query_community_id
-                ):
-                    return None
-            return ann
-        return None
-
-
-class _FakeDalAttr:
-    """Represents an attribute access like dal.announcements.id or .community_id."""
-
-    def __init__(self, parent_dal: Any, attr_name: str) -> None:
-        self._parent_dal = parent_dal
-        self._attr_name = attr_name
-
-    def __eq__(self, other: int) -> Any:
-        """Support == comparison for attributes."""
-        if self._attr_name == "id":
-            self._parent_dal._query_id = other
-        elif self._attr_name == "community_id":
-            self._parent_dal._query_community_id = other
-        return _FakeDalQuery(self._parent_dal)
-
-
-class _FakeDalTable:
-    """Fake table object supporting attribute access."""
-
-    def __init__(self, parent_dal: Any) -> None:
-        self._parent_dal = parent_dal
-
-    def __getattr__(self, name: str) -> Any:
-        """Support dal.announcements.id == value syntax."""
-        # Return an attribute object that can handle comparisons
-        return _FakeDalAttr(self._parent_dal, name)
-
-    def __and__(self, other: Any) -> Any:
-        """Support & operator for combining conditions."""
-        return self
-
-
-class _FakeDal:
-    """In-memory stand-in for AsyncDAL -- implements only the surface this bundle uses."""
-
-    def __init__(self) -> None:
-        self._announcements: dict[int, Any] = {}
-        self._query_id: int | None = None
-        self._query_community_id: int | None = None
-        self._raise_on_query: Exception | None = None
-        self.announcements = _FakeDalTable(self)
-        # `dal.dal(query)` (the real `AsyncDAL.dal` raw-pydal-DAL
-        # attribute) resolves to this same fake's own `__call__` --
-        # and `.tables` pre-populated so `_ensure_announcements_table`'s
-        # idempotent `"x" not in dal.tables` guard is a no-op.
-        self.dal = self
-        self.tables = ("announcements",)
-
-    def __call__(self, query: Any) -> Any:
-        """Support the query pattern dal(dal.announcements.id == id)."""
-        if self._raise_on_query is not None:
-            raise self._raise_on_query
-        # Extract community_id from query if it's a comparison with community_id
-        if hasattr(query, "_parent_dal"):
-            # This is a query object, extract any community_id filter
-            pass
-        return query if hasattr(query, "first") else self
-
-    async def select_async(self, query: Any, *args: object, **kwargs: object) -> Any:
-        """Async version of select -- delegates to the fake query's own `.select()`."""
-        return query.select() if hasattr(query, "select") else query
-
-    def add_announcement(self, id: int, title: str, content: str, **kwargs: object) -> None:
-        """Add a test announcement."""
-        self._announcements[id] = type(
-            "Row",
-            (),
+    async with dal.engine.begin() as conn:
+        await conn.execute(
+            sa_text(
+                "INSERT INTO announcements "
+                "(id, community_id, title, content, announcement_type, status, "
+                "broadcasted_platforms) "
+                "VALUES (:id, :cid, :title, :content, :atype, :status, :platforms)"
+            ),
             {
                 "id": id,
+                "cid": community_id,
                 "title": title,
                 "content": content,
-                "announcement_type": kwargs.get("announcement_type", "general"),
-                "status": kwargs.get("status", "published"),
-                "community_id": kwargs.get("community_id", 1),
-                "broadcasted_platforms": kwargs.get("broadcasted_platforms", []),
+                "atype": announcement_type,
+                "status": status,
+                "platforms": json_module.dumps(broadcasted_platforms)
+                if broadcasted_platforms is not None
+                else None,
             },
-        )()
+        )
+
+
+@pytest.fixture
+async def dal() -> Any:
+    """In-memory `penguin_dal.AsyncDB` with an `announcements` table."""
+    db = AsyncDB("sqlite://", pool_size=1, echo=False)
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            sa_text(
+                "CREATE TABLE announcements ("
+                "id INTEGER PRIMARY KEY, community_id INTEGER NOT NULL, "
+                "title TEXT NOT NULL, content TEXT NOT NULL, "
+                "announcement_type TEXT DEFAULT 'general', "
+                "status TEXT DEFAULT 'published', "
+                "broadcasted_platforms JSON)"
+            )
+        )
+    await db.reflect()
+    set_bundle_dal(db)
+    yield db
+    reset_bundle_dal_for_tests()
+    await db.close()
 
 
 def _event(text: str, **payload_overrides: object) -> PlatformEvent:
@@ -150,24 +95,16 @@ def _event(text: str, **payload_overrides: object) -> PlatformEvent:
     )
 
 
-@pytest.fixture(autouse=True)
-def _dal() -> Any:
-    """Inject fake DAL and reset after each test."""
-    fake = _FakeDal()
-    set_bundle_dal(fake)
-    yield fake
-    reset_bundle_dal_for_tests()
-
-
 class TestTransform:
     """Tests for announcement command parsing and enrichment."""
 
-    async def test_announce_publish_command_with_valid_id(self, _dal: _FakeDal) -> None:
+    async def test_announce_publish_command_with_valid_id(self, dal: AsyncDB) -> None:
         """Test parsing of `!announce publish <id>` with a valid announcement ID."""
-        _dal.add_announcement(
-            42,
-            "Test Announcement",
-            "This is a test announcement",
+        await _add_announcement(
+            dal,
+            id=42,
+            title="Test Announcement",
+            content="This is a test announcement",
             announcement_type="general",
             status="published",
             community_id=42,  # Match the community in the context
@@ -189,12 +126,13 @@ class TestTransform:
         assert result.payload["channel_id"] == "chan-1"
         assert result.platform == "discord"
 
-    async def test_announce_publish_command_case_insensitive(self, _dal: _FakeDal) -> None:
+    async def test_announce_publish_command_case_insensitive(self, dal: AsyncDB) -> None:
         """Test that the command parser is case-insensitive."""
-        _dal.add_announcement(
-            99,
-            "Uppercase Test",
-            "test",
+        await _add_announcement(
+            dal,
+            id=99,
+            title="Uppercase Test",
+            content="test",
             announcement_type="event",
             status="published",
             community_id=42,
@@ -209,7 +147,7 @@ class TestTransform:
         assert result is not None
         assert result.payload["announcement_id"] == 99
 
-    async def test_ordinary_chatter_returns_none(self) -> None:
+    async def test_ordinary_chatter_returns_none(self, dal: AsyncDB) -> None:
         """Test that non-announcement messages return None (no reply)."""
         with bundle_context(
             tenant="acme-corp", community="42", app_id="waddles.community.announcements.default"
@@ -217,7 +155,7 @@ class TestTransform:
             result = await transform(_event("just chatting"))
         assert result is None
 
-    async def test_partial_command_returns_usage_hint(self) -> None:
+    async def test_partial_command_returns_usage_hint(self, dal: AsyncDB) -> None:
         """Test that an incomplete `!announce` command gets a usage-hint reply, not None."""
         with bundle_context(
             tenant="acme-corp", community="42", app_id="waddles.community.announcements.default"
@@ -226,7 +164,7 @@ class TestTransform:
         assert isinstance(result, PlatformEvent)
         assert result.payload["text"] == _ANNOUNCE_USAGE
 
-    async def test_other_bot_commands_return_none(self) -> None:
+    async def test_other_bot_commands_return_none(self, dal: AsyncDB) -> None:
         """Test that other bot commands (not announce) return None."""
         with bundle_context(
             tenant="acme-corp", community="42", app_id="waddles.community.announcements.default"
@@ -234,7 +172,7 @@ class TestTransform:
             result = await transform(_event("!ping"))
         assert result is None
 
-    async def test_announcement_not_found_returns_none(self) -> None:
+    async def test_announcement_not_found_returns_none(self, dal: AsyncDB) -> None:
         """Test that non-existent announcements return None."""
         with bundle_context(
             tenant="acme-corp", community="42", app_id="waddles.community.announcements.default"
@@ -242,7 +180,7 @@ class TestTransform:
             result = await transform(_event("!announce publish 999"))
         assert result is None
 
-    async def test_invalid_announcement_id_returns_usage_hint(self) -> None:
+    async def test_invalid_announcement_id_returns_usage_hint(self, dal: AsyncDB) -> None:
         """Test that a non-numeric announcement id gets a usage-hint reply, not None."""
         with bundle_context(
             tenant="acme-corp", community="42", app_id="waddles.community.announcements.default"
@@ -251,7 +189,7 @@ class TestTransform:
         assert isinstance(result, PlatformEvent)
         assert result.payload["text"] == _ANNOUNCE_USAGE
 
-    async def test_missing_text_field_raises(self) -> None:
+    async def test_missing_text_field_raises(self, dal: AsyncDB) -> None:
         """Test that missing text field in payload raises ValueError."""
         event = PlatformEvent(
             platform="discord",
@@ -266,12 +204,13 @@ class TestTransform:
             with pytest.raises(ValueError, match="text"):
                 await transform(event)
 
-    async def test_enriched_event_preserves_top_level_fields(self, _dal: _FakeDal) -> None:
+    async def test_enriched_event_preserves_top_level_fields(self, dal: AsyncDB) -> None:
         """Test that enrichment preserves all top-level PlatformEvent fields."""
-        _dal.add_announcement(
-            55,
-            "Title",
-            "content",
+        await _add_announcement(
+            dal,
+            id=55,
+            title="Title",
+            content="content",
             announcement_type="update",
             status="published",
             community_id=42,
@@ -289,12 +228,13 @@ class TestTransform:
         assert result.actor == "testuser"
         assert result.occurred_at == "2026-09-04T00:00:00Z"
 
-    async def test_defaults_to_all_platforms_if_not_specified(self, _dal: _FakeDal) -> None:
+    async def test_defaults_to_all_platforms_if_not_specified(self, dal: AsyncDB) -> None:
         """Test that bundles default to all platforms if none specified."""
-        _dal.add_announcement(
-            77,
-            "Title",
-            "content",
+        await _add_announcement(
+            dal,
+            id=77,
+            title="Title",
+            content="content",
             announcement_type="general",
             status="published",
             community_id=42,
@@ -311,23 +251,18 @@ class TestTransform:
         assert "discord" in result.payload["target_platforms"]
         assert "twitch" in result.payload["target_platforms"]
 
-    async def test_handles_missing_broadcasted_platforms_attr(self, _dal: _FakeDal) -> None:
-        """Test handling when broadcasted_platforms attribute is missing."""
-        # Add announcement without broadcasted_platforms attribute
-        announcement = type(
-            "Row",
-            (),
-            {
-                "id": 88,
-                "title": "Title",
-                "content": "content",
-                "announcement_type": "general",
-                "status": "published",
-                "community_id": 42,
-            },
-        )()
-        _dal._announcements[88] = announcement
-        _dal._query_id = 88
+    async def test_handles_missing_broadcasted_platforms_attr(self, dal: AsyncDB) -> None:
+        """Test handling when broadcasted_platforms is NULL in the row."""
+        await _add_announcement(
+            dal,
+            id=88,
+            title="Title",
+            content="content",
+            announcement_type="general",
+            status="published",
+            community_id=42,
+            broadcasted_platforms=None,
+        )
 
         with bundle_context(
             tenant="acme-corp", community="42", app_id="waddles.community.announcements.default"
@@ -339,24 +274,18 @@ class TestTransform:
         assert "discord" in result.payload["target_platforms"]
         assert "twitch" in result.payload["target_platforms"]
 
-    async def test_handles_invalid_broadcasted_platforms_type(self, _dal: _FakeDal) -> None:
+    async def test_handles_invalid_broadcasted_platforms_type(self, dal: AsyncDB) -> None:
         """Test handling when broadcasted_platforms is not a list."""
-        # Add announcement with non-list broadcasted_platforms
-        announcement = type(
-            "Row",
-            (),
-            {
-                "id": 89,
-                "title": "Title",
-                "content": "content",
-                "announcement_type": "general",
-                "status": "published",
-                "community_id": 42,
-                "broadcasted_platforms": "discord",  # Not a list
-            },
-        )()
-        _dal._announcements[89] = announcement
-        _dal._query_id = 89
+        async with dal.engine.begin() as conn:
+            await conn.execute(
+                sa_text(
+                    "INSERT INTO announcements "
+                    "(id, community_id, title, content, announcement_type, status, "
+                    "broadcasted_platforms) "
+                    "VALUES (89, 42, 'Title', 'content', 'general', 'published', :platforms)"
+                ),
+                {"platforms": '"discord"'},  # a JSON string, not a list
+            )
 
         with bundle_context(
             tenant="acme-corp", community="42", app_id="waddles.community.announcements.default"
@@ -368,10 +297,19 @@ class TestTransform:
         assert "discord" in result.payload["target_platforms"]
         assert "twitch" in result.payload["target_platforms"]
 
-    async def test_db_error_during_query_raises(self, _dal: _FakeDal) -> None:
+    async def test_db_error_during_query_raises(
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Test that DB query errors are caught and re-raised as ValueError."""
-        # Configure DAL to raise an error on query
-        _dal._raise_on_query = RuntimeError("Connection failed")
+
+        async def _raise(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("Connection failed")
+
+        # `dal(query)` returns an `AsyncQuerySet`; patch its `.select()`.
+        monkeypatch.setattr(
+            "penguin_dal.query.AsyncQuerySet.select",
+            _raise,
+        )
 
         with bundle_context(
             tenant="acme-corp", community="42", app_id="waddles.community.announcements.default"
@@ -379,13 +317,14 @@ class TestTransform:
             with pytest.raises(ValueError, match="failed to lookup or enrich"):
                 await transform(_event("!announce publish 100"))
 
-    async def test_cross_community_announcement_not_found(self, _dal: _FakeDal) -> None:
+    async def test_cross_community_announcement_not_found(self, dal: AsyncDB) -> None:
         """Regression: announcement from another community should not be found (IDOR prevention)."""
         # Add an announcement belonging to community 99
-        _dal.add_announcement(
-            123,
-            "Other Community Announcement",
-            "This belongs to community 99",
+        await _add_announcement(
+            dal,
+            id=123,
+            title="Other Community Announcement",
+            content="This belongs to community 99",
             announcement_type="general",
             status="published",
             community_id=99,  # Different community
@@ -401,7 +340,7 @@ class TestTransform:
         # Should return None (as if announcement not found) to prevent IDOR
         assert result is None
 
-    async def test_tenant_wide_activation_cannot_broadcast(self) -> None:
+    async def test_tenant_wide_activation_cannot_broadcast(self, dal: AsyncDB) -> None:
         """Tenant-wide activations (community=None) cannot broadcast announcements."""
         # Even if an announcement exists, tenant-wide activations should return None
         with bundle_context(
@@ -412,70 +351,31 @@ class TestTransform:
         assert result is None
 
 
-@pytest.fixture
-async def real_dal(tmp_path: Path) -> AsyncIterator[AsyncDAL]:
-    """Real sqlite `AsyncDAL` -- `tenants`/`communities`/`announcements` physically created.
+class TestRealSqlite:
+    """Real-DB smoke (gh-298): exercises the actual `penguin_dal` query path, not a fake."""
 
-    Same two-tier convention as `svc_action/tests/test_bundles_twitch_
-    shoutout_action.py`'s own `dal` fixture: `_ensure_announcements_table`
-    always binds with `migrate=False`, so this fixture defines the
-    identical column set with `migrate=True` first; the bundle's own
-    guard then finds the table already registered and is a no-op.
-    """
-    async_dal = AsyncDAL(f"sqlite://{tmp_path}/announce_process_test.db", pool_size=1, migrate=True)
-    d = async_dal.dal
-    d.define_table("tenants", migrate=True)
-    d.define_table("communities", d.Field("tenant_id", "reference tenants"), migrate=True)
-    d.define_table(
-        "announcements",
-        d.Field("community_id", "reference communities", notnull=True),
-        d.Field("title", "string", notnull=True),
-        d.Field("content", "text", notnull=True),
-        d.Field("announcement_type", "string", default="general"),
-        d.Field("status", "string", default="published"),
-        d.Field("broadcasted_platforms", "json", default=[]),
-        migrate=True,
-    )
-    d.tenants.insert()
-    d.communities.insert(tenant_id=1)
-    d.commit()
-    set_bundle_dal(async_dal)
-    try:
-        yield async_dal
-    finally:
-        reset_bundle_dal_for_tests()
-        try:
-            await async_dal.close_async()
-        except Exception:  # noqa: BLE001, S110 -- known pydal cross-thread close gotcha
-            pass  # nosec B110
-
-
-class TestRealPydal:
-    """Real-DB smoke (gh-298): exercises the actual pydal query path, not a fake."""
-
-    async def test_announce_publish_against_real_sqlite(self, real_dal: AsyncDAL) -> None:
-        # regression: gh-298 real-pydal
-        """`dal.dal(query)` fix: insert one announcement, enrich via `transform`, read back."""
-        d = real_dal.dal
-        community_id = d.communities.insert(tenant_id=1)
-        announcement_id = d.announcements.insert(
-            community_id=community_id,
+    async def test_announce_publish_against_real_sqlite(self, dal: AsyncDB) -> None:
+        # regression: gh-298 real-pydal (now real-penguin_dal)
+        """Insert one announcement, enrich via `transform`, read back."""
+        await _add_announcement(
+            dal,
+            id=1,
             title="Real Announcement",
             content="Real content",
+            community_id=7,
             announcement_type="general",
             status="published",
             broadcasted_platforms=["discord"],
         )
-        d.commit()
 
         with bundle_context(
             tenant="acme-corp",
-            community=str(community_id),
+            community="7",
             app_id="waddles.community.announcements.default",
         ):
-            result = await transform(_event(f"!announce publish {announcement_id}"))
+            result = await transform(_event("!announce publish 1"))
 
         assert result is not None
-        assert result.payload["announcement_id"] == announcement_id
+        assert result.payload["announcement_id"] == 1
         assert result.payload["announcement"]["title"] == "Real Announcement"
         assert result.payload["target_platforms"] == ["discord"]

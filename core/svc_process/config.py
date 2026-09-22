@@ -67,7 +67,7 @@ def _build_db_url(
             f"unsupported DB_TYPE {db_type!r} -- expected one of {sorted(_DB_URI_SCHEMES)}"
         )
     if scheme == "sqlite":
-        return f"sqlite:{name}"
+        return f"sqlite:{name}:"
     if password:
         return f"{scheme}://{user}:{quote_plus(password)}@{host}:{port}/{name}"
     return f"{scheme}://{user}@{host}:{port}/{name}"

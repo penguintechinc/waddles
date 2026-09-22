@@ -266,9 +266,8 @@ class ActionRunner:
         while `envelope.tenant` is a slug string (e.g. `"global"`,
         `config.py`'s own `RUNNER_TENANT_SLUG` default) -- `int(envelope.
         tenant)` crashes on any real slug. Looks the slug up against the
-        same `tenants` table `services.reference_tables.
-        bind_minimal_reference_tables` already binds (this service's own
-        pydal `DAL`, not hub-api's). Raises `TenantResolutionError` if no
+        `tenants` table discovered by `penguin_dal.AsyncDB.reflect()` at
+        startup (`app.py::startup()`). Raises `TenantResolutionError` if no
         row matches -- `_record`'s own broad `except Exception` catches it,
         same as any other audit-write failure.
         """
@@ -276,14 +275,12 @@ class ActionRunner:
         if cached is not None:
             return cached
 
-        rows = await self._dal.select_async(
-            self._dal.dal(self._dal.dal.tenants.slug == tenant_slug),
-            limitby=(0, 1),
-        )
-        if not rows:
+        rows = await self._dal(self._dal.tenants.slug == tenant_slug).select(limitby=(0, 1))
+        row = rows.first()
+        if row is None:
             raise TenantResolutionError(f"tenant slug {tenant_slug!r} has no matching tenants row")
 
-        tenant_id = int(rows[0].id)
+        tenant_id = int(row.id)
         self._tenant_id_cache[tenant_slug] = tenant_id
         return tenant_id
 

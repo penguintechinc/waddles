@@ -25,35 +25,11 @@ broad `except Exception` so a feed outage never breaks the live bot.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any
-
-from flask_core import AsyncDAL
-
-
-def init_live_activity_events_table(dal: Any) -> None:
-    """Define `live_activity_events` on `dal`. Call once per process during startup.
-
-    Idempotent no-op if already bound (mirrors `services.reference_tables.
-    bind_minimal_reference_tables`'s own `if "..." not in dal.tables` guard).
-    """
-    if "live_activity_events" in dal.tables:
-        return
-    dal.define_table(
-        "live_activity_events",
-        dal.Field("community_id", "integer", notnull=True),
-        dal.Field("platform", "string", length=50, notnull=True),
-        dal.Field("actor", "string", length=255),
-        dal.Field("message_in", "text"),
-        dal.Field("reply_out", "text"),
-        dal.Field("channel_id", "string", length=255),
-        dal.Field("occurred_at", "datetime", default=datetime.utcnow),
-        migrate=False,
-    )
+from penguin_dal import AsyncDB
 
 
 async def record_activity(
-    dal: AsyncDAL,
+    dal: AsyncDB,
     *,
     community_id: int,
     platform: str,
@@ -68,8 +44,7 @@ async def record_activity(
     one place (`runner.py::_emit_activity`), matching `services.
     dispatch_log.record_dispatch`'s own division of responsibility.
     """
-    await dal.insert_async(
-        dal.live_activity_events,
+    await dal.live_activity_events.async_insert(
         community_id=community_id,
         platform=platform,
         actor=actor,

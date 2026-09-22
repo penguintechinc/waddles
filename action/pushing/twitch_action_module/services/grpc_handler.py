@@ -14,7 +14,7 @@ from concurrent import futures
 # from proto import twitch_action_pb2, twitch_action_pb2_grpc
 
 from services.twitch_service import TwitchService
-from services.grpc_auth_interceptor import AuthInterceptor, require_auth
+from services.grpc_auth_interceptor import require_auth
 
 logger = logging.getLogger(__name__)
 

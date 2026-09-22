@@ -316,24 +316,30 @@ class TestRunOnce:
         assert await runner.run_once() == 0
 
 
+class _FakeActivityTable:
+    """Minimal penguin_dal.TableProxy stand-in -- only `async_insert` is used."""
+
+    def __init__(self, parent: _FakeActivityDal) -> None:
+        self._parent = parent
+
+    async def async_insert(self, **fields: Any) -> int:
+        if self._parent._raise_on_insert is not None:
+            raise self._parent._raise_on_insert
+        self._parent.inserted.append(fields)
+        return len(self._parent.inserted)
+
+
 class _FakeActivityDal:
-    """Minimal AsyncDAL stand-in for `services.activity_feed.record_activity`.
+    """Minimal penguin_dal.AsyncDB stand-in for `services.activity_feed.record_activity`.
 
     Implements only the surface `_emit_activity` uses: attribute access for
-    the `live_activity_events` table sentinel, and `insert_async`.
+    the `live_activity_events` table proxy, and its `async_insert`.
     """
 
     def __init__(self, *, raise_on_insert: Exception | None = None) -> None:
         self.inserted: list[dict[str, Any]] = []
         self._raise_on_insert = raise_on_insert
-        self.live_activity_events = object()
-
-    async def insert_async(self, table: Any, **fields: Any) -> int:
-        if self._raise_on_insert is not None:
-            raise self._raise_on_insert
-        assert table is self.live_activity_events
-        self.inserted.append(fields)
-        return len(self.inserted)
+        self.live_activity_events = _FakeActivityTable(self)
 
 
 @pytest.fixture

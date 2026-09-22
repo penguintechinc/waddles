@@ -19,7 +19,8 @@ FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcb
 # static assets over HTTPS via the system `curl` binary; this is a
 # builder-stage-only dependency and never ships in the runtime image below.
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y cmake build-essential curl ca-certificates \
+    && apt-get install --no-install-recommends -y \
+        cmake=3.25.1-1 build-essential=12.9 curl=7.88.1-10+deb12u15 ca-certificates=20250419~deb12u1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -34,7 +35,8 @@ FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe6
 # out to, once implemented. `ca-certificates` for rustls (webpki/native
 # roots) on outbound TLS (reqwest, sea-orm's runtime-tokio-rustls, OTLP).
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y ffmpeg ca-certificates \
+    && apt-get install --no-install-recommends -y \
+        ffmpeg=7:5.1.9-0+deb12u1 ca-certificates=20250419~deb12u1 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system --gid 10001 appuser \

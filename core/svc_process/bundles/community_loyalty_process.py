@@ -63,6 +63,7 @@ from flask_core import (
     get_bundle_context,
     get_bundle_dal,
 )
+from flask_core.bundle_runtime import raw_sql_rows
 from flask_core.feature_flags import feature_enabled
 
 logger = logging.getLogger(__name__)
@@ -92,10 +93,12 @@ _ADMIN_ROLES = frozenset({"owner", "admin", "moderator", "community-owner", "com
 
 _ROLE_BY_PLATFORM_SQL = (
     "SELECT role FROM community_members "
-    "WHERE community_id = $1 AND platform = $2 AND platform_user_id = $3 LIMIT 1"
+    "WHERE community_id = :community_id AND platform = :platform "
+    "AND platform_user_id = :platform_user_id LIMIT 1"
 )
 _ROLE_BY_DISPLAY_NAME_SQL = (
-    "SELECT role FROM community_members WHERE community_id = $1 AND display_name = $2 LIMIT 1"
+    "SELECT role FROM community_members "
+    "WHERE community_id = :community_id AND display_name = :display_name LIMIT 1"
 )
 
 
@@ -270,13 +273,23 @@ async def _caller_is_moderator_or_admin(event: PlatformEvent, community_id: int 
 
     try:
         if platform_user_id:
-            rows = await dal.execute(
-                _ROLE_BY_PLATFORM_SQL, [community_id, event.platform, platform_user_id]
+            rows = await raw_sql_rows(
+                dal,
+                _ROLE_BY_PLATFORM_SQL,
+                {
+                    "community_id": community_id,
+                    "platform": event.platform,
+                    "platform_user_id": platform_user_id,
+                },
             )
             if rows:
                 return str(rows[0]["role"]).lower() in _ADMIN_ROLES
         if event.actor:
-            rows = await dal.execute(_ROLE_BY_DISPLAY_NAME_SQL, [community_id, event.actor])
+            rows = await raw_sql_rows(
+                dal,
+                _ROLE_BY_DISPLAY_NAME_SQL,
+                {"community_id": community_id, "display_name": event.actor},
+            )
             if rows:
                 return str(rows[0]["role"]).lower() in _ADMIN_ROLES
     except Exception as exc:  # noqa: BLE001 -- permission check must fail closed, never crash

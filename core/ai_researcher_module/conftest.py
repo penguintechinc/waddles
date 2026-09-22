@@ -28,4 +28,4 @@ os.environ.setdefault("SECRET_KEY", "test-only-secret-not-a-real-placeholder")
 os.environ.setdefault("SERVICE_API_KEY", "test-only-service-key")
 os.environ.setdefault("CORS_ALLOWED_ORIGINS", "https://allowed.example.com")
 
-import flask_core  # noqa: F401
+import flask_core  # noqa: E402,F401

@@ -6,11 +6,12 @@ and message sending via Discord/Twitch transports.
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from penguin_dal import AsyncDB
+from sqlalchemy import text as sa_text
 from flask_core import (
     PlatformEvent,
     StageEnvelope,
@@ -64,31 +65,30 @@ def _client(handler) -> httpx.AsyncClient:  # noqa: ANN001
     return httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=False)
 
 
-class _FakeDal:
-    """In-memory stand-in for AsyncDAL -- implements only the .execute() surface."""
-
-    def __init__(self) -> None:
-        self._quote_id_counter = 100
-
-    async def execute(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
-        """Mock execute for quote insertion."""
-        if "INSERT INTO quotes" in sql:
-            self._quote_id_counter += 1
-            return [{"id": self._quote_id_counter}]
-        return []
-
-
-@pytest.fixture(autouse=True)
-def _dal() -> Any:
-    """Set up fake DAL for all tests."""
-    fake = _FakeDal()
-    set_bundle_dal(fake)
-    yield fake
+@pytest.fixture
+async def dal():
+    """In-memory penguin_dal.AsyncDB with a minimal `quotes` table."""
+    db = AsyncDB("sqlite://", pool_size=1, echo=False)
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            sa_text(
+                "CREATE TABLE quotes ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, quote_text TEXT, "
+                "quoted_username TEXT, is_approved BOOLEAN, deleted_at TEXT, "
+                "created_at TEXT, updated_at TEXT)"
+            )
+        )
+    await db.reflect()
+    set_bundle_dal(db)
+    yield db
     reset_bundle_dal_for_tests()
+    await db.close()
 
 
 class TestSendMessage:
-    async def test_sends_discord_message_with_auth(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_sends_discord_message_with_auth(
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """sends_message sends Discord message with Bot token auth.
 
         regression: discord Bot auth scheme -- Discord's REST API requires
@@ -110,7 +110,7 @@ class TestSendMessage:
         assert result.transport == "bundle"
 
     async def test_resolves_channel_id_from_payload_discord(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Reply-in-place: payload channel_id takes precedence (Discord)."""
         monkeypatch.setenv("TEST_DISCORD_TOKEN", "s3cr3t")
@@ -131,7 +131,7 @@ class TestSendMessage:
         assert result.http_status == 200
 
     async def test_fallback_to_config_channel_id_discord(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Uses config channel_id when payload has none (Discord)."""
         monkeypatch.setenv("TEST_DISCORD_TOKEN", "s3cr3t")
@@ -150,7 +150,7 @@ class TestSendMessage:
 
         assert "config-chan" in captured["url"]
 
-    async def test_missing_channel_id_is_non_retryable(self) -> None:
+    async def test_missing_channel_id_is_non_retryable(self, dal: AsyncDB) -> None:
         """Missing both payload and config channel raises NonRetryableTransportError."""
         async with _client(lambda r: httpx.Response(200)) as client:
             with pytest.raises(NonRetryableTransportError, match="channel"):
@@ -160,7 +160,7 @@ class TestSendMessage:
                     http_client=client,
                 )
 
-    async def test_missing_text_is_non_retryable(self) -> None:
+    async def test_missing_text_is_non_retryable(self, dal: AsyncDB) -> None:
         """Missing or empty text raises NonRetryableTransportError."""
         async with _client(lambda r: httpx.Response(200)) as client:
             with pytest.raises(NonRetryableTransportError, match="text"):
@@ -170,7 +170,9 @@ class TestSendMessage:
                     http_client=client,
                 )
 
-    async def test_429_rate_limit_is_retryable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_429_rate_limit_is_retryable(
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """HTTP 429 rate limit raises RetryableTransportError."""
         monkeypatch.setenv("TEST_DISCORD_TOKEN", "s3cr3t")
 
@@ -178,7 +180,9 @@ class TestSendMessage:
             with pytest.raises(RetryableTransportError):
                 await send_message(_envelope(), _config(), http_client=client)
 
-    async def test_401_unauthorized_is_non_retryable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_401_unauthorized_is_non_retryable(
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """HTTP 401 auth error raises NonRetryableTransportError."""
         monkeypatch.setenv("TEST_DISCORD_TOKEN", "s3cr3t")
 
@@ -187,7 +191,7 @@ class TestSendMessage:
                 await send_message(_envelope(), _config(), http_client=client)
 
     async def test_401_rejection_logs_token_ref(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """HTTP 401 logs a discord_send_rejected warning naming the token ref.
 
@@ -206,7 +210,9 @@ class TestSendMessage:
         assert "TEST_DISCORD_TOKEN" in caplog.text
         assert "s3cr3t" not in caplog.text
 
-    async def test_500_server_error_is_retryable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_500_server_error_is_retryable(
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """HTTP 5xx server error raises RetryableTransportError."""
         monkeypatch.setenv("TEST_DISCORD_TOKEN", "s3cr3t")
 
@@ -214,7 +220,9 @@ class TestSendMessage:
             with pytest.raises(RetryableTransportError, match="server error"):
                 await send_message(_envelope(), _config(), http_client=client)
 
-    async def test_network_timeout_is_retryable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_network_timeout_is_retryable(
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Network timeout raises RetryableTransportError."""
         monkeypatch.setenv("TEST_DISCORD_TOKEN", "s3cr3t")
 
@@ -228,7 +236,7 @@ class TestSendMessage:
 
 class TestQuoteAddIntent:
     async def test_add_quote_intent_executes_db_insert(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Quote add intent from process stage is executed in action stage."""
         monkeypatch.setenv("TEST_DISCORD_TOKEN", "s3cr3t")
@@ -253,20 +261,28 @@ class TestQuoteAddIntent:
         # Verify response was successful
         assert result.http_status == 200
 
+        # Verify the quote was inserted
+        async with dal.engine.begin() as conn:
+            rows = await conn.execute(sa_text("SELECT COUNT(*) as cnt FROM quotes"))
+            count = rows.fetchone()
+            assert count is not None
+            assert count[0] == 1
+
     async def test_add_quote_db_failure_returns_error_message(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Database error on quote add returns error message."""
         monkeypatch.setenv("TEST_DISCORD_TOKEN", "s3cr3t")
-        mock_dal = AsyncMock()
-        mock_dal.execute = AsyncMock(side_effect=Exception("DB error"))
-        set_bundle_dal(mock_dal)
+
+        # Close the DAL to force a DB error
+        await dal.close()
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200)
 
         async with _client(handler) as client:
             with bundle_context(tenant="1", community="42", app_id="waddles.social.quote.default"):
+                # This should handle the error gracefully and return an error message
                 await send_message(
                     _envelope({
                         "text": "",
@@ -280,7 +296,7 @@ class TestQuoteAddIntent:
                 )
         reset_bundle_dal_for_tests()
 
-    async def test_add_quote_no_dal_returns_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_add_quote_no_dal_returns_error(self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch) -> None:
         """Quote add without DAL returns error message."""
         monkeypatch.setenv("TEST_DISCORD_TOKEN", "s3cr3t")
         # This test doesn't apply anymore since the frozen API always requires a DAL
@@ -289,7 +305,7 @@ class TestQuoteAddIntent:
 
 
 class TestTwitchPlatform:
-    async def test_twitch_uses_channel_name(self) -> None:
+    async def test_twitch_uses_channel_name(self, dal: AsyncDB) -> None:
         """Twitch platform uses channel_name from payload."""
         mock_transport = AsyncMock()
         mock_transport.send = AsyncMock(return_value=MagicMock(transport="relay", detail="sent"))
@@ -310,7 +326,9 @@ class TestTwitchPlatform:
 
 
 class TestEdgeCases:
-    async def test_payload_fields_survive_send(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_payload_fields_survive_send(
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Non-text payload fields are preserved after send."""
         monkeypatch.setenv("TEST_DISCORD_TOKEN", "s3cr3t")
 
@@ -323,7 +341,9 @@ class TestEdgeCases:
 
         assert result.transport == "bundle"
 
-    async def test_empty_quote_text_in_add_intent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_empty_quote_text_in_add_intent(
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Empty quote text in add intent returns error."""
         monkeypatch.setenv("TEST_DISCORD_TOKEN", "s3cr3t")
 
@@ -344,7 +364,7 @@ class TestEdgeCases:
             )
 
     async def test_missing_bot_token_ref_is_non_retryable(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Missing bot_token_ref in config raises NonRetryableTransportError."""
         monkeypatch.setenv("TEST_DISCORD_TOKEN", "s3cr3t")
@@ -358,7 +378,7 @@ class TestEdgeCases:
                 )
 
     async def test_ssrf_guard_rejection_is_non_retryable(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """SSRF guard rejection raises NonRetryableTransportError."""
         monkeypatch.setenv("TEST_DISCORD_TOKEN", "s3cr3t")
@@ -376,7 +396,9 @@ class TestEdgeCases:
                         http_client=client,
                     )
 
-    async def test_400_client_error_is_non_retryable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_400_client_error_is_non_retryable(
+        self, dal: AsyncDB, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """HTTP 4xx client error raises NonRetryableTransportError."""
         monkeypatch.setenv("TEST_DISCORD_TOKEN", "s3cr3t")
 

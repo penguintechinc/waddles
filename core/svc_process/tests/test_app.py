@@ -94,3 +94,25 @@ class TestLifespan:
         async with quart_app.test_app():
             assert quart_app.config["async_dal"] is not None
             assert get_bundle_dal() is quart_app.config["async_dal"]
+
+    async def test_startup_constructs_reflected_asyncdb(self) -> None:
+        """startup() constructs AsyncDB, calls reflect(), and binds it via set_bundle_dal()."""
+        reflected: list[bool] = []
+
+        class _FakeAsyncDB:
+            def __init__(self, *a: Any, **kw: Any) -> None:
+                pass
+
+            async def reflect(self) -> None:
+                reflected.append(True)
+
+            async def close_async(self) -> None:
+                pass
+
+        with (
+            patch("app.AsyncDB", _FakeAsyncDB),
+        ):
+            async with quart_app.test_app():
+                assert quart_app.config["async_dal"] is not None
+                assert reflected == [True]
+                assert get_bundle_dal() is quart_app.config["async_dal"]

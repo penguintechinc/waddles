@@ -82,7 +82,7 @@ def _decode_frame(frame: bytes) -> dict[str, Any]:
     text = frame.decode()
     assert text.startswith("data: ")
     assert text.endswith("\n\n")
-    return dict(json.loads(text[len("data: ") : -2]))
+    return dict(json.loads(text[len("data: ") : -2]))  # noqa: E203 - ruff-format's slice spacing
 
 
 class TestEventStream:

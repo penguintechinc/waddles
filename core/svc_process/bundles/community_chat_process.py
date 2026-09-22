@@ -16,6 +16,7 @@ import dataclasses
 from dataclasses import dataclass
 
 from flask_core import PlatformEvent, get_bundle_context, get_bundle_dal
+from flask_core.bundle_runtime import raw_sql_rows
 
 
 @dataclass(slots=True, frozen=True)
@@ -78,8 +79,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     Reads `event.payload["text"]` for the command, returns `None` for
     non-command messages or if the command is unrecognized.
 
-    Uses `get_bundle_context()` for tenant/community scope and `get_bundle_dal()`
-    to query chat history from `hub_chat_messages`.
+    Uses `get_bundle_context()` for tenant/community scope and
+    `get_bundle_dal()`/`raw_sql_rows()` (D21a) to query chat history from
+    `hub_chat_messages`.
 
     Raises `ValueError` on a malformed event -- the process runner catches
     this per-event so one bad event never kills the poll loop.
@@ -98,12 +100,21 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
                 SELECT id, community_id, channel_name, sender_username, message_content,
                        message_type, created_at
                 FROM hub_chat_messages
-                WHERE community_id = (SELECT id FROM communities WHERE id = $1 OR tenant_id = (
-                    SELECT id FROM tenants WHERE id = $2))
+                WHERE community_id = (
+                    SELECT id FROM communities WHERE id = :community_id
+                    OR tenant_id = (SELECT id FROM tenants WHERE id = :tenant_id)
+                )
                 ORDER BY created_at DESC
                 LIMIT 20
             """
-            rows = await dal.execute(sql, [int(ctx.community) if ctx.community else 0, ctx.tenant])
+            rows = await raw_sql_rows(
+                dal,
+                sql,
+                {
+                    "community_id": int(ctx.community) if ctx.community else 0,
+                    "tenant_id": ctx.tenant,
+                },
+            )
 
             messages = [
                 ChatMessage(
@@ -133,14 +144,24 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
             dal = get_bundle_dal()
 
             sql = """
-                SELECT channel_name, COUNT(*) AS message_count, MAX(created_at) AS last_message_at
+                SELECT channel_name, COUNT(*) AS message_count,
+                       MAX(created_at) AS last_message_at
                 FROM hub_chat_messages
-                WHERE community_id = (SELECT id FROM communities WHERE id = $1 OR tenant_id = (
-                    SELECT id FROM tenants WHERE id = $2))
+                WHERE community_id = (
+                    SELECT id FROM communities WHERE id = :community_id
+                    OR tenant_id = (SELECT id FROM tenants WHERE id = :tenant_id)
+                )
                 GROUP BY channel_name
                 ORDER BY last_message_at DESC
             """
-            rows = await dal.execute(sql, [int(ctx.community) if ctx.community else 0, ctx.tenant])
+            rows = await raw_sql_rows(
+                dal,
+                sql,
+                {
+                    "community_id": int(ctx.community) if ctx.community else 0,
+                    "tenant_id": ctx.tenant,
+                },
+            )
 
             channels = [
                 ChatChannel(

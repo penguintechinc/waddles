@@ -7,15 +7,15 @@ entrypoint, and LPUSHes the result onto that bundle's `:action` key.
 
 DB: as of the App Bundle bundle-runtime freeze (`docs/
 APP_BUNDLE_AUTHORING.md`, 'Accessing the database / shared state'),
-svc-process also constructs its own `AsyncDAL` here (mirroring
-`core/svc_action/app.py`'s existing DAL construction exactly) and binds it
-once via `flask_core.set_bundle_dal()` so a stateful process bundle can
-call `get_bundle_dal()` from inside its own `transform()` body -- the
-frozen `transform(event) -> PlatformEvent | None` signature itself carries
-no DAL parameter. Startup also binds the `live_activity_events` table on
-that same DAL (`services.activity_feed.init_live_activity_events_table`)
-so `runner.py`'s best-effort activity emit has a table to write to -- see
-that module's docstring.
+svc-process also constructs a `penguin_dal.AsyncDB` here (mirroring
+`core/svc_action/app.py`'s DAL construction) and binds it once via
+`flask_core.set_bundle_dal()` after calling `await async_dal.reflect()`,
+which discovers `live_activity_events` (and every other real table) from
+the live schema directly -- so a stateful process bundle can call
+`get_bundle_dal()` from inside its own `transform()` body, and `runner.py`'s
+best-effort activity emit has a table to write to with no separate
+per-table binding step. The frozen `transform(event) -> PlatformEvent | None`
+signature itself carries no DAL parameter.
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ from typing import cast
 import httpx
 import redis.asyncio as redis
 from flask_core import (
-    AsyncDAL,
     create_health_blueprint,
     install_security_headers,
     set_bundle_dal,
@@ -34,11 +33,11 @@ from flask_core import (
 )
 from flask_core.auth import create_jwt_token
 from flask_core.stage_runner import BundlePoller
+from penguin_dal import AsyncDB
 from quart import Quart
 
 from config import Config
 from runner import ProcessRunner
-from services.activity_feed import init_live_activity_events_table
 
 app = Quart(__name__)
 # security.md A05 hardening -- JSON-only service, default deny-everything CSP.
@@ -72,9 +71,14 @@ async def startup() -> None:
     """Wire the httpx client, Valkey client, DAL, poller, and start the background loop."""
     http_client = httpx.AsyncClient()
     redis_client = redis.from_url(Config.VALKEY_URL, encoding="utf-8", decode_responses=True)
-    async_dal = AsyncDAL(Config.DATABASE_URL, pool_size=Config.DB_POOL_SIZE, migrate=False)
+    # penguin-dal (D21a): AsyncDB.reflect() discovers the entire live Postgres
+    # schema via SQLAlchemy MetaData.reflect() -- this supersedes the old
+    # per-table init_live_activity_events_table()/pydal-stub-definition
+    # pattern outright; every real table (live_activity_events included) is
+    # already present as dal.<table_name> after one reflect() call.
+    async_dal = AsyncDB(Config.DATABASE_URL, pool_size=Config.DB_POOL_SIZE)
+    await async_dal.reflect()
     set_bundle_dal(async_dal)
-    init_live_activity_events_table(async_dal.dal)
 
     poller = BundlePoller(
         http_client,
