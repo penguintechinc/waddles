@@ -14,4 +14,9 @@ regexes = ["eb1d5f283081a78b932c"]
 paths = [
   "core/svc_ingest/receivers/kick_pusher\\.py",
   "core/svc_ingest/tests/test_receivers_kick_pusher\\.py",
+  # Deliberately fake AWS-style access key ID, exercising
+  # bundle-compiler's own gitleaks orchestration test
+  # (core/bundle_compiler/tests/scan_test.rs::secret_in_source_blocks) --
+  # never a real credential.
+  "core/bundle_compiler/tests/fixtures/bundles/scan-secret/app\\.py",
 ]

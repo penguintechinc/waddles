@@ -1,0 +1,65 @@
+[package]
+name = "bundle-compiler"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "Proprietary"
+publish = false
+description = "Waddles WASM app-bundle compiler -- manifest validation, ordered source scanning, per-language hermetic compilation, import-allowlist validation, content addressing, Ed25519 signing, bucket upload (spec SS4.6, SS9.3)."
+
+[lib]
+name = "bundle_compiler"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bundle-compiler"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+# Exact-version pins only (no ^ / * ranges) -- see rules/critical-rules.md
+# Dependency Pinning. Cargo.lock is committed alongside this file.
+[dependencies]
+clap = { version = "=4.5.51", features = ["derive"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["json", "env-filter"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+thiserror = "=2.0.20"
+regex = "=1.13.1"
+walkdir = "=2.5.0"
+sha2 = "=0.10.9"
+hex = "=0.4.3"
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "time"] }
+# `penguin-bundle-host`: the landed M1 crate providing the normative
+# bundle.yaml v2 manifest validator (31 rules) and the host-API wire
+# types. Not yet published to a private registry -- pinned to an exact
+# commit (`rev`, a full 40-char SHA, never a branch name) on its release
+# branch per Dependency Pinning (critical-rules.md): a branch ref is
+# mutable and cargo re-resolves it, a commit SHA is not. `package =` is
+# required because penguin-libs has no root workspace manifest (multiple
+# independent crates in one repo); `version =` pins the exact crate
+# version and satisfies cargo-deny's wildcard-dependency ban. This is the
+# canonical penguin-libs -> waddles git-dependency pattern (settled
+# 2026-09-22, verified to resolve from a fresh CARGO_HOME with
+# `--locked`) -- match it verbatim in any other Rust crate here that
+# needs a penguin-libs package before one publishes to a registry.
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "49f098caab95339bf8113ba5c3e9ad039d30d44b", package = "penguin-bundle-host", version = "=0.1.0" }
+
+[dev-dependencies]
+tempfile = "=3.23.0"
+mockito = "=1.7.0"
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "time", "test-util"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
