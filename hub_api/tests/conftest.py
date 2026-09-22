@@ -1194,14 +1194,17 @@ BUNDLE_COMMUNITY_ID = 1
 
 @pytest.fixture
 def bundle_install_db(tmp_path: Any) -> Any:
-    """File-backed pydal `AsyncDAL` with a narrow `tenants` table.
+    """File-backed pydal `AsyncDAL` with a narrow `tenants` table plus `app_catalog` (M2a).
 
     Mirrors `distribution_db`'s own narrow-tenants shape above -- the
-    M2b workstreams/usage-metering slice's tests only ever need a real
-    tenant row to insert `ingest_sources`/`workstreams`/
-    `workstream_usage_hourly` rows against, never `communities`/
-    `app_catalog`/etc, so this fixture stays intentionally smaller than
-    `distribution_db`.
+    M2b workstreams/usage-metering slice's own tests only ever needed a
+    real tenant row. M2a (hub-api install hooks, spec Sec9) additionally
+    needs `app_catalog` -- the `routes_to` cross-tenant check
+    (`bundle_approval_service._validate_routes_to`) reads it read-only,
+    and the approval-service tests insert `app_id`/`app_install_approvals`
+    rows against it directly -- so this fixture calls the same
+    `bind_app_bundle_tables()` production schema `distribution_db` uses,
+    rather than hand-defining a third, drifting copy of `app_catalog`.
     """
     async_dal = AsyncDAL(f"sqlite://{tmp_path / 'bundle_install_test.db'}", pool_size=1)
     dal = async_dal.dal
@@ -1211,7 +1214,15 @@ def bundle_install_db(tmp_path: Any) -> Any:
         Field("display_name"),
         Field("is_active", "boolean", default=True),
     )
+    bind_app_bundle_tables(dal, migrate=True)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
+    # pydal's sqlite adapter defers a table's physical CREATE TABLE until
+    # its first query, `migrate=True` alone is not enough -- force it now
+    # so `install_dal.reflect()` (a separate SQLAlchemy connection onto
+    # the same file) always sees `app_catalog`, even in a test that never
+    # itself queries/inserts against it (e.g. a routes_to target that
+    # legitimately does not exist in the catalog).
+    dal(dal.app_catalog.app_id == "__force_migrate__").count()
     dal.commit()
     yield async_dal
     dal.close()
@@ -1281,17 +1292,130 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("media_minutes", Float),
         Column("recorded_at", DateTime),
     )
+    # M2a hub-api install hooks (spec Sec9, Sec6.7-6.10) -- sqlite-compatible
+    # mirror of migrations 0022-0023's Postgres DDL. Plain generic column
+    # types, no native trigger/JSONB/partial-unique-index equivalents (the
+    # audit trigger and the two partial-unique constraints are exercised
+    # against real Postgres only, not this unit-test fixture).
+    Table(
+        "app_versions",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("app_id", String(255), nullable=False),
+        Column("version", String(50), nullable=False),
+        Column("artifact_digest", String(71)),
+        Column("cwasm_digest", String(71)),
+        Column("wasmtime_abi", String(50)),
+        Column("collector", String(20)),
+        Column("size_bytes", BigInteger),
+        Column("language", String(20), nullable=False),
+        Column("artifact_kind", String(20), nullable=False),
+        Column("built_at", DateTime),
+        Column("builder", String(100)),
+        Column("scan_status", String(30), server_default="not_scanned"),
+        Column("badge", String(100)),
+        Column("approval_id", BigInteger),
+        Column("created_at", DateTime),
+    )
+    Table(
+        "app_active_versions",
+        metadata,
+        Column("app_id", String(255), nullable=False),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer, server_default="0"),
+        Column("version_id", BigInteger, nullable=False),
+        Column("activated_by", Integer),
+        Column("activated_at", DateTime),
+    )
+    Table(
+        "app_version_uploads",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("app_id", String(255), nullable=False),
+        Column("version", String(50), nullable=False),
+        Column("tenant_id", Integer, nullable=False),
+        Column("requested_by", Integer),
+        Column("artifact_kind", String(20), nullable=False),
+        Column("language", String(20), nullable=False),
+        Column("status", String(30), server_default="UPLOADED"),
+        Column("reject_reason", String(100)),
+        Column("compiler_job_name", String(255)),
+        Column("staging_manifest_key", String(500)),
+        Column("staging_source_key", String(500)),
+        Column("staging_component_key", String(500)),
+        Column("manifest_json", JSON),
+        Column("app_version_id", BigInteger),
+        Column("created_at", DateTime),
+        Column("updated_at", DateTime),
+    )
+    Table(
+        "app_install_approvals",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer),
+        Column("app_id", String(255), nullable=False),
+        Column("version", String(50), nullable=False),
+        Column("permission_hash", String(71), nullable=False),
+        Column("summary_json", JSON, nullable=False),
+        Column("approved_by", Integer),
+        Column("approved_at", DateTime),
+        Column("superseded_by", BigInteger),
+    )
+    Table(
+        "app_stream_grants",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer),
+        Column("app_id", String(255), nullable=False),
+        Column("stream_key", String(500), nullable=False),
+        Column("platform", String(50), nullable=False),
+        Column("source_id", String(255), nullable=False),
+        Column("label", String(255), nullable=False),
+        Column("granted_by", Integer),
+        Column("granted_at", DateTime),
+        Column("revoked_at", DateTime),
+    )
+    Table(
+        "platform_settings",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("key", String(150), nullable=False, unique=True),
+        Column("value", String),
+        Column("updated_by", Integer),
+        Column("updated_at", DateTime),
+    )
+    # `audit_log` is a pre-existing production table (services/schema.py's
+    # `bind_admin_tables()`), reflected here as its sqlite-compatible
+    # mirror because this fixture has no full pydal schema bootstrap --
+    # `bundle_approval_service._audit_routes_to_refusal` writes to it via
+    # `install_dal.audit_log` (R52: read/write through install_dal since
+    # reflect() sees the whole live schema in production).
+    Table(
+        "audit_log",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("user_id", Integer),
+        Column("action", String(100), nullable=False),
+        Column("target_type", String(50)),
+        Column("target_id", String(255)),
+        Column("details", JSON),
+        Column("ip_address", String(45)),
+        Column("user_agent", String),
+        Column("created_at", DateTime),
+    )
     metadata.create_all(conn)
 
 
 @pytest.fixture
 async def install_dal(bundle_install_db: Any) -> Any:
-    """`penguin_dal.AsyncDB` for every M2b workstreams/usage-metering test.
+    """`penguin_dal.AsyncDB` for every M2b/M2a bundle-install test.
 
     Points at the exact same sqlite file as `bundle_install_db`
     (`bundle_install_db.uri`) so both fixtures see each other's rows in
-    the same test -- `bundle_install_db` (pydal) seeds `tenants`; this
-    fixture creates the three new M2b tables directly via
+    the same test -- `bundle_install_db` (pydal) seeds `tenants` and
+    `app_catalog`; this fixture creates the M2b/M2a tables directly via
     `_create_bundle_install_tables()` and then calls `await install_dal.
     reflect()`, which discovers both.
     """
