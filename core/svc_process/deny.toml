@@ -31,6 +31,9 @@ allow = [
     "MPL-2.0",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
+    # `xxhash-rust` (transitive via `penguin-spine` -> `redis`, Cargo.toml)
+    # -- permissive, OSI-approved and FSF-free (same tier as MIT/BSD).
+    "BSL-1.0",
 ]
 exceptions = []
 
@@ -57,7 +60,10 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# `penguin-spine`/`penguin-logging` (Cargo.toml) -- unpublished penguin-libs
+# crates pinned by commit `rev`, not by mutable branch name. See the
+# Cargo.toml dependency-pattern comment above `[dependencies]`.
+allow-git = ["https://github.com/penguintechinc/penguin-libs.git"]
 
 [sources.allow-org]
 github = []

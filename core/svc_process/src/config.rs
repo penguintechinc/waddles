@@ -110,6 +110,18 @@ pub struct CliConfig {
     pub cache_host: String,
     #[arg(long, env = "CACHE_PORT", default_value_t = 6379)]
     pub cache_port: u16,
+
+    /// The bundle `app_id` this process-stage instance drains granted
+    /// ingest-source streams for (`penguin_spine::Stage::Process`'s
+    /// consumer group name, spec Sec5.2). Empty (the default) means "no
+    /// bundle assigned yet" -- `crate::run_with_shutdown` does not spawn
+    /// the spine drain loop in that case. Multi-bundle-per-instance
+    /// scheduling, and populating this from a real activation rather than
+    /// a static env var, are themselves blocked on M2's
+    /// distribution-bundles poll (SS4.2), which is what would normally
+    /// supply this value plus the instance's granted-stream list.
+    #[arg(long, env = "PROCESS_APP_ID", default_value = "")]
+    pub process_app_id: String,
 }
 
 impl CliConfig {
@@ -209,7 +221,18 @@ mod tests {
         assert_eq!(cli.http_port, 8201);
         assert_eq!(cli.metrics_port, 9090);
         assert_eq!(cli.poll_interval_s, 5.0);
+        assert_eq!(cli.process_app_id, "");
         cli.validate().expect("defaults must be valid");
+    }
+
+    #[test]
+    fn process_app_id_flag_overrides_default() {
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--process-app-id",
+            "waddles.bot.commands.default",
+        ]);
+        assert_eq!(cli.process_app_id, "waddles.bot.commands.default");
     }
 
     #[test]
