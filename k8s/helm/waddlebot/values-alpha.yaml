@@ -6,7 +6,14 @@ webui:
   connectionsCallbackBaseUrl: "http://localhost:30879"
 
 global:
-  imageRegistry: ""
+  # fix/alpha-helm-deploy -- was "" (empty), which (a) rendered every
+  # pipeline app container on its shared stock base image instead of its own
+  # app image (templates/hub-api.yaml et al now use waddlebot.legacyModuleImage
+  # instead), and (b) combined with migrations-job.yaml's then-unguarded
+  # registry concatenation to render the malformed "/migrations:alpha". MUST
+  # match scripts/deploy-alpha.sh's REGISTRY constant -- that script pushes
+  # here, this chart pulls from here.
+  imageRegistry: "localhost:32000/waddlebot"
   imageTag: "alpha"
   imagePullPolicy: IfNotPresent  # Never makes containerd skip localhost:32000 (ErrImageNeverPull) -- images are pushed, not side-loaded
   deploymentTier: "alpha"
@@ -16,12 +23,15 @@ global:
   # beta/gamma/production even if this file were merged upward by mistake).
   grpcTls:
     insecureDev: true
-  # First-run super-admin bootstrap (PR #256) -- documented non-default so alpha's
-  # Playwright e2e suite (tests/k8s/alpha/) has a known login; NEVER reused in
-  # beta/gamma/production (see values.yaml global.initialAdmin).
+  # First-run super-admin bootstrap (PR #256) -- email is non-sensitive and
+  # documented so alpha's Playwright e2e suite (tests/k8s/alpha/) has a known
+  # login. The password is NOT committed here (fix/alpha-helm-deploy) -- it
+  # comes from the required WADDLEBOT_ALPHA_ADMIN_PASSWORD env var via
+  # scripts/deploy-alpha.sh's generated secrets values file, same as
+  # jwtSecret/moduleSecretKey/serviceApiKey/minio root creds below. NEVER
+  # reused in beta/gamma/production (see values.yaml global.initialAdmin).
   initialAdmin:
     email: "admin@waddlebot.localhost.local"
-    password: "WaddleAlpha-Local-Only-2026!"
 
 # T10 (v3 Discord+Twitch demo) -- dev-only placeholder credentials, NEVER real tokens.
 # Templated into the waddlebot-secrets K8s Secret (templates/secrets.yaml), not committed
@@ -75,13 +85,17 @@ infrastructure:
 #
 # Resources/replicas min-spec'd for a single-node laptop (see docs/plans -- alpha
 # min-spec pass). Pipeline app services share one generic tier; hubApi/hubWebui are
-# sized individually to match their lighter footprint. T10 (v3 demo) -- minimal 5-of-8
-# container demo set: only svc-ingest, svc-process, svc-action, hub-api (all default
-# enabled: true) run; the other pipeline containers (hubWebui, svcCore, svcPresentation,
-# svcStreaming, svcRtc) are not needed for the Discord+Twitch round-trip and are disabled
-# below rather than left running idle. See k8s/helm/waddlebot/README.md and the v3 demo
-# roadmap's "MINIMAL DEPLOY (5 of 8 + 2 infra)" section. Resource specs are kept even
-# while disabled so re-enabling any of them for a non-demo alpha run needs no re-sizing.
+# sized individually to match their lighter footprint.
+#
+# fix/alpha-helm-deploy -- this file must render a COMPLETE working stack on its
+# own (no --set needed for anything but secrets), so hubWebui/svcPresentation/
+# svcStreaming are re-enabled here, superseding the earlier T10 (v3 demo)
+# "minimal 5-of-8" scoping that left them off. All three already had their
+# resources/replicas min-spec'd below for exactly this re-enable (see the old
+# comment this replaces), so no re-sizing was needed. svcCore/svcRtc stay
+# disabled -- svcCore has no Dockerfile yet (still the shared base-image
+# skeleton) and svcRtc is additionally gated on modules.social.enabled; neither
+# is part of this fix's scope.
 pipeline:
   svcIngest:
     replicas: 1
@@ -111,7 +125,7 @@ pipeline:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "384Mi" }
   hubWebui:
-    enabled: false
+    enabled: true
     replicas: 1
     resources:
       requests: { cpu: "50m", memory: "64Mi" }
@@ -123,7 +137,7 @@ pipeline:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "500m", memory: "512Mi" }
   svcPresentation:
-    enabled: false
+    enabled: true
     replicas: 1
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
@@ -132,9 +146,8 @@ pipeline:
   # plus fixed alpha NodePorts for direct RTMP/SRT/HTTP media ingest (OBS/ffmpeg target
   # localhost:31935 for RTMP push). PUBLIC_BASE_URL uses the node LAN IP + the http
   # NodePort below so playback URLs resolve off-laptop, matching webui.publicUrl's pattern.
-  # Disabled for the T10 demo (see above) but left fully configured for non-demo alpha runs.
   svcStreaming:
-    enabled: false
+    enabled: true
     replicas: 1
     publicBaseUrl: "http://192.168.10.75:31208"
     nodePort:

@@ -32,10 +32,11 @@ spec:
       {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
       containers:
       - name: hub-api
-        # SKELETON PLACEHOLDER — no Dockerfile/CI image exists yet for hub-api; pinned to
-        # the repo's existing Python base digest rather than inventing one or using a mutable
-        # tag. Replace once hub-api has its own Dockerfile and CI build.
-        image: "{{ .Values.pipeline.pythonBaseImage }}"
+        # fix/alpha-helm-deploy -- hub_api/Dockerfile (Python 3.13 + Quart control-plane
+        # API, see critical-rules.md Data Plane) now exists; no longer the shared
+        # pipeline.pythonBaseImage skeleton placeholder. Bare module name "hub-api" is the
+        # alpha-local repo under global.imageRegistry -- see scripts/deploy-alpha.sh.
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.global.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}

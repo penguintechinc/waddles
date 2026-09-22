@@ -30,11 +30,11 @@ spec:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
       - name: hub-webui
-        # SKELETON PLACEHOLDER — no Dockerfile/CI image exists yet for this hub-webui
-        # container; pinned to the repo's existing Node base digest (used by
-        # admin/hub_module/Dockerfile.webui) rather than inventing one or using a mutable
-        # tag. Replace once this container has its own Dockerfile and CI build.
-        image: "{{ .Values.pipeline.nodeBaseImage }}"
+        # fix/alpha-helm-deploy -- admin/hub_module/Dockerfile.webui already exists and
+        # already builds under CI as module "hub-webui" (containers.yml); no longer the
+        # shared pipeline.nodeBaseImage skeleton placeholder. Bare module name "hub-webui"
+        # is the alpha-local repo under global.imageRegistry -- see scripts/deploy-alpha.sh.
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-webui" "imageTag" .Values.global.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}

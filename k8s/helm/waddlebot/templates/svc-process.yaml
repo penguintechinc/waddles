@@ -34,10 +34,11 @@ spec:
       {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
       containers:
       - name: svc-process
-        # SKELETON PLACEHOLDER — no Dockerfile/CI image exists yet for svc-process; pinned to
-        # the repo's existing Python base digest rather than inventing one or using a mutable
-        # tag. Replace once svc-process has its own Dockerfile and CI build.
-        image: "{{ .Values.pipeline.pythonBaseImage }}"
+        # fix/alpha-helm-deploy -- core/svc_process/Dockerfile now exists; no longer the
+        # shared pipeline.pythonBaseImage skeleton placeholder. Bare module name
+        # "svc-process" is the alpha-local repo under global.imageRegistry -- see
+        # scripts/deploy-alpha.sh.
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-process" "imageTag" .Values.global.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
