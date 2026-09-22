@@ -31,6 +31,8 @@ tables:
   - ingest_sources
   - platform_settings
   - app_versions_audit_log
+  - workstreams
+  - workstream_usage_hourly
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -263,4 +265,61 @@ grants:
     privileges: []
   - role: migration_runner
     table: platform_settings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # workstreams (D30): hub-api-owned, 1:1 with ingest_sources. Only hub_api writes.
+  - role: hub_api
+    table: workstreams
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: workstreams
+    privileges: []
+  - role: svc_ingest
+    table: workstreams
+    privileges: []
+  - role: svc_process
+    table: workstreams
+    privileges: []
+  - role: svc_action
+    table: workstreams
+    privileges: []
+  - role: svc_streaming
+    table: workstreams
+    privileges: []
+  - role: webui
+    table: workstreams
+    privileges: []
+  - role: migration_runner
+    table: workstreams
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # workstream_usage_hourly (D31): append-only. hub_api gets SELECT/INSERT
+  # only -- no UPDATE/DELETE for anyone, including hub_api (spec Sec11.10.1,
+  # Sec5.12 literal wording: "no UPDATE/DELETE for anyone"). migration_runner
+  # keeps this matrix's uniform DDL-time-only grant (never used at runtime,
+  # matching every other table's migration_runner row) so a future column
+  # migration on this table is not a special case.
+  - role: hub_api
+    table: workstream_usage_hourly
+    privileges: [SELECT, INSERT]
+  - role: waddles_publisher
+    table: workstream_usage_hourly
+    privileges: []
+  - role: svc_ingest
+    table: workstream_usage_hourly
+    privileges: []
+  - role: svc_process
+    table: workstream_usage_hourly
+    privileges: []
+  - role: svc_action
+    table: workstream_usage_hourly
+    privileges: []
+  - role: svc_streaming
+    table: workstream_usage_hourly
+    privileges: []
+  - role: webui
+    table: workstream_usage_hourly
+    privileges: []
+  - role: migration_runner
+    table: workstream_usage_hourly
     privileges: [SELECT, INSERT, UPDATE, DELETE]

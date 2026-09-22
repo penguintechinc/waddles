@@ -195,6 +195,12 @@ convention = "google"
 # itself. Same false-positive shape as the music-provider `_TOKEN_URL`/
 # `_TOKEN_FILE` entries above.
 "services/ai_routing/pii_redaction.py" = ["S105"]
+# Workstream usage admin API (spec Sec5.12, D31) -- camelCase DTO fields
+# (workstreamId, hostCalls, fuelMs, ...) are the wire contract every other
+# v1 blueprint's DTOs already use; S101 is the same tenant_middleware
+# postcondition assert (`get_tenant_context` always non-None on the
+# success path) as blueprints/v2/platform.py above.
+"blueprints/v1/workstream_usage.py" = ["N815", "S101"]
 
 [tool.mypy]
 python_version = "3.13"
