@@ -164,14 +164,28 @@ class BundleIsolationKeys:
 # `payload` key can no longer happen structurally. Frozen + slots: a stage
 # produces a NEW instance (`dataclasses.replace`) rather than mutating one in
 # place.
+#
+# D30 (workstream identity, end-to-end trace, tenant wall): the Rust data
+# plane's `penguin-spine` envelope type requires `schema_version`,
+# `workstream_id`, `event_id` and `binding` on every envelope, with no
+# dual-read of the pre-D30 shape. This module carries the SAME field names
+# and shapes -- golden fixtures under `tests/fixtures/spine/` are asserted
+# against by both readers -- but keeps all six new fields additive-optional
+# (absent/null -> None) here rather than hard-required: this module is still
+# imported by the pre-cut-over Python-only stage runners, which have not yet
+# been migrated to mint them. A fully populated D30 envelope validates
+# identically on both sides; a legacy envelope missing them stays valid
+# here and would be refused by the Rust reader -- an intentional,
+# documented asymmetry during the transition, not a gap.
 
 
 class EnvelopeError(ValueError):
     """Raised when a queue-crossing pipeline object is malformed on read.
 
-    Covers a missing/wrong-typed required field and, deliberately, any
-    legacy pre-fix shape (e.g. a dict with no `event` key). A malformed or
-    legacy-shaped message is refused, never silently coerced.
+    Covers a missing/wrong-typed required field, an unknown top-level key,
+    and, deliberately, any legacy pre-fix shape (e.g. a dict with no `event`
+    key). A malformed or legacy-shaped message is refused, never silently
+    coerced.
     """
 
 
@@ -199,6 +213,18 @@ def _require_object(d: Mapping[str, Any], key: str) -> dict[str, Any]:
             f"{key!r} must be a JSON object, got {type(value).__name__}"
         )
     return value
+
+
+def _reject_unknown_keys(d: Mapping[str, Any], allowed: frozenset[str], what: str) -> None:
+    """Raise `EnvelopeError` if `d` carries a key outside `allowed`.
+
+    Shared strict-deserialization helper (spec Sec6.1.2): "an unknown
+    top-level field ... is an error. No coercion, ever." Applied to every
+    queue-crossing object in this module, not just `StageEnvelope`.
+    """
+    unknown = set(d) - allowed
+    if unknown:
+        raise EnvelopeError(f"unknown {what} field(s): {sorted(unknown)}")
 
 
 @dataclass(slots=True, frozen=True)
@@ -229,13 +255,24 @@ class PlatformEvent:
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> PlatformEvent:
         """Deserialize from a plain dict; raises `EnvelopeError` on a bad shape."""
+        platform = _require_str(d, "platform")
+        event_type = _require_str(d, "event_type")
+        actor = _optional_str(d, "actor")
+        payload = _require_object(d, "payload")
+        occurred_at = _require_str(d, "occurred_at")
+        _reject_unknown_keys(d, _PLATFORM_EVENT_ALLOWED_KEYS, "PlatformEvent")
         return cls(
-            platform=_require_str(d, "platform"),
-            event_type=_require_str(d, "event_type"),
-            actor=_optional_str(d, "actor"),
-            payload=_require_object(d, "payload"),
-            occurred_at=_require_str(d, "occurred_at"),
+            platform=platform,
+            event_type=event_type,
+            actor=actor,
+            payload=payload,
+            occurred_at=occurred_at,
         )
+
+
+_PLATFORM_EVENT_ALLOWED_KEYS = frozenset(
+    {"platform", "event_type", "actor", "payload", "occurred_at"}
+)
 
 
 #: Reserved `PlatformEvent.payload` key a process-stage `transform()` sets
@@ -249,6 +286,148 @@ class PlatformEvent:
 #: reply) sees. General mechanism -- any process bundle may set it, not
 #: forum-specific.
 PROCESS_TARGET_APP_ID_KEY = "_target_app_id"
+
+#: The only `StageEnvelope.schema_version` value this module recognizes as
+#: the D30 shape (spec Sec6.1.2). Additive-optional here (see the module
+#: note above): an ABSENT `schema_version` still means "pre-D30 legacy
+#: shape" and is accepted, but a PRESENT value other than this one is
+#: rejected outright -- no coercion, no silent reinterpretation.
+ENVELOPE_SCHEMA_VERSION = 2
+
+
+@dataclass(slots=True, frozen=True)
+class Trace:
+    """W3C trace context carried on every envelope (D30, spec Sec5.11/6.1.2).
+
+    Supersedes the pre-D30 single-field `trace_context` (A11): absent means
+    "no parent span", exactly like `target_app_id`. `traceparent` is
+    required whenever a `Trace` object itself is present; `tracestate` is
+    optional.
+    """
+
+    traceparent: str
+    tracestate: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain, JSON-ready dict."""
+        return {"traceparent": self.traceparent, "tracestate": self.tracestate}
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> Trace:
+        """Deserialize from a plain dict; raises `EnvelopeError` on a bad shape."""
+        traceparent = _require_str(d, "traceparent")
+        tracestate = _optional_str(d, "tracestate")
+        _reject_unknown_keys(d, _TRACE_ALLOWED_KEYS, "trace")
+        return cls(traceparent=traceparent, tracestate=tracestate)
+
+
+_TRACE_ALLOWED_KEYS = frozenset({"traceparent", "tracestate"})
+
+
+@dataclass(slots=True, frozen=True)
+class Binding:
+    """Envelope tenant-binding MAC (D30, spec Sec5.11/6.1.2): `{kid, mac}`.
+
+    `kid` names the active HMAC key version; `mac` is the lowercase-hex
+    HMAC-SHA256 output of the Sec5.11 formula. Computed and verified by the
+    Rust stage services -- this module only carries the shape.
+    """
+
+    kid: str
+    mac: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain, JSON-ready dict."""
+        return {"kid": self.kid, "mac": self.mac}
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> Binding:
+        """Deserialize from a plain dict; raises `EnvelopeError` on a bad shape."""
+        kid = _require_str(d, "kid")
+        mac = _require_str(d, "mac")
+        _reject_unknown_keys(d, _BINDING_ALLOWED_KEYS, "binding")
+        return cls(kid=kid, mac=mac)
+
+
+_BINDING_ALLOWED_KEYS = frozenset({"kid", "mac"})
+
+
+def _optional_schema_version(d: Mapping[str, Any]) -> int | None:
+    """Fetch the optional `schema_version` field (D30, spec Sec6.1.2).
+
+    Additive-optional: absent or explicit `null` -> `None`, preserving every
+    pre-D30 envelope's validity (a round-tripped envelope's own `to_dict()`
+    always emits this key, so `null` must be treated identically to
+    "absent" here). A PRESENT non-null value must equal
+    `ENVELOPE_SCHEMA_VERSION` -- this module carries the D30 shape but,
+    unlike the Rust reader, does not treat absence itself as an error (see
+    the module note above).
+    """
+    value = d.get("schema_version")
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise EnvelopeError(f"'schema_version' must be an integer, got {value!r}")
+    if value != ENVELOPE_SCHEMA_VERSION:
+        raise EnvelopeError(
+            f"'schema_version' must equal {ENVELOPE_SCHEMA_VERSION}, got {value!r}"
+        )
+    return value
+
+
+def _optional_trace(d: Mapping[str, Any]) -> Trace | None:
+    """Fetch the optional `trace` object (D30, spec Sec5.11/6.1.2, A11).
+
+    Supersedes the pre-D30 single-field `trace_context`; absent or explicit
+    `null` -> `None` ("no parent span"), exactly like `target_app_id`. When
+    present, strictly validated via `Trace.from_dict`.
+    """
+    value = d.get("trace")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise EnvelopeError(
+            f"'trace' must be a JSON object or null, got {type(value).__name__}"
+        )
+    return Trace.from_dict(value)
+
+
+def _optional_binding(d: Mapping[str, Any]) -> Binding | None:
+    """Fetch the optional `binding` object (D30, spec Sec5.11/6.1.2).
+
+    Additive-optional for the same reason as `schema_version`: the
+    tenant-binding MAC is computed and verified by the Rust stage services,
+    not by this module, so a pre-D30 envelope with no `binding` key stays a
+    valid legacy shape here. When present, strictly validated via
+    `Binding.from_dict`.
+    """
+    value = d.get("binding")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise EnvelopeError(
+            f"'binding' must be a JSON object or null, got {type(value).__name__}"
+        )
+    return Binding.from_dict(value)
+
+
+_STAGE_ENVELOPE_ALLOWED_KEYS = frozenset(
+    {
+        "schema_version",
+        "tenant",
+        "community",
+        "app_id",
+        "stage",
+        "event",
+        "ts",
+        "target_app_id",
+        "workstream_id",
+        "event_id",
+        "session_id",
+        "trace",
+        "binding",
+    }
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -275,6 +454,13 @@ class StageEnvelope:
     destination QUEUE KEY only -- `tenant`/`community` above are still
     sourced exclusively from `flask_core.get_bundle_context()`, never from
     event payload, so the security/tenancy invariant is untouched.
+
+    `schema_version`, `workstream_id`, `event_id`, `session_id`, `trace` and
+    `binding` are the D30 workstream-identity/trace/tenant-wall fields
+    (spec Sec5.11/6.1.2), minted once by svc-ingest and copied verbatim by
+    every later stage -- never accepted from a bundle's own output. All six
+    are additive-optional here (see the module note above): every existing
+    envelope that predates D30 stays valid.
     """
 
     tenant: str
@@ -284,10 +470,17 @@ class StageEnvelope:
     event: PlatformEvent
     ts: str
     target_app_id: str | None = None
+    schema_version: int | None = None
+    workstream_id: str | None = None
+    event_id: str | None = None
+    session_id: str | None = None
+    trace: Trace | None = None
+    binding: Binding | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain, JSON-ready dict; `event` nests under an `event` key."""
         return {
+            "schema_version": self.schema_version,
             "tenant": self.tenant,
             "community": self.community,
             "app_id": self.app_id,
@@ -295,6 +488,11 @@ class StageEnvelope:
             "event": self.event.to_dict(),
             "ts": self.ts,
             "target_app_id": self.target_app_id,
+            "workstream_id": self.workstream_id,
+            "event_id": self.event_id,
+            "session_id": self.session_id,
+            "trace": self.trace.to_dict() if self.trace is not None else None,
+            "binding": self.binding.to_dict() if self.binding is not None else None,
         }
 
     @classmethod
@@ -304,8 +502,14 @@ class StageEnvelope:
         Requires an `event` key holding a JSON object; a legacy pre-fix
         message shaped without one (e.g. carrying its data directly under
         `payload` at the top level instead) is refused, not coerced.
-        `target_app_id` is optional -- absent (legacy message) or explicit
-        `null` both deserialize to `None`.
+        `target_app_id` and the D30 fields (`schema_version`,
+        `workstream_id`, `event_id`, `session_id`, `trace`, `binding`) are
+        all optional -- absent or explicit `null` deserialize to `None`,
+        preserving every pre-D30 envelope's validity. A PRESENT value for
+        any of them is still strictly validated: wrong type, a malformed
+        nested object, or a `schema_version` other than
+        `ENVELOPE_SCHEMA_VERSION` is rejected outright, as is any unknown
+        top-level key.
         """
         tenant = _require_str(d, "tenant")
         app_id = _require_str(d, "app_id")
@@ -317,6 +521,15 @@ class StageEnvelope:
         event = _require_object(d, "event")
         target_app_id = _optional_str(d, "target_app_id")
 
+        schema_version = _optional_schema_version(d)
+        workstream_id = _optional_str(d, "workstream_id")
+        event_id = _optional_str(d, "event_id")
+        session_id = _optional_str(d, "session_id")
+        trace = _optional_trace(d)
+        binding = _optional_binding(d)
+
+        _reject_unknown_keys(d, _STAGE_ENVELOPE_ALLOWED_KEYS, "StageEnvelope")
+
         return cls(
             tenant=tenant,
             community=community,
@@ -325,6 +538,12 @@ class StageEnvelope:
             event=PlatformEvent.from_dict(event),
             ts=ts,
             target_app_id=target_app_id,
+            schema_version=schema_version,
+            workstream_id=workstream_id,
+            event_id=event_id,
+            session_id=session_id,
+            trace=trace,
+            binding=binding,
         )
 
 

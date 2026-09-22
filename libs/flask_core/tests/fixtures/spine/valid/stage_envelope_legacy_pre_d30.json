@@ -1,0 +1,15 @@
+{
+  "tenant": "global",
+  "community": null,
+  "app_id": "waddles.bot.commands.default",
+  "stage": "process",
+  "event": {
+    "platform": "twitch",
+    "event_type": "chat.message",
+    "actor": "some_user",
+    "payload": {"text": "!songrequest foo", "channel_id": "12345", "message_id": "abc"},
+    "occurred_at": "2026-09-14T12:00:00.000Z"
+  },
+  "ts": "2026-09-14T12:00:00.123Z",
+  "target_app_id": null
+}

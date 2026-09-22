@@ -100,6 +100,9 @@ from .stream_pipeline import (
     StageEnvelope,
     EnvelopeError,
     PROCESS_TARGET_APP_ID_KEY,
+    Trace,
+    Binding,
+    ENVELOPE_SCHEMA_VERSION,
 )
 from .circuit_breaker import (
     CircuitBreaker,
@@ -304,6 +307,9 @@ __all__ = [
     "StageEnvelope",
     "EnvelopeError",
     "PROCESS_TARGET_APP_ID_KEY",
+    "Trace",
+    "Binding",
+    "ENVELOPE_SCHEMA_VERSION",
     # Circuit Breaker & Resilience
     "CircuitBreaker",
     "CircuitBreakerError",
