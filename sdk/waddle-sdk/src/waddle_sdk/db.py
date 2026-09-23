@@ -63,9 +63,9 @@ def _coerce_param(value: Any) -> Any:
     """
     if isinstance(value, UUID):
         return str(value)
-    if isinstance(value, (dict, list)):
+    if isinstance(value, dict | list):
         return json.dumps(value)
-    if isinstance(value, (datetime, date)):
+    if isinstance(value, datetime | date):
         return value.isoformat()
     return value
 
@@ -84,7 +84,7 @@ def _to_wit_value(db_mod: Any, value: Any) -> Any:
         return db_mod.Value_IntValue(coerced)
     if isinstance(coerced, float):
         return db_mod.Value_FloatValue(coerced)
-    if isinstance(coerced, (bytes, bytearray)):
+    if isinstance(coerced, bytes | bytearray):
         return db_mod.Value_BytesValue(bytes(coerced))
     return db_mod.Value_TextValue(str(coerced))
 

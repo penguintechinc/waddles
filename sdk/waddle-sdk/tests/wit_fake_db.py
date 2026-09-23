@@ -24,7 +24,7 @@ def _wrap(value: Any) -> Any:
         return wit_shapes.Value_IntValue(value)
     if isinstance(value, float):
         return wit_shapes.Value_FloatValue(value)
-    if isinstance(value, (bytes, bytearray)):
+    if isinstance(value, bytes | bytearray):
         return wit_shapes.Value_BytesValue(bytes(value))
     return wit_shapes.Value_TextValue(str(value))
 
@@ -35,12 +35,10 @@ def _unwrap(value: Any) -> Any:
         return None
     if isinstance(
         value,
-        (
-            wit_shapes.Value_BoolValue,
-            wit_shapes.Value_IntValue,
-            wit_shapes.Value_FloatValue,
-            wit_shapes.Value_TextValue,
-        ),
+        wit_shapes.Value_BoolValue
+        | wit_shapes.Value_IntValue
+        | wit_shapes.Value_FloatValue
+        | wit_shapes.Value_TextValue,
     ):
         return value.value
     if isinstance(value, wit_shapes.Value_BytesValue):
