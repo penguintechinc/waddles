@@ -1,0 +1,7 @@
+{
+  "name": "waddles-example-echo-bundle",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Tier 1 JS/TS WIT conformance example bundle -- not published, not installed."
+}
