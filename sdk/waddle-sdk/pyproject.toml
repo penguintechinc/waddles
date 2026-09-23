@@ -1,0 +1,60 @@
+[project]
+name = "waddle-sdk"
+version = "0.1.0"
+description = "Waddles bundle SDK: penguin-dal-compatible facade + flask_core/waddle_transports compatibility shims over the waddle:bundle/stage@1.0.0 WIT world"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3", "pytest-cov==5.0.0", "mypy==1.11.2", "wasmtime==48.0.0"]
+
+[build-system]
+requires = ["setuptools==75.1.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+enable_incomplete_feature = ["NewGenericSyntax"]
+
+# `wit_world`, `componentize_py_types`, `_entry_wiring`, `_bundle_preimports`
+# are generated per-build, only inside a real compiled component (see
+# db.py/_component_entry.py module docstrings) -- never pip-installable, so
+# no stub can exist for static analysis to find.
+[[tool.mypy.overrides]]
+module = ["wit_world", "componentize_py_types", "_entry_wiring", "_bundle_preimports"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "D", "UP", "B", "ASYNC", "S"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Test names are self-documenting (pytest convention); S101 is standard
+# pytest usage; D1xx docstrings are not required on every test function.
+"tests/*" = ["D100", "D101", "D102", "D103", "D104", "S101"]
+# Every SQL string below is built from `$N` placeholders plus trusted
+# table/column identifiers coming from the query builder's own FieldProxy/
+# TableProxy objects -- never from unvalidated external input -- and every
+# value crosses as a parameter, never interpolated into the string. S608 has
+# no way to distinguish that from real string-based injection, so it fires
+# on every f-string in this file's query builder by construction.
+"src/waddle_sdk/db.py" = ["S608"]
+# `Err`/`_FakeErr` are named to match componentize-py's real generated
+# `componentize_py_types.Err` exception class exactly -- these are test
+# doubles standing in for that binding, so the name is load-bearing (tests
+# assert on it), not a naming-convention lapse. wit_shapes.py's `Value_*`/
+# `Error_*` classes are likewise named to match componentize-py's own
+# generated case-name convention (kebab-case WIT variant case ->
+# `Value_PascalCase`), not this repo's usual class-naming convention.
+"tests/wit_shapes.py" = ["N801", "N818"]
+"tests/test_component_entry.py" = ["N818"]
