@@ -1,0 +1,30 @@
+{
+  "name": "@waddles/waddle-sdk-js",
+  "version": "0.1.0",
+  "description": "Tier-1 JavaScript/TypeScript SDK for Waddles app bundles over the waddle:bundle/stage@1.0.0 WIT world.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:tests": "tsc -p tsconfig.test.json",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "test": "npm run build:tests && node --test dist-tests/tests/wrapper.test.js",
+    "test:conformance": "npm run build && npm run build:tests && node --test dist-tests/tests/conformance.test.js",
+    "test:all": "npm test && npm run test:conformance",
+    "generate:types": "bash scripts/generate-guest-types.sh",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "1.34.0",
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.13.6",
+    "eslint": "10.11.0",
+    "globals": "17.12.0",
+    "typescript": "5.6.3",
+    "typescript-eslint": "8.70.1"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}
