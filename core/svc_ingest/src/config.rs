@@ -133,9 +133,9 @@ pub struct CliConfig {
     pub twitch_irc_use_tls: bool,
 
     /// Override for the Discord Gateway WebSocket URL. Empty (the default)
-    /// means the future receiver's own production default is used; only
-    /// overridden for tests against a local fake gateway. Not yet consumed
-    /// by any receiver -- BLOCKED, see `src/lib.rs`'s module doc.
+    /// means `penguin_connector_discord::gateway::GatewayConfig::new`'s own
+    /// production default is used; only overridden for tests against a
+    /// local fake gateway (`crate::lib::try_start_discord`).
     #[arg(long, env = "DISCORD_GATEWAY_URL", default_value = "")]
     pub discord_gateway_url: String,
 }
@@ -166,13 +166,14 @@ impl CliConfig {
 #[derive(Clone)]
 pub struct Config {
     pub cli: CliConfig,
-    /// `TWITCH_IRC_OAUTH_TOKEN` -- the raw OAuth token a future Twitch IRC
-    /// receiver would prefix with `oauth:` before sending it as the IRC
-    /// `PASS`. Not yet consumed -- BLOCKED, see `src/lib.rs`'s module doc.
+    /// `TWITCH_IRC_OAUTH_TOKEN` -- the raw OAuth token
+    /// `crate::ingest::twitch::irc_config` prefixes with `oauth:` before
+    /// sending it as the IRC `PASS`. Also the outbound relay sender's own
+    /// credential (`crate::outbound`) -- see that module's "Credential
+    /// resolution" doc.
     pub twitch_irc_oauth_token: Option<Secret>,
-    /// `DISCORD_BOT_TOKEN` -- would be sent verbatim in the Gateway
-    /// `IDENTIFY`. Not yet consumed -- BLOCKED, see `src/lib.rs`'s module
-    /// doc.
+    /// `DISCORD_BOT_TOKEN` -- sent verbatim in the Gateway `IDENTIFY`
+    /// (`crate::lib::try_start_discord`).
     pub discord_bot_token: Option<Secret>,
     /// `ENVELOPE_BINDING_KEYS`, the `KeyRing::parse` wire shape
     /// (`kid1:hexkey1,kid2:hexkey2`, spec S5.11/S12.3).
@@ -239,16 +240,16 @@ impl Config {
     }
 
     /// True when enough configuration is present for a Twitch IRC receiver
-    /// to start (a nick, a channel, and an OAuth token all set). Not yet
-    /// consumed by a receiver -- BLOCKED, see `src/lib.rs`'s module doc.
+    /// to start (a nick, a channel, and an OAuth token all set) --
+    /// `crate::lib::try_start_twitch_irc`.
     pub fn twitch_irc_enabled(&self) -> bool {
         !self.cli.twitch_irc_nick.is_empty()
             && !self.cli.twitch_irc_channel.is_empty()
             && self.twitch_irc_oauth_token.is_some()
     }
 
-    /// True when a Discord bot token is configured. Not yet consumed by a
-    /// receiver -- BLOCKED, see `src/lib.rs`'s module doc.
+    /// True when a Discord bot token is configured --
+    /// `crate::lib::try_start_discord`.
     pub fn discord_enabled(&self) -> bool {
         self.discord_bot_token.is_some()
     }

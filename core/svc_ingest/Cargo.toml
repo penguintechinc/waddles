@@ -19,34 +19,30 @@ path = "src/main.rs"
 # Dependency Pinning. Cargo.lock is committed alongside this file.
 #
 # M5 runtime: `penguin-spine` (D30 workstream/trace/binding minting + the
-# XADD produce side, see `src/publish.rs`) and `penguin-logging` (telemetry,
-# mirrors `core/svc_process/src/telemetry.rs`) are wired in.
+# XADD produce side, see `src/publish.rs`), `penguin-logging` (telemetry,
+# mirrors `core/svc_process/src/telemetry.rs`), and `penguin-connector-
+# {twitch,discord}` (live platform receivers + the Twitch outbound relay
+# sender, see `src/ingest/`, `src/outbound.rs`) are wired in.
 #
-# `penguin-connector-{twitch,discord,slack,youtube,kick}` are DELIBERATELY
-# NOT dependencies here -- BLOCKED, not merely deferred. Verified via
-# `cargo generate-lockfile`: `penguin-connector-twitch`/`-discord` (pinned
-# rev `5b5cac0d5ad898987705d9eb9e23cb06d484a337`,
-# `release/rust-connectors/v0.1.x`) exact-pin `serde = "=1.0.228"`,
-# `serde_json = "=1.0.150"`, `tokio = "=1.52.3"`, `thiserror = "=2.0.18"`
-# in their own Cargo.toml, while `penguin-spine`/`penguin-logging` (pinned
-# revs below, `release/rust-{spine,logging}/v0.1.x`) exact-pin
-# `serde = "=1.0.229"`, `serde_json = "=1.0.151"`, `tokio = "=1.53.1"`,
-# `thiserror = "=2.0.20"`. Two different exact ("=") requirements for the
-# same SemVer-compatible crate cannot both resolve to one Cargo.lock entry
-# (confirmed: removing every one of this crate's own competing pins still
-# reproduces the identical conflict directly between those two crate
-# families -- see the PR description / final report for the four
-# `cargo generate-lockfile` failure transcripts). `git log` on
-# `release/rust-connectors/v0.1.x` shows these pins have been exactly this
-# since the crate's first commit (`4651e05`), so no earlier commit on that
-# branch is compatible either. This is a genuine defect in the landed
-# `penguin-libs` crates, not something `core/svc_ingest`'s own Cargo.toml
-# can work around -- the fix (aligning the connector crates' pins to match
-# spine/logging, or vice versa) belongs in `penguin-libs`. Until that
-# lands, no platform receiver can be linked into this binary alongside
-# `penguin-spine` at all. The generic webhook/JWT intake surfaces and
-# `penguin-licensing` remain separately `// TODO(M5)` -- see `src/lib.rs`.
-# No `sea-orm`: ingest has no database, matching today's Python service and
+# RESOLVED CROSS-CRATE PIN CONFLICT (previously blocking, now fixed
+# upstream): `penguin-connector-{twitch,discord}` at the OLD rev
+# `5b5cac0d5ad898987705d9eb9e23cb06d484a337` exact-pinned
+# `serde = "=1.0.228"`/`serde_json = "=1.0.150"`/`tokio = "=1.52.3"`/
+# `thiserror = "=2.0.18"`, incompatible with `penguin-spine`/`penguin-
+# logging`'s `1.0.229`/`1.0.151`/`1.53.1`/`2.0.20` -- two different exact
+# ("=") requirements for the same SemVer-compatible crate cannot resolve to
+# one Cargo.lock entry. Fixed in `penguin-libs` PR #98: the connectors'
+# pins were bumped to match spine/logging exactly. The rev pinned below
+# (`a542873b8b594b530f99e1eab48e479d705b5100`) carries that fix -- verified
+# via a clean-`CARGO_HOME` `cargo build --locked` with connectors + spine +
+# logging co-resolved into a single `serde`/`serde_json`/`tokio`/
+# `thiserror` entry each (see the PR description / final report). The
+# connector crates' own source (`irc.rs`/`gateway.rs`) is byte-identical to
+# the old rev -- only `Cargo.toml`/`Cargo.lock` changed.
+#
+# Slack/YouTube/Kick receivers, the generic webhook/JWT intake surfaces,
+# and `penguin-licensing` remain `// TODO(M5)` -- see `src/lib.rs`. No
+# `sea-orm`: ingest has no database, matching today's Python service and
 # the spec's S4.1 dependency list.
 #
 # THE penguin-libs DEPENDENCY PATTERN -- copied verbatim from
@@ -76,26 +72,6 @@ path = "src/main.rs"
 # commit's own `Cargo.toml` actually satisfies this requirement.
 # `deny.toml`'s `[sources]` `allow-git` must list this exact repository URL
 # or `cargo deny check` fails closed on `unknown-git`.
-#
-# KNOWN CROSS-CRATE VERSION SKEW (documented, not silently papered over):
-# `penguin-connector-{twitch,discord}` pin `tokio = "=1.52.3"` internally
-# (their own Cargo.toml, penguin-libs `release/rust-connectors/v0.1.x`)
-# while `penguin-spine`/`penguin-logging` and this crate pin `tokio
-# = "=1.53.1"`. Both are semver-compatible (`^1`) but the two exact pins
-# cannot unify to one Cargo.lock entry, so Cargo resolves two separate
-# `tokio` crate instances in this binary's dependency graph -- confirmed
-# via `cargo tree -i tokio` (see the PR description / final report for the
-# captured output). This is a real, pre-existing skew in the landed
-# penguin-libs revs pinned below, not introduced here; a same-process
-# integration test (`tests/twitch_irc_live_smoke.rs`) proves the connector
-# crate's own internal socket I/O still runs correctly under this crate's
-# `#[tokio::main]` runtime despite the two-tokio-instance graph (tokio's
-# per-task runtime `Handle` is passed by value into every `Future`, not
-# looked up through a single global, so socket I/O compiled against a
-# different tokio *instance* still finds a live reactor as long as SOME
-# compatible runtime is driving the poll loop that instance's own I/O
-# driver was registered against at connect time). Flagged for a follow-up
-# `penguin-connectors` tokio-pin bump to `=1.53.1` rather than left silent.
 [dependencies]
 tokio = { version = "=1.53.1", features = ["full"] }
 axum = "=0.8.9"
@@ -122,6 +98,51 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 # never constructs a `GroupReader` (that is process's/action's job, and
 # outside ingest's Valkey ACL, S11.10.2).
 penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "2976bf8a336a720ee5f939ad2d1a3f7b4b820642", package = "penguin-spine", version = "=0.1.0" }
+# `penguin-connector-twitch`: IRC chat receive (`src/ingest/twitch.rs`) and
+# the outbound relay sender (`src/outbound.rs`, `TwitchIrcSender`) -- rev
+# carries the pin-alignment fix, penguin-libs PR #98 (see the comment
+# above). EventSub webhook verification remains a separate `// TODO(M5)`
+# seam.
+penguin-connector-twitch = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "a542873b8b594b530f99e1eab48e479d705b5100", package = "penguin-connector-twitch", version = "=0.1.0" }
+# `penguin-connector-discord`: Gateway chat receive (`src/ingest/discord.rs`).
+penguin-connector-discord = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "a542873b8b594b530f99e1eab48e479d705b5100", package = "penguin-connector-discord", version = "=0.1.0" }
+# Named directly (not just transitive via penguin-connector-discord) only
+# because `src/ingest/discord.rs`'s `GatewayConnector for
+# DiscordGatewayReceiver` impl names `tokio_tungstenite::MaybeTlsStream` in
+# its associated-type position -- version pinned to match
+# penguin-connector-discord's own internal pin exactly so both refer to the
+# same compiled type.
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = [
+    "connect",
+    "handshake",
+    "rustls-tls-webpki-roots",
+] }
+# Direct Valkey client for the Twitch outbound relay's raw list
+# (`waddles:transport:irc:twitch:outbound`, `src/outbound.rs`) --
+# `penguin_spine::SpineClient` is Streams-only (`XADD`/`XREADGROUP`); the
+# relay queue is a plain list (`LPUSH`/`BRPOP`), out of that surface on
+# purpose (matches the M5 plan's own "Direct Valkey client ... for the
+# Twitch outbound relay's raw BRPOP list" note). Same exact version
+# `penguin-spine`/`core/svc_action` already pin, so this never introduces a
+# second `redis` crate instance into the dependency graph.
+redis = { version = "=1.7.0", default-features = false, features = [
+    "tokio-comp",
+    "tls-rustls",
+    "tokio-rustls-comp",
+] }
+# `redis`'s `tls-rustls` feature enables `dep:rustls` but requests no
+# process-level `CryptoProvider` -- without one installed, the first TLS
+# handshake panics with "Could not automatically determine the process-
+# level CryptoProvider" (rustls 0.23+ requires an explicit choice).
+# `src/outbound.rs` installs it once, idempotently (ignoring an
+# already-installed error), the same defensive pattern
+# `penguin-spine`'s own (private) `ensure_crypto_provider_installed` uses
+# internally -- exact version match so both refer to the same compiled
+# `CryptoProvider` type.
+rustls = { version = "=0.23.45", default-features = false, features = [
+    "std",
+    "ring",
+] }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"
