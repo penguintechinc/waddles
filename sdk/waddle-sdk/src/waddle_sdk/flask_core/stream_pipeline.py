@@ -20,6 +20,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from waddle_sdk._json_guard import to_canonical_json_object
+
 
 @dataclass(slots=True)
 class PlatformEvent:
@@ -68,12 +70,19 @@ class PlatformEvent:
         )
 
     def to_wit_record(self, types_mod: Any) -> Any:
-        """Build the generated WIT binding's ``types.PlatformEvent`` record from this event."""
+        """Build the generated WIT binding's ``types.PlatformEvent`` record from this event.
+
+        ``payload_json`` must be canonical JSON *object* text (spec D21
+        parity with the Rust SDK's ``to_canonical_json_object()``) -- raises
+        :class:`~waddle_sdk._json_guard.NonObjectJsonError` if ``self.payload``
+        isn't a ``dict`` (Python doesn't enforce the field's type hint at
+        runtime).
+        """
         return types_mod.PlatformEvent(
             platform=self.platform,
             event_type=self.event_type,
             actor=self.actor,
-            payload_json=json.dumps(self.payload),
+            payload_json=to_canonical_json_object(self.payload),
             occurred_at=self.occurred_at,
         )
 

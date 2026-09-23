@@ -13,8 +13,9 @@ required, not a plain string.
 
 from __future__ import annotations
 
-import json
 from typing import Any
+
+from waddle_sdk._json_guard import to_canonical_json_object
 
 
 def _write(level_name: str, message: str, fields: dict[str, Any] | None) -> None:
@@ -22,7 +23,7 @@ def _write(level_name: str, message: str, fields: dict[str, Any] | None) -> None
 
     log_mod = wit_world.imports.log
     level = log_mod.Level[level_name]
-    log_mod.write(level, message, json.dumps(fields or {}))
+    log_mod.write(level, message, to_canonical_json_object(fields or {}))
 
 
 def debug(message: str, **fields: Any) -> None:

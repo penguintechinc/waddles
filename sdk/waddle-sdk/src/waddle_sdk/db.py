@@ -463,6 +463,43 @@ class AsyncQuerySet:
         return len(rows) > 0
 
 
+# Table name -> real PK column name, for tables whose primary key isn't
+# `id`. Populated only via `register_primary_key()` -- see that function's
+# docstring for why this registry exists instead of live introspection.
+_PRIMARY_KEY_OVERRIDES: dict[str, str | None] = {}
+
+
+def register_primary_key(table: str, pk_column: str | None) -> None:
+    """Register ``table``'s real primary-key column name (spec D21).
+
+    **Necessary, documented substitute for schema introspection.** Real
+    ``penguin_dal.TableProxy`` reads the actual PK column from live-reflected
+    SQLAlchemy metadata (``Table.primary_key.columns``); this facade has no
+    metadata to reflect -- the WIT ``db`` interface exposes exactly one
+    member, ``execute`` (see ``wit/waddle-bundle/stage.wit``), with no
+    schema-reflection capability at all. ``id`` is therefore the default PK
+    column name -- true for every first-party bundle table today -- and
+    remains the fallback for any table never registered here.
+
+    Call this once (e.g. at bundle import time) before first access to a
+    table whose real PK column is something other than ``id``, so
+    :class:`TableProxy`'s ``__getitem__``/``async_insert`` build the correct
+    ``WHERE``/``RETURNING`` clause instead of guessing ``id``. Pass
+    ``pk_column=None`` to mark a table's PK as explicitly unsupported (e.g.
+    a composite key -- this facade's single-value ``db.table[pk]``/
+    ``RETURNING <col>`` shape has no way to represent one); doing so makes
+    ``__getitem__``/``async_insert`` raise ``NotImplementedError`` naming the
+    table (D21's rule: an explicit gap, never a silent mis-execution) rather
+    than emitting a wrong or nonsensical column name.
+    """
+    _PRIMARY_KEY_OVERRIDES[table] = pk_column
+
+
+def reset_primary_key_overrides_for_tests() -> None:
+    """Clear every registered PK override. Test-only."""
+    _PRIMARY_KEY_OVERRIDES.clear()
+
+
 class TableProxy:
     """``db.command_aliases`` -- matches ``penguin_dal.table_proxy.TableProxy``.
 
@@ -474,6 +511,11 @@ class TableProxy:
     name unconditionally. Column/table-name validation happens where it
     always has to happen in this design: the stage's SQL parser and Postgres
     itself.
+
+    **Second documented, necessary deviation:** ``__getitem__``/
+    ``async_insert`` assume the PK column is named ``id`` unless overridden
+    via :func:`register_primary_key` -- see that function's docstring for why
+    live PK introspection is impossible here.
     """
 
     def __init__(self, name: str) -> None:
@@ -491,6 +533,17 @@ class TableProxy:
             raise AttributeError(name)
         return FieldProxy(self._name, name)
 
+    def _resolve_pk_column(self) -> str:
+        """Return this table's real PK column name, or raise if unsupported.
+
+        See :class:`TableProxy`'s docstring / :func:`register_primary_key`
+        for why ``id`` is the default and how to override it.
+        """
+        pk_column = _PRIMARY_KEY_OVERRIDES.get(self._name, "id")
+        if pk_column is None:
+            raise NotImplementedError(f"non-'id' primary key not supported: {self._name}")
+        return pk_column
+
     def __getitem__(self, pk: Any) -> Row | None:
         """PK lookup -- ``db.table[42]``.
 
@@ -501,7 +554,10 @@ class TableProxy:
         ``run_until_complete`` (which exists there only because its
         underlying engine call genuinely is async I/O).
         """
-        rows, _ = _cross(f"SELECT * FROM {self._name} WHERE {self._name}.id = $1", [pk])
+        pk_column = self._resolve_pk_column()
+        rows, _ = _cross(
+            f"SELECT * FROM {self._name} WHERE {self._name}.{pk_column} = $1", [pk]
+        )
         return Row(rows[0]) if rows else None
 
     def insert(self, **kwargs: Any) -> Any:
@@ -512,14 +568,18 @@ class TableProxy:
         )
 
     async def async_insert(self, **kwargs: Any) -> Any:
-        """Insert one row and return its ``id`` (appends ``RETURNING id``)."""
+        """Insert one row and return its PK value (appends ``RETURNING <pk column>``)."""
+        pk_column = self._resolve_pk_column()
         cols = list(kwargs.keys())
         col_list = ", ".join(cols)
         placeholders = ", ".join(f"${i + 1}" for i in range(len(cols)))
-        sql = f"INSERT INTO {self._name} ({col_list}) VALUES ({placeholders}) RETURNING id"
+        sql = (
+            f"INSERT INTO {self._name} ({col_list}) VALUES ({placeholders}) "
+            f"RETURNING {pk_column}"
+        )
         params = [kwargs[c] for c in cols]
         rows, _ = _cross(sql, params)
-        return rows[0]["id"] if rows else None
+        return rows[0][pk_column] if rows else None
 
     def bulk_insert(self, rows: list[dict[str, Any]]) -> None:
         """Not implemented (sync) -- use :meth:`async_bulk_insert`."""

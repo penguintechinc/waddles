@@ -9,6 +9,7 @@ import types
 import pytest
 
 import waddle_sdk.relay as relay
+from waddle_sdk._json_guard import NonObjectJsonError
 
 
 def _run(coro):
@@ -39,3 +40,10 @@ def test_push_serializes_message_to_json(fake_relay) -> None:
     provider, message_json = fake_relay[0]
     assert provider == "discord"
     assert json.loads(message_json) == {"channel_id": "c1", "text": "hi"}
+
+
+def test_push_rejects_non_object_message(fake_relay) -> None:
+    """push() raises NonObjectJsonError for a list/scalar message, never sends non-object JSON."""
+    with pytest.raises(NonObjectJsonError, match="expected a JSON object"):
+        _run(relay.push("discord", ["not", "an", "object"]))  # type: ignore[arg-type]
+    assert fake_relay == []  # never crossed the WIT boundary
