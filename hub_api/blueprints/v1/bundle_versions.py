@@ -29,6 +29,7 @@ from flask_core.tenancy import get_tenant_context, tenant_middleware
 from penguin_dal import AsyncDB
 from quart import Blueprint, current_app, request
 from quart_schema import validate_response
+from werkzeug.datastructures import FileStorage
 
 from services import bundle_version_service as svc
 from services.current_user import get_current_user_id
@@ -45,6 +46,21 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     return cast(
         tuple[dict[str, object], int], error_response(exc.message, exc.status_code, exc.code)
     )
+
+
+def _read_capped(file_storage: FileStorage, limit: int, message: str) -> bytes:
+    """Read at most `limit + 1` bytes from an uploaded multipart part.
+
+    `FileStorage.read()` alone loads the whole part into memory first and
+    only lets a size check reject it afterwards -- exactly backwards for
+    an attacker-controlled payload size (security.md Input Validation).
+    Reading one byte past the ceiling is enough to detect an oversized
+    part without ever materializing more of it than that.
+    """
+    data = file_storage.stream.read(limit + 1)
+    if len(data) > limit:
+        raise ApiError(message, 413, "PAYLOAD_TOO_LARGE")
+    return data
 
 
 async def _allow_prebuilt(install_dal: AsyncDB) -> bool:
@@ -89,14 +105,24 @@ async def post_version(app_id: str) -> tuple[dict[str, object], int]:
     manifest_file = files.get("manifest")
     if manifest_file is None:
         return _err(bad_request("manifest part is required"))
-    manifest_bytes = manifest_file.read()
     source_file = files.get("source")
     component_file = files.get("component")
-    source_bytes = source_file.read() if source_file is not None else None
-    component_bytes = component_file.read() if component_file is not None else None
 
     caller_id = get_current_user_id(request)
     try:
+        manifest_bytes = _read_capped(
+            manifest_file, svc.BUNDLE_MAX_MANIFEST_BYTES, "manifest exceeds 1 MiB"
+        )
+        source_bytes = (
+            _read_capped(source_file, svc.BUNDLE_MAX_SOURCE_BYTES, "source tarball exceeds 16 MiB")
+            if source_file is not None
+            else None
+        )
+        component_bytes = (
+            _read_capped(component_file, svc.BUNDLE_MAX_COMPONENT_BYTES, "component exceeds 32 MiB")
+            if component_file is not None
+            else None
+        )
         row = await svc.create_version(
             install_dal,
             tenant_id=ctx.tenant_id,

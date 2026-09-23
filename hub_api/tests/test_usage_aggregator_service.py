@@ -9,6 +9,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from penguin_dal.table_proxy import TableProxy
 
 from services.bundle_install_dal import raw_sql_rows
 from services.usage_aggregator_service import (
@@ -209,6 +210,81 @@ async def test_run_usage_aggregation_batch_groups_two_different_workstreams_sepa
     ]
     result = await run_usage_aggregation_batch(install_dal, redis_client)
     assert result == AggregationResult(examined=2, written=2, skipped=0)
+
+
+async def test_run_usage_aggregation_batch_isolates_a_poison_group(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A poison group's insert failure must not block or duplicate every other group in the batch.
+
+    An FK violation on one group must not block acking (or cause
+    re-insertion on a future retry) of every other group in the same
+    batch, and must not leave the poison group's own entries stuck in
+    the pending-entries list forever.
+
+    `install_dal.workstream_usage_hourly` is a fresh `TableProxy` on every
+    attribute access (`AsyncDB.__getattr__` builds a new one each time,
+    never caching per-instance) -- patching one such throwaway instance
+    would never affect the one `run_usage_aggregation_batch()` itself
+    creates. Patching `TableProxy.async_insert` at the class level, gated
+    on this table name and the poison `tenant_id`, is what actually
+    intercepts the real call.
+    """
+    real_async_insert = TableProxy.async_insert
+
+    async def _poison_insert(self: Any, **kwargs: Any) -> Any:
+        if self._table.name == "workstream_usage_hourly" and kwargs.get("tenant_id") == 999:
+            raise RuntimeError("simulated FK violation")
+        return await real_async_insert(self, **kwargs)
+
+    monkeypatch.setattr(TableProxy, "async_insert", _poison_insert)
+
+    def _fields(tenant_id: bytes, workstream_id: bytes, events: bytes) -> dict[bytes, bytes]:
+        return {
+            b"tenant_id": tenant_id,
+            b"community_id": b"_tenant",
+            b"workstream_id": workstream_id,
+            b"stage": b"ingest",
+            b"app_id": b"",
+            b"hour": b"2026-09-14T10:00:00+00:00",
+            b"events": events,
+            b"invocations": b"0",
+            b"host_calls": b"0",
+            b"actions_delivered": b"0",
+            b"fuel_ms": b"0",
+            b"outbound_bytes": b"0",
+        }
+
+    redis_client = AsyncMock()
+    redis_client.xreadgroup.return_value = [
+        (
+            USAGE_STREAM,
+            [
+                (b"4-1", _fields(b"1", b"ws-good", b"2")),
+                (b"4-2", _fields(b"999", b"ws-poison", b"9")),
+            ],
+        ),
+    ]
+
+    result = await run_usage_aggregation_batch(install_dal, redis_client)
+
+    assert result == AggregationResult(examined=2, written=1, skipped=1)
+    # Both groups get ack'd -- the poison group is dead-lettered, not left
+    # stuck pending forever.
+    acked = {eid for call in redis_client.xack.call_args_list for eid in call.args[2:]}
+    assert acked == {b"4-1", b"4-2"}
+    good_rows = await raw_sql_rows(
+        install_dal,
+        "SELECT events FROM workstream_usage_hourly WHERE workstream_id = :w",
+        {"w": "ws-good"},
+    )
+    assert good_rows.first()["events"] == 2
+    poison_rows = await raw_sql_rows(
+        install_dal,
+        "SELECT events FROM workstream_usage_hourly WHERE workstream_id = :w",
+        {"w": "ws-poison"},
+    )
+    assert poison_rows.first() is None
 
 
 async def test_main_propagates_a_redis_connection_error(

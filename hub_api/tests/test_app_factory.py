@@ -18,6 +18,7 @@ from quart import Quart
 
 from app import bridge_session_cookie_to_bearer, create_app
 from config import HubAPIConfig
+from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
 
 
 def _test_config() -> HubAPIConfig:
@@ -59,6 +60,16 @@ class TestAppFactoryBoots:
         async with app.test_app():
             assert app.config.get("dal") is not None
             assert app.config.get("async_dal") is not None
+
+    def test_max_content_length_is_capped(self, app: Quart) -> None:
+        """The cap is explicit and tied to this app's real ceiling, not Quart's 16 MiB default.
+
+        Quart's own built-in default sits exactly at
+        `BUNDLE_MAX_SOURCE_BYTES`, which would silently reject any
+        legitimate 32 MiB `component` upload before it ever reached this
+        app's own per-part checks.
+        """
+        assert app.config["MAX_CONTENT_LENGTH"] == BUNDLE_MAX_REQUEST_BYTES
 
 
 class TestHealthEndpoint:

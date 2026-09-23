@@ -11,6 +11,7 @@ from quart_schema import QuartSchema
 from werkzeug.datastructures import FileStorage
 
 from blueprints.v1.bundle_versions import BLUEPRINTS
+from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
 from tests.conftest import make_token
 
 _MANIFEST_YAML = b"""
@@ -47,6 +48,12 @@ def _upload_files(
 def app(bundle_install_db: Any, install_dal: Any) -> Quart:
     app = Quart(__name__)
     QuartSchema(app)
+    # Mirrors app.py::create_app()'s own MAX_CONTENT_LENGTH -- Quart's own
+    # built-in default (16 MiB) sits exactly at BUNDLE_MAX_SOURCE_BYTES,
+    # which would otherwise mask this blueprint's own oversize-part checks
+    # for anything larger (in particular the 32 MiB component ceiling)
+    # behind Quart's generic, non-JSON 413 instead of this route's own.
+    app.config["MAX_CONTENT_LENGTH"] = BUNDLE_MAX_REQUEST_BYTES
     app.config["async_dal"] = bundle_install_db
     app.config["dal"] = bundle_install_db.dal
     app.config["install_dal"] = install_dal
@@ -89,6 +96,34 @@ async def test_post_version_missing_manifest_is_400(app: Quart) -> None:
         files=_upload_files(manifest=None),
     )
     assert response.status_code == 400
+
+
+async def test_post_version_manifest_app_id_mismatching_the_url_is_400(app: Quart) -> None:
+    """The URL says `forums`, the manifest says `music` -- refused before any DB write."""
+    token = make_token(scope="platform:admin", user_id="1")
+    client = app.test_client()
+    response = await client.post(
+        "/api/v1/apps/waddles.socials.forums.default/versions",
+        headers={"Authorization": f"Bearer {token}"},
+        files=_upload_files(),
+    )
+    assert response.status_code == 400
+    body = await response.get_json()
+    assert body["error"]["code"] == "app_id_mismatch"
+
+
+async def test_post_version_oversize_source_is_413_without_a_500(app: Quart) -> None:
+    """A source part over the 16 MiB ceiling is refused via a bounded read, not a full buffer."""
+    token = make_token(scope="platform:admin", user_id="1")
+    client = app.test_client()
+    response = await client.post(
+        "/api/v1/apps/waddles.socials.music.default/versions",
+        headers={"Authorization": f"Bearer {token}"},
+        files=_upload_files(source=b"x" * (16_777_216 + 1)),
+    )
+    assert response.status_code == 413
+    body = await response.get_json()
+    assert body["error"]["code"] == "PAYLOAD_TOO_LARGE"
 
 
 async def test_get_version_returns_404_for_unknown_version(app: Quart) -> None:

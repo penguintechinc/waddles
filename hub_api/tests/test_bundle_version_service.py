@@ -104,6 +104,49 @@ async def test_create_version_rejects_bad_manifest(install_dal: Any) -> None:
     assert exc.value.code == "unsupported_schema_version"
 
 
+async def test_create_version_rejects_a_manifest_app_id_mismatching_the_url(
+    install_dal: Any,
+) -> None:
+    """The row would store the URL's `app_id` while `manifest_json` keeps the YAML's own.
+
+    An admin scoped to app A must not be able to upload a manifest
+    describing app B.
+    """
+    with pytest.raises(ApiError) as exc:
+        await create_version(
+            install_dal,
+            tenant_id=1,
+            app_id="waddles.socials.forums.default",  # URL says forums...
+            requested_by=1,
+            manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),  # ...manifest says music
+            source_bytes=b"x",
+            component_bytes=None,
+            known_custom_platforms=frozenset(),
+            allow_wildcard_consumes=False,
+            allow_prebuilt=True,
+        )
+    assert exc.value.status_code == 400
+    assert exc.value.code == "app_id_mismatch"
+
+
+async def test_create_version_rejects_an_oversize_manifest(install_dal: Any) -> None:
+    with pytest.raises(ApiError) as exc:
+        await create_version(
+            install_dal,
+            tenant_id=1,
+            app_id="waddles.socials.music.default",
+            requested_by=1,
+            manifest_bytes=b"x" * (1_048_576 + 1),
+            source_bytes=b"x",
+            component_bytes=None,
+            known_custom_platforms=frozenset(),
+            allow_wildcard_consumes=False,
+            allow_prebuilt=True,
+        )
+    assert exc.value.status_code == 413
+    assert exc.value.code == "PAYLOAD_TOO_LARGE"
+
+
 async def test_create_version_rejects_oversize_source(install_dal: Any) -> None:
     with pytest.raises(ApiError) as exc:
         await create_version(

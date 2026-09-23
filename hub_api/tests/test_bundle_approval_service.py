@@ -219,8 +219,20 @@ def test_classify_diff_initial_with_no_previous() -> None:
     assert classify_diff(summary, None) == "initial"
 
 
-async def test_deny_version_sets_rejected(install_dal: Any) -> None:
-    await _seed_published(install_dal)
+async def test_deny_version_sets_rejected_from_a_valid_state(install_dal: Any) -> None:
+    """Deny is legal from any non-terminal state (spec Sec9.1), exercised straight off UPLOADED."""
+    now = datetime.now(UTC)
+    await install_dal.app_version_uploads.async_insert(
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        artifact_kind="source",
+        language="python",
+        status="UPLOADED",
+        manifest_json=_MANIFEST,
+        created_at=now,
+        updated_at=now,
+    )
     await deny_version(
         install_dal,
         app_id="waddles.socials.music.default",
@@ -230,6 +242,27 @@ async def test_deny_version_sets_rejected(install_dal: Any) -> None:
     row = (await install_dal(install_dal.app_version_uploads.version == "3.0.1").select()).first()
     assert row.status == "REJECTED"
     assert row.reject_reason == "egress host not acceptable"
+
+
+async def test_deny_version_on_a_published_row_is_refused(install_dal: Any) -> None:
+    """PUBLISHED is terminal (spec Sec9.1) -- deny must route through the state machine.
+
+    Regression: `deny_version()` used to write `status="REJECTED"` directly,
+    letting it mutate a terminal PUBLISHED row instead of refusing the
+    illegal transition.
+    """
+    await _seed_published(install_dal)
+    with pytest.raises(ApiError) as exc:
+        await deny_version(
+            install_dal,
+            app_id="waddles.socials.music.default",
+            version="3.0.1",
+            reason="late objection",
+        )
+    assert exc.value.status_code == 409
+    assert exc.value.code == "invalid_state_transition"
+    row = (await install_dal(install_dal.app_version_uploads.version == "3.0.1").select()).first()
+    assert row.status == "PUBLISHED"  # untouched -- PUBLISHED is never mutated
 
 
 async def test_deny_version_unknown_raises_404(install_dal: Any) -> None:
@@ -424,3 +457,56 @@ async def test_approve_version_with_no_routes_to_skips_the_check_entirely(instal
         approved_by=1,
     )
     assert row.app_id == "waddles.socials.music.default"
+
+
+# ---------------------------------------------------------------------------
+# communityId tenant ownership (an admin from tenant A must not be able to
+# approve into a community belonging to tenant B)
+# ---------------------------------------------------------------------------
+
+
+async def test_approve_version_refuses_a_community_from_a_different_tenant(
+    install_dal: Any,
+) -> None:
+    await _seed_published(install_dal)
+    other_community_id = await install_dal.communities.async_insert(
+        tenant_id=999, name="other-corp-community"
+    )
+    with pytest.raises(ApiError) as exc:
+        await approve_version(
+            install_dal,
+            app_id="waddles.socials.music.default",
+            version="3.0.1",
+            tenant_id=1,
+            community_id=other_community_id,
+            approved_by=1,
+        )
+    assert exc.value.status_code == 404
+
+
+async def test_approve_version_refuses_an_unknown_community_id(install_dal: Any) -> None:
+    await _seed_published(install_dal)
+    with pytest.raises(ApiError) as exc:
+        await approve_version(
+            install_dal,
+            app_id="waddles.socials.music.default",
+            version="3.0.1",
+            tenant_id=1,
+            community_id=999999,
+            approved_by=1,
+        )
+    assert exc.value.status_code == 404
+
+
+async def test_approve_version_allows_a_community_in_the_same_tenant(install_dal: Any) -> None:
+    await _seed_published(install_dal)
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
+    row = await approve_version(
+        install_dal,
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        community_id=community_id,
+        approved_by=1,
+    )
+    assert row.community_id == community_id

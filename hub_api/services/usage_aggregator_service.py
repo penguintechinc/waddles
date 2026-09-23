@@ -63,7 +63,10 @@ _rows_written_histogram = _meter.create_histogram(
 )
 _entries_skipped_counter = _meter.create_counter(
     "waddles_hub_usage_entries_skipped_total",
-    description="waddles:usage entries acked but unparseable",
+    description=(
+        "waddles:usage entries acked without being written to "
+        "workstream_usage_hourly (unparseable, or a poison group's insert failed)"
+    ),
 )
 
 
@@ -132,7 +135,10 @@ class AggregationResult:
     skipped: int
 
 
-def _group_key(delta: UsageDelta) -> tuple[int, int | None, str, str, str | None, datetime]:
+_GroupKey = tuple[int, int | None, str, str, str | None, datetime]
+
+
+def _group_key(delta: UsageDelta) -> _GroupKey:
     return (
         delta.tenant_id,
         delta.community_id,
@@ -152,7 +158,14 @@ async def run_usage_aggregation_batch(
 ) -> AggregationResult:
     """One bounded read-aggregate-write-ack pass over `waddles:usage`.
 
-    Never blocks (`BLOCK` is unused).
+    Never blocks (`BLOCK` is unused). Each group's insert is isolated: a
+    poison group (e.g. an FK violation on a stale `tenant_id`) is caught,
+    counted via `_entries_skipped_counter`, and its entries are ack'd on
+    their own -- so one bad group can neither block acking of every other
+    group in the batch (which, unfixed, meant that group's rows would be
+    re-inserted -- duplicated -- on every future retry of this same batch)
+    nor leave its own entries stuck in the pending-entries list forever
+    (a permanently stalled consumer for those entries).
     """
     async with bundle_span("hub.usage.aggregate_batch", stream=USAGE_STREAM):
         response = await redis_client.xreadgroup(
@@ -163,48 +176,62 @@ async def run_usage_aggregation_batch(
             return AggregationResult(examined=0, written=0, skipped=0)
 
         entries = response[0][1]
-        groups: dict[tuple[int, int | None, str, str, str | None, datetime], list[UsageDelta]] = (
-            defaultdict(list)
-        )
-        to_ack: list[Any] = []
+        groups: dict[_GroupKey, list[UsageDelta]] = defaultdict(list)
+        group_entry_ids: dict[_GroupKey, list[Any]] = defaultdict(list)
+        unparseable_ids: list[Any] = []
         skipped = 0
         for entry_id, fields in entries:
-            to_ack.append(entry_id)
             try:
                 delta = parse_usage_entry(fields)
             except ValueError:
                 skipped += 1
-                _entries_skipped_counter.add(1)
+                _entries_skipped_counter.add(1, {"reason": "unparseable"})
+                unparseable_ids.append(entry_id)
                 continue
-            groups[_group_key(delta)].append(delta)
+            key = _group_key(delta)
+            groups[key].append(delta)
+            group_entry_ids[key].append(entry_id)
+
+        # Unparseable entries can never succeed on retry -- ack them
+        # immediately, independent of how any group below fares.
+        if unparseable_ids:
+            await redis_client.xack(USAGE_STREAM, USAGE_CONSUMER_GROUP, *unparseable_ids)
 
         now = datetime.now(UTC)
         written = 0
-        for (tenant_id, community_id, workstream_id, stage, app_id, hour), deltas in groups.items():
-            await install_dal.workstream_usage_hourly.async_insert(
-                tenant_id=tenant_id,
-                community_id=community_id,
-                workstream_id=workstream_id,
-                stage=stage,
-                app_id=app_id,
-                hour=hour,
-                events=sum(d.events for d in deltas),
-                invocations=sum(d.invocations for d in deltas),
-                host_calls=sum(d.host_calls for d in deltas),
-                actions_delivered=sum(d.actions_delivered for d in deltas),
-                fuel_ms=sum(d.fuel_ms for d in deltas),
-                outbound_bytes=sum(d.outbound_bytes for d in deltas),
-                media_minutes=(
-                    sum(d.media_minutes for d in deltas if d.media_minutes is not None)
-                    if any(d.media_minutes is not None for d in deltas)
-                    else None
-                ),
-                recorded_at=now,
-            )
+        for key, deltas in groups.items():
+            tenant_id, community_id, workstream_id, stage, app_id, hour = key
+            entry_ids = group_entry_ids[key]
+            try:
+                await install_dal.workstream_usage_hourly.async_insert(
+                    tenant_id=tenant_id,
+                    community_id=community_id,
+                    workstream_id=workstream_id,
+                    stage=stage,
+                    app_id=app_id,
+                    hour=hour,
+                    events=sum(d.events for d in deltas),
+                    invocations=sum(d.invocations for d in deltas),
+                    host_calls=sum(d.host_calls for d in deltas),
+                    actions_delivered=sum(d.actions_delivered for d in deltas),
+                    fuel_ms=sum(d.fuel_ms for d in deltas),
+                    outbound_bytes=sum(d.outbound_bytes for d in deltas),
+                    media_minutes=(
+                        sum(d.media_minutes for d in deltas if d.media_minutes is not None)
+                        if any(d.media_minutes is not None for d in deltas)
+                        else None
+                    ),
+                    recorded_at=now,
+                )
+            # Isolate the poison group -- it must never block acking, or
+            # cause re-insertion, of every other group in this batch.
+            except Exception:  # noqa: BLE001
+                skipped += len(deltas)
+                _entries_skipped_counter.add(len(deltas), {"reason": "insert_failed"})
+                await redis_client.xack(USAGE_STREAM, USAGE_CONSUMER_GROUP, *entry_ids)
+                continue
             written += 1
-
-        if to_ack:
-            await redis_client.xack(USAGE_STREAM, USAGE_CONSUMER_GROUP, *to_ack)
+            await redis_client.xack(USAGE_STREAM, USAGE_CONSUMER_GROUP, *entry_ids)
 
         _batches_counter.add(1, {"result": "processed"})
         _rows_written_histogram.record(written)
