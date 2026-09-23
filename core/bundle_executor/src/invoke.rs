@@ -72,6 +72,13 @@ impl ComponentSource for UnimplementedBucketSource {
 struct LoadedBundle {
     digest: String,
     component: Component,
+    /// This bundle's effective per-instance linear-memory cap in MiB,
+    /// resolved once at `on_load` time (spec SS7.3, sandbox layer 8):
+    /// `body.limits.memory_mb` when the stage supplied a non-zero value,
+    /// else `EXECUTOR_MEMORY_LIMIT_MB`; always clamped to
+    /// `EXECUTOR_MAX_MEMORY_LIMIT_MB`. `on_invoke` wires this into every
+    /// `Store::limiter` for the bundle rather than re-deriving it per call.
+    memory_limit_mb: u32,
 }
 
 /// Runs loaded bundles against real wasmtime instantiation. One per
@@ -82,6 +89,13 @@ pub struct Executor<S: ComponentSource> {
     linker: wasmtime::component::Linker<ExecState>,
     source: S,
     max_call_timeout_ms: u64,
+    /// `EXECUTOR_MEMORY_LIMIT_MB`: the per-instance memory cap a `load`
+    /// gets when it doesn't supply its own `limits.memory_mb` (spec
+    /// SS7.3).
+    default_memory_limit_mb: u32,
+    /// `EXECUTOR_MAX_MEMORY_LIMIT_MB`: the hard ceiling no bundle's
+    /// `limits.memory_mb` override may exceed (spec SS7.3).
+    max_memory_limit_mb: u32,
     bundles: RwLock<HashMap<String, LoadedBundle>>,
     /// Advances `engine`'s epoch on a fixed tick (spec SS7.2/SS7.3,
     /// assumption A16's executor-side half) so `on_invoke`'s
@@ -108,6 +122,8 @@ impl<S: ComponentSource> Executor<S> {
             linker,
             source,
             max_call_timeout_ms: cfg.executor_max_call_timeout_ms,
+            default_memory_limit_mb: cfg.executor_memory_limit_mb,
+            max_memory_limit_mb: cfg.executor_max_memory_limit_mb,
             bundles: RwLock::new(HashMap::new()),
             epoch_ticker,
         })
@@ -188,11 +204,23 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
 
         let app_id = body.app_id.clone();
         let digest = body.digest.clone();
+        // spec SS7.3: a `load` may request its own `limits.memory_mb`; `0`
+        // means "no preference" and falls back to `EXECUTOR_MEMORY_LIMIT_MB`.
+        // Either way the effective cap never exceeds
+        // `EXECUTOR_MAX_MEMORY_LIMIT_MB`, and is never less than 1 MiB.
+        let memory_limit_mb = if body.limits.memory_mb == 0 {
+            self.default_memory_limit_mb
+        } else {
+            body.limits.memory_mb
+        }
+        .min(self.max_memory_limit_mb)
+        .max(1);
         self.bundles.write().await.insert(
             app_id.clone(),
             LoadedBundle {
                 digest: digest.clone(),
                 component,
+                memory_limit_mb,
             },
         );
 
@@ -249,7 +277,7 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
         invoke_id: u64,
         connection: Arc<Connection>,
     ) -> Result<ResultBody, ErrorBody> {
-        let component = {
+        let (component, memory_limit_mb) = {
             let bundles = self.bundles.read().await;
             let loaded = bundles
                 .get(&body.app_id)
@@ -263,21 +291,25 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                     ),
                 ));
             }
-            loaded.component.clone()
+            (loaded.component.clone(), loaded.memory_limit_mb)
         };
 
         let deadline_ms = body.deadline_ms.min(self.max_call_timeout_ms).max(1);
         let bridge = HostBridge::new(connection);
-        let exec_state = ExecState::new(Some(bridge), body.app_id.clone(), invoke_id);
+        let exec_state = ExecState::new(Some(bridge), body.app_id.clone(), invoke_id)
+            .with_memory_limit_mb(memory_limit_mb);
         let mut store = Store::new(&self.engine, exec_state);
         store.set_epoch_deadline(ticks_for_deadline(deadline_ms));
         store.epoch_deadline_trap();
-        // TODO(M2 follow-up): a `wasmtime::StoreLimits` (`Store::limiter`)
-        // wired to `EXECUTOR_MEMORY_LIMIT_MB`/`limits.memory_mb` (spec
-        // SS7.3) for a precise per-bundle override; the pooling
-        // allocator's own per-instance memory reservation already bounds
-        // worst case in the meantime, so this is a tightening, not a gap
-        // in the safety property itself.
+        // Sandbox layer 8 (spec SS7.3): caps this instance's linear memory
+        // to the bundle's resolved `memory_limit_mb` (`on_load`,
+        // `EXECUTOR_MEMORY_LIMIT_MB`/`limits.memory_mb`) via
+        // `ExecState::with_memory_limit_mb`'s `StoreLimits`, so a
+        // `memory.grow` past the cap traps (`trap_on_grow_failure`) rather
+        // than growing unbounded or the epoch deadline alone (CPU only)
+        // being the sole containment layer -- gh security review MED
+        // finding, previously a TODO.
+        store.limiter(|state| &mut state.limits);
 
         let start = std::time::Instant::now();
         let stage = Stage::instantiate_async(&mut store, &component, &self.linker)
@@ -371,16 +403,28 @@ struct EnvelopeAndConfig {
 /// `result<_, E>` the bundle itself returned. Distinguished from a
 /// malformed-payload error so the caller reports `EXECUTOR_DEADLINE`/
 /// `MEMORY_LIMIT`/`WASM_TRAP` rather than a generic failure (spec SS7.3).
+///
+/// Classifies against the **full error chain** (`{err:#}`), not just
+/// `err`'s own top-level `Display`: a real wasmtime trap's outermost
+/// message is generic backtrace text (`"error while executing at wasm
+/// backtrace: ..."`), with the actual cause -- e.g.
+/// `StoreLimits`'s `"forcing trap when growing memory to N bytes"`
+/// (`ExecState::with_memory_limit_mb`) or the epoch interruption's own
+/// deadline message -- one level down in `err.chain()`. Matching only the
+/// top level (the pre-fix behavior) meant every real trap fell through to
+/// the generic `WasmTrap` branch regardless of cause; only a hand-built
+/// `wasmtime::Error::msg(...)` in a unit test ever exercised the
+/// `ExecutorDeadline`/`MemoryLimit` branches.
 fn trap_to_error_body(err: wasmtime::Error) -> ErrorBody {
-    let message = err.to_string();
-    let code = if message.contains("epoch") || message.contains("deadline") {
+    let full_chain = format!("{err:#}");
+    let code = if full_chain.contains("epoch") || full_chain.contains("deadline") {
         ErrorCode::ExecutorDeadline
-    } else if message.contains("memory") || message.contains("allocation") {
+    } else if full_chain.contains("memory") || full_chain.contains("allocation") {
         ErrorCode::MemoryLimit
     } else {
         ErrorCode::WasmTrap
     };
-    error_body(code, message)
+    error_body(code, full_chain)
 }
 
 #[cfg(test)]
@@ -721,6 +765,74 @@ mod tests {
                 ..
             })
         ));
+        Ok(())
+    }
+
+    /// Negative test for gh security review MED finding "per-instance
+    /// memory cap not enforced" (spec SS7.3 sandbox layer 8): a bundle
+    /// loaded with a tight `limits.memory_mb` and invoked against the
+    /// fixture's `memory-hog` branch (which grows linear memory in 1 MiB
+    /// steps up to 64 MiB, see `tests/fixtures/README.md`) must trap with
+    /// `MEMORY_LIMIT` -- never hang past its deadline, never succeed with
+    /// unbounded growth, and never take the process down. `deadline_ms` is
+    /// generous (10s) so the assertion is unambiguously the memory cap, not
+    /// a race against the epoch deadline also wired on this store.
+    #[tokio::test]
+    async fn on_invoke_traps_with_memory_limit_when_a_bundle_exceeds_its_cap(
+    ) -> Result<(), ExecutorError> {
+        crate::init_test_tracing();
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(LoadBody {
+                app_id: "waddles.test.memory-hog".to_string(),
+                version: "1".to_string(),
+                digest: fixture_digest(),
+                component_key: "k".to_string(),
+                sidecar_key: "s".to_string(),
+                capabilities: vec![],
+                // Small enough that the fixture's 64 MiB hog trips it
+                // early, generous enough that plain instantiation (the
+                // component's own baseline runtime footprint) succeeds.
+                limits: penguin_bundle_host::wire::LoadLimits {
+                    timeout_ms: 10_000,
+                    memory_mb: 8,
+                },
+            })
+            .await
+            .expect("load succeeds");
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let connection = crate::wire::Connection::new(tx);
+        let result = executor
+            .on_invoke(
+                InvokeBody {
+                    app_id: "waddles.test.memory-hog".to_string(),
+                    digest: fixture_digest(),
+                    export: ExportKind::Transform,
+                    payload: serde_json::json!({
+                        "platform": "test",
+                        "event_type": "memory-hog",
+                        "actor": null,
+                        "payload_json": "{}",
+                        "occurred_at": "2026-09-22T00:00:00.000Z",
+                    }),
+                    deadline_ms: 10_000,
+                    trace: None,
+                },
+                1,
+                connection,
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(ErrorBody {
+                    code: ErrorCode::MemoryLimit,
+                    ..
+                })
+            ),
+            "expected a MEMORY_LIMIT trap, got {result:?}"
+        );
         Ok(())
     }
 

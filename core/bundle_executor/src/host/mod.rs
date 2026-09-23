@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use tracing::debug;
 use wasmtime::component::ResourceTable;
+use wasmtime::{StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 pub use bridge::HostBridge;
@@ -35,6 +36,13 @@ pub struct ExecState {
     /// charged against that invocation's remaining deadline
     /// (`HostCallBody.call_id`, spec SS6.6).
     pub call_id: u64,
+    /// Backs `Store::limiter` (`crate::invoke::on_invoke`, spec SS7.3
+    /// sandbox layer 8): caps this instance's linear memory growth.
+    /// Unbounded by construction (`StoreLimitsBuilder::new().build()`
+    /// leaves `memory_size` unset) so every `ExecState::new` call site
+    /// that never opts into [`Self::with_memory_limit_mb`] -- every test
+    /// in this crate except `crate::invoke`'s own -- is unaffected.
+    pub limits: StoreLimits,
 }
 
 impl ExecState {
@@ -49,7 +57,29 @@ impl ExecState {
             bridge,
             app_id,
             call_id,
+            limits: StoreLimitsBuilder::new().build(),
         }
+    }
+
+    /// Arms [`Self::limits`] with a hard `memory_limit_mb` MiB cap,
+    /// `trap_on_grow_failure(true)` so a `memory.grow` beyond it raises a
+    /// wasmtime trap (`"forcing trap when growing memory to N bytes"`,
+    /// classified `MEMORY_LIMIT` by `crate::invoke::trap_to_error_body`)
+    /// rather than `memory.grow` quietly returning `-1` to the guest or
+    /// growth continuing unbounded (gh security review MED finding: this
+    /// sandbox layer was previously unenforced -- only the epoch deadline
+    /// was wired). `crate::invoke::on_invoke` is the sole caller; it
+    /// derives `memory_limit_mb` from the loaded bundle's
+    /// `limits.memory_mb`/`EXECUTOR_MEMORY_LIMIT_MB` clamped to
+    /// `EXECUTOR_MAX_MEMORY_LIMIT_MB` (spec SS7.3).
+    #[must_use]
+    pub fn with_memory_limit_mb(mut self, memory_limit_mb: u32) -> Self {
+        let bytes = (memory_limit_mb as usize).saturating_mul(1024 * 1024);
+        self.limits = StoreLimitsBuilder::new()
+            .memory_size(bytes)
+            .trap_on_grow_failure(true)
+            .build();
+        self
     }
 }
 
@@ -128,6 +158,35 @@ mod tests {
         assert_eq!(state.app_id, "waddles.test.app");
         assert_eq!(state.call_id, 1);
         assert!(state.bridge.is_none());
+    }
+
+    /// `with_memory_limit_mb` must actually deny a `memory_growing` request
+    /// once `desired` exceeds the MiB cap converted to bytes -- the exact
+    /// `ResourceLimiter` call `Store::limiter` (`crate::invoke::on_invoke`)
+    /// drives on every real `memory.grow`. Exercising the trait method
+    /// directly (rather than through a full wasmtime instantiation, which
+    /// `invoke.rs`'s own fixture-backed tests cover end to end) keeps this
+    /// assertion fast and independent of the wasm fixture.
+    #[test]
+    fn with_memory_limit_mb_denies_growth_past_the_cap() {
+        use wasmtime::ResourceLimiter;
+
+        let mut state =
+            ExecState::new(None, "waddles.test.app".to_string(), 1).with_memory_limit_mb(1);
+        let one_mib = 1024 * 1024;
+        assert!(state
+            .limits
+            .memory_growing(0, one_mib, None)
+            .expect("growth to exactly the cap is a decision, not an error"));
+
+        let err = state
+            .limits
+            .memory_growing(one_mib, one_mib + 1, None)
+            .expect_err("growth past the cap must trap, not return Ok(false)");
+        assert!(
+            err.to_string().contains("memory"),
+            "trap message must classify as a memory limit: {err}"
+        );
     }
 
     /// Negative sandbox test #1 (spec SS14.6), isolated to the exact

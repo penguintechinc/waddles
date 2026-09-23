@@ -34,6 +34,24 @@ impl ProcessGuest for Component {
                 "logged".to_string()
             }
             "clock-read" => format!("{}", clock::now_millis()),
+            "memory-hog" => {
+                // Negative sandbox test (gh security review MED finding,
+                // spec SS7.3 sandbox layer 8): deliberately grows and
+                // touches linear memory in 1 MiB steps, far past any sane
+                // per-bundle cap, so a wired `StoreLimits` traps this call
+                // instead of letting it succeed or grow unbounded. `resize`
+                // with a non-zero fill value forces the allocator to
+                // actually commit and write every page rather than the
+                // compiler optimizing an untouched allocation away.
+                let mut hog: Vec<u8> = Vec::new();
+                for _ in 0..64u32 {
+                    hog.resize(hog.len() + (1024 * 1024), 0xAB);
+                    if let Some(last) = hog.last_mut() {
+                        *last = 0xCD;
+                    }
+                }
+                format!("allocated {} bytes without tripping the cap", hog.len())
+            }
             "socket-probe" => {
                 // Negative sandbox test #1 (spec Sec14.6): the guest attempts
                 // a real TCP connect. Under wasm32-wasip2 this routes through
