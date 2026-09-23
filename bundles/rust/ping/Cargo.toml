@@ -1,0 +1,30 @@
+[package]
+name = "waddle-bundle-ping-rust"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Minimal real Twitch `!ping` -> `pong` process/action-stage bundle, compiled to a WASI 0.2 component with cargo-component. Exists as the e2e test's deployable fixture -- the executor loads this component and drives it through svc-process/svc-action end to end. Mirrors bundles/rust/example's structure and pins."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Sibling-crate path dependency, not a registry/git one -- this bundle and
+# the SDK it depends on live in the same repo and move together. Mirrors
+# bundles/rust/example/Cargo.toml.
+waddle-sdk-rs = { path = "../../../sdk/waddle-sdk-rs", version = "=0.1.0" }
+# Matches waddle-sdk-rs's own pin (sdk/waddle-sdk-rs/Cargo.toml) -- a
+# bundle needs `serde`'s derive macros directly for its own payload
+# structs; it is not re-exported through the SDK.
+serde = { version = "=1.0.229", features = ["derive"] }
+
+[package.metadata.component]
+package = "waddle:bundle-ping-rust"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-bundle"
+world = "stage"
+
+[package.metadata.component.dependencies]
