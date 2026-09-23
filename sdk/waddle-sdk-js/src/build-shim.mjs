@@ -79,7 +79,13 @@ if (typeof def.transform !== "function" && typeof def.dispatch !== "function") {
 // unconditionally, so a component must always export `transform` and
 // `dispatch`, even when a bundle only logically implements one. The
 // generated shim's fallback throws the `unsupported-stage` shape
-// (`{ stage: string }`) for whichever export the bundle did not define.
+// (`{ stage: string }`) for `transform` -- matching the Python/Rust SDKs'
+// `UnsupportedStage(stage="process")` -- and, for `dispatch`, the WIT
+// `action-stage.dispatch` error type is `transport-error` (not
+// `unsupported-stage`), so its fallback throws the `{ retryable, code,
+// message, retryAfterMs? }` shape, matching Python/Rust's
+// `TransportError{retryable: false, code: "UNSUPPORTED_STAGE", message:
+// "this bundle does not implement the action stage"}`.
 const boundaryHelpers = `
 function parseJsonObject(text, fieldName) {
   const parsed = JSON.parse(text);
@@ -152,7 +158,7 @@ if (typeof def.transform === "function") {
 } else {
   lines.push(`export const processStage = {
   transform(_rawEvent) {
-    throw { stage: "process-stage" };
+    throw { stage: "process" };
   },
 };`);
 }
@@ -169,7 +175,7 @@ if (typeof def.dispatch === "function") {
 } else {
   lines.push(`export const actionStage = {
   dispatch(_rawEnvelope, _rawConfig) {
-    throw { stage: "action-stage" };
+    throw { retryable: false, code: "UNSUPPORTED_STAGE", message: "this bundle does not implement the action stage" };
   },
 };`);
 }
