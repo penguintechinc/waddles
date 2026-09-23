@@ -148,6 +148,14 @@ pub struct CliConfig {
         default_value_t = 86_400
     )]
     pub envelope_binding_rotation_overlap_s: u64,
+
+    /// Per-stage-replica batching interval for `waddles:usage` writes
+    /// (spec §5.12/D31, `metering.flushIntervalSeconds`, default `10`) --
+    /// `crate::usage::UsageBatcher` deltas accumulate in memory and are
+    /// `XADD`ed at most this often, never per event, so a chatty channel
+    /// never multiplies the write rate.
+    #[arg(long, env = "METERING_FLUSH_INTERVAL_S", default_value_t = 10)]
+    pub metering_flush_interval_s: u64,
 }
 
 impl CliConfig {
@@ -330,6 +338,18 @@ mod tests {
         assert_eq!(cli.action_max_retries, 3);
         assert_eq!(cli.action_base_backoff_ms, 250);
         assert_eq!(cli.action_max_backoff_ms, 8000);
+    }
+
+    #[test]
+    fn metering_flush_interval_defaults_to_10s_per_spec_5_12() {
+        let cli = CliConfig::parse_from(["svc-action"]);
+        assert_eq!(cli.metering_flush_interval_s, 10);
+    }
+
+    #[test]
+    fn metering_flush_interval_env_override_is_honored() {
+        let cli = CliConfig::parse_from(["svc-action", "--metering-flush-interval-s", "30"]);
+        assert_eq!(cli.metering_flush_interval_s, 30);
     }
 
     #[test]

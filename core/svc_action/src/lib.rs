@@ -6,13 +6,28 @@
 //!
 //! M3 ("Executor integration", spec §16 M3 row) landed the full stage side
 //! of the bundle-executor wire protocol (`host_api`), hop verification
-//! (`hop`), usage metering (`usage`), retry/audit (`retry`,
-//! `db::entities::action_dispatch_log`), and one built-in sender end to
-//! end (`senders`::Twitch via `capabilities`::relay). What remains a
+//! (`hop`), usage metering (`usage`, periodically flushed to
+//! `waddles:usage` -- see [`try_start_dispatch`]), and retry/audit
+//! (`retry`, `db::entities::action_dispatch_log`). What remains a
 //! documented seam -- never a silent stub -- is named at each call site
 //! below: the `GET /api/v1/distribution/bundles?stage=action` poll (which
 //! bundle/digest/grants to run) is blocked on the same M2 hub-api work
 //! `core/svc_process`'s own M4 skeleton left as `TODO(M4)`.
+//!
+//! **Correction (post-M3 review): Twitch sending is not yet functional
+//! end to end.** `crate::capabilities::StageCapabilities` fully implements
+//! the `relay` host capability's Valkey `LPUSH` (byte-exact port of
+//! `waddle_transports.transports.irc_relay`), but [`try_start_host_api`]
+//! below always installs `DenyAllCapabilities` as the live connection's
+//! handler -- the same tenant/community-scoping gap the distribution poll
+//! above is blocked on -- so a bundle's `relay` host call is denied in
+//! every build shipped so far, not routed to a live Twitch send.
+//! `crate::senders`'s `Platform`/`sender_status`/`is_retryable`/
+//! `twitch_relay_args` are correspondingly unreferenced outside their own
+//! module's tests today; they document the intended shape for the caller
+//! that will issue/classify a relay send once `StageCapabilities` is
+//! actually wired to a live connection, not code currently exercised by
+//! `dispatch`.
 
 pub mod capabilities;
 pub mod config;
@@ -206,6 +221,7 @@ fn try_start_dispatch(config: &config::Config, connections: Arc<host_api::Connec
                 return;
             }
         };
+        let usage = Arc::new(std::sync::Mutex::new(usage::UsageBatcher::new()));
         let deps = dispatch::DispatchDeps {
             app_id: app_id.clone(),
             digest: String::new(),
@@ -221,10 +237,20 @@ fn try_start_dispatch(config: &config::Config, connections: Arc<host_api::Connec
             jitter: retry::Jitter::from_entropy(),
             audit: wiring::DbAuditSink::new(db.clone()),
             tenants: wiring::DbTenantResolver::new(db),
-            usage: Arc::new(std::sync::Mutex::new(usage::UsageBatcher::new())),
+            usage: Arc::clone(&usage),
+            // spec §5.11/D30 (mirrors `penguin_spine::client::claim_stale`'s
+            // own convention): a `DlqError.consumer_id` names the *pod*
+            // handling the entry, not the entry's own stream id.
+            consumer_id: spine_cfg.consumer_id.clone(),
             spine,
             metrics,
         };
+
+        try_start_usage_flush(
+            config.cli.metering_flush_interval_s,
+            usage,
+            spine_cfg.clone(),
+        );
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
@@ -235,6 +261,74 @@ fn try_start_dispatch(config: &config::Config, connections: Arc<host_api::Connec
         if let Err(err) = dispatch::run(spine_cfg, vec![grant], stream_key, deps, shutdown_rx).await
         {
             tracing::error!(error = %err, "action-stage dispatch loop exited");
+        }
+    });
+}
+
+/// Starts the usage-metering flush loop (spec §5.12/D31) as its own
+/// background task, independent of the dispatch drain loop above: `deps`
+/// (moved into [`dispatch::run`]) and this task share the same
+/// `Arc<Mutex<UsageBatcher>>`, so deltas `dispatch::handle_delivered` and
+/// `crate::capabilities::StageCapabilities` accumulate here get drained on
+/// a `METERING_FLUSH_INTERVAL_S` timer regardless of dispatch throughput.
+/// A failed initial Valkey connection is logged and this task exits
+/// without retrying -- usage metering is best-effort accounting (spec
+/// §5.12: "no charging, quota or enforcement wired to it"), never a reason
+/// to crash or block the dispatch loop it instruments; deltas simply keep
+/// accumulating in memory (bounded by the number of distinct
+/// `(tenant, community, workstream, app_id)` keys seen) until a future
+/// successful flush drains them, or the pod restarts.
+fn try_start_usage_flush(
+    flush_interval_s: u64,
+    usage: Arc<std::sync::Mutex<usage::UsageBatcher>>,
+    spine_cfg: penguin_spine::SpineConfig,
+) {
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(());
+    });
+
+    tokio::spawn(async move {
+        let sink = match usage::connect_sink(&spine_cfg).await {
+            Ok(sink) => sink,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "usage-metering valkey connection failed; deltas will accumulate in memory but never flush"
+                );
+                return;
+            }
+        };
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(flush_interval_s.max(1)));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    // Swap the shared batcher for a fresh, empty one while
+                    // holding the lock only for that synchronous swap, then
+                    // flush the *owned* taken-out batcher after dropping
+                    // the guard -- a `std::sync::MutexGuard` held across
+                    // `.await` makes the enclosing future `!Send`, which
+                    // `tokio::spawn` (this task's own caller) requires.
+                    let mut batcher = std::mem::take(
+                        &mut *usage.lock().unwrap_or_else(|e| e.into_inner()),
+                    );
+                    let flushed = batcher.flush(&sink).await;
+                    if flushed > 0 {
+                        tracing::debug!(flushed, "usage deltas flushed to waddles:usage");
+                    }
+                }
+                _ = &mut shutdown_rx => {
+                    let mut batcher = std::mem::take(
+                        &mut *usage.lock().unwrap_or_else(|e| e.into_inner()),
+                    );
+                    let flushed = batcher.flush(&sink).await;
+                    tracing::info!(flushed, "usage-metering flush loop shutting down, final flush complete");
+                    return;
+                }
+            }
         }
     });
 }
@@ -392,5 +486,47 @@ mod tests {
         let result = run_healthcheck().await;
         unsafe { std::env::remove_var("MODULE_PORT") };
         assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    /// A syntactically valid [`penguin_spine::SpineConfig`] that never
+    /// actually connects -- identical fixture to `crate::usage::tests`'
+    /// own `unreachable_spine_config` (same pinned `penguin-spine` rev,
+    /// same rationale: port `1` refuses the TCP connection immediately).
+    fn unreachable_spine_config() -> penguin_spine::SpineConfig {
+        penguin_spine::SpineConfig {
+            valkey_url: "redis://127.0.0.1:1/".to_string(),
+            valkey_username: None,
+            valkey_password: None,
+            valkey_ca_file: std::path::PathBuf::from("/nonexistent-ca.crt"),
+            security_transport_tls: false,
+            security_transport_auth: false,
+            consumer_id: "test-consumer".to_string(),
+            stream_maxlen: 100,
+            read_count: 1,
+            block_ms: 1_000,
+            claim_idle_ms: 30_000,
+            claim_interval_ms: 15_000,
+            stats_interval_ms: 10_000,
+            pel_alert: 5_000,
+            dlq_maxlen: 100,
+            max_deliveries: 5,
+            drain_socket_timeout_s: 65,
+            relay_block_timeout_s: 30,
+        }
+    }
+
+    /// Regression coverage for the CRITICAL usage-metering finding: proves
+    /// [`try_start_usage_flush`] doesn't panic and returns control to its
+    /// caller immediately (fire-and-forget `tokio::spawn`) when the initial
+    /// Valkey connection fails -- the graceful-degradation path every other
+    /// optional dependency in this module also takes (never a reason to
+    /// crash or block the dispatch loop it instruments).
+    #[tokio::test]
+    async fn try_start_usage_flush_does_not_panic_when_valkey_is_unreachable() {
+        let usage = Arc::new(std::sync::Mutex::new(usage::UsageBatcher::new()));
+        try_start_usage_flush(1, usage, unreachable_spine_config());
+        // Fire-and-forget: give the spawned task a moment to attempt (and
+        // fail) its connection before the test process exits and drops it.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
 }
