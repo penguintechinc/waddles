@@ -6,6 +6,7 @@ on:
     paths:
       - 'core/bundle_executor/**'
       - '.github/workflows/rust-bundle-executor.yml'
+      - '.github/workflows/rust-crate-ci.yml'
   pull_request:
     branches: [main, 'release/**']
     paths:
@@ -18,54 +19,18 @@ permissions:
 jobs:
   lint-test:
     name: fmt + clippy + deny + build + coverage
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: core/bundle_executor
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-
-      - name: Install build deps for aws-lc-sys/ring (cmake, C/C++ toolchain)
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y cmake build-essential
-
-      - name: Install Rust 1.97.1 (rustfmt, clippy, llvm-tools-preview)
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
-        with:
-          toolchain: "1.97.1"
-          components: rustfmt, clippy, llvm-tools-preview
-
-      - name: Install cargo-deny + cargo-llvm-cov
-        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2.87.12
-        with:
-          tool: cargo-deny@0.20.2,cargo-llvm-cov@0.9.1
-
-      - name: cargo fmt --check
-        run: cargo fmt --check
-
-      - name: cargo clippy --all-targets -- -D warnings
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: cargo deny check (advisories, licenses, bans, sources)
-        run: cargo deny check
-
+    uses: ./.github/workflows/rust-crate-ci.yml
+    with:
+      crate_name: bundle-executor
+      working_directory: core/bundle_executor
+      # aws-lc-sys/ring need cmake plus a C/C++ toolchain to build.
+      extra_apt_packages: 'cmake build-essential'
+      extra_apt_reason: 'for aws-lc-sys/ring (cmake, C/C++ toolchain)'
       # Proves the penguin-bundle-host git dependency (pinned by commit
       # rev in Cargo.toml, spec SS4.5/SS6.6) resolves and builds from a
       # clean clone with no local penguin-libs checkout anywhere on this
       # runner -- exactly the property the M2 task's NON-NEGOTIABLE list
-      # requires. `--locked` additionally asserts Cargo.lock is fully
-      # up to date with Cargo.toml.
-      - name: cargo build --release --locked (proves the git dep resolves)
-        run: cargo build --release --locked
-
-      # Includes tests/dependency_policy.rs (spec SS4.5/SS14.6 test 16):
-      # asserts no redis/sea-orm/sqlx/deadpool-redis/reqwest anywhere in
-      # this credential-less binary's dependency graph, examining every
-      # package in the committed Cargo.lock and reporting the count.
-      - name: cargo test
-        run: cargo test
-
-      - name: cargo llvm-cov (>=90% line coverage gate)
-        run: cargo llvm-cov --fail-under-lines 90
+      # requires. Also includes tests/dependency_policy.rs (spec
+      # SS4.5/SS14.6 test 16): asserts no redis/sea-orm/sqlx/deadpool-redis/
+      # reqwest anywhere in this credential-less binary's dependency graph.
+      release_build: true
