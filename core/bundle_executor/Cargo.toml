@@ -1,0 +1,107 @@
+[package]
+name = "bundle-executor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Waddles credential-less WASM bundle sandbox host (M2). Holds a wasmtime engine, instantiates a bundle's WASI 0.2 component against the normative waddle:bundle/stage@1.0.0 world, services every WIT host import over the host-API wire protocol back to its stage, and natively denies wasi:sockets -- see docs/superpowers/specs/2026-09-14-rust-data-plane-design.md SS4.5/SS7."
+
+[lib]
+name = "bundle_executor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bundle-executor"
+path = "src/main.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- rules/critical-rules.md
+# Dependency Pinning. Cargo.lock is committed alongside this file.
+#
+# THE penguin-libs DEPENDENCY PATTERN established in core/svc_process's
+# Cargo.toml (M4) applies verbatim here: `rev = "<full 40-char sha>"`, never
+# a branch name, plus `version =` alongside `git =`/`rev =` so cargo-deny's
+# `[bans] wildcards = "deny"` doesn't flag it. See that file's header
+# comment for the full rationale (why not a `path =`/`branch =` dependency).
+#
+# This dependency set is itself a security assertion (spec SS4.5/SS14.6
+# test 16): NO redis, sea-orm, sqlx, deadpool-redis or reqwest anywhere in
+# this binary's dependency graph -- `tests/dependency_policy.rs` asserts it
+# by parsing the committed Cargo.lock and reports the number of packages
+# examined (never a bare "clean").
+[dependencies]
+# wasmtime: component model + WASI 0.2 host, epoch interruption, pooling
+# allocator, `-C collector=drc` (spec SS7.2 -- must match componentize-py's
+# GC collector or a precompiled artifact fails to load).
+wasmtime = { version = "=49.0.0", default-features = false, features = ["component-model", "async", "runtime", "cranelift", "gc", "gc-drc", "pooling-allocator"] }
+# wasmtime-wasi: the permitted-for-Rust-components WASI surface (wasi:cli
+# with empty args/env, wasi:filesystem single read-only /scratch preopen,
+# wasi:random/random, wasi:clocks, wasi:io -- spec SS6.5's per-language
+# allowlist table) AND the wasi:sockets denial mechanism (assumption A19):
+# `WasiCtxBuilder::allow_tcp(false)`/`allow_udp(false)`/
+# `allow_ip_name_lookup(false)` makes the REAL, upstream-tested
+# `wasi:sockets` Host implementation refuse every socket op with
+# `error-code::access-denied` before any OS syscall -- native to this
+# binary, not a hand-authored stub component (round 2 of the compiler-
+# sandbox spike found those impractical). See `src/host/mod.rs`.
+wasmtime-wasi = { version = "=49.0.0", default-features = false, features = ["p2"] }
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync", "signal"] }
+tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "tls12"] }
+# `rustls-pemfile` is RUSTSEC-2025-0134 (unmaintained, archived) -- PEM
+# parsing goes straight through `rustls-pki-types`'s own `PemObject` trait
+# instead (the crate the old wrapper delegated to anyway).
+rustls-pki-types = "=1.15.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.151", features = ["preserve_order"] }
+thiserror = "=2.0.20"
+clap = { version = "=4.6.6", features = ["derive", "env"] }
+sha2 = "=0.10.9"
+# `penguin-bundle-host::wire` -- the length-prefixed frame codec, Frame/
+# Message shapes and correlation-id table shared verbatim with the stage
+# side (spec SS6.6). Pinned to the HEAD of `release/rust-bundle-host/v0.1.x`
+# at the time of this commit (PR penguintechinc/penguin-libs#93).
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "49f098caab95339bf8113ba5c3e9ad039d30d44b", package = "penguin-bundle-host", version = "=0.1.0" }
+tracing = "=0.1.44"
+# `penguin-logging` (spec SS4.5's dependency list) is deliberately NOT
+# depended on here, unlike every other Rust data-plane service in this
+# repo. Verified empirically (`cargo tree -i reqwest` against this
+# crate's own Cargo.lock while `penguin-logging` was still a dependency):
+# `penguin-logging` -> `opentelemetry-otlp` (features = ["grpc-tonic"],
+# no `default-features = false`) -> Cargo feature unification keeps
+# `opentelemetry-otlp`'s OWN default features (`http-proto`,
+# `reqwest-blocking-client`) enabled ALONGSIDE `grpc-tonic` -> pulls in
+# `opentelemetry-http` -> `reqwest`. That is precisely the crate spec
+# SS4.5/SS14.6 test 16 bans from this specific binary's dependency graph
+# (`tests/dependency_policy.rs` catches it; it failed before this
+# exclusion). Every other Rust service may reasonably accept that
+# transitive dependency; a credential-less, network-egress-restricted
+# sandbox host whose entire security argument is dependency-set
+# minimalism cannot. `tracing` + `tracing-subscriber` (below) carries
+# this binary's own operational logs (startup, connection lifecycle,
+# DEBUG-logged denied host calls, WARN-logged sandbox trips) to stdout
+# JSON instead; bundle-authored `log.write()` calls never go through
+# either path -- they are forwarded to the stage as a `log` capability
+# host-call and sanitized/emitted there (spec SS7.4). No OTLP export
+# from this binary: spec SS13.2 -- "The executor never creates spans
+# itself: it returns durations, and the stage records them" -- the
+# stage is already the aggregation point for this component's telemetry.
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "json", "env-filter"] }
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+# Test-only: generates throwaway self-signed CA/client cert+key pairs at
+# test run time (`src/tls.rs`'s tests) so `tests/dependency_policy.rs`'s
+# and gitleaks' pre-commit scan never see a committed PEM private key --
+# see that module's test doc comment. Rustls-org-maintained, pure Rust.
+rcgen = "=0.14.10"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
