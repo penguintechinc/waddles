@@ -1,0 +1,19 @@
+[package]
+name = "hostile-fixture"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wit-bindgen-rt = { version = "0.44.0", features = ["bitflags"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.component]
+package = "waddle:hostile-fixture"
+
+[package.metadata.component.target]
+world = "stage"
+path = "wit"
+
+[package.metadata.component.dependencies]
