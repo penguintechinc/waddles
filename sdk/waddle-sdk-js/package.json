@@ -9,7 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "build:tests": "tsc -p tsconfig.test.json",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
-    "test": "npm run build:tests && node --test dist-tests/tests/wrapper.test.js",
+    "test": "npm run build:tests && node --test dist-tests/tests/wrapper.test.js dist-tests/tests/build-shim-stubs.test.js",
     "test:conformance": "npm run build && npm run build:tests && node --test dist-tests/tests/conformance.test.js",
     "test:all": "npm test && npm run test:conformance",
     "generate:types": "bash scripts/generate-guest-types.sh",
