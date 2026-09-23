@@ -155,13 +155,47 @@ impl EgressGuard {
             ),
             None => None,
         };
+        // The bundle's own trusted activation config (spec §8.3: "an
+        // environment-variable *name* held in the activation config")
+        // fetched once, up front -- the same row every hop's egress-rule
+        // check below reuses, and the *only* source `granted_secret_refs`
+        // resolution below is allowed to consult.
+        let row = self.catalog.get(app_id);
+
         let mut headers: Vec<(String, String)> =
             req.headers.drain(..).map(|h| (h.name, h.value)).collect();
+        // Security review finding (post-M3-capabilities landing): a bundle
+        // names a *symbolic* secret reference per call (spec §6.5's
+        // `secret-refs: list<tuple<string, string>>`), but that name must
+        // never be handed directly to `std::env::var` -- a bundle fully
+        // controls this string at runtime, so doing so lets it read *any*
+        // process environment variable (AWS/DB/license credentials, not
+        // just its own platform token) by simply naming it. Resolution is
+        // therefore two hops, both required: (1) the bundle's symbolic
+        // name must be a key in *this bundle's own* `granted_secret_refs`
+        // (hub-api/admin-controlled activation config, spec §8.3's actual
+        // model -- mirrors `waddle_transports.signing.resolve_secret`,
+        // whose `secret_ref` likewise always comes from trusted `config`,
+        // never bundle-runtime `payload`); (2) only the *granted* env var
+        // name that maps to is ever read from the process environment. A
+        // symbolic name outside the granted set is refused before any
+        // environment lookup happens at all.
+        let granted = row.as_ref().map(|r| &r.granted_secret_refs);
         for (header_name, secret_ref) in &req.secret_refs {
-            let value = std::env::var(secret_ref).map_err(|_| {
+            let env_var_name = granted
+                .and_then(|g| g.get(secret_ref))
+                .ok_or_else(|| {
+                    denied(
+                        "secret_not_granted",
+                        format!(
+                            "secret reference {secret_ref:?} is not granted to this bundle's activation config"
+                        ),
+                    )
+                })?;
+            let value = std::env::var(env_var_name).map_err(|_| {
                 denied(
                     "secret_unresolved",
-                    format!("secret reference {secret_ref} is not configured"),
+                    format!("granted env var {env_var_name:?} is not configured"),
                 )
             })?;
             headers.push((header_name.clone(), value));
@@ -177,12 +211,22 @@ impl EgressGuard {
             if !url.username().is_empty() || url.password().is_some() {
                 return Err(denied("malformed_url", "url must not embed credentials"));
             }
+            // `Url::host_str()` brackets an IPv6-literal host (`"[::1]"`),
+            // unlike `std::net::Ipv6Addr`'s own `Display`. Every host-based
+            // comparison below (manifest allowlist, denylist, DNS/SSRF
+            // resolution) needs the bracket-free form -- stripped once,
+            // here -- or an IPv6-literal URL never matches its own
+            // manifest entry and (more importantly for the SSRF property)
+            // `tokio::net::lookup_host` fails to parse it as a literal
+            // address at all, rather than being a no-op for the
+            // hostname/IPv4 cases where no brackets are ever present.
             let host = url
                 .host_str()
                 .ok_or_else(|| denied("malformed_url", "url has no host"))?
+                .trim_start_matches('[')
+                .trim_end_matches(']')
                 .to_ascii_lowercase();
 
-            let row = self.catalog.get(app_id);
             let egress_rules = row.as_ref().map(|r| r.egress.as_slice()).unwrap_or(&[]);
             let rule = egress_rules
                 .iter()
@@ -322,6 +366,44 @@ fn host_matches(pattern: &str, host: &str) -> bool {
 /// AWS's IPv6 metadata address, `fd00:ec2::254` (spec §8.2 step 6).
 const CLOUD_METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
 
+/// Extracts an embedded IPv4 address from an IPv6 address carrying one, in
+/// any of the three forms a resolver can hand back (security review, HIGH
+/// finding: none of these were canonicalized before the SSRF check, so
+/// `::ffff:169.254.169.254`/`::ffff:127.0.0.1`/`::ffff:10.0.0.1` -- and
+/// their NAT64 equivalents -- all resolved as "not forbidden" despite
+/// carrying a metadata/loopback/private v4 address underneath):
+///
+/// - **IPv4-mapped** (`::ffff:a.b.c.d`, `::ffff:0:0/96`) -- the form a dual-
+///   stack resolver most commonly returns for an A-record-only host.
+/// - **NAT64-synthesized** (`64:ff9b::a.b.c.d`, `64:ff9b::/96`, RFC 6052) --
+///   what a NAT64 gateway's synthesized AAAA answer looks like.
+/// - **IPv4-compatible** (`::a.b.c.d`, deprecated, RFC 4291 §2.5.5.1) --
+///   excluding `::` (unspecified) and `::1` (loopback), which stay
+///   classified as those specific native-v6 addresses instead.
+///
+/// Returns `None` for a native (non-embedding) IPv6 address, in which case
+/// [`is_forbidden_address`] falls through to its ordinary v6-specific
+/// checks -- an embedded address is judged by the *same* rules as the v4
+/// address it carries, never by the (differently-shaped) native-v6 rules.
+fn embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+    let seg = v6.segments();
+    let o = v6.octets();
+    let last_32 = || Ipv4Addr::new(o[12], o[13], o[14], o[15]);
+    // IPv4-mapped: `::ffff:a.b.c.d`.
+    if seg[0..5] == [0, 0, 0, 0, 0] && seg[5] == 0xffff {
+        return Some(last_32());
+    }
+    // NAT64-synthesized: `64:ff9b::a.b.c.d`.
+    if seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2..6] == [0, 0, 0, 0] {
+        return Some(last_32());
+    }
+    // IPv4-compatible: `::a.b.c.d`, excluding `::` and `::1`.
+    if seg[0..6] == [0, 0, 0, 0, 0, 0] && (seg[6] != 0 || seg[7] > 1) {
+        return Some(last_32());
+    }
+    None
+}
+
 fn is_private_v4(ip: Ipv4Addr) -> bool {
     let o = ip.octets();
     o[0] == 10 || (o[0] == 172 && (16..=31).contains(&o[1])) || (o[0] == 192 && o[1] == 168)
@@ -370,6 +452,14 @@ fn is_forbidden_address(ip: IpAddr, allow_private: bool) -> Option<&'static str>
             None
         }
         IpAddr::V6(v6) => {
+            // Security review, HIGH finding: canonicalize an embedded IPv4
+            // address (mapped/NAT64/compatible) to its v4 form and judge
+            // it by the v4 rules *before* any native-v6 check runs --
+            // otherwise `::ffff:169.254.169.254` etc. never match any of
+            // the checks below and are wrongly permitted.
+            if let Some(v4) = embedded_ipv4(v6) {
+                return is_forbidden_address(IpAddr::V4(v4), allow_private);
+            }
             if v6.is_loopback() {
                 return Some("loopback");
             }
@@ -488,9 +578,14 @@ impl HttpTransport for ReqwestTransport {
         Box::pin(async move {
             let url = reqwest::Url::parse(&req.url)
                 .map_err(|_| denied("malformed_url", "url does not parse"))?;
+            // Bracket-strip for consistency with `EgressGuard::send_checked`
+            // (same `host_str()` quirk for IPv6-literal hosts, see its
+            // comment) -- a no-op for hostname/IPv4 targets.
             let host = url
                 .host_str()
                 .ok_or_else(|| denied("malformed_url", "url has no host"))?
+                .trim_start_matches('[')
+                .trim_end_matches(']')
                 .to_string();
             let method = reqwest::Method::from_bytes(req.method.as_bytes())
                 .map_err(|_| denied("invalid_args", "invalid HTTP method"))?;
@@ -592,6 +687,14 @@ mod tests {
     }
 
     fn catalog_with_row(app_id: &str, egress: Vec<(String, Vec<String>)>) -> Arc<BundleCatalog> {
+        catalog_with_row_and_secrets(app_id, egress, HashMap::new())
+    }
+
+    fn catalog_with_row_and_secrets(
+        app_id: &str,
+        egress: Vec<(String, Vec<String>)>,
+        granted_secret_refs: HashMap<String, String>,
+    ) -> Arc<BundleCatalog> {
         let catalog = Arc::new(BundleCatalog::new());
         catalog.update(vec![BundleRow {
             app_id: app_id.to_string(),
@@ -602,6 +705,7 @@ mod tests {
             egress,
             egress_rps: None,
             config_json: "{}".to_string(),
+            granted_secret_refs,
         }]);
         catalog
     }
@@ -725,6 +829,98 @@ mod tests {
         let ip: IpAddr = "fc00::1".parse().unwrap();
         assert_eq!(is_forbidden_address(ip, false), Some("private"));
         assert_eq!(is_forbidden_address(ip, true), None);
+    }
+
+    // -- Mandatory regression tests: IPv4-mapped/NAT64/compatible IPv6 SSRF
+    // bypass (security review, HIGH finding). Before the fix, every one of
+    // these addresses returned `None` (permitted) because `is_loopback()`/
+    // `is_unspecified()`/the manual private/link-local/metadata checks
+    // never canonicalize an embedded v4 address.
+
+    #[test]
+    fn ipv4_mapped_cloud_metadata_is_forbidden() {
+        let ip: IpAddr = "::ffff:169.254.169.254".parse().unwrap();
+        assert_eq!(is_forbidden_address(ip, true), Some("cloud_metadata"));
+    }
+
+    #[test]
+    fn ipv4_mapped_loopback_is_forbidden() {
+        let ip: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert_eq!(is_forbidden_address(ip, true), Some("loopback"));
+    }
+
+    #[test]
+    fn ipv4_mapped_private_is_forbidden_unless_allow_private() {
+        let ip: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+        assert_eq!(is_forbidden_address(ip, false), Some("private"));
+        assert_eq!(is_forbidden_address(ip, true), None);
+    }
+
+    #[test]
+    fn ipv4_mapped_public_address_is_permitted() {
+        let ip: IpAddr = "::ffff:93.184.216.34".parse().unwrap();
+        assert_eq!(is_forbidden_address(ip, false), None);
+    }
+
+    #[test]
+    fn nat64_synthesized_cloud_metadata_is_forbidden() {
+        // 64:ff9b::a9fe:a9fe == 64:ff9b::169.254.169.254.
+        let ip: IpAddr = "64:ff9b::a9fe:a9fe".parse().unwrap();
+        assert_eq!(is_forbidden_address(ip, true), Some("cloud_metadata"));
+    }
+
+    #[test]
+    fn nat64_synthesized_private_is_forbidden_unless_allow_private() {
+        // 64:ff9b::a00:1 == 64:ff9b::10.0.0.1.
+        let ip: IpAddr = "64:ff9b::a00:1".parse().unwrap();
+        assert_eq!(is_forbidden_address(ip, false), Some("private"));
+        assert_eq!(is_forbidden_address(ip, true), None);
+    }
+
+    #[test]
+    fn ipv4_compatible_private_is_forbidden_unless_allow_private() {
+        let ip: IpAddr = "::10.0.0.1".parse().unwrap();
+        assert_eq!(is_forbidden_address(ip, false), Some("private"));
+        assert_eq!(is_forbidden_address(ip, true), None);
+    }
+
+    #[test]
+    fn native_unspecified_and_loopback_v6_are_unaffected_by_embedded_v4_detection() {
+        // `::` and `::1` must still classify as unspecified/loopback via
+        // the native-v6 checks, never be mistaken for IPv4-compatible
+        // `::0.0.0.0`/`::0.0.0.1`.
+        assert_eq!(
+            is_forbidden_address(IpAddr::V6(Ipv6Addr::UNSPECIFIED), true),
+            Some("unspecified")
+        );
+        assert_eq!(
+            is_forbidden_address(IpAddr::V6(Ipv6Addr::LOCALHOST), true),
+            Some("loopback")
+        );
+    }
+
+    #[tokio::test]
+    async fn ssrf_to_an_ipv4_mapped_cloud_metadata_literal_is_blocked_end_to_end() {
+        // Hermetic: an IP-literal host in brackets never queries a real
+        // resolver (`tokio::net::lookup_host` resolves it directly). The
+        // `url` crate normalizes an IPv6-literal host to fully-expanded
+        // hex segments (`::ffff:a9fe:a9fe`), not the dotted-quad mixed
+        // notation (`::ffff:169.254.169.254`) -- the manifest entry below
+        // must match that normalized form, same as any other host
+        // comparison this guard does. `a9fe:a9fe` == `169.254.169.254`.
+        let guard = guard_with(
+            "waddles.a.b.c",
+            vec![("::ffff:a9fe:a9fe".to_string(), vec!["GET".to_string()])],
+            FakeTransport::default(),
+        );
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://[::ffff:169.254.169.254]/latest/meta-data"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "ssrf_blocked_address");
     }
 
     // -- Full pipeline via EgressGuard (negative tests, spec §8.2) --
@@ -953,8 +1149,14 @@ mod tests {
         assert_eq!(decoded, b"{\"ok\":true}");
     }
 
+    /// Happy path for the two-hop resolution (security review fix): the
+    /// bundle's symbolic name (`DISCORD_TOKEN_REF`, deliberately different
+    /// from the real env var name) is granted in this bundle's own
+    /// activation config, mapping to the real env var
+    /// `EGRESS_TEST_DISCORD_TOKEN` -- only *that* granted name is ever read
+    /// from the process environment.
     #[tokio::test]
-    async fn secret_ref_resolves_from_env_and_is_injected_as_a_header() {
+    async fn granted_secret_ref_resolves_via_activation_config_and_is_injected_as_a_header() {
         // SAFETY: test-process-local env var, unique name avoids
         // cross-test collisions under parallel `cargo test` execution.
         unsafe { std::env::set_var("EGRESS_TEST_DISCORD_TOKEN", "s3cr3t") };
@@ -962,9 +1164,13 @@ mod tests {
         let guard = EgressGuard::new(
             Arc::clone(&transport) as Arc<dyn HttpTransport>,
             default_limits(),
-            catalog_with_row(
+            catalog_with_row_and_secrets(
                 "waddles.a.b.c",
                 vec![("discord.com".to_string(), vec!["POST".to_string()])],
+                HashMap::from([(
+                    "DISCORD_TOKEN_REF".to_string(),
+                    "EGRESS_TEST_DISCORD_TOKEN".to_string(),
+                )]),
             ),
             test_metrics(),
         );
@@ -974,7 +1180,7 @@ mod tests {
                 &serde_json::json!({
                     "method": "POST",
                     "url": "https://discord.com/api/webhooks/1",
-                    "secret_refs": {"Authorization": "EGRESS_TEST_DISCORD_TOKEN"}
+                    "secret_refs": {"Authorization": "DISCORD_TOKEN_REF"}
                 }),
             )
             .await
@@ -989,12 +1195,23 @@ mod tests {
             .any(|(k, v)| k == "Authorization" && v == "s3cr3t"));
     }
 
+    /// The granted symbolic name maps to an env var the process never
+    /// actually set -- a configuration error, distinct from naming an
+    /// ungranted reference at all.
     #[tokio::test]
-    async fn unresolvable_secret_ref_is_denied() {
-        let guard = guard_with(
-            "waddles.a.b.c",
-            vec![("discord.com".to_string(), vec!["POST".to_string()])],
-            FakeTransport::default(),
+    async fn granted_secret_ref_whose_env_var_is_unset_is_denied_secret_unresolved() {
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default()),
+            default_limits(),
+            catalog_with_row_and_secrets(
+                "waddles.a.b.c",
+                vec![("discord.com".to_string(), vec!["POST".to_string()])],
+                HashMap::from([(
+                    "DISCORD_TOKEN_REF".to_string(),
+                    "EGRESS_TEST_NEVER_SET_XYZ".to_string(),
+                )]),
+            ),
+            test_metrics(),
         );
         let err = guard
             .send(
@@ -1002,12 +1219,102 @@ mod tests {
                 &serde_json::json!({
                     "method": "POST",
                     "url": "https://discord.com/api/webhooks/1",
-                    "secret_refs": {"Authorization": "EGRESS_TEST_DOES_NOT_EXIST"}
+                    "secret_refs": {"Authorization": "DISCORD_TOKEN_REF"}
                 }),
             )
             .await
             .unwrap_err();
         assert_eq!(err.code, "secret_unresolved");
+    }
+
+    /// **Mandatory regression test (security review, CRITICAL finding):**
+    /// arbitrary env-var read via bundle-controlled `secret_refs`. Before
+    /// the fix, `send_checked` called `std::env::var(secret_ref)` directly
+    /// on the bundle-supplied string -- a bundle naming a process secret
+    /// like `DATABASE_URL` would have it read and injected as a header,
+    /// reachable at any host the bundle's own manifest allowlists. This
+    /// asserts a non-granted name is refused `secret_not_granted` **even
+    /// when that exact env var is set in the process**, and that its value
+    /// never reaches the transport request at all.
+    #[tokio::test]
+    async fn ungranted_secret_ref_is_denied_even_when_the_named_env_var_is_set() {
+        // SAFETY: test-process-local env var, unique name avoids
+        // cross-test collisions under parallel `cargo test` execution --
+        // deliberately shaped like a real credential name to mirror the
+        // finding's exact scenario.
+        unsafe {
+            std::env::set_var(
+                "DATABASE_URL",
+                "postgres://exfiltrated-should-never-be-read",
+            )
+        };
+        let transport = Arc::new(FakeTransport::default());
+        let guard = EgressGuard::new(
+            Arc::clone(&transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            // No grants at all -- the bundle's activation config never
+            // mentions `DATABASE_URL` (or anything else) as a secret ref.
+            catalog_with_row(
+                "waddles.a.b.c",
+                vec![("discord.com".to_string(), vec!["POST".to_string()])],
+            ),
+            test_metrics(),
+        );
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({
+                    "method": "POST",
+                    "url": "https://discord.com/api/webhooks/1",
+                    "secret_refs": {"X-Exfil": "DATABASE_URL"}
+                }),
+            )
+            .await
+            .unwrap_err();
+        unsafe { std::env::remove_var("DATABASE_URL") };
+
+        assert_eq!(err.code, "secret_not_granted");
+        // The transport must never have been reached at all -- the denial
+        // happens before any request is built, so no header (and
+        // certainly not the secret value) can have leaked into it.
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+
+    /// Same finding, second angle: even with a grant map present for other
+    /// refs, a symbolic name outside that specific bundle's own granted
+    /// set is still refused -- a grant is per-name, not "any name once one
+    /// grant exists".
+    #[tokio::test]
+    async fn secret_ref_outside_this_bundles_granted_set_is_denied() {
+        unsafe { std::env::set_var("EGRESS_TEST_OTHER_SECRET", "should-not-leak") };
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default()),
+            default_limits(),
+            catalog_with_row_and_secrets(
+                "waddles.a.b.c",
+                vec![("discord.com".to_string(), vec!["POST".to_string()])],
+                HashMap::from([(
+                    "DISCORD_TOKEN_REF".to_string(),
+                    "EGRESS_TEST_DISCORD_TOKEN".to_string(),
+                )]),
+            ),
+            test_metrics(),
+        );
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({
+                    "method": "POST",
+                    "url": "https://discord.com/api/webhooks/1",
+                    // Not the granted "DISCORD_TOKEN_REF" -- naming the
+                    // *target* env var directly must still be refused.
+                    "secret_refs": {"Authorization": "EGRESS_TEST_OTHER_SECRET"}
+                }),
+            )
+            .await
+            .unwrap_err();
+        unsafe { std::env::remove_var("EGRESS_TEST_OTHER_SECRET") };
+        assert_eq!(err.code, "secret_not_granted");
     }
 
     #[tokio::test]

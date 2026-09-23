@@ -578,6 +578,7 @@ mod tests {
             egress: vec![],
             egress_rps: None,
             config_json: "{\"x\":1}".to_string(),
+            granted_secret_refs: std::collections::HashMap::new(),
         }]);
         let (digest, config_json) = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -618,6 +619,7 @@ mod tests {
             egress: vec![],
             egress_rps: None,
             config_json: "{}".to_string(),
+            granted_secret_refs: std::collections::HashMap::new(),
         }]);
         let (digest, _config_json) = resolve_initial_bundle(
             &catalog,

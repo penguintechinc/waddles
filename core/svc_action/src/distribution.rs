@@ -100,6 +100,22 @@ pub struct BundleRow {
     pub egress: Vec<(String, Vec<String>)>,
     pub egress_rps: Option<u32>,
     pub config_json: String,
+    /// Symbolic secret-reference name -> the actual environment variable
+    /// name it resolves to (spec §8.3: "an environment-variable *name*
+    /// held in the activation config, resolved at call time"; mirrors
+    /// `waddle_transports.signing.resolve_secret`'s Python precedent,
+    /// where `secret_ref` is likewise sourced from trusted `config`, never
+    /// from bundle-runtime-supplied `payload`). Parsed from this row's own
+    /// `config.secret_refs` object -- hub-api/admin-controlled activation
+    /// config, per app_id -- **never** from anything a bundle's `http.send`
+    /// `args` carry at call time. `crate::egress::EgressGuard` validates a
+    /// bundle-supplied `secret_refs` symbolic name against this map before
+    /// resolving anything from the process environment: a name that is not
+    /// a key here is refused (`secret_not_granted`), which is what makes
+    /// arbitrary-env-var-name injection via `http.send` impossible even
+    /// though the bundle picks the symbolic name per call (security review
+    /// finding, post-M3-capabilities landing).
+    pub granted_secret_refs: HashMap<String, String>,
 }
 
 /// Derives the `load` frame's `component_key`/`sidecar_key` bucket paths
@@ -114,6 +130,23 @@ fn bucket_keys(app_id: &str, version: &str, digest: &str) -> (String, String) {
         format!("bundles/{app_id}/{version}/{sha256_hex}.wasm"),
         format!("bundles/{app_id}/{version}/{sha256_hex}.json"),
     )
+}
+
+/// Extracts the `secret_refs` object from this row's raw activation
+/// `config` (if present) into a `{symbolic_name: env_var_name}` map --
+/// non-string values and a missing/non-object `secret_refs` key are
+/// treated as "no grants" (empty map) rather than an error, matching this
+/// module's general leniency on optional config shape.
+fn extract_granted_secret_refs(config: &serde_json::Value) -> HashMap<String, String> {
+    config
+        .get("secret_refs")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl From<RawBundleRow> for BundleRow {
@@ -137,6 +170,7 @@ impl From<RawBundleRow> for BundleRow {
                 (rule.host, methods)
             })
             .collect();
+        let granted_secret_refs = extract_granted_secret_refs(&raw.config);
         Self {
             app_id: raw.app_id,
             version,
@@ -146,6 +180,7 @@ impl From<RawBundleRow> for BundleRow {
             egress,
             egress_rps: raw.manifest.limits.egress_rps,
             config_json: raw.config.to_string(),
+            granted_secret_refs,
         }
     }
 }
@@ -391,6 +426,56 @@ mod tests {
         assert_eq!(row.component_key, "");
     }
 
+    /// Security-review regression: `granted_secret_refs` must come from
+    /// this row's own trusted `config.secret_refs` object (hub-api/admin-
+    /// controlled activation config), never be left populated by anything
+    /// bundle-runtime-controlled -- `crate::egress::EgressGuard` is the
+    /// consumer that enforces this at the `http.send` boundary.
+    #[test]
+    fn raw_bundle_row_parses_granted_secret_refs_from_activation_config() {
+        let raw: RawBundleRow = serde_json::from_value(serde_json::json!({
+            "appId": "waddles.socials.discord.default",
+            "config": {"secret_refs": {"DISCORD_WEBHOOK_TOKEN_REF": "DISCORD_WEBHOOK_TOKEN"}},
+            "manifest": {}
+        }))
+        .unwrap();
+        let row: BundleRow = raw.into();
+        assert_eq!(
+            row.granted_secret_refs.get("DISCORD_WEBHOOK_TOKEN_REF"),
+            Some(&"DISCORD_WEBHOOK_TOKEN".to_string())
+        );
+    }
+
+    #[test]
+    fn raw_bundle_row_with_no_secret_refs_config_has_no_grants() {
+        let raw: RawBundleRow = serde_json::from_value(serde_json::json!({
+            "appId": "waddles.a.b.c",
+            "manifest": {}
+        }))
+        .unwrap();
+        let row: BundleRow = raw.into();
+        assert!(row.granted_secret_refs.is_empty());
+    }
+
+    /// A non-string value under `secret_refs` (malformed activation config)
+    /// is skipped rather than accepted as a grant -- never widens the
+    /// granted set on malformed input.
+    #[test]
+    fn raw_bundle_row_ignores_non_string_secret_ref_values() {
+        let raw: RawBundleRow = serde_json::from_value(serde_json::json!({
+            "appId": "waddles.a.b.c",
+            "config": {"secret_refs": {"BAD_REF": 12345, "GOOD_REF": "REAL_ENV_VAR"}},
+            "manifest": {}
+        }))
+        .unwrap();
+        let row: BundleRow = raw.into();
+        assert!(!row.granted_secret_refs.contains_key("BAD_REF"));
+        assert_eq!(
+            row.granted_secret_refs.get("GOOD_REF"),
+            Some(&"REAL_ENV_VAR".to_string())
+        );
+    }
+
     #[tokio::test]
     async fn fetch_bundles_parses_a_real_response() {
         let (port, _handle) =
@@ -450,6 +535,7 @@ mod tests {
             egress: vec![],
             egress_rps: None,
             config_json: "{}".to_string(),
+            granted_secret_refs: HashMap::new(),
         };
         catalog.update(vec![row.clone()]);
         assert_eq!(catalog.get("waddles.a.b.c"), Some(row));
@@ -467,6 +553,7 @@ mod tests {
             egress: vec![],
             egress_rps: None,
             config_json: "{}".to_string(),
+            granted_secret_refs: HashMap::new(),
         };
         catalog.update(vec![row.clone()]);
         row.artifact_digest = Some("sha256:11".to_string());
