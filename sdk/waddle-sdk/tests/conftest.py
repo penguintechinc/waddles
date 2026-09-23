@@ -20,3 +20,12 @@ def _reset_bundle_runtime_state():
     from waddle_sdk.flask_core.bundle_runtime import reset_bundle_dal_for_tests
 
     reset_bundle_dal_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _reset_db_primary_key_overrides():
+    """Ensure no `register_primary_key()` overrides leak between tests."""
+    yield
+    from waddle_sdk.db import reset_primary_key_overrides_for_tests
+
+    reset_primary_key_overrides_for_tests()

@@ -57,7 +57,7 @@ from waddle_sdk._poll_loop import PollLoop
 from waddle_sdk.db import AsyncDB
 from waddle_sdk.flask_core.bundle_runtime import bundle_context, set_bundle_dal
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-from waddle_sdk.http import HttpClient
+from waddle_sdk.http import HttpClient, RetryableTransportError
 
 try:
     import _bundle_preimports  # noqa: F401 - auto-generated into the bundle's own source dir
@@ -71,6 +71,24 @@ except ImportError:
     _entry_wiring = None
 
 set_bundle_dal(AsyncDB())
+
+
+def _dispatch_result_is_ok(result: Any) -> bool:
+    """Derive a successful ``dispatch()``'s ``ok`` flag from its own result, never unconditionally.
+
+    ``waddle_transports.TransportResult`` (see this module's docstring) has
+    no explicit success flag, only an optional ``http_status`` -- so a bundle
+    that returns rather than raises (e.g. ``http_status=500``) must still map
+    to ``ok=False``; only a *raised* exception previously signaled failure
+    here, silently dropping this case. A result with no ``http_status`` at
+    all (non-HTTP transports, e.g. queue/webhook pushes) keeps the prior
+    behavior: reaching this function at all already means ``bundle_dispatch``
+    did not raise, so no status present is treated as success.
+    """
+    http_status: Any = getattr(result, "http_status", None)
+    if http_status is None:
+        return True
+    return bool(200 <= http_status < 400)
 
 
 def _run_coro(coro: Any) -> Any:
@@ -161,7 +179,13 @@ class WitWorld:
         except Exception as exc:  # noqa: BLE001 - maps *TransportError onto types.TransportError
             from componentize_py_types import Err
 
-            retryable = type(exc).__name__ == "RetryableTransportError"
+            # `isinstance`, not a class-name string match: `RetryableTransportError`
+            # (imported above) is this SDK's own real, importable class -- unlike
+            # the WIT-generated `Err`/`Value_*` types this module and `db.py`
+            # classify structurally by name, there is no per-component binding
+            # identity problem here, so a name-only match would wrongly miss any
+            # subclass a bundle raises.
+            retryable = isinstance(exc, RetryableTransportError)
             raise Err(
                 wit_world.imports.types.TransportError(
                     retryable=retryable,
@@ -172,7 +196,7 @@ class WitWorld:
             ) from exc
 
         return wit_world.imports.types.TransportResult(
-            ok=True,
+            ok=_dispatch_result_is_ok(result),
             status=getattr(result, "http_status", None),
             detail=getattr(result, "detail", None),
             provider_message_id=getattr(result, "sub_type", None),

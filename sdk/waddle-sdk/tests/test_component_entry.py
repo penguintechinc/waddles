@@ -181,10 +181,10 @@ def test_dispatch_maps_retryable_exception_to_transport_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """RetryableTransportError from a bundle's dispatch maps to `TransportError(retryable=True)`."""
-    retryable_transport_error = type("RetryableTransportError", (Exception,), {})
+    from waddle_sdk.http import RetryableTransportError
 
     async def bundle_dispatch(envelope, config, *, http_client):
-        raise retryable_transport_error("upstream 503")
+        raise RetryableTransportError("upstream 503")
 
     entry_wiring = types.ModuleType("_entry_wiring")
     entry_wiring.bundle_dispatch = bundle_dispatch  # type: ignore[attr-defined]
@@ -211,6 +211,49 @@ def test_dispatch_maps_retryable_exception_to_transport_error(
         component_entry.WitWorld().dispatch(envelope, "{}")
     assert exc_info.value.value.retryable is True
     assert exc_info.value.value.code == "RetryableTransportError"
+
+
+def test_dispatch_maps_retryable_exception_subclass_to_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `RetryableTransportError` *subclass* also classifies as retryable via `isinstance`.
+
+    Regression for the exact-class-name match this replaced: `type(exc).__name__
+    == "RetryableTransportError"` would have missed any subclass entirely.
+    """
+    from waddle_sdk.http import RetryableTransportError
+
+    class _RateLimitedError(RetryableTransportError):
+        """A bundle-defined subclass, e.g. for a more specific retry reason."""
+
+    async def bundle_dispatch(envelope, config, *, http_client):
+        raise _RateLimitedError("rate limited, retry later")
+
+    entry_wiring = types.ModuleType("_entry_wiring")
+    entry_wiring.bundle_dispatch = bundle_dispatch  # type: ignore[attr-defined]
+    _install_fake_component_modules(monkeypatch, entry_wiring=entry_wiring)
+    component_entry = _reload_component_entry()
+
+    envelope = wit_shapes.WitStageEnvelope(
+        tenant="acme",
+        community="main",
+        app_id="waddles.social.alias.default",
+        stage="action",
+        event=wit_shapes.WitPlatformEvent(
+            platform="discord",
+            event_type="chat.message",
+            actor="u1",
+            payload_json="{}",
+            occurred_at="ts",
+        ),
+        ts="ts",
+        target_app_id=None,
+        trace_context=None,
+    )
+    with pytest.raises(_FakeErr) as exc_info:
+        component_entry.WitWorld().dispatch(envelope, "{}")
+    assert exc_info.value.value.retryable is True
+    assert exc_info.value.value.code == "_RateLimitedError"
 
 
 def test_dispatch_success_builds_transport_result(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -251,3 +294,84 @@ def test_dispatch_success_builds_transport_result(monkeypatch: pytest.MonkeyPatc
     assert result.status == 200
     assert result.detail == "sent"
     assert result.provider_message_id == "msg-123"
+
+
+def test_dispatch_returning_error_http_status_maps_to_ok_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bundle that *returns* (never raises) `http_status=500` must not map to `ok=True`.
+
+    Regression: the old code set `ok=True` unconditionally on any non-raising
+    return, silently treating a returned server error as success.
+    """
+
+    class _Result:
+        http_status = 500
+        detail = "upstream returned 500"
+        sub_type = None
+
+    async def bundle_dispatch(envelope, config, *, http_client):
+        return _Result()
+
+    entry_wiring = types.ModuleType("_entry_wiring")
+    entry_wiring.bundle_dispatch = bundle_dispatch  # type: ignore[attr-defined]
+    _install_fake_component_modules(monkeypatch, entry_wiring=entry_wiring)
+    component_entry = _reload_component_entry()
+
+    envelope = wit_shapes.WitStageEnvelope(
+        tenant="acme",
+        community="main",
+        app_id="waddles.social.alias.default",
+        stage="action",
+        event=wit_shapes.WitPlatformEvent(
+            platform="discord",
+            event_type="chat.message",
+            actor="u1",
+            payload_json="{}",
+            occurred_at="ts",
+        ),
+        ts="ts",
+        target_app_id=None,
+        trace_context=None,
+    )
+    result = component_entry.WitWorld().dispatch(envelope, "{}")
+    assert result.ok is False
+    assert result.status == 500
+
+
+def test_dispatch_result_with_no_http_status_still_maps_to_ok_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-HTTP transport result (no `http_status` at all) keeps the prior default: `ok=True`."""
+
+    class _Result:
+        detail = "pushed"
+        sub_type = None
+
+    async def bundle_dispatch(envelope, config, *, http_client):
+        return _Result()
+
+    entry_wiring = types.ModuleType("_entry_wiring")
+    entry_wiring.bundle_dispatch = bundle_dispatch  # type: ignore[attr-defined]
+    _install_fake_component_modules(monkeypatch, entry_wiring=entry_wiring)
+    component_entry = _reload_component_entry()
+
+    envelope = wit_shapes.WitStageEnvelope(
+        tenant="acme",
+        community="main",
+        app_id="waddles.social.alias.default",
+        stage="action",
+        event=wit_shapes.WitPlatformEvent(
+            platform="discord",
+            event_type="chat.message",
+            actor="u1",
+            payload_json="{}",
+            occurred_at="ts",
+        ),
+        ts="ts",
+        target_app_id=None,
+        trace_context=None,
+    )
+    result = component_entry.WitWorld().dispatch(envelope, "{}")
+    assert result.ok is True
+    assert result.status is None

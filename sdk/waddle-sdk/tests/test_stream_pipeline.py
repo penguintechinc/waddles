@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import types
 
+import pytest
 import wit_shapes
 
+from waddle_sdk._json_guard import NonObjectJsonError
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 
@@ -89,6 +91,27 @@ def test_platform_event_to_wit_record_round_trips_through_payload_json() -> None
     record = event.to_wit_record(fake_types)
     assert record.payload_json == json.dumps({"n": 1})
     assert PlatformEvent.from_wit_record(record) == event
+
+
+def test_platform_event_to_wit_record_rejects_non_object_payload() -> None:
+    """to_wit_record() raises NonObjectJsonError if `payload` isn't a dict.
+
+    Python doesn't enforce the `payload: dict[str, Any]` field's type hint at
+    runtime, so a bundle bypassing it (e.g. `PlatformEvent(payload=["a"])`)
+    must fail loudly here rather than silently sending a JSON array across
+    the WIT boundary's `payload_json` field.
+    """
+    fake_types = types.ModuleType("fake_types")
+    fake_types.PlatformEvent = wit_shapes.WitPlatformEvent  # type: ignore[attr-defined]
+    event = PlatformEvent(
+        platform="discord",
+        event_type="chat.message",
+        actor="u1",
+        payload=["not", "an", "object"],  # type: ignore[arg-type]
+        occurred_at="ts",
+    )
+    with pytest.raises(NonObjectJsonError, match="expected a JSON object"):
+        event.to_wit_record(fake_types)
 
 
 def test_stage_envelope_from_wit_record() -> None:

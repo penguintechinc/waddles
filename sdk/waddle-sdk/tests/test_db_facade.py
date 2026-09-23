@@ -22,6 +22,7 @@ from waddle_sdk.db import (
     TableNotFoundError,
     ValidationError,
     create_dal,
+    register_primary_key,
 )
 
 
@@ -232,6 +233,58 @@ def test_getitem_pk_lookup_returns_row_or_none(fake_db: wit_fake_db.FakeWitDb) -
     fake_db.canned_rows.clear()
     missing = db.command_aliases[999]
     assert missing is None
+
+
+def test_getitem_and_insert_use_registered_non_id_primary_key(
+    fake_db: wit_fake_db.FakeWitDb,
+) -> None:
+    """A table registered with a non-`id` PK uses that column, never a hardcoded `id`.
+
+    Regression: `__getitem__`/`async_insert` used to hardcode `WHERE
+    {table}.id = $1` / `RETURNING id` unconditionally.
+    """
+    register_primary_key("widgets", "widget_uuid")
+    db = create_dal()
+
+    fake_db.canned_rows["widgets.widget_uuid = $1"] = [{"widget_uuid": "w-1", "name": "gizmo"}]
+    row = db.widgets["w-1"]
+    assert row is not None
+    assert row.name == "gizmo"
+    select_sql, select_params = fake_db.calls[0]
+    assert "widgets.widget_uuid = $1" in select_sql
+    assert "widgets.id" not in select_sql
+    assert select_params == ["w-1"]
+
+    fake_db.canned_rows["INSERT INTO widgets"] = [{"widget_uuid": "w-2"}]
+    new_pk = _run(db.widgets.async_insert(name="sprocket"))
+    insert_sql, _ = fake_db.calls[1]
+    assert insert_sql.endswith("RETURNING widget_uuid")
+    assert new_pk == "w-2"
+
+
+def test_unregistered_table_still_defaults_to_id_primary_key(
+    fake_db: wit_fake_db.FakeWitDb,
+) -> None:
+    """Without a registration, `id` remains the default -- matches every first-party bundle."""
+    db = create_dal()
+    fake_db.canned_rows["command_aliases.id = $1"] = [{"id": 3, "alias": "foo"}]
+    row = db.command_aliases[3]
+    assert row is not None
+    sql, _ = fake_db.calls[0]
+    assert "command_aliases.id = $1" in sql
+
+
+def test_registering_none_primary_key_raises_not_implemented_never_silently_emits_id(
+    fake_db: wit_fake_db.FakeWitDb,
+) -> None:
+    """Registering `pk_column=None` (e.g. a composite key) raises, never falls back to `id`."""
+    register_primary_key("composite_keyed", None)
+    db = create_dal()
+    with pytest.raises(NotImplementedError, match="non-'id' primary key not supported"):
+        db.composite_keyed[1]
+    with pytest.raises(NotImplementedError, match="composite_keyed"):
+        _run(db.composite_keyed.async_insert(a=1))
+    assert len(fake_db.calls) == 0  # never crossed the WIT boundary with a guessed column
 
 
 def test_rows_supports_dict_and_attribute_access_and_iteration(

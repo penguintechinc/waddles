@@ -10,6 +10,7 @@ import pytest
 import wit_shapes
 
 import waddle_sdk.log as log
+from waddle_sdk._json_guard import NonObjectJsonError
 
 
 @pytest.fixture
@@ -52,3 +53,16 @@ def test_no_fields_serializes_to_empty_object(fake_log) -> None:
     log.info("no fields")
     _, _, fields_json = fake_log[0]
     assert fields_json == "{}"
+
+
+def test_write_rejects_non_object_fields(fake_log) -> None:
+    """`_write` raises NonObjectJsonError if `fields` isn't a dict.
+
+    The public `debug`/`info`/`warn`/`error` API always builds `fields` from
+    `**fields: Any`, which is always a dict -- this exercises `_write`'s own
+    guard directly, mirroring the Rust SDK's boundary-wide object-shape check
+    rather than assuming the public API is the only caller forever.
+    """
+    with pytest.raises(NonObjectJsonError, match="expected a JSON object"):
+        log._write("INFO", "bad fields", ["not", "an", "object"])  # type: ignore[arg-type]
+    assert fake_log == []  # never crossed the WIT boundary
