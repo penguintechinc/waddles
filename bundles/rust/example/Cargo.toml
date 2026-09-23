@@ -1,0 +1,31 @@
+[package]
+name = "waddle-bundle-example-rust"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "M2 Tier-1 Rust bundle example: implements the process-stage export of waddle:bundle/stage@1.0.0 via waddle-sdk-rs, compiled to a WASI 0.2 component with cargo-component. Proves the SDK against the normative WIT world -- see docs/superpowers/specs/2026-09-14-rust-data-plane-design.md SS4.0/SS6.5 (\"Example bundle per language passing the WIT conformance suite\")."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Sibling-crate path dependency, not a registry/git one -- this bundle and
+# the SDK it depends on live in the same repo and move together. Mirrors
+# how a real first-party bundle would instead depend on the published
+# `waddle-sdk-rs` crate (SS4.0's `sdk/waddle-sdk-rs`).
+waddle-sdk-rs = { path = "../../../sdk/waddle-sdk-rs", version = "=0.1.0" }
+# Matches waddle-sdk-rs's own pin (sdk/waddle-sdk-rs/Cargo.toml) -- a
+# bundle needs `serde`'s derive macros directly for its own payload
+# structs; it is not re-exported through the SDK.
+serde = { version = "=1.0.229", features = ["derive"] }
+
+[package.metadata.component]
+package = "waddle:bundle-example-rust"
+
+[package.metadata.component.target]
+path = "../../../wit/waddle-bundle"
+world = "stage"
+
+[package.metadata.component.dependencies]
