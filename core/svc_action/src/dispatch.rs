@@ -320,6 +320,13 @@ pub struct DispatchDeps<A: AuditSink, T: TenantResolver, S: SpineOps> {
     pub audit: A,
     pub tenants: T,
     pub usage: Arc<Mutex<UsageBatcher>>,
+    /// This pod's own identity (`penguin_spine::SpineConfig::consumer_id`,
+    /// `SPINE_CONSUMER_ID`) -- the value a `DlqError.consumer_id` must
+    /// carry, matching `penguin_spine::client::claim_stale`'s convention
+    /// (the *consumer* that owned the entry when it was dead-lettered, not
+    /// the entry's own stream id -- `Delivered::entry_id` is a different
+    /// concept entirely and must never be substituted here).
+    pub consumer_id: String,
     pub spine: S,
     pub metrics: Arc<dyn SpineMetrics>,
 }
@@ -350,7 +357,7 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
             message: reason.to_string(),
             detail: None,
             artifact_digest: Some(deps.digest.clone()),
-            consumer_id: d.entry_id.clone(),
+            consumer_id: deps.consumer_id.clone(),
         };
         return deps.spine.dead_letter(d, &err).await;
     }
@@ -363,7 +370,7 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
             message: "no active host-api connection".to_string(),
             detail: None,
             artifact_digest: Some(deps.digest.clone()),
-            consumer_id: d.entry_id.clone(),
+            consumer_id: deps.consumer_id.clone(),
         };
         return deps.spine.dead_letter(d, &err).await;
     };
@@ -734,7 +741,12 @@ mod tests {
     #[derive(Default)]
     struct FakeSpineOps {
         acked: std::sync::Mutex<Vec<String>>,
-        dead_lettered: std::sync::Mutex<Vec<(String, penguin_spine::DlqErrorKind)>>,
+        /// `(entry_id, kind, consumer_id)` -- `consumer_id` is captured
+        /// separately from `entry_id` so tests can assert `DlqError.
+        /// consumer_id` is the pod identity, never the entry's own id
+        /// (gh review: both DLQ sites previously set `consumer_id:
+        /// d.entry_id.clone()`).
+        dead_lettered: std::sync::Mutex<Vec<(String, penguin_spine::DlqErrorKind, String)>>,
     }
 
     impl SpineOps for FakeSpineOps {
@@ -754,10 +766,11 @@ mod tests {
             err: &'a penguin_spine::DlqError,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SpineError>> + Send + 'a>>
         {
-            self.dead_lettered
-                .lock()
-                .unwrap()
-                .push((d.entry_id.clone(), err.kind));
+            self.dead_lettered.lock().unwrap().push((
+                d.entry_id.clone(),
+                err.kind,
+                err.consumer_id.clone(),
+            ));
             Box::pin(async { Ok(()) })
         }
     }
@@ -782,6 +795,7 @@ mod tests {
             audit: FakeAudit::default(),
             tenants: FixedTenantResolver,
             usage: Arc::new(Mutex::new(UsageBatcher::new())),
+            consumer_id: "test-pod-consumer".to_string(),
             spine,
             metrics: Arc::new(RecordingSpineMetrics::default()),
         }
@@ -808,6 +822,12 @@ mod tests {
             dead_lettered[0].1,
             penguin_spine::DlqErrorKind::TenantBoundary
         );
+        // gh review: `DlqError.consumer_id` must be the pod identity
+        // (`DispatchDeps::consumer_id`, matching
+        // `penguin_spine::client::claim_stale`'s convention), never the
+        // entry's own `entry_id`.
+        assert_eq!(dead_lettered[0].2, deps.consumer_id);
+        assert_ne!(dead_lettered[0].2, d.entry_id);
     }
 
     #[tokio::test]
@@ -830,6 +850,8 @@ mod tests {
             dead_lettered[0].1,
             penguin_spine::DlqErrorKind::ExecutorUnavailable
         );
+        assert_eq!(dead_lettered[0].2, deps.consumer_id);
+        assert_ne!(dead_lettered[0].2, d.entry_id);
     }
 
     /// Drives a fake executor over an in-memory duplex: completes the
@@ -927,6 +949,70 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].status, "success");
         assert_eq!(deps.usage.lock().unwrap().pending_len(), 1);
+    }
+
+    /// A [`crate::usage::UsageSink`] that records every delta it is asked
+    /// to write -- the "mock sink asserting flush is called" fallback the
+    /// review comment calls for (no live-Valkey test-container harness
+    /// exists in this workspace yet), proving the *whole* chain end to
+    /// end: `handle_delivered` -> `UsageBatcher::record_action_delivered`
+    /// -> `UsageBatcher::flush` -> `UsageSink::write` (which
+    /// `RedisUsageSink::write`, the real implementation, backs with a
+    /// literal `XADD waddles:usage`, spec §5.12/D31). Regression coverage
+    /// for the CRITICAL finding: usage deltas previously accumulated in
+    /// `DispatchDeps::usage` forever because nothing ever called
+    /// `UsageBatcher::flush` in production.
+    #[derive(Default)]
+    struct RecordingUsageSink {
+        written: std::sync::Mutex<Vec<crate::usage::UsageDelta>>,
+    }
+
+    impl crate::usage::UsageSink for RecordingUsageSink {
+        fn write(
+            &self,
+            delta: &crate::usage::UsageDelta,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), crate::usage::UsageError>> + Send + '_>,
+        > {
+            let delta = delta.clone();
+            Box::pin(async move {
+                self.written.lock().unwrap().push(delta);
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_delivered_action_flushes_to_the_usage_sink_as_an_xadd_ready_delta() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
+
+        let connections = connected_registry_with_fake_executor(
+            serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+        )
+        .await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+        assert_eq!(deps.usage.lock().unwrap().pending_len(), 1);
+
+        let sink = RecordingUsageSink::default();
+        // Don't hold the `MutexGuard` across `.await` (clippy::
+        // await_holding_lock) -- take the batcher out synchronously first,
+        // matching `crate::lib`'s own production flush-loop pattern.
+        let mut batcher = std::mem::take(&mut *deps.usage.lock().unwrap());
+        let flushed = batcher.flush(&sink).await;
+
+        assert_eq!(flushed, 1, "the delivered action's delta must flush");
+        assert_eq!(batcher.pending_len(), 0);
+        let written = sink.written.lock().unwrap();
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].tenant_id, "acme");
+        assert_eq!(written[0].app_id, "waddles.bot.commands.default");
+        assert_eq!(written[0].actions_delivered, 1);
     }
 
     #[tokio::test]

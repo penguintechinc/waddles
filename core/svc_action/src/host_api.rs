@@ -678,6 +678,7 @@ mod tests {
             "acme".to_string(),
             None,
             "waddles.bot.commands.default".to_string(),
+            Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
         ));
 
         let executor = tokio::spawn(async move {

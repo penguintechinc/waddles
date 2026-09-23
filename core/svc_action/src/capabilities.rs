@@ -16,9 +16,11 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
+
+use crate::usage::UsageBatcher;
 
 /// Answers one `host-call` for a given `capability`/`op`. Object-safe (a
 /// manually-boxed future rather than `async fn` in a trait) so the host-API
@@ -65,6 +67,45 @@ fn sanitize_irc_component(value: &str) -> String {
     value.chars().filter(|c| !c.is_control()).collect()
 }
 
+/// This crate's own sanity bound on a bundle's `log` host-call message
+/// length -- the spec (§5.12/§7.4) does not set one; capped so a
+/// buggy/malicious bundle cannot force unbounded memory/log-volume via a
+/// single `host-call` (the "never trust guest input" posture
+/// [`sanitize_irc_component`] already applies to the `relay` capability).
+const MAX_BUNDLE_LOG_MESSAGE_LEN: usize = 4096;
+
+/// Sanitizes a bundle-supplied `log` host-call `message` before it ever
+/// reaches `tracing` (spec §7.4: "`fields-json` is sanitized with the
+/// `penguin-logging` `SENSITIVE_KEYS` rule before anything is emitted").
+/// Three defenses, in order: (1) `penguin_logging::sanitize::sanitize_object`
+/// redacts an email-shaped value (the same shared sanitizer every other
+/// pipeline log line and OTel record passes through); (2)
+/// [`sanitize_irc_component`] strips CR/LF and every other control
+/// character, the same CRLF-injection defense `handle_relay` already
+/// applies, so a bundle can't forge extra log lines or terminal escape
+/// sequences; (3) truncation to [`MAX_BUNDLE_LOG_MESSAGE_LEN`] `char`s
+/// (not bytes, so multi-byte UTF-8 is never split mid-codepoint). Free
+/// function (not a method) so it's unit-testable without a `tracing`
+/// subscriber capturing the eventual log line.
+fn sanitize_bundle_log_message(raw_message: &str) -> String {
+    let mut wrapped = serde_json::Map::with_capacity(1);
+    wrapped.insert(
+        "message".to_string(),
+        serde_json::Value::String(raw_message.to_string()),
+    );
+    let sanitized = penguin_logging::sanitize::sanitize_object(&wrapped);
+    let sanitized_message = sanitized
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<empty>");
+
+    let mut message = sanitize_irc_component(sanitized_message);
+    if message.chars().count() > MAX_BUNDLE_LOG_MESSAGE_LEN {
+        message = message.chars().take(MAX_BUNDLE_LOG_MESSAGE_LEN).collect();
+    }
+    message
+}
+
 /// The one Valkey operation the `relay` capability needs -- narrow and easy
 /// to fake in tests (mirrors `libs/waddle_transports`'s own
 /// `RelayRedisLike` protocol on the Python side).
@@ -100,6 +141,21 @@ pub struct StageCapabilities<Q: RelayQueue> {
     tenant: String,
     community: Option<String>,
     app_id: String,
+    /// Shared with the dispatch loop's own `DispatchDeps::usage` so a
+    /// `relay` host call's outbound byte count is metered alongside the
+    /// same activation's `actions_delivered` (spec §5.12/D31: "host calls
+    /// by kind"). Recorded under an empty `workstream_id` -- unlike
+    /// `dispatch::handle_delivered`, which knows the delivered envelope's
+    /// real `workstream_id`, this connection-scoped capability handler
+    /// answers host calls for every envelope dispatched over its
+    /// connection's lifetime and has no per-call envelope context to key
+    /// on (spec §5.11: "No bundle host call accepts a tenant or community
+    /// argument at all" -- the same constraint extends to workstream_id,
+    /// which isn't in `HostCallBody` either). TODO(M3+): fold into the
+    /// per-activation scoping the distribution poll resolves (see
+    /// `crate::lib`'s `try_start_host_api` doc for the identical
+    /// tenant/community caveat this already carries).
+    usage: Arc<Mutex<UsageBatcher>>,
 }
 
 impl<Q: RelayQueue> StageCapabilities<Q> {
@@ -108,12 +164,19 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
     /// `context` and every other capability are scope-implicit (spec
     /// §5.11: "No bundle host call accepts a tenant or community argument
     /// at all").
-    pub fn new(relay_queue: Q, tenant: String, community: Option<String>, app_id: String) -> Self {
+    pub fn new(
+        relay_queue: Q,
+        tenant: String,
+        community: Option<String>,
+        app_id: String,
+        usage: Arc<Mutex<UsageBatcher>>,
+    ) -> Self {
         Self {
             relay_queue,
             tenant,
             community,
             app_id,
+            usage,
         }
     }
 
@@ -153,10 +216,23 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
 
         let key = outbound_relay_queue_key(provider);
         let payload = serde_json::json!({"channel": channel, "text": text}).to_string();
+        let outbound_bytes = payload.len() as u64;
         self.relay_queue
             .lpush(&key, payload)
             .await
             .map_err(|e| denied("relay_unavailable", e))?;
+        // spec §5.12/D31: "host calls by kind" -- see the `usage` field's
+        // doc for why `workstream_id` is an empty placeholder here.
+        self.usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_relay_call(
+                &self.tenant,
+                self.community.as_deref(),
+                "",
+                &self.app_id,
+                outbound_bytes,
+            );
         Ok(serde_json::json!({"queued": true, "provider": provider}))
     }
 
@@ -188,14 +264,13 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
 
     fn handle_log(&self, args: &serde_json::Value) -> Result<serde_json::Value, HostResultError> {
         let level = args.get("level").and_then(|v| v.as_str()).unwrap_or("info");
-        let message = args
+        let raw_message = args
             .get("message")
             .and_then(|v| v.as_str())
             .unwrap_or("<empty>");
-        // `fields-json` sanitization (spec §7.4) belongs to
-        // `penguin-logging`'s `SENSITIVE_KEYS` rule once this call is wired
-        // to structured field emission; this landing logs via `tracing`
-        // directly with the bundle's own attribution.
+        let message = sanitize_bundle_log_message(raw_message);
+        let message = message.as_str();
+
         match level {
             "error" => {
                 tracing::error!(app_id = %self.app_id, tenant = %self.tenant, bundle_log = %message, "bundle log")
@@ -310,11 +385,19 @@ mod tests {
     }
 
     fn caps(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue> {
+        caps_with_usage(queue, Arc::new(Mutex::new(UsageBatcher::new())))
+    }
+
+    fn caps_with_usage(
+        queue: FakeRelayQueue,
+        usage: Arc<Mutex<UsageBatcher>>,
+    ) -> StageCapabilities<FakeRelayQueue> {
         StageCapabilities::new(
             queue,
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
+            usage,
         )
     }
 
@@ -342,6 +425,38 @@ mod tests {
         assert_eq!(sanitize_irc_component("clean"), "clean");
     }
 
+    // Regression coverage for the MED finding: `handle_log` previously
+    // logged a guest-supplied `message` verbatim, with neither
+    // `penguin-logging` `SENSITIVE_KEYS` sanitization nor CRLF/control-char
+    // stripping (unlike `handle_relay` in this same file).
+
+    #[test]
+    fn sanitize_bundle_log_message_strips_crlf_and_control_characters() {
+        assert_eq!(
+            sanitize_bundle_log_message("line1\r\nline2\tafter-tab"),
+            "line1line2after-tab"
+        );
+    }
+
+    #[test]
+    fn sanitize_bundle_log_message_redacts_an_email_shaped_value() {
+        let sanitized = sanitize_bundle_log_message("user@example.com logged in");
+        assert!(!sanitized.contains("user@example.com"));
+        assert!(sanitized.starts_with("[email]@example.com"));
+    }
+
+    #[test]
+    fn sanitize_bundle_log_message_truncates_to_the_length_cap() {
+        let huge = "a".repeat(MAX_BUNDLE_LOG_MESSAGE_LEN + 500);
+        let sanitized = sanitize_bundle_log_message(&huge);
+        assert_eq!(sanitized.chars().count(), MAX_BUNDLE_LOG_MESSAGE_LEN);
+    }
+
+    #[test]
+    fn sanitize_bundle_log_message_passes_clean_short_messages_through() {
+        assert_eq!(sanitize_bundle_log_message("all good"), "all good");
+    }
+
     #[tokio::test]
     async fn relay_send_pushes_the_expected_key_and_payload() {
         let caps = caps(FakeRelayQueue::default());
@@ -360,6 +475,25 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
         assert_eq!(parsed["channel"], "#somechannel");
         assert_eq!(parsed["text"], "hi");
+    }
+
+    /// Regression coverage for the CRITICAL usage-metering finding:
+    /// `UsageBatcher::record_relay_call` was never called anywhere in this
+    /// crate. A successful relay send must record one host-call-by-kind
+    /// delta (spec §5.12/D31).
+    #[tokio::test]
+    async fn relay_send_records_a_relay_call_against_the_usage_batcher() {
+        let usage = Arc::new(Mutex::new(UsageBatcher::new()));
+        let caps = caps_with_usage(FakeRelayQueue::default(), Arc::clone(&usage));
+        caps.handle(call(
+            CapabilityKind::Relay,
+            "send",
+            serde_json::json!({"provider": "twitch", "channel": "#somechannel", "text": "hi"}),
+        ))
+        .await
+        .expect("relay send succeeds");
+
+        assert_eq!(usage.lock().unwrap().pending_len(), 1);
     }
 
     #[tokio::test]

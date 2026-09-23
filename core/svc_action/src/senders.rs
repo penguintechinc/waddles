@@ -3,17 +3,34 @@
 //! for Twitch, `http` with guarded egress for REST platforms) -- a bundle
 //! never holds a platform credential."
 //!
-//! This M3 landing implements the Twitch relay path end to end (the
+//! This M3 landing implements the Valkey `LPUSH` half of the Twitch relay
+//! path in `crate::capabilities::StageCapabilities::handle_relay` (the
 //! platform explicitly called out as the relay-based one, and the simplest
 //! to land completely: no SSRF-guarded `http` capability, no per-platform
-//! credential injection, just an `LPUSH` `crate::capabilities` already
-//! implements). Discord/Slack/YouTube/Kick all route through the REST
-//! `http` capability, which is itself a documented `TODO(M3+)` seam in
+//! credential injection). Discord/Slack/YouTube/Kick all route through the
+//! REST `http` capability, which is itself a documented `TODO(M3+)` seam in
 //! `crate::capabilities` -- rather than reimplement connector logic here,
 //! this module leaves an explicit seam per platform naming the
 //! `penguin-connectors` crate that owns it, per the M3 task's own
 //! instruction ("USE penguin-connectors' senders where they exist ... do
 //! NOT reimplement connector logic in svc_action").
+//!
+//! **Not yet wired end to end (post-M3 review correction).** This module's
+//! own `Platform`/`sender_status`/`is_retryable`/`twitch_relay_args` are
+//! not referenced from `crate::dispatch` or anywhere else in this crate
+//! outside their own tests below -- `dispatch::invoke_dispatch` hardcodes
+//! `"irc_relay"` as its `target_type_hint` rather than calling
+//! `Platform::Twitch.as_str()` (`"twitch"`), and nothing builds a `relay`
+//! host-call from `twitch_relay_args` today (that call, per the doc below,
+//! is issued by the *bundle* via the wire protocol, not by this stage).
+//! More fundamentally, `crate::lib::try_start_host_api` always installs
+//! `DenyAllCapabilities`, never `StageCapabilities`, as the live
+//! connection's handler, so even a bundle-issued `relay` call is denied in
+//! every build shipped so far -- see that function's module-level doc
+//! correction. Twitch sending is therefore **not functional end to end**
+//! in this build; these functions document the intended shape for the
+//! caller that will use them once both gaps close, not code `dispatch`
+//! currently exercises.
 
 use penguin_bundle_host::wire::HostResultError;
 
