@@ -1,0 +1,138 @@
+# feature/e2e-helm-rust-dataplane -- bundle-executor (core/bundle_executor, M2): the
+# credential-less WASM bundle sandbox host that dials a stage's host-API mTLS listener
+# (pipeline.rustDataPlane.bundleExecutor.stageTarget, default svc-action-rust -- see
+# templates/svc-action-rust.yaml) and services `load`/`invoke`/`unload` calls over it.
+# Gated on the top-level pipeline.rustDataPlane.enabled flag (default false) plus this
+# module's own .enabled sub-flag.
+#
+# D9/D10 credential-less posture, deliberately different from every other pod in this
+# chart:
+#   - NO envFrom (no ConfigMap, no app Secret) -- this pod's only network relationship is
+#     the mTLS dial below; it never touches Postgres/Valkey/OAuth tokens/JWT signing keys.
+#   - automountServiceAccountToken: false -- never talks to the K8s API either.
+#   - The mTLS client cert/key it DOES mount (global.hostApiTls, same Secret
+#     svc-action-rust's server side reads) is a peer-identity credential for the closed
+#     executor<->stage pair, not an application secret.
+#   - readOnlyRootFilesystem + all capabilities dropped + RuntimeDefault seccomp
+#     (.Values.podSecurityContext) + non-root uid -- matches the rest of the chart's Rust
+#     Deployments (10001, core/bundle_executor's future Dockerfile is assumed to create the
+#     same `appuser` convention core/svc_action/Dockerfile.rust already does; NO Dockerfile
+#     exists yet for this crate -- see pipeline.rustDataPlane.bundleExecutor's KNOWN GAPS
+#     comment in values.yaml).
+#
+# No Service object: this process has no HTTP/gRPC listener of any kind (core/
+# bundle_executor/src/tls.rs's own doc comment -- "this process has no HTTP surface to
+# probe"), so liveness/readiness both use the same `--healthcheck` exec subcommand
+# core/bundle_executor/src/main.rs wires (which only builds the wasmtime Engine/Linker,
+# spec SS12.4/SS12.5 -- it does NOT prove the stage dial below is actually succeeding;
+# core/bundle_executor/src/lib.rs::run() retries that forever with capped exponential
+# backoff rather than exiting, so a broken/missing mTLS cert never crashloops this pod, it
+# just never establishes the executor<->stage link -- see global.hostApiTls's comment).
+{{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.bundleExecutor.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-bundle-executor
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bundle-executor
+spec:
+  replicas: {{ .Values.pipeline.rustDataPlane.bundleExecutor.replicas }}
+  selector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: bundle-executor
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: bundle-executor
+    spec:
+      automountServiceAccountToken: false
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: bundle-executor
+        # Own image (self-contained full path per environment, no global.imageRegistry
+        # concatenation) -- same pattern as .Values.streaming.image/.Values.reputation.image
+        # (see those templates' own image lines); using the waddlebot.image helper here
+        # would double-prefix alpha's already-registry-qualified repository value.
+        image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        # uid 10001 -- see file header assumption note (no Dockerfile exists for this crate
+        # yet, so this mirrors the sibling Rust crates' own established convention).
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        env:
+        - name: STAGE_HOST_API_ADDR
+          value: "{{ include "waddlebot.fullname" . }}-{{ .Values.pipeline.rustDataPlane.bundleExecutor.stageTarget }}:{{ .Values.pipeline.rustDataPlane.bundleExecutor.stagePort }}"
+        - name: EXECUTOR_STAGE_CONNECTIONS
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.stageConnections | quote }}
+        - name: EXECUTOR_CALL_TIMEOUT_MS
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.callTimeoutMs | quote }}
+        - name: EXECUTOR_MAX_CALL_TIMEOUT_MS
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.maxCallTimeoutMs | quote }}
+        - name: EXECUTOR_MEMORY_LIMIT_MB
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.memoryLimitMb | quote }}
+        - name: EXECUTOR_MAX_MEMORY_LIMIT_MB
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.maxMemoryLimitMb | quote }}
+        - name: EXECUTOR_INSTANCES_PER_BUNDLE
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.instancesPerBundle | quote }}
+        - name: EXECUTOR_MAX_CONCURRENT_CALLS
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.maxConcurrentCalls | quote }}
+        - name: EXECUTOR_POOL_WAIT_MS
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.poolWaitMs | quote }}
+        - name: EXECUTOR_PRECOMPILE_DIR
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.precompileDir | quote }}
+        - name: EXECUTOR_WASM_COLLECTOR
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.wasmCollector | quote }}
+        - name: WADDLES_SANDBOX_GVISOR
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.sandboxGvisor | quote }}
+        {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.hostApiTlsClientEnv" . | nindent 8 }}
+        {{- end }}
+        livenessProbe:
+          exec:
+            command: ["/app/bundle-executor", "--healthcheck"]
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command: ["/app/bundle-executor", "--healthcheck"]
+          initialDelaySeconds: 5
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          {{- toYaml .Values.pipeline.rustDataPlane.bundleExecutor.resources | nindent 10 }}
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: precompile-cache
+          mountPath: {{ .Values.pipeline.rustDataPlane.bundleExecutor.precompileDir }}
+        {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.hostApiTlsVolumeMount" . | nindent 8 }}
+        {{- end }}
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      # readOnlyRootFilesystem -- EXECUTOR_PRECOMPILE_DIR must be writable regardless.
+      # emptyDir (not persistent): every `load` JIT-compiles fresh in this pass anyway
+      # (core/bundle_executor/src/lib.rs's own "Scaffolded with a TODO" list -- precompiled
+      # .cwasm caching isn't wired yet), so there is no cache to lose on pod restart today.
+      - name: precompile-cache
+        emptyDir: {}
+      {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+      {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
+      {{- end }}
+{{- end }}

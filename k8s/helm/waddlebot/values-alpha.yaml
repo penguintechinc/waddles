@@ -159,6 +159,45 @@ pipeline:
       requests: { cpu: "200m", memory: "256Mi" }
       limits: { cpu: "2000m", memory: "1Gi" }
 
+  # feature/e2e-helm-rust-dataplane -- Rust data-plane stack. `enabled: false` here too
+  # (this file must still render a fully-working Python stack on its own by default,
+  # matching every other alpha convention above) -- flip via
+  # `--set pipeline.rustDataPlane.enabled=true` for the actual e2e cutover run, after:
+  #   1. building+pushing all 4 images (see this branch's handoff notes for the exact list
+  #      -- core/bundle_executor has no Dockerfile at all yet);
+  #   2. populating global.hostApiTls with real mTLS material via --set-file (no
+  #      insecureDev escape hatch exists, unlike global.grpcTls);
+  #   3. optionally disabling the Python pipeline.svcIngest/svcProcess/svcAction
+  #      Deployments above if the Rust image was pushed over their same alpha tag
+  #      (see values.yaml's own comment on the shared-tag cutover convention).
+  rustDataPlane:
+    enabled: false
+    svcIngest:
+      replicas: 1
+      resources:
+        requests: { cpu: "100m", memory: "128Mi" }
+        limits: { cpu: "500m", memory: "512Mi" }
+    svcProcess:
+      replicas: 1
+      # migration 083's seeded 3-stage demo app_id (config/postgres/migrations/
+      # 083_discord_twitch_demo_convergence.sql) -- same app_id the Python pipeline demo
+      # (pipeline.hubApi et al) already activates for the 'global' tenant.
+      processAppId: "waddles.bot.discord.default"
+      resources:
+        requests: { cpu: "100m", memory: "128Mi" }
+        limits: { cpu: "500m", memory: "512Mi" }
+    svcAction:
+      replicas: 1
+      actionAppId: "waddles.bot.discord.default"
+      resources:
+        requests: { cpu: "100m", memory: "128Mi" }
+        limits: { cpu: "500m", memory: "512Mi" }
+    bundleExecutor:
+      replicas: 1
+      resources:
+        requests: { cpu: "100m", memory: "64Mi" }
+        limits: { cpu: "500m", memory: "256Mi" }
+
 presentation:
   image:
     repository: "localhost:32000/waddlebot/svc-presentation"
@@ -175,6 +214,15 @@ presentation:
 streaming:
   image:
     repository: "localhost:32000/waddlebot/svc-streaming"
+    tag: "alpha"
+
+# feature/e2e-helm-rust-dataplane -- bundle-executor built locally + pushed to the local
+# registry (no Dockerfile/CI image exists for this crate yet -- see
+# pipeline.rustDataPlane.bundleExecutor's KNOWN GAPS comment in values.yaml), same pattern
+# as every other alpha-only module image.
+bundleExecutor:
+  image:
+    repository: "localhost:32000/waddlebot/bundle-executor"
     tag: "alpha"
 
 # Reputation service (Issue #310) -- built locally, pushed to the local

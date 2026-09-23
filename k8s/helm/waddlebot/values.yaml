@@ -43,6 +43,12 @@ global:
   # override / ExternalSecret before Connections can be used in any environment.
   credentialEncryptionKey: ""
 
+  # feature/e2e-helm-rust-dataplane -- core/svc_action (Rust) envelope hop-verification HMAC
+  # keyring (see templates/secrets.yaml ENVELOPE_BINDING_KEYS). Empty by default (fail
+  # closed); OVERRIDE REQUIRED via --set or an out-of-git values override / ExternalSecret
+  # before hop verification will accept any envelope.
+  envelopeBindingKeys: ""
+
   # gRPC transport TLS (PR #264, A02 HIGH -- flask_core.grpc_tls / GRPC_TLS_* env vars).
   # Every gRPC server (core-data, core-identity, interactive-productivity,
   # action-serverless) and client (router) now fails closed at gRPC bind/dial time without
@@ -64,6 +70,42 @@ global:
     # Static dev/interim CA + identity cert, used when certManager.enabled=false (the
     # default). OVERRIDE REQUIRED for beta/gamma/production -- NEVER a literal cert/key in
     # git; populate via --set-file or an out-of-git values override / ExternalSecret.
+    ca:
+      crt: ""
+    tls:
+      crt: ""
+      key: ""
+
+  # e2e-helm-rust-dataplane -- mTLS material for the bundle-executor<->stage host-API wire
+  # protocol (core/bundle_executor dialing svc-action's/svc-process's HOST_API_PORT, spec
+  # docs/superpowers/specs/2026-09-14-rust-data-plane-design.md SS6.6). Mirrors global.grpcTls's
+  # two-path shape (static Secret vs cert-manager) but is its OWN CA/cert -- a different wire
+  # protocol on a different port, never conflated with the gRPC identity above.
+  #
+  # UNLIKE global.grpcTls, there is NO insecureDev/plaintext escape hatch here: the Rust
+  # host-API server (core/svc_action/src/host_api.rs build_server_config) and client
+  # (core/bundle_executor/src/tls.rs build_client_config) both fail closed without real
+  # cert/key/CA material -- mTLS is mandatory, not optional, per spec SS6.6 "Both peers
+  # present certificates". A missing/empty Secret here means the executor<->stage host-API
+  # link simply never establishes (svc-action's host-api listener logs a warning and keeps
+  # its HTTP/metrics servers up regardless -- see try_start_host_api's graceful-degradation
+  # comment -- and bundle-executor retries the dial forever with capped exponential backoff,
+  # so neither pod crashloops); only the executor-invoked-bundle path stays inert. Real PEM
+  # material is therefore an OVERRIDE REQUIRED operator step in every environment, alpha
+  # included -- populate via `helm upgrade --set-file global.hostApiTls.ca.crt=...
+  # --set-file global.hostApiTls.tls.crt=... --set-file global.hostApiTls.tls.key=...`
+  # before setting pipeline.rustDataPlane.enabled=true, exactly like global.grpcTls already
+  # requires for beta/gamma/production.
+  hostApiTls:
+    certManager:
+      enabled: false
+      issuerKind: "ClusterIssuer"
+      issuerName: "waddlebot-internal-ca"
+      duration: "2160h"    # 90d
+      renewBefore: "360h"  # 15d
+    # Static dev/interim CA + identity cert, used when certManager.enabled=false (the
+    # default). NEVER a literal cert/key in git in any environment; populate via
+    # --set-file or an out-of-git values override / ExternalSecret.
     ca:
       crt: ""
     tls:
@@ -638,6 +680,128 @@ pipeline:
         cpu: "4000m"
         memory: "4Gi"
 
+  # feature/e2e-helm-rust-dataplane -- Rust data-plane Deployments (core/svc_ingest,
+  # core/svc_process, core/svc_action, core/bundle_executor). ADDITIVE, never replaces
+  # pipeline.svcIngest/svcProcess/svcAction above -- gated behind this single top-level
+  # `enabled` flag, defaulted false so the chart's existing Python deploy is completely
+  # undisturbed until deliberately flipped for an e2e run. Resource names all carry a
+  # `-rust` suffix (templates/svc-ingest-rust.yaml et al) so both stacks can be rendered
+  # (and, if ever needed, scheduled) side by side with zero K8s object-name collision --
+  # deliberately NOT reusing the Python Deployments' bare names even though
+  # core/svc_action/Dockerfile.rust's own build comment tags the Rust image with the exact
+  # same `svc-action:alpha` repo:tag the Python image uses (cutover-in-place image
+  # convention, M6). Image repository/tag values below intentionally mirror that same
+  # tag via `waddlebot.legacyModuleImage` for svc-ingest/svc-process/svc-action -- an
+  # operator doing the e2e cutover builds+pushes the Rust image over the same tag, then
+  # sets pipeline.svcIngest/svcProcess/svcAction.enabled=false alongside this flag so
+  # exactly one binary (Rust) is actually behind that tag while both flags are live.
+  #
+  # KNOWN GAPS this Helm-only change cannot close (read-only reference: core/*/src/*.rs):
+  #   - core/svc_ingest is an M5-blocked skeleton -- no VALKEY_URL/DB/Discord+Twitch
+  #     receiver-credential fields exist in its CliConfig yet. The env wired into
+  #     templates/svc-ingest-rust.yaml is forward-compatible only (extra env vars clap
+  #     silently ignores); no further chart change needed once M5 lands.
+  #   - core/svc_process's host-API/executor integration is TODO(M4) -- HOST_API_PORT
+  #     doesn't exist in its CliConfig yet, so bundleExecutor.stageTarget below defaults
+  #     to svc-action-rust (M3, landed and real) rather than svc-process-rust.
+  #   - core/bundle_executor has no Dockerfile at all yet (not even a `Dockerfile.rust`
+  #     skeleton like the three services above already have) -- must be authored+built
+  #     before this flag can be flipped for a real e2e run.
+  #   - The executor<->stage mTLS material (global.hostApiTls) has no insecureDev escape
+  #     hatch (unlike global.grpcTls) -- real PEM material is an OVERRIDE REQUIRED
+  #     operator step (see global.hostApiTls's own comment) even in alpha.
+  rustDataPlane:
+    enabled: false
+
+    svcIngest:
+      enabled: true
+      port: 8200
+      metricsPort: 9090
+      replicas: 1
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+
+    svcProcess:
+      enabled: true
+      port: 8201
+      metricsPort: 9090
+      replicas: 1
+      # PROCESS_APP_ID (core/svc_process/src/config.rs) -- the bundle app_id this instance
+      # drains granted ingest-source streams for; empty (default) disables the spine drain
+      # loop entirely. values-alpha.yaml sets this to the migration-083-seeded demo app_id.
+      processAppId: ""
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+
+    svcAction:
+      enabled: true
+      port: 8202
+      metricsPort: 9090
+      replicas: 1
+      # mTLS host-API listener core/bundle_executor dials (spec SS6.6/SS7.1) -- matches
+      # HOST_API_PORT's own CliConfig default (core/svc_action/src/config.rs).
+      hostApiPort: 8302
+      # ACTION_APP_ID (core/svc_action/src/config.rs) -- empty (default) disables the
+      # dispatch drain loop entirely. values-alpha.yaml sets this to the migration-083
+      # seeded demo app_id.
+      actionAppId: ""
+      # ENVELOPE_BINDING_ACTIVE_KID (core/svc_action/src/config.rs) -- the `binding.mac` kid
+      # this pod mints new MACs under. Empty (default) omits the env var entirely; must
+      # match a `kid` present in global.envelopeBindingKeys once hop verification is used.
+      envelopeBindingActiveKid: ""
+      # D32: false is the documented default posture, not a fallback (see config.rs).
+      sandboxGvisor: false
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+
+    # D9/D10 -- credential-less sandbox host: no DB, no app secrets, no Valkey: this pod's
+    # ONLY network relationship is the mTLS dial to its stage's host-API port (+ a future
+    # bucket GET once core/bundle_executor/src/invoke.rs's UnimplementedBucketSource lands
+    # real object_store wiring -- templates/bundle-executor-networkpolicy.yaml pre-allows
+    # that egress so no further chart change is needed then either).
+    bundleExecutor:
+      enabled: true
+      replicas: 1
+      # Which stage's host-API this executor dials -- short Service-name suffix, prefixed
+      # with the release fullname by the template (spec SS6.6/SS7.1 -- "svc-process:8301"
+      # or "svc-action:8302"). "svc-action-rust" (M3, real) is the only server-side
+      # implementation that exists today -- see KNOWN GAPS above re: svc-process's M4 gap.
+      stageTarget: "svc-action-rust"
+      stagePort: 8302
+      stageConnections: 4
+      callTimeoutMs: 2000
+      maxCallTimeoutMs: 10000
+      memoryLimitMb: 64
+      maxMemoryLimitMb: 256
+      instancesPerBundle: 4
+      maxConcurrentCalls: 32
+      poolWaitMs: 500
+      precompileDir: "/var/cache/waddles/wasm"
+      wasmCollector: "drc"
+      sandboxGvisor: true
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "128Mi"
+        limits:
+          cpu: "1000m"
+          memory: "512Mi"
+
 # v3.0.x — svc-presentation (8th container, 4th stage-runner). Music overlay + per-community
 # OBS browser-source surfaces. Own image placeholder (core/svc_presentation/ builds with
 # CI once Dockerfile is wired). Image repository structure allows alpha local registry +
@@ -662,6 +826,18 @@ presentation:
 streaming:
   image:
     repository: "waddlebot-svc-streaming"
+    tag: ""
+
+# feature/e2e-helm-rust-dataplane -- bundle-executor (M2, core/bundle_executor). Brand-new
+# module (not a rewrite of an existing Python image), so it needs its own image block same
+# as streaming.image above -- bare repository name here (no global.imageRegistry
+# concatenation, template renders this literally), values-alpha.yaml overrides to the full
+# localhost:32000 path. NOTE: no Dockerfile exists for this crate yet, not even a
+# `Dockerfile.rust` skeleton -- see pipeline.rustDataPlane.bundleExecutor's KNOWN GAPS
+# comment; this image cannot actually be built+pushed until one is authored.
+bundleExecutor:
+  image:
+    repository: "waddlebot-bundle-executor"
     tag: ""
 
 # Reputation service (Issue #310, core/reputation_module) -- standalone internal
