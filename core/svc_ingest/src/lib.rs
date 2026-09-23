@@ -63,6 +63,7 @@
 //! dependency, unlike `svc_process`/`svc_action`.
 
 pub mod config;
+pub mod crypto;
 pub mod error;
 pub mod http;
 pub mod ingest;
@@ -106,6 +107,13 @@ where
     F1: std::future::Future<Output = ()> + Send + 'static,
     F2: std::future::Future<Output = ()> + Send + 'static,
 {
+    // MUST run before anything builds a TLS-capable client (the OTLP
+    // exporter `telemetry::init` may construct next, the license/flag
+    // HTTPS client, the Valkey/IRC/Discord TLS sockets) -- see
+    // `crate::crypto`'s module doc for why two rustls crypto backends
+    // linked into this binary otherwise panic on first TLS use.
+    crypto::ensure_installed();
+
     let (_telemetry_guard, prom_registry) = telemetry::init(SERVICE_NAME);
 
     tracing::info!(
@@ -645,6 +653,13 @@ mod tests {
         // without a live Valkey. Guard is dropped before the `.await`
         // below (clippy `await_holding_lock`) -- the env vars only need to
         // be set for the duration of this synchronous call.
+        //
+        // `crypto::ensure_installed()` first, defense in depth: this test
+        // triggers a real TLS-capable `SpineClient::connect` (which has
+        // its own internal installation, per `Cargo.toml`'s comment) --
+        // explicit here too so this test never depends on execution order
+        // relative to the `license::tests` in the same `--lib` binary.
+        crypto::ensure_installed();
         {
             let _guard = ENV_LOCK.lock().unwrap();
             // SAFETY: serialized by ENV_LOCK above.
@@ -674,6 +689,7 @@ mod tests {
 
     #[tokio::test]
     async fn try_start_discord_spawns_when_everything_is_valid() {
+        crypto::ensure_installed();
         {
             let _guard = ENV_LOCK.lock().unwrap();
             // SAFETY: serialized by ENV_LOCK above.
@@ -698,6 +714,7 @@ mod tests {
 
     #[tokio::test]
     async fn try_start_twitch_outbound_spawns_when_everything_is_valid() {
+        crypto::ensure_installed();
         {
             let _guard = ENV_LOCK.lock().unwrap();
             // SAFETY: serialized by ENV_LOCK above.

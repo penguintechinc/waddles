@@ -114,6 +114,12 @@ mod tests {
 
     #[tokio::test]
     async fn rust_data_plane_enabled_is_false_for_a_fresh_client_with_no_snapshot() {
+        // `crate::crypto::ensure_installed()` first: `LicenseClient::new`
+        // builds an HTTPS `reqwest::Client` (a different rustls crypto
+        // backend than this crate's own `ring` pin -- see that module's
+        // doc comment), and `flag_enabled` below schedules a real
+        // background TLS-capable refresh attempt.
+        crate::crypto::ensure_installed();
         // A freshly-built client (no `spawn_refresh`/`refresh` call, no
         // snapshot ever fetched) must fail closed to OFF -- exercises the
         // real `flag_enabled` call (which schedules its own fire-and-
@@ -126,6 +132,7 @@ mod tests {
 
     #[tokio::test]
     async fn rust_data_plane_enabled_true_under_domain_bypass() {
+        crate::crypto::ensure_installed();
         // Domain bypass (security.md / critical-rules.md: PenguinTech-
         // internal domains) makes every flag/feature evaluate enabled --
         // even with zero network access, proving the gate isn't
@@ -143,6 +150,7 @@ mod tests {
         // `#[tokio::test]`, not `#[test]`: `build_license_client` calls
         // `LicenseClient::spawn_refresh`, which `tokio::spawn`s onto the
         // ambient runtime -- requires a runtime context to exist.
+        crate::crypto::ensure_installed();
         let _guard = ENV_LOCK.lock().unwrap();
         clear_license_env();
         // Defaults (no LICENSE_*/POSTHOG_* set) resolve to the real

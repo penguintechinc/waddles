@@ -28,7 +28,6 @@
 //! plan's own "Direct Valkey client ... for the Twitch outbound relay's
 //! raw BRPOP list" note).
 
-use std::sync::OnceLock;
 use std::time::Duration;
 
 // `TwitchError` is re-exported at the crate root (`pub use error::
@@ -59,21 +58,6 @@ struct RelayMessage {
     text: String,
 }
 
-/// Installs the process-level rustls `CryptoProvider` exactly once,
-/// ignoring an "already installed" error -- safe regardless of whether
-/// `penguin_spine::SpineClient::connect` (which installs its own, private
-/// copy of this same defensive call) has already run first. Idempotent by
-/// construction (`OnceLock`), not merely by convention.
-fn ensure_crypto_provider_installed() {
-    static INSTALLED: OnceLock<()> = OnceLock::new();
-    INSTALLED.get_or_init(|| {
-        // Ignoring the `Result`: `install_default` only fails when a
-        // provider is already installed (by this call or `penguin-spine`'s
-        // own), which is exactly the outcome this function wants.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
-}
-
 /// Builds a `redis::Client` for `cfg`'s transport, mirroring
 /// `penguin_spine`'s own (private, unexported) `build_redis_client` --
 /// duplicated here rather than imported since that function is
@@ -94,7 +78,7 @@ fn build_redis_client(
     let info = base.set_redis_settings(settings);
 
     if cfg.security_transport_tls {
-        ensure_crypto_provider_installed();
+        crate::crypto::ensure_installed();
         let root_cert = std::fs::read(&cfg.valkey_ca_file).ok();
         redis::Client::build_with_tls(
             info,
@@ -407,14 +391,6 @@ mod tests {
         let result =
             tokio::time::timeout(Duration::from_secs(5), drain_loop(queue, &sender, rx)).await;
         assert!(result.is_ok(), "must not hang retrying forever");
-    }
-
-    #[test]
-    fn ensure_crypto_provider_installed_is_idempotent() {
-        // Calling twice in the same test process must not panic (the
-        // OnceLock guard is exactly what makes this safe).
-        ensure_crypto_provider_installed();
-        ensure_crypto_provider_installed();
     }
 
     #[test]
