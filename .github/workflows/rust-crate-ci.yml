@@ -1,0 +1,143 @@
+name: Rust Crate CI (Reusable)
+
+# Shared fmt + clippy + cargo-deny + test + coverage pipeline for every
+# Rust crate/service in this repo. Consolidates the near-identical
+# rust-*.yml caller workflows so a toolchain/tool version bump, or a
+# security fix like `persist-credentials: false`, only needs to change
+# here instead of in every caller.
+
+on:
+  workflow_call:
+    inputs:
+      crate_name:
+        required: true
+        type: string
+        description: 'Display name for job/step titles (e.g., svc-action)'
+      working_directory:
+        required: true
+        type: string
+        description: 'Path to the crate directory (e.g., core/svc_action)'
+      extra_apt_packages:
+        required: false
+        type: string
+        default: ''
+        description: 'Space-separated apt packages needed before building (e.g., "cmake build-essential")'
+      extra_apt_reason:
+        required: false
+        type: string
+        default: ''
+        description: 'Short reason shown in the step name (e.g., "for aws-lc-sys (cmake, C/C++ toolchain)")'
+      extra_security_scanners:
+        required: false
+        type: boolean
+        default: false
+        description: 'Also install cargo-audit + gitleaks + pip-audit alongside cargo-deny/llvm-cov (bundle-compiler)'
+      release_build:
+        required: false
+        type: boolean
+        default: false
+        description: 'Run `cargo build --release --locked` before tests (proves a pinned git dependency resolves cleanly)'
+      coverage_ignore_regex:
+        required: false
+        type: string
+        default: ''
+        description: 'Passed to `cargo llvm-cov --ignore-filename-regex` (e.g., a thin binary entrypoint carve-out)'
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    name: "${{ inputs.crate_name }}: fmt + clippy + deny + coverage"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install build deps (${{ inputs.extra_apt_reason }})
+        if: inputs.extra_apt_packages != ''
+        env:
+          EXTRA_APT_PACKAGES: ${{ inputs.extra_apt_packages }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y $EXTRA_APT_PACKAGES
+
+      - name: Install Rust 1.97.1 (rustfmt, clippy, llvm-tools-preview)
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
+        with:
+          toolchain: "1.97.1"
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Install cargo-deny + cargo-llvm-cov
+        if: ${{ !inputs.extra_security_scanners }}
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2.87.12
+        with:
+          tool: cargo-deny@0.20.2,cargo-llvm-cov@0.9.1
+
+      - name: Install cargo-deny + cargo-llvm-cov + cargo-audit
+        if: inputs.extra_security_scanners
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2.87.12
+        with:
+          tool: cargo-deny@0.20.2,cargo-llvm-cov@0.9.1,cargo-audit@0.21.0
+
+      # gitleaks is not a cargo tool -- pinned release binary, checksum
+      # verified against the upstream published checksums file, matching
+      # this repo's pre-commit gitleaks pin (rev v8.21.2 in
+      # .pre-commit-config.yaml) so local and CI results agree.
+      - name: Install gitleaks 8.21.2 (checksum verified)
+        if: inputs.extra_security_scanners
+        run: |
+          set -euo pipefail
+          curl -sLo /tmp/gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz
+          echo "5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      # pip-audit/cargo-audit/gitleaks are installed for local dev/production
+      # parity with the compiler's own container image
+      # (build/tool-versions.env), not because cargo test's own suite
+      # invokes them for real: every scan::sast dependency-audit test
+      # uses a fixture stub instead (tests/fixtures/bin/*-audit-stub-*.sh)
+      # so results never depend on CI's network access to the
+      # RustSec/PyPI/npm advisory feeds -- see tests/scan_test.rs's own
+      # module doc comment.
+      - name: Install pip-audit 2.10.0
+        if: inputs.extra_security_scanners
+        run: pip install --no-cache-dir pip-audit==2.10.0
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: cargo deny check (advisories, licenses, bans, sources)
+        run: cargo deny check
+
+      # Proves a pinned git dependency (spec SS4.5/SS6.6) resolves and
+      # builds from a clean clone with no local sibling checkout anywhere
+      # on this runner. `--locked` additionally asserts Cargo.lock is
+      # fully up to date with Cargo.toml.
+      - name: cargo build --release --locked (proves the git dep resolves)
+        if: inputs.release_build
+        run: cargo build --release --locked
+
+      - name: cargo test --locked
+        run: cargo test --locked
+
+      - name: cargo llvm-cov --locked (>=90% line coverage gate)
+        env:
+          COVERAGE_IGNORE_REGEX: ${{ inputs.coverage_ignore_regex }}
+        run: |
+          set -euo pipefail
+          if [ -n "$COVERAGE_IGNORE_REGEX" ]; then
+            cargo llvm-cov --locked --fail-under-lines 90 --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
+          else
+            cargo llvm-cov --locked --fail-under-lines 90
+          fi

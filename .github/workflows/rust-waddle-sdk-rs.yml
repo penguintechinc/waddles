@@ -8,6 +8,7 @@ on:
       - 'bundles/rust/example/**'
       - 'wit/waddle-bundle/**'
       - '.github/workflows/rust-waddle-sdk-rs.yml'
+      - '.github/workflows/rust-crate-ci.yml'
   pull_request:
     branches: [main, 'release/**']
     paths:
@@ -22,45 +23,19 @@ permissions:
 jobs:
   lint-test:
     name: fmt + clippy + deny + coverage
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: sdk/waddle-sdk-rs
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    uses: ./.github/workflows/rust-crate-ci.yml
+    with:
+      crate_name: waddle-sdk-rs
+      working_directory: sdk/waddle-sdk-rs
+      # bindings_glue.rs and every capability module's actual host-call fn
+      # are #[cfg(target_arch = "wasm32")]-only -- absent entirely from
+      # this host build, so no coverage carve-out needed here (unlike
+      # svc_process's main.rs). See sdk/waddle-sdk-rs/README.md
+      # "Coverage carve-out".
 
-      - name: Install Rust 1.97.1 (rustfmt, clippy, llvm-tools-preview)
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
-        with:
-          toolchain: "1.97.1"
-          components: rustfmt, clippy, llvm-tools-preview
-
-      - name: Install cargo-deny + cargo-llvm-cov
-        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2.87.12
-        with:
-          tool: cargo-deny@0.20.2,cargo-llvm-cov@0.9.1
-
-      - name: cargo fmt --check
-        run: cargo fmt --check
-
-      - name: cargo clippy --all-targets -- -D warnings
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: cargo deny check (advisories, licenses, bans, sources)
-        run: cargo deny check
-
-      - name: cargo test
-        run: cargo test
-
-      - name: cargo llvm-cov (>=90% line coverage gate)
-        # bindings_glue.rs and every capability module's actual host-call
-        # fn are #[cfg(target_arch = "wasm32")]-only -- absent entirely
-        # from this host build, so nothing to exclude here (unlike
-        # svc_process's main.rs carve-out). See sdk/waddle-sdk-rs/README.md
-        # "Coverage carve-out".
-        run: cargo llvm-cov --fail-under-lines 90
-
+  # Structurally distinct from the shared lint-test pipeline (wasm32
+  # target, cargo-component, wasm-tools) -- kept as its own job rather
+  # than folded into rust-crate-ci.yml's inputs.
   example-bundle-component:
     name: example bundle -> WASI 0.2 component (cargo-component + wasm-tools)
     runs-on: ubuntu-latest
@@ -70,6 +45,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Install Rust 1.97.1 + wasm32 targets
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
@@ -81,8 +58,8 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --check
 
-      - name: cargo clippy --target wasm32-wasip2 --all-targets -- -D warnings
-        run: cargo clippy --target wasm32-wasip2 --all-targets -- -D warnings
+      - name: cargo clippy --target wasm32-wasip2 --all-targets --locked -- -D warnings
+        run: cargo clippy --target wasm32-wasip2 --all-targets --locked -- -D warnings
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2.87.12
