@@ -20,6 +20,12 @@ path = "src/main.rs"
 # match core/svc_streaming's Cargo.toml exactly (the reference template,
 # already vetted) for every dependency the two crates share -- see that
 # crate's Cargo.toml for the `aws_lc_rs`/rustls rationale this inherits.
+#
+# THE penguin-libs DEPENDENCY PATTERN (established in core/svc_process's
+# Cargo.toml, M4 -- copied verbatim here, M3): `git = "...", rev =
+# "<full 40-char sha>", package = "<crate-name>", version = "=X.Y.Z"`. See
+# that file's header comment for the full rationale. `deny.toml`'s
+# `[sources] allow-git` must list this exact repository URL.
 [dependencies]
 tokio = { version = "=1.53.1", features = ["full"] }
 axum = "=0.8.9"
@@ -27,16 +33,12 @@ tower-http = { version = "=0.7.1", features = ["trace"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 tracing = "=0.1.44"
-tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
-opentelemetry = "=0.32.0"
-opentelemetry-otlp = { version = "=0.32.0", features = ["grpc-tonic"] }
-opentelemetry_sdk = { version = "=0.32.1", features = ["rt-tokio"] }
-tracing-opentelemetry = "=0.33.0"
 prometheus = "=0.14.0"
 thiserror = "=2.0.20"
 anyhow = "=1.0.104"
 clap = { version = "=4.6.6", features = ["derive", "env"] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+chrono = { version = "=0.4.45", features = ["serde"] }
 # This service owns `action_dispatch_log` (config/postgres/migrations/074) --
 # see `rules/backend-database.md` Per-Service Database Accounts. No other
 # tables are queried by this crate.
@@ -47,17 +49,62 @@ sea-orm = { version = "=2.0.2", default-features = false, features = [
     "macros",
     "with-chrono",
 ] }
+# `penguin-logging` owns the tracing-subscriber/OTel/OTLP stack internally
+# (spec SS4.9) -- see `src/telemetry.rs`. Pinned to the HEAD of
+# `release/rust-logging/v0.1.x` at the time of this commit.
+penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69e740ce5411d8cd005241fbd829c62e68efb96e", package = "penguin-logging", version = "=0.1.0" }
+# `penguin-spine` (spec SS4.7): the action-stage's own `:action` stream
+# `XREADGROUP` consumer (single consumer group `{app_id}`) -- see
+# `src/dispatch.rs`. Pinned to the HEAD of `release/rust-spine/v0.1.x`.
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "b30f5cb2b2465556e11678f67359702ae487d721", package = "penguin-spine", version = "=0.1.0" }
+# `penguin-bundle-host::wire` (spec SS6.6): the host-API frame codec and
+# Frame/Message shapes shared verbatim with `bundle-executor` -- see
+# `src/host_api.rs`. Pinned to the HEAD of `release/rust-bundle-host/v0.1.x`
+# (PR penguintechinc/penguin-libs#93, same commit `core/bundle_executor`
+# pins).
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "49f098caab95339bf8113ba5c3e9ad039d30d44b", package = "penguin-bundle-host", version = "=0.1.0" }
+# D30 envelope binding MAC (spec SS5.11): HMAC-SHA256 hop verification --
+# `src/hop.rs`. Same exact pins `penguin-spine` itself uses internally for
+# byte-identical behavior (its own `binding` module has not landed yet at
+# the pinned `rev` above, so this stage computes/verifies the MAC itself
+# per the spec's published formula -- see `src/hop.rs`'s module doc).
+hmac = "=0.12.1"
+sha2 = "=0.10.9"
+subtle = "=2.6.1"
+hex = "=0.4.3"
+# mTLS host-API server (spec SS6.6/SS7.1): the executor dials `:8302`: this
+# crate is the TLS *server* side, mirroring `core/bundle_executor/src/tls.rs`
+# (the client side) with the roles reversed. Same exact version pins.
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "tls12"] }
+tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
+rustls-pki-types = "=1.15.1"
+# `relay` host capability (Twitch outbound, spec SS7.4) LPUSHes onto
+# `waddle_transports.transports.irc_relay`'s Valkey key -- ported exactly
+# in `src/capabilities.rs` -- and `src/usage.rs`'s `waddles:usage` XADD
+# (spec SS5.12/D31). Not `penguin-spine`'s `SpineClient` here: neither
+# operation is envelope-typed (`SpineClient::append` requires a
+# `StageEnvelope`), so this is a second, direct `redis` connection, same
+# crate/feature pins `penguin-spine` itself uses internally.
+redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp"] }
 
 [dev-dependencies]
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks
-# `tokio::time::{pause,advance}` for future retry-backoff tests (M3
-# executor-integration wave) -- included now so that wave doesn't need a
-# Cargo.toml touch just to gain it. Never linked into the release binary.
+# `tokio::time::{pause,advance}` for retry-backoff tests. Never linked into
+# the release binary.
 tokio = { version = "=1.53.1", features = ["test-util"] }
 # `ServiceExt::oneshot` -- drives a request through the full `http::router`
 # (middleware included) in tests without binding a real socket. Test-only;
 # never linked into the release binary.
 tower = { version = "=0.5.3", features = ["util"] }
+# Test-only: throwaway self-signed CA/client cert+key pairs generated at
+# test run time (`src/host_api.rs`'s TLS tests) -- same rationale as
+# `core/bundle_executor`'s own dev-dependency: no private key material,
+# test-only or otherwise, ever lands in source control.
+rcgen = "=0.14.10"
+# `MockDatabase` for `src/db/entities/action_dispatch_log.rs`'s insert
+# test -- Cargo unifies this with the main `sea-orm` dependency's features
+# for test builds only, never linked into the release binary.
+sea-orm = { version = "=2.0.2", default-features = false, features = ["mock"] }
 
 [profile.release]
 opt-level = 3

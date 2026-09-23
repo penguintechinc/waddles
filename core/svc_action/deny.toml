@@ -26,6 +26,7 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",
     "ISC",
     "Zlib",
     "MPL-2.0",
@@ -57,3 +58,13 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# `penguin-spine`/`penguin-logging`/`penguin-bundle-host` (Cargo.toml) --
+# unpublished penguin-libs crates pinned by commit `rev`, not by mutable
+# branch name. See the Cargo.toml dependency-pattern comment above
+# `[dependencies]`.
+allow-git = ["https://github.com/penguintechinc/penguin-libs.git"]
+
+[sources.allow-org]
+github = []
+gitlab = []
+bitbucket = []
