@@ -61,6 +61,19 @@ pub struct ScannerConfig {
     pub cargo_bin: String,
     /// `npm` binary name or path.
     pub npm_bin: String,
+    /// Tier-gated escape hatch for a dependency-audit tool (`pip-audit`/
+    /// `cargo-audit`/`npm audit`) that ran but produced no parseable
+    /// output -- typically a transient failure fetching its advisory
+    /// database. `false` (fail-**closed**: the audit blocks with
+    /// `CompilerError::ScanBlocked { reason: "scan_tool_error", .. }`) is
+    /// the only value `ScannerConfig::default()` ever returns, which is
+    /// what every untrusted community-bundle build uses -- see
+    /// `run_dependency_audit`'s doc comment. Setting this `true` is a
+    /// deliberate opt-in reserved for a first-party/dev build tier that
+    /// explicitly accepts a degraded (zeroed) advisory count rather than
+    /// blocking on a transient network issue; nothing in this crate turns
+    /// it on today.
+    pub tolerate_degraded_dependency_audit: bool,
 }
 
 impl Default for ScannerConfig {
@@ -73,6 +86,7 @@ impl Default for ScannerConfig {
             pip_audit_bin: "pip-audit".to_string(),
             cargo_bin: "cargo".to_string(),
             npm_bin: "npm".to_string(),
+            tolerate_degraded_dependency_audit: false,
         }
     }
 }
@@ -278,11 +292,20 @@ fn run_semgrep(
 /// the tool emit no parseable JSON, which used to silently zero out
 /// `dependencies_examined` too -- indistinguishable from "this bundle
 /// declares no dependencies." Reading the count straight from the
-/// manifest file makes it hermetic and always accurate; only the
-/// `advisories` half (which genuinely cannot be known without the
-/// network) degrades to `0` on a tool failure, logged at WARN via
-/// [`warn_degraded_audit`] rather than silently -- see that function's
-/// own doc comment for the fail-open tradeoff this makes deliberately.
+/// manifest file makes it hermetic and always accurate.
+///
+/// **The `advisories` half fails *closed* by default.** A dependency
+/// audit exists specifically to catch known-vulnerable pins in an
+/// untrusted community bundle; degrading the advisory count to `0` and
+/// letting the build proceed on a tool failure would let an attacker
+/// induce (or simply wait for) the exact transient network failure this
+/// module observed in CI and ship known-vulnerable dependencies past the
+/// gate. So unless `config.tolerate_degraded_dependency_audit` is
+/// explicitly set (a first-party/dev-tier opt-in `ScannerConfig::default()`
+/// never sets), a tool-spawn success with unparseable output returns
+/// `CompilerError::ScanBlocked { reason: "scan_tool_error", .. }` instead
+/// of a degraded report -- see [`warn_degraded_audit`]'s doc comment for
+/// the (opt-in-only) tolerated path.
 fn run_dependency_audit(
     source_dir: &Path,
     language: &str,
@@ -317,8 +340,12 @@ fn run_dependency_audit(
                     })
                     .unwrap_or(0),
                 Err(e) => {
-                    warn_degraded_audit("pip-audit", &e, &out.stderr);
-                    0
+                    if config.tolerate_degraded_dependency_audit {
+                        warn_degraded_audit("pip-audit", &e, &out.stderr);
+                        0
+                    } else {
+                        return Err(degraded_audit_blocked("pip-audit", &e, &out.stderr));
+                    }
                 }
             };
             Ok((advisories, examined))
@@ -353,8 +380,12 @@ fn run_dependency_audit(
                     .map(std::vec::Vec::len)
                     .unwrap_or(0),
                 Err(e) => {
-                    warn_degraded_audit("cargo-audit", &e, &out.stderr);
-                    0
+                    if config.tolerate_degraded_dependency_audit {
+                        warn_degraded_audit("cargo-audit", &e, &out.stderr);
+                        0
+                    } else {
+                        return Err(degraded_audit_blocked("cargo-audit", &e, &out.stderr));
+                    }
                 }
             };
             Ok((advisories, examined))
@@ -389,8 +420,12 @@ fn run_dependency_audit(
                     (high + critical) as usize
                 }
                 Err(e) => {
-                    warn_degraded_audit("npm audit", &e, &out.stderr);
-                    0
+                    if config.tolerate_degraded_dependency_audit {
+                        warn_degraded_audit("npm audit", &e, &out.stderr);
+                        0
+                    } else {
+                        return Err(degraded_audit_blocked("npm audit", &e, &out.stderr));
+                    }
                 }
             };
             Ok((advisories, examined))
@@ -401,22 +436,49 @@ fn run_dependency_audit(
     }
 }
 
+/// Blocks the build on a dependency-audit tool producing non-JSON output
+/// -- the default, fail-**closed** path for the untrusted community-bundle
+/// tier (`config.tolerate_degraded_dependency_audit == false`, which is
+/// what `ScannerConfig::default()` always sets). See
+/// [`run_dependency_audit`]'s doc comment for why a degraded advisory
+/// count must never silently pass: an attacker able to induce or await
+/// the tool's advisory-database fetch failing (a real, observed CI
+/// failure mode) would otherwise ship known-vulnerable dependencies past
+/// this gate.
+fn degraded_audit_blocked(
+    tool: &str,
+    parse_error: &serde_json::Error,
+    stderr: &[u8],
+) -> CompilerError {
+    CompilerError::ScanBlocked {
+        reason: "scan_tool_error".to_string(),
+        message: format!(
+            "{tool} produced non-JSON output ({parse_error}); refusing to proceed with a \
+             degraded advisory count for an untrusted bundle (stderr: {})",
+            String::from_utf8_lossy(stderr)
+        ),
+    }
+}
+
 /// Logs (never silently swallows) a dependency-audit tool producing
 /// non-JSON output -- typically a network failure fetching an advisory
 /// database (RustSec for cargo-audit, PyPI's for pip-audit, npm's
-/// registry for `npm audit`). The advisory count degrades to `0` for this
-/// run (fail-open on the vulnerability check specifically) rather than
-/// blocking the whole build on a transient network issue; the WARN line
-/// is the operational signal that the check did not actually run, so a
-/// silently-passing scan is at least visible in logs, not indistinguishable
-/// from a real clean result. `dependencies_examined` (computed separately,
-/// from the lockfile/requirements file on disk) is unaffected either way.
+/// registry for `npm audit`). Only reached when the caller has explicitly
+/// set `config.tolerate_degraded_dependency_audit = true` -- a
+/// first-party/dev-tier opt-in `ScannerConfig::default()` never enables;
+/// every other caller gets [`degraded_audit_blocked`] instead. The
+/// advisory count degrades to `0` for this run rather than blocking; the
+/// WARN line is the operational signal that the check did not actually
+/// run, so a silently-passing scan is at least visible in logs, not
+/// indistinguishable from a real clean result. `dependencies_examined`
+/// (computed separately, from the lockfile/requirements file on disk) is
+/// unaffected either way.
 fn warn_degraded_audit(tool: &str, parse_error: &serde_json::Error, stderr: &[u8]) {
     tracing::warn!(
         tool,
         error = %parse_error,
         stderr = %String::from_utf8_lossy(stderr),
-        "dependency-audit tool produced non-JSON output (advisory count degraded to 0 for this run)"
+        "dependency-audit tool produced non-JSON output (advisory count degraded to 0 for this run; tolerated by explicit opt-in)"
     );
 }
 

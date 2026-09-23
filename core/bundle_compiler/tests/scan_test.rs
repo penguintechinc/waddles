@@ -329,16 +329,21 @@ fn missing_npm_binary_reports_scan_tool_missing() {
 // `dependencies_examined` come back `0` -- indistinguishable from "no
 // dependencies declared" -- because it was read from cargo-audit's own
 // JSON, which the tool never produces on a fetch failure. `examined` is
-// now parsed from the lockfile/requirements file directly; these three
-// tests simulate every audit tool failing the same way (present binary,
-// no parseable output, nonzero exit -- see the stub's own header comment)
-// and assert `examined` is unaffected while `advisories` degrades to `0`
-// without panicking or hard-failing the scan.
+// now parsed from the lockfile/requirements file directly (these three
+// tests still prove that, via `tolerate_degraded_dependency_audit: true`
+// -- the explicit first-party/dev-tier opt-in that accepts a degraded
+// advisory count). The *default* (`ScannerConfig::default()`, what every
+// untrusted community-bundle build actually uses) instead fails **closed**
+// on the exact same tool failure -- see the `_fails_closed_by_default`
+// tests below, added for a MED security-review finding: a fail-open
+// advisory count let an attacker induce/await this network failure and
+// ship known-vulnerable dependencies past the gate.
 
 #[test]
-fn rust_examined_count_survives_a_cargo_audit_network_failure() {
+fn rust_examined_count_survives_a_cargo_audit_network_failure_when_tolerated() {
     let config = ScannerConfig {
         cargo_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        tolerate_degraded_dependency_audit: true,
         ..test_scanner_config()
     };
     let report = run_source_scans_with_config(
@@ -353,14 +358,15 @@ fn rust_examined_count_survives_a_cargo_audit_network_failure() {
     );
     assert_eq!(
         report.dependency_advisories, 0,
-        "advisories degrade to 0 on a tool failure, not an error"
+        "advisories degrade to 0 on a tool failure only under the explicit opt-in"
     );
 }
 
 #[test]
-fn python_examined_count_survives_a_pip_audit_network_failure() {
+fn python_examined_count_survives_a_pip_audit_network_failure_when_tolerated() {
     let config = ScannerConfig {
         pip_audit_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        tolerate_degraded_dependency_audit: true,
         ..test_scanner_config()
     };
     let report = run_source_scans_with_config(
@@ -375,14 +381,15 @@ fn python_examined_count_survives_a_pip_audit_network_failure() {
     );
     assert_eq!(
         report.dependency_advisories, 0,
-        "advisories degrade to 0 on a tool failure, not an error"
+        "advisories degrade to 0 on a tool failure only under the explicit opt-in"
     );
 }
 
 #[test]
-fn js_examined_count_survives_an_npm_audit_network_failure() {
+fn js_examined_count_survives_an_npm_audit_network_failure_when_tolerated() {
     let config = ScannerConfig {
         npm_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        tolerate_degraded_dependency_audit: true,
         ..test_scanner_config()
     };
     let report = run_source_scans_with_config(
@@ -397,6 +404,73 @@ fn js_examined_count_survives_an_npm_audit_network_failure() {
     );
     assert_eq!(
         report.dependency_advisories, 0,
-        "advisories degrade to 0 on a tool failure, not an error"
+        "advisories degrade to 0 on a tool failure only under the explicit opt-in"
     );
+}
+
+#[test]
+fn rust_dependency_audit_tool_error_fails_closed_by_default() {
+    // `test_scanner_config()` inherits `ScannerConfig::default()`'s
+    // `tolerate_degraded_dependency_audit: false` -- the only value the
+    // real community-bundle build path (`sast::run_source_scans`) ever
+    // uses. A tool failure must block, never degrade-and-proceed.
+    let config = ScannerConfig {
+        cargo_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        ..test_scanner_config()
+    };
+    let err = run_source_scans_with_config(
+        Path::new("tests/fixtures/bundles/rust-with-deps"),
+        "rust",
+        &config,
+    )
+    .unwrap_err();
+    match err {
+        CompilerError::ScanBlocked { reason, message } => {
+            assert_eq!(reason, "scan_tool_error");
+            assert!(message.contains("cargo-audit"));
+        }
+        other => panic!("expected ScanBlocked(scan_tool_error), got {other:?}"),
+    }
+}
+
+#[test]
+fn python_dependency_audit_tool_error_fails_closed_by_default() {
+    let config = ScannerConfig {
+        pip_audit_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        ..test_scanner_config()
+    };
+    let err = run_source_scans_with_config(
+        Path::new("tests/fixtures/bundles/python-with-vulnerable-deps"),
+        "python",
+        &config,
+    )
+    .unwrap_err();
+    match err {
+        CompilerError::ScanBlocked { reason, message } => {
+            assert_eq!(reason, "scan_tool_error");
+            assert!(message.contains("pip-audit"));
+        }
+        other => panic!("expected ScanBlocked(scan_tool_error), got {other:?}"),
+    }
+}
+
+#[test]
+fn js_dependency_audit_tool_error_fails_closed_by_default() {
+    let config = ScannerConfig {
+        npm_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        ..test_scanner_config()
+    };
+    let err = run_source_scans_with_config(
+        Path::new("tests/fixtures/bundles/js-with-deps"),
+        "javascript",
+        &config,
+    )
+    .unwrap_err();
+    match err {
+        CompilerError::ScanBlocked { reason, message } => {
+            assert_eq!(reason, "scan_tool_error");
+            assert!(message.contains("npm audit"));
+        }
+        other => panic!("expected ScanBlocked(scan_tool_error), got {other:?}"),
+    }
 }
