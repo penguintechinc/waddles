@@ -37,7 +37,20 @@ prometheus = "=0.14.0"
 thiserror = "=2.0.20"
 anyhow = "=1.0.104"
 clap = { version = "=4.6.6", features = ["derive", "env"] }
-reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "stream"] }
+# `crate::egress`'s response-size cap (spec SS8.2 row 11: "larger bodies are
+# truncated") streams the response body instead of buffering it whole --
+# `reqwest`'s `stream` feature above returns a `Stream`, and `StreamExt::next`
+# (this crate, not re-exported by `reqwest`) is what drives it. Pinned to the
+# version already resolved transitively (Cargo.lock) so this promotion adds
+# no new version to the dependency graph.
+futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
+# `crate::egress`'s `http.send` result payload encodes the WIT `list<u8>`
+# response/request body as base64 (this crate's own wire-JSON convention,
+# same rationale as `crate::dispatch::invoke_dispatch`'s doc comment) rather
+# than a JSON array of byte values or lossy UTF-8. Pinned to the version
+# already resolved transitively (Cargo.lock).
+base64 = "=0.22.1"
 chrono = { version = "=0.4.45", features = ["serde"] }
 # This service owns `action_dispatch_log` (config/postgres/migrations/074) --
 # see `rules/backend-database.md` Per-Service Database Accounts. No other

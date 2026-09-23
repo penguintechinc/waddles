@@ -1,0 +1,540 @@
+//! The `GET /api/v1/distribution/bundles?stage=action` poll (spec §6.7):
+//! resolves which bundle/digest/manifest this pod should run, gated by
+//! `ACTION_APP_ID` (spec §16 M3 row's distribution-poll deliverable).
+//!
+//! This landing polls the endpoint, caches the row for the configured
+//! `ACTION_APP_ID` in a [`BundleCatalog`] (consulted by `crate::egress`'s
+//! `http` capability for the bundle's `egress` allowlist), and -- once an
+//! executor connection is live -- sends `load` for a newly observed digest
+//! so the dispatch loop's `invoke` has something to invoke. What remains a
+//! documented seam: full multi-bundle scheduling, hot-swap draining of a
+//! previous digest (spec §7.6 steps 6-7), and the stream-grants list a
+//! `stage=process` row also carries (irrelevant to this stage) are all
+//! `TODO(M3+)` -- this landing is single-bundle (`ACTION_APP_ID`), matching
+//! every other seam in this crate that is scoped the same way.
+
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
+use serde::Deserialize;
+use thiserror::Error;
+
+use crate::host_api::{ConnectionRegistry, HostApiError};
+
+/// Errors fetching or parsing the distribution response.
+#[derive(Debug, Error)]
+pub enum DistributionError {
+    #[error("http request failed: {0}")]
+    Request(#[from] reqwest::Error),
+    #[error("distribution API returned status {0}")]
+    Status(reqwest::StatusCode),
+}
+
+/// One `egress[]` entry as carried in the distribution response's
+/// `manifest.egress` (spec §6.7/§8.1). `methods` defaults to the spec's
+/// six-verb default when the field is absent/null, matching §8.1: "methods
+/// defaults to GET, HEAD, POST, PUT, PATCH, DELETE".
+#[derive(Debug, Clone, Deserialize)]
+struct RawEgressRule {
+    host: String,
+    #[serde(default)]
+    methods: Option<Vec<String>>,
+}
+
+/// The six-verb default `egress[].methods` applies when the manifest entry
+/// omits it (spec §8.1).
+pub const DEFAULT_EGRESS_METHODS: &[&str] = &["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"];
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RawLimits {
+    #[serde(default)]
+    egress_rps: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RawManifest {
+    #[serde(default)]
+    egress: Vec<RawEgressRule>,
+    #[serde(default)]
+    limits: RawLimits,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawBundleRow {
+    #[serde(rename = "appId")]
+    app_id: String,
+    #[serde(rename = "artifactVersion", default)]
+    artifact_version: Option<String>,
+    #[serde(rename = "artifactDigest", default)]
+    artifact_digest: Option<String>,
+    #[serde(default)]
+    config: serde_json::Value,
+    #[serde(default)]
+    manifest: RawManifest,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DistributionResponse {
+    #[serde(default)]
+    bundles: Vec<RawBundleRow>,
+}
+
+/// One bundle's resolved dispatch-relevant state (spec §6.7): the digest to
+/// `load`/`invoke`, the bucket keys the `load` frame needs (derived from
+/// `app_id`/`version`/digest per §7.6 step 3's naming convention -- the
+/// distribution response itself does not carry them separately), the
+/// `egress` allowlist `crate::egress::EgressGuard` enforces, and the
+/// activation `config` JSON `crate::dispatch::invoke_dispatch` passes to
+/// the bundle's `dispatch` export.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BundleRow {
+    pub app_id: String,
+    pub version: String,
+    /// `sha256:<64 hex>`, or `None` for a registration with no compiled
+    /// artifact yet (spec §6.7: "skipped by the stage").
+    pub artifact_digest: Option<String>,
+    pub component_key: String,
+    pub sidecar_key: String,
+    /// `(host_pattern, methods)` -- byte-identical shape to
+    /// `penguin_bundle_host::manifest::Manifest::egress`.
+    pub egress: Vec<(String, Vec<String>)>,
+    pub egress_rps: Option<u32>,
+    pub config_json: String,
+}
+
+/// Derives the `load` frame's `component_key`/`sidecar_key` bucket paths
+/// from `app_id`/`version`/digest (spec §7.6 step 3: `bundles/{app_id}/
+/// {version}/{sha256}.wasm` and `.json`) -- the distribution response
+/// itself carries only the digest, not these paths, so the stage computes
+/// them by the documented naming convention rather than expecting a
+/// server-supplied key.
+fn bucket_keys(app_id: &str, version: &str, digest: &str) -> (String, String) {
+    let sha256_hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+    (
+        format!("bundles/{app_id}/{version}/{sha256_hex}.wasm"),
+        format!("bundles/{app_id}/{version}/{sha256_hex}.json"),
+    )
+}
+
+impl From<RawBundleRow> for BundleRow {
+    fn from(raw: RawBundleRow) -> Self {
+        let version = raw.artifact_version.unwrap_or_default();
+        let (component_key, sidecar_key) = match &raw.artifact_digest {
+            Some(digest) => bucket_keys(&raw.app_id, &version, digest),
+            None => (String::new(), String::new()),
+        };
+        let egress = raw
+            .manifest
+            .egress
+            .into_iter()
+            .map(|rule| {
+                let methods = rule.methods.unwrap_or_else(|| {
+                    DEFAULT_EGRESS_METHODS
+                        .iter()
+                        .map(|m| m.to_string())
+                        .collect()
+                });
+                (rule.host, methods)
+            })
+            .collect();
+        Self {
+            app_id: raw.app_id,
+            version,
+            artifact_digest: raw.artifact_digest,
+            component_key,
+            sidecar_key,
+            egress,
+            egress_rps: raw.manifest.limits.egress_rps,
+            config_json: raw.config.to_string(),
+        }
+    }
+}
+
+/// GETs `{hub_api_url}/api/v1/distribution/bundles?stage={stage}` and
+/// parses every row (spec §6.7). Never filters by app_id here -- the
+/// caller decides which rows matter, keeping this function reusable by a
+/// future multi-bundle scheduler.
+pub async fn fetch_bundles(
+    client: &reqwest::Client,
+    hub_api_url: &str,
+    stage: &str,
+) -> Result<Vec<BundleRow>, DistributionError> {
+    let url = format!("{hub_api_url}/api/v1/distribution/bundles?stage={stage}");
+    let resp = client.get(&url).send().await?;
+    if !resp.status().is_success() {
+        return Err(DistributionError::Status(resp.status()));
+    }
+    let parsed: DistributionResponse = resp.json().await?;
+    Ok(parsed.bundles.into_iter().map(BundleRow::from).collect())
+}
+
+/// The latest-known-good distribution snapshot, keyed by `app_id` --
+/// consulted by `crate::egress::EgressGuard` (the `http` capability's
+/// allowlist) and the poll loop's own load-on-digest-change logic. A fetch
+/// failure never clears this: "last-known-good" survives a hub-api outage
+/// (spec §6.7: "a hub-api outage degrades gracefully to the last-known-good
+/// bundle set rather than raising").
+#[derive(Default)]
+pub struct BundleCatalog {
+    rows: RwLock<HashMap<String, BundleRow>>,
+}
+
+impl BundleCatalog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn update(&self, rows: Vec<BundleRow>) {
+        let mut guard = self.rows.write().unwrap_or_else(|e| e.into_inner());
+        for row in rows {
+            guard.insert(row.app_id.clone(), row);
+        }
+    }
+
+    pub fn get(&self, app_id: &str) -> Option<BundleRow> {
+        self.rows
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(app_id)
+            .cloned()
+    }
+}
+
+/// Everything [`run_poll_loop`] needs, bundled to keep its own signature
+/// under clippy's argument-count lint (and, unlike a long parameter list,
+/// self-documenting at every call site).
+pub struct PollLoopConfig {
+    pub client: reqwest::Client,
+    pub hub_api_url: String,
+    pub stage: &'static str,
+    pub poll_interval: std::time::Duration,
+    pub catalog: Arc<BundleCatalog>,
+    pub connections: Arc<ConnectionRegistry>,
+    pub action_app_id: String,
+    pub load_limits: penguin_bundle_host::wire::LoadLimits,
+}
+
+/// Runs the poll loop until `shutdown` resolves: fetches every
+/// `poll_interval`, merges the result into `catalog`, and -- once an
+/// executor connection is live and the configured `action_app_id`'s digest
+/// has changed since the last successful `load` -- sends `load` for it
+/// (spec §7.6's reconciliation, single-bundle-scoped: see the module doc
+/// for what full reconciliation still needs). A fetch failure is logged at
+/// WARN and never stops the loop (spec §6.7: "degrades gracefully").
+pub async fn run_poll_loop(
+    config: PollLoopConfig,
+    mut shutdown: tokio::sync::oneshot::Receiver<()>,
+) {
+    let PollLoopConfig {
+        client,
+        hub_api_url,
+        stage,
+        poll_interval,
+        catalog,
+        connections,
+        action_app_id,
+        load_limits,
+    } = config;
+    let mut loaded_digest: Option<String> = None;
+    let mut interval = tokio::time::interval(poll_interval);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return,
+            _ = interval.tick() => {
+                match fetch_bundles(&client, &hub_api_url, stage).await {
+                    Ok(rows) => catalog.update(rows),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "distribution poll failed, serving last-known-good");
+                        continue;
+                    }
+                }
+                let Some(row) = catalog.get(&action_app_id) else { continue };
+                let Some(digest) = row.artifact_digest.clone() else {
+                    tracing::debug!(app_id = %action_app_id, "distribution row has no compiled artifact yet");
+                    continue;
+                };
+                if loaded_digest.as_deref() == Some(digest.as_str()) {
+                    continue;
+                }
+                let Some(connection) = connections.active() else {
+                    tracing::debug!(app_id = %action_app_id, digest, "new digest observed, no executor connection yet");
+                    continue;
+                };
+                match crate::dispatch::ensure_loaded(
+                    &connection,
+                    &row.app_id,
+                    &row.version,
+                    &digest,
+                    &row.component_key,
+                    &row.sidecar_key,
+                    load_limits.clone(),
+                )
+                .await
+                {
+                    Ok(_) => {
+                        tracing::info!(app_id = %action_app_id, digest, "bundle loaded");
+                        loaded_digest = Some(digest);
+                    }
+                    Err(err) => {
+                        tracing::warn!(app_id = %action_app_id, digest, error = %err, "bundle load failed");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Distinguishes "load succeeded/failed" from "no executor" for
+/// [`run_poll_loop`]'s logging -- `crate::dispatch::InvokeError` already
+/// implements `Display`, this alias just names the type at this call site.
+pub type LoadError = HostApiError;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_response_json() -> serde_json::Value {
+        serde_json::json!({
+            "bundles": [
+                {
+                    "appId": "waddles.socials.discord.default",
+                    "communityId": 42,
+                    "entrypoint": "bundles.discord_send_action:dispatch",
+                    "spec": {"required_config": []},
+                    "config": {"webhook_ref": "DISCORD_WEBHOOK_TOKEN_REF"},
+                    "artifactVersion": "1.0.0",
+                    "artifactDigest": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+                    "artifactKind": "prebuilt",
+                    "language": "rust",
+                    "scanStatus": "scanned",
+                    "manifest": {
+                        "egress": [{"host": "discord.com", "methods": ["POST"]}],
+                        "data": {"tables": []},
+                        "limits": {"timeout_ms": 2000, "memory_mb": 64, "egress_rps": 5}
+                    }
+                },
+                {
+                    "appId": "waddles.no.artifact.yet",
+                    "config": {},
+                    "manifest": {}
+                }
+            ]
+        })
+    }
+
+    async fn spawn_distribution_server(
+        body: serde_json::Value,
+        status: axum::http::StatusCode,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
+        let app = axum::Router::new().route(
+            "/api/v1/distribution/bundles",
+            axum::routing::get(move || {
+                let body = body.clone();
+                async move { (status, axum::Json(body)) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("binds an ephemeral port");
+        let port = listener.local_addr().expect("has a local addr").port();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        (port, handle)
+    }
+
+    #[test]
+    fn bucket_keys_follow_the_spec_7_6_step_3_naming_convention() {
+        let (component, sidecar) = bucket_keys(
+            "waddles.a.b.c",
+            "1.0.0",
+            "sha256:aabbccdd00000000000000000000000000000000000000000000000000000",
+        );
+        assert_eq!(
+            component,
+            "bundles/waddles.a.b.c/1.0.0/aabbccdd00000000000000000000000000000000000000000000000000000.wasm"
+        );
+        assert_eq!(
+            sidecar,
+            "bundles/waddles.a.b.c/1.0.0/aabbccdd00000000000000000000000000000000000000000000000000000.json"
+        );
+    }
+
+    #[test]
+    fn raw_bundle_row_defaults_missing_methods_to_the_spec_six_verbs() {
+        let raw: RawBundleRow = serde_json::from_value(serde_json::json!({
+            "appId": "waddles.a.b.c",
+            "manifest": {"egress": [{"host": "api.example.com"}]}
+        }))
+        .unwrap();
+        let row: BundleRow = raw.into();
+        assert_eq!(row.egress.len(), 1);
+        assert_eq!(
+            row.egress[0].1,
+            DEFAULT_EGRESS_METHODS
+                .iter()
+                .map(|m| m.to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn raw_bundle_row_with_no_artifact_digest_has_no_bucket_keys() {
+        let raw: RawBundleRow = serde_json::from_value(serde_json::json!({
+            "appId": "waddles.a.b.c",
+            "manifest": {}
+        }))
+        .unwrap();
+        let row: BundleRow = raw.into();
+        assert!(row.artifact_digest.is_none());
+        assert_eq!(row.component_key, "");
+    }
+
+    #[tokio::test]
+    async fn fetch_bundles_parses_a_real_response() {
+        let (port, _handle) =
+            spawn_distribution_server(sample_response_json(), axum::http::StatusCode::OK).await;
+        let client = reqwest::Client::new();
+        let rows = fetch_bundles(&client, &format!("http://127.0.0.1:{port}"), "action")
+            .await
+            .expect("fetch succeeds");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].app_id, "waddles.socials.discord.default");
+        assert_eq!(
+            rows[0].egress,
+            vec![("discord.com".to_string(), vec!["POST".to_string()])]
+        );
+        assert_eq!(rows[0].egress_rps, Some(5));
+        assert!(rows[1].artifact_digest.is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_bundles_reports_non_success_status() {
+        let (port, _handle) = spawn_distribution_server(
+            serde_json::json!({"bundles": []}),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+        let client = reqwest::Client::new();
+        let err = fetch_bundles(&client, &format!("http://127.0.0.1:{port}"), "action")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DistributionError::Status(_)));
+    }
+
+    #[tokio::test]
+    async fn fetch_bundles_fails_against_an_unreachable_host() {
+        let client = reqwest::Client::new();
+        let err = fetch_bundles(&client, "http://127.0.0.1:1", "action")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DistributionError::Request(_)));
+    }
+
+    #[test]
+    fn bundle_catalog_get_returns_none_before_any_update() {
+        let catalog = BundleCatalog::new();
+        assert!(catalog.get("waddles.a.b.c").is_none());
+    }
+
+    #[test]
+    fn bundle_catalog_update_then_get_round_trips() {
+        let catalog = BundleCatalog::new();
+        let row = BundleRow {
+            app_id: "waddles.a.b.c".to_string(),
+            version: "1.0.0".to_string(),
+            artifact_digest: Some("sha256:00".to_string()),
+            component_key: "k".to_string(),
+            sidecar_key: "s".to_string(),
+            egress: vec![],
+            egress_rps: None,
+            config_json: "{}".to_string(),
+        };
+        catalog.update(vec![row.clone()]);
+        assert_eq!(catalog.get("waddles.a.b.c"), Some(row));
+    }
+
+    #[test]
+    fn bundle_catalog_update_replaces_the_row_for_the_same_app_id() {
+        let catalog = BundleCatalog::new();
+        let mut row = BundleRow {
+            app_id: "waddles.a.b.c".to_string(),
+            version: "1.0.0".to_string(),
+            artifact_digest: Some("sha256:00".to_string()),
+            component_key: "k".to_string(),
+            sidecar_key: "s".to_string(),
+            egress: vec![],
+            egress_rps: None,
+            config_json: "{}".to_string(),
+        };
+        catalog.update(vec![row.clone()]);
+        row.artifact_digest = Some("sha256:11".to_string());
+        catalog.update(vec![row.clone()]);
+        assert_eq!(
+            catalog.get("waddles.a.b.c").unwrap().artifact_digest,
+            Some("sha256:11".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn run_poll_loop_stops_promptly_once_shutdown_resolves() {
+        let (port, _handle) =
+            spawn_distribution_server(sample_response_json(), axum::http::StatusCode::OK).await;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tx.send(()).unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_poll_loop(
+                PollLoopConfig {
+                    client: reqwest::Client::new(),
+                    hub_api_url: format!("http://127.0.0.1:{port}"),
+                    stage: "action",
+                    poll_interval: std::time::Duration::from_millis(50),
+                    catalog: Arc::new(BundleCatalog::new()),
+                    connections: Arc::new(ConnectionRegistry::new()),
+                    action_app_id: "waddles.a.b.c".to_string(),
+                    load_limits: penguin_bundle_host::wire::LoadLimits {
+                        timeout_ms: 2000,
+                        memory_mb: 64,
+                    },
+                },
+                rx,
+            ),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "run_poll_loop must return promptly once shutdown resolves"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_poll_loop_populates_the_catalog_without_an_executor() {
+        let (port, _handle) =
+            spawn_distribution_server(sample_response_json(), axum::http::StatusCode::OK).await;
+        let catalog = Arc::new(BundleCatalog::new());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let catalog_clone = Arc::clone(&catalog);
+        let handle = tokio::spawn(run_poll_loop(
+            PollLoopConfig {
+                client: reqwest::Client::new(),
+                hub_api_url: format!("http://127.0.0.1:{port}"),
+                stage: "action",
+                poll_interval: std::time::Duration::from_millis(20),
+                catalog: catalog_clone,
+                connections: Arc::new(ConnectionRegistry::new()),
+                action_app_id: "waddles.socials.discord.default".to_string(),
+                load_limits: penguin_bundle_host::wire::LoadLimits {
+                    timeout_ms: 2000,
+                    memory_mb: 64,
+                },
+            },
+            rx,
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _ = tx.send(());
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        assert!(catalog.get("waddles.socials.discord.default").is_some());
+    }
+}

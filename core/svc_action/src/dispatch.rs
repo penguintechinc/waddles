@@ -35,6 +35,7 @@ use penguin_spine::{
 };
 use serde::Deserialize;
 
+use crate::capabilities::InvokeScope;
 use crate::hop::KeyRing;
 use crate::host_api::{Connection, ConnectionRegistry, HostApiError};
 use crate::retry::{dispatch_with_retry, AttemptOutcome, DispatchRecord, Jitter};
@@ -131,15 +132,28 @@ pub async fn invoke_dispatch(
         "envelope": env,
         "config": config_json,
     });
+    // Spec §5.11: tenant/community come from the verified envelope, never
+    // from payload -- this is the scope every `host-call` the executor
+    // issues during this invoke will be answered against (see
+    // `crate::capabilities`'s module doc and `crate::host_api::Connection::
+    // invoke`).
+    let scope = InvokeScope {
+        tenant: env.tenant.clone(),
+        community: env.community.clone(),
+        app_id: app_id.to_string(),
+    };
     let reply = conn
-        .request(Message::Invoke(InvokeBody {
-            app_id: app_id.to_string(),
-            digest: digest.to_string(),
-            export: ExportKind::Dispatch,
-            payload,
-            deadline_ms,
-            trace,
-        }))
+        .invoke(
+            InvokeBody {
+                app_id: app_id.to_string(),
+                digest: digest.to_string(),
+                export: ExportKind::Dispatch,
+                payload,
+                deadline_ms,
+                trace,
+            },
+            scope,
+        )
         .await?;
     match reply.message {
         Message::Result(body) => Ok(body.payload),

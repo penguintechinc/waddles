@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use penguin_bundle_host::wire::{
     read_frame, write_frame, CorrelationError, CorrelationTable, ErrorBody, ErrorCode, Frame,
-    HelloOkBody, IdAllocator, Message, ShutdownBody,
+    HelloOkBody, IdAllocator, InvokeBody, Message, ShutdownBody,
 };
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, warn};
 
-use crate::capabilities::CapabilityHandler;
+use crate::capabilities::{denied, CapabilityHandler, InvokeScope};
 use crate::config::CliConfig;
 
 /// Errors this module raises. Every variant is fatal to the connection or
@@ -115,13 +115,18 @@ pub fn build_server_config(cli: &CliConfig) -> Result<ServerConfig, HostApiError
 
 /// One accepted host-API connection's request/reply bookkeeping. Owns the
 /// ids this side allocates (for `load`/`unload`/`invoke`/`ping`/`shutdown`
-/// -- the message kinds the stage initiates, spec §6.6) and the channel
-/// frames are written through.
+/// -- the message kinds the stage initiates, spec §6.6), the channel
+/// frames are written through, and the per-in-flight-`invoke`
+/// [`InvokeScope`] table `crate::capabilities`'s module doc describes: one
+/// connection multiplexes many `invoke`s, so the scope a `host-call`
+/// answers against must be looked up by that call's own `call_id`, never
+/// assumed from the connection as a whole.
 pub struct Connection {
     ids: IdAllocator,
     pending: CorrelationTable,
     writer_tx: mpsc::UnboundedSender<Frame>,
     closed: Arc<std::sync::atomic::AtomicBool>,
+    scopes: std::sync::Mutex<std::collections::HashMap<u64, InvokeScope>>,
 }
 
 impl Connection {
@@ -131,13 +136,16 @@ impl Connection {
             pending: CorrelationTable::new(),
             writer_tx,
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            scopes: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
     /// Sends `message` under a freshly allocated id and awaits the peer's
-    /// reply frame. Used for every stage-initiated exchange: `load` ->
-    /// `loaded`/`error`, `unload` -> `unloaded`/`error`, `invoke` ->
-    /// `result`/`error`, `ping` -> `pong`.
+    /// reply frame. Used for every stage-initiated exchange that carries no
+    /// per-invoke scope: `load` -> `loaded`/`error`, `unload` ->
+    /// `unloaded`/`error`, `ping` -> `pong`. `invoke` goes through
+    /// [`Connection::invoke`] instead, which additionally registers the
+    /// call's [`InvokeScope`] for the read loop's `host-call` handling.
     pub async fn request(&self, message: Message) -> Result<Frame, HostApiError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(HostApiError::ConnectionUnavailable);
@@ -146,6 +154,58 @@ impl Connection {
         let rx = self.pending.register(id)?;
         self.send(Frame::new(id, message))?;
         rx.await.map_err(|_| HostApiError::ConnectionUnavailable)
+    }
+
+    /// Sends an `invoke` frame, registering `scope` under the frame's own
+    /// id for the duration of the call so any `host-call` the executor
+    /// issues mid-invoke (`call_id` == this frame's id, spec §6.6) resolves
+    /// to the correct `(tenant, community, app_id)` -- never a different
+    /// invoke's scope, and never a connection-wide default (spec §5.11,
+    /// `crate::capabilities`'s module doc). The scope is removed once the
+    /// reply arrives or the request fails, whichever comes first -- a
+    /// `call_id` outliving its invoke must never resolve to a stale scope.
+    pub async fn invoke(
+        &self,
+        body: InvokeBody,
+        scope: InvokeScope,
+    ) -> Result<Frame, HostApiError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(HostApiError::ConnectionUnavailable);
+        }
+        let id = self.ids.next_id();
+        let rx = self.pending.register(id)?;
+        self.scopes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, scope);
+        let send_result = self.send(Frame::new(id, Message::Invoke(body)));
+        if let Err(err) = send_result {
+            self.scopes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
+            return Err(err);
+        }
+        let result = rx.await.map_err(|_| HostApiError::ConnectionUnavailable);
+        self.scopes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
+        result
+    }
+
+    /// Looks up the [`InvokeScope`] registered for `call_id` by
+    /// [`Connection::invoke`] -- `None` means `call_id` does not name any
+    /// invoke currently in flight on this connection (already completed,
+    /// never existed, or belongs to a different connection): the read
+    /// loop's [`HostApiError`]-free path treats that as `unknown_invoke`,
+    /// never as "use some other scope instead".
+    fn scope_for(&self, call_id: u64) -> Option<InvokeScope> {
+        self.scopes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&call_id)
+            .cloned()
     }
 
     /// Sends `shutdown` without awaiting a reply (spec §6.6: "connection
@@ -312,12 +372,26 @@ where
             // capability handler and reply on the same connection, reusing
             // its correlation id (spec §6.6). Spawned onto its own task so
             // a slow capability call never blocks delivery of other
-            // in-flight replies.
+            // in-flight replies. The scope answered against is looked up by
+            // `body.call_id` (the originating `invoke` frame's own id) --
+            // never a connection-wide default -- so a `call_id` that names
+            // no in-flight invoke on this connection (forged, stale, or
+            // from a different connection/tenant) is refused outright
+            // rather than answered against a guessed scope (spec §5.11,
+            // `crate::capabilities`'s module doc; this is the fix for the
+            // post-M3 review's connection-fixed-scope finding).
             Message::HostCall(body) => {
                 let connection = Arc::clone(connection);
                 let capabilities = Arc::clone(&capabilities);
                 tokio::spawn(async move {
-                    let result = capabilities.handle(body).await;
+                    let scope = connection.scope_for(body.call_id);
+                    let result = match scope {
+                        Some(scope) => capabilities.handle(&scope, body).await,
+                        None => Err(denied(
+                            "unknown_invoke",
+                            "host-call call_id does not match any invoke in flight on this connection",
+                        )),
+                    };
                     let reply = match result {
                         Ok(value) => penguin_bundle_host::wire::HostResultBody {
                             result: Some(value),
@@ -673,11 +747,26 @@ mod tests {
         }
 
         let (stage_io, executor_io) = tokio::io::duplex(64 * 1024);
+        let egress = Arc::new(crate::egress::EgressGuard::new(
+            Arc::new(crate::egress::ReqwestTransport),
+            crate::egress::EgressLimits {
+                allow_private_hosts: false,
+                rate_limit_rps: 10,
+                rate_limit_burst: 20,
+                timeout: std::time::Duration::from_secs(5),
+                max_redirects: 3,
+                max_response_bytes: 1_048_576,
+            },
+            Arc::new(crate::distribution::BundleCatalog::new()),
+            prometheus::IntCounterVec::new(
+                prometheus::Opts::new("test_egress_denied_total_hostapi", "test"),
+                &["app_id", "reason"],
+            )
+            .unwrap(),
+        ));
         let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
             NoopQueue,
-            "acme".to_string(),
-            None,
-            "waddles.bot.commands.default".to_string(),
+            egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
         ));
 
@@ -730,7 +819,20 @@ mod tests {
             .await
             .unwrap();
             let host_result = read_frame(&mut io).await.unwrap();
-            assert!(matches!(host_result.message, Message::HostResult(_)));
+            let host_result_body = match host_result.message {
+                Message::HostResult(b) => b,
+                other => panic!("expected host-result, got {other:?}"),
+            };
+            // Proves the per-invoke scope (registered by `Connection::
+            // invoke` below) actually reached the capability handler: a
+            // missing/mismatched scope would answer `unknown_invoke`
+            // instead of a real clock value (spec §5.11, the fix this test
+            // guards against regressing).
+            assert!(
+                host_result_body.error.is_none(),
+                "expected the clock host-call to succeed, got {:?}",
+                host_result_body.error
+            );
 
             write_frame(
                 &mut io,
@@ -779,14 +881,21 @@ mod tests {
         assert!(matches!(loaded.message, Message::Loaded(_)));
 
         let result = connection
-            .request(Message::Invoke(InvokeBody {
-                app_id: "waddles.bot.commands.default".to_string(),
-                digest: "sha256:00".to_string(),
-                export: penguin_bundle_host::wire::ExportKind::Dispatch,
-                payload: serde_json::json!({}),
-                deadline_ms: 2000,
-                trace: None,
-            }))
+            .invoke(
+                InvokeBody {
+                    app_id: "waddles.bot.commands.default".to_string(),
+                    digest: "sha256:00".to_string(),
+                    export: penguin_bundle_host::wire::ExportKind::Dispatch,
+                    payload: serde_json::json!({}),
+                    deadline_ms: 2000,
+                    trace: None,
+                },
+                crate::capabilities::InvokeScope {
+                    tenant: "acme".to_string(),
+                    community: None,
+                    app_id: "waddles.bot.commands.default".to_string(),
+                },
+            )
             .await
             .expect("invoke succeeds");
         if let Message::Result(r) = result.message {
@@ -799,6 +908,516 @@ mod tests {
         // Give the read loop a moment to see EOF and mark the connection
         // closed, then stop it explicitly (its underlying io just ended).
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), read_loop_handle).await;
+    }
+
+    /// **The end-to-end proof this M3 landing exists to deliver**: a
+    /// bundle's `relay`/`send` host-call, issued mid-`invoke` exactly as a
+    /// real executor would relay it from a WASM guest, reaches a real
+    /// `LPUSH` onto the Twitch outbound relay key -- through the exact
+    /// connection/capability wiring `crate::lib::try_start_host_api`
+    /// installs in production (mTLS handshake, `load`, per-invoke-scoped
+    /// `invoke`, `host-call` dispatch), not a shortcut that calls
+    /// `StageCapabilities::handle_relay` directly. Where a real deployment
+    /// would `BRPOP` this key from a Valkey connection and write it to the
+    /// Twitch IRC socket (`libs/waddle_transports/transports/irc_relay.py`,
+    /// outside this crate's own process boundary), this test asserts the
+    /// exact key and payload that reader consumes.
+    #[tokio::test]
+    async fn bundle_relay_host_call_reaches_a_twitch_lpush_end_to_end() {
+        use crate::capabilities::{InvokeScope, RelayQueue, StageCapabilities};
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct RecordingRelayQueue {
+            pushed: StdMutex<Vec<(String, String)>>,
+        }
+        impl RelayQueue for RecordingRelayQueue {
+            fn lpush<'a>(
+                &'a self,
+                key: &'a str,
+                value: String,
+            ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+                self.pushed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((key.to_string(), value));
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let (stage_io, executor_io) = tokio::io::duplex(64 * 1024);
+        let relay_queue = Arc::new(RecordingRelayQueue::default());
+        let egress = Arc::new(crate::egress::EgressGuard::new(
+            Arc::new(crate::egress::ReqwestTransport),
+            crate::egress::EgressLimits {
+                allow_private_hosts: false,
+                rate_limit_rps: 10,
+                rate_limit_burst: 20,
+                timeout: std::time::Duration::from_secs(5),
+                max_redirects: 3,
+                max_response_bytes: 1_048_576,
+            },
+            Arc::new(crate::distribution::BundleCatalog::new()),
+            prometheus::IntCounterVec::new(
+                prometheus::Opts::new("test_egress_denied_total_relay_e2e", "test"),
+                &["app_id", "reason"],
+            )
+            .unwrap(),
+        ));
+        // `Arc<RecordingRelayQueue>` doesn't itself impl `RelayQueue` (the
+        // impl is on the concrete type); wrap so `StageCapabilities` can
+        // still observe pushes through the shared `Arc` after being moved.
+        struct SharedQueue(Arc<RecordingRelayQueue>);
+        impl RelayQueue for SharedQueue {
+            fn lpush<'a>(
+                &'a self,
+                key: &'a str,
+                value: String,
+            ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+                self.0.lpush(key, value)
+            }
+        }
+        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
+            SharedQueue(Arc::clone(&relay_queue)),
+            egress,
+            Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+        ));
+
+        let executor = tokio::spawn(async move {
+            let mut io = executor_io;
+            write_frame(&mut io, &Frame::new(1, Message::Hello(hello_body("runc"))))
+                .await
+                .unwrap();
+            read_frame(&mut io).await.unwrap();
+
+            let load = read_frame(&mut io).await.unwrap();
+            let (load_id, load_body) = match load.message {
+                Message::Load(b) => (load.id, b),
+                other => panic!("expected load, got {other:?}"),
+            };
+            write_frame(
+                &mut io,
+                &Frame::new(
+                    load_id,
+                    Message::Loaded(LoadedBody {
+                        app_id: load_body.app_id,
+                        digest: load_body.digest,
+                        precompile_ms: 5,
+                        exports: vec!["dispatch".to_string()],
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+
+            let invoke = read_frame(&mut io).await.unwrap();
+            let invoke_id = invoke.id;
+            assert!(matches!(invoke.message, Message::Invoke(_)));
+
+            // The bundle's `dispatch` export, mid-invoke, issues exactly
+            // the `relay`/`send` host-call `crate::senders::
+            // twitch_relay_args` documents as the wire shape a Twitch
+            // send takes.
+            write_frame(
+                &mut io,
+                &Frame::new(
+                    2,
+                    Message::HostCall(penguin_bundle_host::wire::HostCallBody {
+                        app_id: "waddles.bot.commands.default".to_string(),
+                        capability: penguin_bundle_host::wire::CapabilityKind::Relay,
+                        op: "send".to_string(),
+                        args: crate::senders::twitch_relay_args(
+                            "#somechannel",
+                            "hello from waddles",
+                        ),
+                        call_id: invoke_id,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            let host_result = read_frame(&mut io).await.unwrap();
+            match host_result.message {
+                Message::HostResult(b) => {
+                    let result = b.result.expect("relay send succeeds end to end");
+                    assert_eq!(result["queued"], serde_json::json!(true));
+                }
+                other => panic!("expected host-result, got {other:?}"),
+            }
+
+            write_frame(
+                &mut io,
+                &Frame::new(
+                    invoke_id,
+                    Message::Result(penguin_bundle_host::wire::ResultBody {
+                        payload: serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+                        duration_ms: 3,
+                        fuel_used: 0,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let (connection, read_loop) = run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: test_limits(),
+            },
+            false,
+            capabilities,
+        )
+        .await
+        .expect("handshake succeeds");
+        let read_loop_handle = tokio::spawn(read_loop);
+
+        connection
+            .request(Message::Load(LoadBody {
+                app_id: "waddles.bot.commands.default".to_string(),
+                version: "1".to_string(),
+                digest: "sha256:00".to_string(),
+                component_key: "k".to_string(),
+                sidecar_key: "s".to_string(),
+                capabilities: vec![],
+                limits: LoadLimits {
+                    timeout_ms: 2000,
+                    memory_mb: 64,
+                },
+            }))
+            .await
+            .expect("load succeeds");
+
+        let result = connection
+            .invoke(
+                InvokeBody {
+                    app_id: "waddles.bot.commands.default".to_string(),
+                    digest: "sha256:00".to_string(),
+                    export: penguin_bundle_host::wire::ExportKind::Dispatch,
+                    payload: serde_json::json!({}),
+                    deadline_ms: 2000,
+                    trace: None,
+                },
+                InvokeScope {
+                    tenant: "acme".to_string(),
+                    community: Some("main".to_string()),
+                    app_id: "waddles.bot.commands.default".to_string(),
+                },
+            )
+            .await
+            .expect("invoke succeeds");
+        assert!(matches!(result.message, Message::Result(_)));
+
+        executor.await.expect("executor task");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), read_loop_handle).await;
+
+        // The proof: exactly one LPUSH landed on the Twitch outbound relay
+        // key, with the sanitized channel/text the bundle sent -- the
+        // handoff point to the process that actually opens the Twitch IRC
+        // socket.
+        let pushed = relay_queue.pushed.lock().unwrap();
+        assert_eq!(pushed.len(), 1);
+        assert_eq!(pushed[0].0, "waddles:transport:irc:twitch:outbound");
+        let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
+        assert_eq!(parsed["channel"], "#somechannel");
+        assert_eq!(parsed["text"], "hello from waddles");
+    }
+
+    /// Regression coverage for the mandatory negative test: "a cross-tenant
+    /// call_id is refused". A `host-call` whose `call_id` does not match
+    /// any `invoke` currently in flight on this connection (here: a
+    /// `call_id` that was never registered at all, the same shape a
+    /// forged/stale/cross-connection `call_id` would take) must be denied
+    /// `unknown_invoke` -- never answered against some other invoke's
+    /// scope, and never against a fabricated default.
+    #[tokio::test]
+    async fn host_call_with_an_unregistered_call_id_is_refused_as_unknown_invoke() {
+        use crate::capabilities::{RelayQueue, StageCapabilities};
+        use std::future::Future;
+        use std::pin::Pin;
+
+        struct NoopQueue;
+        impl RelayQueue for NoopQueue {
+            fn lpush<'a>(
+                &'a self,
+                _key: &'a str,
+                _value: String,
+            ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let (stage_io, executor_io) = tokio::io::duplex(64 * 1024);
+        let egress = Arc::new(crate::egress::EgressGuard::new(
+            Arc::new(crate::egress::ReqwestTransport),
+            crate::egress::EgressLimits {
+                allow_private_hosts: false,
+                rate_limit_rps: 10,
+                rate_limit_burst: 20,
+                timeout: std::time::Duration::from_secs(5),
+                max_redirects: 3,
+                max_response_bytes: 1_048_576,
+            },
+            Arc::new(crate::distribution::BundleCatalog::new()),
+            prometheus::IntCounterVec::new(
+                prometheus::Opts::new("test_egress_denied_total_unknown_invoke", "test"),
+                &["app_id", "reason"],
+            )
+            .unwrap(),
+        ));
+        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
+            NoopQueue,
+            egress,
+            Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+        ));
+
+        let executor = tokio::spawn(async move {
+            let mut io = executor_io;
+            write_frame(&mut io, &Frame::new(1, Message::Hello(hello_body("runc"))))
+                .await
+                .unwrap();
+            read_frame(&mut io).await.unwrap();
+
+            // No `invoke` was ever sent on this connection -- `call_id:
+            // 9999` names nothing in flight.
+            write_frame(
+                &mut io,
+                &Frame::new(
+                    2,
+                    Message::HostCall(penguin_bundle_host::wire::HostCallBody {
+                        app_id: "waddles.bot.commands.default".to_string(),
+                        capability: penguin_bundle_host::wire::CapabilityKind::Clock,
+                        op: "now-millis".to_string(),
+                        args: serde_json::json!({}),
+                        call_id: 9999,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            let host_result = read_frame(&mut io).await.unwrap();
+            match host_result.message {
+                Message::HostResult(b) => {
+                    let err = b
+                        .error
+                        .expect("expected an error, call_id was never registered");
+                    assert_eq!(err.code, "unknown_invoke");
+                }
+                other => panic!("expected host-result, got {other:?}"),
+            }
+        });
+
+        let (_connection, read_loop) = run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: test_limits(),
+            },
+            false,
+            capabilities,
+        )
+        .await
+        .expect("handshake succeeds");
+        let read_loop_handle = tokio::spawn(read_loop);
+
+        executor.await.expect("executor task");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), read_loop_handle).await;
+    }
+
+    /// The literal regression test for the post-M3 review finding this
+    /// module fixes: two concurrent `invoke`s on the **same** connection,
+    /// for two different tenants, each answered against its *own*
+    /// `InvokeScope` -- never the other's. Before this fix,
+    /// `StageCapabilities` was scoped once at connection-construction time,
+    /// so every `host-call` on a connection resolved to whichever tenant
+    /// happened to be first; this test would have failed under that design
+    /// (both `context` calls would report the same tenant).
+    #[tokio::test]
+    async fn concurrent_invokes_for_different_tenants_never_cross_scope() {
+        use crate::capabilities::{InvokeScope, RelayQueue, StageCapabilities};
+        use std::future::Future;
+        use std::pin::Pin;
+
+        struct NoopQueue;
+        impl RelayQueue for NoopQueue {
+            fn lpush<'a>(
+                &'a self,
+                _key: &'a str,
+                _value: String,
+            ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let (stage_io, executor_io) = tokio::io::duplex(64 * 1024);
+        let egress = Arc::new(crate::egress::EgressGuard::new(
+            Arc::new(crate::egress::ReqwestTransport),
+            crate::egress::EgressLimits {
+                allow_private_hosts: false,
+                rate_limit_rps: 10,
+                rate_limit_burst: 20,
+                timeout: std::time::Duration::from_secs(5),
+                max_redirects: 3,
+                max_response_bytes: 1_048_576,
+            },
+            Arc::new(crate::distribution::BundleCatalog::new()),
+            prometheus::IntCounterVec::new(
+                prometheus::Opts::new("test_egress_denied_total_cross_tenant", "test"),
+                &["app_id", "reason"],
+            )
+            .unwrap(),
+        ));
+        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
+            NoopQueue,
+            egress,
+            Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+        ));
+
+        let executor = tokio::spawn(async move {
+            let mut io = executor_io;
+            write_frame(&mut io, &Frame::new(1, Message::Hello(hello_body("runc"))))
+                .await
+                .unwrap();
+            read_frame(&mut io).await.unwrap();
+
+            // Both `invoke`s land before either is answered -- the fake
+            // executor reads both frames up front, mirroring a real
+            // executor multiplexing two concurrent calls on one
+            // connection.
+            let invoke_a = read_frame(&mut io).await.unwrap();
+            let invoke_b = read_frame(&mut io).await.unwrap();
+            let (id_a, body_a) = match invoke_a.message {
+                Message::Invoke(b) => (invoke_a.id, b),
+                other => panic!("expected invoke, got {other:?}"),
+            };
+            let (id_b, _body_b) = match invoke_b.message {
+                Message::Invoke(b) => (invoke_b.id, b),
+                other => panic!("expected invoke, got {other:?}"),
+            };
+
+            // Issue a `context` host-call for each invoke's own id.
+            write_frame(
+                &mut io,
+                &Frame::new(
+                    100,
+                    Message::HostCall(penguin_bundle_host::wire::HostCallBody {
+                        app_id: body_a.app_id.clone(),
+                        capability: penguin_bundle_host::wire::CapabilityKind::Context,
+                        op: "get".to_string(),
+                        args: serde_json::json!({}),
+                        call_id: id_a,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            let result_a = read_frame(&mut io).await.unwrap();
+            let result_b_body = {
+                write_frame(
+                    &mut io,
+                    &Frame::new(
+                        101,
+                        Message::HostCall(penguin_bundle_host::wire::HostCallBody {
+                            app_id: "waddles.bot.commands.default".to_string(),
+                            capability: penguin_bundle_host::wire::CapabilityKind::Context,
+                            op: "get".to_string(),
+                            args: serde_json::json!({}),
+                            call_id: id_b,
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+                read_frame(&mut io).await.unwrap()
+            };
+
+            let tenant_of = |frame: Frame| -> String {
+                match frame.message {
+                    Message::HostResult(b) => b
+                        .result
+                        .expect("context call succeeds")
+                        .get("tenant")
+                        .and_then(|v| v.as_str())
+                        .unwrap()
+                        .to_string(),
+                    other => panic!("expected host-result, got {other:?}"),
+                }
+            };
+            assert_eq!(tenant_of(result_a), "tenant-a");
+            assert_eq!(tenant_of(result_b_body), "tenant-b");
+
+            for (id, digest) in [(id_a, "sha256:aa"), (id_b, "sha256:bb")] {
+                write_frame(
+                    &mut io,
+                    &Frame::new(
+                        id,
+                        Message::Result(penguin_bundle_host::wire::ResultBody {
+                            payload: serde_json::json!({"ok": true, "digest": digest}),
+                            duration_ms: 1,
+                            fuel_used: 0,
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+            }
+        });
+
+        let (connection, read_loop) = run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: test_limits(),
+            },
+            false,
+            capabilities,
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let (result_a, result_b) = tokio::join!(
+            connection.invoke(
+                InvokeBody {
+                    app_id: "waddles.bot.commands.default".to_string(),
+                    digest: "sha256:aa".to_string(),
+                    export: penguin_bundle_host::wire::ExportKind::Dispatch,
+                    payload: serde_json::json!({}),
+                    deadline_ms: 2000,
+                    trace: None,
+                },
+                InvokeScope {
+                    tenant: "tenant-a".to_string(),
+                    community: None,
+                    app_id: "waddles.bot.commands.default".to_string(),
+                },
+            ),
+            connection.invoke(
+                InvokeBody {
+                    app_id: "waddles.bot.commands.default".to_string(),
+                    digest: "sha256:bb".to_string(),
+                    export: penguin_bundle_host::wire::ExportKind::Dispatch,
+                    payload: serde_json::json!({}),
+                    deadline_ms: 2000,
+                    trace: None,
+                },
+                InvokeScope {
+                    tenant: "tenant-b".to_string(),
+                    community: None,
+                    app_id: "waddles.bot.commands.default".to_string(),
+                },
+            ),
+        );
+        result_a.expect("invoke a succeeds");
+        result_b.expect("invoke b succeeds");
+
+        executor.await.expect("executor task");
     }
 
     #[test]

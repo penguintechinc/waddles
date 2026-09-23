@@ -156,6 +156,44 @@ pub struct CliConfig {
     /// never multiplies the write rate.
     #[arg(long, env = "METERING_FLUSH_INTERVAL_S", default_value_t = 10)]
     pub metering_flush_interval_s: u64,
+
+    /// hub-api base URL, source of the `GET /api/v1/distribution/bundles
+    /// ?stage=action` poll (spec §6.7) `crate::distribution` drives --
+    /// same field name/default `core/svc_process`'s own M4 config carries
+    /// for the identical poll, kept consistent across the two stages.
+    #[arg(long, env = "HUB_API_URL", default_value = "http://hub-api:8204")]
+    pub hub_api_url: String,
+    /// Distribution-bundles poll interval, in seconds (spec §6.7: "Polling
+    /// behaviour is unchanged ... every `POLL_INTERVAL_S` (5.0 s)").
+    #[arg(long, env = "POLL_INTERVAL_S", default_value_t = 5.0)]
+    pub poll_interval_s: f64,
+
+    /// Lifts the private-address half of the bundle `http` capability's
+    /// SSRF guard (spec §8.2 step 6 / §8.5) for hosts already on that
+    /// bundle's manifest `egress` allowlist -- loopback, link-local,
+    /// unspecified, multicast and the cloud-metadata addresses stay
+    /// blocked regardless of this setting.
+    #[arg(long, env = "EGRESS_ALLOW_PRIVATE_HOSTS", default_value_t = false)]
+    pub egress_allow_private_hosts: bool,
+    /// Default per-bundle egress token-bucket rate (spec §7.3), overridden
+    /// per bundle by `manifest.limits.egress_rps` when present.
+    #[arg(long, env = "EGRESS_RATE_LIMIT_RPS", default_value_t = 10)]
+    pub egress_rate_limit_rps: u32,
+    /// Egress token-bucket burst size (spec §8.2 step 8).
+    #[arg(long, env = "EGRESS_RATE_LIMIT_BURST", default_value_t = 20)]
+    pub egress_rate_limit_burst: u32,
+    /// Total wall-clock budget for one `http.send` call, including
+    /// redirects (spec §8.2 step 12).
+    #[arg(long, env = "EGRESS_TIMEOUT_MS", default_value_t = 5000)]
+    pub egress_timeout_ms: u64,
+    /// Maximum redirect hops a bundle `http.send` call follows, each
+    /// re-validated against the full guard (spec §8.2 step 10).
+    #[arg(long, env = "EGRESS_MAX_REDIRECTS", default_value_t = 3)]
+    pub egress_max_redirects: u8,
+    /// Response bodies larger than this are truncated, never denied (spec
+    /// §8.2 step 11).
+    #[arg(long, env = "EGRESS_MAX_RESPONSE_BYTES", default_value_t = 1_048_576)]
+    pub egress_max_response_bytes: usize,
 }
 
 impl CliConfig {
@@ -356,6 +394,30 @@ mod tests {
     fn host_api_port_default_is_8302() {
         let cli = CliConfig::parse_from(["svc-action"]);
         assert_eq!(cli.host_api_port, 8302);
+    }
+
+    #[test]
+    fn distribution_poll_defaults_match_spec_6_7() {
+        let cli = CliConfig::parse_from(["svc-action"]);
+        assert_eq!(cli.hub_api_url, "http://hub-api:8204");
+        assert_eq!(cli.poll_interval_s, 5.0);
+    }
+
+    #[test]
+    fn egress_defaults_match_spec_7_3_and_8_2() {
+        let cli = CliConfig::parse_from(["svc-action"]);
+        assert!(!cli.egress_allow_private_hosts);
+        assert_eq!(cli.egress_rate_limit_rps, 10);
+        assert_eq!(cli.egress_rate_limit_burst, 20);
+        assert_eq!(cli.egress_timeout_ms, 5000);
+        assert_eq!(cli.egress_max_redirects, 3);
+        assert_eq!(cli.egress_max_response_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn egress_allow_private_hosts_flag_override_is_honored() {
+        let cli = CliConfig::parse_from(["svc-action", "--egress-allow-private-hosts"]);
+        assert!(cli.egress_allow_private_hosts);
     }
 
     #[test]
