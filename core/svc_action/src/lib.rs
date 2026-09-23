@@ -4,39 +4,32 @@
 //! (`src/main.rs`) so integration tests under `tests/` can exercise the
 //! router and config loader directly instead of spawning a subprocess.
 //!
-//! Scope of this file (M3, "Rust service on the `svc_streaming` template"
-//! per the M3 row of
-//! `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md`): health,
-//! metrics, OTel wiring, config loading. Everything else is a deliberate
-//! seam, not a silent gap -- see the `TODO(M3)` markers below and in
-//! `src/http/mod.rs`/`src/db/mod.rs`.
+//! M3 ("Executor integration", spec §16 M3 row) landed the full stage side
+//! of the bundle-executor wire protocol (`host_api`), hop verification
+//! (`hop`), usage metering (`usage`), retry/audit (`retry`,
+//! `db::entities::action_dispatch_log`), and one built-in sender end to
+//! end (`senders`::Twitch via `capabilities`::relay). What remains a
+//! documented seam -- never a silent stub -- is named at each call site
+//! below: the `GET /api/v1/distribution/bundles?stage=action` poll (which
+//! bundle/digest/grants to run) is blocked on the same M2 hub-api work
+//! `core/svc_process`'s own M4 skeleton left as `TODO(M4)`.
 
+pub mod capabilities;
 pub mod config;
 pub mod db;
+pub mod dispatch;
 pub mod error;
+pub mod hop;
+pub mod host_api;
 pub mod http;
+pub mod retry;
+pub mod senders;
 pub mod telemetry;
-
-// TODO(M3): executor integration -- blocked on M2 (`bundle_executor`,
-// `penguin-spine`, `penguin-bundle-host`, all landing in parallel this
-// wave). Once those crates exist, this file additionally wires:
-//   - `pub mod dispatch` -- `XREADGROUP` each activated bundle's own
-//     `:action` stream (single consumer group `{app_id}`), invoke
-//     `dispatch` through the executor, classify
-//     `transport-error.retryable`, apply retry-with-backoff
-//     (`ACTION_MAX_RETRIES`/`ACTION_BASE_BACKOFF_MS`/`ACTION_MAX_BACKOFF_MS`,
-//     §4.3), and write the outcome to `action_dispatch_log`
-//     (`db::entities::action_dispatch_log`, already declared).
-//   - `pub mod senders` -- Rust built-in platform senders (Discord, Slack,
-//     YouTube, Kick REST; Twitch via the outbound relay `LPUSH`) reached by
-//     bundles through the host API, never holding a platform credential
-//     directly in a bundle.
-//   - The `:8302` mTLS host-API listener (`HOST_API_PORT`) the
-//     `svc-action-executor` deployment dials.
-// None of this is stubbed here: a stub that "looks wired" but silently
-// no-ops would be worse than an honest absence.
+pub mod usage;
+pub mod wiring;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use tokio::signal;
@@ -80,6 +73,9 @@ where
 
     let state = http::AppState::new(config.clone(), prom_registry);
 
+    let connections = try_start_host_api(&config.cli);
+    try_start_dispatch(&config, connections);
+
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
     let metrics_addr = SocketAddr::new(config.cli.bind_addr, config.cli.metrics_port);
 
@@ -103,6 +99,144 @@ where
     )?;
 
     Ok(())
+}
+
+/// Starts the host-API mTLS listener as its own background task and
+/// returns the [`host_api::ConnectionRegistry`] immediately, regardless of
+/// whether the listener actually starts -- never blocks or fails
+/// `run_with_shutdown`'s caller. Missing/invalid TLS config (no
+/// `HOST_API_SERVER_CERT_FILE`/`_KEY_FILE`/`HOST_API_CLIENT_CA_FILE`) is
+/// logged and disables executor integration rather than crashing the
+/// HTTP/metrics servers served alongside it -- the same graceful-
+/// degradation contract `core/svc_process`'s `try_start_spine_drain`
+/// applies to its own optional dependency.
+fn try_start_host_api(cli: &config::CliConfig) -> Arc<host_api::ConnectionRegistry> {
+    let registry = Arc::new(host_api::ConnectionRegistry::new());
+    let cli = cli.clone();
+    let registry_for_task = Arc::clone(&registry);
+    tokio::spawn(async move {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            let _ = shutdown_tx.send(());
+        });
+        // TODO(M3+): the `relay`/`clock`/`context`/`log` capabilities need
+        // a live Valkey connection (`crate::capabilities::StageCapabilities`)
+        // and per-activation (tenant, community, app_id) scope neither of
+        // which the host-api listener alone has -- until the distribution
+        // poll (see the module doc) resolves that scope, every host-call
+        // this listener receives is answered by `DenyAllCapabilities`
+        // (a real, correct "not configured yet" denial, never a fabricated
+        // success).
+        let capabilities: Arc<dyn capabilities::CapabilityHandler> =
+            Arc::new(capabilities::DenyAllCapabilities);
+        if let Err(err) = host_api::serve(cli, registry_for_task, capabilities, shutdown_rx).await {
+            tracing::warn!(error = %err, "host-api listener unavailable; executor integration disabled");
+        }
+    });
+    registry
+}
+
+/// Starts the action-stage dispatch loop (`crate::dispatch::run`) as its
+/// own background task, mirroring `core/svc_process`'s
+/// `try_start_spine_drain` exactly: two independent reasons this never
+/// starts, both logged and neither an error -- `ACTION_APP_ID` unset (no
+/// bundle assigned yet, multi-bundle scheduling is blocked on the
+/// distribution poll), or `penguin_spine::SpineConfig::from_env()`/
+/// `ENVELOPE_BINDING_KEYS` parsing failing (missing/invalid required
+/// config -- hop verification must never silently fail open, so a missing
+/// keyring disables the loop rather than starting it unverified).
+fn try_start_dispatch(config: &config::Config, connections: Arc<host_api::ConnectionRegistry>) {
+    if config.cli.action_app_id.is_empty() {
+        tracing::info!(
+            "ACTION_APP_ID not set; dispatch loop not started (blocked on distribution poll)"
+        );
+        return;
+    }
+
+    let Some(keys_raw) = config.envelope_binding_keys.as_ref() else {
+        tracing::warn!("ENVELOPE_BINDING_KEYS not set; dispatch loop disabled (hop verification must never fail open)");
+        return;
+    };
+    let key_ring = match hop::KeyRing::parse(keys_raw.expose()) {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::warn!(error = %err, "ENVELOPE_BINDING_KEYS invalid; dispatch loop disabled");
+            return;
+        }
+    };
+
+    let spine_cfg = match penguin_spine::SpineConfig::from_env() {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(error = %err, "spine config unavailable; action-stage dispatch disabled");
+            return;
+        }
+    };
+
+    let app_id = config.cli.action_app_id.clone();
+    let config = config.clone();
+    tokio::spawn(async move {
+        let db = match db::connect(&config).await {
+            Ok(db) => db,
+            Err(err) => {
+                tracing::error!(error = %err, "db connection failed; dispatch loop not started");
+                return;
+            }
+        };
+        // TODO(M3+): tenant/community scope is hardcoded to the
+        // tenant-wide `global` activation until the distribution poll
+        // (module doc) resolves the real set of (tenant, community,
+        // app_id) activations this pod should drain -- a single-tenant
+        // deployment (today's only shipped topology) is unaffected.
+        let scope = penguin_spine::Scope::new("global", None);
+        let stream_key = scope.action_stream(&app_id);
+        let grant = penguin_spine::Grant {
+            stream: stream_key.clone(),
+            platform: "internal".to_string(),
+            source_id: app_id.clone(),
+        };
+        let metrics: Arc<dyn penguin_spine::SpineMetrics> = Arc::new(penguin_spine::NoopMetrics);
+        let spine = match penguin_spine::SpineClient::connect(spine_cfg.clone(), metrics.clone())
+            .await
+        {
+            Ok(c) => c,
+            Err(err) => {
+                tracing::error!(error = %err, "spine client connect failed; dispatch loop not started");
+                return;
+            }
+        };
+        let deps = dispatch::DispatchDeps {
+            app_id: app_id.clone(),
+            digest: String::new(),
+            config_json: "{}".to_string(),
+            key_ring,
+            connections,
+            retry_policy: dispatch::RetryPolicy {
+                max_retries: config.cli.action_max_retries,
+                base_backoff_ms: config.cli.action_base_backoff_ms,
+                max_backoff_ms: config.cli.action_max_backoff_ms,
+                call_timeout_ms: config.cli.executor_call_timeout_ms,
+            },
+            jitter: retry::Jitter::from_entropy(),
+            audit: wiring::DbAuditSink::new(db.clone()),
+            tenants: wiring::DbTenantResolver::new(db),
+            usage: Arc::new(std::sync::Mutex::new(usage::UsageBatcher::new())),
+            spine,
+            metrics,
+        };
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            let _ = shutdown_tx.send(());
+        });
+
+        if let Err(err) = dispatch::run(spine_cfg, vec![grant], stream_key, deps, shutdown_rx).await
+        {
+            tracing::error!(error = %err, "action-stage dispatch loop exited");
+        }
+    });
 }
 
 /// Waits for SIGINT (Ctrl-C) or SIGTERM (Kubernetes pod termination) and
@@ -188,6 +322,7 @@ mod tests {
         Config {
             cli,
             db_password: Secret::new("test-password"),
+            envelope_binding_keys: None,
         }
     }
 

@@ -90,6 +90,7 @@ mod tests {
         let config = Config {
             cli,
             db_password: Secret::new("x"),
+            envelope_binding_keys: None,
         };
         AppState::new(config, prometheus::Registry::new())
     }

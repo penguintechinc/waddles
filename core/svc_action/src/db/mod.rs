@@ -91,6 +91,7 @@ mod tests {
         Config {
             cli,
             db_password: Secret::new("test-password"),
+            envelope_binding_keys: None,
         }
     }
 
@@ -131,6 +132,7 @@ mod tests {
         let config = Config {
             cli,
             db_password: Secret::new("unused"),
+            envelope_binding_keys: None,
         };
         let first = get_or_connect(&config).await.expect("connects");
         // Second call returns the cached connection rather than

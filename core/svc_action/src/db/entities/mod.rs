@@ -11,3 +11,5 @@
 //! declares the shape.
 
 pub mod action_dispatch_log;
+pub mod communities;
+pub mod tenants;
