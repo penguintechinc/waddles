@@ -1,0 +1,14 @@
+.git
+.gitignore
+.github
+target
+*.md
+.DS_Store
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.env
+.env.*
+Dockerfile.rust
