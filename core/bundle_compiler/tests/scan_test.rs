@@ -12,6 +12,20 @@
 //! `run_source_scans` (the production entry point, real binaries only) is
 //! exercised directly for the zero-file case, which fails before any
 //! external tool is invoked.
+//!
+//! **The three dependency-audit tools (`pip-audit`/`cargo-audit`/`npm
+//! audit`) are never invoked for real anywhere in this file, by the same
+//! network-hermeticity requirement as `semgrep`'s stub above -- CI has no
+//! network access to any of their advisory feeds, and this crate's fix
+//! for a MED security-review finding (fail-closed on a dependency-audit
+//! tool spawn/parse error, see `scan::sast::run_dependency_audit`'s doc
+//! comment) turns exactly that fetch failure into a hard block. Every
+//! test exercising the dependency-audit branches therefore uses a
+//! fixture stub -- `*-stub-clean.sh` (empty advisories, happy path),
+//! `*-stub-vulnerable.sh` (one fabricated advisory, blocking path), or
+//! `audit-stub-network-failure.sh` (spawns fine, produces no parseable
+//! output, fails-closed path) -- each mirroring the real tool's JSON
+//! shape exactly, never a real network call.**
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use bundle_compiler::errors::CompilerError;
@@ -105,32 +119,51 @@ fn no_lockfile_means_zero_dependencies_examined_not_a_failure() {
 
 #[test]
 fn rust_dependency_audit_examines_a_real_lockfile() {
-    // Fixture Cargo.lock is this crate's own -- a real, valid lockfile
-    // real `cargo audit` can parse, run against the real RustSec advisory
-    // DB (network-fetched/cached by cargo-audit itself, not this crate).
+    // Fixture Cargo.lock is this crate's own -- a real, valid lockfile.
+    // The audit *tool* itself is a stub (`cargo-audit-stub-clean.sh`),
+    // deliberately never the real `cargo audit` binary: CI runs with no
+    // network access to the RustSec advisory database, so a real
+    // invocation here would hit the exact fetch failure
+    // `audit-stub-network-failure.sh` simulates, which now correctly
+    // fails closed (see the `_fails_closed_by_default` tests below) --
+    // this happy-path test must stay hermetic, asserting only that
+    // `dependencies_examined` is parsed from the real lockfile on disk,
+    // independent of any tool/network at all.
+    let config = ScannerConfig {
+        cargo_bin: "tests/fixtures/bin/cargo-audit-stub-clean.sh".to_string(),
+        ..test_scanner_config()
+    };
     let report = run_source_scans_with_config(
         Path::new("tests/fixtures/bundles/rust-with-deps"),
         "rust",
-        &test_scanner_config(),
+        &config,
     )
     .unwrap();
     assert!(
         report.dependencies_examined > 0,
-        "cargo audit should have examined this crate's own real Cargo.lock"
+        "examined must come from this crate's own real Cargo.lock on disk"
     );
+    assert_eq!(report.dependency_advisories, 0);
 }
 
 #[test]
 fn js_dependency_audit_examines_a_real_lockfile() {
+    // Same hermeticity rationale as the rust test above -- the audit tool
+    // is a stub (`npm-audit-stub-clean.sh`), never real `npm audit`,
+    // since CI has no network access to the npm registry.
+    let config = ScannerConfig {
+        npm_bin: "tests/fixtures/bin/npm-audit-stub-clean.sh".to_string(),
+        ..test_scanner_config()
+    };
     let report = run_source_scans_with_config(
         Path::new("tests/fixtures/bundles/js-with-deps"),
         "javascript",
-        &test_scanner_config(),
+        &config,
     )
     .unwrap();
     assert!(
         report.dependencies_examined > 0,
-        "npm audit should have examined the fixture package-lock.json"
+        "examined must come from the fixture's real package-lock.json on disk"
     );
     assert_eq!(report.dependency_advisories, 0);
 }
@@ -229,16 +262,26 @@ fn scanner_config_is_debug_and_clone() {
 }
 
 #[test]
-fn python_dependency_audit_blocks_on_a_real_known_vulnerable_pin() {
-    // `requests==2.31.0` carries real, published PyPI advisories -- real
-    // `pip-audit` finds them (network-fetched from PyPI's advisory feed,
-    // not this crate's own doing), exercising both the python branch of
-    // `run_dependency_audit` and the `dependency_vulnerability` blocking
-    // path in one real, non-fabricated case.
+fn python_dependency_audit_blocks_on_a_fabricated_advisory() {
+    // `requests==2.31.0` carries real, published PyPI advisories -- but
+    // this test uses a fixture stub (`pip-audit-stub-vulnerable.sh`)
+    // reporting one fabricated advisory for it, mirroring real
+    // pip-audit's JSON shape exactly, rather than the real `pip-audit`
+    // binary hitting PyPI's live advisory feed: CI runs with no network
+    // access to that feed, where a real invocation would fail exactly
+    // like `audit-stub-network-failure.sh` simulates and now correctly
+    // fails closed with `scan_tool_error` (see the
+    // `_fails_closed_by_default` test below) -- not the
+    // `dependency_vulnerability` reason this test exercises. Same
+    // hermeticity rationale as `js_dependency_audit_blocks_on_a_fabricated_advisory`.
+    let config = ScannerConfig {
+        pip_audit_bin: "tests/fixtures/bin/pip-audit-stub-vulnerable.sh".to_string(),
+        ..test_scanner_config()
+    };
     let err = run_source_scans_with_config(
         Path::new("tests/fixtures/bundles/python-with-vulnerable-deps"),
         "python",
-        &test_scanner_config(),
+        &config,
     )
     .unwrap_err();
     match err {
@@ -329,16 +372,21 @@ fn missing_npm_binary_reports_scan_tool_missing() {
 // `dependencies_examined` come back `0` -- indistinguishable from "no
 // dependencies declared" -- because it was read from cargo-audit's own
 // JSON, which the tool never produces on a fetch failure. `examined` is
-// now parsed from the lockfile/requirements file directly; these three
-// tests simulate every audit tool failing the same way (present binary,
-// no parseable output, nonzero exit -- see the stub's own header comment)
-// and assert `examined` is unaffected while `advisories` degrades to `0`
-// without panicking or hard-failing the scan.
+// now parsed from the lockfile/requirements file directly (these three
+// tests still prove that, via `tolerate_degraded_dependency_audit: true`
+// -- the explicit first-party/dev-tier opt-in that accepts a degraded
+// advisory count). The *default* (`ScannerConfig::default()`, what every
+// untrusted community-bundle build actually uses) instead fails **closed**
+// on the exact same tool failure -- see the `_fails_closed_by_default`
+// tests below, added for a MED security-review finding: a fail-open
+// advisory count let an attacker induce/await this network failure and
+// ship known-vulnerable dependencies past the gate.
 
 #[test]
-fn rust_examined_count_survives_a_cargo_audit_network_failure() {
+fn rust_examined_count_survives_a_cargo_audit_network_failure_when_tolerated() {
     let config = ScannerConfig {
         cargo_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        tolerate_degraded_dependency_audit: true,
         ..test_scanner_config()
     };
     let report = run_source_scans_with_config(
@@ -353,14 +401,15 @@ fn rust_examined_count_survives_a_cargo_audit_network_failure() {
     );
     assert_eq!(
         report.dependency_advisories, 0,
-        "advisories degrade to 0 on a tool failure, not an error"
+        "advisories degrade to 0 on a tool failure only under the explicit opt-in"
     );
 }
 
 #[test]
-fn python_examined_count_survives_a_pip_audit_network_failure() {
+fn python_examined_count_survives_a_pip_audit_network_failure_when_tolerated() {
     let config = ScannerConfig {
         pip_audit_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        tolerate_degraded_dependency_audit: true,
         ..test_scanner_config()
     };
     let report = run_source_scans_with_config(
@@ -375,14 +424,15 @@ fn python_examined_count_survives_a_pip_audit_network_failure() {
     );
     assert_eq!(
         report.dependency_advisories, 0,
-        "advisories degrade to 0 on a tool failure, not an error"
+        "advisories degrade to 0 on a tool failure only under the explicit opt-in"
     );
 }
 
 #[test]
-fn js_examined_count_survives_an_npm_audit_network_failure() {
+fn js_examined_count_survives_an_npm_audit_network_failure_when_tolerated() {
     let config = ScannerConfig {
         npm_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        tolerate_degraded_dependency_audit: true,
         ..test_scanner_config()
     };
     let report = run_source_scans_with_config(
@@ -397,6 +447,73 @@ fn js_examined_count_survives_an_npm_audit_network_failure() {
     );
     assert_eq!(
         report.dependency_advisories, 0,
-        "advisories degrade to 0 on a tool failure, not an error"
+        "advisories degrade to 0 on a tool failure only under the explicit opt-in"
     );
+}
+
+#[test]
+fn rust_dependency_audit_tool_error_fails_closed_by_default() {
+    // `test_scanner_config()` inherits `ScannerConfig::default()`'s
+    // `tolerate_degraded_dependency_audit: false` -- the only value the
+    // real community-bundle build path (`sast::run_source_scans`) ever
+    // uses. A tool failure must block, never degrade-and-proceed.
+    let config = ScannerConfig {
+        cargo_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        ..test_scanner_config()
+    };
+    let err = run_source_scans_with_config(
+        Path::new("tests/fixtures/bundles/rust-with-deps"),
+        "rust",
+        &config,
+    )
+    .unwrap_err();
+    match err {
+        CompilerError::ScanBlocked { reason, message } => {
+            assert_eq!(reason, "scan_tool_error");
+            assert!(message.contains("cargo-audit"));
+        }
+        other => panic!("expected ScanBlocked(scan_tool_error), got {other:?}"),
+    }
+}
+
+#[test]
+fn python_dependency_audit_tool_error_fails_closed_by_default() {
+    let config = ScannerConfig {
+        pip_audit_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        ..test_scanner_config()
+    };
+    let err = run_source_scans_with_config(
+        Path::new("tests/fixtures/bundles/python-with-vulnerable-deps"),
+        "python",
+        &config,
+    )
+    .unwrap_err();
+    match err {
+        CompilerError::ScanBlocked { reason, message } => {
+            assert_eq!(reason, "scan_tool_error");
+            assert!(message.contains("pip-audit"));
+        }
+        other => panic!("expected ScanBlocked(scan_tool_error), got {other:?}"),
+    }
+}
+
+#[test]
+fn js_dependency_audit_tool_error_fails_closed_by_default() {
+    let config = ScannerConfig {
+        npm_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        ..test_scanner_config()
+    };
+    let err = run_source_scans_with_config(
+        Path::new("tests/fixtures/bundles/js-with-deps"),
+        "javascript",
+        &config,
+    )
+    .unwrap_err();
+    match err {
+        CompilerError::ScanBlocked { reason, message } => {
+            assert_eq!(reason, "scan_tool_error");
+            assert!(message.contains("npm audit"));
+        }
+        other => panic!("expected ScanBlocked(scan_tool_error), got {other:?}"),
+    }
 }
