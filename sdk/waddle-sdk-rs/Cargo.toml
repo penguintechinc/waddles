@@ -1,0 +1,41 @@
+[package]
+name = "waddle-sdk-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Tier-1 Rust SDK for Waddles app bundles -- idiomatic bindings over the normative waddle:bundle/stage@1.0.0 WIT world (wit/waddle-bundle/stage.wit). Thinner than waddle-sdk (Python): no penguin-dal facade, no compatibility obligation to a prior API -- see docs/superpowers/specs/2026-09-14-rust-data-plane-design.md SS4.12/SS6.5."
+
+[lib]
+name = "waddle_sdk"
+path = "src/lib.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- see rules/critical-rules.md
+# Dependency Pinning. Cargo.lock is committed alongside this file. serde /
+# serde_json / thiserror versions mirror core/svc_process, core/svc_action,
+# core/svc_ingest and core/svc_streaming's Cargo.toml so the eventual
+# workspace doesn't carry two pins of the same dependency.
+#
+# `wit-bindgen-rt` supplies the component-model ABI runtime support
+# (cabi_realloc, resource tables) that `wit_bindgen::generate!`'s expansion
+# links against. Pinned to the exact version proven by
+# `spikes/bundle-compiler-sandbox` (branch `spike/bundle-compiler-sandbox`,
+# `bundles/rust/Cargo.toml`) -- Rust built in 0.40s in that spike.
+#
+# This crate is a plain Rust library, never itself a WASI component: only
+# `#[cfg(target_arch = "wasm32")]` code paths (src/bindings.rs and the
+# thin host-call wrappers in each capability module) reference
+# `wit-bindgen-rt`'s generated symbols, so `cargo build`/`cargo test`/
+# `cargo clippy` on a host target (x86_64/aarch64) never touch them --
+# see each module's doc comment for the resulting coverage carve-out,
+# mirroring core/svc_process's main.rs exclusion precedent.
+[dependencies]
+wit-bindgen = "=0.44.0"
+wit-bindgen-rt = { version = "=0.44.0", features = ["bitflags"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+thiserror = "=2.0.20"
+
+[dev-dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
