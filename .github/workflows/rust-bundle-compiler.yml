@@ -49,10 +49,14 @@ jobs:
           sudo tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
           gitleaks version
 
-      # pip-audit exercises scan::sast's python dependency-audit branch
-      # (tests/scan_test.rs::python_dependency_audit_blocks_on_a_real_known_vulnerable_pin).
-      # cargo-audit (above) and npm (preinstalled on ubuntu-latest) cover
-      # the rust/js branches the same way.
+      # pip-audit/cargo-audit/npm are installed for local dev/production
+      # parity with the compiler's own container image
+      # (build/tool-versions.env), not because cargo test's own suite
+      # invokes them for real: every scan::sast dependency-audit test
+      # uses a fixture stub instead (tests/fixtures/bin/*-audit-stub-*.sh)
+      # so results never depend on CI's network access to the
+      # RustSec/PyPI/npm advisory feeds -- see tests/scan_test.rs's own
+      # module doc comment.
       - name: Install pip-audit 2.10.0
         run: pip install --no-cache-dir pip-audit==2.10.0
 
