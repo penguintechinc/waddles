@@ -6,10 +6,12 @@
 //! via `penguin-spine` (`crate::spine`), hop verification (`crate::hop`),
 //! the mTLS host-API server and per-invoke-scoped capabilities
 //! (`crate::host_api`/`crate::capabilities`), the cross-app `_target_app_id`
-//! routing built-in (`crate::builtins`), and the `/health` + `/healthz` +
-//! `/metrics` control-plane surface -- the same shape as `core/svc_action`
-//! (the M3 reference this landing mirrors for the executor-integration
-//! half) and `core/svc_streaming` (the original M4 skeleton template).
+//! routing built-in (`crate::builtins`), the `waddles.core.rust-data-plane`
+//! license/feature-flag gate on the drain loop (`crate::license`, spec
+//! §13.5), and the `/health` + `/healthz` + `/metrics` control-plane
+//! surface -- the same shape as `core/svc_action` (the M3 reference this
+//! landing mirrors for the executor-integration half) and
+//! `core/svc_streaming` (the original M4 skeleton template).
 //!
 //! Per `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md` §4.2
 //! and the M4 milestone row (§16), the following remain **honest,
@@ -39,6 +41,7 @@ pub mod error;
 pub mod hop;
 pub mod host_api;
 pub mod http;
+pub mod license;
 pub mod spine;
 pub mod telemetry;
 
@@ -81,6 +84,18 @@ where
     F1: std::future::Future<Output = ()> + Send + 'static,
     F2: std::future::Future<Output = ()> + Send + 'static,
 {
+    // Installed as early as possible, once, process-wide: two rustls
+    // backends now reach this crate's dependency graph (this crate's own
+    // direct `rustls` dep selects `ring`; `penguin-licensing`'s `reqwest`
+    // pulls in a second one for its own HTTPS calls) -- with two
+    // candidates present, rustls can no longer auto-detect a default and
+    // panics on the first TLS config built by *whichever* subsystem gets
+    // there first (the host-API mTLS listener, the license client's
+    // background refresh, or this crate's own `reqwest` client). See
+    // `host_api::ensure_crypto_provider_installed`'s doc for the full
+    // rationale; called there too as a defensive, idempotent second call.
+    host_api::ensure_crypto_provider_installed();
+
     let (_telemetry_guard, prom_registry) = telemetry::init(SERVICE_NAME);
 
     tracing::info!(
@@ -149,13 +164,18 @@ fn try_start_host_api(cli: &config::CliConfig) -> Arc<host_api::ConnectionRegist
 }
 
 /// Attempts to start the process-stage drain loop (`crate::spine::run`) as
-/// its own background task, mirroring `core/svc_action::try_start_dispatch`
-/// exactly: two independent reasons this never starts, both logged and
-/// neither an error -- `PROCESS_APP_ID` unset (no bundle assigned yet,
-/// multi-bundle scheduling is blocked on the distribution poll), or
-/// `penguin_spine::SpineConfig::from_env()`/`ENVELOPE_BINDING_KEYS` parsing
-/// failing (hop verification must never silently fail open, so a missing
-/// keyring disables the loop rather than starting it unverified).
+/// its own background task, mirroring `core/svc_action::try_start_dispatch`'s
+/// shape: three independent reasons this never starts, all logged and none
+/// an error -- `PROCESS_APP_ID` unset (no bundle assigned yet, multi-bundle
+/// scheduling is blocked on the distribution poll); `penguin_spine::
+/// SpineConfig::from_env()`/`ENVELOPE_BINDING_KEYS` parsing failing (hop
+/// verification must never silently fail open, so a missing keyring
+/// disables the loop rather than starting it unverified); or the license
+/// client failing to construct (a malformed `LICENSE_SERVER_URL`/
+/// `POSTHOG_HOST` -- see `crate::license`). Once started, the loop itself
+/// is additionally gated per-batch on `waddles.core.rust-data-plane`
+/// (spec §13.5) -- OFF drains nothing without stopping the loop or
+/// affecting `/health`/`/metrics`, see `crate::spine::drain_batch`.
 ///
 /// **TODO(M4+), interim substitutes for the `GET /api/v1/distribution/
 /// bundles?stage=process` poll (spec §6.7):**
@@ -203,6 +223,22 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
         }
     };
 
+    // Spec §13.5: the drain loop itself is gated on `waddles.core.
+    // rust-data-plane` (default OFF, fail-closed on an unreachable
+    // license server) -- see `crate::license`. `build_license_client`
+    // never touches the network; only a malformed `LICENSE_SERVER_URL`/
+    // `POSTHOG_HOST` fails here, treated the same as every other
+    // startup-config gate in this function.
+    let license_client = match license::build_license_client("waddles") {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(error = %err, "license client config invalid; process loop disabled");
+            return;
+        }
+    };
+    let license_gate: Arc<dyn license::FeatureGate> =
+        Arc::new(license::LicenseFeatureGate::new(license_client));
+
     let cli = config.cli.clone();
     let app_id = cli.process_app_id.clone();
     let approved_targets = builtins::parse_approved_targets(&cli.process_routes_to_approved);
@@ -247,6 +283,7 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
                 }
             },
             metrics,
+            license: license_gate,
         };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();

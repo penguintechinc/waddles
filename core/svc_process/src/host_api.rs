@@ -101,12 +101,31 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, HostApiError>
         .map_err(|e| HostApiError::Config(format!("failed to read private key from {path:?}: {e}")))
 }
 
+/// Installs rustls's `ring` `CryptoProvider` as the process default,
+/// exactly once. Needed because more than one rustls backend now reaches
+/// this crate's dependency graph (this module's own direct `rustls`
+/// dependency selects `ring`; `penguin-licensing`'s `reqwest` pulls in a
+/// second rustls-based TLS stack for its own HTTPS calls to
+/// `license.penguintech.io`) -- with two candidate providers present,
+/// rustls can no longer auto-detect a single implicit default and panics
+/// on the first `ServerConfig`/`ClientConfig` build until one is installed
+/// explicitly. Same `std::sync::Once`-guarded pattern
+/// `penguin_spine::config::ensure_crypto_provider_installed` already uses
+/// for its own TLS Valkey connections.
+pub(crate) fn ensure_crypto_provider_installed() {
+    static CRYPTO_PROVIDER_INIT: std::sync::Once = std::sync::Once::new();
+    CRYPTO_PROVIDER_INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Builds the rustls `ServerConfig` for the host-API mTLS listener: the
 /// configured server cert/key, and mutual-TLS client-certificate
 /// verification against the configured CA (spec §6.6: "Both peers present
 /// certificates" -- a connection whose peer certificate does not verify is
 /// "closed before a single frame is read", spec §14.6 test 12d).
 pub fn build_server_config(cli: &CliConfig) -> Result<ServerConfig, HostApiError> {
+    ensure_crypto_provider_installed();
     let (cert_path, key_path) = match (
         &cli.host_api_server_cert_file,
         &cli.host_api_server_key_file,

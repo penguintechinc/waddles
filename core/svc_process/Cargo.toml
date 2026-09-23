@@ -84,12 +84,19 @@ chrono = { version = "=0.4.45", features = ["serde"] }
 # commit's own `Cargo.toml` actually satisfies this requirement.
 penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69e740ce5411d8cd005241fbd829c62e68efb96e", package = "penguin-logging", version = "=0.1.0" }
 # `penguin-spine` (spec SS4.7): the process-stage granted-ingest-stream
-# `XREADGROUP` consumer -- see `src/spine.rs`. Bumped to the current tip of
-# `release/rust-spine/v0.1.x` (was b30f5cb2b2465556e11678f67359702ae487d721)
-# specifically for the `binding` module (Task 19, `KeyRing`/`verify_binding`/
-# `BindingError`) this M4 landing's `src/hop.rs` uses directly instead of
-# reimplementing the HMAC formula locally -- see that module's doc comment.
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "2976bf8a336a720ee5f939ad2d1a3f7b4b820642", package = "penguin-spine", version = "=0.1.0" }
+# `XREADGROUP` consumer -- see `src/spine.rs`. Bumped to
+# `release/rust-spine/v0.1.x`'s finalized tip (was
+# 2976bf8a336a720ee5f939ad2d1a3f7b4b820642) for the `Delivered.group` fix:
+# `SpineClient::dead_letter` now `XACK`s under the entry's actual
+# consumer-group name (`d.group`, set by `GroupReader::read`/`claim_stale`)
+# instead of guessing from `d.env.app_id` -- the exact "shared ingest-source
+# stream" bug this crate's own `src/hop.rs` doc comment already called out
+# (env.app_id never identifies the reading bundle on a shared stream).
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "586b8dadfcad26f2e8207b91cd2deb81afb6630f", package = "penguin-spine", version = "=0.1.0" }
+# `penguin-licensing` (spec SS13.5): gates the process-stage drain loop on
+# the `waddles.core.rust-data-plane` PostHog-compatible flag (default OFF,
+# fail-closed on an unreachable license server) -- see `src/license.rs`.
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f642e0695046386ca674e47eb9e6f7d6283ac531", package = "penguin-licensing", version = "=0.1.0" }
 # `penguin-bundle-host::wire` (spec SS6.6): the host-API frame codec and
 # Frame/Message shapes shared verbatim with `bundle-executor` -- see
 # `src/host_api.rs`. Same pinned rev `core/svc_action`/`core/bundle_executor`

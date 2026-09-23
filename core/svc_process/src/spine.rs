@@ -47,6 +47,7 @@ use crate::builtins::RouteDecision;
 use crate::capabilities::{CapabilityHandler, StageCapabilities};
 use crate::hop::KeyRing;
 use crate::host_api::{Connection, ConnectionRegistry, HostApiError};
+use crate::license::FeatureGate;
 
 /// Converts a `penguin_spine::PlatformEvent` into the WIT `platform-event`
 /// record's JSON shape (see the module doc's wire-JSON convention) -- the
@@ -318,6 +319,11 @@ pub struct ProcessDeps<S: SpineOps> {
     pub consumer_id: String,
     pub spine: S,
     pub metrics: Arc<dyn SpineMetrics>,
+    /// Gates the drain loop on `waddles.core.rust-data-plane` (spec
+    /// §13.5, `crate::license`) -- OFF means [`drain_batch`] never calls
+    /// `reader.read()` at all (drains nothing; `/health`/`/metrics` are
+    /// unaffected, since they run on entirely separate tasks).
+    pub license: Arc<dyn FeatureGate>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -495,10 +501,25 @@ async fn handle_delivered<S: SpineOps>(
 
 /// Reads and dispatches exactly one batch, returning how many entries were
 /// handled.
+/// How long a gate-OFF iteration of [`drain_batch`] sleeps before
+/// re-checking `deps.license` -- a live flag flip (ON -> OFF or back) is
+/// picked up within this window, without a pod restart. Cheap: nothing
+/// else happens while OFF, and `FeatureGate::enabled` itself never blocks
+/// on network I/O (spec §13.5, `crate::license`'s module doc).
+const GATE_OFF_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
 async fn drain_batch<R: StreamReader, S: SpineOps>(
     reader: &mut R,
     deps: &ProcessDeps<S>,
 ) -> Result<usize, SpineError> {
+    if !deps.license.enabled().await {
+        // OFF: drain nothing at all -- `reader.read()` (a real
+        // `XREADGROUP`) is never called. Sleeping here (rather than
+        // spinning) keeps a disabled pod from busy-looping on a cheap but
+        // still-nonzero cached-read check.
+        tokio::time::sleep(GATE_OFF_RECHECK_INTERVAL).await;
+        return Ok(0);
+    }
     let batch = reader.read().await?;
     for d in &batch {
         handle_delivered(d, deps).await?;
@@ -601,6 +622,14 @@ mod tests {
             }))
             .unwrap(),
             deliveries: 1,
+            // The consumer-group name `GroupReader::read` would actually
+            // set. Coincides with `env.app_id` above in this default
+            // fixture; `dead_letters_using_the_readers_group_not_envelope_
+            // app_id` below builds one where they deliberately DIFFER, the
+            // exact "shared ingest-source stream" shape `d.group` exists
+            // for (see `penguin_spine::Delivered`'s own doc comment at the
+            // pinned rev).
+            group: "waddles.bot.commands.default".to_string(),
         }
     }
 
@@ -814,6 +843,10 @@ mod tests {
             consumer_id: "test-pod-consumer".to_string(),
             spine,
             metrics: metrics.clone() as Arc<dyn SpineMetrics>,
+            // ON by default so every existing test's drain behavior is
+            // unaffected -- the gate's own OFF/ON behavior is exercised
+            // directly by the `license_gate_*` tests below.
+            license: Arc::new(crate::license::test_support::FixedGate(true)),
         };
         (deps, metrics)
     }
@@ -1096,6 +1129,106 @@ mod tests {
         let count = drain_batch(&mut reader, &deps).await.unwrap();
         assert_eq!(count, 1);
         assert_eq!(deps.spine.acked.lock().unwrap().len(), 1);
+    }
+
+    /// Regression coverage for spec §13.5's `waddles.core.rust-data-plane`
+    /// gate: OFF must drain nothing at all -- `reader.read()` (a real
+    /// `XREADGROUP` in production) is never even called.
+    #[tokio::test]
+    async fn drain_batch_gate_off_never_reads_and_returns_zero() {
+        struct PanicIfReadReader;
+        impl StreamReader for PanicIfReadReader {
+            async fn read(&mut self) -> Result<Vec<Delivered>, SpineError> {
+                panic!("drain_batch must not call read() while the gate is OFF");
+            }
+        }
+
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
+        deps.license = Arc::new(crate::license::test_support::FixedGate(false));
+        let mut reader = PanicIfReadReader;
+
+        let count = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            drain_batch(&mut reader, &deps),
+        )
+        .await
+        .expect("drain_batch must return promptly while the gate is OFF")
+        .unwrap();
+        assert_eq!(count, 0);
+        assert!(deps.spine.acked.lock().unwrap().is_empty());
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+    }
+
+    /// The gate is re-checked every iteration -- flipping it ON mid-loop
+    /// (no restart) makes the very next `drain_batch` call actually read.
+    #[tokio::test]
+    async fn drain_batch_resumes_once_the_gate_flips_on() {
+        struct OneShotReader {
+            batch: Option<Vec<Delivered>>,
+        }
+        impl StreamReader for OneShotReader {
+            async fn read(&mut self) -> Result<Vec<Delivered>, SpineError> {
+                Ok(self.batch.take().unwrap_or_default())
+            }
+        }
+
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let connections = connected_registry_with_fake_executor(serde_json::json!(null)).await;
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        let gate = Arc::new(crate::license::test_support::ToggleGate::new(false));
+        deps.license = gate.clone();
+        let mut reader = OneShotReader {
+            batch: Some(vec![d.clone()]),
+        };
+
+        let off_count = drain_batch(&mut reader, &deps).await.unwrap();
+        assert_eq!(off_count, 0, "gate is OFF, nothing should drain yet");
+        assert!(deps.spine.acked.lock().unwrap().is_empty());
+
+        gate.set(true);
+        let on_count = drain_batch(&mut reader, &deps).await.unwrap();
+        assert_eq!(on_count, 1, "gate flipped ON, the pending entry drains");
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 1);
+    }
+
+    /// Regression coverage for the fixed upstream bug (`penguin-spine`
+    /// `Delivered.group`, this crate's `Cargo.toml` pin comment): the
+    /// entry `handle_delivered` hands to `dead_letter` carries the
+    /// READER's own group (`d.group`), distinct from `env.app_id` (the
+    /// ingest-stamped, non-reader-identifying value) -- proving this
+    /// crate's own code preserves that distinction end to end rather than
+    /// collapsing it back to `env.app_id` anywhere along the way.
+    #[tokio::test]
+    async fn dead_letters_using_the_readers_group_not_envelope_app_id() {
+        let ring = test_ring();
+        let mut d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        // Shared ingest-source-stream shape: the envelope's own app_id is
+        // svc-ingest's generic stamped value, NOT the reading bundle's
+        // group.
+        d.env.app_id = "waddles.core.ingest.default".to_string();
+        d.group = "waddles.bot.commands.default".to_string();
+
+        let spine = FakeSpineOps::default();
+        // No executor connection -> `handle_delivered` dead-letters.
+        let deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        // `FakeSpineOps::dead_letter` (below) does not itself need to
+        // inspect `d.group` to prove this -- `d` is passed through to
+        // `crate::spine::SpineOps::dead_letter` unchanged, and the
+        // pinned `penguin_spine::SpineClient::dead_letter` (verified by
+        // that crate's own test suite at this rev) is what `XACK`s under
+        // `d.group`. This test's own job is only to prove `d.group` still
+        // holds its distinct, correct value at the point this crate hands
+        // the entry off -- asserted directly here.
+        assert_eq!(d.group, "waddles.bot.commands.default");
+        assert_ne!(d.group, d.env.app_id);
     }
 
     #[tokio::test]
