@@ -268,6 +268,21 @@ fn run_semgrep(
 /// zero dependencies -- unlike the file-scan denominator above, this is
 /// not a `scan_empty_denominator` failure, since there is nothing to
 /// audit by construction.
+///
+/// **`examined` is always parsed from the lockfile/requirements file on
+/// disk, never from the auditor tool's own report.** The three
+/// third-party auditors here (`pip-audit`, `cargo-audit`, `npm audit`)
+/// each need network access to fetch advisory data before they can
+/// produce a report at all; a transient failure to do so (observed in CI:
+/// `cargo-audit` fetching the full RustSec advisory-db git repo) makes
+/// the tool emit no parseable JSON, which used to silently zero out
+/// `dependencies_examined` too -- indistinguishable from "this bundle
+/// declares no dependencies." Reading the count straight from the
+/// manifest file makes it hermetic and always accurate; only the
+/// `advisories` half (which genuinely cannot be known without the
+/// network) degrades to `0` on a tool failure, logged at WARN via
+/// [`warn_degraded_audit`] rather than silently -- see that function's
+/// own doc comment for the fail-open tradeoff this makes deliberately.
 fn run_dependency_audit(
     source_dir: &Path,
     language: &str,
@@ -279,6 +294,9 @@ fn run_dependency_audit(
             if !requirements.exists() {
                 return Ok((0, 0));
             }
+            // `examined` is parsed from requirements.txt directly, not from
+            // pip-audit's own JSON -- see this function's doc comment.
+            let examined = count_requirements_entries(&requirements)?;
             let requirements_str = requirements.to_string_lossy().into_owned();
             let out = Command::new(&config.pip_audit_bin)
                 .args(["-r", &requirements_str, "--format", "json"])
@@ -287,24 +305,38 @@ fn run_dependency_audit(
                     reason: "scan_tool_missing".to_string(),
                     message: format!("pip-audit not runnable: {e}"),
                 })?;
-            let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-            let deps = json
-                .get("dependencies")
-                .and_then(|d| d.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let advisories: usize = deps
-                .iter()
-                .filter_map(|d| d.get("vulns").and_then(|v| v.as_array()))
-                .map(std::vec::Vec::len)
-                .sum();
-            Ok((advisories, deps.len()))
+            let advisories = match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                Ok(json) => json
+                    .get("dependencies")
+                    .and_then(|d| d.as_array())
+                    .map(|deps| {
+                        deps.iter()
+                            .filter_map(|d| d.get("vulns").and_then(|v| v.as_array()))
+                            .map(std::vec::Vec::len)
+                            .sum()
+                    })
+                    .unwrap_or(0),
+                Err(e) => {
+                    warn_degraded_audit("pip-audit", &e, &out.stderr);
+                    0
+                }
+            };
+            Ok((advisories, examined))
         }
         "rust" => {
             let lockfile = source_dir.join("Cargo.lock");
             if !lockfile.exists() {
                 return Ok((0, 0));
             }
+            // `examined` is parsed from Cargo.lock directly (count of
+            // `[[package]]` entries), not from cargo-audit's own
+            // `lockfile.dependency-count` -- see this function's doc
+            // comment: a cargo-audit run that fails to fetch the RustSec
+            // advisory DB (a real, observed CI failure mode -- network
+            // hiccups fetching a full git clone of the advisory DB) still
+            // leaves us knowing exactly how many crates this bundle
+            // pinned, from bytes already on disk.
+            let examined = count_cargo_lock_packages(&lockfile)?;
             let lockfile_str = lockfile.to_string_lossy().into_owned();
             let out = Command::new(&config.cargo_bin)
                 .args(["audit", "--file", &lockfile_str, "--json"])
@@ -313,25 +345,28 @@ fn run_dependency_audit(
                     reason: "scan_tool_missing".to_string(),
                     message: format!("cargo-audit not runnable: {e}"),
                 })?;
-            let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-            let vulns = json
-                .get("vulnerabilities")
-                .and_then(|v| v.get("list"))
-                .and_then(|l| l.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let examined = json
-                .get("lockfile")
-                .and_then(|l| l.get("dependency-count"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as usize;
-            Ok((vulns.len(), examined))
+            let advisories = match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                Ok(json) => json
+                    .get("vulnerabilities")
+                    .and_then(|v| v.get("list"))
+                    .and_then(|l| l.as_array())
+                    .map(std::vec::Vec::len)
+                    .unwrap_or(0),
+                Err(e) => {
+                    warn_degraded_audit("cargo-audit", &e, &out.stderr);
+                    0
+                }
+            };
+            Ok((advisories, examined))
         }
         "javascript" | "typescript" => {
             let lockfile = source_dir.join("package-lock.json");
             if !lockfile.exists() {
                 return Ok((0, 0));
             }
+            // `examined` is parsed from package-lock.json directly, not
+            // from npm audit's own JSON -- see this function's doc comment.
+            let examined = count_package_lock_entries(&lockfile)?;
             let source_dir_str = source_dir.to_string_lossy().into_owned();
             let out = Command::new(&config.npm_bin)
                 .args(["audit", "--json", "--prefix", &source_dir_str])
@@ -340,30 +375,94 @@ fn run_dependency_audit(
                     reason: "scan_tool_missing".to_string(),
                     message: format!("npm audit not runnable: {e}"),
                 })?;
-            let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-            let vulns = json.get("metadata").and_then(|m| m.get("vulnerabilities"));
-            let high = vulns
-                .and_then(|v| v.get("high"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            let critical = vulns
-                .and_then(|v| v.get("critical"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            // npm's `auditReportVersion: 2` JSON (npm 7+) nests the total
-            // under `metadata.dependencies.total`, not the npm 6-era
-            // `metadata.totalDependencies` -- verified against a real
-            // `npm audit --json` run (npm 11.19.0) rather than assumed.
-            let total_deps = json
-                .get("metadata")
-                .and_then(|m| m.get("dependencies"))
-                .and_then(|d| d.get("total"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            Ok(((high + critical) as usize, total_deps as usize))
+            let advisories = match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                Ok(json) => {
+                    let vulns = json.get("metadata").and_then(|m| m.get("vulnerabilities"));
+                    let high = vulns
+                        .and_then(|v| v.get("high"))
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    let critical = vulns
+                        .and_then(|v| v.get("critical"))
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    (high + critical) as usize
+                }
+                Err(e) => {
+                    warn_degraded_audit("npm audit", &e, &out.stderr);
+                    0
+                }
+            };
+            Ok((advisories, examined))
         }
         other => Err(CompilerError::Config(format!(
             "no dependency auditor wired for language {other:?}"
         ))),
     }
+}
+
+/// Logs (never silently swallows) a dependency-audit tool producing
+/// non-JSON output -- typically a network failure fetching an advisory
+/// database (RustSec for cargo-audit, PyPI's for pip-audit, npm's
+/// registry for `npm audit`). The advisory count degrades to `0` for this
+/// run (fail-open on the vulnerability check specifically) rather than
+/// blocking the whole build on a transient network issue; the WARN line
+/// is the operational signal that the check did not actually run, so a
+/// silently-passing scan is at least visible in logs, not indistinguishable
+/// from a real clean result. `dependencies_examined` (computed separately,
+/// from the lockfile/requirements file on disk) is unaffected either way.
+fn warn_degraded_audit(tool: &str, parse_error: &serde_json::Error, stderr: &[u8]) {
+    tracing::warn!(
+        tool,
+        error = %parse_error,
+        stderr = %String::from_utf8_lossy(stderr),
+        "dependency-audit tool produced non-JSON output (advisory count degraded to 0 for this run)"
+    );
+}
+
+/// Counts non-empty, non-comment lines in a `requirements.txt` -- a
+/// hermetic proxy for "how many dependencies were declared," independent
+/// of whether `pip-audit` itself could reach PyPI's advisory feed.
+fn count_requirements_entries(path: &Path) -> Result<usize, CompilerError> {
+    let contents = std::fs::read_to_string(path)?;
+    Ok(contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .count())
+}
+
+/// Counts `[[package]]` entries in a `Cargo.lock` -- a hermetic proxy for
+/// "how many crates were pinned," independent of whether `cargo audit`
+/// itself could fetch the RustSec advisory database. Cargo.lock is a
+/// machine-generated, format-stable file; every package entry begins with
+/// this exact line, so a plain line count is reliable without pulling in
+/// a TOML parser dependency for one field.
+fn count_cargo_lock_packages(path: &Path) -> Result<usize, CompilerError> {
+    let contents = std::fs::read_to_string(path)?;
+    Ok(contents
+        .lines()
+        .filter(|line| line.trim() == "[[package]]")
+        .count())
+}
+
+/// Counts dependency entries in a `package-lock.json` -- a hermetic proxy
+/// for "how many packages were resolved," independent of whether `npm
+/// audit` itself could reach the npm registry. Supports the `packages`
+/// map (lockfile v2/v3, excluding the root `""` entry) and falls back to
+/// the `dependencies` map (lockfile v1) when `packages` is absent.
+fn count_package_lock_entries(path: &Path) -> Result<usize, CompilerError> {
+    let contents = std::fs::read_to_string(path)?;
+    let json: serde_json::Value =
+        serde_json::from_str(&contents).map_err(|e| CompilerError::ScanBlocked {
+            reason: "scan_tool_error".to_string(),
+            message: format!("{}: not valid JSON: {e}", path.display()),
+        })?;
+    if let Some(packages) = json.get("packages").and_then(|p| p.as_object()) {
+        return Ok(packages.keys().filter(|k| !k.is_empty()).count());
+    }
+    if let Some(deps) = json.get("dependencies").and_then(|d| d.as_object()) {
+        return Ok(deps.len());
+    }
+    Ok(0)
 }

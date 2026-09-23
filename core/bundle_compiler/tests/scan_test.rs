@@ -322,3 +322,81 @@ fn missing_npm_binary_reports_scan_tool_missing() {
         other => panic!("expected ScanBlocked(scan_tool_missing), got {other:?}"),
     }
 }
+
+// Regression coverage for a real CI incident: `cargo-audit` failing to
+// fetch the RustSec advisory database over the network (a full git clone,
+// slower and less reliable than pip-audit's/npm's registry calls) made
+// `dependencies_examined` come back `0` -- indistinguishable from "no
+// dependencies declared" -- because it was read from cargo-audit's own
+// JSON, which the tool never produces on a fetch failure. `examined` is
+// now parsed from the lockfile/requirements file directly; these three
+// tests simulate every audit tool failing the same way (present binary,
+// no parseable output, nonzero exit -- see the stub's own header comment)
+// and assert `examined` is unaffected while `advisories` degrades to `0`
+// without panicking or hard-failing the scan.
+
+#[test]
+fn rust_examined_count_survives_a_cargo_audit_network_failure() {
+    let config = ScannerConfig {
+        cargo_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        ..test_scanner_config()
+    };
+    let report = run_source_scans_with_config(
+        Path::new("tests/fixtures/bundles/rust-with-deps"),
+        "rust",
+        &config,
+    )
+    .unwrap();
+    assert!(
+        report.dependencies_examined > 0,
+        "examined must come from Cargo.lock on disk, not cargo-audit's (failed) JSON output"
+    );
+    assert_eq!(
+        report.dependency_advisories, 0,
+        "advisories degrade to 0 on a tool failure, not an error"
+    );
+}
+
+#[test]
+fn python_examined_count_survives_a_pip_audit_network_failure() {
+    let config = ScannerConfig {
+        pip_audit_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        ..test_scanner_config()
+    };
+    let report = run_source_scans_with_config(
+        Path::new("tests/fixtures/bundles/python-with-vulnerable-deps"),
+        "python",
+        &config,
+    )
+    .unwrap();
+    assert!(
+        report.dependencies_examined > 0,
+        "examined must come from requirements.txt on disk, not pip-audit's (failed) JSON output"
+    );
+    assert_eq!(
+        report.dependency_advisories, 0,
+        "advisories degrade to 0 on a tool failure, not an error"
+    );
+}
+
+#[test]
+fn js_examined_count_survives_an_npm_audit_network_failure() {
+    let config = ScannerConfig {
+        npm_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        ..test_scanner_config()
+    };
+    let report = run_source_scans_with_config(
+        Path::new("tests/fixtures/bundles/js-with-deps"),
+        "javascript",
+        &config,
+    )
+    .unwrap();
+    assert!(
+        report.dependencies_examined > 0,
+        "examined must come from package-lock.json on disk, not npm audit's (failed) JSON output"
+    );
+    assert_eq!(
+        report.dependency_advisories, 0,
+        "advisories degrade to 0 on a tool failure, not an error"
+    );
+}
