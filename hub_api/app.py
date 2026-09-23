@@ -38,6 +38,7 @@ from blueprints import register_blueprints
 from config import HubAPIConfig
 from openapi.routes import register_openapi_docs
 from services.bundle_install_dal import build_install_dal
+from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
 from services.rate_limiting import install_rate_limiting
 from services.schema import (
     bind_ai_routing_tables,
@@ -155,6 +156,17 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     app = Quart(__name__)
     app.config["HUB_API_CONFIG"] = cfg
     app.secret_key = cfg.secret_key
+    # security.md Input Validation -- this app never set its own cap, so
+    # Quart's built-in default (16 MiB) was the only thing standing between
+    # a request and unbounded memory use, and it happens to sit exactly at
+    # BUNDLE_MAX_SOURCE_BYTES -- meaning a legitimate 32 MiB `component`
+    # upload (bundle_version_service.BUNDLE_MAX_COMPONENT_BYTES) could never
+    # have reached blueprints/v1/bundle_versions.py's own per-part checks at
+    # all. An explicit cap tied to this endpoint's real ceiling (manifest +
+    # source + component) fixes both: Quart/hypercorn now refuses anything
+    # larger while the body is still streaming in, not after it is fully
+    # buffered, and every legitimate upload this app accepts actually fits.
+    app.config["MAX_CONTENT_LENGTH"] = BUNDLE_MAX_REQUEST_BYTES
 
     # Default quart-schema doc routes are unauthenticated and cover every
     # route -- exactly what security.md's Docs/spec endpoints rule forbids.

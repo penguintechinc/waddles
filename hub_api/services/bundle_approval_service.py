@@ -29,7 +29,7 @@ from typing import Any
 from penguin_dal import AsyncDB
 
 from services.bundle_manifest_v2 import BundleManifestV2, ConsumeRule, EgressRule, Limits
-from services.bundle_version_service import STATUS_PUBLISHED
+from services.bundle_version_service import STATUS_PUBLISHED, STATUS_REJECTED, advance_state
 from services.errors import ApiError, not_found
 from services.permission_summary_service import build_permission_summary, permission_hash
 
@@ -121,6 +121,26 @@ async def _audit_routes_to_refusal(
         )
     except Exception:  # noqa: BLE001, S110 -- audit logging failure must not break the refusal itself
         pass
+
+
+async def _validate_community_tenant(
+    install_dal: AsyncDB, *, community_id: int, tenant_id: int
+) -> None:
+    """Refuse a `communityId` that does not exist or belongs to a different tenant.
+
+    404 (not 403) deliberately masks whether the community exists at all
+    outside the caller's tenant -- same IDOR-masking rationale as
+    `services.admin_service._require_community`. `communities` is a
+    pre-existing table, reachable read-only through `install_dal` since
+    `reflect()` discovers the entire live schema (see this module's own
+    R52 docstring note above `_validate_routes_to`'s `app_catalog` read).
+    """
+    rows = await install_dal(
+        (install_dal.communities.id == community_id)
+        & (install_dal.communities.tenant_id == tenant_id)
+    ).select()
+    if not rows:
+        raise not_found("community not found")
 
 
 async def _validate_routes_to(
@@ -244,11 +264,20 @@ async def approve_version(
 ) -> Any:
     """Record an `app_install_approvals` row. Fails closed on a headless hash mismatch (Sec9.7.5).
 
-    Refuses (422) a `routes_to` target that does not exist or is
-    installed in a different tenant, before recording anything (spec
-    Sec5.9, D30) -- the runtime independently drops such a redirect at
-    the stage as well; this is the install-time half.
+    Refuses (404) a `community_id` that does not belong to the caller's
+    tenant, before anything else -- an IDOR a client-supplied
+    `communityId` would otherwise open (this module's `_validate_routes_to`
+    masks the equivalent cross-tenant case for `app_install_approvals`
+    the same way). Refuses (422) a `routes_to` target that does not
+    exist or is installed in a different tenant, before recording
+    anything (spec Sec5.9, D30) -- the runtime independently drops such
+    a redirect at the stage as well; this is the install-time half.
     """
+    if community_id is not None:
+        await _validate_community_tenant(
+            install_dal, community_id=community_id, tenant_id=tenant_id
+        )
+
     upload_rows = await install_dal(
         (install_dal.app_version_uploads.app_id == app_id)
         & (install_dal.app_version_uploads.version == version)
@@ -308,16 +337,16 @@ async def approve_version(
 
 
 async def deny_version(install_dal: AsyncDB, *, app_id: str, version: str, reason: str) -> None:
-    """Move the version to REJECTED with `reason` -- reuses `app_version_uploads.status`."""
-    rows = await install_dal(
-        (install_dal.app_version_uploads.app_id == app_id)
-        & (install_dal.app_version_uploads.version == version)
-    ).select()
-    upload = rows.first()
-    if upload is None:
-        raise not_found(f"version {version} of {app_id} not found")
-    await install_dal(install_dal.app_version_uploads.id == upload.id).update(
-        status="REJECTED",
-        reject_reason=reason,
-        updated_at=datetime.now(UTC),
+    """Move the version to REJECTED with `reason`, through the spec Sec9.1 state machine.
+
+    Routes through `advance_state()`/`valid_transition()` -- the same
+    guard every other status write uses -- rather than writing
+    `status="REJECTED"` directly. Denying a version already in a
+    terminal state (PUBLISHED, or REJECTED again) is an illegal
+    transition and raises `ApiError` 409 `invalid_state_transition`
+    instead of silently mutating a row the state machine says is
+    immutable (PUBLISHED is never mutated).
+    """
+    await advance_state(
+        install_dal, app_id=app_id, version=version, target=STATUS_REJECTED, reject_reason=reason
     )

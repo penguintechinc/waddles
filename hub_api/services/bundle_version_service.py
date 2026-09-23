@@ -59,6 +59,21 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
 
 BUNDLE_MAX_SOURCE_BYTES = 16_777_216
 BUNDLE_MAX_COMPONENT_BYTES = 33_554_432
+#: Generous ceiling for a YAML manifest -- also bounds the raw input size to
+#: `yaml.safe_load()` below, which `safe_load` alone does not: it blocks
+#: arbitrary code execution but not a small-input/huge-output alias-bomb
+#: (anchors/aliases are core YAML, usable under `safe_load` too). Capping
+#: the byte count the parser ever sees is the defensible bound available
+#: without swapping in a anchor-limiting YAML loader.
+BUNDLE_MAX_MANIFEST_BYTES = 1_048_576
+#: The largest single multipart request this endpoint should ever accept --
+#: manifest + source + component all present at once, plus a small margin
+#: for multipart boundaries/headers. Wired into `app.py`'s
+#: `MAX_CONTENT_LENGTH` so Quart refuses an oversize body while it is still
+#: streaming in, instead of after buffering the whole thing.
+BUNDLE_MAX_REQUEST_BYTES = (
+    BUNDLE_MAX_SOURCE_BYTES + BUNDLE_MAX_COMPONENT_BYTES + BUNDLE_MAX_MANIFEST_BYTES + 65_536
+)
 
 
 def valid_transition(current: str, target: str) -> bool:
@@ -100,6 +115,12 @@ async def advance_state(
     return (await install_dal(install_dal.app_version_uploads.id == upload.id).select()).first()
 
 
+def _require(condition: bool, message: str, code: str) -> None:
+    """Raise `ApiError(message, 400, code)` when `condition` is false."""
+    if not condition:
+        raise ApiError(message, 400, code)
+
+
 async def create_version(
     install_dal: AsyncDB,
     *,
@@ -115,11 +136,14 @@ async def create_version(
 ) -> Any:
     """Validate and persist a new bundle version upload at status `UPLOADED`.
 
-    Raises `ApiError` 400 (manifest rule failure, `code` = the rule's
-    `reason`), 403 `prebuilt_not_allowed`, 409 (version already exists),
-    or 413 (oversize part). See this module's own docstring for why no
-    compiler Job is launched here.
+    Raises `ApiError` 400 (manifest rule failure or a manifest `app_id`
+    that does not match `app_id`, `code` = the rule's `reason` /
+    `"app_id_mismatch"`), 403 `prebuilt_not_allowed`, 409 (version
+    already exists), or 413 (oversize part). See this module's own
+    docstring for why no compiler Job is launched here.
     """
+    if len(manifest_bytes) > BUNDLE_MAX_MANIFEST_BYTES:
+        raise ApiError("manifest exceeds 1 MiB", 413, "PAYLOAD_TOO_LARGE")
     raw = yaml.safe_load(manifest_bytes)
     try:
         manifest = parse_bundle_manifest_v2(
@@ -131,6 +155,16 @@ async def create_version(
     except ManifestV2Error as exc:
         status_code = 403 if exc.reason == "prebuilt_not_allowed" else 400
         raise ApiError(str(exc), status_code, exc.reason) from exc
+
+    # The row this function writes stores `app_id` from the URL while
+    # `manifest_json` keeps the YAML's own `app_id` verbatim -- unchecked,
+    # the two can diverge, letting an admin scoped to app A upload (and
+    # later have approved) a manifest that actually describes app B.
+    _require(
+        manifest.app_id == app_id,
+        f"manifest app_id {manifest.app_id!r} does not match the URL app_id {app_id!r}",
+        "app_id_mismatch",
+    )
 
     if manifest.artifact == "source" and source_bytes is None:
         raise ApiError("source part is required when artifact: source", 400, "missing_part")

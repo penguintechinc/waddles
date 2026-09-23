@@ -1386,6 +1386,20 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("updated_by", Integer),
         Column("updated_at", DateTime),
     )
+    # `communities` is a pre-existing production table
+    # (services/schema.py::bind_auth_tables) -- reflected here as its
+    # sqlite-compatible mirror (id + tenant_id only, the columns
+    # `bundle_approval_service._validate_community_tenant` actually reads)
+    # for the same R52 reason as `audit_log` below: no full pydal schema
+    # bootstrap in this fixture, and the check reads it read-only through
+    # `install_dal`, never a new pydal binder.
+    Table(
+        "communities",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("tenant_id", Integer, nullable=False),
+        Column("name", String(255)),
+    )
     # `audit_log` is a pre-existing production table (services/schema.py's
     # `bind_admin_tables()`), reflected here as its sqlite-compatible
     # mirror because this fixture has no full pydal schema bootstrap --

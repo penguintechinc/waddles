@@ -54,6 +54,21 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
         created_at=now,
         updated_at=now,
     )
+    # A second, non-terminal version -- deny is only legal off a
+    # non-terminal state (spec Sec9.1); 3.0.1 above is PUBLISHED
+    # (terminal) so the approve/permissions tests above have a
+    # publishable row, this one is for the deny-happy-path test below.
+    await install_dal.app_version_uploads.async_insert(
+        app_id="waddles.socials.music.default",
+        version="1.0.0",
+        tenant_id=1,
+        artifact_kind="source",
+        language="python",
+        status="UPLOADED",
+        manifest_json={**_MANIFEST, "version": "1.0.0"},
+        created_at=now,
+        updated_at=now,
+    )
     app = Quart(__name__)
     QuartSchema(app)
     app.config["async_dal"] = bundle_install_db
@@ -113,21 +128,36 @@ async def test_approve_without_a_hash_succeeds_interactively(app: Quart) -> None
 
 
 async def test_deny_happy_path(app: Quart) -> None:
+    """Deny succeeds from a non-terminal state -- 1.0.0 (UPLOADED), not 3.0.1 (PUBLISHED)."""
     token = make_token(scope="platform:admin")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/deny",
+        "/api/v1/apps/waddles.socials.music.default/versions/1.0.0/deny",
         headers={"Authorization": f"Bearer {token}"},
         json={"reason": "egress host not acceptable"},
     )
     assert response.status_code == 200
 
 
+async def test_deny_on_a_published_version_is_409(app: Quart) -> None:
+    """PUBLISHED is terminal (spec Sec9.1) -- deny must refuse, not silently reject it anyway."""
+    token = make_token(scope="platform:admin")
+    client = app.test_client()
+    response = await client.post(
+        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/deny",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"reason": "late objection"},
+    )
+    assert response.status_code == 409
+    body = await response.get_json()
+    assert body["error"]["code"] == "invalid_state_transition"
+
+
 async def test_deny_requires_platform_admin(app: Quart) -> None:
     token = make_token(scope="")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/deny",
+        "/api/v1/apps/waddles.socials.music.default/versions/1.0.0/deny",
         headers={"Authorization": f"Bearer {token}"},
         json={"reason": "nope"},
     )
