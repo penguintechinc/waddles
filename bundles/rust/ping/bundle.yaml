@@ -1,0 +1,43 @@
+schema_version: 2
+app_id: waddles.core.example.ping
+name: Ping Example Bundle (Rust)
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+language: rust
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!ping"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions: []
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null
