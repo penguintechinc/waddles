@@ -77,6 +77,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "arcstr"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1333,6 +1342,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "penguin-licensing"
+version = "0.1.0"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=f642e0695046386ca674e47eb9e6f7d6283ac531#f642e0695046386ca674e47eb9e6f7d6283ac531"
+dependencies = [
+ "arc-swap",
+ "chrono",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "penguin-logging"
 version = "0.1.0"
 source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=69e740ce5411d8cd005241fbd829c62e68efb96e#69e740ce5411d8cd005241fbd829c62e68efb96e"
@@ -1357,7 +1383,7 @@ dependencies = [
 [[package]]
 name = "penguin-spine"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=2976bf8a336a720ee5f939ad2d1a3f7b4b820642#2976bf8a336a720ee5f939ad2d1a3f7b4b820642"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=586b8dadfcad26f2e8207b91cd2deb81afb6630f#586b8dadfcad26f2e8207b91cd2deb81afb6630f"
 dependencies = [
  "chrono",
  "hex",
@@ -2151,6 +2177,7 @@ dependencies = [
  "libc",
  "penguin-connector-discord",
  "penguin-connector-twitch",
+ "penguin-licensing",
  "penguin-logging",
  "penguin-spine",
  "prometheus",

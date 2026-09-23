@@ -31,24 +31,26 @@
 //! `Cargo.toml`'s dependency-pattern comment for the pinned rev and the
 //! verification evidence.
 //!
-//! Each receiver/the outbound drain independently no-ops with a logged
-//! reason when its own configuration/secret is absent
+//! The whole bundle above is additionally gated on the
+//! `waddles.core.rust-data-plane` PostHog flag (spec S13.5,
+//! `crate::license`) -- OFF (the default until validated) means this
+//! service serves `/health`/`/healthz`/`/metrics` and receives/produces/
+//! drains nothing at all, checked once at startup before any
+//! `try_start_*` call below. Each receiver/the outbound drain
+//! additionally, independently no-ops with a logged reason when its own
+//! configuration/secret is absent
 //! (`try_start_twitch_irc`/`try_start_discord`/`try_start_twitch_outbound`),
 //! the same graceful-degradation contract
 //! `core/svc_process::try_start_spine_drain` uses for a missing
-//! `SpineConfig` -- a service with nothing configured still serves
-//! `/health`/`/healthz`/`/metrics`.
+//! `SpineConfig`.
 //!
-//! **Deliberately left as documented seams, not done in this pass** (a
-//! separate follow-up owns them, per explicit coordinator direction):
-//! - The `waddles.core.rust-data-plane` PostHog feature-flag gate on the
-//!   receive/outbound loops -- needs `penguin-licensing`, which is being
-//!   version-aligned in parallel and isn't ready yet.
-//! - Any `penguin_spine::SpineClient::dead_letter` call-site change --
-//!   `penguin-spine` is being rev'd for a `dead_letter` fix in parallel;
-//!   this crate makes no `dead_letter` call at all (ingest mints and
-//!   `append`s only, per D23/D24/S10.6 -- it never reads a stage stream or
-//!   DLQs anything), so there is no call site to chase a new rev for.
+//! Left as a documented seam per explicit coordinator direction (a
+//! separate follow-up owns it): any `penguin_spine::SpineClient::
+//! dead_letter` call-site change -- `penguin-spine` was rev'd for a
+//! `dead_letter`/`Delivered.group` fix, but this crate makes no
+//! `dead_letter` call and constructs no `Delivered` at all (ingest mints
+//! and `append`s only, per D23/D24/S10.6 -- it never reads a stage
+//! stream), so there is no call site to chase.
 //!
 //! Also out of scope, per the milestone's own stated priority order:
 //! Slack/YouTube/Kick receivers, the generic signed-webhook and JWT REST
@@ -64,6 +66,7 @@ pub mod config;
 pub mod error;
 pub mod http;
 pub mod ingest;
+pub mod license;
 pub mod normalize;
 pub mod outbound;
 pub mod publish;
@@ -114,15 +117,28 @@ where
     let ingest_metrics = Arc::new(telemetry::register_ingest_metrics(&prom_registry));
     let state = http::AppState::new(config.clone(), prom_registry);
 
-    // Twitch IRC (primary e2e path), Discord Gateway (secondary), and the
-    // Twitch outbound relay drain each independently no-op with a logged
-    // reason when unconfigured -- see each function's own doc comment.
-    // Slack/YouTube/Kick receivers, the generic webhook/JWT intake, and D31
-    // usage metering are `// TODO(M5)` -- not started here, see this
-    // module's doc comment.
-    try_start_twitch_irc(&config, ingest_metrics.clone());
-    try_start_discord(&config, ingest_metrics);
-    try_start_twitch_outbound(&config);
+    // `waddles.core.rust-data-plane` (spec S13.5): OFF (default until
+    // validated) means serve /health + /metrics and start nothing below.
+    // `flag_enabled` never performs inline network I/O (see
+    // `crate::license`'s module doc), so this check never blocks startup
+    // regardless of license/flag-server reachability.
+    let license_client = license::build_license_client();
+    if license::rust_data_plane_enabled(license_client.as_ref()).await {
+        // Twitch IRC (primary e2e path), Discord Gateway (secondary), and
+        // the Twitch outbound relay drain each independently no-op with a
+        // logged reason when unconfigured -- see each function's own doc
+        // comment. Slack/YouTube/Kick receivers, the generic webhook/JWT
+        // intake, and D31 usage metering are `// TODO(M5)` -- not started
+        // here, see this module's doc comment.
+        try_start_twitch_irc(&config, ingest_metrics.clone());
+        try_start_discord(&config, ingest_metrics);
+        try_start_twitch_outbound(&config);
+    } else {
+        tracing::info!(
+            flag = license::RUST_DATA_PLANE_FLAG,
+            "flag is OFF; receive/produce/outbound-drain not started"
+        );
+    }
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
     let metrics_addr = SocketAddr::new(config.cli.bind_addr, config.cli.metrics_port);

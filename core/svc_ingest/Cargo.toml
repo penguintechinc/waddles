@@ -96,8 +96,16 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 # side (spec S4.7/S5.11) -- see `src/publish.rs`. Ingest MINTS via
 # `penguin_spine::KeyRing`/`compute_binding_mac`; it never verifies and
 # never constructs a `GroupReader` (that is process's/action's job, and
-# outside ingest's Valkey ACL, S11.10.2).
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "2976bf8a336a720ee5f939ad2d1a3f7b4b820642", package = "penguin-spine", version = "=0.1.0" }
+# outside ingest's Valkey ACL, S11.10.2). Rev bumped for the `dead_letter`/
+# `Delivered.group` fix -- ingest calls neither `dead_letter` nor
+# constructs a `Delivered` (it never reads a stage stream), so this bump
+# is a pure no-op for this crate's own call sites; taken anyway to stay on
+# the same finalized spine rev as svc_process/svc_action.
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "586b8dadfcad26f2e8207b91cd2deb81afb6630f", package = "penguin-spine", version = "=0.1.0" }
+# `penguin-licensing`: the `waddles.core.rust-data-plane` feature-flag gate
+# on the receive/produce/outbound-drain loops (spec S13.5) -- see
+# `try_start_license_client`/`rust_data_plane_enabled` in `src/lib.rs`.
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f642e0695046386ca674e47eb9e6f7d6283ac531", package = "penguin-licensing", version = "=0.1.0" }
 # `penguin-connector-twitch`: IRC chat receive (`src/ingest/twitch.rs`) and
 # the outbound relay sender (`src/outbound.rs`, `TwitchIrcSender`) -- rev
 # carries the pin-alignment fix, penguin-libs PR #98 (see the comment
