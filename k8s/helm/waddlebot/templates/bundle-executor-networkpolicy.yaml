@@ -1,0 +1,57 @@
+# feature/e2e-helm-rust-dataplane -- default-deny CiliumNetworkPolicy scoped to ONLY the
+# bundle-executor pod (devops-kubernetes.md Cluster Security Baseline / security.md
+# Kubernetes Network Security -- CiliumNetworkPolicy, never plain NetworkPolicy). This is
+# additive on top of the chart's existing namespace-wide plain-NetworkPolicy pair
+# (templates/network-policies.yaml, which already allows all same-namespace traffic) --
+# this CiliumNetworkPolicy further restricts what the credential-less bundle-executor pod
+# ITSELF may originate/receive, independent of that broader namespace policy.
+#
+# Ingress: explicit deny-all -- this pod has no listening port of any kind (see
+# templates/bundle-executor.yaml's header), so nothing should ever dial it.
+# Egress: DNS (to resolve the stage Service name below) + the stage's host-API mTLS port
+# ONLY + a future bucket-egress allowance (core/bundle_executor/src/invoke.rs's
+# UnimplementedBucketSource -- not yet wired, pre-allowed so no further chart change is
+# needed once object_store lands).
+{{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.bundleExecutor.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-bundle-executor
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bundle-executor
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: bundle-executor
+  ingress: []
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: {{ .Values.pipeline.rustDataPlane.bundleExecutor.stageTarget | quote }}
+      toPorts:
+        - ports:
+            - port: {{ .Values.pipeline.rustDataPlane.bundleExecutor.stagePort | quote }}
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: storage
+      toPorts:
+        - ports:
+            - port: {{ .Values.infrastructure.minio.service.apiPort | quote }}
+              protocol: TCP
+{{- end }}

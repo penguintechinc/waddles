@@ -1,0 +1,164 @@
+# feature/e2e-helm-rust-dataplane -- Rust svc-action (core/svc_action, M3 executor
+# integration landed) Deployment, ADDITIVE to templates/svc-action.yaml's Python
+# Deployment -- never replaces it. Gated on the top-level pipeline.rustDataPlane.enabled
+# flag (default false) plus this stage's own .enabled sub-flag. See
+# templates/svc-ingest-rust.yaml's header for the full `-rust` resource-naming-vs-shared-
+# image-tag rationale (identical here) -- not repeated per file.
+#
+# This is the ONE stage whose host-API mTLS server (core/svc_action/src/host_api.rs) is
+# real today -- pipeline.rustDataPlane.bundleExecutor.stageTarget defaults to
+# svc-action-rust for exactly this reason (svc-process's own host-API is TODO(M4), see
+# templates/svc-process-rust.yaml). The HOST_API_SERVER_CERT_FILE/KEY_FILE/CLIENT_CA_FILE
+# env + volume below only render when waddlebot.hostApiTlsMaterialAvailable is true (real
+# PEM material supplied via global.hostApiTls, see its values.yaml comment) -- otherwise
+# host_api.rs's own build_server_config fails closed with a clear "must both be set" error
+# INSIDE its own spawned task (try_start_host_api's graceful-degradation contract), never
+# crashing this pod's HTTP/metrics servers.
+{{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcAction.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-action-rust
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-action-rust
+spec:
+  replicas: {{ .Values.pipeline.rustDataPlane.svcAction.replicas }}
+  selector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-action-rust
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: svc-action-rust
+    spec:
+      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+      {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
+      containers:
+      - name: svc-action-rust
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-action" "imageTag" .Values.global.imageTag) }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        # Pinned to the Rust image's own `appuser` (uid 10001, core/svc_action/
+        # Dockerfile.rust), not the chart-wide .Values.securityContext (uid 1000) the
+        # Python placeholder templates use -- same pattern as templates/svc-streaming.yaml.
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: {{ .Values.pipeline.rustDataPlane.svcAction.port }}
+          protocol: TCP
+        - name: metrics
+          containerPort: {{ .Values.pipeline.rustDataPlane.svcAction.metricsPort }}
+          protocol: TCP
+        - name: host-api
+          containerPort: {{ .Values.pipeline.rustDataPlane.svcAction.hostApiPort }}
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: {{ include "waddlebot.fullname" . }}-config
+        - secretRef:
+            name: {{ include "waddlebot.fullname" . }}-secrets
+        env:
+        - name: MODULE_PORT
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.port | quote }}
+        - name: METRICS_PORT
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.metricsPort | quote }}
+        - name: HOST_API_PORT
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.hostApiPort | quote }}
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: DB_PASSWORD
+        - name: WADDLES_SANDBOX_GVISOR
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.sandboxGvisor | quote }}
+        # Per-call wall-clock budget handed to the executor on every `invoke` -- kept in
+        # sync with bundleExecutor.callTimeoutMs (the SAME spec SS7.3 default, 2000ms) so
+        # the stage and the executor it drives never disagree about the budget.
+        - name: EXECUTOR_CALL_TIMEOUT_MS
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.callTimeoutMs | quote }}
+        # Empty (default) disables the dispatch drain loop entirely -- see config.rs.
+        - name: ACTION_APP_ID
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.actionAppId | default "" | quote }}
+        - name: ENVELOPE_BINDING_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: ENVELOPE_BINDING_KEYS
+        {{- if .Values.pipeline.rustDataPlane.svcAction.envelopeBindingActiveKid }}
+        - name: ENVELOPE_BINDING_ACTIVE_KID
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.envelopeBindingActiveKid | quote }}
+        {{- end }}
+        {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.hostApiTlsServerEnv" . | nindent 8 }}
+        {{- end }}
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        resources:
+          {{- toYaml .Values.pipeline.rustDataPlane.svcAction.resources | nindent 10 }}
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.hostApiTlsVolumeMount" . | nindent 8 }}
+        {{- end }}
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+      {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-action-rust
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-action-rust
+spec:
+  type: ClusterIP
+  ports:
+  - port: {{ .Values.pipeline.rustDataPlane.svcAction.port }}
+    targetPort: http
+    protocol: TCP
+    name: http
+  - port: {{ .Values.pipeline.rustDataPlane.svcAction.metricsPort }}
+    targetPort: metrics
+    protocol: TCP
+    name: metrics
+  - port: {{ .Values.pipeline.rustDataPlane.svcAction.hostApiPort }}
+    targetPort: host-api
+    protocol: TCP
+    name: host-api
+  selector:
+    {{- include "waddlebot.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-action-rust
+{{- end }}

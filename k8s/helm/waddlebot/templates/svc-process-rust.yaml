@@ -1,0 +1,146 @@
+# feature/e2e-helm-rust-dataplane -- Rust svc-process (core/svc_process) Deployment,
+# ADDITIVE to templates/svc-process.yaml's Python Deployment -- never replaces it. Gated on
+# the top-level pipeline.rustDataPlane.enabled flag (default false) plus this stage's own
+# .enabled sub-flag. See templates/svc-ingest-rust.yaml's header for the full `-rust`
+# resource-naming-vs-shared-image-tag rationale (identical here) -- not repeated per file.
+#
+# KNOWN GAP: core/svc_process/src/config.rs has NO HOST_API_PORT/HOST_API_SERVER_CERT_FILE/
+# HOST_API_CLIENT_CA_FILE fields yet -- the executor<->stage host-API integration is
+# TODO(M4) for this stage (svc-action's own M3 integration already landed, see
+# templates/svc-action-rust.yaml). Deliberately NOT wiring host-API env/TLS volume here
+# until that field surface exists -- pipeline.rustDataPlane.bundleExecutor.stageTarget
+# defaults to svc-action-rust for exactly this reason. CACHE_HOST/CACHE_PORT are wired
+# explicitly below (not envFrom'd) because the shared ConfigMap only exposes
+# REDIS_HOST/REDIS_PORT, a different name than this crate's CliConfig reads.
+{{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcProcess.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-process-rust
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-process-rust
+spec:
+  replicas: {{ .Values.pipeline.rustDataPlane.svcProcess.replicas }}
+  selector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-process-rust
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: svc-process-rust
+    spec:
+      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+      {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
+      containers:
+      - name: svc-process-rust
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-process" "imageTag" .Values.global.imageTag) }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        # Pinned to the Rust image's own `appuser` (uid 10001, core/svc_process/
+        # Dockerfile.rust), not the chart-wide .Values.securityContext (uid 1000) the
+        # Python placeholder templates use -- same pattern as templates/svc-streaming.yaml.
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: {{ .Values.pipeline.rustDataPlane.svcProcess.port }}
+          protocol: TCP
+        - name: metrics
+          containerPort: {{ .Values.pipeline.rustDataPlane.svcProcess.metricsPort }}
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: {{ include "waddlebot.fullname" . }}-config
+        - secretRef:
+            name: {{ include "waddlebot.fullname" . }}-secrets
+        env:
+        - name: MODULE_PORT
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.port | quote }}
+        - name: METRICS_PORT
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.metricsPort | quote }}
+        - name: HUB_API_URL
+          value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: DB_PASSWORD
+        - name: SERVICE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: SERVICE_API_KEY
+        # CliConfig reads CACHE_HOST/CACHE_PORT/CACHE_PASSWORD -- the shared ConfigMap only
+        # publishes REDIS_HOST/REDIS_PORT (a different name), so these are wired explicitly.
+        - name: CACHE_HOST
+          value: {{ .Values.infrastructure.redis.service.name | quote }}
+        - name: CACHE_PORT
+          value: {{ .Values.infrastructure.redis.service.port | quote }}
+        - name: CACHE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: REDIS_PASSWORD
+        # Empty (default) disables the spine drain loop entirely -- see config.rs.
+        - name: PROCESS_APP_ID
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processAppId | default "" | quote }}
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        resources:
+          {{- toYaml .Values.pipeline.rustDataPlane.svcProcess.resources | nindent 10 }}
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-process-rust
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-process-rust
+spec:
+  type: ClusterIP
+  ports:
+  - port: {{ .Values.pipeline.rustDataPlane.svcProcess.port }}
+    targetPort: http
+    protocol: TCP
+    name: http
+  - port: {{ .Values.pipeline.rustDataPlane.svcProcess.metricsPort }}
+    targetPort: metrics
+    protocol: TCP
+    name: metrics
+  selector:
+    {{- include "waddlebot.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-process-rust
+{{- end }}

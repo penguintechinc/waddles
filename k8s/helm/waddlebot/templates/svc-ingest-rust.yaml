@@ -1,0 +1,157 @@
+# feature/e2e-helm-rust-dataplane -- Rust svc-ingest (core/svc_ingest, M5-blocked skeleton
+# today) Deployment, ADDITIVE to templates/svc-ingest.yaml's Python Deployment -- never
+# replaces it. Gated on the top-level pipeline.rustDataPlane.enabled flag (default false)
+# plus this stage's own .enabled sub-flag, so flipping the parent flag alone doesn't force
+# every stage on.
+#
+# Resource name carries a `-rust` suffix (see pipeline.rustDataPlane's values.yaml comment
+# for why) even though the image repository:tag below (waddlebot.legacyModuleImage,
+# module "svc-ingest") is the exact same one templates/svc-ingest.yaml's Python Deployment
+# already uses -- core/svc_ingest/Dockerfile.rust's own build comment tags the Rust image
+# with that identical repo:tag (M6 cutover-in-place convention), so an operator doing the
+# e2e cutover builds+pushes the Rust image over that tag and disables the Python
+# Deployment (pipeline.svcIngest.enabled=false) alongside enabling this one.
+#
+# KNOWN GAP: core/svc_ingest/src/config.rs has no VALKEY_URL/DB/Discord+Twitch receiver-
+# credential fields yet (TODO(M5)) -- the env below is wired ahead of that landing so no
+# further chart change is needed once M5 lands; until then these are harmless extra env
+# vars clap silently ignores. No DB -- this stage owns no tables (config.rs's own doc
+# comment), so unlike svc-process-rust/svc-action-rust there is no db-migrate initContainer
+# here.
+{{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcIngest.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-ingest-rust
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-ingest-rust
+spec:
+  replicas: {{ .Values.pipeline.rustDataPlane.svcIngest.replicas }}
+  selector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-ingest-rust
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: svc-ingest-rust
+    spec:
+      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: svc-ingest-rust
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-ingest" "imageTag" .Values.global.imageTag) }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        # Pinned to the Rust image's own `appuser` (uid 10001, core/svc_ingest/
+        # Dockerfile.rust), not the chart-wide .Values.securityContext (uid 1000) the
+        # Python placeholder templates use -- same pattern as templates/svc-streaming.yaml.
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: {{ .Values.pipeline.rustDataPlane.svcIngest.port }}
+          protocol: TCP
+        - name: metrics
+          containerPort: {{ .Values.pipeline.rustDataPlane.svcIngest.metricsPort }}
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: {{ include "waddlebot.fullname" . }}-config
+        - secretRef:
+            name: {{ include "waddlebot.fullname" . }}-secrets
+        env:
+        - name: MODULE_PORT
+          value: {{ .Values.pipeline.rustDataPlane.svcIngest.port | quote }}
+        - name: METRICS_PORT
+          value: {{ .Values.pipeline.rustDataPlane.svcIngest.metricsPort | quote }}
+        - name: RUNNER_TENANT_SLUG
+          value: {{ .Values.pipeline.runnerTenantSlug | quote }}
+        - name: HUB_API_URL
+          value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+        # Forward-compatible only until core/svc_ingest's M5 connector/intake work lands
+        # (see file header KNOWN GAP) -- same Secret keys the Python svc-ingest Deployment
+        # already reads (templates/svc-ingest.yaml).
+        - name: VALKEY_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: VALKEY_URL
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: SECRET_KEY
+        - name: WADDLES_AI_ENABLED
+          value: {{ .Values.pipeline.hubApi.aiEnabled | quote }}
+        - name: DISCORD_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: DISCORD_BOT_TOKEN
+        - name: TWITCH_OAUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: TWITCH_OAUTH_TOKEN
+        - name: TWITCH_NICK
+          value: {{ .Values.oauth.twitch.nick | default "" | quote }}
+        - name: TWITCH_CHANNELS
+          value: {{ .Values.oauth.twitch.channels | default "" | quote }}
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        resources:
+          {{- toYaml .Values.pipeline.rustDataPlane.svcIngest.resources | nindent 10 }}
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-ingest-rust
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-ingest-rust
+spec:
+  type: ClusterIP
+  ports:
+  - port: {{ .Values.pipeline.rustDataPlane.svcIngest.port }}
+    targetPort: http
+    protocol: TCP
+    name: http
+  - port: {{ .Values.pipeline.rustDataPlane.svcIngest.metricsPort }}
+    targetPort: metrics
+    protocol: TCP
+    name: metrics
+  selector:
+    {{- include "waddlebot.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-ingest-rust
+{{- end }}

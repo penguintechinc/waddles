@@ -504,3 +504,62 @@ roles, matching cert-manager's fixed Secret key names natively; the static Secre
   mountPath: /etc/waddlebot/grpc-tls
   readOnly: true
 {{- end }}
+
+{{/*
+feature/e2e-helm-rust-dataplane -- host-API mTLS helpers (the bundle-executor<->stage wire
+protocol, core/bundle_executor/src/tls.rs + core/svc_action/src/host_api.rs), a separate
+identity from the gRPC helpers above -- different wire protocol, different port, mounted
+from the {{ fullname }}-host-api-tls Secret (templates/host-api-tls-secret.yaml /
+host-api-tls-certificate.yaml) rather than -grpc-tls. UNLIKE grpcTlsMaterialAvailable's
+Python-side flask_core, the Rust code on both ends fails closed with no plaintext escape
+hatch -- see global.hostApiTls's values.yaml comment.
+*/}}
+
+{{/*
+True only when real cert material will exist in the {{ fullname }}-host-api-tls Secret at
+deploy time -- either cert-manager mints it or a full CA+cert/key was supplied via values.
+Callers gate rendering the volume/env blocks on this so a missing Secret produces the
+Rust side's own clear "HOST_API_SERVER_CERT_FILE and HOST_API_SERVER_KEY_FILE must both be
+set" config error at startup (host-api listener disabled, rest of the pod keeps serving --
+see host_api.rs's graceful-degradation comment) instead of a mounted-but-empty file
+producing an opaque low-level TLS parse error.
+*/}}
+{{- define "waddlebot.hostApiTlsMaterialAvailable" -}}
+{{- if or .Values.global.hostApiTls.certManager.enabled (and .Values.global.hostApiTls.ca.crt .Values.global.hostApiTls.tls.crt .Values.global.hostApiTls.tls.key) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/* Server-role env vars: this pod binds the host-API mTLS listener (e.g. svc-action-rust). */}}
+{{- define "waddlebot.hostApiTlsServerEnv" -}}
+- name: HOST_API_SERVER_CERT_FILE
+  value: /etc/waddlebot/host-api-tls/tls.crt
+- name: HOST_API_SERVER_KEY_FILE
+  value: /etc/waddlebot/host-api-tls/tls.key
+- name: HOST_API_CLIENT_CA_FILE
+  value: /etc/waddlebot/host-api-tls/ca.crt
+{{- end }}
+
+{{/* Client-role env vars: this pod dials a stage's host-API listener (bundle-executor). */}}
+{{- define "waddlebot.hostApiTlsClientEnv" -}}
+- name: HOST_API_CA_FILE
+  value: /etc/waddlebot/host-api-tls/ca.crt
+- name: HOST_API_CLIENT_CERT_FILE
+  value: /etc/waddlebot/host-api-tls/tls.crt
+- name: HOST_API_CLIENT_KEY_FILE
+  value: /etc/waddlebot/host-api-tls/tls.key
+{{- end }}
+
+{{/* Cert volume, sourced from the chart-managed {{ fullname }}-host-api-tls Secret. */}}
+{{- define "waddlebot.hostApiTlsVolume" -}}
+- name: host-api-tls
+  secret:
+    secretName: {{ include "waddlebot.fullname" . }}-host-api-tls
+    defaultMode: 0440
+{{- end }}
+
+{{- define "waddlebot.hostApiTlsVolumeMount" -}}
+- name: host-api-tls
+  mountPath: /etc/waddlebot/host-api-tls
+  readOnly: true
+{{- end }}

@@ -1,0 +1,34 @@
+# feature/e2e-helm-rust-dataplane -- cert-manager path (global.hostApiTls.certManager.
+# enabled=true) for the bundle-executor<->stage host-API mTLS identity, preferred over the
+# static Secret (templates/host-api-tls-secret.yaml) whenever the cluster already runs
+# cert-manager. Mirrors templates/grpc-tls-certificate.yaml exactly, but mints into the
+# fullname-host-api-tls Secret name for the SEPARATE host-API identity -- never conflated
+# with the gRPC Certificate above.
+# Requires a pre-existing Issuer/ClusterIssuer named global.hostApiTls.certManager.issuerName
+# (an internal CA issuer -- out of this chart's scope to provision).
+{{- if .Values.global.hostApiTls.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-host-api-tls
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: host-api-tls
+spec:
+  secretName: {{ include "waddlebot.fullname" . }}-host-api-tls
+  duration: {{ .Values.global.hostApiTls.certManager.duration | default "2160h" | quote }}
+  renewBefore: {{ .Values.global.hostApiTls.certManager.renewBefore | default "360h" | quote }}
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+    - {{ include "waddlebot.fullname" . }}-svc-process-rust
+    - {{ include "waddlebot.fullname" . }}-svc-action-rust
+    - {{ include "waddlebot.fullname" . }}-bundle-executor
+    - "*.{{ .Values.namespace }}.svc.cluster.local"
+  issuerRef:
+    name: {{ .Values.global.hostApiTls.certManager.issuerName }}
+    kind: {{ .Values.global.hostApiTls.certManager.issuerKind | default "ClusterIssuer" }}
+    group: cert-manager.io
+{{- end }}
