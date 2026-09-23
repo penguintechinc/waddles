@@ -1,0 +1,90 @@
+name: Python waddle-sdk (lint + type-check + test + oracle)
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'sdk/waddle-sdk/**'
+      - 'core/svc_process/bundles/social_alias_process.py'
+      - 'core/svc_process/services/command_alias_store.py'
+      - 'wit/waddle-bundle/**'
+      - '.github/workflows/python-waddle-sdk.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'sdk/waddle-sdk/**'
+      - 'core/svc_process/bundles/social_alias_process.py'
+      - 'core/svc_process/services/command_alias_store.py'
+      - 'wit/waddle-bundle/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-type-test:
+    name: ruff + mypy --strict + pytest --cov + WIT binding-shape check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/waddle-sdk
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      # No `cache: pip` here deliberately -- this workflow runs on
+      # `pull_request` from any branch, and a pip cache populated by an
+      # untrusted PR run could be poisoned and then reused by a later
+      # trusted push/workflow_dispatch run on the same cache key
+      # (zizmor's cache-poisoning audit). The install step below is fast
+      # (a handful of pure-Python wheels), so the cache isn't worth that
+      # exposure.
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      # `componentize-py` (the `[build]` extra) is a normal pip-installable
+      # wheel -- confirmed directly on Linux x86_64 / Python 3.13 during this
+      # SDK's own development (the same platform `ubuntu-latest` provides),
+      # so this is a hard, required step, not an optional/soft one: a
+      # `continue-on-error` here would let the R1 binding-shape check below
+      # silently stop running while still reporting green, which is exactly
+      # the failure mode `critical-rules.md` Verification Integrity forbids.
+      # If a future CI image genuinely cannot install it, this step fails
+      # loudly here -- the visible signal to split it out with a real
+      # fallback, not a reason to have pre-emptively masked it.
+      - name: Install waddle-sdk (editable) + dev/build extras
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -e ".[dev,build]"
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: mypy --strict
+        run: mypy --strict src/waddle_sdk
+
+      - name: pytest --cov (>=90% gate) -- full suite, includes the oracle tests
+        run: pytest -q --cov=waddle_sdk --cov-report=term-missing --cov-fail-under=90
+
+      # Named separately for visibility even though the step above already
+      # runs it: the R1 mitigation is "the real, unmodified, M1.5-migrated
+      # bundle's write path through this facade, not a hand-picked
+      # reproduction" (see tests/test_oracle_alias_bundle.py's module
+      # docstring) -- a reviewer should be able to see its pass count
+      # without digging through the full 96-test run above.
+      - name: Oracle proof (R1) -- real social_alias_process.py through the facade
+        run: pytest -q -v tests/test_oracle_alias_bundle.py
+
+      # Confirms waddle_sdk/db.py, http.py, kv.py, log.py, clock.py,
+      # relay.py, _component_entry.py, and tests/wit_shapes.py still match
+      # componentize-py's real generated bindings for the committed
+      # wit/waddle-bundle/stage.wit -- see the script's own header for what
+      # it checks and why. A hard failure here means the facade's hardcoded
+      # binding assumptions have drifted from reality; fix the facade or the
+      # test doubles, never suppress this step.
+      - name: Verify WIT binding shapes against componentize-py's real output
+        run: bash scripts/verify_wit_bindings.sh
