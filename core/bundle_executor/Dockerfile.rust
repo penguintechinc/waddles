@@ -1,0 +1,57 @@
+# bundle-executor (Rust) -- Waddles credential-less WASM bundle sandbox host.
+#
+# Stateless executor: holds a wasmtime engine, instantiates a bundle's WASI 0.2
+# component, services every WIT host import over the host-API wire protocol to
+# its stage, and natively denies wasi:sockets. No secrets, no credentials, no
+# network egress policy needed -- the security argument is dependency minimalism
+# (spec SS4.5/SS14.6 test 16 asserts NO redis, sea-orm, sqlx, reqwest in the
+# dependency graph).
+#
+# Build (context = repo root; includes wit/ files):
+#   docker build -f core/bundle_executor/Dockerfile.rust -t localhost:32000/waddlebot/bundle-executor:alpha-<epoch> .
+
+FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
+
+# A C compiler -- required to build `ring` (rustls's crypto provider;
+# confirmed via `cargo deny check`'s dependency graph that this crate depends
+# on `ring`, not `aws-lc-sys`).
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        build-essential=12.9 ca-certificates=20250419~deb12u1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /repo
+COPY core/bundle_executor core/bundle_executor
+COPY wit wit
+WORKDIR /repo/core/bundle_executor
+RUN cargo build --release --locked
+
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
+
+# `ca-certificates` for rustls (webpki/native roots) on outbound TLS if needed.
+# Wasmtime is statically linked; no libc-specific runtime deps beyond the
+# system libc (inherited from debian-slim base).
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        ca-certificates=20250419~deb12u1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --system --gid 10001 appuser \
+    && useradd --system --uid 10001 --gid appuser --home-dir /nonexistent \
+       --shell /usr/sbin/nologin appuser
+
+COPY --from=builder --chown=appuser:appuser /repo/core/bundle_executor/target/release/bundle-executor /app/bundle-executor
+
+WORKDIR /app
+USER appuser
+
+ENV EXECUTOR_PORT=8203
+
+# Native Rust healthcheck subcommand -- the executor supports `--healthcheck`
+# which exits 0 iff the main server loop is responsive.
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+    CMD ["/app/bundle-executor", "--healthcheck"]
+
+EXPOSE 8203
+
+ENTRYPOINT ["/app/bundle-executor"]
