@@ -1,35 +1,229 @@
-//! Wires `penguin-spine` (spec SS4.7) as the process-stage consumer:
-//! `XREADGROUP`s a bundle's granted ingest-source Valkey streams, up to the
-//! exact point a delivered entry would be handed to the bundle's
-//! `transform` call over the `bundle-executor` wire protocol -- and stops
-//! there. `bundle-executor` does not exist yet (Wave 2, blocked on M2), so
-//! [`handle_delivered`] is the seam and nothing past it is implemented or
-//! faked.
+//! Wires `penguin-spine` (spec §4.7) as the process-stage consumer:
+//! `XREADGROUP`s a bundle's granted ingest-source Valkey streams, verifies
+//! the hop (`crate::hop`, spec §5.11) before any other processing, invokes
+//! the bundle's `transform` over the `bundle-executor` wire protocol
+//! (`crate::host_api`/`crate::capabilities`), applies the cross-app
+//! `_target_app_id` routing built-in (`crate::builtins`), and `XADD`s the
+//! result onto the destination bundle's own `:action` stream.
 //!
-//! This is the concrete consumer half of the M4 penguin-libs dependency
-//! pattern established in `Cargo.toml` (the git-dependency mechanism) and
-//! `crate::telemetry` (the sanitizing OTel wiring); this module is the
-//! third and final M1 crate wired into this skeleton
-//! (`penguin-bundle-host`/`penguin-connectors` remain `// TODO(M4)`,
-//! blocked on M2's executor/compiler -- see `crate::lib`).
+//! Structured exactly like `core/svc_action/src/dispatch.rs` (which
+//! explicitly names this module as "the M4 reference for this same
+//! drain-loop shape" in its own doc comment, before this landing filled
+//! it in): a private `StreamReader` trait wraps `penguin_spine::
+//! GroupReader::read` so `drain_batch`/`drain_loop` are unit-testable
+//! against a fake reader, and a `SpineOps` trait wraps the
+//! `ack`/`dead_letter`/`append` operations `handle_delivered` needs so
+//! those tests don't require a live Valkey. The real `run()` entry point
+//! wires the live Valkey/host-API connections.
 //!
-//! The drain loop's control flow (batch dispatch, shutdown handling) is
-//! split from `penguin_spine::GroupReader`'s actual `XREADGROUP` I/O behind
-//! the private [`StreamReader`] trait so it can be unit-tested against a
-//! fake reader -- `cargo test` has no live Valkey to connect to, and the
-//! real `GroupReader::connect` path is only exercised by a running service
-//! (or a future `testcontainers`-backed integration test, see
-//! `implementing-database-patterns` skill).
+//! **Wire-JSON convention for `transform` (spec §6.5/§6.6, assumption
+//! A2).** `core/bundle_executor/src/invoke.rs::on_invoke`'s `ExportKind::
+//! Transform` arm is the landed, normative convention this module matches
+//! exactly (not an independent choice, unlike `svc_action::dispatch`'s own
+//! documented `{"envelope":..., "config":...}` convention, which predates
+//! any landed executor-side reference): `InvokeBody.payload` is the WIT
+//! `platform-event` record's bindgen-generated JSON shape *directly* --
+//! `{"platform", "event_type", "actor", "payload_json", "occurred_at"}`,
+//! where `payload_json` is `penguin_spine::PlatformEvent.payload`
+//! (a JSON *object*) re-encoded as a canonical JSON *string* (WIT has no
+//! open-ended-object type, spec §6.5's own words: "every open-ended
+//! structure is carried as canonical UTF-8 JSON text"). The `Ok(Ok(reply))`
+//! result payload is `Option<PlatformEvent>` in that same shape (`null` for
+//! "no reply"); `Ok(Err(unsupported_stage))` is `{"unsupported_stage":
+//! {...}}`; a guest trap is a `Message::Error` frame, never a `Message::
+//! Result`. [`wire_platform_event`]/[`platform_event_from_wire`] are the
+//! two conversion functions this module owns for that shape.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use penguin_bundle_host::wire::{ErrorCode, ExportKind, InvokeBody, Message, TraceContext};
 use penguin_spine::{
-    Delivered, Grant, GroupReader, SpineClient, SpineConfig, SpineError, SpineMetrics, Stage,
+    Delivered, DlqError, DlqErrorKind, Grant, GroupReader, PlatformEvent, Scope, SpineClient,
+    SpineConfig, SpineError, SpineMetrics, Stage, StageEnvelope,
 };
 
-/// Abstraction over [`penguin_spine::GroupReader::read`]'s exact signature,
-/// implemented for `GroupReader` itself as a pure delegation. Exists solely
-/// so [`drain_loop`] can be driven by a fake reader in tests.
+use crate::builtins::RouteDecision;
+use crate::capabilities::{CapabilityHandler, StageCapabilities};
+use crate::hop::KeyRing;
+use crate::host_api::{Connection, ConnectionRegistry, HostApiError};
+
+/// Converts a `penguin_spine::PlatformEvent` into the WIT `platform-event`
+/// record's JSON shape (see the module doc's wire-JSON convention) -- the
+/// `InvokeBody.payload` this module sends for `ExportKind::Transform`.
+fn wire_platform_event(event: &PlatformEvent) -> Result<serde_json::Value, serde_json::Error> {
+    let payload_json = serde_json::to_string(&event.payload)?;
+    Ok(serde_json::json!({
+        "platform": event.platform,
+        "event_type": event.event_type,
+        "actor": event.actor,
+        "payload_json": payload_json,
+        "occurred_at": event.occurred_at,
+    }))
+}
+
+/// The inverse of [`wire_platform_event`]: parses a `transform` result's
+/// wire-shaped `platform-event` JSON back into a `penguin_spine::
+/// PlatformEvent`, going through that type's own strict `Deserialize`
+/// impl (never constructed directly from untrusted bundle output) so a
+/// malformed field (empty `platform`/`event_type`, a bad `occurred_at`,
+/// invalid `payload_json`) is rejected the same way any other envelope
+/// input would be -- a bundle's return value is guest-controlled and must
+/// never be trusted more than wire input from any other untrusted source.
+/// `source` is never populated from bundle output (spec §6.5's WIT record
+/// has no `source` field at all -- it is stage-injected provenance, not a
+/// bundle-settable value).
+fn platform_event_from_wire(wire: &serde_json::Value) -> Result<PlatformEvent, InvokeError> {
+    let obj = wire.as_object().ok_or_else(|| {
+        InvokeError::MalformedPayload("transform reply is not a JSON object".to_string())
+    })?;
+    let payload_json = obj
+        .get("payload_json")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            InvokeError::MalformedPayload("missing string field 'payload_json'".to_string())
+        })?;
+    let payload: serde_json::Value = serde_json::from_str(payload_json).map_err(|e| {
+        InvokeError::MalformedPayload(format!("payload_json is not valid JSON: {e}"))
+    })?;
+    let reconstructed = serde_json::json!({
+        "platform": obj.get("platform"),
+        "event_type": obj.get("event_type"),
+        "actor": obj.get("actor"),
+        "payload": payload,
+        "occurred_at": obj.get("occurred_at"),
+        "source": null,
+    });
+    serde_json::from_value(reconstructed)
+        .map_err(|e| InvokeError::MalformedPayload(format!("invalid platform-event: {e}")))
+}
+
+/// Errors invoking the bundle's `transform` export over the host-API
+/// connection -- distinct from the bundle's own `result<option<
+/// platform-event>, unsupported-stage>` business-level return, which
+/// [`TransformOutcome`] classifies. An `InvokeError` means the invocation
+/// itself never produced a bundle-classified outcome at all
+/// (infrastructure failure or malformed guest output) and is DLQ'd
+/// directly (spec §6.3's `call_timeout`/`bundle_trap`/`bundle_error`/
+/// `host_call_denied`/`executor_unavailable` DLQ kinds are all
+/// infrastructure-level).
+#[derive(Debug, thiserror::Error)]
+pub enum InvokeError {
+    #[error("no executor connection available")]
+    NoExecutor,
+    #[error("host-api error: {0}")]
+    HostApi(#[from] HostApiError),
+    #[error("executor reported error {code:?}: {message}")]
+    ExecutorError { code: ErrorCode, message: String },
+    #[error("transform payload encode/decode failed: {0}")]
+    MalformedPayload(String),
+}
+
+/// The bundle's `transform` export's classified return value (spec §6.5:
+/// `result<option<platform-event>, unsupported-stage>`).
+#[derive(Debug)]
+pub enum TransformOutcome {
+    /// `none` -- "no reply"; the event is dropped, nothing is enqueued.
+    NoReply,
+    /// `ok(some(event))` -- enqueue `event` (after cross-app routing).
+    /// Boxed (clippy::large_enum_variant): `PlatformEvent` is far larger
+    /// than the other variants.
+    Reply(Box<PlatformEvent>),
+    /// `err(unsupported-stage)` -- the bundle does not implement
+    /// `process-stage.transform` at all; a manifest/registration bug
+    /// (spec §6.5), DLQ'd with `error.kind = "bundle_error"`.
+    UnsupportedStage,
+}
+
+/// Maps an `ErrorCode` (spec §6.6) reported on an `invoke`'s reply onto
+/// the closest `penguin_spine::DlqErrorKind` (spec §6.3's ten-value
+/// vocabulary, which has no 1:1 protocol-error kind for every `ErrorCode`
+/// variant) -- grouped by what the failure actually means operationally:
+/// a deadline/memory/trap/host-call-denial maps to its own dedicated kind;
+/// anything naming a broken bundle registration (unknown bundle, digest
+/// mismatch, load failure, missing export, malformed frame) maps to
+/// `BundleError`; anything naming a broken *connection*/protocol maps to
+/// `ExecutorUnavailable`.
+fn error_code_to_dlq_kind(code: ErrorCode) -> DlqErrorKind {
+    match code {
+        ErrorCode::ExecutorDeadline => DlqErrorKind::CallTimeout,
+        ErrorCode::MemoryLimit => DlqErrorKind::MemoryLimit,
+        ErrorCode::WasmTrap => DlqErrorKind::BundleTrap,
+        // `HostCallFailed` (the host-call attempt itself errored) buckets
+        // with `HostCallDenied` (an ungranted capability) -- the ten-value
+        // `DlqErrorKind` vocabulary has no separate "host call technically
+        // failed" kind, and both name a problem in the same host-call
+        // subsystem rather than the bundle's own registration or a
+        // deadline/memory/trap condition.
+        ErrorCode::HostCallDenied | ErrorCode::HostCallFailed => DlqErrorKind::HostCallDenied,
+        ErrorCode::UnknownBundle
+        | ErrorCode::DigestMismatch
+        | ErrorCode::LoadFailed
+        | ErrorCode::ExportMissing
+        | ErrorCode::MalformedFrame => DlqErrorKind::BundleError,
+        ErrorCode::ProtocolVersion
+        | ErrorCode::FrameTooLarge
+        | ErrorCode::UnsandboxedExecutor
+        | ErrorCode::ShuttingDown => DlqErrorKind::ExecutorUnavailable,
+    }
+}
+
+/// Invokes the bundle's `transform` export for one delivered event over
+/// `conn`, scoped to `capabilities` for exactly this call (see
+/// `crate::host_api`'s per-invoke scoping design). Returns the classified
+/// [`TransformOutcome`] on any *executor-answered* reply (`result` frame,
+/// success or `unsupported_stage` alike); an `InvokeError` covers every
+/// case that never produced one (host-api failure, guest trap, malformed
+/// reply payload).
+pub async fn invoke_transform(
+    conn: &Connection,
+    app_id: &str,
+    digest: &str,
+    event: &PlatformEvent,
+    deadline_ms: u64,
+    trace: Option<TraceContext>,
+    capabilities: Arc<dyn CapabilityHandler>,
+) -> Result<TransformOutcome, InvokeError> {
+    let payload =
+        wire_platform_event(event).map_err(|e| InvokeError::MalformedPayload(e.to_string()))?;
+    let reply = conn
+        .invoke(
+            InvokeBody {
+                app_id: app_id.to_string(),
+                digest: digest.to_string(),
+                export: ExportKind::Transform,
+                payload,
+                deadline_ms,
+                trace,
+            },
+            capabilities,
+        )
+        .await?;
+    match reply.message {
+        Message::Result(body) => {
+            if body.payload.is_null() {
+                return Ok(TransformOutcome::NoReply);
+            }
+            if let Some(obj) = body.payload.as_object() {
+                if obj.contains_key("unsupported_stage") {
+                    return Ok(TransformOutcome::UnsupportedStage);
+                }
+            }
+            let event = platform_event_from_wire(&body.payload)?;
+            Ok(TransformOutcome::Reply(Box::new(event)))
+        }
+        Message::Error(e) => Err(InvokeError::ExecutorError {
+            code: e.code,
+            message: e.message,
+        }),
+        _ => Err(InvokeError::MalformedPayload(
+            "expected result or error frame".to_string(),
+        )),
+    }
+}
+
+/// Abstraction over [`penguin_spine::GroupReader::read`]'s exact signature.
+/// Exists solely so [`drain_loop`] can be driven by a fake reader in tests.
 trait StreamReader {
     async fn read(&mut self) -> Result<Vec<Delivered>, SpineError>;
 }
@@ -40,66 +234,288 @@ impl StreamReader for GroupReader {
     }
 }
 
-/// The executor-invocation seam (spec SS4.2, SS16's M4 row). Every entry
-/// `penguin-spine` successfully reads and deserializes reaches exactly this
-/// point and no further in the M4 skeleton -- it is logged for
-/// observability and then intentionally left un-acked: an unacknowledged
-/// entry stays in the consumer group's pending-entries list (at-least-once
-/// delivery, spec SS5.3), which is the correct outcome for work that was
-/// never actually attempted, not a bug to fix later.
+/// Abstraction over the three [`penguin_spine::SpineClient`] operations
+/// [`handle_delivered`] needs (`ack`/`dead_letter`/`append`) -- narrow
+/// trait, same rationale as `svc_action::dispatch::SpineOps`: a live
+/// Valkey connection is `SpineClient::connect`'s own concern (already
+/// covered by `penguin-spine`'s own test suite), not something every
+/// caller of this module's control flow should need just to exercise it.
+pub trait SpineOps: Send + Sync {
+    fn ack<'a>(
+        &'a self,
+        d: &'a Delivered,
+        app_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SpineError>> + Send + 'a>>;
+
+    fn dead_letter<'a>(
+        &'a self,
+        d: &'a Delivered,
+        err: &'a DlqError,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SpineError>> + Send + 'a>>;
+
+    fn append<'a>(
+        &'a self,
+        stream: &'a str,
+        env: &'a StageEnvelope,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, SpineError>> + Send + 'a>>;
+}
+
+impl SpineOps for SpineClient {
+    fn ack<'a>(
+        &'a self,
+        d: &'a Delivered,
+        app_id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SpineError>> + Send + 'a>>
+    {
+        Box::pin(SpineClient::ack(self, d, app_id))
+    }
+
+    fn dead_letter<'a>(
+        &'a self,
+        d: &'a Delivered,
+        err: &'a DlqError,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SpineError>> + Send + 'a>>
+    {
+        Box::pin(SpineClient::dead_letter(self, d, err))
+    }
+
+    fn append<'a>(
+        &'a self,
+        stream: &'a str,
+        env: &'a StageEnvelope,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, SpineError>> + Send + 'a>>
+    {
+        Box::pin(SpineClient::append(self, stream, env))
+    }
+}
+
+/// Everything [`handle_delivered`] needs beyond the entry itself --
+/// bundled so `drain_batch`/`drain_loop`/`run` don't carry an
+/// ever-growing parameter list. Mirrors `svc_action::dispatch::
+/// DispatchDeps`'s shape.
+pub struct ProcessDeps<S: SpineOps> {
+    pub app_id: String,
+    /// Interim substitute for the distribution poll's resolved digest
+    /// (spec §6.7) -- `crate::lib::try_start_process_loop`'s
+    /// `PROCESS_BUNDLE_DIGEST`. Empty disables nothing by itself: an
+    /// empty digest is simply sent as-is and the executor reports
+    /// `UNKNOWN_BUNDLE`, mapped to `DlqErrorKind::BundleError` like any
+    /// other unloaded-bundle invoke -- the same "caller's responsibility
+    /// until the poll client lands" scope `svc_action::dispatch::
+    /// ensure_loaded`'s doc comment documents for its own crate.
+    pub digest: String,
+    pub key_ring: KeyRing,
+    pub connections: Arc<ConnectionRegistry>,
+    pub call_timeout_ms: u64,
+    /// See `crate::builtins::resolve_cross_app_route`'s doc for the
+    /// `target_app_id -> approved tenant` shape and its TODO(M4+) real
+    /// source.
+    pub approved_targets: HashMap<String, String>,
+    /// This pod's own identity (`penguin_spine::SpineConfig::consumer_id`,
+    /// `SPINE_CONSUMER_ID`) -- the value a `DlqError.consumer_id` must
+    /// carry (matching `penguin_spine::client::claim_stale`'s convention:
+    /// the *consumer* that owned the entry, never the entry's own id).
+    pub consumer_id: String,
+    pub spine: S,
+    pub metrics: Arc<dyn SpineMetrics>,
+}
+
+/// Handles exactly one delivered entry end to end: hop-verify, invoke
+/// `transform`, apply cross-app routing, and either enqueue+ack or
+/// dead-letter. Returns `Ok(())` in every case where the entry was
+/// terminally handled (acked, dropped-and-acked, or dead-lettered) --
+/// only a `SpineError` from the ack/DLQ/append write itself propagates,
+/// matching `svc_action::dispatch::handle_delivered`'s identical
+/// error-handling shape.
 ///
-/// TODO(M4): executor integration -- blocked on bundle-executor (Wave 2).
-/// Once the executor binary exists, this function additionally invokes the
-/// bundle's `transform` over its mTLS wire protocol, runs the stage
-/// built-ins (moderation gate, enforcement routing, cross-app
-/// `_target_app_id` routing) around that call, `SpineClient::append`s the
-/// result onto the bundle's `:action` stream, and only then
-/// `SpineClient::ack`s the source entry -- see SS4.2.
-fn handle_delivered(d: &Delivered, metrics: &dyn SpineMetrics) {
-    tracing::info!(
-        stream = %d.stream,
-        entry_id = %d.entry_id,
-        app_id = %d.env.app_id,
-        tenant = %d.env.tenant,
-        event_type = %d.env.event.event_type,
-        deliveries = d.deliveries,
-        "delivered entry received; executor integration is TODO(M4), blocked on bundle-executor (Wave 2)"
+/// **Not yet wired here (documented, not silently skipped):** the
+/// content-moderation gate (`crate::builtins::run_moderation_gate`, an
+/// honest TODO(M4+) seam that always returns "no match" today, so wiring
+/// it in would currently be a no-op); spec §5.3's consumer-side `consumes.
+/// event_types`/`filters` cheap-skip optimization (needs the bundle's
+/// resolved manifest, itself blocked on the same distribution poll gap);
+/// and calling `svc_action::dispatch`-style `ensure_loaded` before invoke
+/// (same "caller's responsibility until the poll lands" scope as that
+/// crate's own M3 landing -- see [`ProcessDeps::digest`]'s doc).
+async fn handle_delivered<S: SpineOps>(
+    d: &Delivered,
+    deps: &ProcessDeps<S>,
+) -> Result<(), SpineError> {
+    // Spec §5.11: hop verification runs before any other processing.
+    // Verified against THIS entry's own `d.stream` (not a single fixed
+    // key, unlike `svc_action::dispatch`'s action-stream reader) --
+    // process's `GroupReader` is granted potentially many ingest-source
+    // streams at once (spec §5.1/§5.2), and a batch returned by one
+    // `read()` call can mix entries from several of them.
+    if let Err(reason) = crate::hop::verify_hop(&deps.key_ring, &d.env, &d.stream) {
+        deps.metrics
+            .tenant_boundary_violation("process", reason.as_metric_reason());
+        tracing::error!(
+            app_id = %d.env.app_id,
+            tenant = %d.env.tenant,
+            reason = reason.as_metric_reason(),
+            "hop verification failed, dead-lettering (never retried)"
+        );
+        let err = DlqError {
+            kind: DlqErrorKind::TenantBoundary,
+            code: "TENANT_BOUNDARY".to_string(),
+            message: reason.to_string(),
+            detail: None,
+            artifact_digest: Some(deps.digest.clone()),
+            consumer_id: deps.consumer_id.clone(),
+        };
+        return deps.spine.dead_letter(d, &err).await;
+    }
+
+    let Some(connection) = deps.connections.active() else {
+        tracing::warn!(app_id = %deps.app_id, "no executor connection available, dead-lettering for redelivery");
+        let err = DlqError {
+            kind: DlqErrorKind::ExecutorUnavailable,
+            code: "EXECUTOR_UNAVAILABLE".to_string(),
+            message: "no active host-api connection".to_string(),
+            detail: None,
+            artifact_digest: Some(deps.digest.clone()),
+            consumer_id: deps.consumer_id.clone(),
+        };
+        return deps.spine.dead_letter(d, &err).await;
+    };
+
+    // Per-invoke capability scope (see `crate::host_api`/`crate::
+    // capabilities`'s per-invoke-scoping design): built fresh from THIS
+    // envelope's own (tenant, community, app_id), never a fixed
+    // connection-lifetime default.
+    let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
+        d.env.tenant.clone(),
+        d.env.community.clone(),
+        deps.app_id.clone(),
+    ));
+    let trace = d.env.trace.as_ref().map(|t| TraceContext {
+        traceparent: t.traceparent.clone(),
+        tracestate: t.tracestate.clone(),
+    });
+
+    let outcome = invoke_transform(
+        &connection,
+        &deps.app_id,
+        &deps.digest,
+        &d.env.event,
+        deps.call_timeout_ms,
+        trace,
+        capabilities,
+    )
+    .await;
+
+    let event_out = match outcome {
+        Err(InvokeError::ExecutorError { code, message }) => {
+            let kind = error_code_to_dlq_kind(code);
+            tracing::error!(app_id = %deps.app_id, ?code, %message, "transform invoke failed, dead-lettering");
+            let err = DlqError {
+                kind,
+                code: format!("{code:?}"),
+                message,
+                detail: None,
+                artifact_digest: Some(deps.digest.clone()),
+                consumer_id: deps.consumer_id.clone(),
+            };
+            return deps.spine.dead_letter(d, &err).await;
+        }
+        Err(e) => {
+            tracing::error!(app_id = %deps.app_id, error = %e, "transform invoke failed, dead-lettering");
+            let err = DlqError {
+                kind: DlqErrorKind::ExecutorUnavailable,
+                code: "INVOKE_FAILED".to_string(),
+                message: e.to_string(),
+                detail: None,
+                artifact_digest: Some(deps.digest.clone()),
+                consumer_id: deps.consumer_id.clone(),
+            };
+            return deps.spine.dead_letter(d, &err).await;
+        }
+        Ok(TransformOutcome::UnsupportedStage) => {
+            tracing::error!(app_id = %deps.app_id, "bundle does not implement process-stage.transform, dead-lettering");
+            let err = DlqError {
+                kind: DlqErrorKind::BundleError,
+                code: "UNSUPPORTED_STAGE".to_string(),
+                message: "bundle does not implement process-stage.transform".to_string(),
+                detail: None,
+                artifact_digest: Some(deps.digest.clone()),
+                consumer_id: deps.consumer_id.clone(),
+            };
+            return deps.spine.dead_letter(d, &err).await;
+        }
+        Ok(TransformOutcome::NoReply) => {
+            tracing::info!(app_id = %deps.app_id, "transform returned no reply");
+            return deps.spine.ack(d, &deps.app_id).await;
+        }
+        Ok(TransformOutcome::Reply(event)) => *event,
+    };
+
+    let mut event_out = event_out;
+    let decision = crate::builtins::resolve_cross_app_route(
+        &mut event_out.payload,
+        &d.env.tenant,
+        &deps.approved_targets,
     );
-    metrics.consumer_skipped(&d.env.app_id, "executor_not_implemented");
+    let dest_app_id = match decision {
+        RouteDecision::Denied { reason } => {
+            deps.metrics.consumer_skipped(&deps.app_id, "route_denied");
+            tracing::warn!(
+                app_id = %deps.app_id,
+                reason,
+                "cross-app route denied, event dropped (not delivered anywhere)"
+            );
+            return deps.spine.ack(d, &deps.app_id).await;
+        }
+        RouteDecision::SameApp => deps.app_id.clone(),
+        RouteDecision::Redirect { target_app_id } => target_app_id,
+    };
+
+    let scope = Scope::new(d.env.tenant.clone(), d.env.community.clone());
+    let dest_stream = scope.action_stream(&dest_app_id);
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let envelope_out = StageEnvelope {
+        schema_version: penguin_spine::ENVELOPE_SCHEMA_VERSION,
+        tenant: d.env.tenant.clone(),
+        community: d.env.community.clone(),
+        app_id: dest_app_id,
+        stage: "action".to_string(),
+        event: event_out,
+        ts,
+        target_app_id: None,
+        workstream_id: d.env.workstream_id.clone(),
+        event_id: d.env.event_id.clone(),
+        session_id: d.env.session_id.clone(),
+        trace: d.env.trace.clone(),
+        binding: d.env.binding.clone(),
+    };
+
+    deps.spine.append(&dest_stream, &envelope_out).await?;
+    deps.spine.ack(d, &deps.app_id).await
 }
 
 /// Reads and dispatches exactly one batch, returning how many entries were
-/// handled. Split out from [`drain_loop`] so both the dispatch logic and
-/// the loop/shutdown control flow are independently unit-tested.
-async fn drain_batch<R: StreamReader>(
+/// handled.
+async fn drain_batch<R: StreamReader, S: SpineOps>(
     reader: &mut R,
-    metrics: &dyn SpineMetrics,
+    deps: &ProcessDeps<S>,
 ) -> Result<usize, SpineError> {
     let batch = reader.read().await?;
     for d in &batch {
-        handle_delivered(d, metrics);
+        handle_delivered(d, deps).await?;
     }
     Ok(batch.len())
 }
 
-/// Runs [`drain_batch`] in a loop until `shutdown` resolves. A
-/// `tokio::sync::oneshot::Receiver` is used (rather than a generic
-/// `Future`) specifically because it is safe to poll repeatedly after
-/// resolving -- `tokio::select!` re-polls every still-enabled branch on
-/// every loop iteration regardless of which branch it picks, and a
-/// one-shot-style future like `std::future::ready` would panic if it
-/// "loses" a race once and is polled again on the next iteration; a
-/// `oneshot::Receiver` instead keeps returning `Ready` once its sender is
-/// gone, so reusing `&mut shutdown` across iterations is sound.
-async fn drain_loop<R: StreamReader>(
+/// Runs [`drain_batch`] in a loop until `shutdown` resolves.
+async fn drain_loop<R: StreamReader, S: SpineOps>(
     mut reader: R,
-    metrics: Arc<dyn SpineMetrics>,
+    deps: ProcessDeps<S>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), SpineError> {
     loop {
         tokio::select! {
             _ = &mut shutdown => return Ok(()),
-            result = drain_batch(&mut reader, metrics.as_ref()) => {
+            result = drain_batch(&mut reader, &deps) => {
                 result?;
             }
         }
@@ -107,28 +523,31 @@ async fn drain_loop<R: StreamReader>(
 }
 
 /// Connects the spine DLQ client and a grant-scoped [`GroupReader`] for
-/// `app_id`'s process-stage streams, then runs the drain loop until
-/// `shutdown` resolves. This is the function `crate::run_with_shutdown`
-/// spawns as its own background task -- see the `// TODO(M4)` seam there.
-///
-/// `grants` is empty in every call site this skeleton has today: the
-/// `GET /api/v1/distribution/bundles?stage=process` poll that would
-/// resolve a bundle's granted ingest-source streams is itself blocked on
-/// M2 (spec SS4.2). `GroupReader::read` on an empty grant list returns
-/// `Ok(vec![])` immediately without blocking (see `penguin_spine`'s own
-/// `read` doc comment), so this still connects to Valkey for real and
-/// exercises the drain loop's shutdown path safely with nothing to read.
+/// `deps.app_id`'s ingest-source streams, then runs the drain loop until
+/// `shutdown` resolves. `grants` is resolved by
+/// `crate::lib::try_start_process_loop` from interim, env-driven config
+/// (see that module's doc for why -- the real `GET /api/v1/distribution/
+/// bundles?stage=process` poll, spec §6.7, is `TODO(M4+)`); each delivered
+/// entry is hop-verified against its OWN `Delivered::stream`, so `grants`
+/// may safely name more than one stream once that poll lands.
 pub async fn run(
     cfg: SpineConfig,
-    app_id: String,
     grants: Vec<Grant>,
-    metrics: Arc<dyn SpineMetrics>,
+    deps: ProcessDeps<SpineClient>,
     shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), SpineError> {
-    let dlq = SpineClient::connect(cfg.clone(), metrics.clone()).await?;
-    let reader =
-        GroupReader::connect(&cfg, grants, app_id, Stage::Process, dlq, metrics.clone()).await?;
-    drain_loop(reader, metrics, shutdown).await
+    let app_id = deps.app_id.clone();
+    let dlq = SpineClient::connect(cfg.clone(), deps.metrics.clone()).await?;
+    let reader = GroupReader::connect(
+        &cfg,
+        grants,
+        app_id,
+        Stage::Process,
+        dlq,
+        deps.metrics.clone(),
+    )
+    .await?;
+    drain_loop(reader, deps, shutdown).await
 }
 
 #[cfg(test)]
@@ -136,221 +555,568 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// A fully-formed, schema-valid [`Delivered`] entry for tests -- every
-    /// field on [`penguin_spine::StageEnvelope`] is `pub`, so constructing
-    /// one directly (bypassing strict JSON deserialization, which is
-    /// `penguin_spine`'s own concern, already covered by its own test
-    /// suite) is the simplest fixture for exercising this module's dispatch
-    /// logic.
-    fn fixture_delivered(app_id: &str) -> Delivered {
+    fn fixture_delivered(
+        tenant: &str,
+        community: Option<&str>,
+        ring: &KeyRing,
+        kid: &str,
+    ) -> Delivered {
+        let mac = penguin_spine::compute_binding_mac(
+            ring,
+            kid,
+            tenant,
+            community,
+            "00000000-0000-0000-0000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+            None,
+        )
+        .unwrap();
+        let community_segment = community.unwrap_or(penguin_spine::TENANT_WIDE_SEGMENT);
         Delivered {
-            stream: "waddles:t:acme:c:main:src:twitch:tw-channelA:events".to_string(),
+            stream: format!(
+                "waddles:t:{tenant}:c:{community_segment}:src:twitch:tw-channelA:events"
+            ),
             entry_id: "1234567890-0".to_string(),
-            env: penguin_spine::StageEnvelope {
-                schema_version: penguin_spine::ENVELOPE_SCHEMA_VERSION,
-                tenant: "acme".to_string(),
-                community: Some("main".to_string()),
-                app_id: app_id.to_string(),
-                stage: "process".to_string(),
-                event: penguin_spine::PlatformEvent {
-                    platform: "twitch".to_string(),
-                    event_type: "chat.message".to_string(),
-                    actor: Some("some_user".to_string()),
-                    payload: serde_json::Map::new(),
-                    occurred_at: "2026-09-22T00:00:00.000Z".to_string(),
-                    source: None,
+            env: serde_json::from_value(serde_json::json!({
+                "schema_version": 2,
+                "tenant": tenant,
+                "community": community,
+                "app_id": "waddles.bot.commands.default",
+                "stage": "process",
+                "event": {
+                    "platform": "twitch",
+                    "event_type": "chat.message",
+                    "actor": "some_user",
+                    "payload": {"text": "!songrequest foo"},
+                    "occurred_at": "2026-09-22T00:00:00.000Z",
+                    "source": null
                 },
-                ts: "2026-09-22T00:00:00.000Z".to_string(),
-                target_app_id: None,
-                workstream_id: "00000000-0000-0000-0000-000000000001".to_string(),
-                event_id: "00000000-0000-4000-8000-000000000002".to_string(),
-                session_id: None,
-                trace: None,
-                binding: penguin_spine::Binding {
-                    kid: "k1".to_string(),
-                    mac: "a".repeat(64),
-                },
-            },
+                "ts": "2026-09-22T00:00:00.000Z",
+                "target_app_id": null,
+                "workstream_id": "00000000-0000-0000-0000-000000000001",
+                "event_id": "00000000-0000-4000-8000-000000000002",
+                "session_id": null,
+                "trace": null,
+                "binding": {"kid": kid, "mac": mac}
+            }))
+            .unwrap(),
             deliveries: 1,
         }
     }
 
-    /// Records every `SpineMetrics` call it receives, for asserting exactly
-    /// which callback fired and with what arguments -- mirrors
-    /// `penguin_spine`'s own `RecordingMetrics` test helper.
-    #[derive(Default)]
-    struct RecordingMetrics {
-        calls: Mutex<Vec<(String, String)>>,
+    fn test_ring() -> KeyRing {
+        KeyRing::new(vec![("k1".to_string(), vec![9u8; 32])])
     }
 
-    impl SpineMetrics for RecordingMetrics {
+    #[test]
+    fn wire_platform_event_encodes_payload_as_a_json_string() {
+        let event = PlatformEvent {
+            platform: "twitch".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: Some("user".to_string()),
+            payload: serde_json::from_value(serde_json::json!({"text": "hi"})).unwrap(),
+            occurred_at: "2026-09-22T00:00:00.000Z".to_string(),
+            source: None,
+        };
+        let wire = wire_platform_event(&event).unwrap();
+        assert_eq!(wire["platform"], "twitch");
+        assert_eq!(wire["event_type"], "chat.message");
+        assert_eq!(wire["actor"], "user");
+        assert_eq!(wire["payload_json"], serde_json::json!(r#"{"text":"hi"}"#));
+        assert_eq!(wire["occurred_at"], "2026-09-22T00:00:00.000Z");
+    }
+
+    #[test]
+    fn platform_event_from_wire_round_trips_through_wire_platform_event() {
+        let event = PlatformEvent {
+            platform: "discord".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: None,
+            payload: serde_json::from_value(serde_json::json!({"a": 1})).unwrap(),
+            occurred_at: "2026-09-22T00:00:00.000Z".to_string(),
+            source: None,
+        };
+        let wire = wire_platform_event(&event).unwrap();
+        let round_tripped = platform_event_from_wire(&wire).unwrap();
+        assert_eq!(round_tripped.platform, "discord");
+        assert_eq!(round_tripped.actor, None);
+        assert_eq!(round_tripped.payload.get("a"), Some(&serde_json::json!(1)));
+    }
+
+    #[test]
+    fn platform_event_from_wire_rejects_missing_payload_json() {
+        let err = platform_event_from_wire(&serde_json::json!({"platform": "x"})).unwrap_err();
+        assert!(matches!(err, InvokeError::MalformedPayload(_)));
+    }
+
+    #[test]
+    fn platform_event_from_wire_rejects_empty_platform() {
+        let wire = serde_json::json!({
+            "platform": "",
+            "event_type": "chat.message",
+            "actor": null,
+            "payload_json": "{}",
+            "occurred_at": "2026-09-22T00:00:00.000Z",
+        });
+        assert!(platform_event_from_wire(&wire).is_err());
+    }
+
+    #[test]
+    fn platform_event_from_wire_rejects_a_non_object_wire_value() {
+        let err = platform_event_from_wire(&serde_json::json!("not-an-object")).unwrap_err();
+        assert!(matches!(err, InvokeError::MalformedPayload(_)));
+    }
+
+    #[test]
+    fn platform_event_from_wire_rejects_invalid_payload_json_string() {
+        let wire = serde_json::json!({
+            "platform": "twitch",
+            "event_type": "chat.message",
+            "actor": null,
+            "payload_json": "not-valid-json{{{",
+            "occurred_at": "2026-09-22T00:00:00.000Z",
+        });
+        let err = platform_event_from_wire(&wire).unwrap_err();
+        assert!(
+            matches!(err, InvokeError::MalformedPayload(msg) if msg.contains("not valid JSON"))
+        );
+    }
+
+    #[test]
+    fn error_code_mapping_covers_every_variant() {
+        assert_eq!(
+            error_code_to_dlq_kind(ErrorCode::ExecutorDeadline),
+            DlqErrorKind::CallTimeout
+        );
+        assert_eq!(
+            error_code_to_dlq_kind(ErrorCode::MemoryLimit),
+            DlqErrorKind::MemoryLimit
+        );
+        assert_eq!(
+            error_code_to_dlq_kind(ErrorCode::WasmTrap),
+            DlqErrorKind::BundleTrap
+        );
+        for code in [ErrorCode::HostCallDenied, ErrorCode::HostCallFailed] {
+            assert_eq!(error_code_to_dlq_kind(code), DlqErrorKind::HostCallDenied);
+        }
+        for code in [
+            ErrorCode::UnknownBundle,
+            ErrorCode::DigestMismatch,
+            ErrorCode::LoadFailed,
+            ErrorCode::ExportMissing,
+            ErrorCode::MalformedFrame,
+        ] {
+            assert_eq!(error_code_to_dlq_kind(code), DlqErrorKind::BundleError);
+        }
+        for code in [
+            ErrorCode::ProtocolVersion,
+            ErrorCode::FrameTooLarge,
+            ErrorCode::UnsandboxedExecutor,
+            ErrorCode::ShuttingDown,
+        ] {
+            assert_eq!(
+                error_code_to_dlq_kind(code),
+                DlqErrorKind::ExecutorUnavailable
+            );
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSpineMetrics {
+        violations: Mutex<Vec<(String, String)>>,
+        skipped: Mutex<Vec<(String, String)>>,
+    }
+    impl SpineMetrics for RecordingSpineMetrics {
+        fn tenant_boundary_violation(&self, stage: &str, reason: &str) {
+            self.violations
+                .lock()
+                .unwrap()
+                .push((stage.to_string(), reason.to_string()));
+        }
         fn consumer_skipped(&self, app_id: &str, reason: &str) {
-            self.calls
+            self.skipped
                 .lock()
                 .unwrap()
                 .push((app_id.to_string(), reason.to_string()));
         }
     }
 
-    /// A [`StreamReader`] fed a fixed sequence of canned results, one per
-    /// call to `read()`; the last result repeats once the sequence is
-    /// exhausted so tests that race against a shutdown signal never panic
-    /// on running out of fixtures.
-    struct FakeReader {
-        batches: Vec<Result<Vec<Delivered>, SpineErrorKind>>,
-        calls: usize,
+    #[derive(Default)]
+    struct FakeSpineOps {
+        acked: Mutex<Vec<String>>,
+        dead_lettered: Mutex<Vec<(String, DlqErrorKind, String)>>,
+        appended: Mutex<Vec<(String, StageEnvelope)>>,
     }
 
-    /// `SpineError` doesn't implement `Clone` (its `Redis`/`Json` variants
-    /// wrap non-`Clone` external error types), so `FakeReader` stores this
-    /// small `Clone`-able stand-in and builds the real `SpineError` lazily
-    /// in `read()`.
-    #[derive(Clone)]
-    enum SpineErrorKind {
-        Config(String),
-    }
+    impl SpineOps for FakeSpineOps {
+        fn ack<'a>(
+            &'a self,
+            d: &'a Delivered,
+            _app_id: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SpineError>> + Send + 'a>>
+        {
+            self.acked.lock().unwrap().push(d.entry_id.clone());
+            Box::pin(async { Ok(()) })
+        }
 
-    impl FakeReader {
-        fn new(batches: Vec<Result<Vec<Delivered>, SpineErrorKind>>) -> Self {
-            Self { batches, calls: 0 }
+        fn dead_letter<'a>(
+            &'a self,
+            d: &'a Delivered,
+            err: &'a DlqError,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), SpineError>> + Send + 'a>>
+        {
+            self.dead_lettered.lock().unwrap().push((
+                d.entry_id.clone(),
+                err.kind,
+                err.consumer_id.clone(),
+            ));
+            Box::pin(async { Ok(()) })
+        }
+
+        fn append<'a>(
+            &'a self,
+            stream: &'a str,
+            env: &'a StageEnvelope,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<String, SpineError>> + Send + 'a>,
+        > {
+            self.appended
+                .lock()
+                .unwrap()
+                .push((stream.to_string(), env.clone()));
+            Box::pin(async { Ok("1-0".to_string()) })
         }
     }
 
-    impl StreamReader for FakeReader {
-        async fn read(&mut self) -> Result<Vec<Delivered>, SpineError> {
-            let idx = self.calls.min(self.batches.len() - 1);
-            self.calls += 1;
-            match &self.batches[idx] {
-                Ok(batch) => Ok(batch.clone()),
-                Err(SpineErrorKind::Config(msg)) => Err(SpineError::Config(msg.clone())),
-            }
-        }
+    fn test_deps(
+        spine: FakeSpineOps,
+        connections: Arc<ConnectionRegistry>,
+    ) -> ProcessDeps<FakeSpineOps> {
+        test_deps_with_metrics(spine, connections).0
+    }
+
+    /// Same as [`test_deps`], but also returns the concrete
+    /// `RecordingSpineMetrics` handle so a test can assert on it directly
+    /// -- `ProcessDeps::metrics` is `Arc<dyn SpineMetrics>`, which can't
+    /// be downcast back without this.
+    fn test_deps_with_metrics(
+        spine: FakeSpineOps,
+        connections: Arc<ConnectionRegistry>,
+    ) -> (ProcessDeps<FakeSpineOps>, Arc<RecordingSpineMetrics>) {
+        let metrics = Arc::new(RecordingSpineMetrics::default());
+        let deps = ProcessDeps {
+            app_id: "waddles.bot.commands.default".to_string(),
+            digest: "sha256:00".to_string(),
+            key_ring: test_ring(),
+            connections,
+            call_timeout_ms: 2000,
+            approved_targets: HashMap::new(),
+            consumer_id: "test-pod-consumer".to_string(),
+            spine,
+            metrics: metrics.clone() as Arc<dyn SpineMetrics>,
+        };
+        (deps, metrics)
     }
 
     #[tokio::test]
-    async fn handle_delivered_reports_executor_not_implemented() {
-        let metrics = RecordingMetrics::default();
-        let delivered = fixture_delivered("waddles.bot.commands.default");
-        handle_delivered(&delivered, &metrics);
-        let calls = metrics.calls.lock().unwrap();
+    async fn handle_delivered_dead_letters_on_hop_verification_failure() {
+        let ring = test_ring();
+        // `d.stream` (not a separately-passed key) is what `handle_delivered`
+        // verifies against now (see its doc) -- build a fixture whose
+        // `env` was minted for tenant "acme" but whose `stream` names a
+        // DIFFERENT tenant, the Sec14.11-style cross-tenant-replay shape.
+        let mut d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        d.stream = "waddles:t:other-tenant:c:main:src:twitch:tw-channelA:events".to_string();
+
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 0);
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, DlqErrorKind::TenantBoundary);
+        assert_eq!(dead_lettered[0].2, deps.consumer_id);
+        assert_ne!(dead_lettered[0].2, d.entry_id);
+    }
+
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_when_no_executor_connection() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, DlqErrorKind::ExecutorUnavailable);
+    }
+
+    /// Drives a fake executor over an in-memory duplex: completes the
+    /// `hello`/`hello-ok` handshake, then answers exactly one `invoke`
+    /// with `result.payload = response`.
+    async fn connected_registry_with_fake_executor(
+        response: serde_json::Value,
+    ) -> Arc<ConnectionRegistry> {
+        use crate::capabilities::DenyAllCapabilities;
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, Frame, HelloBody, HelloOkBody, ResultBody, SandboxInfo,
+        };
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            let hello_ok = read_frame(&mut executor_io).await.unwrap();
+            assert!(matches!(hello_ok.message, Message::HelloOk(_)));
+
+            let invoke = read_frame(&mut executor_io).await.unwrap();
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    invoke.id,
+                    Message::Result(ResultBody {
+                        payload: response,
+                        duration_ms: 1,
+                        fuel_used: 0,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-process".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let registry = Arc::new(ConnectionRegistry::new());
+        registry.set_active(connection);
+        registry
+    }
+
+    #[tokio::test]
+    async fn handle_delivered_no_reply_acks_without_enqueue() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let connections = connected_registry_with_fake_executor(serde_json::json!(null)).await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+        assert!(deps.spine.appended.lock().unwrap().is_empty());
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_delivered_reply_enqueues_onto_the_same_apps_action_stream_and_acks() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let reply = wire_platform_event(&PlatformEvent {
+            platform: "twitch".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: Some("bot".to_string()),
+            payload: serde_json::from_value(serde_json::json!({"text": "pong"})).unwrap(),
+            occurred_at: "2026-09-22T00:00:01.000Z".to_string(),
+            source: None,
+        })
+        .unwrap();
+        let connections = connected_registry_with_fake_executor(reply).await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+        let appended = deps.spine.appended.lock().unwrap();
+        assert_eq!(appended.len(), 1);
         assert_eq!(
-            *calls,
+            appended[0].0,
+            "waddles:t:acme:c:main:app:waddles.bot.commands.default:action"
+        );
+        assert_eq!(appended[0].1.stage, "action");
+        assert_eq!(appended[0].1.app_id, "waddles.bot.commands.default");
+        // Binding/workstream/event_id carried unchanged (see the module
+        // doc: the MAC formula doesn't cover app_id/stage).
+        assert_eq!(appended[0].1.binding, d.env.binding);
+        assert_eq!(appended[0].1.workstream_id, d.env.workstream_id);
+        assert_eq!(appended[0].1.event_id, d.env.event_id);
+        assert_eq!(
+            appended[0].1.event.payload.get("text"),
+            Some(&serde_json::json!("pong"))
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_delivered_redirects_to_an_approved_cross_app_target() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let reply = wire_platform_event(&PlatformEvent {
+            platform: "twitch".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: None,
+            payload: serde_json::from_value(serde_json::json!({
+                "text": "posted",
+                "_target_app_id": "waddles.community.forums.default"
+            }))
+            .unwrap(),
+            occurred_at: "2026-09-22T00:00:01.000Z".to_string(),
+            source: None,
+        })
+        .unwrap();
+        let connections = connected_registry_with_fake_executor(reply).await;
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.approved_targets.insert(
+            "waddles.community.forums.default".to_string(),
+            "acme".to_string(),
+        );
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        let appended = deps.spine.appended.lock().unwrap();
+        assert_eq!(appended.len(), 1);
+        assert_eq!(
+            appended[0].0,
+            "waddles:t:acme:c:main:app:waddles.community.forums.default:action"
+        );
+        assert_eq!(appended[0].1.app_id, "waddles.community.forums.default");
+        assert!(!appended[0].1.event.payload.contains_key("_target_app_id"));
+    }
+
+    #[tokio::test]
+    async fn handle_delivered_drops_a_denied_cross_app_route_without_enqueue() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let reply = wire_platform_event(&PlatformEvent {
+            platform: "twitch".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: None,
+            payload: serde_json::from_value(serde_json::json!({
+                "text": "posted",
+                "_target_app_id": "waddles.other.app.default"
+            }))
+            .unwrap(),
+            occurred_at: "2026-09-22T00:00:01.000Z".to_string(),
+            source: None,
+        })
+        .unwrap();
+        let connections = connected_registry_with_fake_executor(reply).await;
+        let spine = FakeSpineOps::default();
+        let (deps, metrics) = test_deps_with_metrics(spine, connections);
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert!(deps.spine.appended.lock().unwrap().is_empty());
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+        assert_eq!(
+            *metrics.skipped.lock().unwrap(),
             vec![(
                 "waddles.bot.commands.default".to_string(),
-                "executor_not_implemented".to_string()
+                "route_denied".to_string()
             )]
         );
     }
 
     #[tokio::test]
-    async fn drain_batch_dispatches_every_entry_in_the_batch() {
-        let metrics = RecordingMetrics::default();
-        let mut reader = FakeReader::new(vec![Ok(vec![
-            fixture_delivered("waddles.bot.commands.default"),
-            fixture_delivered("waddles.bot.commands.default"),
-        ])]);
-        let count = drain_batch(&mut reader, &metrics).await.unwrap();
-        assert_eq!(count, 2);
-        assert_eq!(metrics.calls.lock().unwrap().len(), 2);
+    async fn handle_delivered_unsupported_stage_dead_letters_as_bundle_error() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let connections = connected_registry_with_fake_executor(
+            serde_json::json!({"unsupported_stage": {"stage": "process"}}),
+        )
+        .await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, DlqErrorKind::BundleError);
     }
 
     #[tokio::test]
-    async fn drain_batch_on_empty_batch_returns_zero_without_dispatch() {
-        let metrics = RecordingMetrics::default();
-        let mut reader = FakeReader::new(vec![Ok(vec![])]);
-        let count = drain_batch(&mut reader, &metrics).await.unwrap();
-        assert_eq!(count, 0);
-        assert!(metrics.calls.lock().unwrap().is_empty());
-    }
+    async fn drain_batch_dispatches_every_entry_and_acks_each() {
+        struct OneShotReader {
+            batch: Option<Vec<Delivered>>,
+        }
+        impl StreamReader for OneShotReader {
+            async fn read(&mut self) -> Result<Vec<Delivered>, SpineError> {
+                Ok(self.batch.take().unwrap_or_default())
+            }
+        }
 
-    #[tokio::test]
-    async fn drain_batch_propagates_reader_error() {
-        let metrics = RecordingMetrics::default();
-        let mut reader = FakeReader::new(vec![Err(SpineErrorKind::Config("boom".to_string()))]);
-        let err = drain_batch(&mut reader, &metrics).await.unwrap_err();
-        assert!(matches!(err, SpineError::Config(msg) if msg == "boom"));
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let connections = connected_registry_with_fake_executor(serde_json::json!(null)).await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+        let mut reader = OneShotReader {
+            batch: Some(vec![d.clone()]),
+        };
+
+        let count = drain_batch(&mut reader, &deps).await.unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn drain_loop_stops_once_shutdown_resolves() {
-        let metrics: Arc<dyn SpineMetrics> = Arc::new(RecordingMetrics::default());
-        // Always returns an empty batch -- the loop would otherwise spin
-        // forever without ever yielding, since neither branch here ever
-        // blocks.
-        let reader = FakeReader::new(vec![Ok(vec![])]);
+        struct EmptyReader;
+        impl StreamReader for EmptyReader {
+            async fn read(&mut self) -> Result<Vec<Delivered>, SpineError> {
+                Ok(Vec::new())
+            }
+        }
+
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
         let (tx, rx) = tokio::sync::oneshot::channel();
         tx.send(()).unwrap();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            drain_loop(reader, metrics, rx),
+            drain_loop(EmptyReader, deps, rx),
         )
         .await
         .expect("drain_loop must return promptly once shutdown resolves");
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn drain_loop_propagates_reader_error_before_shutdown() {
-        let metrics: Arc<dyn SpineMetrics> = Arc::new(RecordingMetrics::default());
-        let reader = FakeReader::new(vec![Err(SpineErrorKind::Config("boom".to_string()))]);
-        // Never resolves: the loop must return on the reader error, not by
-        // racing a shutdown signal that never fires.
-        let (_tx, rx) = tokio::sync::oneshot::channel();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            drain_loop(reader, metrics, rx),
-        )
-        .await
-        .expect("drain_loop must return promptly on a reader error");
-        assert!(matches!(result, Err(SpineError::Config(msg)) if msg == "boom"));
-    }
-
-    /// A syntactically valid [`SpineConfig`] that never actually connects --
-    /// `security_transport_tls`/`security_transport_auth` are both disabled
-    /// so `SpineConfig::validate()` accepts a plain `redis://` URL with no
-    /// credentials, and port `1` (a privileged port with no listener in any
-    /// CI/dev sandbox) refuses the TCP connection immediately rather than
-    /// timing out, so [`penguin_spine::SpineClient::connect`]'s
-    /// retry-with-backoff probe fails fast.
-    fn unreachable_spine_config() -> SpineConfig {
-        SpineConfig {
-            valkey_url: "redis://127.0.0.1:1/".to_string(),
-            valkey_username: None,
-            valkey_password: None,
-            valkey_ca_file: std::path::PathBuf::from("/nonexistent-ca.crt"),
-            security_transport_tls: false,
-            security_transport_auth: false,
-            consumer_id: "test-consumer".to_string(),
-            stream_maxlen: 100,
-            read_count: 1,
-            block_ms: 1_000,
-            claim_idle_ms: 30_000,
-            claim_interval_ms: 15_000,
-            stats_interval_ms: 10_000,
-            pel_alert: 5_000,
-            dlq_maxlen: 100,
-            max_deliveries: 5,
-            drain_socket_timeout_s: 65,
-            relay_block_timeout_s: 30,
-        }
-    }
-
-    #[tokio::test]
-    async fn run_propagates_a_connect_error_without_ever_reaching_drain_loop() {
-        let metrics: Arc<dyn SpineMetrics> = Arc::new(RecordingMetrics::default());
-        let (_tx, rx) = tokio::sync::oneshot::channel();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            run(
-                unreachable_spine_config(),
-                "waddles.bot.commands.default".to_string(),
-                Vec::new(),
-                metrics,
-                rx,
-            ),
-        )
-        .await
-        .expect("SpineClient::connect must fail fast against a refused connection, not hang");
-        assert!(result.is_err(), "connecting to a refused port must error");
     }
 }

@@ -18,6 +18,7 @@
 
 use std::fmt;
 use std::net::IpAddr;
+use std::path::PathBuf;
 
 use clap::Parser;
 use thiserror::Error;
@@ -122,6 +123,62 @@ pub struct CliConfig {
     /// supply this value plus the instance's granted-stream list.
     #[arg(long, env = "PROCESS_APP_ID", default_value = "")]
     pub process_app_id: String,
+
+    /// The mTLS host-API listener the `svc-process-executor` deployment
+    /// dials (spec SS6.6/SS7.1) -- `:8301` for this stage.
+    #[arg(long, env = "HOST_API_PORT", default_value_t = 8301)]
+    pub host_api_port: u16,
+    /// PEM server certificate for the host-API mTLS listener.
+    #[arg(long, env = "HOST_API_SERVER_CERT_FILE")]
+    pub host_api_server_cert_file: Option<PathBuf>,
+    /// PEM server private key, file-only (never inline) per Token & Secret
+    /// Hygiene.
+    #[arg(long, env = "HOST_API_SERVER_KEY_FILE")]
+    pub host_api_server_key_file: Option<PathBuf>,
+    /// PEM CA bundle used to verify the executor's client certificate
+    /// (mutual TLS -- spec SS6.6: "Both peers present certificates").
+    #[arg(long, env = "HOST_API_CLIENT_CA_FILE")]
+    pub host_api_client_ca_file: Option<PathBuf>,
+    /// Whether this pod expects its executor to be running under the
+    /// gVisor `RuntimeClass` (spec SS12.2, D32 -- default `false`: "this is
+    /// the default posture, not a fallback").
+    #[arg(long, env = "WADDLES_SANDBOX_GVISOR", default_value_t = false)]
+    pub sandbox_gvisor: bool,
+    /// Per-call wall-clock budget handed to the executor on every `invoke`
+    /// (spec SS7.3).
+    #[arg(long, env = "EXECUTOR_CALL_TIMEOUT_MS", default_value_t = 2000)]
+    pub executor_call_timeout_ms: u64,
+
+    /// Interim, env-driven substitute for the `GET /api/v1/distribution/
+    /// bundles?stage=process` grant list (spec SS4.2/SS6.7) -- **TODO(M4+)**:
+    /// replace with the real poll once it lands. When set together with
+    /// [`Self::process_ingest_source_id`], the drain loop is granted
+    /// exactly one ingest-source stream to read; when either is unset, the
+    /// grant list stays empty (the loop connects and blocks, reading
+    /// nothing -- identical to the pre-M4-runtime skeleton's behavior).
+    #[arg(long, env = "PROCESS_INGEST_PLATFORM", default_value = "")]
+    pub process_ingest_platform: String,
+    /// See [`Self::process_ingest_platform`].
+    #[arg(long, env = "PROCESS_INGEST_SOURCE_ID", default_value = "")]
+    pub process_ingest_source_id: String,
+    /// Interim, env-driven substitute for the digest/keys a real
+    /// distribution-poll `load` would supply (spec SS6.6) -- **TODO(M4+)**.
+    /// Empty disables the executor `load`/`invoke` path entirely (the drain
+    /// loop still runs and can dead-letter on `executor_unavailable`).
+    #[arg(long, env = "PROCESS_BUNDLE_DIGEST", default_value = "")]
+    pub process_bundle_digest: String,
+    #[arg(long, env = "PROCESS_BUNDLE_VERSION", default_value = "1")]
+    pub process_bundle_version: String,
+    #[arg(long, env = "PROCESS_BUNDLE_COMPONENT_KEY", default_value = "")]
+    pub process_bundle_component_key: String,
+    #[arg(long, env = "PROCESS_BUNDLE_SIDECAR_KEY", default_value = "")]
+    pub process_bundle_sidecar_key: String,
+    /// Interim, env-driven substitute for a real `app_install_approvals`/
+    /// `routes_to` (spec SS5.9/SS6.9) lookup -- **TODO(M4+)**. Shape:
+    /// `target_app_id1:tenant1,target_app_id2:tenant2`. See
+    /// `crate::builtins::parse_approved_targets`/`resolve_cross_app_route`.
+    #[arg(long, env = "PROCESS_ROUTES_TO_APPROVED", default_value = "")]
+    pub process_routes_to_approved: String,
 }
 
 impl CliConfig {
@@ -140,6 +197,18 @@ impl CliConfig {
                 reason: "must be positive".to_string(),
             });
         }
+        if self.host_api_port == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "host_api_port",
+                reason: "port 0 is not a valid bind port".to_string(),
+            });
+        }
+        if self.host_api_server_cert_file.is_some() != self.host_api_server_key_file.is_some() {
+            return Err(ConfigError::InvalidValue {
+                field: "host_api_server_cert_file/host_api_server_key_file",
+                reason: "must be set together".to_string(),
+            });
+        }
         Ok(())
     }
 }
@@ -152,6 +221,12 @@ pub struct Config {
     pub db_password: Secret,
     pub cache_password: Option<Secret>,
     pub service_api_key: Secret,
+    /// Raw `ENVELOPE_BINDING_KEYS` value (spec SS5.11): `kid:hexkey[,kid:hexkey...]`
+    /// -- the symmetric HMAC key material `penguin_spine::KeyRing` parses
+    /// (`crate::hop`). `None` when unset; the process loop refuses to start
+    /// hop verification without it rather than silently accepting every
+    /// envelope (a missing keyring must never fail open).
+    pub envelope_binding_keys: Option<Secret>,
 }
 
 impl fmt::Debug for Config {
@@ -164,6 +239,10 @@ impl fmt::Debug for Config {
                 &self.cache_password.as_ref().map(|_| Secret::new("")),
             )
             .field("service_api_key", &Secret::new(""))
+            .field(
+                "envelope_binding_keys",
+                &self.envelope_binding_keys.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -185,11 +264,13 @@ impl Config {
         let db_password = Secret::new(env_required("DB_PASSWORD")?);
         let cache_password = std::env::var("CACHE_PASSWORD").ok().map(Secret::new);
         let service_api_key = Secret::new(env_required("SERVICE_API_KEY")?);
+        let envelope_binding_keys = std::env::var("ENVELOPE_BINDING_KEYS").ok().map(Secret::new);
         Ok(Self {
             cli,
             db_password,
             cache_password,
             service_api_key,
+            envelope_binding_keys,
         })
     }
 }
@@ -208,7 +289,12 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn clear_secret_env() {
-        for var in ["DB_PASSWORD", "CACHE_PASSWORD", "SERVICE_API_KEY"] {
+        for var in [
+            "DB_PASSWORD",
+            "CACHE_PASSWORD",
+            "SERVICE_API_KEY",
+            "ENVELOPE_BINDING_KEYS",
+        ] {
             // SAFETY: serialized by ENV_LOCK, no concurrent readers/writers
             // of these specific variables within the test process.
             unsafe { std::env::remove_var(var) };
@@ -248,6 +334,63 @@ mod tests {
     }
 
     #[test]
+    fn zero_host_api_port_fails_validation() {
+        let cli = CliConfig::parse_from(["svc-process", "--host-api-port", "0"]);
+        assert!(cli.validate().is_err());
+    }
+
+    #[test]
+    fn host_api_cert_without_key_fails_validation() {
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--host-api-server-cert-file",
+            "/tmp/cert.pem",
+        ]);
+        assert!(cli.validate().is_err());
+    }
+
+    #[test]
+    fn host_api_key_without_cert_fails_validation() {
+        let cli =
+            CliConfig::parse_from(["svc-process", "--host-api-server-key-file", "/tmp/key.pem"]);
+        assert!(cli.validate().is_err());
+    }
+
+    #[test]
+    fn host_api_cert_and_key_together_is_valid() {
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--host-api-server-cert-file",
+            "/tmp/cert.pem",
+            "--host-api-server-key-file",
+            "/tmp/key.pem",
+        ]);
+        assert!(cli.validate().is_ok());
+    }
+
+    #[test]
+    fn host_api_port_default_is_8301() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert_eq!(cli.host_api_port, 8301);
+    }
+
+    #[test]
+    fn sandbox_gvisor_defaults_to_false_per_d32() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert!(!cli.sandbox_gvisor);
+    }
+
+    #[test]
+    fn interim_ingest_grant_and_bundle_fields_default_empty() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert_eq!(cli.process_ingest_platform, "");
+        assert_eq!(cli.process_ingest_source_id, "");
+        assert_eq!(cli.process_bundle_digest, "");
+        assert_eq!(cli.process_bundle_component_key, "");
+        assert_eq!(cli.process_bundle_sidecar_key, "");
+    }
+
+    #[test]
     fn non_positive_poll_interval_fails_validation() {
         let cli = CliConfig::parse_from(["svc-process", "--poll-interval-s", "0"]);
         assert!(cli.validate().is_err());
@@ -276,6 +419,26 @@ mod tests {
         assert_eq!(cfg.db_password.expose(), "test-db-pass");
         assert_eq!(cfg.service_api_key.expose(), "test-api-key");
         assert!(cfg.cache_password.is_none());
+        assert!(cfg.envelope_binding_keys.is_none());
+        clear_secret_env();
+    }
+
+    #[test]
+    fn envelope_binding_keys_loaded_from_env_when_present() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_secret_env();
+        // SAFETY: serialized by ENV_LOCK above.
+        unsafe {
+            std::env::set_var("DB_PASSWORD", "test-db-pass");
+            std::env::set_var("SERVICE_API_KEY", "test-api-key");
+            std::env::set_var("ENVELOPE_BINDING_KEYS", "k1:aabbcc");
+        }
+        let cli = CliConfig::parse_from(["svc-process"]);
+        let cfg = Config::from_cli(cli).expect("secrets are set");
+        assert_eq!(
+            cfg.envelope_binding_keys.as_ref().map(Secret::expose),
+            Some("k1:aabbcc")
+        );
         clear_secret_env();
     }
 
