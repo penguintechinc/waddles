@@ -1,0 +1,77 @@
+name: Rust bundle-compiler (lint + test)
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/bundle_compiler/**'
+      - '.github/workflows/rust-bundle-compiler.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/bundle_compiler/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    name: fmt + clippy + deny + audit + coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: core/bundle_compiler
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Rust 1.97.1 (rustfmt, clippy, llvm-tools-preview)
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
+        with:
+          toolchain: "1.97.1"
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Install cargo-deny + cargo-llvm-cov + cargo-audit
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2.87.12
+        with:
+          tool: cargo-deny@0.20.2,cargo-llvm-cov@0.9.1,cargo-audit@0.21.0
+
+      # gitleaks is not a cargo tool -- pinned release binary, checksum
+      # verified against the upstream published checksums file, matching
+      # this repo's pre-commit gitleaks pin (rev v8.21.2 in
+      # .pre-commit-config.yaml) so local and CI results agree.
+      - name: Install gitleaks 8.21.2 (checksum verified)
+        run: |
+          set -euo pipefail
+          curl -sLo /tmp/gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz
+          echo "5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      # pip-audit exercises scan::sast's python dependency-audit branch
+      # (tests/scan_test.rs::python_dependency_audit_blocks_on_a_real_known_vulnerable_pin).
+      # cargo-audit (above) and npm (preinstalled on ubuntu-latest) cover
+      # the rust/js branches the same way.
+      - name: Install pip-audit 2.10.0
+        run: pip install --no-cache-dir pip-audit==2.10.0
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: cargo deny check (advisories, licenses, bans, sources)
+        run: cargo deny check
+
+      # Includes the D34-ordered scan-pipeline suite (manifest validation
+      # -> legacy-DAL import check -> SAST/secrets/dependency-audit ->
+      # Skauswatch, strictly before any per-language builder runs) --
+      # tests/build_orchestration_test.rs, tests/scan_test.rs,
+      # tests/legacy_dal_test.rs, tests/skauswatch_test.rs.
+      - name: cargo test --locked
+        run: cargo test --locked
+
+      - name: cargo llvm-cov (>=90% line coverage gate)
+        run: cargo llvm-cov --locked --fail-under-lines 90

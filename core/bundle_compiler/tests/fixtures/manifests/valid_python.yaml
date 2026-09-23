@@ -1,0 +1,33 @@
+schema_version: 2
+app_id: waddles.core.example.echo
+name: Echo Example Bundle
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+language: python
+artifact: source
+execution_model: native
+is_default: false
+stages:
+  process:
+    entry: "app:transform"
+    consumes:
+      - platform: discord
+        event_types: ["chat.message"]
+  action:
+    entry: "app:dispatch"
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions: []
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

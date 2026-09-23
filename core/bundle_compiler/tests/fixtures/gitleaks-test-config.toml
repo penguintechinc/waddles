@@ -1,0 +1,14 @@
+# Minimal gitleaks rule set for this crate's own host-run test suite
+# (tests/scan_test.rs). Some gitleaks distributions ship without a usable
+# embedded default ruleset, so `scan::sast::ScannerConfig` always passes
+# `--config` explicitly rather than relying on one; this fixture is a
+# small, self-contained stand-in for the real config the compiler's
+# container image installs (M2a plan Task 19), covering exactly the
+# pattern `tests/fixtures/bundles/scan-secret/app.py` plants.
+title = "bundle-compiler test gitleaks config"
+
+[[rules]]
+id = "test-aws-access-key"
+description = "AWS-style access key ID, for this crate's own scan-secret fixture"
+regex = '''(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}'''
+keywords = ["akia"]
