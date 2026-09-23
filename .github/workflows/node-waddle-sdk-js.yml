@@ -1,0 +1,80 @@
+name: Node waddle-sdk-js (typecheck + lint + test)
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'sdk/waddle-sdk-js/**'
+      - 'wit/waddle-bundle/**'
+      - 'bundles/javascript/example/**'
+      - '.github/workflows/node-waddle-sdk-js.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'sdk/waddle-sdk-js/**'
+      - 'wit/waddle-bundle/**'
+      - 'bundles/javascript/example/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: typecheck + lint + test + conformance
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/waddle-sdk-js
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      # `package-manager-cache: false` deliberately: this workflow also runs
+      # on `push` to main/release (a privileged trigger), and setup-node's
+      # npm cache (on by default in v7 when unset) combined with a push
+      # trigger is a cache-poisoning vector (flagged `high` by zizmor) --
+      # rust-svc-process.yml's equivalent job avoids it the same way by not
+      # opting into toolchain caching.
+      - name: Set up Node.js 26
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '26'
+          package-manager-cache: false
+
+      - name: npm ci
+        run: npm ci
+
+      - name: typecheck (tsc --noEmit, strict + exactOptionalPropertyTypes)
+        run: npm run typecheck
+
+      - name: lint (eslint, typescript-eslint strict-type-checked, no-explicit-any)
+        run: npm run lint
+
+      - name: unit tests (node --test, pure boundary/JSON conversion logic)
+        run: npm test
+
+      # jco (JS componentize toolchain) is an npm devDependency, installed by
+      # `npm ci` above. wasm-tools is a standalone Rust CLI, installed here
+      # from the same pinned version (1.259.0) this package's README and
+      # local development use. `continue-on-error` only covers the install
+      # step -- the very next step turns an install failure into a loud,
+      # clearly-labeled job failure, never a silent green skip.
+      - name: Install wasm-tools 1.259.0 (for the componentize round-trip check)
+        id: install-wasm-tools
+        continue-on-error: true
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2.87.12
+        with:
+          tool: wasm-tools@1.259.0
+
+      - name: Conformance toolchain unavailable (TODO, not a silent skip)
+        if: steps.install-wasm-tools.outcome != 'success'
+        run: |
+          echo "::error::wasm-tools failed to install in this CI image -- test:conformance (real jco componentize + 'wasm-tools component wit' round-trip against bundles/javascript/example) did NOT run. This is a tracked gap (see sdk/waddle-sdk-js/README.md Known gaps), not a passing check -- failing this job so it is never mistaken for a green conformance run."
+          exit 1
+
+      - name: conformance (real jco componentize + wasm-tools component wit round-trip)
+        if: steps.install-wasm-tools.outcome == 'success'
+        run: npm run test:conformance
