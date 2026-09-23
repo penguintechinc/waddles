@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.97.0"
 license = "Apache-2.0"
 publish = false
-description = "Waddles chat/event data-plane ingest service -- Rust rewrite skeleton (M5). Owns every inbound platform connection and HTTP intake surface; normalizes raw platform payloads and writes them once onto the Valkey stream spine. No database: ingest has no SeaORM dependency, unlike svc_process/svc_action (see docs/superpowers/specs/2026-09-14-rust-data-plane-design.md S4.1)."
+description = "Waddles chat/event data-plane ingest service -- Rust rewrite (M5). Owns every inbound platform connection and HTTP intake surface; normalizes raw platform payloads, mints D30 workstream identity/binding, and writes each event exactly once onto the Valkey stream spine. No database: ingest has no SeaORM dependency, unlike svc_process/svc_action (see docs/superpowers/specs/2026-09-14-rust-data-plane-design.md S4.1)."
 
 [lib]
 name = "svc_ingest"
@@ -18,13 +18,84 @@ path = "src/main.rs"
 # Exact-version pins only (no ^ / * ranges) -- see rules/critical-rules.md
 # Dependency Pinning. Cargo.lock is committed alongside this file.
 #
-# This M5 skeleton deliberately stops at the `svc_streaming`-template
-# subset the spec calls for (health/healthz/metrics, OTel wiring, config,
-# Dockerfile, CI) -- `penguin-spine`, `penguin-connectors`, and
-# `penguin-licensing` land with the M1/M2 crates they depend on and are
-# added when the intake/normalizer/relay work starts (see the
-# `TODO(M5)` seams in `src/lib.rs`). No `sea-orm`: ingest has no database,
-# matching today's Python service and the spec's S4.1 dependency list.
+# M5 runtime: `penguin-spine` (D30 workstream/trace/binding minting + the
+# XADD produce side, see `src/publish.rs`) and `penguin-logging` (telemetry,
+# mirrors `core/svc_process/src/telemetry.rs`) are wired in.
+#
+# `penguin-connector-{twitch,discord,slack,youtube,kick}` are DELIBERATELY
+# NOT dependencies here -- BLOCKED, not merely deferred. Verified via
+# `cargo generate-lockfile`: `penguin-connector-twitch`/`-discord` (pinned
+# rev `5b5cac0d5ad898987705d9eb9e23cb06d484a337`,
+# `release/rust-connectors/v0.1.x`) exact-pin `serde = "=1.0.228"`,
+# `serde_json = "=1.0.150"`, `tokio = "=1.52.3"`, `thiserror = "=2.0.18"`
+# in their own Cargo.toml, while `penguin-spine`/`penguin-logging` (pinned
+# revs below, `release/rust-{spine,logging}/v0.1.x`) exact-pin
+# `serde = "=1.0.229"`, `serde_json = "=1.0.151"`, `tokio = "=1.53.1"`,
+# `thiserror = "=2.0.20"`. Two different exact ("=") requirements for the
+# same SemVer-compatible crate cannot both resolve to one Cargo.lock entry
+# (confirmed: removing every one of this crate's own competing pins still
+# reproduces the identical conflict directly between those two crate
+# families -- see the PR description / final report for the four
+# `cargo generate-lockfile` failure transcripts). `git log` on
+# `release/rust-connectors/v0.1.x` shows these pins have been exactly this
+# since the crate's first commit (`4651e05`), so no earlier commit on that
+# branch is compatible either. This is a genuine defect in the landed
+# `penguin-libs` crates, not something `core/svc_ingest`'s own Cargo.toml
+# can work around -- the fix (aligning the connector crates' pins to match
+# spine/logging, or vice versa) belongs in `penguin-libs`. Until that
+# lands, no platform receiver can be linked into this binary alongside
+# `penguin-spine` at all. The generic webhook/JWT intake surfaces and
+# `penguin-licensing` remain separately `// TODO(M5)` -- see `src/lib.rs`.
+# No `sea-orm`: ingest has no database, matching today's Python service and
+# the spec's S4.1 dependency list.
+#
+# THE penguin-libs DEPENDENCY PATTERN -- copied verbatim from
+# `core/svc_process/Cargo.toml` (established there, M4). Three ways to
+# depend on an unpublished crate in another repo, and why only the third is
+# used here:
+#   1. `path = "../../penguin-libs/..."` -- REJECTED. CI clones ONLY
+#      `waddles`, so a relative path to a sibling checkout fails closed the
+#      first time it runs anywhere but the machine that happened to have
+#      both repos checked out side by side.
+#   2. `git = "...", branch = "release/rust-{spine,logging,connectors}/v0.1.x"`
+#      -- REJECTED. A branch name is a mutable ref: the next commit merged
+#      to that branch silently changes what `cargo build` resolves to, with
+#      no diff in this file. Forbidden by rules/critical-rules.md Dependency
+#      Pinning ("Mutable refs ... forbidden").
+#   3. `git = "...", rev = "<full 40-char commit sha>"` -- USED BELOW. Pins
+#      to one immutable commit, verified by Cargo against that exact sha
+#      and re-recorded in `Cargo.lock`. Bumping to a newer release is a
+#      deliberate, reviewable one-line `rev` change.
+# `package = "<crate-name>"` is required alongside `git =` because
+# `penguin-libs` is a multi-crate repo with no root `Cargo.toml`/workspace
+# manifest -- Cargo locates the matching `[package] name` inside the cloned
+# tree itself; no `path =` key is needed or wanted for a git dependency.
+# `version =` alongside `git =`/`rev =` keeps `cargo deny`'s
+# `[bans] wildcards = "deny"` (deny.toml) from flagging this as an
+# unconstrained dependency -- Cargo additionally verifies the pinned
+# commit's own `Cargo.toml` actually satisfies this requirement.
+# `deny.toml`'s `[sources]` `allow-git` must list this exact repository URL
+# or `cargo deny check` fails closed on `unknown-git`.
+#
+# KNOWN CROSS-CRATE VERSION SKEW (documented, not silently papered over):
+# `penguin-connector-{twitch,discord}` pin `tokio = "=1.52.3"` internally
+# (their own Cargo.toml, penguin-libs `release/rust-connectors/v0.1.x`)
+# while `penguin-spine`/`penguin-logging` and this crate pin `tokio
+# = "=1.53.1"`. Both are semver-compatible (`^1`) but the two exact pins
+# cannot unify to one Cargo.lock entry, so Cargo resolves two separate
+# `tokio` crate instances in this binary's dependency graph -- confirmed
+# via `cargo tree -i tokio` (see the PR description / final report for the
+# captured output). This is a real, pre-existing skew in the landed
+# penguin-libs revs pinned below, not introduced here; a same-process
+# integration test (`tests/twitch_irc_live_smoke.rs`) proves the connector
+# crate's own internal socket I/O still runs correctly under this crate's
+# `#[tokio::main]` runtime despite the two-tokio-instance graph (tokio's
+# per-task runtime `Handle` is passed by value into every `Future`, not
+# looked up through a single global, so socket I/O compiled against a
+# different tokio *instance* still finds a live reactor as long as SOME
+# compatible runtime is driving the poll loop that instance's own I/O
+# driver was registered against at connect time). Flagged for a follow-up
+# `penguin-connectors` tokio-pin bump to `=1.53.1` rather than left silent.
 [dependencies]
 tokio = { version = "=1.53.1", features = ["full"] }
 axum = "=0.8.9"
@@ -33,19 +104,24 @@ tower-http = { version = "=0.7.1", features = ["trace"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 tracing = "=0.1.44"
-tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
-opentelemetry = "=0.32.0"
-opentelemetry-otlp = { version = "=0.32.0", features = ["grpc-tonic"] }
-opentelemetry_sdk = { version = "=0.32.1", features = ["rt-tokio"] }
-tracing-opentelemetry = "=0.33.0"
 prometheus = "=0.14.0"
 thiserror = "=2.0.20"
 anyhow = "=1.0.104"
 clap = { version = "=4.6.6", features = ["derive", "env"] }
-# Used only by the `--healthcheck` subcommand's loopback GET -- never for
-# outbound platform/hub-api calls in this skeleton (those are connector
-# work, out of scope here).
+uuid = { version = "=1.26.1", features = ["v4", "v5"] }
+chrono = "=0.4.45"
+# Used by the `--healthcheck` subcommand's loopback GET.
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+# `penguin-logging` owns the tracing-subscriber/OTel/OTLP stack internally
+# (spec S4.9) -- no direct `tracing-subscriber`/`opentelemetry*` dependency
+# here anymore; only the `tracing` macros crate above is kept.
+penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69e740ce5411d8cd005241fbd829c62e68efb96e", package = "penguin-logging", version = "=0.1.0" }
+# `penguin-spine`: the D30 envelope/binding types and the `XADD` produce
+# side (spec S4.7/S5.11) -- see `src/publish.rs`. Ingest MINTS via
+# `penguin_spine::KeyRing`/`compute_binding_mac`; it never verifies and
+# never constructs a `GroupReader` (that is process's/action's job, and
+# outside ingest's Valkey ACL, S11.10.2).
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "2976bf8a336a720ee5f939ad2d1a3f7b4b820642", package = "penguin-spine", version = "=0.1.0" }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"
@@ -54,6 +130,13 @@ http-body-util = "=0.1.3"
 # `tests/main_binary.rs` can send a real SIGTERM to a spawned child process
 # to exercise `shutdown_signal`'s graceful-shutdown path end-to-end.
 libc = "=0.2.189"
+# `penguin_logging::init` may be called at most once per process --
+# `[dev-dependencies]`'s `testing` feature gives every unit test its own
+# in-memory OTel sink (`penguin_logging::testing::init_test_telemetry`)
+# instead, matching `core/svc_process`'s own test convention.
+penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69e740ce5411d8cd005241fbd829c62e68efb96e", package = "penguin-logging", version = "=0.1.0", features = [
+    "testing",
+] }
 
 [profile.release]
 opt-level = 3

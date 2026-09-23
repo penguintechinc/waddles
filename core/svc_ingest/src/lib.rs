@@ -1,35 +1,59 @@
 //! `svc-ingest`: the Waddles chat/event data-plane ingest service (Rust
-//! rewrite, M5 skeleton).
+//! rewrite, M5).
 //!
 //! This crate is split into a library (this file) and a thin binary
 //! (`src/main.rs`) so integration tests under `tests/` can exercise the
 //! router and config loader directly instead of spawning a subprocess --
 //! same split as `core/svc_streaming`.
 //!
-//! **Scope of this skeleton.** Per the M5 milestone row in
-//! `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md` S16, this
-//! chunk builds only the `svc_streaming`-template subset: `/health`,
-//! `/healthz`, `/metrics`, OTel wiring, config, the Dockerfile, and CI.
-//! The fixed platform normalizers, the five `penguin-connectors` crates,
-//! the outbound relay drain, the generic/JWT intake surfaces, and
-//! workstream minting are **out of scope** here -- they depend on the M1
-//! `penguin-connectors` crates and M2 (compiler/SDKs/hub-api hooks), both
-//! building in parallel. Every seam where that work lands is marked:
+//! **M5 scope: the D30 minting + XADD produce side is real; live platform
+//! receivers are BLOCKED, not merely deferred.** Per the M5 milestone row
+//! in `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md` S16 and
+//! `docs/superpowers/plans/2026-09-14-rust-data-plane-m5-svc-ingest.md`,
+//! this chunk builds the produce-side half of the primary e2e path:
+//! `crate::publish::publish_event` normalizes a `penguin_spine::
+//! PlatformEvent` into a fully D30-complete envelope (`workstream_id`/
+//! `event_id`/`trace`/`binding.mac`, minted via `penguin_spine::KeyRing`/
+//! `compute_binding_mac`) and `XADD`s it via `penguin_spine::SpineClient`
+//! onto its ingest source's spine stream -- so `svc_process` (M4) can drain
+//! it. `crate::config` carries the full Twitch/Discord/binding-keyring
+//! configuration surface (`Config::twitch_irc_enabled`/`discord_enabled`/
+//! `binding_keyring`) ready for a receiver to consume.
 //!
-//! ```text
-//! // TODO(M5): connectors/intake -- blocked on M1 connectors + M2
-//! ```
+//! **What is NOT wired, and why:** the live Twitch IRC / Discord Gateway
+//! receivers (`penguin-connector-{twitch,discord}`) cannot be linked into
+//! this binary at all today -- verified via `cargo generate-lockfile`,
+//! those crates (pinned rev `5b5cac0d5ad898987705d9eb9e23cb06d484a337`)
+//! exact-pin `serde`/`serde_json`/`tokio`/`thiserror` to different patch
+//! versions than `penguin-spine`/`penguin-logging` (pinned revs below)
+//! require, and two different exact (`=`) requirements for the same
+//! SemVer-compatible crate cannot both resolve to one `Cargo.lock` entry.
+//! This is a genuine defect in the landed `penguin-libs` crates (present
+//! since the connectors crate's first commit, not a recent regression),
+//! not something this crate's own `Cargo.toml` can work around -- see
+//! `Cargo.toml`'s dependency-pattern comment for the full evidence. Once
+//! `penguin-libs` aligns those pins, the receiver supervisors (connect,
+//! receive, normalize, call `publish::publish_event`, reconnect with
+//! backoff) are the next `// TODO(M5)` seam to land here.
 //!
-//! See `src/http/mod.rs::router` for the one seam this skeleton has today.
+//! Also out of scope, per the milestone's own stated priority order:
+//! Slack/YouTube/Kick receivers, the generic signed-webhook and JWT REST
+//! intake surfaces (S10.1), `penguin_spine::SocketLease` single-owner-
+//! socket guarding (S10.2, a separate crate gap, PA-LEASE), and D31
+//! usage-delta metering (`UsageBatcher`/`append_usage`, a `penguin-spine`
+//! crate gap at the pinned rev -- see `crate::publish`'s module doc).
+//!
 //! Per spec S4.1, this service has **no database** -- no `sea-orm`
 //! dependency, unlike `svc_process`/`svc_action`.
 
 pub mod config;
 pub mod error;
 pub mod http;
+pub mod publish;
 pub mod telemetry;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use tokio::signal;
 
@@ -70,16 +94,18 @@ where
         "starting {SERVICE_NAME}"
     );
 
-    // TODO(M5): connectors/intake -- blocked on M1 connectors + M2. This is
-    // where the platform receivers (Twitch IRC/EventSub, Discord gateway,
-    // Slack Socket Mode, YouTube poll, Kick Pusher), the outbound relay
-    // drain, and the generic/JWT intake routes attach once
-    // `penguin-connectors` and `penguin-spine` land -- see spec S4.1, S10.
-    // This skeleton spawns no background tasks: it serves health and
-    // metrics only, which is the honest state of an unimplemented
-    // milestone rather than a faked one.
-
+    // Registered now (exercised by `telemetry::tests`) so `/metrics` already
+    // exposes these series and `crate::publish::publish_event` has a live
+    // `SpineMetrics` implementation to record into the moment a receiver is
+    // wired -- see this module's doc comment for exactly what blocks that.
+    let _ingest_metrics = Arc::new(telemetry::register_ingest_metrics(&prom_registry));
     let state = http::AppState::new(config.clone(), prom_registry);
+
+    // TODO(M5): live platform receivers -- BLOCKED on a penguin-libs pin
+    // conflict (this module's doc comment, `Cargo.toml`'s dependency-
+    // pattern comment). This service spawns no background tasks: it serves
+    // health and metrics only, which is the honest state of a blocked
+    // milestone chunk rather than a faked one.
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
     let metrics_addr = SocketAddr::new(config.cli.bind_addr, config.cli.metrics_port);
