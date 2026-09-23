@@ -418,6 +418,7 @@ mod tests {
                 &["app_id", "reason"],
             )
             .unwrap(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
         ))
     }
 

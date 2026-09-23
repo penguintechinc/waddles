@@ -117,11 +117,38 @@ pub fn is_retryable(err: &HostResultError) -> bool {
     matches!(err.code.as_str(), "relay_unavailable")
 }
 
+/// Extracts this bundle's own Discord webhook URL from its activation
+/// config (`crate::distribution::BundleRow::config_json`, hub-api/admin-
+/// controlled -- never bundle-runtime-supplied). Hardening fix (own
+/// observation from the `secret_refs` finding, same principle applied
+/// here): the webhook URL embeds a bearer-token-equivalent secret in its
+/// path, so it must be resolved the same way as any other outbound
+/// credential/target -- from this bundle's own trusted config, never a
+/// literal a caller/bundle chooses at call time (spec §7.5: "the outbound
+/// credential and target are resolved from the envelope's (tenant,
+/// community) -- never from anything a bundle's outbound args carry").
+/// [`discord_webhook_args`] takes an already-resolved URL for exactly this
+/// reason: obtain it through this function, never by embedding a literal.
+/// Returns `None` when the config has no `discord_webhook_url` string
+/// (not configured for this bundle, or malformed config JSON) --
+/// `crate::dispatch`'s caller treats that as a non-retryable configuration
+/// error, never a reason to fall back to a bundle-supplied URL.
+pub fn discord_webhook_url_from_config(config_json: &str) -> Option<String> {
+    let config: serde_json::Value = serde_json::from_str(config_json).ok()?;
+    config
+        .get("discord_webhook_url")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 /// Builds the `http` host-call args for a Discord webhook send -- the
 /// shape `crate::egress::EgressGuard::send` expects (spec §6.5's WIT
 /// `http::request`, this crate's JSON-wire convention -- see
-/// `crate::egress`'s module doc). `webhook_url` must already be on the
-/// bundle's manifest `egress` allowlist (e.g. `{host: "discord.com",
+/// `crate::egress`'s module doc). `webhook_url` **must** come from
+/// [`discord_webhook_url_from_config`] (this bundle's own trusted
+/// activation config), never a caller-invented or bundle-runtime-supplied
+/// literal -- see that function's doc for why. It must also already be on
+/// the bundle's manifest `egress` allowlist (e.g. `{host: "discord.com",
 /// methods: ["POST"]}`); the bundle constructs and issues this call itself
 /// via the wire protocol -- this function documents the expected shape,
 /// mirroring `twitch_relay_args` above for `relay`.
@@ -182,6 +209,25 @@ mod tests {
         assert_eq!(args["provider"], "twitch");
         assert_eq!(args["channel"], "#somechannel");
         assert_eq!(args["text"], "hello");
+    }
+
+    #[test]
+    fn discord_webhook_url_from_config_extracts_the_configured_url() {
+        let config = r#"{"discord_webhook_url": "https://discord.com/api/webhooks/1/abc"}"#;
+        assert_eq!(
+            discord_webhook_url_from_config(config),
+            Some("https://discord.com/api/webhooks/1/abc".to_string())
+        );
+    }
+
+    #[test]
+    fn discord_webhook_url_from_config_is_none_when_not_configured() {
+        assert_eq!(discord_webhook_url_from_config("{}"), None);
+    }
+
+    #[test]
+    fn discord_webhook_url_from_config_is_none_on_malformed_json() {
+        assert_eq!(discord_webhook_url_from_config("not json"), None);
     }
 
     #[test]

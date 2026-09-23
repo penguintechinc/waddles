@@ -467,14 +467,30 @@ async fn drain_batch<R: StreamReader, A: AuditSink, T: TenantResolver, S: SpineO
 }
 
 /// Runs [`drain_batch`] in a loop until `shutdown` resolves -- identical
-/// shape to `core/svc_process/src/spine.rs::drain_loop`.
+/// shape to `core/svc_process/src/spine.rs::drain_loop`, plus the spec
+/// §13.5 `waddles.core.rust-data-plane` gate: while `rust_data_plane` is
+/// disabled, this loop never calls [`drain_batch`] at all (nothing is
+/// read, dispatched, acked, or dead-lettered) -- "the stage serves health
+/// and metrics and drains nothing, which is the safe state during
+/// rollout." The gate is re-checked every iteration (via
+/// `crate::flags::FeatureFlag::enabled`'s non-blocking cached read for the
+/// real `penguin_licensing`-backed implementation, never inline network
+/// I/O), so a live flag flip takes effect within one poll of this loop,
+/// not just at startup.
 async fn drain_loop<R: StreamReader, A: AuditSink, T: TenantResolver, S: SpineOps>(
     mut reader: R,
     stream_key: String,
     deps: DispatchDeps<A, T, S>,
+    rust_data_plane: Arc<dyn crate::flags::FeatureFlag>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), SpineError> {
     loop {
+        if !rust_data_plane.enabled().await {
+            tokio::select! {
+                _ = &mut shutdown => return Ok(()),
+                () = tokio::time::sleep(std::time::Duration::from_secs(5)) => continue,
+            }
+        }
         tokio::select! {
             _ = &mut shutdown => return Ok(()),
             result = drain_batch(&mut reader, &stream_key, &deps) => {
@@ -496,6 +512,7 @@ pub async fn run<A: AuditSink, T: TenantResolver>(
     grants: Vec<Grant>,
     stream_key: String,
     deps: DispatchDeps<A, T, SpineClient>,
+    rust_data_plane: Arc<dyn crate::flags::FeatureFlag>,
     shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), SpineError> {
     let app_id = deps.app_id.clone();
@@ -509,7 +526,7 @@ pub async fn run<A: AuditSink, T: TenantResolver>(
         deps.metrics.clone(),
     )
     .await?;
-    drain_loop(reader, stream_key, deps, shutdown).await
+    drain_loop(reader, stream_key, deps, rust_data_plane, shutdown).await
 }
 
 #[cfg(test)]
@@ -641,6 +658,11 @@ mod tests {
             }))
             .unwrap(),
             deliveries: 1,
+            // Action streams' consumer group is always `{app_id}` (spec
+            // §5.9) -- `group` now carries the reader's own group
+            // (penguin-spine `Delivered.group`, the dead_letter XACK
+            // fix), coinciding with `env.app_id` here by construction.
+            group: app_id.to_string(),
         }
     }
 
@@ -1097,11 +1119,71 @@ mod tests {
         tx.send(()).unwrap();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            drain_loop(EmptyReader, "unused".to_string(), deps, rx),
+            drain_loop(
+                EmptyReader,
+                "unused".to_string(),
+                deps,
+                crate::flags::boxed(crate::flags::StaticFlag(true)),
+                rx,
+            ),
         )
         .await
         .expect("drain_loop must return promptly once shutdown resolves");
         assert!(result.is_ok());
+    }
+
+    /// Spec §13.5's `waddles.core.rust-data-plane` gate: OFF ⇒ "drains
+    /// nothing". A reader that *would* hand back an entry on every call
+    /// tracks how many times it was actually invoked; if the gate were not
+    /// enforced, `drain_batch` (and therefore `reader.read()`) would run
+    /// repeatedly. It is never called at all while the flag is off.
+    #[tokio::test]
+    async fn drain_loop_with_the_flag_off_never_calls_drain_batch() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+
+        struct CountingReader {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+            entry: Delivered,
+        }
+        impl StreamReader for CountingReader {
+            async fn read(&mut self) -> Result<Vec<Delivered>, SpineError> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(vec![self.entry.clone()])
+            }
+        }
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader = CountingReader {
+            calls: Arc::clone(&calls),
+            entry: d,
+        };
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let _ = tx.send(());
+        });
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            drain_loop(
+                reader,
+                "unused".to_string(),
+                deps,
+                crate::flags::boxed(crate::flags::StaticFlag(false)),
+                rx,
+            ),
+        )
+        .await
+        .expect("drain_loop must still respond to shutdown while the flag is off");
+        assert!(result.is_ok());
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "reader.read() must never be called while the flag is off"
+        );
     }
 
     #[tokio::test]

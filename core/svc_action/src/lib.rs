@@ -30,11 +30,13 @@
 
 pub mod capabilities;
 pub mod config;
+pub(crate) mod crypto;
 pub mod db;
 pub mod dispatch;
 pub mod distribution;
 pub mod egress;
 pub mod error;
+pub mod flags;
 pub mod hop;
 pub mod host_api;
 pub mod http;
@@ -98,6 +100,32 @@ where
     let catalog = Arc::new(distribution::BundleCatalog::new());
     let egress_denied_total = telemetry::register_egress_metrics(&prom_registry);
 
+    // Spec §13.5's two-gate check for this service's flags
+    // (`flags::RUST_DATA_PLANE_FLAG`, `flags::BUNDLE_EGRESS_FLAG`), both
+    // `min_tier: free` so `flag_enabled` alone gates them (see
+    // `build_license_client`'s doc for the fail-closed-to-OFF fallback
+    // when even the client itself can't be built).
+    let license = build_license_client();
+    if let Some(client) = &license {
+        let initial_refresh = Arc::clone(client);
+        tokio::spawn(async move {
+            if let Err(err) = initial_refresh.refresh().await {
+                tracing::warn!(
+                    error = %err,
+                    "initial license/flag refresh failed; both spec §13.5 flags serve their \
+                     default (OFF) until the next scheduled refresh succeeds"
+                );
+            }
+        });
+        // Runs for the process lifetime (crate doc: "drop it to let the
+        // loop run for the process lifetime") -- the same fire-and-forget
+        // posture every other background task in this module takes.
+        // `drop`, not `let _ =` (clippy::let_underscore_future): the
+        // `JoinHandle` itself implements `Future`, and this is a
+        // deliberate detach, not an accidental one.
+        drop(client.spawn_refresh());
+    }
+
     let state = http::AppState::new(config.clone(), prom_registry);
 
     let connections = try_start_host_api(
@@ -105,9 +133,10 @@ where
         Arc::clone(&usage),
         Arc::clone(&catalog),
         egress_denied_total,
+        license.clone(),
     );
     try_start_distribution_poll(&config, Arc::clone(&connections), Arc::clone(&catalog));
-    try_start_dispatch(&config, connections, catalog, usage);
+    try_start_dispatch(&config, connections, catalog, usage, license);
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
     let metrics_addr = SocketAddr::new(config.cli.bind_addr, config.cli.metrics_port);
@@ -134,6 +163,66 @@ where
     Ok(())
 }
 
+/// Product identifier `penguin_licensing::LicenseConfig` validates against
+/// and the flag-key prefix it resolves under (spec §13.5: "Flag keys
+/// follow `{product}.{feature}`") -- both flags this service checks are
+/// `waddles.core.*`.
+const LICENSE_PRODUCT: &str = "waddles";
+
+/// Builds the shared `penguin_licensing::LicenseClient` this service's two
+/// spec §13.5 flags resolve against, from the standard `LICENSE_KEY`/
+/// `LICENSE_SERVER_URL`/`POSTHOG_HOST`/`POSTHOG_KEY` environment variables.
+/// `None` only if even the no-network-required default `LicenseConfig`
+/// fails to build (a hardcoded, always-valid literal URL parse -- not
+/// reachable in practice, handled rather than unwrapped): callers use
+/// [`flag_or_closed`] to fall back to [`flags::StaticFlag`]`(false)` for
+/// both flags in that case, the same fail-closed-to-OFF posture spec
+/// §13.5 already specifies for a never-seen flag.
+fn build_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
+    let cfg = match penguin_licensing::LicenseConfig::from_env(LICENSE_PRODUCT) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "LICENSE_SERVER_URL/POSTHOG_HOST invalid; falling back to defaults \
+                 (both spec §13.5 flags default OFF until a valid config is set)"
+            );
+            match penguin_licensing::LicenseConfig::new(LICENSE_PRODUCT) {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    tracing::error!(
+                        error = %err,
+                        "LicenseConfig::new failed unexpectedly; license/flag gating disabled"
+                    );
+                    return None;
+                }
+            }
+        }
+    };
+    match penguin_licensing::LicenseClient::new(cfg) {
+        Ok(client) => Some(client),
+        Err(err) => {
+            tracing::error!(error = %err, "LicenseClient::new failed; license/flag gating disabled");
+            None
+        }
+    }
+}
+
+/// Wraps `license` into a live [`flags::LicenseFlag`] for `key` when a
+/// client is available, or [`flags::StaticFlag`]`(false)` otherwise -- the
+/// single place every call site applies the fail-closed-to-OFF fallback
+/// identically (see [`build_license_client`]'s doc for when `None`
+/// happens).
+fn flag_or_closed(
+    license: &Option<Arc<penguin_licensing::LicenseClient>>,
+    key: &'static str,
+) -> Arc<dyn flags::FeatureFlag> {
+    match license {
+        Some(client) => flags::boxed(flags::LicenseFlag::new(Arc::clone(client), key)),
+        None => flags::boxed(flags::StaticFlag(false)),
+    }
+}
+
 /// Builds the real [`capabilities::StageCapabilities`] (a live Valkey
 /// connection for `relay`, [`egress::EgressGuard`] for `http`), or `None`
 /// if either dependency is unavailable right now. `try_start_host_api`
@@ -149,6 +238,7 @@ async fn build_stage_capabilities(
     usage: Arc<Mutex<usage::UsageBatcher>>,
     catalog: Arc<distribution::BundleCatalog>,
     egress_denied_total: prometheus::IntCounterVec,
+    license: Option<Arc<penguin_licensing::LicenseClient>>,
 ) -> Option<Arc<dyn capabilities::CapabilityHandler>> {
     let spine_cfg = match penguin_spine::SpineConfig::from_env() {
         Ok(c) => c,
@@ -176,6 +266,7 @@ async fn build_stage_capabilities(
         },
         catalog,
         egress_denied_total,
+        flag_or_closed(&license, flags::BUNDLE_EGRESS_FLAG),
     ));
     Some(Arc::new(capabilities::StageCapabilities::new(
         relay_conn, egress, usage,
@@ -196,6 +287,7 @@ fn try_start_host_api(
     usage: Arc<Mutex<usage::UsageBatcher>>,
     catalog: Arc<distribution::BundleCatalog>,
     egress_denied_total: prometheus::IntCounterVec,
+    license: Option<Arc<penguin_licensing::LicenseClient>>,
 ) -> Arc<host_api::ConnectionRegistry> {
     let registry = Arc::new(host_api::ConnectionRegistry::new());
     let cli = cli.clone();
@@ -206,9 +298,10 @@ fn try_start_host_api(
             shutdown_signal().await;
             let _ = shutdown_tx.send(());
         });
-        let capabilities = build_stage_capabilities(&cli, usage, catalog, egress_denied_total)
-            .await
-            .unwrap_or_else(|| Arc::new(capabilities::DenyAllCapabilities));
+        let capabilities =
+            build_stage_capabilities(&cli, usage, catalog, egress_denied_total, license)
+                .await
+                .unwrap_or_else(|| Arc::new(capabilities::DenyAllCapabilities));
         if let Err(err) = host_api::serve(cli, registry_for_task, capabilities, shutdown_rx).await {
             tracing::warn!(error = %err, "host-api listener unavailable; executor integration disabled");
         }
@@ -306,6 +399,7 @@ fn try_start_dispatch(
     connections: Arc<host_api::ConnectionRegistry>,
     catalog: Arc<distribution::BundleCatalog>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
+    license: Option<Arc<penguin_licensing::LicenseClient>>,
 ) {
     if config.cli.action_app_id.is_empty() {
         tracing::info!(
@@ -404,7 +498,16 @@ fn try_start_dispatch(
             let _ = shutdown_tx.send(());
         });
 
-        if let Err(err) = dispatch::run(spine_cfg, vec![grant], stream_key, deps, shutdown_rx).await
+        let rust_data_plane = flag_or_closed(&license, flags::RUST_DATA_PLANE_FLAG);
+        if let Err(err) = dispatch::run(
+            spine_cfg,
+            vec![grant],
+            stream_key,
+            deps,
+            rust_data_plane,
+            shutdown_rx,
+        )
+        .await
         {
             tracing::error!(error = %err, "action-stage dispatch loop exited");
         }
@@ -564,6 +667,34 @@ mod tests {
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
         }
+    }
+
+    #[tokio::test]
+    async fn flag_or_closed_fails_closed_to_off_when_no_license_client_is_available() {
+        let flag = flag_or_closed(&None, flags::RUST_DATA_PLANE_FLAG);
+        assert!(!flag.enabled().await);
+    }
+
+    #[tokio::test]
+    async fn flag_or_closed_wraps_a_real_client_as_a_license_flag() {
+        let cfg = penguin_licensing::LicenseConfig::new(LICENSE_PRODUCT)
+            .expect("default LicenseConfig::new never fails");
+        let client = penguin_licensing::LicenseClient::new(cfg)
+            .expect("LicenseClient::new with a valid default config never fails");
+        let flag = flag_or_closed(&Some(client), flags::RUST_DATA_PLANE_FLAG);
+        // A cold client (never refreshed) has an empty snapshot -- proves
+        // this reaches the real `LicenseFlag` wrapper, not some other
+        // default, since a cold real client also fails closed to OFF.
+        assert!(!flag.enabled().await);
+    }
+
+    #[test]
+    fn build_license_client_succeeds_with_no_license_env_vars_set() {
+        // `LicenseConfig::from_env`'s defaults (no `LICENSE_KEY`/
+        // `LICENSE_SERVER_URL`/`POSTHOG_HOST`/`POSTHOG_KEY` set) still
+        // validate -- the community-tier, no-flags-configured shape every
+        // deployment starts from before an operator sets a real key.
+        assert!(build_license_client().is_some());
     }
 
     #[tokio::test]
@@ -760,7 +891,7 @@ mod tests {
         let connections = Arc::new(host_api::ConnectionRegistry::new());
         let catalog = Arc::new(distribution::BundleCatalog::new());
         let usage = Arc::new(std::sync::Mutex::new(usage::UsageBatcher::new()));
-        try_start_dispatch(&config, connections, catalog, usage);
+        try_start_dispatch(&config, connections, catalog, usage, None);
     }
 
     /// `try_start_distribution_poll`'s own gate: `ACTION_APP_ID` unset never

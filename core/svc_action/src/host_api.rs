@@ -74,6 +74,11 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, HostApiError>
 /// certificates" -- a connection whose peer certificate does not verify is
 /// "closed before a single frame is read", spec §14.6 test 12d).
 pub fn build_server_config(cli: &CliConfig) -> Result<ServerConfig, HostApiError> {
+    // Two rustls crypto backends are linked into this binary now
+    // (`ring` + `penguin-licensing`'s transitive `aws-lc-rs`) -- see
+    // `crate::crypto`'s doc for why `ServerConfig::builder()` below
+    // panics without this.
+    crate::crypto::ensure_crypto_provider_installed();
     let (cert_path, key_path) = match (
         &cli.host_api_server_cert_file,
         &cli.host_api_server_key_file,
@@ -763,6 +768,7 @@ mod tests {
                 &["app_id", "reason"],
             )
             .unwrap(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
         let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
             NoopQueue,
@@ -965,6 +971,7 @@ mod tests {
                 &["app_id", "reason"],
             )
             .unwrap(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
         // `Arc<RecordingRelayQueue>` doesn't itself impl `RelayQueue` (the
         // impl is on the concrete type); wrap so `StageCapabilities` can
@@ -1168,6 +1175,7 @@ mod tests {
                 &["app_id", "reason"],
             )
             .unwrap(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
         let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
             NoopQueue,
@@ -1271,6 +1279,7 @@ mod tests {
                 &["app_id", "reason"],
             )
             .unwrap(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
         let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
             NoopQueue,

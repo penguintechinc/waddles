@@ -93,6 +93,12 @@ pub struct EgressGuard {
     denylist: Arc<RwLock<HashSet<String>>>,
     buckets: Mutex<HashMap<String, TokenBucket>>,
     denied_total: prometheus::IntCounterVec,
+    /// Spec §13.5's `waddles.core.bundle-egress` flag: OFF ⇒ every call
+    /// denied `feature_disabled`, checked before anything else (scheme,
+    /// allowlist, SSRF -- none of it runs at all while this capability is
+    /// disabled). `min_tier: free`, so `crate::flags::FeatureFlag::enabled`
+    /// alone gates it -- no license-tier `check_feature` needed.
+    bundle_egress: Arc<dyn crate::flags::FeatureFlag>,
 }
 
 impl EgressGuard {
@@ -101,6 +107,7 @@ impl EgressGuard {
         limits: EgressLimits,
         catalog: Arc<BundleCatalog>,
         denied_total: prometheus::IntCounterVec,
+        bundle_egress: Arc<dyn crate::flags::FeatureFlag>,
     ) -> Self {
         Self {
             transport,
@@ -109,18 +116,27 @@ impl EgressGuard {
             denylist: Arc::new(RwLock::new(HashSet::new())),
             buckets: Mutex::new(HashMap::new()),
             denied_total,
+            bundle_egress,
         }
     }
 
     /// Services one `http`/`send` host-call for `app_id` (spec §7.4's
     /// `http` row). Every rejection is counted against
     /// `waddles_egress_denied_total{app_id,reason}` (spec §8.2) before
-    /// returning.
+    /// returning -- including the spec §13.5 flag check, which runs before
+    /// any of it and short-circuits with `feature_disabled` when off.
     pub async fn send(
         &self,
         app_id: &str,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, HostResultError> {
+        if !self.bundle_egress.enabled().await {
+            let err = denied("feature_disabled", "waddles.core.bundle-egress is disabled");
+            self.denied_total
+                .with_label_values(&[app_id, &err.code])
+                .inc();
+            return Err(err);
+        }
         let parsed: HttpSendArgs = match serde_json::from_value(args.clone()) {
             Ok(p) => p,
             Err(e) => {
@@ -751,6 +767,12 @@ mod tests {
         }
     }
 
+    /// Every existing test in this module exercises *other* properties of
+    /// the guard (allowlist, SSRF, secrets, redirects, ...), not the spec
+    /// §13.5 flag gate itself -- so the shared fixture holds it ON via
+    /// `crate::flags::StaticFlag`, no live license/PostHog server needed.
+    /// The flag-gate tests further down construct an `EgressGuard`
+    /// directly with `StaticFlag(false)` instead.
     fn guard_with(
         app_id: &str,
         egress: Vec<(String, Vec<String>)>,
@@ -761,6 +783,7 @@ mod tests {
             default_limits(),
             catalog_with_row(app_id, egress),
             test_metrics(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
         )
     }
 
@@ -1067,6 +1090,7 @@ mod tests {
                 vec![("10.0.0.5".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
         );
         let result = guard
             .send(
@@ -1078,13 +1102,17 @@ mod tests {
     }
 
     /// End-to-end proof of the M3 "http capability -> Discord REST send"
-    /// deliverable: a bundle-shaped call built by
-    /// `crate::senders::discord_webhook_args` (the same JSON a real bundle
-    /// would send over the wire), routed through the real `EgressGuard`
-    /// pipeline (allowlist/method/SSRF/rate-limit all genuinely evaluated),
-    /// landing on a fake transport standing in for the live TLS connection
-    /// to `discord.com` -- proves the wiring end to end without a live
-    /// Discord webhook.
+    /// deliverable, **plus** the Discord-URL-hardening fix (own observation
+    /// from the `secret_refs` finding, same principle applied here): the
+    /// webhook URL is sourced via `crate::senders::
+    /// discord_webhook_url_from_config` from this bundle's own
+    /// `BundleRow.config_json` (hub-api-controlled activation config) --
+    /// never a literal the test (standing in for a bundle) invents
+    /// directly -- then built into the bundle-shaped call
+    /// `crate::senders::discord_webhook_args` sends over the wire, routed
+    /// through the real `EgressGuard` pipeline (allowlist/method/SSRF/
+    /// rate-limit all genuinely evaluated), landing on a fake transport
+    /// standing in for the live TLS connection to `discord.com`.
     #[tokio::test]
     async fn discord_webhook_args_reach_the_transport_through_the_full_guard() {
         let transport = Arc::new(FakeTransport::default().queue(Ok(TransportResponse {
@@ -1093,19 +1121,33 @@ mod tests {
             body: vec![],
             truncated: false,
         })));
+        let catalog = Arc::new(BundleCatalog::new());
+        catalog.update(vec![BundleRow {
+            app_id: "waddles.socials.discord.default".to_string(),
+            version: "1.0.0".to_string(),
+            artifact_digest: Some("sha256:00".to_string()),
+            component_key: "k".to_string(),
+            sidecar_key: "s".to_string(),
+            egress: vec![("discord.com".to_string(), vec!["POST".to_string()])],
+            egress_rps: None,
+            config_json: r#"{"discord_webhook_url": "https://discord.com/api/webhooks/1/abc"}"#
+                .to_string(),
+            granted_secret_refs: HashMap::new(),
+        }]);
         let guard = EgressGuard::new(
             Arc::clone(&transport) as Arc<dyn HttpTransport>,
             default_limits(),
-            catalog_with_row(
-                "waddles.socials.discord.default",
-                vec![("discord.com".to_string(), vec!["POST".to_string()])],
-            ),
+            Arc::clone(&catalog),
             test_metrics(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
         );
-        let args = crate::senders::discord_webhook_args(
-            "https://discord.com/api/webhooks/1/abc",
-            "hello from waddles",
-        );
+
+        let row = catalog
+            .get("waddles.socials.discord.default")
+            .expect("row was just inserted");
+        let webhook_url = crate::senders::discord_webhook_url_from_config(&row.config_json)
+            .expect("this bundle's activation config carries discord_webhook_url");
+        let args = crate::senders::discord_webhook_args(&webhook_url, "hello from waddles");
         let result = guard
             .send("waddles.socials.discord.default", &args)
             .await
@@ -1173,6 +1215,7 @@ mod tests {
                 )]),
             ),
             test_metrics(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
         );
         guard
             .send(
@@ -1212,6 +1255,7 @@ mod tests {
                 )]),
             ),
             test_metrics(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
         );
         let err = guard
             .send(
@@ -1259,6 +1303,7 @@ mod tests {
                 vec![("discord.com".to_string(), vec!["POST".to_string()])],
             ),
             test_metrics(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
         );
         let err = guard
             .send(
@@ -1299,6 +1344,7 @@ mod tests {
                 )]),
             ),
             test_metrics(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
         );
         let err = guard
             .send(
@@ -1334,6 +1380,7 @@ mod tests {
                 vec![("discord.com".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
         );
         let args = serde_json::json!({"method": "GET", "url": "https://discord.com/"});
         guard
@@ -1427,6 +1474,7 @@ mod tests {
                 vec![("discord.com".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
         );
         let err = guard
             .send(
@@ -1446,6 +1494,64 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "invalid_args");
+    }
+
+    // -- spec §13.5 `waddles.core.bundle-egress` flag gate --
+
+    /// OFF ⇒ every egress call is denied `feature_disabled`, before any
+    /// other check runs (even an otherwise-fully-valid, allowlisted
+    /// request) -- and the denial is counted in the same metric as every
+    /// other rejection reason.
+    #[tokio::test]
+    async fn bundle_egress_flag_off_denies_every_call_as_feature_disabled() {
+        let transport = Arc::new(FakeTransport::default());
+        let guard = EgressGuard::new(
+            Arc::clone(&transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog_with_row(
+                "waddles.a.b.c",
+                vec![("discord.com".to_string(), vec!["POST".to_string()])],
+            ),
+            test_metrics(),
+            crate::flags::boxed(crate::flags::StaticFlag(false)),
+        );
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "POST", "url": "https://discord.com/api/webhooks/1"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "feature_disabled");
+        // Never even reached the transport -- the flag check is the very
+        // first thing `send` does.
+        assert!(transport.requests.lock().unwrap().is_empty());
+        let value = guard
+            .denied_total
+            .with_label_values(&["waddles.a.b.c", "feature_disabled"])
+            .get();
+        assert_eq!(value, 1);
+    }
+
+    #[tokio::test]
+    async fn bundle_egress_flag_on_permits_an_otherwise_valid_call() {
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default().queue(Ok(ok_response()))),
+            default_limits(),
+            catalog_with_row(
+                "waddles.a.b.c",
+                vec![("discord.com".to_string(), vec!["POST".to_string()])],
+            ),
+            test_metrics(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
+        );
+        let result = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "POST", "url": "https://discord.com/api/webhooks/1"}),
+            )
+            .await;
+        assert!(result.is_ok(), "expected success, got {result:?}");
     }
 
     // -- ReqwestTransport (real TLS/connect/size-cap, spec §8.2 steps 9/11/12) --
