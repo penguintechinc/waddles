@@ -69,6 +69,10 @@ hyper = { version = "=1.11.1", features = ["full"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 tracing = "=0.1.44"
+# RFC 3339 timestamps for envelope `ts` (`src/execute.rs`) and the `clock`
+# host capability's `now-rfc3339` op (`src/capabilities.rs`). Same version
+# pin `core/svc_action` uses for the identical purpose.
+chrono = { version = "=0.4.45", features = ["serde"] }
 # `penguin-logging` owns the tracing-subscriber/OTel/OTLP stack internally
 # (spec SS4.9) -- this crate no longer depends on `tracing-subscriber`,
 # `opentelemetry`, `opentelemetry-otlp`, `opentelemetry_sdk`, or
@@ -80,8 +84,31 @@ tracing = "=0.1.44"
 # commit's own `Cargo.toml` actually satisfies this requirement.
 penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69e740ce5411d8cd005241fbd829c62e68efb96e", package = "penguin-logging", version = "=0.1.0" }
 # `penguin-spine` (spec SS4.7): the process-stage granted-ingest-stream
-# `XREADGROUP` consumer -- see `src/spine.rs`.
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "b30f5cb2b2465556e11678f67359702ae487d721", package = "penguin-spine", version = "=0.1.0" }
+# `XREADGROUP` consumer -- see `src/spine.rs`. Bumped to
+# `release/rust-spine/v0.1.x`'s finalized tip (was
+# 2976bf8a336a720ee5f939ad2d1a3f7b4b820642) for the `Delivered.group` fix:
+# `SpineClient::dead_letter` now `XACK`s under the entry's actual
+# consumer-group name (`d.group`, set by `GroupReader::read`/`claim_stale`)
+# instead of guessing from `d.env.app_id` -- the exact "shared ingest-source
+# stream" bug this crate's own `src/hop.rs` doc comment already called out
+# (env.app_id never identifies the reading bundle on a shared stream).
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "586b8dadfcad26f2e8207b91cd2deb81afb6630f", package = "penguin-spine", version = "=0.1.0" }
+# `penguin-licensing` (spec SS13.5): gates the process-stage drain loop on
+# the `waddles.core.rust-data-plane` PostHog-compatible flag (default OFF,
+# fail-closed on an unreachable license server) -- see `src/license.rs`.
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f642e0695046386ca674e47eb9e6f7d6283ac531", package = "penguin-licensing", version = "=0.1.0" }
+# `penguin-bundle-host::wire` (spec SS6.6): the host-API frame codec and
+# Frame/Message shapes shared verbatim with `bundle-executor` -- see
+# `src/host_api.rs`. Same pinned rev `core/svc_action`/`core/bundle_executor`
+# already use (PR penguintechinc/penguin-libs#93).
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "49f098caab95339bf8113ba5c3e9ad039d30d44b", package = "penguin-bundle-host", version = "=0.1.0" }
+# mTLS host-API server (spec SS6.6/SS7.1): the executor dials `:8301`; this
+# crate is the TLS *server* side, mirroring `core/bundle_executor/src/tls.rs`
+# (the client side) with the roles reversed -- same exact version pins
+# `core/svc_action` uses for its own `:8302` listener.
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "tls12"] }
+tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
+rustls-pki-types = "=1.15.1"
 prometheus = "=0.14.0"
 thiserror = "=2.0.20"
 anyhow = "=1.0.104"
@@ -107,6 +134,11 @@ governor = "=0.8.1"
 
 [dev-dependencies]
 http-body-util = "=0.1.3"
+# Test-only: throwaway self-signed CA/client cert+key pairs generated at
+# test run time (`src/host_api.rs`'s TLS tests) -- same rationale as
+# `core/svc_action`'s identical dev-dependency: no private key material,
+# test-only or otherwise, ever lands in source control.
+rcgen = "=0.14.10"
 
 [profile.release]
 opt-level = 3
