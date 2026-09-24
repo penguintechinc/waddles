@@ -101,6 +101,28 @@ pub fn register_request_metrics(registry: &prometheus::Registry) -> RequestMetri
     }
 }
 
+/// Registers `waddles_egress_denied_total{app_id,reason}` (spec §8.2: "Each
+/// step that rejects ... increments `waddles_egress_denied_total{app_id,
+/// reason}`") against `registry` -- called once at startup and shared into
+/// `crate::egress::EgressGuard`. Separate from [`register_request_metrics`]
+/// because it is registered before `crate::http::AppState` exists (the
+/// host-API listener and its `EgressGuard` start before the control-plane
+/// router is built) -- see `crate::try_start_host_api`.
+pub fn register_egress_metrics(registry: &prometheus::Registry) -> prometheus::IntCounterVec {
+    let denied_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_action_egress_denied_total",
+            "Bundle http.send calls denied or rate-limited by the egress guard, by app_id/reason",
+        ),
+        &["app_id", "reason"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(denied_total.clone()))
+        .expect("register svc_action_egress_denied_total");
+    denied_total
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +152,18 @@ mod tests {
         register_request_metrics(&registry);
         let rendered = render_metrics(&registry).expect("registry with metrics must encode");
         assert!(rendered.contains("svc_action_up 1"));
+    }
+
+    #[test]
+    fn register_egress_metrics_produces_a_labeled_counter() {
+        let registry = prometheus::Registry::new();
+        let denied_total = register_egress_metrics(&registry);
+        denied_total
+            .with_label_values(&["waddles.a.b.c", "host_not_declared"])
+            .inc();
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_action_egress_denied_total"));
+        assert!(rendered.contains("host_not_declared"));
     }
 
     #[test]

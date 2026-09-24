@@ -37,7 +37,20 @@ prometheus = "=0.14.0"
 thiserror = "=2.0.20"
 anyhow = "=1.0.104"
 clap = { version = "=4.6.6", features = ["derive", "env"] }
-reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "stream"] }
+# `crate::egress`'s response-size cap (spec SS8.2 row 11: "larger bodies are
+# truncated") streams the response body instead of buffering it whole --
+# `reqwest`'s `stream` feature above returns a `Stream`, and `StreamExt::next`
+# (this crate, not re-exported by `reqwest`) is what drives it. Pinned to the
+# version already resolved transitively (Cargo.lock) so this promotion adds
+# no new version to the dependency graph.
+futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
+# `crate::egress`'s `http.send` result payload encodes the WIT `list<u8>`
+# response/request body as base64 (this crate's own wire-JSON convention,
+# same rationale as `crate::dispatch::invoke_dispatch`'s doc comment) rather
+# than a JSON array of byte values or lossy UTF-8. Pinned to the version
+# already resolved transitively (Cargo.lock).
+base64 = "=0.22.1"
 chrono = { version = "=0.4.45", features = ["serde"] }
 # This service owns `action_dispatch_log` (config/postgres/migrations/074) --
 # see `rules/backend-database.md` Per-Service Database Accounts. No other
@@ -55,19 +68,31 @@ sea-orm = { version = "=2.0.2", default-features = false, features = [
 penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69e740ce5411d8cd005241fbd829c62e68efb96e", package = "penguin-logging", version = "=0.1.0" }
 # `penguin-spine` (spec SS4.7): the action-stage's own `:action` stream
 # `XREADGROUP` consumer (single consumer group `{app_id}`) -- see
-# `src/dispatch.rs`. Pinned to the HEAD of `release/rust-spine/v0.1.x`.
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "b30f5cb2b2465556e11678f67359702ae487d721", package = "penguin-spine", version = "=0.1.0" }
+# `src/dispatch.rs`. Pinned to the tip of `release/rust-spine/v0.1.x`,
+# which now carries the `binding` module (`compute_binding_mac`/
+# `verify_binding`, spec SS5.11) and the `Delivered.group`/`dead_letter`
+# XACK fix -- see `src/hop.rs`'s module doc for why this crate keeps its
+# own byte-identical MAC implementation rather than switching to the
+# landed `binding` module (a separate follow-up, re-verified against this
+# rev's own canonical test vectors, not done here), and `src/dispatch.rs`'s
+# `fixture_delivered` for the `group` field this rev added.
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "586b8dadfcad26f2e8207b91cd2deb81afb6630f", package = "penguin-spine", version = "=0.1.0" }
 # `penguin-bundle-host::wire` (spec SS6.6): the host-API frame codec and
 # Frame/Message shapes shared verbatim with `bundle-executor` -- see
 # `src/host_api.rs`. Pinned to the HEAD of `release/rust-bundle-host/v0.1.x`
 # (PR penguintechinc/penguin-libs#93, same commit `core/bundle_executor`
 # pins).
 penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "49f098caab95339bf8113ba5c3e9ad039d30d44b", package = "penguin-bundle-host", version = "=0.1.0" }
+# Spec SS13.5's two flags this crate gates on (`waddles.core.rust-data-plane`,
+# `waddles.core.bundle-egress`) -- see `src/flags.rs`. Pinned to the tip of
+# `release/rust-licensing/v0.1.x`.
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f642e0695046386ca674e47eb9e6f7d6283ac531", package = "penguin-licensing", version = "=0.1.0" }
 # D30 envelope binding MAC (spec SS5.11): HMAC-SHA256 hop verification --
 # `src/hop.rs`. Same exact pins `penguin-spine` itself uses internally for
-# byte-identical behavior (its own `binding` module has not landed yet at
-# the pinned `rev` above, so this stage computes/verifies the MAC itself
-# per the spec's published formula -- see `src/hop.rs`'s module doc).
+# byte-identical behavior. `penguin-spine`'s own `binding` module (above)
+# now implements the identical formula -- `src/hop.rs`'s module doc records
+# the cross-check against that module's canonical test vectors and why this
+# crate keeps its own copy rather than switching over in this landing.
 hmac = "=0.12.1"
 sha2 = "=0.10.9"
 subtle = "=2.6.1"

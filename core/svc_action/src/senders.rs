@@ -7,30 +7,28 @@
 //! path in `crate::capabilities::StageCapabilities::handle_relay` (the
 //! platform explicitly called out as the relay-based one, and the simplest
 //! to land completely: no SSRF-guarded `http` capability, no per-platform
-//! credential injection). Discord/Slack/YouTube/Kick all route through the
-//! REST `http` capability, which is itself a documented `TODO(M3+)` seam in
-//! `crate::capabilities` -- rather than reimplement connector logic here,
-//! this module leaves an explicit seam per platform naming the
-//! `penguin-connectors` crate that owns it, per the M3 task's own
+//! credential injection). Discord routes through the REST `http`
+//! capability (`crate::egress::EgressGuard`); Slack/YouTube/Kick remain a
+//! documented `TODO(M3+)` seam -- rather than reimplement connector logic
+//! here, this module leaves an explicit seam per remaining platform naming
+//! the `penguin-connectors` crate that owns it, per the M3 task's own
 //! instruction ("USE penguin-connectors' senders where they exist ... do
 //! NOT reimplement connector logic in svc_action").
 //!
-//! **Not yet wired end to end (post-M3 review correction).** This module's
-//! own `Platform`/`sender_status`/`is_retryable`/`twitch_relay_args` are
-//! not referenced from `crate::dispatch` or anywhere else in this crate
-//! outside their own tests below -- `dispatch::invoke_dispatch` hardcodes
-//! `"irc_relay"` as its `target_type_hint` rather than calling
-//! `Platform::Twitch.as_str()` (`"twitch"`), and nothing builds a `relay`
-//! host-call from `twitch_relay_args` today (that call, per the doc below,
-//! is issued by the *bundle* via the wire protocol, not by this stage).
-//! More fundamentally, `crate::lib::try_start_host_api` always installs
-//! `DenyAllCapabilities`, never `StageCapabilities`, as the live
-//! connection's handler, so even a bundle-issued `relay` call is denied in
-//! every build shipped so far -- see that function's module-level doc
-//! correction. Twitch sending is therefore **not functional end to end**
-//! in this build; these functions document the intended shape for the
-//! caller that will use them once both gaps close, not code `dispatch`
-//! currently exercises.
+//! **Wired end to end (post-M3 review fix).** `crate::lib::try_start_host_api`
+//! now installs a real `crate::capabilities::StageCapabilities` -- backed
+//! by a live Valkey connection for `relay` and `crate::egress::EgressGuard`
+//! for `http` -- as the live connection's handler, scoped per invoke (not
+//! per connection, see `crate::capabilities`'s module doc for why that
+//! distinction matters). A bundle's `relay`/`http` host-call is answered
+//! for real; `Platform`/`sender_status`/`is_retryable`/`twitch_relay_args`
+//! below remain reference/documentation helpers for the *bundle-authoring*
+//! side of this contract (the relay/http call itself is issued by the
+//! bundle via the wire protocol, per the doc below, never constructed by
+//! this stage) and by `crate::dispatch::interpret_dispatch_payload`'s
+//! `target_type_hint`, which stays `"irc_relay"` (Python-parity transport
+//! name, `libs/waddle_transports/transports/irc_relay.py`'s `name` field --
+//! not `Platform::Twitch.as_str()`, a different, bundle-facing string).
 
 use penguin_bundle_host::wire::HostResultError;
 
@@ -119,6 +117,63 @@ pub fn is_retryable(err: &HostResultError) -> bool {
     matches!(err.code.as_str(), "relay_unavailable")
 }
 
+/// Extracts this bundle's own Discord webhook URL from its activation
+/// config (`crate::distribution::BundleRow::config_json`, hub-api/admin-
+/// controlled -- never bundle-runtime-supplied). Hardening fix (own
+/// observation from the `secret_refs` finding, same principle applied
+/// here): the webhook URL embeds a bearer-token-equivalent secret in its
+/// path, so it must be resolved the same way as any other outbound
+/// credential/target -- from this bundle's own trusted config, never a
+/// literal a caller/bundle chooses at call time (spec §7.5: "the outbound
+/// credential and target are resolved from the envelope's (tenant,
+/// community) -- never from anything a bundle's outbound args carry").
+/// [`discord_webhook_args`] takes an already-resolved URL for exactly this
+/// reason: obtain it through this function, never by embedding a literal.
+/// Returns `None` when the config has no `discord_webhook_url` string
+/// (not configured for this bundle, or malformed config JSON) --
+/// `crate::dispatch`'s caller treats that as a non-retryable configuration
+/// error, never a reason to fall back to a bundle-supplied URL.
+pub fn discord_webhook_url_from_config(config_json: &str) -> Option<String> {
+    let config: serde_json::Value = serde_json::from_str(config_json).ok()?;
+    config
+        .get("discord_webhook_url")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// Builds the `http` host-call args for a Discord webhook send -- the
+/// shape `crate::egress::EgressGuard::send` expects (spec §6.5's WIT
+/// `http::request`, this crate's JSON-wire convention -- see
+/// `crate::egress`'s module doc). `webhook_url` **must** come from
+/// [`discord_webhook_url_from_config`] (this bundle's own trusted
+/// activation config), never a caller-invented or bundle-runtime-supplied
+/// literal -- see that function's doc for why. It must also already be on
+/// the bundle's manifest `egress` allowlist (e.g. `{host: "discord.com",
+/// methods: ["POST"]}`); the bundle constructs and issues this call itself
+/// via the wire protocol -- this function documents the expected shape,
+/// mirroring `twitch_relay_args` above for `relay`.
+pub fn discord_webhook_args(webhook_url: &str, content: &str) -> serde_json::Value {
+    use base64::Engine;
+    let body = serde_json::json!({"content": content}).to_string();
+    let body_base64 = base64::engine::general_purpose::STANDARD.encode(body.as_bytes());
+    serde_json::json!({
+        "method": "POST",
+        "url": webhook_url,
+        "headers": [{"name": "Content-Type", "value": "application/json"}],
+        "body_base64": body_base64,
+    })
+}
+
+/// Classifies an `http` capability's `HostResultError` into whether the
+/// dispatch attempt should retry (spec §4.3). `rate_limited`/`timeout`/
+/// `transport` are transient (a bundle should back off and retry); every
+/// SSRF/allowlist/malformed-request denial reason is a caller-side
+/// configuration problem -- never retryable, since retrying an undeclared
+/// host or a bad URL will fail identically every time.
+pub fn discord_is_retryable(err: &HostResultError) -> bool {
+    matches!(err.code.as_str(), "rate_limited" | "timeout" | "transport")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +209,62 @@ mod tests {
         assert_eq!(args["provider"], "twitch");
         assert_eq!(args["channel"], "#somechannel");
         assert_eq!(args["text"], "hello");
+    }
+
+    #[test]
+    fn discord_webhook_url_from_config_extracts_the_configured_url() {
+        let config = r#"{"discord_webhook_url": "https://discord.com/api/webhooks/1/abc"}"#;
+        assert_eq!(
+            discord_webhook_url_from_config(config),
+            Some("https://discord.com/api/webhooks/1/abc".to_string())
+        );
+    }
+
+    #[test]
+    fn discord_webhook_url_from_config_is_none_when_not_configured() {
+        assert_eq!(discord_webhook_url_from_config("{}"), None);
+    }
+
+    #[test]
+    fn discord_webhook_url_from_config_is_none_on_malformed_json() {
+        assert_eq!(discord_webhook_url_from_config("not json"), None);
+    }
+
+    #[test]
+    fn discord_webhook_args_shape_matches_the_http_capability() {
+        let args = discord_webhook_args("https://discord.com/api/webhooks/1/abc", "hello");
+        assert_eq!(args["method"], "POST");
+        assert_eq!(args["url"], "https://discord.com/api/webhooks/1/abc");
+        assert_eq!(args["headers"][0]["name"], "Content-Type");
+        assert_eq!(args["headers"][0]["value"], "application/json");
+        let body_b64 = args["body_base64"].as_str().unwrap();
+        let decoded =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body_b64).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(parsed["content"], "hello");
+    }
+
+    #[test]
+    fn discord_transient_codes_are_retryable_denial_reasons_are_not() {
+        for code in ["rate_limited", "timeout", "transport"] {
+            assert!(discord_is_retryable(&HostResultError {
+                code: code.to_string(),
+                message: "x".to_string()
+            }));
+        }
+        for code in [
+            "scheme_not_https",
+            "host_not_declared",
+            "method_not_declared",
+            "malformed_url",
+            "secret_unresolved",
+            "ssrf_blocked_address",
+        ] {
+            assert!(!discord_is_retryable(&HostResultError {
+                code: code.to_string(),
+                message: "x".to_string()
+            }));
+        }
     }
 
     #[test]

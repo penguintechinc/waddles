@@ -8,32 +8,35 @@
 //! of the bundle-executor wire protocol (`host_api`), hop verification
 //! (`hop`), usage metering (`usage`, periodically flushed to
 //! `waddles:usage` -- see [`try_start_dispatch`]), and retry/audit
-//! (`retry`, `db::entities::action_dispatch_log`). What remains a
-//! documented seam -- never a silent stub -- is named at each call site
-//! below: the `GET /api/v1/distribution/bundles?stage=action` poll (which
-//! bundle/digest/grants to run) is blocked on the same M2 hub-api work
-//! `core/svc_process`'s own M4 skeleton left as `TODO(M4)`.
+//! (`retry`, `db::entities::action_dispatch_log`).
 //!
-//! **Correction (post-M3 review): Twitch sending is not yet functional
-//! end to end.** `crate::capabilities::StageCapabilities` fully implements
-//! the `relay` host capability's Valkey `LPUSH` (byte-exact port of
-//! `waddle_transports.transports.irc_relay`), but [`try_start_host_api`]
-//! below always installs `DenyAllCapabilities` as the live connection's
-//! handler -- the same tenant/community-scoping gap the distribution poll
-//! above is blocked on -- so a bundle's `relay` host call is denied in
-//! every build shipped so far, not routed to a live Twitch send.
-//! `crate::senders`'s `Platform`/`sender_status`/`is_retryable`/
-//! `twitch_relay_args` are correspondingly unreferenced outside their own
-//! module's tests today; they document the intended shape for the caller
-//! that will issue/classify a relay send once `StageCapabilities` is
-//! actually wired to a live connection, not code currently exercised by
-//! `dispatch`.
+//! **Post-M3 review fix: the sender path is now live.** [`try_start_host_api`]
+//! installs a real `crate::capabilities::StageCapabilities` (a live Valkey
+//! connection for `relay`, `crate::egress::EgressGuard` for `http`) rather
+//! than the placeholder `DenyAllCapabilities` this crate shipped
+//! previously -- and, per the review's other finding, capability scope is
+//! resolved **per invoke** (`crate::capabilities::InvokeScope`, threaded
+//! through `crate::host_api::Connection::invoke`), never fixed at
+//! connection-construction time, since one connection multiplexes many
+//! `(tenant, community, app_id)` activations (see `crate::capabilities`'s
+//! module doc for the full rationale). [`try_start_distribution_poll`]
+//! resolves which bundle/digest to `load` from the `GET /api/v1/
+//! distribution/bundles?stage=action` poll, gated by `ACTION_APP_ID` --
+//! single-bundle-scoped in this landing, matching every other seam at that
+//! same scope (`core/svc_process`'s own M4 skeleton's `PROCESS_APP_ID`).
+//! What remains a documented seam: `db`/`kv`/`flags` host capabilities
+//! (`crate::capabilities`), and full multi-bundle/hot-swap distribution
+//! reconciliation (`crate::distribution`'s module doc).
 
 pub mod capabilities;
 pub mod config;
+pub(crate) mod crypto;
 pub mod db;
 pub mod dispatch;
+pub mod distribution;
+pub mod egress;
 pub mod error;
+pub mod flags;
 pub mod hop;
 pub mod host_api;
 pub mod http;
@@ -44,7 +47,7 @@ pub mod usage;
 pub mod wiring;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
 use tokio::signal;
@@ -86,10 +89,54 @@ where
         "starting {SERVICE_NAME}"
     );
 
+    // Shared across the host-API capability set and the dispatch loop --
+    // see `crate::capabilities::StageCapabilities`'s `usage` field doc and
+    // `try_start_usage_flush` below: one batcher, one flush loop,
+    // regardless of which of the two accumulates a given delta.
+    let usage = Arc::new(Mutex::new(usage::UsageBatcher::new()));
+    // Shared between the distribution poll (writer) and the host-API
+    // capability set's `EgressGuard` (reader, spec §7.4's `http` egress
+    // allowlist) -- see `crate::distribution`'s module doc.
+    let catalog = Arc::new(distribution::BundleCatalog::new());
+    let egress_denied_total = telemetry::register_egress_metrics(&prom_registry);
+
+    // Spec §13.5's two-gate check for this service's flags
+    // (`flags::RUST_DATA_PLANE_FLAG`, `flags::BUNDLE_EGRESS_FLAG`), both
+    // `min_tier: free` so `flag_enabled` alone gates them (see
+    // `build_license_client`'s doc for the fail-closed-to-OFF fallback
+    // when even the client itself can't be built).
+    let license = build_license_client();
+    if let Some(client) = &license {
+        let initial_refresh = Arc::clone(client);
+        tokio::spawn(async move {
+            if let Err(err) = initial_refresh.refresh().await {
+                tracing::warn!(
+                    error = %err,
+                    "initial license/flag refresh failed; both spec §13.5 flags serve their \
+                     default (OFF) until the next scheduled refresh succeeds"
+                );
+            }
+        });
+        // Runs for the process lifetime (crate doc: "drop it to let the
+        // loop run for the process lifetime") -- the same fire-and-forget
+        // posture every other background task in this module takes.
+        // `drop`, not `let _ =` (clippy::let_underscore_future): the
+        // `JoinHandle` itself implements `Future`, and this is a
+        // deliberate detach, not an accidental one.
+        drop(client.spawn_refresh());
+    }
+
     let state = http::AppState::new(config.clone(), prom_registry);
 
-    let connections = try_start_host_api(&config.cli);
-    try_start_dispatch(&config, connections);
+    let connections = try_start_host_api(
+        &config.cli,
+        Arc::clone(&usage),
+        Arc::clone(&catalog),
+        egress_denied_total,
+        license.clone(),
+    );
+    try_start_distribution_poll(&config, Arc::clone(&connections), Arc::clone(&catalog));
+    try_start_dispatch(&config, connections, catalog, usage, license);
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
     let metrics_addr = SocketAddr::new(config.cli.bind_addr, config.cli.metrics_port);
@@ -116,6 +163,116 @@ where
     Ok(())
 }
 
+/// Product identifier `penguin_licensing::LicenseConfig` validates against
+/// and the flag-key prefix it resolves under (spec §13.5: "Flag keys
+/// follow `{product}.{feature}`") -- both flags this service checks are
+/// `waddles.core.*`.
+const LICENSE_PRODUCT: &str = "waddles";
+
+/// Builds the shared `penguin_licensing::LicenseClient` this service's two
+/// spec §13.5 flags resolve against, from the standard `LICENSE_KEY`/
+/// `LICENSE_SERVER_URL`/`POSTHOG_HOST`/`POSTHOG_KEY` environment variables.
+/// `None` only if even the no-network-required default `LicenseConfig`
+/// fails to build (a hardcoded, always-valid literal URL parse -- not
+/// reachable in practice, handled rather than unwrapped): callers use
+/// [`flag_or_closed`] to fall back to [`flags::StaticFlag`]`(false)` for
+/// both flags in that case, the same fail-closed-to-OFF posture spec
+/// §13.5 already specifies for a never-seen flag.
+fn build_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
+    let cfg = match penguin_licensing::LicenseConfig::from_env(LICENSE_PRODUCT) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "LICENSE_SERVER_URL/POSTHOG_HOST invalid; falling back to defaults \
+                 (both spec §13.5 flags default OFF until a valid config is set)"
+            );
+            match penguin_licensing::LicenseConfig::new(LICENSE_PRODUCT) {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    tracing::error!(
+                        error = %err,
+                        "LicenseConfig::new failed unexpectedly; license/flag gating disabled"
+                    );
+                    return None;
+                }
+            }
+        }
+    };
+    match penguin_licensing::LicenseClient::new(cfg) {
+        Ok(client) => Some(client),
+        Err(err) => {
+            tracing::error!(error = %err, "LicenseClient::new failed; license/flag gating disabled");
+            None
+        }
+    }
+}
+
+/// Wraps `license` into a live [`flags::LicenseFlag`] for `key` when a
+/// client is available, or [`flags::StaticFlag`]`(false)` otherwise -- the
+/// single place every call site applies the fail-closed-to-OFF fallback
+/// identically (see [`build_license_client`]'s doc for when `None`
+/// happens).
+fn flag_or_closed(
+    license: &Option<Arc<penguin_licensing::LicenseClient>>,
+    key: &'static str,
+) -> Arc<dyn flags::FeatureFlag> {
+    match license {
+        Some(client) => flags::boxed(flags::LicenseFlag::new(Arc::clone(client), key)),
+        None => flags::boxed(flags::StaticFlag(false)),
+    }
+}
+
+/// Builds the real [`capabilities::StageCapabilities`] (a live Valkey
+/// connection for `relay`, [`egress::EgressGuard`] for `http`), or `None`
+/// if either dependency is unavailable right now. `try_start_host_api`
+/// falls back to [`capabilities::DenyAllCapabilities`] on `None` -- the
+/// same all-or-nothing graceful-degradation posture this capability set
+/// has always had (a `relay_queue` is not optional on
+/// `StageCapabilities<Q>`, so a missing Valkey connection cannot yield a
+/// partial capability set without a larger refactor than this landing's
+/// scope; a bundle sees `access-denied` on every capability, never a
+/// crash, until the next connection attempt).
+async fn build_stage_capabilities(
+    cli: &config::CliConfig,
+    usage: Arc<Mutex<usage::UsageBatcher>>,
+    catalog: Arc<distribution::BundleCatalog>,
+    egress_denied_total: prometheus::IntCounterVec,
+    license: Option<Arc<penguin_licensing::LicenseClient>>,
+) -> Option<Arc<dyn capabilities::CapabilityHandler>> {
+    let spine_cfg = match penguin_spine::SpineConfig::from_env() {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(error = %err, "spine config unavailable; capabilities disabled (DenyAllCapabilities)");
+            return None;
+        }
+    };
+    let relay_conn = match usage::connect(&spine_cfg).await {
+        Ok(conn) => conn,
+        Err(err) => {
+            tracing::warn!(error = %err, "valkey connection for relay capability failed; capabilities disabled (DenyAllCapabilities)");
+            return None;
+        }
+    };
+    let egress = Arc::new(egress::EgressGuard::new(
+        Arc::new(egress::ReqwestTransport),
+        egress::EgressLimits {
+            allow_private_hosts: cli.egress_allow_private_hosts,
+            rate_limit_rps: cli.egress_rate_limit_rps,
+            rate_limit_burst: cli.egress_rate_limit_burst,
+            timeout: std::time::Duration::from_millis(cli.egress_timeout_ms),
+            max_redirects: cli.egress_max_redirects,
+            max_response_bytes: cli.egress_max_response_bytes,
+        },
+        catalog,
+        egress_denied_total,
+        flag_or_closed(&license, flags::BUNDLE_EGRESS_FLAG),
+    ));
+    Some(Arc::new(capabilities::StageCapabilities::new(
+        relay_conn, egress, usage,
+    )))
+}
+
 /// Starts the host-API mTLS listener as its own background task and
 /// returns the [`host_api::ConnectionRegistry`] immediately, regardless of
 /// whether the listener actually starts -- never blocks or fails
@@ -125,7 +282,13 @@ where
 /// HTTP/metrics servers served alongside it -- the same graceful-
 /// degradation contract `core/svc_process`'s `try_start_spine_drain`
 /// applies to its own optional dependency.
-fn try_start_host_api(cli: &config::CliConfig) -> Arc<host_api::ConnectionRegistry> {
+fn try_start_host_api(
+    cli: &config::CliConfig,
+    usage: Arc<Mutex<usage::UsageBatcher>>,
+    catalog: Arc<distribution::BundleCatalog>,
+    egress_denied_total: prometheus::IntCounterVec,
+    license: Option<Arc<penguin_licensing::LicenseClient>>,
+) -> Arc<host_api::ConnectionRegistry> {
     let registry = Arc::new(host_api::ConnectionRegistry::new());
     let cli = cli.clone();
     let registry_for_task = Arc::clone(&registry);
@@ -135,21 +298,91 @@ fn try_start_host_api(cli: &config::CliConfig) -> Arc<host_api::ConnectionRegist
             shutdown_signal().await;
             let _ = shutdown_tx.send(());
         });
-        // TODO(M3+): the `relay`/`clock`/`context`/`log` capabilities need
-        // a live Valkey connection (`crate::capabilities::StageCapabilities`)
-        // and per-activation (tenant, community, app_id) scope neither of
-        // which the host-api listener alone has -- until the distribution
-        // poll (see the module doc) resolves that scope, every host-call
-        // this listener receives is answered by `DenyAllCapabilities`
-        // (a real, correct "not configured yet" denial, never a fabricated
-        // success).
-        let capabilities: Arc<dyn capabilities::CapabilityHandler> =
-            Arc::new(capabilities::DenyAllCapabilities);
+        let capabilities =
+            build_stage_capabilities(&cli, usage, catalog, egress_denied_total, license)
+                .await
+                .unwrap_or_else(|| Arc::new(capabilities::DenyAllCapabilities));
         if let Err(err) = host_api::serve(cli, registry_for_task, capabilities, shutdown_rx).await {
             tracing::warn!(error = %err, "host-api listener unavailable; executor integration disabled");
         }
     });
     registry
+}
+
+/// Starts the `GET /api/v1/distribution/bundles?stage=action` poll
+/// (`crate::distribution::run_poll_loop`) as its own background task.
+/// Mirrors [`try_start_dispatch`]'s own `ACTION_APP_ID`-gating: no bundle
+/// assigned yet means nothing to poll for.
+fn try_start_distribution_poll(
+    config: &config::Config,
+    connections: Arc<host_api::ConnectionRegistry>,
+    catalog: Arc<distribution::BundleCatalog>,
+) {
+    if config.cli.action_app_id.is_empty() {
+        tracing::info!("ACTION_APP_ID not set; distribution poll not started");
+        return;
+    }
+    let cli = config.cli.clone();
+    tokio::spawn(async move {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            let _ = shutdown_tx.send(());
+        });
+        let load_limits = penguin_bundle_host::wire::LoadLimits {
+            timeout_ms: cli.executor_call_timeout_ms,
+            memory_mb: 64,
+        };
+        distribution::run_poll_loop(
+            distribution::PollLoopConfig {
+                client: reqwest::Client::new(),
+                hub_api_url: cli.hub_api_url.clone(),
+                stage: "action",
+                poll_interval: std::time::Duration::from_secs_f64(cli.poll_interval_s.max(0.1)),
+                catalog,
+                connections,
+                action_app_id: cli.action_app_id.clone(),
+                load_limits,
+            },
+            shutdown_rx,
+        )
+        .await;
+    });
+}
+
+/// Waits up to a few `poll_interval`s for [`try_start_distribution_poll`]
+/// to have resolved `app_id`'s digest/config into `catalog`, so the
+/// dispatch loop's first `invoke` has a real digest to run rather than the
+/// empty-string placeholder (which the executor would refuse with
+/// `UNKNOWN_BUNDLE`). Falls back to `(String::new(), "{}")` -- today's
+/// behavior -- if the poll hasn't landed a row in time (hub-api slow/down
+/// at startup): never blocks `try_start_dispatch` indefinitely, and never
+/// panics. **This is a one-shot resolution, not hot-swap** -- a digest
+/// change observed later by the poll loop updates `catalog` and (once an
+/// executor is connected) sends `load` for it, but this dispatch loop's own
+/// `deps.digest` stays fixed at whatever this function returned (documented
+/// seam, `crate::dispatch`'s own module doc).
+async fn resolve_initial_bundle(
+    catalog: &distribution::BundleCatalog,
+    app_id: &str,
+    poll_interval: std::time::Duration,
+) -> (String, String) {
+    const MAX_ATTEMPTS: u32 = 3;
+    for attempt in 0..MAX_ATTEMPTS {
+        if let Some(row) = catalog.get(app_id) {
+            if let Some(digest) = row.artifact_digest {
+                return (digest, row.config_json);
+            }
+        }
+        if attempt + 1 < MAX_ATTEMPTS {
+            tokio::time::sleep(poll_interval).await;
+        }
+    }
+    tracing::warn!(
+        app_id,
+        "no distribution row resolved yet; dispatch loop starting with an empty digest"
+    );
+    (String::new(), "{}".to_string())
 }
 
 /// Starts the action-stage dispatch loop (`crate::dispatch::run`) as its
@@ -161,7 +394,13 @@ fn try_start_host_api(cli: &config::CliConfig) -> Arc<host_api::ConnectionRegist
 /// `ENVELOPE_BINDING_KEYS` parsing failing (missing/invalid required
 /// config -- hop verification must never silently fail open, so a missing
 /// keyring disables the loop rather than starting it unverified).
-fn try_start_dispatch(config: &config::Config, connections: Arc<host_api::ConnectionRegistry>) {
+fn try_start_dispatch(
+    config: &config::Config,
+    connections: Arc<host_api::ConnectionRegistry>,
+    catalog: Arc<distribution::BundleCatalog>,
+    usage: Arc<Mutex<usage::UsageBatcher>>,
+    license: Option<Arc<penguin_licensing::LicenseClient>>,
+) {
     if config.cli.action_app_id.is_empty() {
         tracing::info!(
             "ACTION_APP_ID not set; dispatch loop not started (blocked on distribution poll)"
@@ -190,6 +429,7 @@ fn try_start_dispatch(config: &config::Config, connections: Arc<host_api::Connec
     };
 
     let app_id = config.cli.action_app_id.clone();
+    let poll_interval = std::time::Duration::from_secs_f64(config.cli.poll_interval_s.max(0.1));
     let config = config.clone();
     tokio::spawn(async move {
         let db = match db::connect(&config).await {
@@ -199,6 +439,7 @@ fn try_start_dispatch(config: &config::Config, connections: Arc<host_api::Connec
                 return;
             }
         };
+        let (digest, config_json) = resolve_initial_bundle(&catalog, &app_id, poll_interval).await;
         // TODO(M3+): tenant/community scope is hardcoded to the
         // tenant-wide `global` activation until the distribution poll
         // (module doc) resolves the real set of (tenant, community,
@@ -221,11 +462,10 @@ fn try_start_dispatch(config: &config::Config, connections: Arc<host_api::Connec
                 return;
             }
         };
-        let usage = Arc::new(std::sync::Mutex::new(usage::UsageBatcher::new()));
         let deps = dispatch::DispatchDeps {
             app_id: app_id.clone(),
-            digest: String::new(),
-            config_json: "{}".to_string(),
+            digest,
+            config_json,
             key_ring,
             connections,
             retry_policy: dispatch::RetryPolicy {
@@ -258,7 +498,16 @@ fn try_start_dispatch(config: &config::Config, connections: Arc<host_api::Connec
             let _ = shutdown_tx.send(());
         });
 
-        if let Err(err) = dispatch::run(spine_cfg, vec![grant], stream_key, deps, shutdown_rx).await
+        let rust_data_plane = flag_or_closed(&license, flags::RUST_DATA_PLANE_FLAG);
+        if let Err(err) = dispatch::run(
+            spine_cfg,
+            vec![grant],
+            stream_key,
+            deps,
+            rust_data_plane,
+            shutdown_rx,
+        )
+        .await
         {
             tracing::error!(error = %err, "action-stage dispatch loop exited");
         }
@@ -421,6 +670,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flag_or_closed_fails_closed_to_off_when_no_license_client_is_available() {
+        let flag = flag_or_closed(&None, flags::RUST_DATA_PLANE_FLAG);
+        assert!(!flag.enabled().await);
+    }
+
+    #[tokio::test]
+    async fn flag_or_closed_wraps_a_real_client_as_a_license_flag() {
+        let cfg = penguin_licensing::LicenseConfig::new(LICENSE_PRODUCT)
+            .expect("default LicenseConfig::new never fails");
+        let client = penguin_licensing::LicenseClient::new(cfg)
+            .expect("LicenseClient::new with a valid default config never fails");
+        let flag = flag_or_closed(&Some(client), flags::RUST_DATA_PLANE_FLAG);
+        // A cold client (never refreshed) has an empty snapshot -- proves
+        // this reaches the real `LicenseFlag` wrapper, not some other
+        // default, since a cold real client also fails closed to OFF.
+        assert!(!flag.enabled().await);
+    }
+
+    #[test]
+    fn build_license_client_succeeds_with_no_license_env_vars_set() {
+        // `LicenseConfig::from_env`'s defaults (no `LICENSE_KEY`/
+        // `LICENSE_SERVER_URL`/`POSTHOG_HOST`/`POSTHOG_KEY` set) still
+        // validate -- the community-tier, no-flags-configured shape every
+        // deployment starts from before an operator sets a real key.
+        assert!(build_license_client().is_some());
+    }
+
+    #[tokio::test]
+    async fn resolve_initial_bundle_returns_immediately_once_the_catalog_has_a_digest() {
+        let catalog = distribution::BundleCatalog::new();
+        catalog.update(vec![distribution::BundleRow {
+            app_id: "waddles.a.b.c".to_string(),
+            version: "1.0.0".to_string(),
+            artifact_digest: Some("sha256:aa".to_string()),
+            component_key: "k".to_string(),
+            sidecar_key: "s".to_string(),
+            egress: vec![],
+            egress_rps: None,
+            config_json: "{\"x\":1}".to_string(),
+            granted_secret_refs: std::collections::HashMap::new(),
+        }]);
+        let (digest, config_json) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            resolve_initial_bundle(
+                &catalog,
+                "waddles.a.b.c",
+                std::time::Duration::from_secs(60),
+            ),
+        )
+        .await
+        .expect("resolves without waiting out the poll interval");
+        assert_eq!(digest, "sha256:aa");
+        assert_eq!(config_json, "{\"x\":1}");
+    }
+
+    #[tokio::test]
+    async fn resolve_initial_bundle_falls_back_to_empty_when_nothing_ever_resolves() {
+        let catalog = distribution::BundleCatalog::new();
+        let (digest, config_json) = resolve_initial_bundle(
+            &catalog,
+            "waddles.never.resolves",
+            std::time::Duration::from_millis(5),
+        )
+        .await;
+        assert_eq!(digest, "");
+        assert_eq!(config_json, "{}");
+    }
+
+    #[tokio::test]
+    async fn resolve_initial_bundle_ignores_a_row_with_no_artifact_yet() {
+        let catalog = distribution::BundleCatalog::new();
+        catalog.update(vec![distribution::BundleRow {
+            app_id: "waddles.a.b.c".to_string(),
+            version: String::new(),
+            artifact_digest: None,
+            component_key: String::new(),
+            sidecar_key: String::new(),
+            egress: vec![],
+            egress_rps: None,
+            config_json: "{}".to_string(),
+            granted_secret_refs: std::collections::HashMap::new(),
+        }]);
+        let (digest, _config_json) = resolve_initial_bundle(
+            &catalog,
+            "waddles.a.b.c",
+            std::time::Duration::from_millis(5),
+        )
+        .await;
+        assert_eq!(digest, "");
+    }
+
+    #[tokio::test]
     async fn run_with_shutdown_binds_and_shuts_down_cleanly() {
         let _guard = ENV_LOCK.lock().await;
         // SAFETY: serialized by ENV_LOCK; no other test reads OTEL env.
@@ -528,5 +869,45 @@ mod tests {
         // Fire-and-forget: give the spawned task a moment to attempt (and
         // fail) its connection before the test process exits and drops it.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    /// `try_start_dispatch`'s second independent disable reason (module
+    /// doc): `ACTION_APP_ID` set but `ENVELOPE_BINDING_KEYS` unset --
+    /// returns before spawning anything, hop verification must never fail
+    /// open. Fire-and-forget, same shape as the Valkey-unreachable test
+    /// above: nothing to await, just proves it doesn't panic and doesn't
+    /// spawn the loop.
+    #[tokio::test]
+    async fn try_start_dispatch_disabled_when_envelope_binding_keys_missing() {
+        let _guard = ENV_LOCK.lock().await;
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::remove_var("ENVELOPE_BINDING_KEYS") };
+        let cli = CliConfig::parse_from(["svc-action", "--action-app-id", "waddles.a.b.c"]);
+        let config = Config {
+            cli,
+            db_password: Secret::new("test-password"),
+            envelope_binding_keys: None,
+        };
+        let connections = Arc::new(host_api::ConnectionRegistry::new());
+        let catalog = Arc::new(distribution::BundleCatalog::new());
+        let usage = Arc::new(std::sync::Mutex::new(usage::UsageBatcher::new()));
+        try_start_dispatch(&config, connections, catalog, usage, None);
+    }
+
+    /// `try_start_distribution_poll`'s own gate: `ACTION_APP_ID` unset never
+    /// starts the poll task. A fire-and-forget call proving no panic and no
+    /// spawned task -- the "set" path is already exercised end to end by
+    /// `crate::distribution`'s own `run_poll_loop` tests.
+    #[test]
+    fn try_start_distribution_poll_disabled_without_action_app_id() {
+        let cli = CliConfig::parse_from(["svc-action"]);
+        let config = Config {
+            cli,
+            db_password: Secret::new("test-password"),
+            envelope_binding_keys: None,
+        };
+        let connections = Arc::new(host_api::ConnectionRegistry::new());
+        let catalog = Arc::new(distribution::BundleCatalog::new());
+        try_start_distribution_poll(&config, connections, catalog);
     }
 }

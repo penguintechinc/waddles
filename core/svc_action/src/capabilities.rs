@@ -1,14 +1,28 @@
 //! Host capability implementations serviced on the stage side of the
 //! host-API connection (spec §7.4): the executor issues a `host-call`
 //! frame naming a `capability`/`op`, and this module answers it, replying
-//! `host-result`. This M3 landing wires the two capabilities the Twitch
-//! relay sender path needs end to end (`relay`, `clock`) plus `context`
-//! (needed for every `invoke` regardless of sender) and `log` (sanitized
-//! passthrough); `http`/`kv`/`db` are documented seams -- see
-//! [`StageCapabilities::handle`]'s match arms -- since the REST platform
-//! senders that would exercise them (Discord/Slack/YouTube/Kick) are
-//! themselves `TODO(M3)` seams in `crate::senders` (spec §16 M3 row's
-//! "REALISTIC SCOPE": "leave remaining senders as honest TODO seams").
+//! `host-result`.
+//!
+//! **Capability scope is resolved per invoke, never per connection**
+//! (post-M3 security review finding). One host-API connection multiplexes
+//! many `invoke`s, potentially for different `(tenant, community, app_id)`
+//! activations sharing the same executor replica; a capability handler
+//! that was scoped once at connection-construction time would answer every
+//! host-call on that connection under the FIRST invoke's tenant, a latent
+//! cross-tenant bug. [`InvokeScope`] is threaded per call instead:
+//! `crate::host_api::Connection::invoke` records the scope for the `invoke`
+//! frame's own id before sending it, and the connection's read loop looks
+//! it up again by the `host-call` frame's `call_id` (which spec §6.6
+//! defines as "the originating `invoke` id") before ever calling
+//! [`CapabilityHandler::handle`]. A `call_id` with no matching in-flight
+//! invoke -- forged, stale, or from a different connection -- is refused
+//! outright (`unknown_invoke`), never answered against a guessed or
+//! leftover scope.
+//!
+//! `relay` (Twitch outbound), `clock`, `context` and `log` are fully wired.
+//! `http` is wired to `crate::egress::EgressGuard` (spec §8's full SSRF
+//! guard). `db`/`kv`/`flags` remain documented `TODO(M3+)` seams -- see
+//! [`StageCapabilities::handle`]'s match arms.
 //!
 //! A bundle never holds a platform credential (spec §4.3): every
 //! capability here resolves any credential itself, from this process's own
@@ -20,24 +34,39 @@ use std::sync::{Arc, Mutex};
 
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
+use crate::egress::EgressGuard;
 use crate::usage::UsageBatcher;
 
-/// Answers one `host-call` for a given `capability`/`op`. Object-safe (a
-/// manually-boxed future rather than `async fn` in a trait) so the host-API
-/// connection can hold `Arc<dyn CapabilityHandler>` without an `async_trait`
-/// dependency.
+/// The `(tenant, community, app_id)` an in-flight `invoke` belongs to,
+/// resolved from the delivered envelope (spec §5.11: "Tenant and community
+/// come from the key, never from payload") and carried alongside that
+/// invoke's frame id for the lifetime of the call -- see the module doc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvokeScope {
+    pub tenant: String,
+    pub community: Option<String>,
+    pub app_id: String,
+}
+
+/// Answers one `host-call` for a given `capability`/`op`, scoped to the
+/// invoke it happened during. Object-safe (a manually-boxed future rather
+/// than `async fn` in a trait) so the host-API connection can hold
+/// `Arc<dyn CapabilityHandler>` without an `async_trait` dependency.
 pub trait CapabilityHandler: Send + Sync {
-    /// Services one host call, returning the capability-specific JSON
+    /// Services one host call under `scope` (resolved by the caller from
+    /// the `call_id`'s own in-flight invoke -- never guessed, never a
+    /// connection-wide default), returning the capability-specific JSON
     /// result or a `{code, message}` error the executor forwards to the
     /// guest as `error-code::access-denied`/`internal-error` per the WIT
     /// world's `host-error` variant (spec §6.5).
     fn handle<'a>(
         &'a self,
+        scope: &'a InvokeScope,
         call: HostCallBody,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, HostResultError>> + Send + 'a>>;
 }
 
-fn denied(code: &str, message: impl Into<String>) -> HostResultError {
+pub(crate) fn denied(code: &str, message: impl Into<String>) -> HostResultError {
     HostResultError {
         code: code.to_string(),
         message: message.into(),
@@ -136,52 +165,38 @@ impl RelayQueue for redis::aio::MultiplexedConnection {
 /// over [`RelayQueue`] so `handle_relay` is fully unit-testable against a
 /// fake queue without a live Valkey server -- production callers
 /// instantiate `StageCapabilities<redis::aio::MultiplexedConnection>`.
+/// Holds no per-connection tenant/community/app_id (see the module doc --
+/// that scope now arrives per call via [`InvokeScope`]).
 pub struct StageCapabilities<Q: RelayQueue> {
     relay_queue: Q,
-    tenant: String,
-    community: Option<String>,
-    app_id: String,
+    egress: Arc<EgressGuard>,
     /// Shared with the dispatch loop's own `DispatchDeps::usage` so a
-    /// `relay` host call's outbound byte count is metered alongside the
-    /// same activation's `actions_delivered` (spec §5.12/D31: "host calls
-    /// by kind"). Recorded under an empty `workstream_id` -- unlike
+    /// `relay`/`http` host call's outbound byte count is metered alongside
+    /// the same activation's `actions_delivered` (spec §5.12/D31: "host
+    /// calls by kind"). Recorded under an empty `workstream_id`: unlike
     /// `dispatch::handle_delivered`, which knows the delivered envelope's
-    /// real `workstream_id`, this connection-scoped capability handler
-    /// answers host calls for every envelope dispatched over its
-    /// connection's lifetime and has no per-call envelope context to key
-    /// on (spec §5.11: "No bundle host call accepts a tenant or community
-    /// argument at all" -- the same constraint extends to workstream_id,
-    /// which isn't in `HostCallBody` either). TODO(M3+): fold into the
-    /// per-activation scoping the distribution poll resolves (see
-    /// `crate::lib`'s `try_start_host_api` doc for the identical
-    /// tenant/community caveat this already carries).
+    /// real `workstream_id`, a host call's `InvokeScope` doesn't carry one
+    /// (spec §5.11: "No bundle host call accepts a tenant or community
+    /// argument at all" -- the same constraint extends to workstream_id).
     usage: Arc<Mutex<UsageBatcher>>,
 }
 
 impl<Q: RelayQueue> StageCapabilities<Q> {
-    /// Builds the capability set for one dispatch loop's lifetime, scoped
-    /// to the (tenant, community, app_id) it is currently servicing --
-    /// `context` and every other capability are scope-implicit (spec
-    /// §5.11: "No bundle host call accepts a tenant or community argument
-    /// at all").
-    pub fn new(
-        relay_queue: Q,
-        tenant: String,
-        community: Option<String>,
-        app_id: String,
-        usage: Arc<Mutex<UsageBatcher>>,
-    ) -> Self {
+    /// Builds the capability set this connection's read loop answers every
+    /// `host-call` against, for as long as the connection lives. No
+    /// tenant/community/app_id here -- every capability method below takes
+    /// its [`InvokeScope`] as a parameter instead (module doc).
+    pub fn new(relay_queue: Q, egress: Arc<EgressGuard>, usage: Arc<Mutex<UsageBatcher>>) -> Self {
         Self {
             relay_queue,
-            tenant,
-            community,
-            app_id,
+            egress,
             usage,
         }
     }
 
     async fn handle_relay(
         &self,
+        scope: &InvokeScope,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, HostResultError> {
         let provider = args
@@ -227,10 +242,10 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .record_relay_call(
-                &self.tenant,
-                self.community.as_deref(),
+                &scope.tenant,
+                scope.community.as_deref(),
                 "",
-                &self.app_id,
+                &scope.app_id,
                 outbound_bytes,
             );
         Ok(serde_json::json!({"queued": true, "provider": provider}))
@@ -252,17 +267,21 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
         }
     }
 
-    fn handle_context(&self) -> Result<serde_json::Value, HostResultError> {
+    fn handle_context(&self, scope: &InvokeScope) -> Result<serde_json::Value, HostResultError> {
         // Spec §7.4: "Tenant and community come from the key, never from
         // payload." Never includes a credential or secret.
         Ok(serde_json::json!({
-            "tenant": self.tenant,
-            "community": self.community,
-            "app_id": self.app_id,
+            "tenant": scope.tenant,
+            "community": scope.community,
+            "app_id": scope.app_id,
         }))
     }
 
-    fn handle_log(&self, args: &serde_json::Value) -> Result<serde_json::Value, HostResultError> {
+    fn handle_log(
+        &self,
+        scope: &InvokeScope,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, HostResultError> {
         let level = args.get("level").and_then(|v| v.as_str()).unwrap_or("info");
         let raw_message = args
             .get("message")
@@ -273,16 +292,16 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
 
         match level {
             "error" => {
-                tracing::error!(app_id = %self.app_id, tenant = %self.tenant, bundle_log = %message, "bundle log")
+                tracing::error!(app_id = %scope.app_id, tenant = %scope.tenant, bundle_log = %message, "bundle log")
             }
             "warn" => {
-                tracing::warn!(app_id = %self.app_id, tenant = %self.tenant, bundle_log = %message, "bundle log")
+                tracing::warn!(app_id = %scope.app_id, tenant = %scope.tenant, bundle_log = %message, "bundle log")
             }
             "debug" => {
-                tracing::debug!(app_id = %self.app_id, tenant = %self.tenant, bundle_log = %message, "bundle log")
+                tracing::debug!(app_id = %scope.app_id, tenant = %scope.tenant, bundle_log = %message, "bundle log")
             }
             _ => {
-                tracing::info!(app_id = %self.app_id, tenant = %self.tenant, bundle_log = %message, "bundle log")
+                tracing::info!(app_id = %scope.app_id, tenant = %scope.tenant, bundle_log = %message, "bundle log")
             }
         }
         Ok(serde_json::json!({}))
@@ -292,28 +311,23 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
 impl<Q: RelayQueue> CapabilityHandler for StageCapabilities<Q> {
     fn handle<'a>(
         &'a self,
+        scope: &'a InvokeScope,
         call: HostCallBody,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, HostResultError>> + Send + 'a>> {
         Box::pin(async move {
             match call.capability {
-                CapabilityKind::Relay => self.handle_relay(&call.args).await,
+                CapabilityKind::Relay => self.handle_relay(scope, &call.args).await,
                 CapabilityKind::Clock => self.handle_clock(&call.op),
-                CapabilityKind::Context => self.handle_context(),
-                CapabilityKind::Log => self.handle_log(&call.args),
-                // TODO(M3+): `http` (guarded egress + per-platform
-                // credential injection for the REST senders --
-                // Discord/Slack/YouTube/Kick, spec §7.4/§8) and `db`/`kv`
-                // (spec §7.4's SQL-parser-gated statement execution and the
-                // per-bundle KV hash) are not wired in this landing --
-                // `crate::senders` documents the same gap per platform.
-                // Denying (never silently succeeding) is the correct
-                // behavior for an unimplemented capability: a bundle
-                // calling it sees `access-denied`, not a fabricated
+                CapabilityKind::Context => self.handle_context(scope),
+                CapabilityKind::Log => self.handle_log(scope, &call.args),
+                CapabilityKind::Http => self.egress.send(&scope.app_id, &call.args).await,
+                // TODO(M3+): `db`/`kv`/`flags` (spec §7.4's SQL-parser-gated
+                // statement execution, the per-bundle KV hash, and the
+                // `penguin-licensing` two-gate flag check) are not wired in
+                // this landing. Denying (never silently succeeding) is the
+                // correct behavior for an unimplemented capability: a
+                // bundle calling it sees `access-denied`, not a fabricated
                 // success.
-                CapabilityKind::Http => Err(denied(
-                    "not_implemented",
-                    "http capability is not wired in this build -- TODO(M3+), see crate::senders",
-                )),
                 CapabilityKind::Db => Err(denied(
                     "not_implemented",
                     "db capability is not wired in this build -- TODO(M3+)",
@@ -332,14 +346,16 @@ impl<Q: RelayQueue> CapabilityHandler for StageCapabilities<Q> {
 }
 
 /// A [`CapabilityHandler`] that denies every call -- used where no
-/// capability set is configured (e.g. a health-check-only invocation path)
-/// or in tests exercising the host-API connection layer in isolation from
-/// capability semantics.
+/// capability set is configured (e.g. a health-check-only invocation path,
+/// or the executor's Valkey/manifest dependencies are unavailable at
+/// startup) or in tests exercising the host-API connection layer in
+/// isolation from capability semantics.
 pub struct DenyAllCapabilities;
 
 impl CapabilityHandler for DenyAllCapabilities {
     fn handle<'a>(
         &'a self,
+        _scope: &'a InvokeScope,
         call: HostCallBody,
     ) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, HostResultError>> + Send + 'a>> {
         Box::pin(async move {
@@ -360,6 +376,7 @@ pub fn boxed(handler: impl CapabilityHandler + 'static) -> Arc<dyn CapabilityHan
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::distribution::BundleCatalog;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -384,6 +401,27 @@ mod tests {
         }
     }
 
+    fn test_egress() -> Arc<EgressGuard> {
+        Arc::new(EgressGuard::new(
+            Arc::new(crate::egress::ReqwestTransport),
+            crate::egress::EgressLimits {
+                allow_private_hosts: false,
+                rate_limit_rps: 10,
+                rate_limit_burst: 20,
+                timeout: std::time::Duration::from_secs(5),
+                max_redirects: 3,
+                max_response_bytes: 1_048_576,
+            },
+            Arc::new(BundleCatalog::new()),
+            prometheus::IntCounterVec::new(
+                prometheus::Opts::new("test_egress_denied_total", "test"),
+                &["app_id", "reason"],
+            )
+            .unwrap(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
+        ))
+    }
+
     fn caps(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue> {
         caps_with_usage(queue, Arc::new(Mutex::new(UsageBatcher::new())))
     }
@@ -392,13 +430,15 @@ mod tests {
         queue: FakeRelayQueue,
         usage: Arc<Mutex<UsageBatcher>>,
     ) -> StageCapabilities<FakeRelayQueue> {
-        StageCapabilities::new(
-            queue,
-            "acme".to_string(),
-            Some("main".to_string()),
-            "waddles.bot.commands.default".to_string(),
-            usage,
-        )
+        StageCapabilities::new(queue, test_egress(), usage)
+    }
+
+    fn scope() -> InvokeScope {
+        InvokeScope {
+            tenant: "acme".to_string(),
+            community: Some("main".to_string()),
+            app_id: "waddles.bot.commands.default".to_string(),
+        }
     }
 
     fn call(capability: CapabilityKind, op: &str, args: serde_json::Value) -> HostCallBody {
@@ -461,11 +501,14 @@ mod tests {
     async fn relay_send_pushes_the_expected_key_and_payload() {
         let caps = caps(FakeRelayQueue::default());
         let result = caps
-            .handle(call(
-                CapabilityKind::Relay,
-                "send",
-                serde_json::json!({"provider": "twitch", "channel": "#somechannel", "text": "hi"}),
-            ))
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "channel": "#somechannel", "text": "hi"}),
+                ),
+            )
             .await
             .expect("relay send succeeds");
         assert_eq!(result["queued"], serde_json::json!(true));
@@ -485,11 +528,14 @@ mod tests {
     async fn relay_send_records_a_relay_call_against_the_usage_batcher() {
         let usage = Arc::new(Mutex::new(UsageBatcher::new()));
         let caps = caps_with_usage(FakeRelayQueue::default(), Arc::clone(&usage));
-        caps.handle(call(
-            CapabilityKind::Relay,
-            "send",
-            serde_json::json!({"provider": "twitch", "channel": "#somechannel", "text": "hi"}),
-        ))
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "twitch", "channel": "#somechannel", "text": "hi"}),
+            ),
+        )
         .await
         .expect("relay send succeeds");
 
@@ -499,11 +545,14 @@ mod tests {
     #[tokio::test]
     async fn relay_send_sanitizes_crlf_before_queuing() {
         let caps = caps(FakeRelayQueue::default());
-        caps.handle(call(
-            CapabilityKind::Relay,
-            "send",
-            serde_json::json!({"provider": "twitch", "channel": "#c", "text": "line1\r\nline2"}),
-        ))
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "twitch", "channel": "#c", "text": "line1\r\nline2"}),
+            ),
+        )
         .await
         .expect("relay send succeeds");
         let pushed = caps.relay_queue.pushed.lock().unwrap();
@@ -515,11 +564,14 @@ mod tests {
     async fn relay_send_rejects_unknown_provider() {
         let caps = caps(FakeRelayQueue::default());
         let err = caps
-            .handle(call(
-                CapabilityKind::Relay,
-                "send",
-                serde_json::json!({"provider": "discord", "channel": "c", "text": "hi"}),
-            ))
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "discord", "channel": "c", "text": "hi"}),
+                ),
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code, "unknown_provider");
@@ -530,11 +582,14 @@ mod tests {
     async fn relay_send_rejects_empty_channel() {
         let caps = caps(FakeRelayQueue::default());
         let err = caps
-            .handle(call(
-                CapabilityKind::Relay,
-                "send",
-                serde_json::json!({"provider": "twitch", "channel": "", "text": "hi"}),
-            ))
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "channel": "", "text": "hi"}),
+                ),
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code, "invalid_args");
@@ -544,11 +599,14 @@ mod tests {
     async fn relay_send_rejects_empty_text() {
         let caps = caps(FakeRelayQueue::default());
         let err = caps
-            .handle(call(
-                CapabilityKind::Relay,
-                "send",
-                serde_json::json!({"provider": "twitch", "channel": "c", "text": ""}),
-            ))
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "channel": "c", "text": ""}),
+                ),
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code, "invalid_args");
@@ -558,11 +616,14 @@ mod tests {
     async fn relay_send_missing_provider_is_invalid_args() {
         let caps = caps(FakeRelayQueue::default());
         let err = caps
-            .handle(call(
-                CapabilityKind::Relay,
-                "send",
-                serde_json::json!({"channel": "c", "text": "hi"}),
-            ))
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"channel": "c", "text": "hi"}),
+                ),
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code, "invalid_args");
@@ -575,11 +636,14 @@ mod tests {
             ..Default::default()
         });
         let err = caps
-            .handle(call(
-                CapabilityKind::Relay,
-                "send",
-                serde_json::json!({"provider": "twitch", "channel": "c", "text": "hi"}),
-            ))
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "channel": "c", "text": "hi"}),
+                ),
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code, "relay_unavailable");
@@ -589,11 +653,10 @@ mod tests {
     async fn clock_now_millis_returns_a_positive_integer() {
         let caps = caps(FakeRelayQueue::default());
         let result = caps
-            .handle(call(
-                CapabilityKind::Clock,
-                "now-millis",
-                serde_json::json!({}),
-            ))
+            .handle(
+                &scope(),
+                call(CapabilityKind::Clock, "now-millis", serde_json::json!({})),
+            )
             .await
             .expect("clock succeeds");
         assert!(result.as_u64().unwrap() > 0);
@@ -603,7 +666,10 @@ mod tests {
     async fn clock_unknown_op_is_denied() {
         let caps = caps(FakeRelayQueue::default());
         let err = caps
-            .handle(call(CapabilityKind::Clock, "bogus", serde_json::json!({})))
+            .handle(
+                &scope(),
+                call(CapabilityKind::Clock, "bogus", serde_json::json!({})),
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code, "unknown_op");
@@ -613,7 +679,10 @@ mod tests {
     async fn context_reports_scope_without_secrets() {
         let caps = caps(FakeRelayQueue::default());
         let result = caps
-            .handle(call(CapabilityKind::Context, "get", serde_json::json!({})))
+            .handle(
+                &scope(),
+                call(CapabilityKind::Context, "get", serde_json::json!({})),
+            )
             .await
             .expect("context succeeds");
         assert_eq!(result["tenant"], "acme");
@@ -626,28 +695,55 @@ mod tests {
         let caps = caps(FakeRelayQueue::default());
         for level in ["error", "warn", "debug", "info", "unrecognized"] {
             let result = caps
-                .handle(call(
-                    CapabilityKind::Log,
-                    "write",
-                    serde_json::json!({"level": level, "message": "hello"}),
-                ))
+                .handle(
+                    &scope(),
+                    call(
+                        CapabilityKind::Log,
+                        "write",
+                        serde_json::json!({"level": level, "message": "hello"}),
+                    ),
+                )
                 .await
                 .expect("log write succeeds");
             assert_eq!(result, serde_json::json!({}));
         }
     }
 
+    /// `http` now delegates to `crate::egress::EgressGuard`; with an empty
+    /// `BundleCatalog` (no manifest registered for this `app_id`), every
+    /// call is denied `host_not_declared` -- proving the wiring reaches the
+    /// guard rather than a stub, without needing a live manifest here (see
+    /// `crate::egress`'s own tests for the guard's full behavior).
     #[tokio::test]
-    async fn http_kv_db_flags_capabilities_are_documented_seams() {
+    async fn http_capability_is_wired_to_the_egress_guard() {
+        let caps = caps(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Http,
+                    "send",
+                    serde_json::json!({"method": "GET", "url": "https://example.com/"}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "host_not_declared");
+    }
+
+    #[tokio::test]
+    async fn db_kv_flags_capabilities_are_documented_seams() {
         let caps = caps(FakeRelayQueue::default());
         for capability in [
-            CapabilityKind::Http,
             CapabilityKind::Db,
             CapabilityKind::Kv,
             CapabilityKind::Flags,
         ] {
             let err = caps
-                .handle(call(capability, "anything", serde_json::json!({})))
+                .handle(
+                    &scope(),
+                    call(capability, "anything", serde_json::json!({})),
+                )
                 .await
                 .unwrap_err();
             assert_eq!(err.code, "not_implemented");
@@ -658,11 +754,10 @@ mod tests {
     async fn deny_all_denies_every_capability() {
         let handler = DenyAllCapabilities;
         let result = handler
-            .handle(call(
-                CapabilityKind::Clock,
-                "now-millis",
-                serde_json::json!({}),
-            ))
+            .handle(
+                &scope(),
+                call(CapabilityKind::Clock, "now-millis", serde_json::json!({})),
+            )
             .await;
         assert!(result.is_err());
     }
@@ -671,7 +766,10 @@ mod tests {
     async fn boxed_wraps_a_handler_as_an_arc_dyn() {
         let handler: Arc<dyn CapabilityHandler> = boxed(DenyAllCapabilities);
         let result = handler
-            .handle(call(CapabilityKind::Log, "write", serde_json::json!({})))
+            .handle(
+                &scope(),
+                call(CapabilityKind::Log, "write", serde_json::json!({})),
+            )
             .await;
         assert!(result.is_err());
     }

@@ -5,15 +5,21 @@
 //! approval verification (§5.11) run before every dispatch; outbound
 //! credential/target resolved only from the verified envelope".
 //!
-//! `penguin_spine`'s own `binding` module (referenced by that crate's doc
-//! comments as "Task 19") has not landed at the `rev` this service pins --
-//! confirmed against `release/rust-spine/v0.1.x`'s current tip, which is
-//! exactly the pinned commit. This module computes/verifies the MAC
-//! directly from the spec's published formula, using the same `hmac`/
-//! `sha2`/`subtle`/`hex` crate versions `penguin-spine` itself declares
-//! internally for the same purpose, so swapping to that crate's own
-//! `compute_binding_mac`/`verify_binding` later (once landed) is a
-//! drop-in replacement, not a behavior change.
+//! `penguin_spine`'s own `binding` module (`compute_binding_mac`/
+//! `verify_binding`, that crate's doc comments reference it as "Task 19")
+//! has now landed, at the `rev` this service pins as of the M1a/dead-letter
+//! finalization pass. Its module doc states it was "reproduced byte-for-
+//! byte from `waddles core/svc_action/src/hop.rs` (verified-correct,
+//! reviewed) -- same formula, same keyring shape, same constant-time
+//! comparison", and this module's own re-verification below
+//! (`tests::this_modules_mac_matches_penguin_spines_binding_module_exactly`)
+//! confirms it against that crate's own published canonical test vectors:
+//! byte-identical output for the same `(tenant, community, workstream_id,
+//! event_id, trace_id)` tuple and keyring. Switching `svc_action::hop` to
+//! call `penguin_spine::binding` directly instead of keeping this local
+//! copy remains a separate follow-up (a call-site refactor, not a
+//! behavior change, since the two are already proven identical) -- not
+//! done in this landing.
 //!
 //! Implements checks 1-2 of the four-part list in spec §5.11 ("Verification
 //! at every hop"): `binding.mac` recomputation under the claimed `kid`, and
@@ -319,6 +325,27 @@ mod tests {
         assert_eq!(mac1, mac2);
         assert_eq!(mac1.len(), 64);
         assert!(mac1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// **Re-verification against the newly-landed `penguin_spine::binding`
+    /// module** (spine rev bump, finalization pass): this crate's fixture
+    /// (`ring()`, and `mac_for`'s tenant/community/workstream_id/event_id/
+    /// trace_id tuple) is byte-identical to `penguin_spine::binding`'s own
+    /// canonical test vectors -- so this hex literal is `penguin_spine::
+    /// binding::tests::K1_MAIN_MAC`, copied verbatim from that crate's
+    /// source at the pinned rev, not hand-computed here. A match proves
+    /// this module's independent implementation and spine's newly-landed
+    /// one agree exactly; do NOT assume it, the module doc explicitly
+    /// requires re-running this check on any future spine binding-module
+    /// pin bump.
+    #[test]
+    fn this_modules_mac_matches_penguin_spines_binding_module_exactly() {
+        const K1_MAIN_MAC_FROM_PENGUIN_SPINE_BINDING: &str =
+            "d94c3849257550fe817c399410113a45e22b1c9203fbd02908f6bcc19df95f3f";
+        assert_eq!(
+            mac_for(&ring(), "k1"),
+            K1_MAIN_MAC_FROM_PENGUIN_SPINE_BINDING
+        );
     }
 
     #[test]

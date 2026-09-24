@@ -132,22 +132,6 @@ impl UsageSink for RedisUsageSink {
     }
 }
 
-/// Installs the process-level rustls `CryptoProvider` (`ring` backend)
-/// exactly once. `redis`'s `tls-rustls` feature enables `dep:rustls` but
-/// requests no default provider itself -- the first TLS handshake this
-/// connection attempts panics without one. Duplicates
-/// `penguin_spine::config::ensure_crypto_provider_installed` byte-for-byte
-/// (that helper is `pub(crate)` there, unreachable from this crate) -- see
-/// the module doc for why this crate opens its own, second Valkey
-/// connection instead of reusing `penguin_spine::SpineClient`'s.
-static CRYPTO_PROVIDER_INIT: std::sync::Once = std::sync::Once::new();
-
-fn ensure_crypto_provider_installed() {
-    CRYPTO_PROVIDER_INIT.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
-}
-
 /// Opens the direct Valkey connection [`RedisUsageSink`] writes through,
 /// built from the same `VALKEY_URL`/username/password/TLS/CA-file settings
 /// `penguin_spine::SpineClient` connects with (spec §12.7 delegates spine
@@ -168,7 +152,7 @@ pub async fn connect(
     let info = info.set_redis_settings(settings);
 
     let client = if cfg.security_transport_tls {
-        ensure_crypto_provider_installed();
+        crate::crypto::ensure_crypto_provider_installed();
         let root_cert = std::fs::read(&cfg.valkey_ca_file).ok();
         redis::Client::build_with_tls(
             info,
