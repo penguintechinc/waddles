@@ -105,6 +105,10 @@ spec:
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsServerEnv" . | nindent 8 }}
         {{- end }}
+        {{- if .Values.pipeline.licenseDeploymentDomain }}
+        - name: LICENSE_DEPLOYMENT_DOMAIN
+          value: {{ .Values.pipeline.licenseDeploymentDomain | quote }}
+        {{- end }}
         livenessProbe:
           httpGet:
             path: /health

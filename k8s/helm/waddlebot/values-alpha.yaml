@@ -159,6 +159,11 @@ pipeline:
       requests: { cpu: "200m", memory: "256Mi" }
       limits: { cpu: "2000m", memory: "1Gi" }
 
+  # LICENSE_DEPLOYMENT_DOMAIN -- enables domain-based license bypass for internal deployments
+  # (penguintech.cloud, penguincloud.io domains); set in alpha to allow feature flags
+  # to resolve ON. Unset in prod (fail-closed, no bypass).
+  licenseDeploymentDomain: "waddlebot.penguintech.cloud"
+
   # feature/e2e-helm-rust-dataplane -- Rust data-plane stack. `enabled: false` here too
   # (this file must still render a fully-working Python stack on its own by default,
   # matching every other alpha convention above) -- flip via

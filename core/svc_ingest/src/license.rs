@@ -44,7 +44,7 @@ const PRODUCT: &str = "waddles";
 /// matching the crate's "never-seen flag defaults OFF" contract rather
 /// than crashing startup over a license-server misconfiguration.
 pub fn build_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
-    let cfg = match penguin_licensing::LicenseConfig::from_env(PRODUCT) {
+    let mut cfg = match penguin_licensing::LicenseConfig::from_env(PRODUCT) {
         Ok(cfg) => cfg,
         Err(err) => {
             tracing::warn!(
@@ -54,6 +54,13 @@ pub fn build_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
             return None;
         }
     };
+    // Set deployment domain from env var if present and non-empty,
+    // to enable domain-based license bypass for internal deployments.
+    if let Ok(domain) = std::env::var("LICENSE_DEPLOYMENT_DOMAIN") {
+        if !domain.trim().is_empty() {
+            cfg = cfg.with_deployment_domain(domain);
+        }
+    }
     match penguin_licensing::LicenseClient::new(cfg) {
         Ok(client) => {
             // The returned `JoinHandle` is intentionally dropped -- "drop

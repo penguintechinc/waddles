@@ -171,7 +171,8 @@ const LICENSE_PRODUCT: &str = "waddles";
 
 /// Builds the shared `penguin_licensing::LicenseClient` this service's two
 /// spec §13.5 flags resolve against, from the standard `LICENSE_KEY`/
-/// `LICENSE_SERVER_URL`/`POSTHOG_HOST`/`POSTHOG_KEY` environment variables.
+/// `LICENSE_SERVER_URL`/`POSTHOG_HOST`/`POSTHOG_KEY`, optionally
+/// `LICENSE_DEPLOYMENT_DOMAIN` environment variables.
 /// `None` only if even the no-network-required default `LicenseConfig`
 /// fails to build (a hardcoded, always-valid literal URL parse -- not
 /// reachable in practice, handled rather than unwrapped): callers use
@@ -179,7 +180,7 @@ const LICENSE_PRODUCT: &str = "waddles";
 /// both flags in that case, the same fail-closed-to-OFF posture spec
 /// §13.5 already specifies for a never-seen flag.
 fn build_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
-    let cfg = match penguin_licensing::LicenseConfig::from_env(LICENSE_PRODUCT) {
+    let mut cfg = match penguin_licensing::LicenseConfig::from_env(LICENSE_PRODUCT) {
         Ok(cfg) => cfg,
         Err(err) => {
             tracing::error!(
@@ -199,6 +200,13 @@ fn build_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
             }
         }
     };
+    // Set deployment domain from env var if present and non-empty,
+    // to enable domain-based license bypass for internal deployments.
+    if let Ok(domain) = std::env::var("LICENSE_DEPLOYMENT_DOMAIN") {
+        if !domain.trim().is_empty() {
+            cfg = cfg.with_deployment_domain(domain);
+        }
+    }
     match penguin_licensing::LicenseClient::new(cfg) {
         Ok(client) => Some(client),
         Err(err) => {

@@ -56,7 +56,7 @@ impl FeatureGate for LicenseFeatureGate {
 
 /// Builds the process's `penguin_licensing::LicenseClient` from the
 /// standard env vars (`LICENSE_KEY`, `LICENSE_SERVER_URL`, `POSTHOG_HOST`,
-/// `POSTHOG_KEY`) -- `crate::lib::try_start_process_loop`'s caller. Never
+/// `POSTHOG_KEY`, optionally `LICENSE_DEPLOYMENT_DOMAIN`) -- `crate::lib::try_start_process_loop`'s caller. Never
 /// touches the network itself (`LicenseClient::new` only builds an HTTP
 /// client and validates URL schemes); the first real request happens
 /// lazily, in the background, the first time [`FeatureGate::enabled`] is
@@ -68,7 +68,14 @@ impl FeatureGate for LicenseFeatureGate {
 /// startup-config gate in this crate (log a warning, disable the drain
 /// loop rather than starting it unverified).
 pub fn build_license_client(product: &str) -> Result<Arc<LicenseClient>, LicenseError> {
-    let cfg = LicenseConfig::from_env(product)?;
+    let mut cfg = LicenseConfig::from_env(product)?;
+    // Set deployment domain from env var if present and non-empty,
+    // to enable domain-based license bypass for internal deployments.
+    if let Ok(domain) = std::env::var("LICENSE_DEPLOYMENT_DOMAIN") {
+        if !domain.trim().is_empty() {
+            cfg = cfg.with_deployment_domain(domain);
+        }
+    }
     LicenseClient::new(cfg)
 }
 
