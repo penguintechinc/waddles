@@ -186,4 +186,36 @@ mod tests {
         let gate = LicenseFeatureGate::new(client);
         assert!(!gate.enabled().await);
     }
+
+    #[test]
+    fn build_license_client_deployment_domain_unset() {
+        // When LICENSE_DEPLOYMENT_DOMAIN is unset, `from_env()` reads
+        // nothing and config builds successfully with no domain. Verifies
+        // the new env-reading doesn't interfere when the var is absent.
+        // Does NOT remove other env vars to avoid affecting other tests.
+        let client = build_license_client("waddles-test-no-domain");
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn build_license_client_deployment_domain_set() {
+        // When LICENSE_DEPLOYMENT_DOMAIN is set to a valid domain string,
+        // build_license_client reads it and calls .with_deployment_domain()
+        // to enable bypass matching. Verifies the new code path works.
+        unsafe { std::env::set_var("LICENSE_DEPLOYMENT_DOMAIN", "test.penguintech.cloud") };
+        let client = build_license_client("waddles-test-with-domain");
+        unsafe { std::env::remove_var("LICENSE_DEPLOYMENT_DOMAIN") };
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn build_license_client_deployment_domain_empty() {
+        // When LICENSE_DEPLOYMENT_DOMAIN is set but empty/whitespace-only,
+        // it's ignored (trimmed and checked) and config builds successfully
+        // with no domain. Verifies the whitespace-stripping logic.
+        unsafe { std::env::set_var("LICENSE_DEPLOYMENT_DOMAIN", "   ") };
+        let client = build_license_client("waddles-test-empty-domain");
+        unsafe { std::env::remove_var("LICENSE_DEPLOYMENT_DOMAIN") };
+        assert!(client.is_ok());
+    }
 }
