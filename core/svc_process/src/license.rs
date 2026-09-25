@@ -68,15 +68,30 @@ impl FeatureGate for LicenseFeatureGate {
 /// startup-config gate in this crate (log a warning, disable the drain
 /// loop rather than starting it unverified).
 pub fn build_license_client(product: &str) -> Result<Arc<LicenseClient>, LicenseError> {
-    let mut cfg = LicenseConfig::from_env(product)?;
-    // Set deployment domain from env var if present and non-empty,
-    // to enable domain-based license bypass for internal deployments.
-    if let Ok(domain) = std::env::var("LICENSE_DEPLOYMENT_DOMAIN") {
-        if !domain.trim().is_empty() {
-            cfg = cfg.with_deployment_domain(domain);
-        }
-    }
+    let cfg = LicenseConfig::from_env(product)?;
+    let domain_env = std::env::var("LICENSE_DEPLOYMENT_DOMAIN").ok();
+    let cfg = apply_deployment_domain(cfg, domain_env.as_deref());
     LicenseClient::new(cfg)
+}
+
+/// Applies an optional `LICENSE_DEPLOYMENT_DOMAIN` override to `cfg`,
+/// trimming whitespace and treating an empty/whitespace-only value the
+/// same as "unset". Pure -- no env access of its own -- so the trim-and-
+/// apply logic is unit-testable directly (see the `apply_deployment_
+/// domain_*` tests below) without mutating the process-wide
+/// `LICENSE_DEPLOYMENT_DOMAIN` env var, which is a data race under
+/// `cargo test`'s default parallel execution: any other test calling
+/// [`build_license_client`] concurrently would observe the mutated value
+/// too, e.g. making `LicenseConfig::domain_bypassed` unexpectedly `true`
+/// for a client a different, unrelated test expected to stay un-bypassed
+/// (the exact nondeterministic CI failure this refactor fixes).
+/// [`build_license_client`] reads the env exactly once and passes the
+/// result in here.
+fn apply_deployment_domain(cfg: LicenseConfig, raw: Option<&str>) -> LicenseConfig {
+    match raw.map(str::trim) {
+        Some(domain) if !domain.is_empty() => cfg.with_deployment_domain(domain.to_owned()),
+        _ => cfg,
+    }
 }
 
 #[cfg(test)]
@@ -120,6 +135,16 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::{FixedGate, ToggleGate};
     use super::*;
+    use std::sync::Mutex;
+
+    // std::env is process-global; serialize env-mutating tests so parallel
+    // `cargo test` threads don't race on the same variable. Mirrors
+    // `core/svc_ingest/src/license.rs`'s identical guard for the identical
+    // hazard. Only `LICENSE_SERVER_URL` needs this now -- the
+    // `LICENSE_DEPLOYMENT_DOMAIN` env var is no longer mutated by any test
+    // in this file; `apply_deployment_domain`'s tests exercise that logic
+    // as a pure function instead (no env access at all).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[tokio::test]
     async fn fixed_gate_returns_its_constructed_value() {
@@ -148,17 +173,27 @@ mod tests {
         // key) are already valid HTTPS -- `LicenseConfig::from_env` must
         // succeed even with nothing set, matching "default OFF, never a
         // hard startup requirement" for a feature-flag dependency.
+        //
+        // Guarded by ENV_LOCK: `build_license_client` reads the ambient
+        // `LICENSE_SERVER_URL` env var via `LicenseConfig::from_env`, so
+        // this must not overlap with the malformed-URL test below, which
+        // transiently sets it to an invalid value.
+        let _guard = ENV_LOCK.lock().unwrap();
         let client = build_license_client("waddles-test-defaults");
         assert!(client.is_ok());
     }
 
     #[test]
     fn build_license_client_rejects_a_malformed_license_server_url() {
-        // SAFETY: `cargo test` runs single-threaded per test binary by
-        // default is not guaranteed, but this crate's other env-mutating
-        // tests already rely on `std::env::set_var`/`remove_var` without
-        // a lock when the variable is exclusive to one test -- no other
-        // test in this crate reads `LICENSE_SERVER_URL`.
+        // Guarded by ENV_LOCK -- see its doc comment: this is the only
+        // remaining env-mutating test in this file (`LICENSE_SERVER_URL`
+        // parsing lives in the external `penguin_licensing::LicenseConfig
+        // ::from_env`, so it can't be tested as a pure function the way
+        // `apply_deployment_domain` is). Without the lock, this
+        // transiently-invalid value would race with every other test that
+        // calls `build_license_client`/`from_env` concurrently.
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by ENV_LOCK.
         unsafe { std::env::set_var("LICENSE_SERVER_URL", "not a url") };
         let result = build_license_client("waddles-test-bad-url");
         unsafe { std::env::remove_var("LICENSE_SERVER_URL") };
@@ -171,6 +206,10 @@ mod tests {
         // implements `FeatureGate` over a real (never-refreshed)
         // `LicenseClient` -- no network I/O, since `flag_enabled` is only
         // called inside the `#[tokio::test]` below.
+        //
+        // Guarded by ENV_LOCK -- see `build_license_client_succeeds_with_
+        // no_env_configured`.
+        let _guard = ENV_LOCK.lock().unwrap();
         let client = build_license_client("waddles-test-gate-wrap").expect("valid defaults");
         let _gate: Box<dyn FeatureGate> = Box::new(LicenseFeatureGate::new(client));
     }
@@ -182,40 +221,50 @@ mod tests {
         // blocking on a network round trip. The call schedules a
         // background refresh (fire-and-forget); this test does not wait
         // for or assert on it.
-        let client = build_license_client("waddles-test-gate-default-off").expect("valid defaults");
+        //
+        // The ENV_LOCK guard is scoped to just the `build_license_client`
+        // call (dropped before the `.await` below) -- `std::sync::
+        // MutexGuard` is `!Send` and must never be held across an await
+        // point; once the client is built, the env value has already been
+        // read into an owned `Url`/`String`, so later mutation elsewhere
+        // cannot affect it.
+        let client = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            build_license_client("waddles-test-gate-default-off").expect("valid defaults")
+        };
         let gate = LicenseFeatureGate::new(client);
         assert!(!gate.enabled().await);
     }
 
     #[test]
-    fn build_license_client_deployment_domain_unset() {
-        // When LICENSE_DEPLOYMENT_DOMAIN is unset, `from_env()` reads
-        // nothing and config builds successfully with no domain. Verifies
-        // the new env-reading doesn't interfere when the var is absent.
-        // Does NOT remove other env vars to avoid affecting other tests.
-        let client = build_license_client("waddles-test-no-domain");
-        assert!(client.is_ok());
+    fn apply_deployment_domain_none_leaves_config_unset() {
+        // No env access at all -- `LicenseConfig::new` never reads the
+        // process environment, and neither does `apply_deployment_domain`
+        // itself, so this test needs no ENV_LOCK guard and can run fully
+        // in parallel with every other test in this crate.
+        let cfg = LicenseConfig::new("waddles-test-domain-none").expect("valid defaults");
+        let cfg = apply_deployment_domain(cfg, None);
+        assert!(cfg.deployment_domain.is_none());
     }
 
     #[test]
-    fn build_license_client_deployment_domain_set() {
-        // When LICENSE_DEPLOYMENT_DOMAIN is set to a valid domain string,
-        // build_license_client reads it and calls .with_deployment_domain()
-        // to enable bypass matching. Verifies the new code path works.
-        unsafe { std::env::set_var("LICENSE_DEPLOYMENT_DOMAIN", "test.penguintech.cloud") };
-        let client = build_license_client("waddles-test-with-domain");
-        unsafe { std::env::remove_var("LICENSE_DEPLOYMENT_DOMAIN") };
-        assert!(client.is_ok());
+    fn apply_deployment_domain_sets_a_trimmed_value() {
+        let cfg = LicenseConfig::new("waddles-test-domain-set").expect("valid defaults");
+        let cfg = apply_deployment_domain(cfg, Some("  test.penguintech.cloud  "));
+        assert_eq!(
+            cfg.deployment_domain.as_deref(),
+            Some("test.penguintech.cloud")
+        );
     }
 
     #[test]
-    fn build_license_client_deployment_domain_empty() {
-        // When LICENSE_DEPLOYMENT_DOMAIN is set but empty/whitespace-only,
-        // it's ignored (trimmed and checked) and config builds successfully
-        // with no domain. Verifies the whitespace-stripping logic.
-        unsafe { std::env::set_var("LICENSE_DEPLOYMENT_DOMAIN", "   ") };
-        let client = build_license_client("waddles-test-empty-domain");
-        unsafe { std::env::remove_var("LICENSE_DEPLOYMENT_DOMAIN") };
-        assert!(client.is_ok());
+    fn apply_deployment_domain_ignores_empty_or_whitespace_only() {
+        let cfg = LicenseConfig::new("waddles-test-domain-empty").expect("valid defaults");
+        let cfg = apply_deployment_domain(cfg, Some("   "));
+        assert!(cfg.deployment_domain.is_none());
+
+        let cfg = LicenseConfig::new("waddles-test-domain-empty-str").expect("valid defaults");
+        let cfg = apply_deployment_domain(cfg, Some(""));
+        assert!(cfg.deployment_domain.is_none());
     }
 }
