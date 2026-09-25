@@ -88,7 +88,11 @@ fn build_client_config(cfg: &CliConfig) -> Result<ClientConfig, ExecutorError> {
     Ok(config)
 }
 
-fn load_certs(path: &std::path::Path) -> Result<Vec<CertificateDer<'static>>, ExecutorError> {
+/// `pub(crate)`: also used by `crate::bucket`'s optional `https://` bucket
+/// TLS config (same PEM-CA-file loading, different `ClientConfig`).
+pub(crate) fn load_certs(
+    path: &std::path::Path,
+) -> Result<Vec<CertificateDer<'static>>, ExecutorError> {
     CertificateDer::pem_file_iter(path)
         .map_err(|e| ExecutorError::Config(format!("failed to read certs from {path:?}: {e}")))?
         .collect::<Result<Vec<_>, _>>()

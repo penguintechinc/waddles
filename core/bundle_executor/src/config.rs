@@ -95,6 +95,58 @@ pub struct CliConfig {
     /// PEM CA bundle used to verify the stage's server certificate.
     #[arg(long, env = "HOST_API_CA_FILE")]
     pub host_api_ca_file: Option<PathBuf>,
+
+    /// S3-compatible bucket endpoint bundle components are fetched from,
+    /// e.g. `http://minio.waddles.svc.cluster.local:9000` (spec SS7.6/
+    /// SS12.7). `Option` (rather than a required arg) so every existing
+    /// test config that never touches the bucket keeps parsing; the real
+    /// production path (`crate::bucket::BucketConfig::from_cli`, wired in
+    /// `crate::run`) fails closed with a clear `Config` error if unset,
+    /// same effect as a required arg without breaking every other test's
+    /// `CliConfig` fixture.
+    #[arg(long, env = "BUNDLE_BUCKET_ENDPOINT")]
+    pub bundle_bucket_endpoint: Option<String>,
+
+    /// Bucket name components are stored under (spec SS12.7 default
+    /// `waddles-bundles`).
+    #[arg(long, env = "BUNDLE_BUCKET_NAME")]
+    pub bundle_bucket_name: Option<String>,
+
+    /// AWS SigV4 region; MinIO accepts any value consistent between signer
+    /// and server (spec SS12.7 default `us-east-1`).
+    #[arg(long, env = "BUNDLE_BUCKET_REGION", default_value = "us-east-1")]
+    pub bundle_bucket_region: String,
+
+    /// SigV4 access key id -- env only per spec SS12.7 (the spec documents
+    /// this pair as "required, env only", distinct from the mTLS material
+    /// above which Token & Secret Hygiene requires to be file-based).
+    #[arg(long, env = "BUNDLE_BUCKET_ACCESS_KEY_ID")]
+    pub bundle_bucket_access_key_id: Option<String>,
+
+    /// SigV4 secret access key -- env only, same as above. Never logged:
+    /// `crate::bucket::SecretAccessKey`'s `Debug` impl redacts it before it
+    /// ever reaches a `{:?}`/`tracing` field.
+    #[arg(long, env = "BUNDLE_BUCKET_SECRET_ACCESS_KEY")]
+    pub bundle_bucket_secret_access_key: Option<String>,
+
+    /// PEM CA bundle verifying the bucket's server certificate when
+    /// `BUNDLE_BUCKET_ENDPOINT` is `https://`. Required in that case --
+    /// this binary never disables certificate verification (`rules/
+    /// security.md`) -- and unused for the plain `http://` in-namespace
+    /// MinIO endpoint spec SS12.7 documents as the default.
+    #[arg(long, env = "BUNDLE_BUCKET_CA_FILE")]
+    pub bundle_bucket_ca_file: Option<PathBuf>,
+
+    /// Wall-clock budget for one bucket GET (spec SS12.7 default `30`).
+    #[arg(long, env = "BUNDLE_FETCH_TIMEOUT_S", default_value_t = 30)]
+    pub bundle_fetch_timeout_s: u64,
+
+    /// Hard cap on a fetched component's byte size (spec SS12.7 default
+    /// `33554432` = 32 MiB). A `Content-Length` above this -- or a body
+    /// that would grow past it -- fails the fetch rather than buffering
+    /// unbounded misconfiguration- or compromise-controlled data.
+    #[arg(long, env = "BUNDLE_MAX_COMPONENT_BYTES", default_value_t = 33_554_432)]
+    pub bundle_max_component_bytes: u64,
 }
 
 impl CliConfig {
@@ -120,6 +172,14 @@ impl CliConfig {
             host_api_client_cert_file: None,
             host_api_client_key_file: None,
             host_api_ca_file: None,
+            bundle_bucket_endpoint: None,
+            bundle_bucket_name: None,
+            bundle_bucket_region: "us-east-1".to_string(),
+            bundle_bucket_access_key_id: None,
+            bundle_bucket_secret_access_key: None,
+            bundle_bucket_ca_file: None,
+            bundle_fetch_timeout_s: 30,
+            bundle_max_component_bytes: 33_554_432,
         }
     }
 
@@ -172,6 +232,25 @@ mod tests {
         assert_eq!(cfg.executor_wasm_collector, "drc");
         assert!(cfg.sandbox_gvisor);
         assert!(cfg.host_api_client_cert_file.is_none());
+        assert!(cfg.bundle_bucket_endpoint.is_none());
+        assert_eq!(cfg.bundle_bucket_region, "us-east-1");
+        assert_eq!(cfg.bundle_fetch_timeout_s, 30);
+        assert_eq!(cfg.bundle_max_component_bytes, 33_554_432);
+        Ok(())
+    }
+
+    #[test]
+    fn defaults_parse_with_no_bundle_bucket_env_set() -> Result<(), Box<dyn std::error::Error>> {
+        // The bundle-bucket fields are `Option`/defaulted precisely so that
+        // this -- and every other pre-existing test's `CliConfig` fixture
+        // -- keeps parsing without setting `BUNDLE_BUCKET_*` at all.
+        let cfg = CliConfig::try_parse_from(base_args())?;
+        assert!(cfg.bundle_bucket_endpoint.is_none());
+        assert!(cfg.bundle_bucket_name.is_none());
+        assert!(cfg.bundle_bucket_access_key_id.is_none());
+        assert!(cfg.bundle_bucket_secret_access_key.is_none());
+        assert!(cfg.bundle_bucket_ca_file.is_none());
+        assert_eq!(cfg.bundle_bucket_region, "us-east-1");
         Ok(())
     }
 
