@@ -1,26 +1,41 @@
-//! Integration tests for `telemetry::init` -- run as a separate process
-//! (standard for a `tests/*.rs` file) since it installs a process-global
-//! `tracing` subscriber exactly once, which would conflict with the
-//! `--lib` unit test binary's own test runs if colocated there.
+//! Integration test (own process) exercising `telemetry::init` with no OTLP
+//! endpoint configured -- the "skip export entirely" branch. Kept out of
+//! `src/telemetry.rs`'s own `#[cfg(test)]` module because
+//! `tracing_subscriber::registry().init()` (via `penguin_logging::init`)
+//! installs a process-global default subscriber and panics if called a
+//! second time in the same process. Every file under `tests/` is compiled
+//! as its own binary, so this file and `tests/telemetry_otlp.rs` each get
+//! exactly one call to `telemetry::init`.
 
-use std::sync::Mutex;
-
-// std::env is process-global; serialize env-mutating tests within this
-// binary (there's only one process per `tests/*.rs` file, but
-// `#[tokio::test]` still runs tests concurrently within it).
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-#[tokio::test]
-async fn init_without_otlp_endpoint_uses_tracing_only() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    // SAFETY: serialized by ENV_LOCK; this is the only test in this binary
-    // that touches OTEL_* env vars before calling `init` (a process-global,
-    // one-time operation).
+#[test]
+fn init_without_otlp_endpoint_uses_tracing_only() {
+    // SAFETY: the only test in this binary/process that touches this var.
     unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT") };
 
     let (mut guard, registry) = svc_ingest::telemetry::init("svc-ingest-test-no-otlp");
     tracing::info!("telemetry initialized without an OTLP endpoint");
-    let rendered = svc_ingest::telemetry::render_metrics(&registry).unwrap();
-    assert!(rendered.is_empty());
+
+    // `penguin_logging::init` always attaches a Prometheus reader to the
+    // OTel meter provider it builds -- that reader unconditionally emits
+    // one `target_info` resource-metadata gauge, so the registry is never
+    // truly empty even with zero application metrics recorded. This
+    // replaces the pre-`penguin-logging` assertion (a bare
+    // `prometheus::Registry::new()` really was empty); asserting
+    // `target_info` carries this service's name is a stronger check of the
+    // same underlying property this test always cared about -- telemetry
+    // initialized without an OTLP endpoint still produces a usable,
+    // correctly-labeled `/metrics` surface.
+    let rendered = svc_ingest::telemetry::render_metrics(&registry).expect("registry must encode");
+    assert!(
+        rendered.contains("target_info"),
+        "expected the OTel resource target_info gauge, got: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("service_name=\"svc-ingest-test-no-otlp\""),
+        "target_info must carry the service name passed to init, got: {rendered:?}"
+    );
+
+    // Shutdown with no tracer/logger provider configured must be a no-op,
+    // never a panic or hang.
     guard.shutdown();
 }
