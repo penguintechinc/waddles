@@ -79,6 +79,16 @@ pub enum ExecutorError {
     /// Configuration failed to load or validate.
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// `crate::bucket::BucketComponentSource`'s bucket GET failed: network
+    /// error, non-200 status, missing/oversized `Content-Length`, or a
+    /// malformed HTTP response from the bucket (spec SS7.6). Always
+    /// surfaces to the stage as `LOAD_FAILED` (`crate::invoke::on_load`),
+    /// same as any other fetch failure; kept distinct from `Config` so
+    /// tests can tell "the bucket answered badly" apart from "this
+    /// process's own configuration was invalid".
+    #[error("bucket fetch failed: {0}")]
+    BucketFetch(String),
 }
 
 /// `wasmtime::Error` does not implement `std::error::Error` in this

@@ -57,6 +57,22 @@ serde_json = { version = "=1.0.151", features = ["preserve_order"] }
 thiserror = "=2.0.20"
 clap = { version = "=4.6.6", features = ["derive", "env"] }
 sha2 = "=0.10.9"
+# `hmac`: AWS SigV4 request signing for `crate::bucket`'s bundle-bucket GET
+# (spec SS7.6/SS12.7's `BUNDLE_BUCKET_*`). Deliberately NOT `object_store`
+# (the crate `core/svc_streaming` uses for its own S3-compatible uploads):
+# `object_store`'s `aws`/`http`/`azure`/`gcp` features all hard-require
+# `reqwest` (verified against its published `Cargo.toml` feature table),
+# which `tests/dependency_policy.rs`/`deny.toml` ban outright for this
+# specific binary (SS4.5/SS14.6 test 16: "no free-form HTTP client").
+# `hmac` (RustCrypto, MIT/Apache-2.0, same family as the already-pinned
+# `sha2`) carries no networking or HTTP dependency at all -- pairs with
+# `sha2 = "=0.10.9"` via `digest = "0.10.x"` (hmac 0.12.1 requires
+# `digest = "0.10.3"`, satisfied by the same `digest` resolution sha2
+# already pulls in). `crate::bucket` hand-rolls the minimal HTTP/1.1 GET
+# over the `tokio`/`rustls`/`tokio-rustls` already pinned below, keeping
+# this binary's only two egress paths (host-API port, bucket GET) on a
+# purpose-built client rather than a general-purpose one.
+hmac = "=0.12.1"
 # `penguin-bundle-host::wire` -- the length-prefixed frame codec, Frame/
 # Message shapes and correlation-id table shared verbatim with the stage
 # side (spec SS6.6). Pinned to the HEAD of `release/rust-bundle-host/v0.1.x`

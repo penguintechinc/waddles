@@ -12,15 +12,22 @@
 //!   and its request/reply dispatch (`crate::wire`, using the landed
 //!   `penguin-bundle-host::wire` module directly); the per-call epoch
 //!   deadline (`crate::engine::ticks_for_deadline` + `crate::invoke`);
-//!   SHA-256 digest verification (`crate::invoke::verify_digest`).
-//! - **Scaffolded with a `TODO`**: the bucket `GET` that supplies a
-//!   bundle's component bytes (`crate::invoke::UnimplementedBucketSource`,
-//!   fails closed rather than fabricating bytes); precompiled `.cwasm`
+//!   SHA-256 digest verification (`crate::invoke::verify_digest`); the
+//!   bucket `GET` that supplies a bundle's component bytes
+//!   (`crate::bucket::BucketComponentSource`, a hand-rolled SigV4-signed
+//!   HTTP/1.1 client wired into `Executor` in place of the fail-closed
+//!   `crate::invoke::UnimplementedBucketSource` this production path used
+//!   before this pass -- that stub now backs only the tests exercising its
+//!   own fail-closed behavior; see `crate::bucket`'s doc for why not
+//!   `object_store`).
+//! - **Scaffolded with a `TODO`**: precompiled `.cwasm`
 //!   caching under `EXECUTOR_PRECOMPILE_DIR` (every `load` JIT-compiles
 //!   fresh); the mTLS peer-identity (SPIFFE ID / pinned CN) check on top
-//!   of the base rustls handshake in `crate::tls`; the per-bundle
-//!   `wasmtime::StoreLimits` memory-limit override in `crate::invoke`.
+//!   of the base rustls handshake in `crate::tls`; the sidecar's Ed25519
+//!   signature verification (spec SS7.6 step 4), which
+//!   `BucketComponentSource` does not itself fetch or check.
 
+pub mod bucket;
 pub mod config;
 pub mod engine;
 pub mod error;
@@ -33,9 +40,10 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
+use crate::bucket::BucketComponentSource;
 use crate::config::CliConfig;
 use crate::error::ExecutorError;
-use crate::invoke::{Executor, UnimplementedBucketSource};
+use crate::invoke::{ComponentSource, Executor};
 
 /// `tracing`/OTel service name (spec SS12.7's `OTEL_SERVICE_NAME`
 /// fallback).
@@ -52,7 +60,8 @@ pub async fn run() -> Result<(), ExecutorError> {
 
     init_telemetry();
 
-    let executor = Arc::new(Executor::new(&cfg, UnimplementedBucketSource)?);
+    let source = BucketComponentSource::from_cli(&cfg)?;
+    let executor = Arc::new(Executor::new(&cfg, source)?);
 
     let mut backoff = std::time::Duration::from_secs(1);
     let backoff_cap = std::time::Duration::from_secs(30);
@@ -71,9 +80,9 @@ pub async fn run() -> Result<(), ExecutorError> {
     }
 }
 
-async fn connect_and_serve(
+async fn connect_and_serve<S: ComponentSource>(
     cfg: &CliConfig,
-    executor: &Arc<Executor<UnimplementedBucketSource>>,
+    executor: &Arc<Executor<S>>,
 ) -> Result<(), ExecutorError> {
     let io = tls::dial_stage(cfg).await?;
     let hello = executor.hello(
@@ -145,6 +154,7 @@ pub async fn run_healthcheck() -> Result<(), ExecutorError> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use crate::invoke::UnimplementedBucketSource;
 
     #[tokio::test]
     async fn run_healthcheck_succeeds() -> Result<(), ExecutorError> {
