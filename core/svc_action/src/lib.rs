@@ -169,10 +169,43 @@ where
 /// `waddles.core.*`.
 const LICENSE_PRODUCT: &str = "waddles";
 
+/// PenguinTech/Waddles-owned bypass suffix -- the sole license/flag
+/// bypass lever, hardcoded in source (never an env var, CLI flag, or Helm
+/// value -- `rules/critical-rules.md` Feature Flags & License Tiers:
+/// "bypass is domain-based ONLY, never env var/CLI arg/config flag". A
+/// prior revision of this file read `LICENSE_DEPLOYMENT_DOMAIN` from the
+/// environment, which let anyone with Helm-values/env access fabricate
+/// an arbitrary bypass domain string with no real DNS control; that was
+/// reverted).
+///
+/// `waddles.app` is not one of the pinned `penguin_licensing` crate's
+/// *default* bypass suffixes (`penguintech.cloud`/`penguincloud.io` --
+/// see `LicenseConfig::DEFAULT_BYPASS_DOMAINS`), so it is explicitly
+/// registered via [`penguin_licensing::LicenseConfig::with_bypass_domain`]
+/// below -- exactly the mechanism that crate's own module doc describes:
+/// "Product `.app` domains are added in code with `LicenseConfig::
+/// with_bypass_domain`" (`packages/rust-licensing/src/config.rs`).
+/// `domain_bypassed()`'s own match rule (`domain == suffix ||
+/// domain.ends_with(".{suffix}")`) already does suffix/subdomain
+/// matching, so registering the bare apex here makes every
+/// `*.waddles.app` deployment domain bypass, not just this exact literal
+/// (`waddles_app_bypass_domain_matches_any_subdomain` below proves it).
+const BYPASS_DOMAIN: &str = "waddles.app";
+
+/// This service's own deployment domain -- a `*.waddles.app` subdomain,
+/// hardcoded in source (see [`BYPASS_DOMAIN`]'s doc for why it can never
+/// be an env var/config value). Distinct per service (`svc-ingest.
+/// waddles.app`/`svc-process.waddles.app`/`svc-action.waddles.app`) so
+/// each binary's own bypass is traceable to the service that claimed it,
+/// though all three resolve bypass true against the same registered
+/// [`BYPASS_DOMAIN`] suffix.
+const DEPLOYMENT_DOMAIN: &str = "svc-action.waddles.app";
+
 /// Builds the shared `penguin_licensing::LicenseClient` this service's two
 /// spec §13.5 flags resolve against, from the standard `LICENSE_KEY`/
-/// `LICENSE_SERVER_URL`/`POSTHOG_HOST`/`POSTHOG_KEY`, optionally
-/// `LICENSE_DEPLOYMENT_DOMAIN` environment variables.
+/// `LICENSE_SERVER_URL`/`POSTHOG_HOST`/`POSTHOG_KEY` environment
+/// variables plus the hardcoded [`DEPLOYMENT_DOMAIN`]/[`BYPASS_DOMAIN`]
+/// bypass.
 /// `None` only if even the no-network-required default `LicenseConfig`
 /// fails to build (a hardcoded, always-valid literal URL parse -- not
 /// reachable in practice, handled rather than unwrapped): callers use
@@ -180,7 +213,7 @@ const LICENSE_PRODUCT: &str = "waddles";
 /// both flags in that case, the same fail-closed-to-OFF posture spec
 /// §13.5 already specifies for a never-seen flag.
 fn build_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
-    let mut cfg = match penguin_licensing::LicenseConfig::from_env(LICENSE_PRODUCT) {
+    let cfg = match penguin_licensing::LicenseConfig::from_env(LICENSE_PRODUCT) {
         Ok(cfg) => cfg,
         Err(err) => {
             tracing::error!(
@@ -200,13 +233,9 @@ fn build_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
             }
         }
     };
-    // Set deployment domain from env var if present and non-empty,
-    // to enable domain-based license bypass for internal deployments.
-    if let Ok(domain) = std::env::var("LICENSE_DEPLOYMENT_DOMAIN") {
-        if !domain.trim().is_empty() {
-            cfg = cfg.with_deployment_domain(domain);
-        }
-    }
+    let cfg = cfg
+        .with_bypass_domain(BYPASS_DOMAIN)
+        .with_deployment_domain(DEPLOYMENT_DOMAIN);
     match penguin_licensing::LicenseClient::new(cfg) {
         Ok(client) => Some(client),
         Err(err) => {
@@ -703,6 +732,69 @@ mod tests {
         // validate -- the community-tier, no-flags-configured shape every
         // deployment starts from before an operator sets a real key.
         assert!(build_license_client().is_some());
+    }
+
+    #[tokio::test]
+    async fn build_license_client_hardcoded_domain_bypasses_flag_checks() {
+        // Proves the net effect the hardcoded DEPLOYMENT_DOMAIN bypass is
+        // meant to have: `build_license_client`'s own output resolves
+        // every flag ON, with zero network access and zero env/config
+        // spoofability (`rules/critical-rules.md` Feature Flags & License
+        // Tiers: bypass is domain-based ONLY -- satisfied entirely in
+        // source here).
+        let client = build_license_client().expect("valid defaults");
+        assert!(client.bypass_active());
+        let flag = flag_or_closed(&Some(Arc::clone(&client)), flags::RUST_DATA_PLANE_FLAG);
+        assert!(flag.enabled().await);
+    }
+
+    #[test]
+    fn waddles_app_bypass_domain_matches_any_subdomain() {
+        // `LicenseConfig::domain_bypassed()`'s own match rule is
+        // `domain == suffix || domain.ends_with(".{suffix}")` (`packages/
+        // rust-licensing/src/config.rs`) -- proves registering the bare
+        // `BYPASS_DOMAIN` apex via `with_bypass_domain` makes both the
+        // apex itself AND any `*.waddles.app` subdomain (this service's
+        // own `DEPLOYMENT_DOMAIN` included) resolve bypass true, not just
+        // one exact literal. No env access -- no lock needed.
+        let apex = penguin_licensing::LicenseConfig::new(LICENSE_PRODUCT)
+            .expect("valid defaults")
+            .with_bypass_domain(BYPASS_DOMAIN)
+            .with_deployment_domain(BYPASS_DOMAIN);
+        assert!(apex.domain_bypassed());
+
+        let subdomain = penguin_licensing::LicenseConfig::new(LICENSE_PRODUCT)
+            .expect("valid defaults")
+            .with_bypass_domain(BYPASS_DOMAIN)
+            .with_deployment_domain(DEPLOYMENT_DOMAIN);
+        assert!(subdomain.domain_bypassed());
+
+        let arbitrary_subdomain = penguin_licensing::LicenseConfig::new(LICENSE_PRODUCT)
+            .expect("valid defaults")
+            .with_bypass_domain(BYPASS_DOMAIN)
+            .with_deployment_domain("anything.waddles.app");
+        assert!(arbitrary_subdomain.domain_bypassed());
+    }
+
+    #[test]
+    fn a_non_bypass_domain_does_not_resolve_bypass() {
+        // Two negative cases: a domain sharing no suffix with
+        // `BYPASS_DOMAIN` at all, and the adversarial near-miss
+        // `evil-waddles.app` -- which contains the substring
+        // `waddles.app` but does NOT end with the required `.waddles.app`
+        // dot-boundary, so a naive substring check would wrongly bypass
+        // it while the real suffix check correctly rejects it.
+        let unrelated = penguin_licensing::LicenseConfig::new(LICENSE_PRODUCT)
+            .expect("valid defaults")
+            .with_bypass_domain(BYPASS_DOMAIN)
+            .with_deployment_domain("example.com");
+        assert!(!unrelated.domain_bypassed());
+
+        let near_miss = penguin_licensing::LicenseConfig::new(LICENSE_PRODUCT)
+            .expect("valid defaults")
+            .with_bypass_domain(BYPASS_DOMAIN)
+            .with_deployment_domain("evil-waddles.app");
+        assert!(!near_miss.domain_bypassed());
     }
 
     #[tokio::test]

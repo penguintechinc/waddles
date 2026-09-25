@@ -108,10 +108,6 @@ spec:
           value: {{ .Values.oauth.twitch.nick | default "" | quote }}
         - name: TWITCH_CHANNELS
           value: {{ .Values.oauth.twitch.channels | default "" | quote }}
-        {{- if .Values.pipeline.licenseDeploymentDomain }}
-        - name: LICENSE_DEPLOYMENT_DOMAIN
-          value: {{ .Values.pipeline.licenseDeploymentDomain | quote }}
-        {{- end }}
         livenessProbe:
           httpGet:
             path: /health

@@ -97,10 +97,6 @@ spec:
         # Empty (default) disables the spine drain loop entirely -- see config.rs.
         - name: PROCESS_APP_ID
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.processAppId | default "" | quote }}
-        {{- if .Values.pipeline.licenseDeploymentDomain }}
-        - name: LICENSE_DEPLOYMENT_DOMAIN
-          value: {{ .Values.pipeline.licenseDeploymentDomain | quote }}
-        {{- end }}
         livenessProbe:
           httpGet:
             path: /health
