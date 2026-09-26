@@ -60,7 +60,12 @@ spec:
         # (see those templates' own image lines); using the waddlebot.image helper here
         # would double-prefix alpha's already-registry-qualified repository value.
         image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag }}"
-        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        # Hardcoded Always -- see templates/svc-process-rust.yaml's comment on this same
+        # line for the node-image-cache rationale (identical here). Proven stale in this
+        # exact deploy: the running pod was serving invoke.rs's UnimplementedBucketSource
+        # stub (LOAD_FAILED "object_store bucket GET not yet wired") a full image behind
+        # the registry's current BucketComponentSource-wired build.
+        imagePullPolicy: Always
         # uid 10001 -- see file header assumption note (no Dockerfile exists for this crate
         # yet, so this mirrors the sibling Rust crates' own established convention).
         securityContext:
@@ -96,6 +101,28 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.wasmCollector | quote }}
         - name: WADDLES_SANDBOX_GVISOR
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.sandboxGvisor | quote }}
+        # BUNDLE_BUCKET_* (core/bundle_executor/src/bucket.rs) -- the executor's one
+        # sanctioned credentialed egress path, alongside the mTLS stage dial above. In-cluster
+        # MinIO is plain http:// here, so no BUNDLE_BUCKET_CA_FILE is required (bucket.rs only
+        # demands one when the endpoint is https://). Access key/secret are individually
+        # secretKeyRef'd from the shared secret (not envFrom) -- see values.yaml's comment on
+        # this block for why.
+        - name: BUNDLE_BUCKET_ENDPOINT
+          value: "http://{{ .Values.infrastructure.minio.service.name }}:{{ .Values.infrastructure.minio.service.apiPort }}"
+        - name: BUNDLE_BUCKET_NAME
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName | quote }}
+        - name: BUNDLE_BUCKET_REGION
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketRegion | quote }}
+        - name: BUNDLE_BUCKET_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: MINIO_ROOT_USER
+        - name: BUNDLE_BUCKET_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: MINIO_ROOT_PASSWORD
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsClientEnv" . | nindent 8 }}
         {{- end }}

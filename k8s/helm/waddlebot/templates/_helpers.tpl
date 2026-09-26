@@ -563,3 +563,56 @@ true
   mountPath: /etc/waddlebot/host-api-tls
   readOnly: true
 {{- end }}
+
+{{/*
+fix/valkey-tls-alpha -- Valkey (infra-redis) TLS helpers. Server-auth-only TLS (no client
+cert/key needed by any consumer, see global.valkeyTls's values.yaml comment): the server
+(templates/infrastructure/redis.yaml) mounts the full Secret (ca.crt/tls.crt/tls.key), the
+3 Rust data-plane client pods mount only the `valkey-ca.crt` key at
+`/etc/waddles/ca/valkey-ca.crt` -- penguin_spine::SpineConfig's own default VALKEY_CA_FILE
+path, so no VALKEY_CA_FILE env override is needed on the client side.
+*/}}
+
+{{/*
+True only when real cert material will exist in the {{ fullname }}-valkey-tls Secret at
+deploy time. Callers gate rendering the tls-port args/volumes on this so a missing Secret
+falls back cleanly to Valkey's existing plaintext-only listener (dual-listener never even
+attempted) instead of a mounted-but-empty file producing an opaque low-level TLS parse
+error.
+*/}}
+{{- define "waddlebot.valkeyTlsMaterialAvailable" -}}
+{{- if and .Values.infrastructure.redis.tls.enabled .Values.global.valkeyTls.ca.crt .Values.global.valkeyTls.tls.crt .Values.global.valkeyTls.tls.key -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/* Server-role volume: full cert+key+CA bundle, mounted by templates/infrastructure/redis.yaml. */}}
+{{- define "waddlebot.valkeyTlsServerVolume" -}}
+- name: valkey-tls
+  secret:
+    secretName: {{ include "waddlebot.fullname" . }}-valkey-tls
+    defaultMode: 0440
+{{- end }}
+
+{{- define "waddlebot.valkeyTlsServerVolumeMount" -}}
+- name: valkey-tls
+  mountPath: /etc/valkey/tls
+  readOnly: true
+{{- end }}
+
+{{/* Client-role volume: CA only, at penguin_spine's default VALKEY_CA_FILE path/filename. */}}
+{{- define "waddlebot.valkeyTlsCaVolume" -}}
+- name: valkey-ca
+  secret:
+    secretName: {{ include "waddlebot.fullname" . }}-valkey-tls
+    defaultMode: 0440
+    items:
+    - key: valkey-ca.crt
+      path: valkey-ca.crt
+{{- end }}
+
+{{- define "waddlebot.valkeyTlsCaVolumeMount" -}}
+- name: valkey-ca
+  mountPath: /etc/waddles/ca
+  readOnly: true
+{{- end }}

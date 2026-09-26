@@ -44,7 +44,9 @@ spec:
       containers:
       - name: svc-action-rust
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-action" "imageTag" .Values.global.imageTag) }}"
-        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        # Hardcoded Always -- see templates/svc-process-rust.yaml's comment on this same line
+        # for the node-image-cache rationale (identical here).
+        imagePullPolicy: Always
         # Pinned to the Rust image's own `appuser` (uid 10001, core/svc_action/
         # Dockerfile.rust), not the chart-wide .Values.securityContext (uid 1000) the
         # Python placeholder templates use -- same pattern as templates/svc-streaming.yaml.
@@ -115,6 +117,20 @@ spec:
         - name: ENVELOPE_BINDING_ACTIVE_KID
           value: {{ .Values.pipeline.rustDataPlane.svcAction.envelopeBindingActiveKid | quote }}
         {{- end }}
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        # fix/valkey-tls-alpha -- see templates/svc-process-rust.yaml's comment on this same
+        # override block for the full rationale (identical here).
+        - name: VALKEY_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: VALKEY_URL_TLS
+        - name: VALKEY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: REDIS_PASSWORD
+        {{- end }}
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsServerEnv" . | nindent 8 }}
         {{- end }}
@@ -142,11 +158,17 @@ spec:
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsVolumeMount" . | nindent 8 }}
         {{- end }}
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
+        {{- end }}
       volumes:
       - name: tmp
         emptyDir: {}
       {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
+      {{- end }}
+      {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+      {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       {{- end }}
 ---
 apiVersion: v1
