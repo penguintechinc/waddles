@@ -52,6 +52,14 @@ futures-util = { version = "=0.3.34", default-features = false, features = ["std
 # already resolved transitively (Cargo.lock).
 base64 = "=0.22.1"
 chrono = { version = "=0.4.45", features = ["serde"] }
+# `crate::service_jwt` mints the HS256 service JWT `crate::distribution::
+# fetch_bundles` presents to hub-api's `distribution:read`-scoped poll --
+# same exact version/feature pins `core/svc_streaming`'s Cargo.toml already
+# uses (`aws_lc_rs`, not `rust_crypto`: the latter pulls in the pure-Rust
+# `rsa` crate, which carries RUSTSEC-2023-0071 with no fix available -- a
+# live network service is exactly the exposed scenario the advisory warns
+# about, even though this crate only exercises the HS256 path).
+jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["use_pem", "aws_lc_rs"] }
 # This service owns `action_dispatch_log` (config/postgres/migrations/074) --
 # see `rules/backend-database.md` Per-Service Database Accounts. No other
 # tables are queried by this crate.

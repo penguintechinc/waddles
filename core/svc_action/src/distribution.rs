@@ -20,6 +20,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use crate::host_api::{ConnectionRegistry, HostApiError};
+use crate::service_jwt::{ServiceJwtConfig, ServiceJwtError};
 
 /// Errors fetching or parsing the distribution response.
 #[derive(Debug, Error)]
@@ -28,6 +29,13 @@ pub enum DistributionError {
     Request(#[from] reqwest::Error),
     #[error("distribution API returned status {0}")]
     Status(reqwest::StatusCode),
+    /// Bug this guards against: hub-api's `tenant_middleware`/
+    /// `require_scope("distribution:read")` reject any request with no (or
+    /// a malformed) `Authorization` header with a permanent 401 -- a poll
+    /// that can't mint its own credential must never silently degrade to an
+    /// unauthenticated request (`crate::service_jwt`'s module doc).
+    #[error("failed to mint service jwt: {0}")]
+    Jwt(#[from] ServiceJwtError),
 }
 
 /// One `egress[]` entry as carried in the distribution response's
@@ -189,13 +197,27 @@ impl From<RawBundleRow> for BundleRow {
 /// parses every row (spec §6.7). Never filters by app_id here -- the
 /// caller decides which rows matter, keeping this function reusable by a
 /// future multi-bundle scheduler.
+///
+/// Presents a freshly-minted `Authorization: Bearer <jwt>` header
+/// (`jwt_config.mint()`) on every call -- hub-api's `tenant_middleware` +
+/// `require_scope("distribution:read")` (`hub_api/blueprints/v1/
+/// distribution.py`) reject an unauthenticated request with a permanent
+/// 401, which is exactly what silently starved the bundle catalog before
+/// this was wired up. See `crate::service_jwt`'s module doc for why a fresh
+/// token is minted per call rather than cached/refreshed.
 pub async fn fetch_bundles(
     client: &reqwest::Client,
     hub_api_url: &str,
     stage: &str,
+    jwt_config: &ServiceJwtConfig,
 ) -> Result<Vec<BundleRow>, DistributionError> {
     let url = format!("{hub_api_url}/api/v1/distribution/bundles?stage={stage}");
-    let resp = client.get(&url).send().await?;
+    let jwt = jwt_config.mint()?;
+    let resp = client
+        .get(&url)
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {jwt}"))
+        .send()
+        .await?;
     if !resp.status().is_success() {
         return Err(DistributionError::Status(resp.status()));
     }
@@ -247,6 +269,9 @@ pub struct PollLoopConfig {
     pub connections: Arc<ConnectionRegistry>,
     pub action_app_id: String,
     pub load_limits: penguin_bundle_host::wire::LoadLimits,
+    /// Credentials `fetch_bundles` mints a fresh service JWT from on every
+    /// poll tick (see that function's doc for why this is required at all).
+    pub jwt_config: ServiceJwtConfig,
 }
 
 /// Runs the poll loop until `shutdown` resolves: fetches every
@@ -269,6 +294,7 @@ pub async fn run_poll_loop(
         connections,
         action_app_id,
         load_limits,
+        jwt_config,
     } = config;
     let mut loaded_digest: Option<String> = None;
     let mut interval = tokio::time::interval(poll_interval);
@@ -277,7 +303,7 @@ pub async fn run_poll_loop(
         tokio::select! {
             _ = &mut shutdown => return,
             _ = interval.tick() => {
-                match fetch_bundles(&client, &hub_api_url, stage).await {
+                match fetch_bundles(&client, &hub_api_url, stage, &jwt_config).await {
                     Ok(rows) => catalog.update(rows),
                     Err(err) => {
                         tracing::warn!(error = %err, "distribution poll failed, serving last-known-good");
@@ -328,6 +354,20 @@ pub type LoadError = HostApiError;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Secret;
+
+    /// A fixed test signing secret -- every test that decodes a minted
+    /// token verifies against this same value.
+    const TEST_JWT_SECRET: &str = "test-signing-secret";
+
+    fn test_jwt_config() -> ServiceJwtConfig {
+        ServiceJwtConfig {
+            secret: Secret::new(TEST_JWT_SECRET),
+            issuer: "waddlebot".to_string(),
+            audience: "waddlebot-services".to_string(),
+            tenant: "global".to_string(),
+        }
+    }
 
     fn sample_response_json() -> serde_json::Value {
         serde_json::json!({
@@ -481,9 +521,14 @@ mod tests {
         let (port, _handle) =
             spawn_distribution_server(sample_response_json(), axum::http::StatusCode::OK).await;
         let client = reqwest::Client::new();
-        let rows = fetch_bundles(&client, &format!("http://127.0.0.1:{port}"), "action")
-            .await
-            .expect("fetch succeeds");
+        let rows = fetch_bundles(
+            &client,
+            &format!("http://127.0.0.1:{port}"),
+            "action",
+            &test_jwt_config(),
+        )
+        .await
+        .expect("fetch succeeds");
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].app_id, "waddles.socials.discord.default");
         assert_eq!(
@@ -502,19 +547,94 @@ mod tests {
         )
         .await;
         let client = reqwest::Client::new();
-        let err = fetch_bundles(&client, &format!("http://127.0.0.1:{port}"), "action")
-            .await
-            .unwrap_err();
+        let err = fetch_bundles(
+            &client,
+            &format!("http://127.0.0.1:{port}"),
+            "action",
+            &test_jwt_config(),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, DistributionError::Status(_)));
     }
 
     #[tokio::test]
     async fn fetch_bundles_fails_against_an_unreachable_host() {
         let client = reqwest::Client::new();
-        let err = fetch_bundles(&client, "http://127.0.0.1:1", "action")
+        let err = fetch_bundles(&client, "http://127.0.0.1:1", "action", &test_jwt_config())
             .await
             .unwrap_err();
         assert!(matches!(err, DistributionError::Request(_)));
+    }
+
+    /// Regression for the auth bug this module was fixed for: hub-api's
+    /// `tenant_middleware` + `require_scope("distribution:read")` reject
+    /// any poll request with no `Authorization` header with a permanent
+    /// 401 -- before this fix, `fetch_bundles` sent none at all, so the
+    /// bundle catalog never populated. Asserts the header is present,
+    /// well-formed, and decodes to a token hub-api's own verification path
+    /// (`libs/flask_core/flask_core/auth.py::verify_jwt_token`) would
+    /// accept: signed with the shared secret, carrying the exact
+    /// `distribution:read` scope and the configured tenant.
+    #[tokio::test]
+    async fn fetch_bundles_sends_a_bearer_authorization_header_hub_api_accepts() {
+        let captured_auth = Arc::new(std::sync::Mutex::new(None::<String>));
+        let captured_auth_clone = Arc::clone(&captured_auth);
+        let body = sample_response_json();
+        let app = axum::Router::new().route(
+            "/api/v1/distribution/bundles",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let captured_auth = Arc::clone(&captured_auth_clone);
+                let body = body.clone();
+                async move {
+                    let auth = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    *captured_auth.lock().unwrap_or_else(|e| e.into_inner()) = auth;
+                    (axum::http::StatusCode::OK, axum::Json(body))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("binds an ephemeral port");
+        let port = listener.local_addr().expect("has a local addr").port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let client = reqwest::Client::new();
+        fetch_bundles(
+            &client,
+            &format!("http://127.0.0.1:{port}"),
+            "action",
+            &test_jwt_config(),
+        )
+        .await
+        .expect("fetch succeeds");
+
+        let auth_header = captured_auth
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .expect("Authorization header must be present on the poll request");
+        let token = auth_header
+            .strip_prefix("Bearer ")
+            .expect("Authorization header must be a Bearer token");
+
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.set_issuer(&["waddlebot"]);
+        validation.set_audience(&["waddlebot-services"]);
+        let decoded = jsonwebtoken::decode::<serde_json::Value>(
+            token,
+            &jsonwebtoken::DecodingKey::from_secret(TEST_JWT_SECRET.as_bytes()),
+            &validation,
+        )
+        .expect("hub-api's shared-secret verification would accept this token");
+        assert_eq!(decoded.claims["scope"], "distribution:read");
+        assert_eq!(decoded.claims["tenant"], "global");
+        assert_eq!(decoded.claims["sub"], "svc-action");
     }
 
     #[test]
@@ -585,6 +705,7 @@ mod tests {
                         timeout_ms: 2000,
                         memory_mb: 64,
                     },
+                    jwt_config: test_jwt_config(),
                 },
                 rx,
             ),
@@ -616,6 +737,7 @@ mod tests {
                     timeout_ms: 2000,
                     memory_mb: 64,
                 },
+                jwt_config: test_jwt_config(),
             },
             rx,
         ));

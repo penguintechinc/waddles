@@ -42,6 +42,7 @@ pub mod host_api;
 pub mod http;
 pub mod retry;
 pub mod senders;
+pub mod service_jwt;
 pub mod telemetry;
 pub mod usage;
 pub mod wiring;
@@ -360,6 +361,18 @@ fn try_start_distribution_poll(
         return;
     }
     let cli = config.cli.clone();
+    // Credentials the poll presents to hub-api's `distribution:read`-scoped
+    // endpoint (spec §6.7) -- see `crate::service_jwt`'s module doc for why
+    // this reuses the existing platform-wide machine-JWT scheme rather than
+    // inventing a new one. `config.secret_key` is the shared HS256
+    // `SECRET_KEY` every flask_core-based service (hub-api included)
+    // verifies bearer tokens against.
+    let jwt_config = service_jwt::ServiceJwtConfig {
+        secret: config.secret_key.clone(),
+        issuer: cli.jwt_issuer.clone(),
+        audience: cli.jwt_audience.clone(),
+        tenant: cli.runner_tenant_slug.clone(),
+    };
     tokio::spawn(async move {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
@@ -380,6 +393,7 @@ fn try_start_distribution_poll(
                 connections,
                 action_app_id: cli.action_app_id.clone(),
                 load_limits,
+                jwt_config,
             },
             shutdown_rx,
         )
@@ -703,6 +717,7 @@ mod tests {
             cli,
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
+            secret_key: Secret::new("test-jwt-signing-secret"),
         }
     }
 
@@ -987,6 +1002,7 @@ mod tests {
             cli,
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
+            secret_key: Secret::new("test-jwt-signing-secret"),
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
         let catalog = Arc::new(distribution::BundleCatalog::new());
@@ -1005,6 +1021,7 @@ mod tests {
             cli,
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
+            secret_key: Secret::new("test-jwt-signing-secret"),
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
         let catalog = Arc::new(distribution::BundleCatalog::new());

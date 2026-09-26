@@ -11,14 +11,16 @@
 
 FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
 
-# A C compiler -- required to build `ring` (rustls's crypto provider here;
-# confirmed via `cargo deny check`'s dependency graph that this crate's
-# dependency set resolves to `ring`, not `aws-lc-sys`, so unlike
-# `core/svc_streaming` -- which pulls in `aws_lc_rs` via `jsonwebtoken` --
-# no `cmake` is needed in this builder stage).
+# cmake + a C/C++ compiler are required to build aws-lc-sys -- this crate's
+# `jsonwebtoken` dependency (`crate::service_jwt`, the distribution-poll
+# service-JWT minter) pulls in the `aws_lc_rs` crypto backend, same as
+# `core/svc_streaming`'s Cargo.toml (see that crate's Dockerfile.rust
+# comment for the RUSTSEC-2023-0071 rationale). rustls itself still
+# resolves to `ring` here (unaffected), but `aws-lc-sys` now needs `cmake`
+# regardless.
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
-        build-essential=12.9 ca-certificates=20250419~deb12u1 \
+        cmake=3.25.1-1 build-essential=12.9 ca-certificates=20250419~deb12u1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build

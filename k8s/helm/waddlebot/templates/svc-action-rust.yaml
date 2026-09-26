@@ -83,6 +83,19 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: DB_PASSWORD
+        # `crate::service_jwt` mints the `distribution:read`-scoped service
+        # JWT this pod presents to hub-api's distribution poll. `SECRET_KEY`
+        # itself needs no separate wiring here -- it already reaches this
+        # container via the blanket `envFrom: secretRef` above (same
+        # `SECRET_KEY` key `templates/secrets.yaml` renders, shared with
+        # hub-api.yaml). `RUNNER_TENANT_SLUG` is NOT covered by that
+        # `envFrom` (it's a `.Values.pipeline.runnerTenantSlug` template
+        # value, not a secret/configmap key), so it's wired explicitly here
+        # to match templates/svc-action.yaml's Python Deployment -- without
+        # this, a non-default `runnerTenantSlug` would silently diverge
+        # between the Python and Rust pods.
+        - name: RUNNER_TENANT_SLUG
+          value: {{ .Values.pipeline.runnerTenantSlug | quote }}
         - name: WADDLES_SANDBOX_GVISOR
           value: {{ .Values.pipeline.rustDataPlane.svcAction.sandboxGvisor | quote }}
         # Per-call wall-clock budget handed to the executor on every `invoke` -- kept in
