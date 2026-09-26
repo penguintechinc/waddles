@@ -92,6 +92,7 @@ mod tests {
             cli,
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
+            secret_key: Secret::new("test-jwt-signing-secret"),
         }
     }
 
@@ -133,6 +134,7 @@ mod tests {
             cli,
             db_password: Secret::new("unused"),
             envelope_binding_keys: None,
+            secret_key: Secret::new("unused"),
         };
         let first = get_or_connect(&config).await.expect("connects");
         // Second call returns the cached connection rather than

@@ -167,6 +167,27 @@ pub struct CliConfig {
     /// behaviour is unchanged ... every `POLL_INTERVAL_S` (5.0 s)").
     #[arg(long, env = "POLL_INTERVAL_S", default_value_t = 5.0)]
     pub poll_interval_s: f64,
+    /// `iss` claim on the service JWT `crate::service_jwt` mints for the
+    /// distribution poll -- matches `libs/flask_core/flask_core/
+    /// auth.py::DEFAULT_JWT_ISSUER`'s own default exactly, so this pod's
+    /// tokens verify against the same platform-wide `verify_jwt_token`
+    /// hub-api (and every other flask_core-based service) already runs.
+    /// Not currently overridden anywhere in `k8s/helm/waddlebot` -- both
+    /// sides rely on this identical hardcoded default.
+    #[arg(long, env = "JWT_ISSUER", default_value = "waddlebot")]
+    pub jwt_issuer: String,
+    /// `aud` claim -- matches `DEFAULT_JWT_AUDIENCE`'s own default. See
+    /// `jwt_issuer` above.
+    #[arg(long, env = "JWT_AUDIENCE", default_value = "waddlebot-services")]
+    pub jwt_audience: String,
+    /// `tenant` claim on the minted service JWT -- same env var name and
+    /// `"global"` default `core/svc_process`/`core/svc_ingest`'s Python
+    /// stage-runner `Config.RUNNER_TENANT_SLUG` already uses for this exact
+    /// purpose (`libs/flask_core/flask_core/stage_runner.py`'s
+    /// `jwt_provider`, wired from `RUNNER_TENANT_SLUG` in each service's
+    /// `app.py`).
+    #[arg(long, env = "RUNNER_TENANT_SLUG", default_value = "global")]
+    pub runner_tenant_slug: String,
 
     /// Lifts the private-address half of the bundle `http` capability's
     /// SSRF guard (spec §8.2 step 6 / §8.5) for hosts already on that
@@ -240,6 +261,22 @@ pub struct Config {
     /// without it rather than silently accepting every envelope (a missing
     /// keyring must never fail open).
     pub envelope_binding_keys: Option<Secret>,
+    /// `SECRET_KEY` (env-only, see [`Config::from_cli`]) -- the shared
+    /// HS256 signing key `crate::service_jwt` uses to mint the distribution
+    /// poll's service JWT. The exact same secret hub-api (and every other
+    /// flask_core-based service) verifies incoming bearer tokens against
+    /// (`libs/flask_core/flask_core/secrets.py::require_secret_key`,
+    /// default env var `SECRET_KEY`) -- already present on this pod today
+    /// via the Helm chart's blanket `envFrom: secretRef` (`templates/
+    /// secrets.yaml`'s `SECRET_KEY` key, shared with `hub-api.yaml`), no
+    /// chart change required. Required at startup, same fail-closed
+    /// treatment as `db_password` above -- there is no insecure-placeholder
+    /// fallback here (unlike the Python `require_secret_key()` helper this
+    /// mirrors, which tolerates an unset value outside production): this
+    /// binary has no equivalent "is this a dev/test process" signal to key
+    /// that leniency off of, so requiring the value unconditionally is the
+    /// safe default.
+    pub secret_key: Secret,
 }
 
 impl fmt::Debug for Config {
@@ -251,6 +288,7 @@ impl fmt::Debug for Config {
                 "envelope_binding_keys",
                 &self.envelope_binding_keys.as_ref().map(|_| "<redacted>"),
             )
+            .field("secret_key", &Secret::new(""))
             .finish()
     }
 }
@@ -271,10 +309,12 @@ impl Config {
         cli.validate()?;
         let db_password = Secret::new(env_required("DB_PASSWORD")?);
         let envelope_binding_keys = std::env::var("ENVELOPE_BINDING_KEYS").ok().map(Secret::new);
+        let secret_key = Secret::new(env_required("SECRET_KEY")?);
         Ok(Self {
             cli,
             db_password,
             envelope_binding_keys,
+            secret_key,
         })
     }
 }
@@ -294,8 +334,11 @@ mod tests {
 
     fn clear_secret_env() {
         // SAFETY: serialized by ENV_LOCK, no concurrent readers/writers of
-        // this specific variable within the test process.
-        unsafe { std::env::remove_var("DB_PASSWORD") };
+        // these specific variables within the test process.
+        unsafe {
+            std::env::remove_var("DB_PASSWORD");
+            std::env::remove_var("SECRET_KEY");
+        }
     }
 
     #[test]
@@ -429,8 +472,12 @@ mod tests {
         assert_eq!(err, ConfigError::MissingEnv("DB_PASSWORD"));
     }
 
+    /// `SECRET_KEY` is checked after `DB_PASSWORD` (see `Config::from_cli`)
+    /// -- with `DB_PASSWORD` set and `SECRET_KEY` absent, the missing-secret
+    /// error must name `SECRET_KEY` specifically, not silently succeed or
+    /// report the wrong variable.
     #[test]
-    fn load_succeeds_with_required_secrets_set() {
+    fn load_fails_without_secret_key() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_secret_env();
         // SAFETY: serialized by ENV_LOCK above.
@@ -438,8 +485,24 @@ mod tests {
             std::env::set_var("DB_PASSWORD", "test-db-pass");
         }
         let cli = CliConfig::parse_from(["svc-action"]);
+        let err = Config::from_cli(cli).unwrap_err();
+        assert_eq!(err, ConfigError::MissingEnv("SECRET_KEY"));
+        clear_secret_env();
+    }
+
+    #[test]
+    fn load_succeeds_with_required_secrets_set() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_secret_env();
+        // SAFETY: serialized by ENV_LOCK above.
+        unsafe {
+            std::env::set_var("DB_PASSWORD", "test-db-pass");
+            std::env::set_var("SECRET_KEY", "test-jwt-signing-secret");
+        }
+        let cli = CliConfig::parse_from(["svc-action"]);
         let cfg = Config::from_cli(cli).expect("secrets are set");
         assert_eq!(cfg.db_password.expose(), "test-db-pass");
+        assert_eq!(cfg.secret_key.expose(), "test-jwt-signing-secret");
         assert!(cfg.envelope_binding_keys.is_none());
         clear_secret_env();
     }
@@ -451,6 +514,7 @@ mod tests {
         // SAFETY: serialized by ENV_LOCK above.
         unsafe {
             std::env::set_var("DB_PASSWORD", "test-db-pass");
+            std::env::set_var("SECRET_KEY", "test-jwt-signing-secret");
             std::env::set_var("ENVELOPE_BINDING_KEYS", "k1:aabbcc");
         }
         let cli = CliConfig::parse_from(["svc-action"]);
@@ -478,11 +542,42 @@ mod tests {
         // SAFETY: serialized by ENV_LOCK above.
         unsafe {
             std::env::set_var("DB_PASSWORD", "super-secret-db-pass");
+            std::env::set_var("SECRET_KEY", "super-secret-jwt-signing-key");
         }
         let cli = CliConfig::parse_from(["svc-action"]);
         let cfg = Config::from_cli(cli).expect("secrets are set");
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("super-secret-db-pass"));
+        assert!(!rendered.contains("super-secret-jwt-signing-key"));
         clear_secret_env();
+    }
+
+    #[test]
+    fn jwt_issuer_audience_and_runner_tenant_slug_defaults_match_flask_core() {
+        let cli = CliConfig::parse_from(["svc-action"]);
+        // Matches `libs/flask_core/flask_core/auth.py`'s
+        // `DEFAULT_JWT_ISSUER`/`DEFAULT_JWT_AUDIENCE` and
+        // `core/svc_process/config.py`'s `RUNNER_TENANT_SLUG` default
+        // exactly -- hub-api verifies the minted service JWT against these
+        // same defaults.
+        assert_eq!(cli.jwt_issuer, "waddlebot");
+        assert_eq!(cli.jwt_audience, "waddlebot-services");
+        assert_eq!(cli.runner_tenant_slug, "global");
+    }
+
+    #[test]
+    fn jwt_issuer_audience_and_runner_tenant_slug_env_overrides_are_honored() {
+        let cli = CliConfig::parse_from([
+            "svc-action",
+            "--jwt-issuer",
+            "custom-issuer",
+            "--jwt-audience",
+            "custom-audience",
+            "--runner-tenant-slug",
+            "acme",
+        ]);
+        assert_eq!(cli.jwt_issuer, "custom-issuer");
+        assert_eq!(cli.jwt_audience, "custom-audience");
+        assert_eq!(cli.runner_tenant_slug, "acme");
     }
 }
