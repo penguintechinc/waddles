@@ -1310,7 +1310,7 @@ dependencies = [
 [[package]]
 name = "penguin-connector-discord"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=a542873b8b594b530f99e1eab48e479d705b5100#a542873b8b594b530f99e1eab48e479d705b5100"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=4a7619720615ea0df6731f5ae278eb8b03021ca6#4a7619720615ea0df6731f5ae278eb8b03021ca6"
 dependencies = [
  "futures-util",
  "reqwest 0.13.4",
@@ -1325,7 +1325,7 @@ dependencies = [
 [[package]]
 name = "penguin-connector-twitch"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=a542873b8b594b530f99e1eab48e479d705b5100#a542873b8b594b530f99e1eab48e479d705b5100"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=4a7619720615ea0df6731f5ae278eb8b03021ca6#4a7619720615ea0df6731f5ae278eb8b03021ca6"
 dependencies = [
  "hex",
  "hmac",
