@@ -38,6 +38,8 @@ use penguin_connector_twitch::irc::TwitchIrcSender;
 use penguin_connector_twitch::TwitchError;
 use tokio::sync::oneshot;
 
+use crate::ingest::Backoff;
+
 /// The queue key this module drains -- byte-identical to
 /// `core/svc_action/src/capabilities.rs::outbound_relay_queue_key("twitch")`,
 /// duplicated as a constant here (not imported) since `svc_action` and
@@ -175,8 +177,20 @@ impl IrcOutbound for RealIrcOutbound {
 /// send failure is logged and dropped too -- this is a best-effort relay,
 /// not an at-least-once delivery guarantee (S5.5 makes no stronger
 /// promise: a bundle-initiated chat reply is not spine-durable data).
-async fn drain_loop<Q, S>(mut queue: Q, sender: &S, mut shutdown: oneshot::Receiver<()>)
-where
+///
+/// Queue-read-error retry discipline uses the same shared [`Backoff`] as
+/// the platform reconnect loops (`ingest::discord`/`ingest::twitch`, see
+/// `Backoff`'s own doc comment): the delay grows (exponential, jittered,
+/// capped at 30s) on every consecutive `Err`, and `reset()`s only once a
+/// poll actually succeeds (`Ok(Some(_))` or `Ok(None)` -- either proves
+/// the Valkey round-trip is healthy) -- never a fixed 2s retry that never
+/// escalates against a genuinely down connection.
+async fn drain_loop<Q, S>(
+    mut queue: Q,
+    sender: &S,
+    mut backoff: Backoff,
+    mut shutdown: oneshot::Receiver<()>,
+) where
     Q: RelaySource,
     S: IrcOutbound,
 {
@@ -185,6 +199,7 @@ where
             _ = &mut shutdown => return,
             popped = queue.brpop_one() => match popped {
                 Ok(Some(raw)) => {
+                    backoff.reset();
                     match serde_json::from_str::<RelayMessage>(&raw) {
                         Ok(msg) => {
                             if let Err(err) = sender.send(&msg.channel, &msg.text).await {
@@ -196,12 +211,18 @@ where
                         }
                     }
                 }
-                Ok(None) => {} // BRPOP timeout, empty queue -- loop and re-check shutdown.
+                Ok(None) => {
+                    // BRPOP timeout, empty queue -- a successful round-trip
+                    // with nothing to do, not a failure; loop and re-check
+                    // shutdown. Still resets the backoff (see doc comment).
+                    backoff.reset();
+                }
                 Err(err) => {
                     tracing::warn!(platform = "twitch", error = %err, "outbound relay queue read error, retrying");
+                    let delay = backoff.delay();
                     tokio::select! {
                         _ = &mut shutdown => return,
-                        () = tokio::time::sleep(Duration::from_secs(2)) => {}
+                        () = tokio::time::sleep(delay) => {}
                     }
                 }
             }
@@ -221,7 +242,8 @@ pub async fn run(
     let client = build_redis_client(spine_cfg)?;
     let conn = client.get_multiplexed_async_connection().await?;
     let sender = RealIrcOutbound::new(identity);
-    drain_loop(conn, &sender, shutdown).await;
+    let backoff = Backoff::new(Duration::from_secs(30));
+    drain_loop(conn, &sender, backoff, shutdown).await;
     Ok(())
 }
 
@@ -320,8 +342,11 @@ mod tests {
         let sender = RecordingSender::default();
         let (_tx, rx) = oneshot::channel();
 
-        let result =
-            tokio::time::timeout(Duration::from_secs(5), drain_loop(queue, &sender, rx)).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx),
+        )
+        .await;
         assert!(
             result.is_err(),
             "drain_loop only returns via shutdown, which this test never sends"
@@ -341,7 +366,7 @@ mod tests {
         let sender = RecordingSender::default();
         let (tx, rx) = oneshot::channel();
         tx.send(()).unwrap();
-        drain_loop(queue, &sender, rx).await;
+        drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx).await;
         assert!(sender.calls.lock().unwrap().is_empty());
     }
 
@@ -359,8 +384,11 @@ mod tests {
         tx.send(()).unwrap();
         // Must return promptly on shutdown despite the send failure, not
         // panic and not hang retrying the same message forever.
-        let result =
-            tokio::time::timeout(Duration::from_secs(5), drain_loop(queue, &sender, rx)).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx),
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -373,8 +401,11 @@ mod tests {
         let sender = RecordingSender::default();
         let (tx, rx) = oneshot::channel();
         tx.send(()).unwrap();
-        let result =
-            tokio::time::timeout(Duration::from_secs(5), drain_loop(queue, &sender, rx)).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx),
+        )
+        .await;
         assert!(result.is_ok());
         assert!(sender.calls.lock().unwrap().is_empty());
     }
@@ -388,9 +419,101 @@ mod tests {
         let sender = RecordingSender::default();
         let (tx, rx) = oneshot::channel();
         tx.send(()).unwrap();
-        let result =
-            tokio::time::timeout(Duration::from_secs(5), drain_loop(queue, &sender, rx)).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx),
+        )
+        .await;
         assert!(result.is_ok(), "must not hang retrying forever");
+    }
+
+    /// Proves the queue-read retry loop grows its delay across repeated
+    /// `Err`s and resets only once a poll actually succeeds (`Ok(None)`
+    /// counts -- an empty queue is still a healthy round-trip), mirroring
+    /// `ingest::discord`/`ingest::twitch`'s own regression tests for the
+    /// same [`Backoff`] discipline.
+    #[tokio::test(start_paused = true)]
+    async fn queue_read_backoff_grows_and_resets_after_a_successful_poll() {
+        struct TimedQueue {
+            results: Vec<Result<Option<String>, String>>,
+            idx: AtomicUsize,
+            call_times: std::sync::Arc<Mutex<Vec<tokio::time::Instant>>>,
+        }
+
+        impl RelaySource for TimedQueue {
+            async fn brpop_one(&mut self) -> Result<Option<String>, String> {
+                self.call_times
+                    .lock()
+                    .unwrap()
+                    .push(tokio::time::Instant::now());
+                let i = self.idx.fetch_add(1, Ordering::SeqCst);
+                match self.results.get(i) {
+                    Some(r) => r.clone(),
+                    None => Err("simulated queue exhausted".to_string()),
+                }
+            }
+        }
+
+        let call_times: std::sync::Arc<Mutex<Vec<tokio::time::Instant>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let queue = TimedQueue {
+            results: vec![
+                Err("e1".to_string()),
+                Err("e2".to_string()),
+                Ok(None),
+                Err("e3".to_string()),
+            ],
+            idx: AtomicUsize::new(0),
+            call_times: call_times.clone(),
+        };
+        let sender = RecordingSender::default();
+        let (_tx, rx) = oneshot::channel();
+
+        const SEED: u64 = 0xABCD_EF01_2345_6789;
+        let backoff = Backoff::seeded(Duration::from_secs(30), SEED);
+
+        let _ = tokio::time::timeout(
+            Duration::from_secs(600),
+            drain_loop(queue, &sender, backoff, rx),
+        )
+        .await;
+
+        let times = call_times.lock().unwrap();
+        assert!(
+            times.len() >= 5,
+            "expected at least 5 brpop calls, got {}",
+            times.len()
+        );
+        let deltas: Vec<Duration> = times.windows(2).map(|w| w[1] - w[0]).collect();
+
+        // Independently replicate the exact call sequence a correct loop
+        // makes: two churn delays (Err, Err), then the successful `Ok(None)`
+        // resets the backoff with no delay before the very next call, then
+        // one more delay (the post-reset Err) -- same seed, so this
+        // reproduces the real sequence bit-for-bit if (and only if) the
+        // reset actually fired after the successful poll.
+        let mut expected_backoff = Backoff::seeded(Duration::from_secs(30), SEED);
+        let expected_churn_1 = expected_backoff.delay();
+        let expected_churn_2 = expected_backoff.delay();
+        expected_backoff.reset();
+        let expected_post_reset = expected_backoff.delay();
+
+        assert_eq!(deltas[0], expected_churn_1);
+        assert_eq!(deltas[1], expected_churn_2);
+        assert_eq!(
+            deltas[2],
+            Duration::ZERO,
+            "a successful poll (Ok(None)) must not sleep before the next call"
+        );
+        assert_eq!(
+            deltas[3], expected_post_reset,
+            "the delay right after the successful poll must reflect a reset backoff, not a continued climb"
+        );
+        assert!(
+            deltas[3] <= Duration::from_secs(1),
+            "post-reset delay {:?} must be bounded by the base 1s ceiling, not the pre-reset ~4s ceiling",
+            deltas[3]
+        );
     }
 
     #[test]
