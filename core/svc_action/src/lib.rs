@@ -146,6 +146,7 @@ where
 
     let connections = try_start_host_api(
         &config.cli,
+        config.discord_bot_token.clone(),
         Arc::clone(&usage),
         Arc::clone(&catalog),
         egress_denied_total,
@@ -289,6 +290,7 @@ fn flag_or_closed(
 /// crash, until the next connection attempt).
 async fn build_stage_capabilities(
     cli: &config::CliConfig,
+    discord_bot_token: Option<config::Secret>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
     catalog: Arc<distribution::BundleCatalog>,
     egress_denied_total: prometheus::IntCounterVec,
@@ -322,9 +324,24 @@ async fn build_stage_capabilities(
         egress_denied_total,
         flag_or_closed(&license, flags::BUNDLE_EGRESS_FLAG),
     ));
-    Some(Arc::new(capabilities::StageCapabilities::new(
-        relay_conn, egress, usage,
-    )))
+    let caps = capabilities::StageCapabilities::new(relay_conn, egress, usage);
+    // Discord relay send (spec: relay providers, `discord`) -- graceful
+    // degradation, not a startup requirement: a deployment that never sets
+    // `DISCORD_BOT_TOKEN` simply never enables this provider, and a bundle
+    // calling `relay.send("discord", ...)` sees `relay_unavailable` rather
+    // than this process failing to start (`config::Config::
+    // discord_bot_token`'s doc).
+    let caps = match discord_bot_token {
+        Some(token) => caps.with_discord(Arc::new(egress::ReqwestTransport), token),
+        None => {
+            tracing::warn!(
+                "DISCORD_BOT_TOKEN not set; discord relay provider disabled \
+                 (relay_unavailable on every discord relay.send)"
+            );
+            caps
+        }
+    };
+    Some(Arc::new(caps))
 }
 
 /// Starts the host-API mTLS listener as its own background task and
@@ -338,6 +355,7 @@ async fn build_stage_capabilities(
 /// applies to its own optional dependency.
 fn try_start_host_api(
     cli: &config::CliConfig,
+    discord_bot_token: Option<config::Secret>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
     catalog: Arc<distribution::BundleCatalog>,
     egress_denied_total: prometheus::IntCounterVec,
@@ -352,10 +370,16 @@ fn try_start_host_api(
             shutdown_signal().await;
             let _ = shutdown_tx.send(());
         });
-        let capabilities =
-            build_stage_capabilities(&cli, usage, catalog, egress_denied_total, license)
-                .await
-                .unwrap_or_else(|| Arc::new(capabilities::DenyAllCapabilities));
+        let capabilities = build_stage_capabilities(
+            &cli,
+            discord_bot_token,
+            usage,
+            catalog,
+            egress_denied_total,
+            license,
+        )
+        .await
+        .unwrap_or_else(|| Arc::new(capabilities::DenyAllCapabilities));
         if let Err(err) = host_api::serve(cli, registry_for_task, capabilities, shutdown_rx).await {
             tracing::warn!(error = %err, "host-api listener unavailable; executor integration disabled");
         }
@@ -868,6 +892,7 @@ mod tests {
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
             secret_key: Secret::new("test-jwt-signing-secret"),
+            discord_bot_token: None,
         }
     }
 
@@ -1208,6 +1233,7 @@ mod tests {
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
             secret_key: Secret::new("test-jwt-signing-secret"),
+            discord_bot_token: None,
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
         let catalog = Arc::new(distribution::BundleCatalog::new());
@@ -1227,6 +1253,7 @@ mod tests {
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
             secret_key: Secret::new("test-jwt-signing-secret"),
+            discord_bot_token: None,
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
         let catalog = Arc::new(distribution::BundleCatalog::new());

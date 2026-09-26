@@ -183,6 +183,10 @@ pub async fn invoke_dispatch(
         tenant: env.tenant.clone(),
         community: env.community.clone(),
         app_id: app_id.to_string(),
+        // The inbound event's own origin channel (spec: relay providers,
+        // discord) -- `None` when the platform/event has no channel
+        // concept. Never re-derived from anything a bundle returns.
+        origin_channel_id: env.event.source.as_ref().and_then(|s| s.channel_id.clone()),
     };
     let reply = conn
         .invoke(
