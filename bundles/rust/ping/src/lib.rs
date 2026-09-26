@@ -1,14 +1,15 @@
-//! Minimal, real `!ping` -> `pong` Twitch bundle: the e2e test's
-//! deployable process/action-stage fixture (the "currently-missing
-//! deployable test bundle that gates the whole e2e"). Implements both WIT
-//! exports against `wit/waddle-bundle/stage.wit` --
-//! [`waddle_sdk::ProcessStage::transform`] recognizes the exact command
-//! `!ping` in an inbound `chat.message` and rewrites the event into a
-//! `pong` reply on the same platform/channel; [`waddle_sdk::ActionStage::
-//! dispatch`] takes that reply and relays it back via the `relay` host
-//! import (granted only to action-stage bundles, `wit/waddle-bundle/
-//! stage.wit` `interface relay`). Non-matching text produces no reply and
-//! no action.
+//! Minimal, real `!ping` -> `pong` chat bundle: the e2e test's deployable
+//! process/action-stage fixture (the "currently-missing deployable test
+//! bundle that gates the whole e2e"). Implements both WIT exports against
+//! `wit/waddle-bundle/stage.wit` -- [`waddle_sdk::ProcessStage::transform`]
+//! recognizes the exact command `!ping` in an inbound `chat.message` and
+//! rewrites the event into a `pong` reply on the same platform/channel;
+//! [`waddle_sdk::ActionStage::dispatch`] takes that reply and relays it
+//! back via the `relay` host import (granted only to action-stage bundles,
+//! `wit/waddle-bundle/stage.wit` `interface relay`) to the event's own
+//! origin platform (`envelope.event.platform` -- never a fixed provider,
+//! so a Discord `!ping`'s pong relays to Discord, not Twitch). Non-matching
+//! text produces no reply and no action.
 //!
 //! Deliberately tiny: this exists to give the executor a small, correct,
 //! real component to load in the e2e test, not to demonstrate SDK surface
@@ -20,9 +21,11 @@
 //! without a WASI test runner.
 
 use serde::{Deserialize, Serialize};
-use waddle_sdk::{ActionStage, PlatformEvent, ProcessStage, UnsupportedStage};
 #[cfg(target_arch = "wasm32")]
-use waddle_sdk::{StageEnvelope, TransportError, TransportResult};
+use waddle_sdk::TransportResult;
+use waddle_sdk::{
+    ActionStage, PlatformEvent, ProcessStage, StageEnvelope, TransportError, UnsupportedStage,
+};
 
 /// The exact command text this bundle reacts to, matched against the
 /// trimmed `text` field only -- no prefix/argument parsing, this is a
@@ -30,10 +33,6 @@ use waddle_sdk::{StageEnvelope, TransportError, TransportResult};
 const PING_COMMAND: &str = "!ping";
 /// The reply body sent back for a matching command.
 const PONG_REPLY: &str = "pong";
-/// The Twitch outbound relay's provider name (matches
-/// `waddle_transports.transports.irc_relay.outbound_queue_key("twitch")`).
-#[cfg(target_arch = "wasm32")]
-const TWITCH_PROVIDER: &str = "twitch";
 
 /// Inbound Twitch `chat.message` payload shape (spec
 /// `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md` SS6.1.1).
@@ -52,13 +51,13 @@ struct PongPayload {
     channel_id: Option<String>,
 }
 
-/// The `{channel, text}` shape
-/// `waddle_transports.transports.irc_relay.RelayOutboundIrcTransport.send`
-/// LPUSHes onto the Twitch outbound relay queue -- the wire contract this
-/// bundle's `dispatch` must match exactly for svc-ingest's drain loop to
-/// deliver the reply.
-#[cfg(target_arch = "wasm32")]
-#[derive(Debug, Serialize)]
+/// The `{channel, text}` shape the provider-scoped outbound relay
+/// transport (e.g. `waddle_transports.transports.irc_relay.
+/// RelayOutboundIrcTransport.send` for Twitch) LPUSHes onto its queue --
+/// the wire contract this bundle's `dispatch` must match exactly for
+/// svc-ingest's drain loop to deliver the reply, regardless of which
+/// provider queue it lands on.
+#[derive(Debug, Serialize, PartialEq, Eq)]
 struct RelayMessage {
     channel: String,
     text: String,
@@ -98,6 +97,33 @@ impl ProcessStage for PingBundle {
     }
 }
 
+/// Builds the outbound provider name and relay message body for a pong
+/// reply, target-independent so it is unit-testable on the host without a
+/// WASI runner. The provider is always the inbound event's own
+/// `platform` (`envelope.event.platform`) -- **never** a fixed constant --
+/// so a Discord-origin `!ping` relays its pong to Discord, a Twitch-origin
+/// one to Twitch, etc.
+fn build_relay(envelope: &StageEnvelope) -> Result<(String, RelayMessage), TransportError> {
+    let reply: PongPayload = envelope
+        .event
+        .payload()
+        .map_err(|err| TransportError::fatal("BAD_PAYLOAD", err.to_string()))?;
+    let channel = reply.channel_id.ok_or_else(|| {
+        TransportError::fatal(
+            "MISSING_CHANNEL",
+            "pong reply requires a channel_id from the inbound chat.message",
+        )
+    })?;
+
+    Ok((
+        envelope.event.platform.clone(),
+        RelayMessage {
+            channel,
+            text: reply.text,
+        },
+    ))
+}
+
 impl ActionStage for PingBundle {
     /// Only compiled for `wasm32` -- [`waddle_sdk::relay::push`] is a
     /// wasm32-only host call (`sdk/waddle-sdk-rs/src/relay.rs`). On a host
@@ -107,26 +133,11 @@ impl ActionStage for PingBundle {
     /// that actually runs in production and in the e2e test.
     #[cfg(target_arch = "wasm32")]
     fn dispatch(envelope: StageEnvelope, _config: &str) -> Result<TransportResult, TransportError> {
-        let reply: PongPayload = envelope
-            .event
-            .payload()
-            .map_err(|err| TransportError::fatal("BAD_PAYLOAD", err.to_string()))?;
-        let channel = reply.channel_id.ok_or_else(|| {
-            TransportError::fatal(
-                "MISSING_CHANNEL",
-                "pong reply requires a channel_id from the inbound chat.message",
-            )
-        })?;
+        let (provider, message) = build_relay(&envelope)?;
 
-        waddle_sdk::relay::push(
-            TWITCH_PROVIDER,
-            &RelayMessage {
-                channel,
-                text: reply.text,
-            },
-        )
-        .map(|()| TransportResult::ok())
-        .map_err(|err| TransportError::retryable("RELAY_PUSH_FAILED", err.to_string(), None))
+        waddle_sdk::relay::push(&provider, &message)
+            .map(|()| TransportResult::ok())
+            .map_err(|err| TransportError::retryable("RELAY_PUSH_FAILED", err.to_string(), None))
     }
 }
 
@@ -193,5 +204,93 @@ mod tests {
         };
         let result = PingBundle::transform(event).expect("implemented, not an error");
         assert_eq!(result, None);
+    }
+
+    /// Builds a `dispatch`-shaped `StageEnvelope` whose inbound event
+    /// originates on `platform`, carrying a pong reply payload -- exactly
+    /// what `ProcessStage::transform` would have produced for that
+    /// platform's `!ping`.
+    fn sample_envelope(platform: &str) -> StageEnvelope {
+        StageEnvelope {
+            tenant: "tenant-1".to_string(),
+            community: None,
+            app_id: "waddles.core.example.ping".to_string(),
+            stage: "action".to_string(),
+            event: PlatformEvent::with_payload(
+                platform,
+                "chat.message",
+                Some("viewer-1".to_string()),
+                "2026-09-23T00:00:00.000Z",
+                &PongPayload {
+                    text: PONG_REPLY.to_string(),
+                    channel_id: Some("12345".to_string()),
+                },
+            )
+            .expect("valid object payload serializes"),
+            ts: "2026-09-23T00:00:00.000Z".to_string(),
+            target_app_id: None,
+            trace_context: None,
+        }
+    }
+
+    #[test]
+    fn dispatch_relays_to_the_events_own_origin_platform_not_a_hardcoded_one() {
+        // Regression: the bundle used to hardcode a Twitch provider
+        // constant, so a Discord-origin `!ping`'s pong was relayed onto
+        // the Twitch queue instead of Discord's. The provider must always
+        // track `envelope.event.platform`.
+        for platform in ["twitch", "discord"] {
+            let envelope = sample_envelope(platform);
+            let (provider, message) =
+                build_relay(&envelope).expect("payload has a channel_id, so this succeeds");
+
+            assert_eq!(
+                provider, platform,
+                "relay provider must match the inbound event's own platform"
+            );
+            assert_eq!(
+                message,
+                RelayMessage {
+                    channel: "12345".to_string(),
+                    text: "pong".to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn build_relay_errors_when_channel_id_is_missing() {
+        let mut envelope = sample_envelope("twitch");
+        envelope.event = PlatformEvent::with_payload(
+            "twitch",
+            "chat.message",
+            Some("viewer-1".to_string()),
+            "2026-09-23T00:00:00.000Z",
+            &PongPayload {
+                text: PONG_REPLY.to_string(),
+                channel_id: None,
+            },
+        )
+        .expect("valid object payload serializes");
+
+        let err = build_relay(&envelope).expect_err("missing channel_id must fail");
+        assert_eq!(err.code, "MISSING_CHANNEL");
+        assert!(!err.retryable);
+    }
+
+    #[test]
+    fn build_relay_errors_on_a_non_pong_payload() {
+        let mut envelope = sample_envelope("twitch");
+        envelope.event = PlatformEvent {
+            platform: "twitch".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: None,
+            payload_json: "{}".to_string(),
+            occurred_at: "2026-09-23T00:00:00.000Z".to_string(),
+        };
+
+        let err = build_relay(&envelope).expect_err("payload missing `text` must fail");
+        assert_eq!(err.code, "BAD_PAYLOAD");
+        assert!(!err.retryable);
     }
 }
