@@ -57,6 +57,15 @@ infrastructure:
     enabled: true
     replicas: 1
     persistence: {size: 512Mi}
+    # fix/valkey-tls-alpha -- dual-listener TLS port for the 3 Rust data-plane pods, whose
+    # `penguin_spine::SpineConfig::validate()` fail-closes on plaintext VALKEY_URL. Real CA/
+    # cert/key material has NO alpha-file default (never a literal in git, see
+    # global.valkeyTls's values.yaml comment) -- supplied via `helm upgrade --set-file
+    # global.valkeyTls.ca.crt=... --set-file global.valkeyTls.tls.crt=... --set-file
+    # global.valkeyTls.tls.key=...` at deploy time; this flag alone is a no-op without it
+    # (waddlebot.valkeyTlsMaterialAvailable stays false, dual-listener never renders).
+    tls:
+      enabled: true
     resources:
       requests: { cpu: "50m", memory: "64Mi" }
       limits: { cpu: "250m", memory: "256Mi" }

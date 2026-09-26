@@ -46,7 +46,9 @@ spec:
       containers:
       - name: svc-ingest-rust
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-ingest" "imageTag" .Values.global.imageTag) }}"
-        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        # Hardcoded Always -- see templates/svc-process-rust.yaml's comment on this same line
+        # for the node-image-cache rationale (identical here).
+        imagePullPolicy: Always
         # Pinned to the Rust image's own `appuser` (uid 10001, core/svc_ingest/
         # Dockerfile.rust), not the chart-wide .Values.securityContext (uid 1000) the
         # Python placeholder templates use -- same pattern as templates/svc-streaming.yaml.
@@ -79,14 +81,37 @@ spec:
           value: {{ .Values.pipeline.runnerTenantSlug | quote }}
         - name: HUB_API_URL
           value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+        {{- if .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid }}
+        - name: ENVELOPE_BINDING_ACTIVE_KID
+          value: {{ .Values.pipeline.rustDataPlane.svcIngest.envelopeBindingActiveKid | quote }}
+        {{- end }}
         # Forward-compatible only until core/svc_ingest's M5 connector/intake work lands
         # (see file header KNOWN GAP) -- same Secret keys the Python svc-ingest Deployment
         # already reads (templates/svc-ingest.yaml).
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        # fix/valkey-tls-alpha -- see templates/svc-process-rust.yaml's comment on this same
+        # override block for the full rationale (identical here). Stays a secretKeyRef
+        # (VALKEY_URL_TLS instead of VALKEY_URL) rather than switching to an inline
+        # `value:` -- this entry was already a secretKeyRef pre-TLS, and switching an
+        # existing env entry's field TYPE breaks Kubernetes' strategic-merge-patch on an
+        # in-place upgrade (see secrets.yaml's comment on VALKEY_URL_TLS).
+        - name: VALKEY_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: VALKEY_URL_TLS
+        - name: VALKEY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: REDIS_PASSWORD
+        {{- else }}
         - name: VALKEY_URL
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: VALKEY_URL
+        {{- end }}
         - name: SECRET_KEY
           valueFrom:
             secretKeyRef:
@@ -129,9 +154,15 @@ spec:
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
+        {{- end }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+      {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

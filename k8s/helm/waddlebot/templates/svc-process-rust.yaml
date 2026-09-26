@@ -4,13 +4,14 @@
 # .enabled sub-flag. See templates/svc-ingest-rust.yaml's header for the full `-rust`
 # resource-naming-vs-shared-image-tag rationale (identical here) -- not repeated per file.
 #
-# KNOWN GAP: core/svc_process/src/config.rs has NO HOST_API_PORT/HOST_API_SERVER_CERT_FILE/
-# HOST_API_CLIENT_CA_FILE fields yet -- the executor<->stage host-API integration is
-# TODO(M4) for this stage (svc-action's own M3 integration already landed, see
-# templates/svc-action-rust.yaml). Deliberately NOT wiring host-API env/TLS volume here
-# until that field surface exists -- pipeline.rustDataPlane.bundleExecutor.stageTarget
-# defaults to svc-action-rust for exactly this reason. CACHE_HOST/CACHE_PORT are wired
-# explicitly below (not envFrom'd) because the shared ConfigMap only exposes
+# fix/svc-process-host-api-wiring-alpha -- core/svc_process/src/config.rs now HAS
+# HOST_API_PORT/HOST_API_SERVER_CERT_FILE/HOST_API_SERVER_KEY_FILE/HOST_API_CLIENT_CA_FILE
+# fields (the M4 host-API server landed; the prior "KNOWN GAP" comment here was stale) --
+# wired the same way templates/svc-action-rust.yaml's own server-role host-API env/volume
+# already is. bundleExecutor.stageTarget must point at svc-process-rust (not its
+# svc-action-rust default) for the ping-bundle e2e proof, since PROCESS_BUNDLE_* above is
+# what drives the `load`/`invoke` calls this connection carries. CACHE_HOST/CACHE_PORT are
+# wired explicitly below (not envFrom'd) because the shared ConfigMap only exposes
 # REDIS_HOST/REDIS_PORT, a different name than this crate's CliConfig reads.
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcProcess.enabled }}
 ---
@@ -42,7 +43,12 @@ spec:
       containers:
       - name: svc-process-rust
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-process" "imageTag" .Values.global.imageTag) }}"
-        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        # Hardcoded Always (not .Values.global.imagePullPolicy) -- this Rust data-plane image
+        # iterates rapidly against the mutable `alpha` tag on the in-cluster registry and the
+        # node's containerd IfNotPresent cache was proven to serve a stale binary after a
+        # same-tag push (alpha deploy retro). Always guarantees the running pod matches the
+        # registry's current digest for this actively-iterating tag.
+        imagePullPolicy: Always
         # Pinned to the Rust image's own `appuser` (uid 10001, core/svc_process/
         # Dockerfile.rust), not the chart-wide .Values.securityContext (uid 1000) the
         # Python placeholder templates use -- same pattern as templates/svc-streaming.yaml.
@@ -61,6 +67,9 @@ spec:
         - name: metrics
           containerPort: {{ .Values.pipeline.rustDataPlane.svcProcess.metricsPort }}
           protocol: TCP
+        - name: host-api
+          containerPort: {{ .Values.pipeline.rustDataPlane.svcProcess.hostApiPort }}
+          protocol: TCP
         envFrom:
         - configMapRef:
             name: {{ include "waddlebot.fullname" . }}-config
@@ -71,6 +80,11 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.port | quote }}
         - name: METRICS_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.metricsPort | quote }}
+        - name: HOST_API_PORT
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.hostApiPort | quote }}
+        {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.hostApiTlsServerEnv" . | nindent 8 }}
+        {{- end }}
         - name: HUB_API_URL
           value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
         - name: DB_PASSWORD
@@ -94,9 +108,47 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: REDIS_PASSWORD
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        # fix/valkey-tls-alpha -- overrides the plaintext VALKEY_URL this container would
+        # otherwise inherit via envFrom's secretRef (templates/secrets.yaml) with the
+        # rediss:// TLS listener (see infrastructure/redis.yaml's dual-listener). K8s env
+        # resolution: an explicit `env:` entry always wins over the same name from
+        # `envFrom` regardless of list order. Sourced via secretKeyRef (VALKEY_URL_TLS,
+        # never an inline `value:`) so this entry's field TYPE never flips between
+        # deploys regardless of infrastructure.redis.tls.enabled -- see secrets.yaml's
+        # comment on VALKEY_URL_TLS for why that matters for an in-place upgrade.
+        # VALKEY_PASSWORD is wired explicitly because `penguin_spine::SpineConfig::
+        # validate()`'s security.transport.auth check reads this env var directly -- it
+        # does NOT parse credentials back out of VALKEY_URL. No VALKEY_CA_FILE override:
+        # the mounted CA lands at SpineConfig's own default path
+        # (/etc/waddles/ca/valkey-ca.crt).
+        - name: VALKEY_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: VALKEY_URL_TLS
+        - name: VALKEY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: REDIS_PASSWORD
+        {{- end }}
         # Empty (default) disables the spine drain loop entirely -- see config.rs.
         - name: PROCESS_APP_ID
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.processAppId | default "" | quote }}
+        # fix/process-bundle-wiring-alpha -- see values.yaml's comment on these fields.
+        - name: PROCESS_INGEST_PLATFORM
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processIngestPlatform | default "" | quote }}
+        - name: PROCESS_INGEST_SOURCE_ID
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processIngestSourceId | default "" | quote }}
+        - name: PROCESS_BUNDLE_DIGEST
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processBundleDigest | default "" | quote }}
+        - name: PROCESS_BUNDLE_VERSION
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processBundleVersion | default "1" | quote }}
+        - name: PROCESS_BUNDLE_COMPONENT_KEY
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processBundleComponentKey | default "" | quote }}
+        - name: PROCESS_BUNDLE_SIDECAR_KEY
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processBundleSidecarKey | default "" | quote }}
         livenessProbe:
           httpGet:
             path: /health
@@ -118,9 +170,21 @@ spec:
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
+        {{- end }}
+        {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.hostApiTlsVolumeMount" . | nindent 8 }}
+        {{- end }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+      {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
+      {{- end }}
+      {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+      {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -140,6 +204,10 @@ spec:
     targetPort: metrics
     protocol: TCP
     name: metrics
+  - port: {{ .Values.pipeline.rustDataPlane.svcProcess.hostApiPort }}
+    targetPort: host-api
+    protocol: TCP
+    name: host-api
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: svc-process-rust

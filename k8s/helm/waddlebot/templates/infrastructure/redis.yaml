@@ -39,10 +39,34 @@ spec:
         - {{ .Values.infrastructure.redis.maxMemory | quote }}
         - --maxmemory-policy
         - {{ .Values.infrastructure.redis.maxMemoryPolicy | quote }}
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        # fix/valkey-tls-alpha -- dual-listener: this TLS port runs ALONGSIDE the plaintext
+        # `--port 6379` above (never replacing it), so hub-api/Python services already on
+        # plaintext VALKEY_URL/REDIS_URL are undisturbed. tls-auth-clients no: server-auth
+        # only (see global.valkeyTls's values.yaml comment) -- clients verify this cert via
+        # the CA, requirepass above still gates every connection regardless of transport.
+        - --tls-port
+        - {{ .Values.infrastructure.redis.tls.port | quote }}
+        - --tls-cert-file
+        - /etc/valkey/tls/tls.crt
+        - --tls-key-file
+        - /etc/valkey/tls/tls.key
+        - --tls-ca-cert-file
+        - /etc/valkey/tls/ca.crt
+        - --tls-auth-clients
+        - "no"
+        - --tls-protocols
+        - "TLSv1.2 TLSv1.3"
+        {{- end }}
         ports:
         - name: redis
           containerPort: 6379
           protocol: TCP
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        - name: valkey-tls
+          containerPort: {{ .Values.infrastructure.redis.tls.port }}
+          protocol: TCP
+        {{- end }}
         env:
         - name: REDIS_PASSWORD
           valueFrom:
@@ -52,6 +76,9 @@ spec:
         volumeMounts:
         - name: redis-data
           mountPath: /data
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.valkeyTlsServerVolumeMount" . | nindent 8 }}
+        {{- end }}
         resources:
           requests:
             memory: {{ .Values.infrastructure.redis.resources.requests.memory }}
@@ -89,6 +116,9 @@ spec:
         {{- else }}
         emptyDir: {}
         {{- end }}
+      {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+      {{- include "waddlebot.valkeyTlsServerVolume" . | nindent 6 }}
+      {{- end }}
 ---
 {{- if .Values.infrastructure.redis.persistence.enabled }}
 apiVersion: v1
@@ -129,6 +159,12 @@ spec:
     targetPort: redis
     protocol: TCP
     name: redis
+  {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+  - port: {{ .Values.infrastructure.redis.tls.port }}
+    targetPort: valkey-tls
+    protocol: TCP
+    name: valkey-tls
+  {{- end }}
   selector:
     app.kubernetes.io/name: redis
     app.kubernetes.io/instance: {{ .Release.Name }}

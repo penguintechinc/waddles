@@ -112,6 +112,28 @@ global:
       crt: ""
       key: ""
 
+  # fix/valkey-tls-alpha -- TLS material for the Valkey (infra-redis) cache/streams
+  # listener. `penguin_spine::SpineConfig::validate()` (core/svc_process, core/svc_action,
+  # core/svc_ingest) fails closed when SECURITY_TRANSPORT_TLS=true (the default -- never
+  # weakened to false here, see infrastructure.redis.tls's own comment) and VALKEY_URL is
+  # not rediss://valkeys://. This is SERVER-AUTH-ONLY TLS (redis-rs `TlsCertificates {
+  # client_tls: None, root_cert: Some(ca_pem) }`, per core/svc_action/src/usage.rs and
+  # penguin-spine's own client.rs) -- client pods need only the CA to verify the server,
+  # never their own cert/key, so only global.valkeyTls.ca.crt is mounted into the 3 Rust
+  # data-plane pods (see templates/_helpers.tpl waddlebot.valkeyTlsCaVolume); tls.crt/
+  # tls.key are the Valkey server's own identity, mounted only into templates/
+  # infrastructure/redis.yaml. Static dev/interim CA + identity cert; NEVER a literal
+  # cert/key in git in any environment -- populate via `helm upgrade --set-file
+  # global.valkeyTls.ca.crt=... --set-file global.valkeyTls.tls.crt=...
+  # --set-file global.valkeyTls.tls.key=...` (or an out-of-git values override /
+  # ExternalSecrets/SealedSecrets) before infrastructure.redis.tls.enabled=true.
+  valkeyTls:
+    ca:
+      crt: ""
+    tls:
+      crt: ""
+      key: ""
+
   # First-run super-admin bootstrap (PR #256, CWE-798 -- admin/hub_module backend
   # adminBootstrap.js / config/postgres/migrations/081_seed_default_hub_admin.sql). Both
   # unset (the default) means no admin account is auto-created -- fail closed, safe
@@ -216,6 +238,18 @@ infrastructure:
       slack: "REPLACE_ME"
     maxMemory: "256mb"
     maxMemoryPolicy: "allkeys-lru"
+    # fix/valkey-tls-alpha -- adds a `tls-port` listener ALONGSIDE the existing plaintext
+    # `port` above (dual-listener: `redis-server --port 6379 --tls-port <this>` runs both),
+    # so hub-api/Python services already on plaintext VALKEY_URL/REDIS_URL are never
+    # disturbed. Only the 3 Rust data-plane pods (svc-process-rust/svc-action-rust/
+    # svc-ingest-rust) are pointed at rediss://<service>:<tlsPort> -- see those templates'
+    # VALKEY_URL override. Disabled by default (no cert material in the base chart, see
+    # global.valkeyTls); enabled explicitly once real material is supplied. NEVER
+    # SECURITY_TRANSPORT_TLS=false as the alternative -- that weakens a fail-closed check
+    # `penguin_spine::SpineConfig::validate()` deliberately enforces.
+    tls:
+      enabled: false
+      port: 6380
     service:
       name: "infra-redis"
       port: 6379
@@ -718,6 +752,14 @@ pipeline:
       port: 8200
       metricsPort: 9090
       replicas: 1
+      # fix/svc-ingest-envelope-kid-wiring-alpha -- ENVELOPE_BINDING_ACTIVE_KID
+      # (core/svc_ingest/src/config.rs) -- the `binding.mac` kid this pod mints new MACs
+      # under when minting an envelope for a receiver event (e.g. Discord gateway).
+      # Empty (default) leaves that receiver disabled ("ENVELOPE_BINDING_ACTIVE_KID not
+      # set; receiver not started") -- must match a `kid` present in
+      # global.envelopeBindingKeys once any receiver is used, same requirement as
+      # svcAction's own field below.
+      envelopeBindingActiveKid: ""
       resources:
         requests:
           cpu: "100m"
@@ -735,6 +777,30 @@ pipeline:
       # drains granted ingest-source streams for; empty (default) disables the spine drain
       # loop entirely. values-alpha.yaml sets this to the migration-083-seeded demo app_id.
       processAppId: ""
+      # fix/process-bundle-wiring-alpha -- interim, env-driven substitute for the real
+      # `GET /api/v1/distribution/bundles?stage=process` poll (core/svc_process/src/
+      # config.rs PROCESS_INGEST_PLATFORM/_SOURCE_ID, spec SS4.2/SS6.7). Both empty
+      # (default) means an empty grant list -- the drain loop connects and blocks,
+      # reading nothing (see lib.rs try_start_process_loop). Together they resolve the
+      # ONE ingest-source stream this pod's `Scope::new("global", None).source_stream(...)`
+      # reads: `waddles:t:global:c:_tenant:src:{platform}:{sourceId}:events`.
+      processIngestPlatform: ""
+      processIngestSourceId: ""
+      # PROCESS_BUNDLE_* (core/svc_process/src/config.rs) -- interim, env-driven
+      # substitute for the digest/keys a real distribution-poll `load` would supply (spec
+      # SS6.6). Empty digest (default) disables the executor load/invoke path entirely --
+      # the drain loop still runs and can dead-letter on `executor_unavailable`.
+      # componentKey/sidecarKey are the exact MinIO object keys under
+      # pipeline.rustDataPlane.bundleExecutor.bucketName (the `.wasm`/`.json` sidecar).
+      processBundleDigest: ""
+      processBundleVersion: "1"
+      processBundleComponentKey: ""
+      processBundleSidecarKey: ""
+      # fix/svc-process-host-api-wiring-alpha -- mTLS host-API listener bundle-executor
+      # dials once pipeline.rustDataPlane.bundleExecutor.stageTarget points here instead
+      # of its svc-action-rust default. Matches HOST_API_PORT's own CliConfig default
+      # (core/svc_process/src/config.rs).
+      hostApiPort: 8301
       resources:
         requests:
           cpu: "100m"
@@ -794,6 +860,16 @@ pipeline:
       precompileDir: "/var/cache/waddles/wasm"
       wasmCollector: "drc"
       sandboxGvisor: true
+      # BUNDLE_BUCKET_* (core/bundle_executor/src/bucket.rs BucketConfig::from_cli) -- the
+      # executor's one sanctioned credentialed egress path (spec SS7.6/SS12.7), now that
+      # BucketComponentSource replaces UnimplementedBucketSource in production (crate::run).
+      # bucketName/bucketRegion are static across environments; the endpoint is derived in
+      # the template from infrastructure.minio.service.name/apiPort (alpha: in-cluster MinIO,
+      # plain http:// -- no BUNDLE_BUCKET_CA_FILE needed) and the access key/secret come from
+      # the shared MINIO_ROOT_USER/MINIO_ROOT_PASSWORD secret keys, individually referenced
+      # (not envFrom) to keep this pod's credential surface to exactly what bucket.rs needs.
+      bucketName: "waddles-bundles"
+      bucketRegion: "us-east-1"
       resources:
         requests:
           cpu: "250m"
