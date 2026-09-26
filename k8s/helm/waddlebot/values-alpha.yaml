@@ -168,40 +168,98 @@ pipeline:
       requests: { cpu: "200m", memory: "256Mi" }
       limits: { cpu: "2000m", memory: "1Gi" }
 
-  # feature/e2e-helm-rust-dataplane -- Rust data-plane stack. `enabled: false` here too
-  # (this file must still render a fully-working Python stack on its own by default,
-  # matching every other alpha convention above) -- flip via
-  # `--set pipeline.rustDataPlane.enabled=true` for the actual e2e cutover run, after:
-  #   1. building+pushing all 4 images (see this branch's handoff notes for the exact list
-  #      -- core/bundle_executor has no Dockerfile at all yet);
-  #   2. populating global.hostApiTls with real mTLS material via --set-file (no
-  #      insecureDev escape hatch exists, unlike global.grpcTls);
-  #   3. optionally disabling the Python pipeline.svcIngest/svcProcess/svcAction
-  #      Deployments above if the Rust image was pushed over their same alpha tag
-  #      (see values.yaml's own comment on the shared-tag cutover convention).
+  # feature/e2e-helm-rust-dataplane -- Rust data-plane stack. Formalizing the alpha e2e
+  # cutover state here (fix/svc-action-bundle-executor-alpha-wiring) -- this was previously
+  # `enabled: false` with the e2e run only ever reached via ad hoc `--set` flags never
+  # committed to git (tribal knowledge, at risk of being lost between sessions). This alpha
+  # cluster's real, proven purpose today IS the Rust data-plane e2e proof (ping/pong bundle,
+  # spec `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md`), so `enabled: true`
+  # now reflects that honestly. The Python pipeline.svcIngest/svcProcess/svcAction
+  # Deployments above stay enabled too (coexistence, not cutover) -- matches the live
+  # cluster's actual pod list. Still requires, via --reuse-values or an ephemeral
+  # secrets file (never committed, critical-rules.md Token & Secret Hygiene):
+  #   1. global.hostApiTls real mTLS material (--set-file; no insecureDev escape hatch
+  #      exists, unlike global.grpcTls);
+  #   2. global.envelopeBindingKeys (kid e2e1) -- HMAC key material, secret, never committed.
   rustDataPlane:
-    enabled: false
+    enabled: true
     svcIngest:
       replicas: 1
+      # kid `e2e1` -- must match a key present in global.envelopeBindingKeys (secret,
+      # supplied at deploy time only, see comment above). Enables the Discord gateway
+      # receiver's envelope signing (core/svc_ingest/src/config.rs) -- DISCORD_BOT_TOKEN
+      # already reaches this pod via envFrom/explicit secretKeyRef either way.
+      envelopeBindingActiveKid: "e2e1"
       resources:
         requests: { cpu: "100m", memory: "128Mi" }
         limits: { cpu: "500m", memory: "512Mi" }
     svcProcess:
       replicas: 1
-      # migration 083's seeded 3-stage demo app_id (config/postgres/migrations/
-      # 083_discord_twitch_demo_convergence.sql) -- same app_id the Python pipeline demo
-      # (pipeline.hubApi et al) already activates for the 'global' tenant.
-      processAppId: "waddles.bot.discord.default"
+      # Superseded migration 083's discord/twitch demo app_id with the minimal
+      # waddles.core.example.ping bundle (PRIOR DEPLOY STATE: MinIO bucket
+      # waddles-bundles, DB-registered, digest below) -- the actual bundle this alpha
+      # cluster's e2e proof exercises end-to-end today.
+      processAppId: "waddles.core.example.ping"
+      # fix/svc-action-bundle-executor-alpha-wiring -- real Discord ingest routing.
+      # svc-ingest-rust's Discord gateway receiver is genuinely live in this cluster
+      # (DISCORD_BOT_TOKEN set, core/svc_ingest/src/ingest/discord.rs connected --
+      # confirmed via its own "connected" platform=discord log lines) and normalizes
+      # into `Scope::source_stream("discord", source_id(guild_id))`
+      # (core/svc_ingest/src/ingest/discord.rs::source_id: "dg-{guild_id}", "dg-dm" for
+      # a DM). `dg-474965105759748096` is the real guild the bot is already joined to
+      # ("Club Penguinz", #waddlebot-test channel id 1311210594011054151) -- discovered
+      # via `GET /users/@me/guilds` against the cluster's own DISCORD_BOT_TOKEN, never
+      # hardcoded/invented. Routing is guild-wide (source_id has no channel component),
+      # so `!ping` in ANY channel of that guild reaches this bundle, not just
+      # #waddlebot-test.
+      #
+      # Supersedes this same field's prior `twitch`/`e2e-proof` value, the hermetic
+      # relay e2e proof's synthetic ingest source (Twitch live is impossible here --
+      # ~/.twitch.token is app creds, not a live bot session) -- that proof's evidence
+      # (Valkey `waddles:transport:irc:twitch:outbound` entry + `action_dispatch_log`
+      # row id 4, status=success) was captured before this switch and remains valid;
+      # switching the single svc-process-rust replica's live grant afterward doesn't
+      # retract it. See the Discord round-trip honest-assessment note below for why a
+      # real `!ping` here still won't produce a `pong` back in Discord.
+      processIngestPlatform: "discord"
+      processIngestSourceId: "dg-474965105759748096"
+      processBundleDigest: "sha256:4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7"
+      processBundleVersion: "1.0.0"
+      processBundleComponentKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.wasm"
+      processBundleSidecarKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.json"
       resources:
         requests: { cpu: "100m", memory: "128Mi" }
         limits: { cpu: "500m", memory: "512Mi" }
     svcAction:
       replicas: 1
-      actionAppId: "waddles.bot.discord.default"
+      actionAppId: "waddles.core.example.ping"
+      envelopeBindingActiveKid: "e2e1"
+      # fix/svc-action-bundle-executor-alpha-wiring -- ACTION_BUNDLE_* (core/svc_action/
+      # src/config.rs, #366): the SAME ping.wasm component as svcProcess.processBundle*
+      # above -- one bundle implements both ProcessStage::transform (detects `!ping`) and
+      # ActionStage::dispatch (relays the `pong`), spec SS7.6.
+      actionBundleDigest: "sha256:4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7"
+      actionBundleVersion: "1.0.0"
+      actionBundleComponentKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.wasm"
+      actionBundleSidecarKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.json"
       resources:
         requests: { cpu: "100m", memory: "128Mi" }
         limits: { cpu: "500m", memory: "512Mi" }
+    # The proven process-stage executor -- overridden off its svc-action-rust default onto
+    # svc-process-rust (whose host-API mTLS listener landed later, fix/svc-process-host-api-
+    # wiring-alpha) for the ping-bundle e2e proof. Formalizing what alpha was already
+    # running via ad hoc --set.
     bundleExecutor:
+      replicas: 1
+      stageTarget: "svc-process-rust"
+      resources:
+        requests: { cpu: "100m", memory: "64Mi" }
+        limits: { cpu: "500m", memory: "256Mi" }
+    # fix/svc-action-bundle-executor-alpha-wiring -- second, independent executor for the
+    # action stage (default stageTarget=svc-action-rust already matches, no override
+    # needed). See values.yaml's own comment on this block for why a second pod is
+    # required rather than re-pointing the one above.
+    bundleExecutorAction:
       replicas: 1
       resources:
         requests: { cpu: "100m", memory: "64Mi" }

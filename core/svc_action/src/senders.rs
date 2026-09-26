@@ -95,17 +95,26 @@ pub fn sender_status(platform: Platform) -> SenderStatus {
 }
 
 /// Builds the `relay` host-call args for a Twitch chat send -- the shape
-/// `crate::capabilities::StageCapabilities::handle_relay` expects.
-/// `crate::dispatch` issues this over the live host-API `Connection` as a
-/// `host-call` frame the executor's `dispatch` export would normally
-/// trigger; a bundle never constructs this JSON itself (spec §4.3: "a
-/// bundle never holds a platform credential" -- there is no credential
-/// here at all, which is exactly why Twitch is relay-based).
+/// `crate::capabilities::StageCapabilities::handle_relay` expects, which is
+/// in turn the shape `core/bundle_executor/src/host/imports.rs`'s
+/// `relay::Host::push` actually proxies over the wire for the WIT
+/// `relay.push(provider: string, message-json: string)` import:
+/// `{"provider", "message_json"}`, with `channel`/`text` nested INSIDE the
+/// `message_json` string, never top-level args (fixed alongside
+/// `handle_relay` itself, `fix/svc-action-bundle-executor-alpha-wiring` --
+/// this function's prior flat `{"provider","channel","text"}` shape was
+/// self-consistent with `handle_relay`'s own prior bug, so this exact
+/// mismatch with the real executor was never caught until the hermetic
+/// relay e2e proof). `crate::dispatch` issues this over the live host-API
+/// `Connection` as a `host-call` frame the executor's `dispatch` export
+/// would normally trigger; a bundle never constructs this JSON itself
+/// (spec §4.3: "a bundle never holds a platform credential" -- there is no
+/// credential here at all, which is exactly why Twitch is relay-based).
 pub fn twitch_relay_args(channel: &str, text: &str) -> serde_json::Value {
+    let message_json = serde_json::json!({"channel": channel, "text": text}).to_string();
     serde_json::json!({
         "provider": "twitch",
-        "channel": channel,
-        "text": text,
+        "message_json": message_json,
     })
 }
 
@@ -207,8 +216,17 @@ mod tests {
     fn twitch_relay_args_shape_matches_the_relay_capability() {
         let args = twitch_relay_args("#somechannel", "hello");
         assert_eq!(args["provider"], "twitch");
-        assert_eq!(args["channel"], "#somechannel");
-        assert_eq!(args["text"], "hello");
+        assert!(
+            args.get("channel").is_none(),
+            "channel must not be top-level"
+        );
+        assert!(args.get("text").is_none(), "text must not be top-level");
+        let message_json = args["message_json"]
+            .as_str()
+            .expect("message_json is a string");
+        let message: serde_json::Value = serde_json::from_str(message_json).unwrap();
+        assert_eq!(message["channel"], "#somechannel");
+        assert_eq!(message["text"], "hello");
     }
 
     #[test]

@@ -209,16 +209,53 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
                 format!("relay provider {provider:?} is not in the compiled-in allowlist"),
             ));
         }
-        let channel = args
+        // WIT `relay.push(provider: string, message-json: string)`
+        // (`wit/waddle-bundle/stage.wit`) carries the message as an
+        // opaque, provider-shaped JSON *string* -- `channel`/`text` are
+        // fields INSIDE `message_json`, never top-level host-call args.
+        // `core/bundle_executor/src/host/imports.rs`'s `relay::Host::push`
+        // proxies exactly `{"provider", "message_json"}` over the host-API
+        // wire; a flat `{"provider","channel","text"}` args object (this
+        // function's prior shape) is never what a real invoke sends --
+        // every real relay call hit `invalid_args: requires a non-empty
+        // 'channel'` regardless of the bundle's actual message, caught by
+        // the hermetic relay e2e proof (`fix/svc-action-bundle-executor-
+        // alpha-wiring`).
+        let message_json = args
+            .get("message_json")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                denied(
+                    "invalid_args",
+                    "relay.send requires a 'message_json' string",
+                )
+            })?;
+        let message: serde_json::Value = serde_json::from_str(message_json).map_err(|e| {
+            denied(
+                "invalid_args",
+                format!("relay.send message_json is not valid JSON: {e}"),
+            )
+        })?;
+        let channel = message
             .get("channel")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| denied("invalid_args", "relay.send requires a non-empty 'channel'"))?;
-        let text = args
+            .ok_or_else(|| {
+                denied(
+                    "invalid_args",
+                    "relay.send message_json requires a non-empty 'channel'",
+                )
+            })?;
+        let text = message
             .get("text")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| denied("invalid_args", "relay.send requires non-empty 'text'"))?;
+            .ok_or_else(|| {
+                denied(
+                    "invalid_args",
+                    "relay.send message_json requires non-empty 'text'",
+                )
+            })?;
 
         let channel = sanitize_irc_component(channel);
         let text = sanitize_irc_component(text);
@@ -506,7 +543,7 @@ mod tests {
                 call(
                     CapabilityKind::Relay,
                     "send",
-                    serde_json::json!({"provider": "twitch", "channel": "#somechannel", "text": "hi"}),
+                    serde_json::json!({"provider": "twitch", "message_json": "{\"channel\":\"#somechannel\",\"text\":\"hi\"}"}),
                 ),
             )
             .await
@@ -533,7 +570,7 @@ mod tests {
             call(
                 CapabilityKind::Relay,
                 "send",
-                serde_json::json!({"provider": "twitch", "channel": "#somechannel", "text": "hi"}),
+                serde_json::json!({"provider": "twitch", "message_json": "{\"channel\":\"#somechannel\",\"text\":\"hi\"}"}),
             ),
         )
         .await
@@ -550,7 +587,7 @@ mod tests {
             call(
                 CapabilityKind::Relay,
                 "send",
-                serde_json::json!({"provider": "twitch", "channel": "#c", "text": "line1\r\nline2"}),
+                serde_json::json!({"provider": "twitch", "message_json": "{\"channel\":\"#c\",\"text\":\"line1\\r\\nline2\"}"}),
             ),
         )
         .await
@@ -569,7 +606,7 @@ mod tests {
                 call(
                     CapabilityKind::Relay,
                     "send",
-                    serde_json::json!({"provider": "discord", "channel": "c", "text": "hi"}),
+                    serde_json::json!({"provider": "discord", "message_json": r#"{"channel":"c","text":"hi"}"#}),
                 ),
             )
             .await
@@ -587,7 +624,7 @@ mod tests {
                 call(
                     CapabilityKind::Relay,
                     "send",
-                    serde_json::json!({"provider": "twitch", "channel": "", "text": "hi"}),
+                    serde_json::json!({"provider": "twitch", "message_json": r#"{"channel":"","text":"hi"}"#}),
                 ),
             )
             .await
@@ -604,7 +641,7 @@ mod tests {
                 call(
                     CapabilityKind::Relay,
                     "send",
-                    serde_json::json!({"provider": "twitch", "channel": "c", "text": ""}),
+                    serde_json::json!({"provider": "twitch", "message_json": r#"{"channel":"c","text":""}"#}),
                 ),
             )
             .await
@@ -621,7 +658,24 @@ mod tests {
                 call(
                     CapabilityKind::Relay,
                     "send",
-                    serde_json::json!({"channel": "c", "text": "hi"}),
+                    serde_json::json!({"message_json": r#"{"channel":"c","text":"hi"}"#}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn relay_send_missing_message_json_is_invalid_args() {
+        let caps = caps(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch"}),
                 ),
             )
             .await
@@ -641,7 +695,7 @@ mod tests {
                 call(
                     CapabilityKind::Relay,
                     "send",
-                    serde_json::json!({"provider": "twitch", "channel": "c", "text": "hi"}),
+                    serde_json::json!({"provider": "twitch", "message_json": r#"{"channel":"c","text":"hi"}"#}),
                 ),
             )
             .await

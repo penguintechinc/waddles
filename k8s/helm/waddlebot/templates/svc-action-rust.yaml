@@ -108,6 +108,20 @@ spec:
         # Empty (default) disables the dispatch drain loop entirely -- see config.rs.
         - name: ACTION_APP_ID
           value: {{ .Values.pipeline.rustDataPlane.svcAction.actionAppId | default "" | quote }}
+        # fix/svc-action-bundle-executor-alpha-wiring -- ACTION_BUNDLE_* (core/svc_action/
+        # src/config.rs, #366) -- interim, env-driven substitute for the real
+        # `GET /api/v1/distribution/bundles?stage=action` poll (spec SS6.7), field-for-field
+        # mirror of svc-process-rust.yaml's own PROCESS_BUNDLE_* block above. Empty digest
+        # (default) disables the fallback entirely -- today's catalog-only behavior
+        # unchanged.
+        - name: ACTION_BUNDLE_DIGEST
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.actionBundleDigest | default "" | quote }}
+        - name: ACTION_BUNDLE_VERSION
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.actionBundleVersion | default "1" | quote }}
+        - name: ACTION_BUNDLE_COMPONENT_KEY
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.actionBundleComponentKey | default "" | quote }}
+        - name: ACTION_BUNDLE_SIDECAR_KEY
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.actionBundleSidecarKey | default "" | quote }}
         - name: ENVELOPE_BINDING_KEYS
           valueFrom:
             secretKeyRef:

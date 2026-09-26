@@ -37,7 +37,13 @@ spec:
         # pipeline.pythonBaseImage skeleton placeholder. Bare module name "hub-api" is the
         # alpha-local repo under global.imageRegistry -- see scripts/deploy-alpha.sh.
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.global.imageTag) }}"
-        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        # Hardcoded Always (not .Values.global.imagePullPolicy, which alpha pins to
+        # IfNotPresent) -- same node-image-cache rationale as templates/svc-process-rust.yaml/
+        # svc-action-rust.yaml/bundle-executor.yaml: proven stale here too (this Deployment
+        # kept serving a pre-fix image with a `ModuleNotFoundError: penguin_dal` crash for
+        # hours after a same-tag push carried the fix). hub-api iterates against the same
+        # mutable `alpha` tag those Rust services do, so it needs the same guarantee.
+        imagePullPolicy: Always
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:

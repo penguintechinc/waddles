@@ -1,0 +1,47 @@
+# fix/svc-action-bundle-executor-alpha-wiring -- default-deny CiliumNetworkPolicy scoped to
+# ONLY the second bundle-executor pod (templates/bundle-executor-action.yaml), mirroring
+# templates/bundle-executor-networkpolicy.yaml exactly for this pod's own component label
+# and its own stageTarget/stagePort. See that file's header for the full rationale.
+{{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.bundleExecutorAction.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-bundle-executor-action
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bundle-executor-action
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: bundle-executor-action
+  ingress: []
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.stageTarget | quote }}
+      toPorts:
+        - ports:
+            - port: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.stagePort | quote }}
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: storage
+      toPorts:
+        - ports:
+            - port: {{ .Values.infrastructure.minio.service.apiPort | quote }}
+              protocol: TCP
+{{- end }}
