@@ -268,9 +268,13 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
         let deps = spine::ProcessDeps {
             app_id: app_id.clone(),
             digest: cli.process_bundle_digest.clone(),
+            version: cli.process_bundle_version.clone(),
+            component_key: cli.process_bundle_component_key.clone(),
+            sidecar_key: cli.process_bundle_sidecar_key.clone(),
             key_ring,
             connections,
             call_timeout_ms: cli.executor_call_timeout_ms,
+            load_state: Arc::new(spine::LoadState::new()),
             approved_targets,
             consumer_id: spine_cfg.consumer_id.clone(),
             spine: match penguin_spine::SpineClient::connect(spine_cfg.clone(), metrics.clone())
