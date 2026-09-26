@@ -154,6 +154,13 @@ rustls = { version = "=0.23.45", default-features = false, features = [
 
 [dev-dependencies]
 http-body-util = "=0.1.3"
+# `test-util` (already-declared `tokio` crate, dev-only feature) unlocks
+# `#[tokio::test(start_paused = true)]`/`tokio::time::{pause,advance}` so
+# `ingest::discord`'s reconnect-backoff regression test can drive many
+# virtual-time reconnect cycles instead of a real multi-minute sleep in the
+# suite. Never linked into the release binary. Matches
+# `core/svc_streaming/Cargo.toml`'s own precedent/comment.
+tokio = { version = "=1.53.1", features = ["test-util"] }
 # Already resolved transitively (tokio's unix signal support) at this exact
 # version -- promoted to a direct dev-dependency only so
 # `tests/main_binary.rs` can send a real SIGTERM to a spawned child process

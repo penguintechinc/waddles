@@ -23,7 +23,7 @@ use penguin_connector_twitch::TwitchError;
 use penguin_spine::{KeyRing, Scope, SpineMetrics};
 use tokio::sync::oneshot;
 
-use crate::ingest::Backoff;
+use crate::ingest::{Backoff, STABILITY_WINDOW};
 use crate::publish::{deterministic_workstream_id, publish_event, EventAppender};
 
 /// Abstraction over a live, joined IRC connection's `recv()` -- lets
@@ -68,6 +68,21 @@ impl IrcConnector for TwitchIrcReceiver {
 /// resolves. Split out from [`run`] (which builds the real connector,
 /// keyring, and `SpineClient`) so this control flow is exercised in tests
 /// against a scripted fake connector -- no live socket, no live Valkey.
+///
+/// Reconnect discipline mirrors `ingest::discord::run_loop` exactly (see
+/// `crate::ingest::Backoff`'s doc comment for the incident that drove
+/// this):
+/// - `backoff.delay()` is applied -- and awaited, racing `shutdown` -- on
+///   *every* reconnect path: a failed connect, a closed channel
+///   (`Ok(None)`), and a recv error, not just some of them.
+/// - `backoff.reset()` fires only once the connection is confirmed
+///   healthy: it delivers a line (a `PRIVMSG`, even a self-echoed one --
+///   receiving anything at all proves registration+join actually worked)
+///   or it simply survives, error-free, for [`STABILITY_WINDOW`] -- never
+///   on the raw `connect_and_register` succeeding.
+/// - A [`TwitchError`] that `!is_retryable()` (`RegistrationRejected` --
+///   bad nick/password, an auth failure) stops this loop entirely instead
+///   of backing off forever against a connection that can never succeed.
 #[allow(clippy::too_many_arguments)] // every parameter is independently varied across tests; a params struct would just move the same count elsewhere
 async fn run_loop<C, A, M>(
     connector: C,
@@ -78,6 +93,7 @@ async fn run_loop<C, A, M>(
     active_kid: &str,
     scope: &Scope,
     source_id: String,
+    mut backoff: Backoff,
     mut shutdown: oneshot::Receiver<()>,
 ) where
     C: IrcConnector,
@@ -85,19 +101,24 @@ async fn run_loop<C, A, M>(
     M: SpineMetrics,
 {
     let workstream_id = deterministic_workstream_id(&source_id);
-    let mut backoff = Backoff::new(Duration::from_secs(30));
 
     'outer: loop {
         let mut channel = tokio::select! {
             _ = &mut shutdown => return,
             result = connector.connect() => match result {
                 Ok(channel) => {
-                    backoff.reset();
-                    tracing::info!(platform = "twitch", source_id = %source_id, "connected");
+                    // Deliberately NOT `backoff.reset()` -- a successful
+                    // connect+register+join is not evidence the session is
+                    // usable. See `crate::ingest::Backoff`'s doc comment.
+                    tracing::info!(platform = "twitch", source_id = %source_id, "connected, awaiting session stability");
                     channel
                 }
                 Err(err) => {
                     tracing::warn!(platform = "twitch", source_id = %source_id, error = %err, "connect failed, retrying");
+                    if !err.is_retryable() {
+                        tracing::error!(platform = "twitch", source_id = %source_id, error = %err, "non-retryable connect failure, stopping Twitch ingest");
+                        return;
+                    }
                     let delay = backoff.delay();
                     tokio::select! {
                         _ = &mut shutdown => return,
@@ -108,11 +129,25 @@ async fn run_loop<C, A, M>(
             }
         };
 
+        let mut stable = false;
+        let stability_timer = tokio::time::sleep(STABILITY_WINDOW);
+        tokio::pin!(stability_timer);
+
         loop {
             tokio::select! {
                 _ = &mut shutdown => return,
+                () = &mut stability_timer, if !stable => {
+                    stable = true;
+                    backoff.reset();
+                    tracing::info!(platform = "twitch", source_id = %source_id, "session stable (stability window elapsed), backoff reset");
+                }
                 recv = channel.recv() => match recv {
                     Ok(Some(msg)) => {
+                        if !stable {
+                            stable = true;
+                            backoff.reset();
+                            tracing::info!(platform = "twitch", source_id = %source_id, "session stable (line received), backoff reset");
+                        }
                         if crate::normalize::is_self_message(&msg.sender, configured_nick) {
                             continue;
                         }
@@ -135,10 +170,24 @@ async fn run_loop<C, A, M>(
                     }
                     Ok(None) => {
                         tracing::warn!(platform = "twitch", source_id = %source_id, "connection closed, reconnecting");
+                        let delay = backoff.delay();
+                        tokio::select! {
+                            _ = &mut shutdown => return,
+                            () = tokio::time::sleep(delay) => {}
+                        }
                         continue 'outer;
                     }
                     Err(err) => {
                         tracing::warn!(platform = "twitch", source_id = %source_id, error = %err, "recv error, reconnecting");
+                        if !err.is_retryable() {
+                            tracing::error!(platform = "twitch", source_id = %source_id, error = %err, "non-retryable gateway error, stopping Twitch ingest");
+                            return;
+                        }
+                        let delay = backoff.delay();
+                        tokio::select! {
+                            _ = &mut shutdown => return,
+                            () = tokio::time::sleep(delay) => {}
+                        }
                         continue 'outer;
                     }
                 }
@@ -206,6 +255,7 @@ pub async fn run<A: EventAppender, M: SpineMetrics>(
 ) {
     let receiver = TwitchIrcReceiver::new(irc_cfg);
     let sid = source_id(channel);
+    let backoff = Backoff::new(Duration::from_secs(30));
     run_loop(
         receiver,
         configured_nick,
@@ -215,6 +265,7 @@ pub async fn run<A: EventAppender, M: SpineMetrics>(
         active_kid,
         scope,
         sid,
+        backoff,
         shutdown,
     )
     .await;
@@ -366,6 +417,7 @@ mod tests {
                 "k1",
                 &Scope::new("acme", None),
                 "tw-somechannel".to_string(),
+                Backoff::new(Duration::from_secs(30)),
                 rx,
             ),
         )
@@ -418,6 +470,7 @@ mod tests {
                 "k1",
                 &Scope::new("acme", None),
                 "tw-somechannel".to_string(),
+                Backoff::new(Duration::from_secs(30)),
                 rx,
             ),
         )
@@ -454,6 +507,7 @@ mod tests {
                 "k1",
                 &Scope::new("acme", None),
                 "tw-somechannel".to_string(),
+                Backoff::new(Duration::from_secs(30)),
                 rx,
             ),
         )
@@ -499,5 +553,219 @@ mod tests {
             true,
         );
         assert_eq!(cfg.password.as_deref(), Some("oauth:abc123"));
+    }
+
+    // `Backoff`'s own unit tests live in `crate::ingest::tests` -- the
+    // shared type's single canonical home, not re-tested per call site.
+
+    /// The regression test for the reconnect-storm class of bug (the same
+    /// shape as the live Discord incident this fix responds to, see
+    /// `ingest::discord`'s own regression test): a fake IRC server that
+    /// completes registration+join every time but whose connection closes
+    /// immediately after -- before any `PRIVMSG`, before `STABILITY_WINDOW`
+    /// elapses. Proves the backoff keeps escalating (and never drops back
+    /// to the base) for as long as the churn continues.
+    #[tokio::test(start_paused = true)]
+    async fn backoff_grows_and_never_resets_on_repeated_pre_stability_connect_churn() {
+        struct ImmediateCloseConnector {
+            connect_times: std::sync::Arc<Mutex<Vec<tokio::time::Instant>>>,
+        }
+
+        impl IrcConnector for ImmediateCloseConnector {
+            type Channel = FakeChannel;
+            async fn connect(&self) -> Result<Self::Channel, TwitchError> {
+                self.connect_times
+                    .lock()
+                    .unwrap()
+                    .push(tokio::time::Instant::now());
+                Ok(FakeChannel {
+                    messages: vec![],
+                    idx: 0,
+                })
+            }
+        }
+
+        let connect_times: std::sync::Arc<Mutex<Vec<tokio::time::Instant>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let connector = ImmediateCloseConnector {
+            connect_times: connect_times.clone(),
+        };
+        let appender = RecordingAppender::default();
+        let (_tx, rx) = oneshot::channel();
+
+        const SEED: u64 = 0x5EED_C0FF_EE12_3456;
+        let backoff = Backoff::seeded(Duration::from_secs(30), SEED);
+
+        let _ = tokio::time::timeout(
+            Duration::from_secs(600),
+            run_loop(
+                connector,
+                "waddlebot",
+                &appender,
+                &NoopTestMetrics,
+                &test_keyring(),
+                "k1",
+                &Scope::new("acme", None),
+                "tw-somechannel".to_string(),
+                backoff,
+                rx,
+            ),
+        )
+        .await;
+
+        let times = connect_times.lock().unwrap();
+        assert!(
+            times.len() >= 8,
+            "expected at least 8 connect attempts within the virtual window, got {}",
+            times.len()
+        );
+        assert!(
+            times.len() < 100,
+            "reconnect attempt count must stay bounded by the capped backoff, got {}",
+            times.len()
+        );
+
+        let deltas: Vec<Duration> = times.windows(2).map(|w| w[1] - w[0]).collect();
+        let mut expected_backoff = Backoff::seeded(Duration::from_secs(30), SEED);
+        let expected: Vec<Duration> = (0..deltas.len())
+            .map(|_| expected_backoff.delay())
+            .collect();
+        assert_eq!(
+            deltas, expected,
+            "observed reconnect delays must match the never-reset reference sequence"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_retryable_registration_rejected_stops_the_loop_instead_of_backing_off_forever() {
+        struct AlwaysRejectedConnector;
+        impl IrcConnector for AlwaysRejectedConnector {
+            type Channel = FakeChannel;
+            async fn connect(&self) -> Result<Self::Channel, TwitchError> {
+                Err(TwitchError::RegistrationRejected(
+                    "Login authentication failed".to_string(),
+                ))
+            }
+        }
+
+        let appender = RecordingAppender::default();
+        let (_tx, rx) = oneshot::channel();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_loop(
+                AlwaysRejectedConnector,
+                "waddlebot",
+                &appender,
+                &NoopTestMetrics,
+                &test_keyring(),
+                "k1",
+                &Scope::new("acme", None),
+                "tw-somechannel".to_string(),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            ),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "a non-retryable registration-rejected error must make run_loop return promptly, not keep backing off forever"
+        );
+        assert!(appender.calls.lock().unwrap().is_empty());
+    }
+
+    /// Proves the other half of the stability contract: once the
+    /// connection *does* prove itself (here, by delivering a `PRIVMSG`),
+    /// the backoff resets, so the *next* disconnect starts escalating from
+    /// the base delay again instead of continuing to climb from wherever
+    /// pre-stability churn had left it.
+    #[tokio::test(start_paused = true)]
+    async fn a_delivered_line_resets_backoff_so_the_next_churn_starts_from_the_base_again() {
+        struct ScriptedConnector {
+            connect_times: std::sync::Arc<Mutex<Vec<tokio::time::Instant>>>,
+            stable_message: ChatMessage,
+        }
+
+        impl IrcConnector for ScriptedConnector {
+            type Channel = FakeChannel;
+            async fn connect(&self) -> Result<Self::Channel, TwitchError> {
+                let mut times = self.connect_times.lock().unwrap();
+                let call_index = times.len();
+                times.push(tokio::time::Instant::now());
+                drop(times);
+                if call_index == 2 {
+                    Ok(FakeChannel {
+                        messages: vec![self.stable_message.clone()],
+                        idx: 0,
+                    })
+                } else {
+                    Ok(FakeChannel {
+                        messages: vec![],
+                        idx: 0,
+                    })
+                }
+            }
+        }
+
+        let connect_times: std::sync::Arc<Mutex<Vec<tokio::time::Instant>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let connector = ScriptedConnector {
+            connect_times: connect_times.clone(),
+            stable_message: test_msg("someuser", "proves stability"),
+        };
+        let appender = RecordingAppender::default();
+        let (_tx, rx) = oneshot::channel();
+
+        const SEED: u64 = 0xFEED_FACE_1234_5678;
+        let backoff = Backoff::seeded(Duration::from_secs(30), SEED);
+
+        let _ = tokio::time::timeout(
+            Duration::from_secs(600),
+            run_loop(
+                connector,
+                "waddlebot",
+                &appender,
+                &NoopTestMetrics,
+                &test_keyring(),
+                "k1",
+                &Scope::new("acme", None),
+                "tw-somechannel".to_string(),
+                backoff,
+                rx,
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            appender.calls.lock().unwrap().len(),
+            1,
+            "the stability-proving line must have been published"
+        );
+
+        let times = connect_times.lock().unwrap();
+        assert!(
+            times.len() >= 4,
+            "expected at least 4 connects, got {}",
+            times.len()
+        );
+        let deltas: Vec<Duration> = times.windows(2).map(|w| w[1] - w[0]).collect();
+
+        let mut expected_backoff = Backoff::seeded(Duration::from_secs(30), SEED);
+        let expected_churn_1 = expected_backoff.delay();
+        let expected_churn_2 = expected_backoff.delay();
+        expected_backoff.reset();
+        let expected_post_reset = expected_backoff.delay();
+
+        assert_eq!(deltas[0], expected_churn_1);
+        assert_eq!(deltas[1], expected_churn_2);
+        assert_eq!(
+            deltas[2], expected_post_reset,
+            "the delay right after the stability-proving line must reflect a reset backoff, not a continued climb"
+        );
+        assert!(
+            deltas[2] <= Duration::from_secs(1),
+            "post-reset delay {:?} must be bounded by the base 1s ceiling, not the pre-reset ~4s ceiling",
+            deltas[2]
+        );
     }
 }
