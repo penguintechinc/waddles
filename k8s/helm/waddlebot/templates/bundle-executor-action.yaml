@@ -1,0 +1,129 @@
+# fix/svc-action-bundle-executor-alpha-wiring -- SECOND bundle-executor Deployment, ADDITIVE
+# to templates/bundle-executor.yaml (never replaces it). A bundle-executor dials exactly ONE
+# stage (STAGE_HOST_API_ADDR below), so proving both the process stage AND the action stage
+# each have a live executor connection at the same time requires two independent pods, not
+# one executor re-pointed at a different target. templates/bundle-executor.yaml (alpha:
+# stageTarget=svc-process-rust) keeps serving svc-process; this one is pinned to
+# pipeline.rustDataPlane.bundleExecutorAction.stageTarget (default svc-action-rust).
+#
+# Byte-for-byte the same D9/D10 credential-less posture, securityContext, health-check
+# shape, and hostApiTls client wiring as templates/bundle-executor.yaml -- see that file's
+# header comment for the full rationale (not repeated here). Gated on the top-level
+# pipeline.rustDataPlane.enabled flag (default false) plus this module's own .enabled
+# sub-flag.
+{{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.bundleExecutorAction.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-bundle-executor-action
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bundle-executor-action
+spec:
+  replicas: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.replicas }}
+  selector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: bundle-executor-action
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: bundle-executor-action
+    spec:
+      automountServiceAccountToken: false
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: bundle-executor
+        # Same image as templates/bundle-executor.yaml -- literally the same crate/binary,
+        # pointed at a different stage purely via env vars below.
+        image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag }}"
+        imagePullPolicy: Always
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        env:
+        - name: STAGE_HOST_API_ADDR
+          value: "{{ include "waddlebot.fullname" . }}-{{ .Values.pipeline.rustDataPlane.bundleExecutorAction.stageTarget }}:{{ .Values.pipeline.rustDataPlane.bundleExecutorAction.stagePort }}"
+        - name: EXECUTOR_STAGE_CONNECTIONS
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.stageConnections | quote }}
+        - name: EXECUTOR_CALL_TIMEOUT_MS
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.callTimeoutMs | quote }}
+        - name: EXECUTOR_MAX_CALL_TIMEOUT_MS
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.maxCallTimeoutMs | quote }}
+        - name: EXECUTOR_MEMORY_LIMIT_MB
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.memoryLimitMb | quote }}
+        - name: EXECUTOR_MAX_MEMORY_LIMIT_MB
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.maxMemoryLimitMb | quote }}
+        - name: EXECUTOR_INSTANCES_PER_BUNDLE
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.instancesPerBundle | quote }}
+        - name: EXECUTOR_MAX_CONCURRENT_CALLS
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.maxConcurrentCalls | quote }}
+        - name: EXECUTOR_POOL_WAIT_MS
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.poolWaitMs | quote }}
+        - name: EXECUTOR_PRECOMPILE_DIR
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.precompileDir | quote }}
+        - name: EXECUTOR_WASM_COLLECTOR
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.wasmCollector | quote }}
+        - name: WADDLES_SANDBOX_GVISOR
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.sandboxGvisor | quote }}
+        - name: BUNDLE_BUCKET_ENDPOINT
+          value: "http://{{ .Values.infrastructure.minio.service.name }}:{{ .Values.infrastructure.minio.service.apiPort }}"
+        - name: BUNDLE_BUCKET_NAME
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.bucketName | quote }}
+        - name: BUNDLE_BUCKET_REGION
+          value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.bucketRegion | quote }}
+        - name: BUNDLE_BUCKET_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: MINIO_ROOT_USER
+        - name: BUNDLE_BUCKET_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: MINIO_ROOT_PASSWORD
+        {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.hostApiTlsClientEnv" . | nindent 8 }}
+        {{- end }}
+        livenessProbe:
+          exec:
+            command: ["/app/bundle-executor", "--healthcheck"]
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command: ["/app/bundle-executor", "--healthcheck"]
+          initialDelaySeconds: 5
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          {{- toYaml .Values.pipeline.rustDataPlane.bundleExecutorAction.resources | nindent 10 }}
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: precompile-cache
+          mountPath: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.precompileDir }}
+        {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.hostApiTlsVolumeMount" . | nindent 8 }}
+        {{- end }}
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: precompile-cache
+        emptyDir: {}
+      {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+      {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
+      {{- end }}
+{{- end }}

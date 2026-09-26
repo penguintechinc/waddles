@@ -109,12 +109,54 @@ pub async fn ensure_loaded(
     }
 }
 
-/// Invokes the bundle's `dispatch` export for one delivered envelope
-/// (assumption: the `dispatch(envelope: stage-envelope, config: string)`
-/// WIT signature maps to a JSON payload of `{"envelope": ..., "config":
-/// ...}` -- see the module doc for why this exact wire-JSON convention is
-/// this crate's own documented choice rather than a value copied from a
-/// landed reference). Returns the raw `result.payload` JSON for
+/// Converts the internal `penguin_spine::StageEnvelope` into the exact wire
+/// shape `wit/waddle-bundle/stage.wit`'s `stage-envelope`/`platform-event`
+/// records require. `core/bundle_executor/src/engine.rs`'s `bindgen!`
+/// generates those types with `additional_derives: [serde::Deserialize]`
+/// and no `rename_all`, so the JSON keys are exactly the WIT fields'
+/// snake_case Rust identifiers (`payload_json`, `event_type`, `app_id`,
+/// `target_app_id`, `trace_context`) -- confirmed against
+/// `core/bundle_executor/src/invoke.rs`'s `EnvelopeAndConfig` struct.
+///
+/// Deliberately narrower than `StageEnvelope`'s own `Serialize` impl: this
+/// crate's `env` carries D30 identity/audit fields (`schema_version`,
+/// `workstream_id`, `event_id`, `session_id`, `binding`) a bundle must
+/// never see (spec §5.11 "Bundles cannot move a workstream"), and nests
+/// `event.payload` as a JSON *object* rather than the WIT record's
+/// `payload_json` canonical-JSON *string*. Serializing `env` directly (this
+/// function's predecessor) round-trips through `serde_json::from_value`
+/// into `bundle_executor`'s WIT-generated `StageEnvelope` type and fails
+/// every call with `MalformedFrame: missing field \`payload_json\`` --
+/// caught by the hermetic relay e2e proof (`fix/svc-action-bundle-executor-
+/// alpha-wiring`), never previously exercised end-to-end because no bundle-
+/// executor was wired to this stage until that same change.
+fn envelope_to_wire_json(env: &StageEnvelope) -> Result<serde_json::Value, InvokeError> {
+    let payload_json = serde_json::to_string(&env.event.payload)
+        .map_err(|e| InvokeError::MalformedPayload(e.to_string()))?;
+    Ok(serde_json::json!({
+        "tenant": env.tenant,
+        "community": env.community,
+        "app_id": env.app_id,
+        "stage": env.stage,
+        "event": {
+            "platform": env.event.platform,
+            "event_type": env.event.event_type,
+            "actor": env.event.actor,
+            "payload_json": payload_json,
+            "occurred_at": env.event.occurred_at,
+        },
+        "ts": env.ts,
+        "target_app_id": env.target_app_id,
+        "trace_context": env.trace.as_ref().map(|t| t.traceparent.clone()),
+    }))
+}
+
+/// Invokes the bundle's `dispatch` export for one delivered envelope. The
+/// wire payload is `{"envelope": ..., "config": ...}` (this executor's own
+/// convention for `EnvelopeAndConfig`, spec SS6.6 only specifies "the
+/// export's arguments as JSON") with `envelope` built by
+/// [`envelope_to_wire_json`] -- see that function's doc for the wire-shape
+/// bug this replaced. Returns the raw `result.payload` JSON for
 /// [`interpret_dispatch_payload`] to classify.
 pub async fn invoke_dispatch(
     conn: &Connection,
@@ -129,7 +171,7 @@ pub async fn invoke_dispatch(
         tracestate: t.tracestate.clone(),
     });
     let payload = serde_json::json!({
-        "envelope": env,
+        "envelope": envelope_to_wire_json(env)?,
         "config": config_json,
     });
     // Spec §5.11: tenant/community come from the verified envelope, never
@@ -168,69 +210,90 @@ pub async fn invoke_dispatch(
     }
 }
 
-/// The `dispatch` export's JSON result shape this stage expects (spec
-/// §6.5's `transport-result`/`transport-error` WIT records, flattened
-/// under one `ok` discriminant -- see [`invoke_dispatch`]'s doc for the
-/// wire-JSON convention this assumes).
+/// `bundle_executor`'s actual `dispatch` result wire shape (spec §6.5's
+/// `result<transport-result, transport-error>`, `core/bundle_executor/src/
+/// invoke.rs`'s `ExportKind::Dispatch` arm) -- **not** flattened under one
+/// `ok` discriminant, contrary to this struct's predecessor
+/// (`DispatchResultPayload`): a WIT `Ok` return serializes `transport-
+/// result` FLAT at the top level (its own `ok`/`status`/`detail`/
+/// `provider_message_id` fields, `ok` always `true` here), while an `Err`
+/// return wraps `transport-error` under a `transport_error` key with NO
+/// top-level `ok` field at all (`transport-error` has no `ok`/`status`
+/// fields either -- only `retryable`/`code`/`message`/`retry_after_ms`,
+/// spec `wit/waddle-bundle/stage.wit`). The single-struct assumption meant
+/// every real dispatch failure hit "missing field `ok`" instead of being
+/// classified retryable/non-retryable -- caught by the hermetic relay e2e
+/// proof (`fix/svc-action-bundle-executor-alpha-wiring`), never previously
+/// exercised end-to-end because no bundle-executor was wired to this stage
+/// until that same change.
 #[derive(Debug, Deserialize)]
-struct DispatchResultPayload {
+struct TransportResultPayload {
     ok: bool,
     #[serde(default)]
     status: Option<u16>,
     #[serde(default)]
     detail: Option<String>,
-    #[serde(default)]
-    retryable: Option<bool>,
-    #[serde(default)]
-    code: Option<String>,
-    #[serde(default)]
-    message: Option<String>,
+}
+
+/// See [`TransportResultPayload`]'s doc -- the `Err` branch's wire shape.
+#[derive(Debug, Deserialize)]
+struct TransportErrorPayload {
+    retryable: bool,
+    code: String,
+    message: String,
     #[serde(default)]
     retry_after_ms: Option<u32>,
+}
+
+/// The `Err` branch's outer wrapper key (`bundle_executor::invoke`'s
+/// `serde_json::json!({"transport_error": v})`).
+#[derive(Debug, Deserialize)]
+struct TransportErrorEnvelope {
+    transport_error: TransportErrorPayload,
 }
 
 /// Classifies a `dispatch` export's raw JSON result into an
 /// [`AttemptOutcome`] the retry loop understands. `target_type_hint` (e.g.
 /// `"irc_relay"`) is used for a successful outcome's
 /// `action_dispatch_log.target_type` when the payload itself doesn't name
-/// one -- mirrors the Python runner's `result.transport` field.
+/// one -- mirrors the Python runner's `result.transport` field. Tries the
+/// `Err` (`transport_error`-wrapped) shape first since it's structurally
+/// distinguishable (the wrapper key), falling back to the flat `Ok`
+/// (`transport-result`) shape -- see [`TransportResultPayload`]'s doc for
+/// why these are two shapes, not one.
 fn interpret_dispatch_payload(
     payload: &serde_json::Value,
     target_type_hint: &str,
 ) -> AttemptOutcome {
-    let parsed: DispatchResultPayload = match serde_json::from_value(payload.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            return AttemptOutcome::NonRetryable {
+    if let Ok(err_env) = serde_json::from_value::<TransportErrorEnvelope>(payload.clone()) {
+        let e = err_env.transport_error;
+        let detail = format!("{} ({})", e.message, e.code);
+        return if e.retryable {
+            AttemptOutcome::Retryable {
                 http_status: None,
-                detail: format!("dispatch result payload malformed: {e}"),
+                detail,
+                retry_after_ms: e.retry_after_ms.map(u64::from),
             }
-        }
-    };
-    if parsed.ok {
-        return AttemptOutcome::Success {
-            target_type: target_type_hint.to_string(),
-            http_status: parsed.status.map(i32::from),
-            detail: parsed.detail.unwrap_or_default(),
+        } else {
+            AttemptOutcome::NonRetryable {
+                http_status: None,
+                detail,
+            }
         };
     }
-    let detail = parsed.message.unwrap_or_else(|| {
-        parsed
-            .code
-            .clone()
-            .unwrap_or_else(|| "dispatch failed".to_string())
-    });
-    if parsed.retryable.unwrap_or(false) {
-        AttemptOutcome::Retryable {
-            http_status: parsed.status.map(i32::from),
-            detail,
-            retry_after_ms: parsed.retry_after_ms.map(u64::from),
-        }
-    } else {
-        AttemptOutcome::NonRetryable {
-            http_status: parsed.status.map(i32::from),
-            detail,
-        }
+    match serde_json::from_value::<TransportResultPayload>(payload.clone()) {
+        Ok(p) if p.ok => AttemptOutcome::Success {
+            target_type: target_type_hint.to_string(),
+            http_status: p.status.map(i32::from),
+            detail: p.detail.unwrap_or_default(),
+        },
+        Ok(_) | Err(_) => AttemptOutcome::NonRetryable {
+            http_status: None,
+            detail: format!(
+                "dispatch result payload matched neither transport-result nor \
+                 transport-error: {payload}"
+            ),
+        },
     }
 }
 
@@ -535,6 +598,44 @@ mod tests {
     use crate::hop::BoundaryReason;
 
     #[test]
+    fn envelope_to_wire_json_matches_the_wit_stage_envelope_shape() {
+        // Regression for the hermetic relay e2e proof's "MalformedFrame:
+        // missing field `payload_json`" -- `envelope_to_wire_json` must
+        // produce exactly `wit/waddle-bundle/stage.wit`'s `stage-envelope`/
+        // `platform-event` field set (snake_case, no D30 identity fields,
+        // `payload_json` as a JSON *string*, `trace_context` as a flat
+        // optional string), never `penguin_spine::StageEnvelope`'s own
+        // richer `Serialize` shape.
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+
+        let wire = envelope_to_wire_json(&d.env).expect("payload always serializes");
+
+        assert_eq!(wire["tenant"], "acme");
+        assert_eq!(wire["community"], "main");
+        assert_eq!(wire["app_id"], "waddles.bot.commands.default");
+        assert_eq!(wire["stage"], "action");
+        assert_eq!(wire["ts"], "2026-09-22T00:00:00.000Z");
+        assert_eq!(wire["target_app_id"], serde_json::Value::Null);
+        assert_eq!(wire["trace_context"], serde_json::Value::Null);
+        assert_eq!(wire["event"]["platform"], "twitch");
+        assert_eq!(wire["event"]["event_type"], "chat.message");
+        assert_eq!(wire["event"]["actor"], "some_user");
+        assert_eq!(wire["event"]["occurred_at"], "2026-09-22T00:00:00.000Z");
+        // `payload_json` is a STRING (canonical JSON text), not a nested
+        // object -- the exact field the executor reported missing.
+        assert_eq!(wire["event"]["payload_json"], "{}");
+        assert!(wire["event"].get("payload").is_none());
+        // No D30 identity/audit fields ever cross to the bundle.
+        assert!(wire.get("schema_version").is_none());
+        assert!(wire.get("workstream_id").is_none());
+        assert!(wire.get("event_id").is_none());
+        assert!(wire.get("session_id").is_none());
+        assert!(wire.get("binding").is_none());
+    }
+
+    #[test]
     fn interpret_success_payload() {
         let outcome = interpret_dispatch_payload(
             &serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
@@ -552,15 +653,17 @@ mod tests {
 
     #[test]
     fn interpret_retryable_failure_payload() {
+        // `bundle_executor::invoke`'s actual `Err` wire shape: `transport-
+        // error` wrapped under a `transport_error` key, no top-level `ok`.
         let outcome = interpret_dispatch_payload(
-            &serde_json::json!({"ok": false, "retryable": true, "code": "RATE_LIMITED", "message": "slow down", "retry_after_ms": 5000}),
+            &serde_json::json!({"transport_error": {"retryable": true, "code": "RATE_LIMITED", "message": "slow down", "retry_after_ms": 5000}}),
             "irc_relay",
         );
         assert_eq!(
             outcome,
             AttemptOutcome::Retryable {
                 http_status: None,
-                detail: "slow down".to_string(),
+                detail: "slow down (RATE_LIMITED)".to_string(),
                 retry_after_ms: Some(5000),
             }
         );
@@ -569,22 +672,38 @@ mod tests {
     #[test]
     fn interpret_non_retryable_failure_payload() {
         let outcome = interpret_dispatch_payload(
-            &serde_json::json!({"ok": false, "retryable": false, "status": 400, "message": "bad request"}),
+            &serde_json::json!({"transport_error": {"retryable": false, "code": "BAD_REQUEST", "message": "bad request"}}),
             "irc_relay",
         );
         assert_eq!(
             outcome,
             AttemptOutcome::NonRetryable {
-                http_status: Some(400),
-                detail: "bad request".to_string(),
+                http_status: None,
+                detail: "bad request (BAD_REQUEST)".to_string(),
             }
         );
     }
 
     #[test]
-    fn interpret_failure_defaults_to_non_retryable_when_retryable_absent() {
+    fn interpret_malformed_transport_error_defaults_to_non_retryable() {
+        // Missing the WIT-required `retryable`/`message` fields -- neither
+        // a valid `transport_error` wrapper nor a valid `ok: true`
+        // transport-result; must fail safe, never be read as a success.
         let outcome = interpret_dispatch_payload(
-            &serde_json::json!({"ok": false, "code": "UNKNOWN"}),
+            &serde_json::json!({"transport_error": {"code": "UNKNOWN"}}),
+            "irc_relay",
+        );
+        assert!(matches!(outcome, AttemptOutcome::NonRetryable { .. }));
+    }
+
+    #[test]
+    fn interpret_ok_false_transport_result_is_non_retryable() {
+        // A flat transport-result with `ok: false` is not a shape
+        // `bundle_executor` actually produces (failures are always
+        // `transport_error`-wrapped) but must still fail safe rather than
+        // being read as a success.
+        let outcome = interpret_dispatch_payload(
+            &serde_json::json!({"ok": false, "status": 200}),
             "irc_relay",
         );
         assert!(matches!(outcome, AttemptOutcome::NonRetryable { .. }));
@@ -1059,7 +1178,7 @@ mod tests {
         let stream_key = d.stream.clone();
 
         let connections = connected_registry_with_fake_executor(
-            serde_json::json!({"ok": false, "retryable": false, "status": 400, "message": "bad"}),
+            serde_json::json!({"transport_error": {"retryable": false, "code": "BAD_REQUEST", "message": "bad"}}),
         )
         .await;
         let spine = FakeSpineOps::default();

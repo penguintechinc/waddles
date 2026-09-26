@@ -825,6 +825,17 @@ pipeline:
       # this pod mints new MACs under. Empty (default) omits the env var entirely; must
       # match a `kid` present in global.envelopeBindingKeys once hop verification is used.
       envelopeBindingActiveKid: ""
+      # fix/svc-action-bundle-executor-alpha-wiring -- ACTION_BUNDLE_* (core/svc_action/
+      # src/config.rs, #366) -- interim, env-driven substitute for the digest/keys a real
+      # distribution-poll `load` would supply (spec SS6.6), field-for-field mirror of
+      # svcProcess.processBundle* above. Empty digest (default) disables the executor
+      # load/invoke path entirely -- the dispatch drain loop still runs and can
+      # dead-letter on `executor_unavailable`. componentKey/sidecarKey are the exact
+      # MinIO object keys under pipeline.rustDataPlane.bundleExecutor.bucketName.
+      actionBundleDigest: ""
+      actionBundleVersion: "1"
+      actionBundleComponentKey: ""
+      actionBundleSidecarKey: ""
       # D32: false is the documented default posture, not a fallback (see config.rs).
       sandboxGvisor: false
       resources:
@@ -868,6 +879,45 @@ pipeline:
       # plain http:// -- no BUNDLE_BUCKET_CA_FILE needed) and the access key/secret come from
       # the shared MINIO_ROOT_USER/MINIO_ROOT_PASSWORD secret keys, individually referenced
       # (not envFrom) to keep this pod's credential surface to exactly what bucket.rs needs.
+      bucketName: "waddles-bundles"
+      bucketRegion: "us-east-1"
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "128Mi"
+        limits:
+          cpu: "1000m"
+          memory: "512Mi"
+
+    # fix/svc-action-bundle-executor-alpha-wiring -- a bundle-executor dials exactly ONE
+    # stage (see STAGE_HOST_API_ADDR above); bundleExecutor above is alpha's proven
+    # process-stage executor (overridden to stageTarget=svc-process-rust there). This is
+    # the SECOND, independent executor deployment/pod (own Deployment, own replica) for
+    # the action stage, so both stages get a live executor connection simultaneously
+    # instead of one dial replacing the other. Shares the same image/binary
+    # (.Values.bundleExecutor.image) and D9/D10 credential-less posture as bundleExecutor
+    # above -- literally the same crate, pointed at a different stage via env only. Reuses
+    # the shared {{ fullname }}-host-api-tls Secret for its mTLS client identity; no new
+    # SAN is required -- host-api-tls-certificate.yaml's dnsNames already lists both
+    # svc-process-rust and svc-action-rust plus a `*.{{ namespace }}.svc.cluster.local`
+    # wildcard, and client-cert verification (WebPkiClientVerifier) only checks the chain,
+    # never a per-client hostname/SAN.
+    bundleExecutorAction:
+      enabled: true
+      replicas: 1
+      stageTarget: "svc-action-rust"
+      stagePort: 8302
+      stageConnections: 4
+      callTimeoutMs: 2000
+      maxCallTimeoutMs: 10000
+      memoryLimitMb: 64
+      maxMemoryLimitMb: 256
+      instancesPerBundle: 4
+      maxConcurrentCalls: 32
+      poolWaitMs: 500
+      precompileDir: "/var/cache/waddles/wasm"
+      wasmCollector: "drc"
+      sandboxGvisor: true
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
       resources:
