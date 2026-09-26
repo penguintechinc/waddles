@@ -174,7 +174,26 @@ pub async fn publish_event<A: EventAppender, M: SpineMetrics + ?Sized>(
             app_id_slug(&platform),
             app_id_slug(source_id)
         ),
-        stage: "ingest".to_string(),
+        // "process", NOT "ingest": `StageEnvelope.stage` names the stage
+        // that will read/consume this entry off the stream and therefore
+        // owns its DLQ routing -- the same forward-looking convention this
+        // crate's own sibling, `svc_process::spine`, already follows when
+        // *it* produces an envelope for svc-action to consume (it stamps
+        // `stage: "action"`, never "process", its own identity). Every
+        // process bundle granted this ingest-source stream reads it via
+        // `penguin_spine::GroupReader`/`SpineClient::dead_letter`, which
+        // parses `d.env.stage` with `Stage::parse` -- that parser only
+        // accepts `"process"`/`"action"` (`penguin_spine::Stage` has no
+        // `Ingest` variant: ingest only ever writes, never consumes, so it
+        // never dead-letters under its own name). Stamping "ingest" here
+        // was a bug: any DLQ-worthy entry read off an ingest-source stream
+        // (hop-verification failure, executor-unavailable, bundle error,
+        // ...) made `dead_letter` fail with `SpineError::Config("spine
+        // config error: unsupported stage for spine DLQ routing:
+        // \"ingest\" ...")`, which propagated out of `drain_loop` and
+        // killed the entire process-stage drain loop on the very first
+        // failure -- a live incident on the Discord ingest-source stream.
+        stage: "process".to_string(),
         event,
         ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         target_app_id: None,
@@ -282,7 +301,7 @@ mod tests {
             "waddles:t:acme:c:main:src:twitch:tw-channelA:events"
         );
         assert_eq!(env.schema_version, ENVELOPE_SCHEMA_VERSION);
-        assert_eq!(env.stage, "ingest");
+        assert_eq!(env.stage, "process");
         assert_eq!(env.app_id, "waddles.ingest.twitch.tw-channela");
         assert_eq!(env.target_app_id, None);
         assert_eq!(env.tenant, "acme");
@@ -305,6 +324,58 @@ mod tests {
         assert_eq!(
             *metrics.calls.lock().unwrap(),
             vec![("twitch".to_string(), "tw-channelA".to_string())]
+        );
+    }
+
+    /// Regression: a live incident (svc-process's drain loop crash-looping
+    /// on the Discord ingest-source stream) traced back to this crate
+    /// stamping `stage: "ingest"` on every envelope it writes onto an
+    /// ingest-source stream. `penguin_spine::Stage::parse` -- the function
+    /// `SpineClient::dead_letter` calls on `d.env.stage` to route a DLQ
+    /// write -- only accepts `"process"`/`"action"`; `"ingest"` is
+    /// deliberately rejected there because ingest never consumes and so
+    /// never dead-letters under its own name. Any entry needing dead-letter
+    /// handling once a process bundle reads it off this stream would
+    /// otherwise crash `dead_letter` with `SpineError::Config`, which
+    /// propagates out of the process-stage drain loop and kills it. This
+    /// test asserts the envelope this crate produces is always
+    /// DLQ-routable by its actual (forward-looking) consumer, not just that
+    /// `stage` holds a particular literal.
+    #[tokio::test]
+    async fn published_envelope_stage_is_dlq_routable_by_penguin_spine() {
+        let appender = FakeAppender {
+            calls: Mutex::new(vec![]),
+            fail: false,
+        };
+        let (metrics, keyring) = (RecordingMetrics::default(), test_keyring());
+        let scope = Scope::new("acme", Some("main".to_string()));
+        publish_event(
+            &appender,
+            &metrics,
+            &keyring,
+            "test-kid",
+            &scope,
+            "dg-guildX",
+            "ws-1",
+            None,
+            test_event(),
+        )
+        .await
+        .unwrap();
+
+        let calls = appender.calls.lock().unwrap();
+        let (_, env) = &calls[0];
+        assert_eq!(
+            env.stage, "process",
+            "ingest-source-stream envelopes must name their consumer's \
+             stage (\"process\"), never ingest's own identity"
+        );
+        assert!(
+            penguin_spine::Stage::parse(&env.stage).is_ok(),
+            "envelope stage {:?} must be one penguin_spine::SpineClient::dead_letter \
+             can route (\"process\"/\"action\") -- \"ingest\" crashes it, see gh incident \
+             \"unsupported stage for spine DLQ routing\"",
+            env.stage
         );
     }
 
