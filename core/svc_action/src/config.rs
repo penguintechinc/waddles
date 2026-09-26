@@ -157,6 +157,43 @@ pub struct CliConfig {
     #[arg(long, env = "METERING_FLUSH_INTERVAL_S", default_value_t = 10)]
     pub metering_flush_interval_s: u64,
 
+    /// Interim, env-driven substitute for the `GET /api/v1/distribution/
+    /// bundles?stage=action` poll actually resolving a loadable digest
+    /// (spec §6.7) -- defense-in-depth fallback, mirrors `core/svc_process`'s
+    /// own `PROCESS_BUNDLE_DIGEST` (`config::CliConfig` there) field-for-
+    /// field. The distribution poll (`crate::distribution`) remains the
+    /// primary/eventual source: `crate::resolve_initial_bundle` only falls
+    /// back to this value when the catalog never resolves a digest for
+    /// `ACTION_APP_ID` within its retry window (hub-api empty/unreachable),
+    /// and `crate::try_start_env_bundle_loader` sends this bundle's `load`
+    /// frame directly -- independent of hub-api reachability -- so the
+    /// action stage can invoke without ever having polled a live hub-api.
+    /// Empty (default) disables the fallback entirely, leaving today's
+    /// catalog-only behavior unchanged. Expected shape: `sha256:<64 hex>`
+    /// -- the executor's own digest validator (`bundle_executor::invoke::
+    /// verify_digest`) rejects a bare hex string with `MalformedDigest`, so
+    /// the chart must set this with the prefix already included.
+    #[arg(long, env = "ACTION_BUNDLE_DIGEST", default_value = "")]
+    pub action_bundle_digest: String,
+    /// See [`Self::action_bundle_digest`]. The `load` frame's `version`
+    /// field (spec §6.6) -- distinct from the digest, echoed back by the
+    /// executor's `loaded` reply.
+    #[arg(long, env = "ACTION_BUNDLE_VERSION", default_value = "1")]
+    pub action_bundle_version: String,
+    /// See [`Self::action_bundle_digest`]. The bucket key `load` asks the
+    /// executor to fetch the compiled component from (spec §7.6 step 3's
+    /// naming convention -- `crate::distribution::bucket_keys` derives the
+    /// same shape from a real distribution row; this fallback requires the
+    /// operator to supply it directly since there is no row to derive it
+    /// from).
+    #[arg(long, env = "ACTION_BUNDLE_COMPONENT_KEY", default_value = "")]
+    pub action_bundle_component_key: String,
+    /// See [`Self::action_bundle_digest`]. The bucket key for the bundle's
+    /// manifest sidecar, same convention as
+    /// [`Self::action_bundle_component_key`].
+    #[arg(long, env = "ACTION_BUNDLE_SIDECAR_KEY", default_value = "")]
+    pub action_bundle_sidecar_key: String,
+
     /// hub-api base URL, source of the `GET /api/v1/distribution/bundles
     /// ?stage=action` poll (spec §6.7) `crate::distribution` drives --
     /// same field name/default `core/svc_process`'s own M4 config carries
@@ -444,6 +481,34 @@ mod tests {
         let cli = CliConfig::parse_from(["svc-action"]);
         assert_eq!(cli.hub_api_url, "http://hub-api:8204");
         assert_eq!(cli.poll_interval_s, 5.0);
+    }
+
+    #[test]
+    fn action_bundle_env_override_defaults_to_disabled() {
+        let cli = CliConfig::parse_from(["svc-action"]);
+        assert_eq!(cli.action_bundle_digest, "");
+        assert_eq!(cli.action_bundle_version, "1");
+        assert_eq!(cli.action_bundle_component_key, "");
+        assert_eq!(cli.action_bundle_sidecar_key, "");
+    }
+
+    #[test]
+    fn action_bundle_env_override_flags_are_honored() {
+        let cli = CliConfig::parse_from([
+            "svc-action",
+            "--action-bundle-digest",
+            "sha256:aa",
+            "--action-bundle-version",
+            "2.0.0",
+            "--action-bundle-component-key",
+            "bundles/app/2.0.0/aa.wasm",
+            "--action-bundle-sidecar-key",
+            "bundles/app/2.0.0/aa.json",
+        ]);
+        assert_eq!(cli.action_bundle_digest, "sha256:aa");
+        assert_eq!(cli.action_bundle_version, "2.0.0");
+        assert_eq!(cli.action_bundle_component_key, "bundles/app/2.0.0/aa.wasm");
+        assert_eq!(cli.action_bundle_sidecar_key, "bundles/app/2.0.0/aa.json");
     }
 
     #[test]
