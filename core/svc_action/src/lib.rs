@@ -27,6 +27,21 @@
 //! What remains a documented seam: `db`/`kv`/`flags` host capabilities
 //! (`crate::capabilities`), and full multi-bundle/hot-swap distribution
 //! reconciliation (`crate::distribution`'s module doc).
+//!
+//! **Interim fix: `ACTION_BUNDLE_*` env override (defense-in-depth,
+//! mirrors `core/svc_process`'s `PROCESS_BUNDLE_*` fix).** Before this,
+//! [`resolve_initial_bundle`] depended entirely on the distribution poll
+//! (`crate::distribution::run_poll_loop`) ever populating the catalog with
+//! a digest -- an empty/unreachable hub-api left the dispatch loop's
+//! `deps.digest` permanently empty, and nothing ever sent `load` for it, so
+//! every invoke failed `UNKNOWN_BUNDLE` (no pong from the relay leg).
+//! [`try_start_env_bundle_loader`] now sends `load` for a statically
+//! configured bundle directly over the host-API connection --
+//! independent of hub-api reachability -- and [`resolve_initial_bundle`]
+//! falls back to that same digest for `deps.digest`/`invoke` when the
+//! catalog never resolves one. The distribution poll remains the primary,
+//! eventual source; the env override is strictly the interim fallback
+//! (`config::CliConfig::action_bundle_digest`'s doc).
 
 pub mod capabilities;
 pub mod config;
@@ -136,6 +151,7 @@ where
         egress_denied_total,
         license.clone(),
     );
+    try_start_env_bundle_loader(&config.cli, Arc::clone(&connections));
     try_start_distribution_poll(&config, Arc::clone(&connections), Arc::clone(&catalog));
     try_start_dispatch(&config, connections, catalog, usage, license);
 
@@ -405,18 +421,25 @@ fn try_start_distribution_poll(
 /// to have resolved `app_id`'s digest/config into `catalog`, so the
 /// dispatch loop's first `invoke` has a real digest to run rather than the
 /// empty-string placeholder (which the executor would refuse with
-/// `UNKNOWN_BUNDLE`). Falls back to `(String::new(), "{}")` -- today's
-/// behavior -- if the poll hasn't landed a row in time (hub-api slow/down
-/// at startup): never blocks `try_start_dispatch` indefinitely, and never
-/// panics. **This is a one-shot resolution, not hot-swap** -- a digest
-/// change observed later by the poll loop updates `catalog` and (once an
-/// executor is connected) sends `load` for it, but this dispatch loop's own
+/// `UNKNOWN_BUNDLE`). Falls back to `env_bundle_digest` (`ACTION_BUNDLE_
+/// DIGEST`, `config::CliConfig::action_bundle_digest`'s doc) when the
+/// catalog never resolves one -- the same digest [`try_start_env_bundle_
+/// loader`] sends `load` for independently of hub-api reachability, so a
+/// non-empty fallback here always has a matching `load` in flight rather
+/// than immediately refusing `UNKNOWN_BUNDLE` itself. Falls back further to
+/// `(String::new(), "{}")` -- today's pre-fix behavior -- only when
+/// `env_bundle_digest` is also empty (no interim override configured):
+/// never blocks `try_start_dispatch` indefinitely, and never panics.
+/// **This is a one-shot resolution, not hot-swap** -- a digest change
+/// observed later by the poll loop updates `catalog` and (once an executor
+/// is connected) sends `load` for it, but this dispatch loop's own
 /// `deps.digest` stays fixed at whatever this function returned (documented
 /// seam, `crate::dispatch`'s own module doc).
 async fn resolve_initial_bundle(
     catalog: &distribution::BundleCatalog,
     app_id: &str,
     poll_interval: std::time::Duration,
+    env_bundle_digest: &str,
 ) -> (String, String) {
     const MAX_ATTEMPTS: u32 = 3;
     for attempt in 0..MAX_ATTEMPTS {
@@ -429,11 +452,132 @@ async fn resolve_initial_bundle(
             tokio::time::sleep(poll_interval).await;
         }
     }
+    if !env_bundle_digest.is_empty() {
+        tracing::info!(
+            app_id,
+            digest = env_bundle_digest,
+            "no distribution row resolved yet; falling back to ACTION_BUNDLE_DIGEST env override"
+        );
+        return (env_bundle_digest.to_string(), "{}".to_string());
+    }
     tracing::warn!(
         app_id,
-        "no distribution row resolved yet; dispatch loop starting with an empty digest"
+        "no distribution row resolved yet and no ACTION_BUNDLE_DIGEST override set; dispatch \
+         loop starting with an empty digest"
     );
     (String::new(), "{}".to_string())
+}
+
+/// Sends `load` for a statically-configured bundle (`ACTION_BUNDLE_*` env
+/// vars, `config::CliConfig::action_bundle_digest`'s doc) directly over the
+/// host-API connection, independent of `crate::distribution`'s hub-api poll
+/// -- the defense-in-depth fix this module's doc describes. A no-op (never
+/// spawns a task) when `ACTION_BUNDLE_DIGEST` is unset, leaving today's
+/// catalog-only behavior unchanged.
+fn try_start_env_bundle_loader(
+    cli: &config::CliConfig,
+    connections: Arc<host_api::ConnectionRegistry>,
+) {
+    if cli.action_bundle_digest.is_empty() {
+        tracing::info!(
+            "ACTION_BUNDLE_DIGEST not set; env bundle-override loader not started (catalog poll \
+             remains the sole load source)"
+        );
+        return;
+    }
+    let app_id = cli.action_app_id.clone();
+    let version = cli.action_bundle_version.clone();
+    let digest = cli.action_bundle_digest.clone();
+    let component_key = cli.action_bundle_component_key.clone();
+    let sidecar_key = cli.action_bundle_sidecar_key.clone();
+    let call_timeout_ms = cli.executor_call_timeout_ms;
+    tokio::spawn(async move {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            let _ = shutdown_tx.send(());
+        });
+        env_bundle_loader_loop(
+            connections,
+            app_id,
+            version,
+            digest,
+            component_key,
+            sidecar_key,
+            call_timeout_ms,
+            shutdown_rx,
+        )
+        .await;
+    });
+}
+
+/// [`try_start_env_bundle_loader`]'s actual retry loop, split out so it is
+/// directly testable against a fake in-memory executor connection instead
+/// of requiring a real OS signal to ever terminate (mirrors `crate::
+/// dispatch::drain_loop`'s split from `crate::dispatch::run`). Polls
+/// `connections` every 500ms; once a connection is active and this exact
+/// `Arc` hasn't already been successfully loaded (tracked by `Arc::ptr_eq`,
+/// same identity convention as `core/svc_process`'s `LoadState` --
+/// `ConnectionRegistry::set_active` constructs a fresh `Connection` per
+/// TCP accept, so a reconnect is always a different allocation), sends
+/// `load` via [`dispatch::ensure_loaded`]. A failed `load` (no connection
+/// yet, or the executor rejected it) is logged at WARN/DEBUG and retried on
+/// the next tick rather than propagating -- this loader has no caller to
+/// report a terminal failure to, and retry is always the right response to
+/// a still-starting executor.
+#[allow(clippy::too_many_arguments)]
+async fn env_bundle_loader_loop(
+    connections: Arc<host_api::ConnectionRegistry>,
+    app_id: String,
+    version: String,
+    digest: String,
+    component_key: String,
+    sidecar_key: String,
+    call_timeout_ms: u64,
+    mut shutdown: tokio::sync::oneshot::Receiver<()>,
+) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut loaded_on: Option<Arc<host_api::Connection>> = None;
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return,
+            _ = interval.tick() => {
+                let Some(connection) = connections.active() else {
+                    tracing::debug!(app_id = %app_id, "env bundle-override loader: no executor connection yet");
+                    continue;
+                };
+                if loaded_on
+                    .as_ref()
+                    .is_some_and(|c| Arc::ptr_eq(c, &connection))
+                {
+                    continue;
+                }
+                match dispatch::ensure_loaded(
+                    &connection,
+                    &app_id,
+                    &version,
+                    &digest,
+                    &component_key,
+                    &sidecar_key,
+                    penguin_bundle_host::wire::LoadLimits {
+                        timeout_ms: call_timeout_ms,
+                        memory_mb: 64,
+                    },
+                )
+                .await
+                {
+                    Ok(_) => {
+                        tracing::info!(app_id = %app_id, digest = %digest, "ACTION_BUNDLE_* env override: bundle loaded onto executor");
+                        loaded_on = Some(connection);
+                    }
+                    Err(err) => {
+                        tracing::warn!(app_id = %app_id, digest = %digest, error = %err, "ACTION_BUNDLE_* env override: bundle load failed, will retry");
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Starts the action-stage dispatch loop (`crate::dispatch::run`) as its
@@ -490,7 +634,13 @@ fn try_start_dispatch(
                 return;
             }
         };
-        let (digest, config_json) = resolve_initial_bundle(&catalog, &app_id, poll_interval).await;
+        let (digest, config_json) = resolve_initial_bundle(
+            &catalog,
+            &app_id,
+            poll_interval,
+            &config.cli.action_bundle_digest,
+        )
+        .await;
         // TODO(M3+): tenant/community scope is hardcoded to the
         // tenant-wide `global` activation until the distribution poll
         // (module doc) resolves the real set of (tenant, community,
@@ -832,6 +982,7 @@ mod tests {
                 &catalog,
                 "waddles.a.b.c",
                 std::time::Duration::from_secs(60),
+                "",
             ),
         )
         .await
@@ -847,10 +998,63 @@ mod tests {
             &catalog,
             "waddles.never.resolves",
             std::time::Duration::from_millis(5),
+            "",
         )
         .await;
         assert_eq!(digest, "");
         assert_eq!(config_json, "{}");
+    }
+
+    /// The interim fix this PR adds: when the catalog never resolves a
+    /// digest (hub-api empty/unreachable) but `ACTION_BUNDLE_DIGEST` is
+    /// set, the dispatch loop's `deps.digest` must be the env-configured
+    /// one -- not the pre-fix empty placeholder the executor would refuse
+    /// with `UNKNOWN_BUNDLE` -- so `invoke_dispatch` targets the same
+    /// digest [`try_start_env_bundle_loader`] is sending `load` for.
+    #[tokio::test]
+    async fn resolve_initial_bundle_falls_back_to_the_env_override_digest_when_catalog_is_empty() {
+        let catalog = distribution::BundleCatalog::new();
+        let (digest, config_json) = resolve_initial_bundle(
+            &catalog,
+            "waddles.never.resolves",
+            std::time::Duration::from_millis(5),
+            "sha256:aa",
+        )
+        .await;
+        assert_eq!(digest, "sha256:aa");
+        assert_eq!(config_json, "{}");
+    }
+
+    /// A live catalog digest always wins over the env override -- the
+    /// catalog poll is the primary/eventual source, the env var is strictly
+    /// the fallback (`config::CliConfig::action_bundle_digest`'s doc).
+    #[tokio::test]
+    async fn resolve_initial_bundle_prefers_a_resolved_catalog_digest_over_the_env_override() {
+        let catalog = distribution::BundleCatalog::new();
+        catalog.update(vec![distribution::BundleRow {
+            app_id: "waddles.a.b.c".to_string(),
+            version: "1.0.0".to_string(),
+            artifact_digest: Some("sha256:catalog".to_string()),
+            component_key: "k".to_string(),
+            sidecar_key: "s".to_string(),
+            egress: vec![],
+            egress_rps: None,
+            config_json: "{\"x\":1}".to_string(),
+            granted_secret_refs: std::collections::HashMap::new(),
+        }]);
+        let (digest, config_json) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            resolve_initial_bundle(
+                &catalog,
+                "waddles.a.b.c",
+                std::time::Duration::from_secs(60),
+                "sha256:env-override",
+            ),
+        )
+        .await
+        .expect("resolves without waiting out the poll interval");
+        assert_eq!(digest, "sha256:catalog");
+        assert_eq!(config_json, "{\"x\":1}");
     }
 
     #[tokio::test]
@@ -871,6 +1075,7 @@ mod tests {
             &catalog,
             "waddles.a.b.c",
             std::time::Duration::from_millis(5),
+            "",
         )
         .await;
         assert_eq!(digest, "");
@@ -1026,5 +1231,162 @@ mod tests {
         let connections = Arc::new(host_api::ConnectionRegistry::new());
         let catalog = Arc::new(distribution::BundleCatalog::new());
         try_start_distribution_poll(&config, connections, catalog);
+    }
+
+    /// `try_start_env_bundle_loader`'s own gate: `ACTION_BUNDLE_DIGEST`
+    /// unset never starts the loader task -- a fire-and-forget call proving
+    /// no panic and no spawned task, mirroring `try_start_distribution_poll_
+    /// disabled_without_action_app_id` above.
+    #[test]
+    fn try_start_env_bundle_loader_disabled_without_digest() {
+        let cli = CliConfig::parse_from(["svc-action"]);
+        let connections = Arc::new(host_api::ConnectionRegistry::new());
+        try_start_env_bundle_loader(&cli, connections);
+    }
+
+    /// The core of this PR's fix: once a host-API connection is active,
+    /// [`env_bundle_loader_loop`] sends `load` for the `ACTION_BUNDLE_*`
+    /// env-configured bundle over it -- entirely independent of the
+    /// distribution catalog/hub-api (none is constructed in this test) --
+    /// so the action stage can invoke without ever having polled a live
+    /// hub-api. Drives a fake executor over an in-memory duplex, matching
+    /// `crate::dispatch`'s own `ensure_loaded_sends_load_and_returns_the_
+    /// loaded_reply` test harness shape.
+    #[tokio::test]
+    async fn env_bundle_loader_loop_loads_the_env_configured_bundle_once_connected() {
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, Frame, HelloBody, HelloOkBody, LoadBody, LoadedBody, Message,
+            SandboxInfo,
+        };
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        let received_load: Arc<tokio::sync::Mutex<Option<LoadBody>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+        let received_load_writer = Arc::clone(&received_load);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            let hello_ok = read_frame(&mut executor_io).await.unwrap();
+            assert!(matches!(hello_ok.message, Message::HelloOk(_)));
+
+            let load = read_frame(&mut executor_io).await.unwrap();
+            let load_body = match load.message {
+                Message::Load(b) => b,
+                other => panic!("expected load, got {other:?}"),
+            };
+            *received_load_writer.lock().await = Some(load_body.clone());
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    load.id,
+                    Message::Loaded(LoadedBody {
+                        app_id: load_body.app_id,
+                        digest: load_body.digest,
+                        precompile_ms: 1,
+                        exports: vec!["dispatch".to_string()],
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let (connection, read_loop) = host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(capabilities::DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let connections = Arc::new(host_api::ConnectionRegistry::new());
+        connections.set_active(connection);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let loader = tokio::spawn(env_bundle_loader_loop(
+            Arc::clone(&connections),
+            "waddles.a.b.c".to_string(),
+            "2.0.0".to_string(),
+            "sha256:aa".to_string(),
+            "bundles/waddles.a.b.c/2.0.0/aa.wasm".to_string(),
+            "bundles/waddles.a.b.c/2.0.0/aa.json".to_string(),
+            2000,
+            shutdown_rx,
+        ));
+
+        // The loop ticks every 500ms; give it a couple of ticks to observe
+        // the already-active connection and send `load`.
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let _ = shutdown_tx.send(());
+        tokio::time::timeout(std::time::Duration::from_secs(5), loader)
+            .await
+            .expect("env_bundle_loader_loop must return promptly once shutdown resolves")
+            .expect("loader task must not panic");
+
+        let load_body = received_load
+            .lock()
+            .await
+            .clone()
+            .expect("the fake executor must have received a load frame");
+        assert_eq!(load_body.app_id, "waddles.a.b.c");
+        assert_eq!(load_body.version, "2.0.0");
+        assert_eq!(load_body.digest, "sha256:aa");
+        assert_eq!(
+            load_body.component_key,
+            "bundles/waddles.a.b.c/2.0.0/aa.wasm"
+        );
+        assert_eq!(load_body.sidecar_key, "bundles/waddles.a.b.c/2.0.0/aa.json");
+    }
+
+    /// `env_bundle_loader_loop` must terminate promptly once `shutdown`
+    /// resolves even when no connection is ever active (hub-api-independent
+    /// -- and here, executor-independent too): the loop must never block on
+    /// a connection that never arrives.
+    #[tokio::test]
+    async fn env_bundle_loader_loop_stops_promptly_without_a_connection() {
+        let connections = Arc::new(host_api::ConnectionRegistry::new());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let loader = tokio::spawn(env_bundle_loader_loop(
+            connections,
+            "waddles.a.b.c".to_string(),
+            "1".to_string(),
+            "sha256:aa".to_string(),
+            "component-key".to_string(),
+            "sidecar-key".to_string(),
+            2000,
+            shutdown_rx,
+        ));
+        shutdown_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), loader)
+            .await
+            .expect("env_bundle_loader_loop must return promptly once shutdown resolves")
+            .expect("loader task must not panic");
     }
 }
