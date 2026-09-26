@@ -444,7 +444,12 @@ fn is_link_local_v6(ip: Ipv6Addr) -> bool {
 /// `bundles.egress.allowPrivateHosts` escape hatch) -- loopback,
 /// link-local, unspecified, multicast and the cloud-metadata addresses are
 /// **never** lifted by any setting.
-fn is_forbidden_address(ip: IpAddr, allow_private: bool) -> Option<&'static str> {
+///
+/// `pub(crate)`: also reused by `crate::capabilities`'s Discord relay send
+/// (a stage built-in, not a bundle-declared `http.send` -- see that
+/// module's doc -- but DNS-rebinding defense is worth applying regardless
+/// of whether the destination host is bundle-supplied or compiled-in).
+pub(crate) fn is_forbidden_address(ip: IpAddr, allow_private: bool) -> Option<&'static str> {
     match ip {
         IpAddr::V4(v4) => {
             if v4.is_loopback() {

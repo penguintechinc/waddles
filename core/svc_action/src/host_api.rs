@@ -900,6 +900,7 @@ mod tests {
                     tenant: "acme".to_string(),
                     community: None,
                     app_id: "waddles.bot.commands.default".to_string(),
+                    origin_channel_id: None,
                 },
             )
             .await
@@ -1113,6 +1114,7 @@ mod tests {
                     tenant: "acme".to_string(),
                     community: Some("main".to_string()),
                     app_id: "waddles.bot.commands.default".to_string(),
+                    origin_channel_id: None,
                 },
             )
             .await
@@ -1405,6 +1407,7 @@ mod tests {
                     tenant: "tenant-a".to_string(),
                     community: None,
                     app_id: "waddles.bot.commands.default".to_string(),
+                    origin_channel_id: None,
                 },
             ),
             connection.invoke(
@@ -1420,6 +1423,7 @@ mod tests {
                     tenant: "tenant-b".to_string(),
                     community: None,
                     app_id: "waddles.bot.commands.default".to_string(),
+                    origin_channel_id: None,
                 },
             ),
         );

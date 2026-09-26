@@ -19,10 +19,13 @@
 //! outright (`unknown_invoke`), never answered against a guessed or
 //! leftover scope.
 //!
-//! `relay` (Twitch outbound), `clock`, `context` and `log` are fully wired.
-//! `http` is wired to `crate::egress::EgressGuard` (spec §8's full SSRF
-//! guard). `db`/`kv`/`flags` remain documented `TODO(M3+)` seams -- see
-//! [`StageCapabilities::handle`]'s match arms.
+//! `relay` (Twitch outbound via Valkey `LPUSH`, drained by svc-ingest's own
+//! persistent IRC connection; Discord outbound via a direct, stateless bot
+//! REST send -- see [`StageCapabilities::handle_discord_relay`]'s doc for
+//! why Discord takes a different path than Twitch), `clock`, `context` and
+//! `log` are fully wired. `http` is wired to `crate::egress::EgressGuard`
+//! (spec §8's full SSRF guard). `db`/`kv`/`flags` remain documented
+//! `TODO(M3+)` seams -- see [`StageCapabilities::handle`]'s match arms.
 //!
 //! A bundle never holds a platform credential (spec §4.3): every
 //! capability here resolves any credential itself, from this process's own
@@ -46,6 +49,17 @@ pub struct InvokeScope {
     pub tenant: String,
     pub community: Option<String>,
     pub app_id: String,
+    /// The delivered envelope's own `event.source.channel_id` (spec
+    /// `penguin_spine::envelope::Source`) -- the platform channel/guild/room
+    /// the *inbound* event that triggered this invoke actually came from,
+    /// when the platform has one. Threaded through by
+    /// `crate::dispatch::invoke_dispatch` so the `relay` capability's
+    /// Discord path can reply into the right channel without ever trusting
+    /// a bundle-supplied channel argument (`handle_discord_relay`'s doc).
+    /// `None` for Twitch relay sends (which still take `channel` from the
+    /// bundle's own `message_json`, unchanged) and for any invoke with no
+    /// channel-bearing origin event.
+    pub origin_channel_id: Option<String>,
 }
 
 /// Answers one `host-call` for a given `capability`/`op`, scoped to the
@@ -82,10 +96,14 @@ pub fn outbound_relay_queue_key(provider: &str) -> String {
     format!("waddles:transport:irc:{provider}:outbound")
 }
 
-/// Compiled-in providers the `relay` capability accepts (spec §7.4:
-/// "Validates `provider` against the compiled-in provider list (`twitch`
-/// today)"). Action-stage bundles only.
-const RELAY_PROVIDERS: &[&str] = &["twitch"];
+/// Compiled-in providers the `relay` capability accepts. Spec §7.4 (as
+/// published) still reads "the compiled-in provider list (`twitch`
+/// today)" -- `discord` extends that list in this landing; the two
+/// providers take genuinely different code paths in
+/// [`StageCapabilities::handle_relay`] (Valkey `LPUSH` vs. a direct bot
+/// REST send), documented on that function and
+/// [`StageCapabilities::handle_discord_relay`]. Action-stage bundles only.
+const RELAY_PROVIDERS: &[&str] = &["twitch", "discord"];
 
 /// Strips CR/LF and every other control character before an outbound relay
 /// write -- a byte-exact port of `waddle_transports.transports.irc.
@@ -94,6 +112,34 @@ const RELAY_PROVIDERS: &[&str] = &["twitch"];
 /// before it is ever queued.
 fn sanitize_irc_component(value: &str) -> String {
     value.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// Discord snowflake IDs are unsigned 64-bit integers rendered as decimal
+/// ASCII digits. Validated purely as defense in depth before `channel_id`
+/// reaches a URL path segment -- `scope.origin_channel_id` is sourced from
+/// the binding-MAC-verified envelope, never bundle input, but a malformed
+/// value should still fail closed rather than build a bogus request URL.
+fn is_discord_snowflake(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Pins DNS resolution for `discord.com` to a single address that passes
+/// [`crate::egress::is_forbidden_address`] (loopback/private/link-local/
+/// multicast/cloud-metadata all rejected, `allow_private` hardcoded
+/// `false` here -- this built-in has no per-tenant escape hatch,
+/// unlike bundle-declared egress's spec §8.5 `allowPrivateHosts`).
+async fn resolve_discord_address() -> Result<std::net::SocketAddr, HostResultError> {
+    let mut addrs = tokio::net::lookup_host(("discord.com", 443))
+        .await
+        .map_err(|e| {
+            denied(
+                "relay_unavailable",
+                format!("discord.com dns resolution failed: {e}"),
+            )
+        })?;
+    addrs
+        .find(|addr| crate::egress::is_forbidden_address(addr.ip(), false).is_none())
+        .ok_or_else(|| denied("relay_unavailable", "no permitted address for discord.com"))
 }
 
 /// This crate's own sanity bound on a bundle's `log` host-call message
@@ -161,6 +207,31 @@ impl RelayQueue for redis::aio::MultiplexedConnection {
     }
 }
 
+/// Fixed operational limits for the built-in Discord relay send. Not
+/// `crate::egress::EgressLimits` (that struct governs *bundle*-declared
+/// `http.send` policy, one bucket per `app_id`, spec §7.3/§8.2) -- this is
+/// a stage built-in with exactly one compiled-in destination and no
+/// per-bundle manifest to read limits from, so it gets its own small,
+/// fixed defaults rather than threading CLI config through for a single
+/// hardcoded host.
+const DISCORD_RELAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const DISCORD_RELAY_MAX_RESPONSE_BYTES: usize = 65_536;
+
+/// Discord's REST API version this send targets (spec: relay providers).
+const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
+
+/// The Discord relay send's own dependencies, present only once
+/// [`StageCapabilities::with_discord`] configures them -- absent (`None`)
+/// means `DISCORD_BOT_TOKEN` was not set at startup, and every Discord
+/// relay send is refused `relay_unavailable` rather than the process
+/// failing to start or a bundle-runtime credential ever being consulted
+/// (module doc: "resolves any credential itself, from this process's own
+/// configuration/environment").
+struct DiscordRelay {
+    transport: Arc<dyn crate::egress::HttpTransport>,
+    bot_token: crate::config::Secret,
+}
+
 /// The real capability implementations this stage wires today. Generic
 /// over [`RelayQueue`] so `handle_relay` is fully unit-testable against a
 /// fake queue without a live Valkey server -- production callers
@@ -179,19 +250,48 @@ pub struct StageCapabilities<Q: RelayQueue> {
     /// (spec §5.11: "No bundle host call accepts a tenant or community
     /// argument at all" -- the same constraint extends to workstream_id).
     usage: Arc<Mutex<UsageBatcher>>,
+    /// See [`DiscordRelay`]'s doc; `None` until [`Self::with_discord`] is
+    /// called.
+    discord: Option<DiscordRelay>,
 }
 
 impl<Q: RelayQueue> StageCapabilities<Q> {
     /// Builds the capability set this connection's read loop answers every
     /// `host-call` against, for as long as the connection lives. No
     /// tenant/community/app_id here -- every capability method below takes
-    /// its [`InvokeScope`] as a parameter instead (module doc).
+    /// its [`InvokeScope`] as a parameter instead (module doc). The Discord
+    /// relay provider starts unconfigured (`relay_unavailable` until
+    /// [`Self::with_discord`] is chained on) so every existing caller of
+    /// this constructor -- production and test alike -- is unaffected by
+    /// this landing.
     pub fn new(relay_queue: Q, egress: Arc<EgressGuard>, usage: Arc<Mutex<UsageBatcher>>) -> Self {
         Self {
             relay_queue,
             egress,
             usage,
+            discord: None,
         }
+    }
+
+    /// Enables the Discord relay provider, given the transport to send
+    /// through (production: `crate::egress::ReqwestTransport`; tests: a
+    /// fake -- see this module's `tests::FakeDiscordTransport`) and the
+    /// bot token to authenticate with (`DISCORD_BOT_TOKEN`, the exact same
+    /// secret the Helm chart already provisions for svc-ingest's Discord
+    /// Gateway connection -- `crate::config::Config::discord_bot_token`'s
+    /// doc). Builder-style so `lib.rs`'s real construction site can skip
+    /// this call entirely when the token is unset, rather than needing an
+    /// `Option`-wrapped transport threaded through [`Self::new`] itself.
+    pub fn with_discord(
+        mut self,
+        transport: Arc<dyn crate::egress::HttpTransport>,
+        bot_token: crate::config::Secret,
+    ) -> Self {
+        self.discord = Some(DiscordRelay {
+            transport,
+            bot_token,
+        });
+        self
     }
 
     async fn handle_relay(
@@ -236,16 +336,9 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
                 format!("relay.send message_json is not valid JSON: {e}"),
             )
         })?;
-        let channel = message
-            .get("channel")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                denied(
-                    "invalid_args",
-                    "relay.send message_json requires a non-empty 'channel'",
-                )
-            })?;
+        // `text` is common to every provider; `channel` resolution below is
+        // NOT -- Discord branches off before ever looking at
+        // `message.channel` (see `handle_discord_relay`'s doc for why).
         let text = message
             .get("text")
             .and_then(|v| v.as_str())
@@ -254,6 +347,24 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
                 denied(
                     "invalid_args",
                     "relay.send message_json requires non-empty 'text'",
+                )
+            })?;
+
+        if provider == "discord" {
+            return self.handle_discord_relay(scope, text).await;
+        }
+
+        // Twitch, the only other compiled-in provider: `channel` comes from
+        // the bundle's own `message_json`, unchanged from this capability's
+        // original (Twitch-only) landing.
+        let channel = message
+            .get("channel")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                denied(
+                    "invalid_args",
+                    "relay.send message_json requires a non-empty 'channel'",
                 )
             })?;
 
@@ -286,6 +397,109 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
                 outbound_bytes,
             );
         Ok(serde_json::json!({"queued": true, "provider": provider}))
+    }
+
+    /// Discord relay send: a stateless bot REST `POST
+    /// /channels/{channel_id}/messages` with `Authorization: Bot <token>`
+    /// -- no persistent Gateway (websocket) connection is needed to *send*,
+    /// only to *receive*. Deliberately **not** the Twitch pattern (`LPUSH`
+    /// onto a Valkey list drained by svc-ingest's own persistent
+    /// connection): svc-ingest owns the inbound Discord Gateway connection
+    /// because receiving genuinely needs one, but sending needs no such
+    /// thing, so routing a reply through svc-ingest would only add a
+    /// dependency this send has no actual use for -- and svc-ingest's
+    /// connection is flaky, exactly the failure mode this path avoids.
+    ///
+    /// **The channel is never the bundle's to name.** Unlike Twitch (whose
+    /// `channel` comes straight from the bundle's own `message_json`,
+    /// unchanged above), Discord's target channel is `scope.
+    /// origin_channel_id` -- threaded from the delivered envelope's own
+    /// `event.source.channel_id` by `crate::dispatch::invoke_dispatch`,
+    /// never a bundle-runtime literal. A bundle-chosen Discord channel id
+    /// would let any bundle holding this capability post into *any*
+    /// channel the shared bot account is a member of, cluster-wide --
+    /// crossing every tenant/community boundary this capability set is
+    /// otherwise built to hold (module doc, `crate::hop`'s D30 tenant
+    /// wall). Replying only into the channel the triggering event actually
+    /// came from closes that off by construction, the same way `crate::
+    /// senders::discord_webhook_url_from_config`'s doc reasons about a
+    /// bundle-chosen webhook URL.
+    async fn handle_discord_relay(
+        &self,
+        scope: &InvokeScope,
+        text: &str,
+    ) -> Result<serde_json::Value, HostResultError> {
+        let Some(discord) = &self.discord else {
+            return Err(denied(
+                "relay_unavailable",
+                "discord relay is not configured on this stage (DISCORD_BOT_TOKEN unset)",
+            ));
+        };
+        let channel_id = scope.origin_channel_id.as_deref().ok_or_else(|| {
+            denied(
+                "invalid_args",
+                "discord relay requires an origin channel id on the delivered envelope",
+            )
+        })?;
+        if !is_discord_snowflake(channel_id) {
+            return Err(denied(
+                "invalid_args",
+                "discord relay origin channel id is not a valid snowflake",
+            ));
+        }
+
+        // Spec §8.2 steps 6-7's SSRF-pinning discipline, reused here even
+        // though `discord.com` is a compiled-in host rather than a
+        // bundle-declared one (`crate::egress::is_forbidden_address`'s doc):
+        // defense in depth against DNS-rebinding this process's own
+        // trusted egress path onto an internal address.
+        let pinned_addr = resolve_discord_address().await?;
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
+        let body = serde_json::json!({ "content": text })
+            .to_string()
+            .into_bytes();
+        let outbound_bytes = body.len() as u64;
+        let request = crate::egress::TransportRequest {
+            method: "POST".to_string(),
+            url,
+            pinned_addr,
+            headers: vec![
+                (
+                    "Authorization".to_string(),
+                    format!("Bot {}", discord.bot_token.expose()),
+                ),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ],
+            body: Some(body),
+        };
+        let response = discord
+            .transport
+            .send(
+                request,
+                DISCORD_RELAY_TIMEOUT,
+                DISCORD_RELAY_MAX_RESPONSE_BYTES,
+            )
+            .await?;
+        if !(200..300).contains(&response.status) {
+            return Err(denied(
+                "relay_unavailable",
+                format!("discord API returned status {}", response.status),
+            ));
+        }
+
+        // spec §5.12/D31: "host calls by kind" -- see the `usage` field's
+        // doc for why `workstream_id` is an empty placeholder here.
+        self.usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_relay_call(
+                &scope.tenant,
+                scope.community.as_deref(),
+                "",
+                &scope.app_id,
+                outbound_bytes,
+            );
+        Ok(serde_json::json!({"sent": true, "provider": "discord"}))
     }
 
     fn handle_clock(&self, op: &str) -> Result<serde_json::Value, HostResultError> {
@@ -475,6 +689,60 @@ mod tests {
             tenant: "acme".to_string(),
             community: Some("main".to_string()),
             app_id: "waddles.bot.commands.default".to_string(),
+            origin_channel_id: None,
+        }
+    }
+
+    /// Same as [`scope`] but carrying an origin channel id, as
+    /// `crate::dispatch::invoke_dispatch` would populate it from a real
+    /// inbound Discord event's `event.source.channel_id`.
+    fn discord_scope() -> InvokeScope {
+        InvokeScope {
+            origin_channel_id: Some("123456789012345678".to_string()),
+            ..scope()
+        }
+    }
+
+    /// Mirrors `crate::egress`'s own `FakeTransport` test pattern (module
+    /// doc's own `HttpTransport` split) so the Discord relay send is
+    /// unit-testable with no live network access: records every request it
+    /// is asked to send, then replies with a queued response (defaulting to
+    /// a bare `200 {}` when none is queued).
+    #[derive(Default)]
+    struct FakeDiscordTransport {
+        requests: Mutex<Vec<crate::egress::TransportRequest>>,
+        responses: Mutex<Vec<Result<crate::egress::TransportResponse, HostResultError>>>,
+    }
+
+    impl FakeDiscordTransport {
+        fn queue(&self, resp: Result<crate::egress::TransportResponse, HostResultError>) {
+            self.responses.lock().unwrap().push(resp);
+        }
+    }
+
+    impl crate::egress::HttpTransport for FakeDiscordTransport {
+        fn send<'a>(
+            &'a self,
+            req: crate::egress::TransportRequest,
+            _timeout: std::time::Duration,
+            _max_response_bytes: usize,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<crate::egress::TransportResponse, HostResultError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            self.requests.lock().unwrap().push(req);
+            let next = self.responses.lock().unwrap().pop().unwrap_or_else(|| {
+                Ok(crate::egress::TransportResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: b"{}".to_vec(),
+                    truncated: false,
+                })
+            });
+            Box::pin(async move { next })
         }
     }
 
@@ -599,6 +867,11 @@ mod tests {
 
     #[tokio::test]
     async fn relay_send_rejects_unknown_provider() {
+        // "discord" used to be this test's rejected example before it
+        // joined `RELAY_PROVIDERS` in this landing -- "slack" is the next
+        // platform `crate::senders::Platform` names but that has no relay
+        // path wired (`crate::senders::sender_status` still reports it a
+        // `PendingSeam`), so it stays a genuinely-unknown relay provider.
         let caps = caps(FakeRelayQueue::default());
         let err = caps
             .handle(
@@ -606,7 +879,7 @@ mod tests {
                 call(
                     CapabilityKind::Relay,
                     "send",
-                    serde_json::json!({"provider": "discord", "message_json": r#"{"channel":"c","text":"hi"}"#}),
+                    serde_json::json!({"provider": "slack", "message_json": r#"{"channel":"c","text":"hi"}"#}),
                 ),
             )
             .await
@@ -696,6 +969,222 @@ mod tests {
                     CapabilityKind::Relay,
                     "send",
                     serde_json::json!({"provider": "twitch", "message_json": r#"{"channel":"c","text":"hi"}"#}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "relay_unavailable");
+    }
+
+    /// **Proves the design decision this landing makes**: a Discord relay
+    /// send never touches `self.relay_queue` (no Valkey `LPUSH`, no
+    /// dependency on svc-ingest's outbound drain) -- it hits Discord's REST
+    /// API directly, through the same `crate::egress::HttpTransport`
+    /// abstraction (`http.send`'s own guard) uses, mocked exactly the way
+    /// `crate::egress`'s own tests mock it.
+    #[tokio::test]
+    async fn relay_send_discord_posts_to_the_discord_rest_api() {
+        let transport = Arc::new(FakeDiscordTransport::default());
+        let caps = caps(FakeRelayQueue::default()).with_discord(
+            transport.clone(),
+            crate::config::Secret::new("test-bot-token"),
+        );
+
+        let result = caps
+            .handle(
+                &discord_scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "discord", "message_json": r#"{"text":"pong"}"#}),
+                ),
+            )
+            .await
+            .expect("discord relay send succeeds");
+        assert_eq!(result["sent"], serde_json::json!(true));
+        assert_eq!(result["provider"], serde_json::json!("discord"));
+        // Never LPUSHed -- the whole point of this design.
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let req = &requests[0];
+        assert_eq!(req.method, "POST");
+        assert_eq!(
+            req.url,
+            "https://discord.com/api/v10/channels/123456789012345678/messages"
+        );
+        assert!(req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == "Bot test-bot-token"));
+        assert!(req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Content-Type" && v == "application/json"));
+        let body = req.body.as_ref().expect("body present");
+        let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(parsed["content"], "pong");
+    }
+
+    /// A bundle-supplied `channel` in `message_json` is silently ignored for
+    /// Discord -- `handle_discord_relay`'s whole reason for existing is that
+    /// the channel comes from the envelope, never bundle args.
+    #[tokio::test]
+    async fn relay_send_discord_ignores_a_bundle_supplied_channel() {
+        let transport = Arc::new(FakeDiscordTransport::default());
+        let caps = caps(FakeRelayQueue::default()).with_discord(
+            transport.clone(),
+            crate::config::Secret::new("test-bot-token"),
+        );
+
+        caps.handle(
+            &discord_scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "discord", "message_json": r#"{"channel":"999999999999999999","text":"pong"}"#}),
+            ),
+        )
+        .await
+        .expect("discord relay send succeeds");
+
+        let requests = transport.requests.lock().unwrap();
+        // The scope's origin channel (123...678), never the bundle's
+        // "999...999".
+        assert!(requests[0].url.contains("123456789012345678"));
+        assert!(!requests[0].url.contains("999999999999999999"));
+    }
+
+    /// Multi-line Discord text is sent verbatim -- unlike Twitch, no
+    /// IRC-line CRLF sanitization applies (Discord is a JSON-bodied REST
+    /// call, not a line-oriented wire protocol; stripping newlines would
+    /// mangle a legitimate multi-line message).
+    #[tokio::test]
+    async fn relay_send_discord_does_not_strip_newlines_from_text() {
+        let transport = Arc::new(FakeDiscordTransport::default());
+        let caps = caps(FakeRelayQueue::default()).with_discord(
+            transport.clone(),
+            crate::config::Secret::new("test-bot-token"),
+        );
+
+        caps.handle(
+            &discord_scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "discord", "message_json": r#"{"text":"line1\nline2"}"#}),
+            ),
+        )
+        .await
+        .expect("discord relay send succeeds");
+
+        let requests = transport.requests.lock().unwrap();
+        let body = requests[0].body.as_ref().unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(parsed["content"], "line1\nline2");
+    }
+
+    #[tokio::test]
+    async fn relay_send_discord_records_a_relay_call_against_the_usage_batcher() {
+        let usage = Arc::new(Mutex::new(UsageBatcher::new()));
+        let transport = Arc::new(FakeDiscordTransport::default());
+        let caps = caps_with_usage(FakeRelayQueue::default(), Arc::clone(&usage))
+            .with_discord(transport, crate::config::Secret::new("test-bot-token"));
+
+        caps.handle(
+            &discord_scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "discord", "message_json": r#"{"text":"pong"}"#}),
+            ),
+        )
+        .await
+        .expect("discord relay send succeeds");
+
+        assert_eq!(usage.lock().unwrap().pending_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn relay_send_discord_is_unavailable_when_not_configured() {
+        // No `.with_discord(...)` -- the graceful-degradation default.
+        let caps = caps(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &discord_scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "discord", "message_json": r#"{"text":"pong"}"#}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "relay_unavailable");
+    }
+
+    #[tokio::test]
+    async fn relay_send_discord_rejects_a_missing_origin_channel() {
+        let transport = Arc::new(FakeDiscordTransport::default());
+        let caps = caps(FakeRelayQueue::default())
+            .with_discord(transport, crate::config::Secret::new("test-bot-token"));
+        // `scope()` (not `discord_scope()`) carries `origin_channel_id: None`.
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "discord", "message_json": r#"{"text":"pong"}"#}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn relay_send_discord_rejects_a_malformed_origin_channel() {
+        let transport = Arc::new(FakeDiscordTransport::default());
+        let caps = caps(FakeRelayQueue::default())
+            .with_discord(transport, crate::config::Secret::new("test-bot-token"));
+        let bad_scope = InvokeScope {
+            origin_channel_id: Some("not-a-snowflake".to_string()),
+            ..scope()
+        };
+        let err = caps
+            .handle(
+                &bad_scope,
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "discord", "message_json": r#"{"text":"pong"}"#}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn relay_send_discord_propagates_a_non_2xx_discord_response() {
+        let transport = Arc::new(FakeDiscordTransport::default());
+        transport.queue(Ok(crate::egress::TransportResponse {
+            status: 401,
+            headers: vec![],
+            body: b"{\"message\":\"401: Unauthorized\"}".to_vec(),
+            truncated: false,
+        }));
+        let caps = caps(FakeRelayQueue::default())
+            .with_discord(transport, crate::config::Secret::new("bad-token"));
+        let err = caps
+            .handle(
+                &discord_scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "discord", "message_json": r#"{"text":"pong"}"#}),
                 ),
             )
             .await

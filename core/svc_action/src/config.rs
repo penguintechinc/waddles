@@ -314,6 +314,20 @@ pub struct Config {
     /// that leniency off of, so requiring the value unconditionally is the
     /// safe default.
     pub secret_key: Secret,
+    /// `DISCORD_BOT_TOKEN` (env-only, optional): the bot token
+    /// `crate::capabilities::StageCapabilities::with_discord` authenticates
+    /// the Discord relay send with (`Authorization: Bot <token>`). This is
+    /// the **same secret key** `templates/secrets.yaml` already renders for
+    /// the legacy Python `svc-action` and for `svc-ingest-rust`'s Discord
+    /// Gateway connection (`.Values.oauth.discord.botToken` -> the
+    /// `DISCORD_BOT_TOKEN` key in the shared `{fullname}-secrets` Secret) --
+    /// wiring the Discord relay provider onto this pod needs only a new env
+    /// mount in `templates/svc-action-rust.yaml` pointing at that existing
+    /// key, no new chart secret. `None` when unset -- not every deployment
+    /// enables Discord, and a relay send for "discord" is then refused
+    /// `relay_unavailable` (graceful degradation, not a startup failure;
+    /// mirrors `envelope_binding_keys` above).
+    pub discord_bot_token: Option<Secret>,
 }
 
 impl fmt::Debug for Config {
@@ -326,6 +340,10 @@ impl fmt::Debug for Config {
                 &self.envelope_binding_keys.as_ref().map(|_| "<redacted>"),
             )
             .field("secret_key", &Secret::new(""))
+            .field(
+                "discord_bot_token",
+                &self.discord_bot_token.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -347,11 +365,13 @@ impl Config {
         let db_password = Secret::new(env_required("DB_PASSWORD")?);
         let envelope_binding_keys = std::env::var("ENVELOPE_BINDING_KEYS").ok().map(Secret::new);
         let secret_key = Secret::new(env_required("SECRET_KEY")?);
+        let discord_bot_token = std::env::var("DISCORD_BOT_TOKEN").ok().map(Secret::new);
         Ok(Self {
             cli,
             db_password,
             envelope_binding_keys,
             secret_key,
+            discord_bot_token,
         })
     }
 }
@@ -375,6 +395,7 @@ mod tests {
         unsafe {
             std::env::remove_var("DB_PASSWORD");
             std::env::remove_var("SECRET_KEY");
+            std::env::remove_var("DISCORD_BOT_TOKEN");
         }
     }
 
@@ -593,6 +614,38 @@ mod tests {
     }
 
     #[test]
+    fn discord_bot_token_is_none_when_unset() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_secret_env();
+        unsafe {
+            std::env::set_var("DB_PASSWORD", "test-db-pass");
+            std::env::set_var("SECRET_KEY", "test-jwt-signing-secret");
+        }
+        let cli = CliConfig::parse_from(["svc-action"]);
+        let cfg = Config::from_cli(cli).expect("secrets are set");
+        assert!(cfg.discord_bot_token.is_none());
+        clear_secret_env();
+    }
+
+    #[test]
+    fn discord_bot_token_loaded_from_env_when_present() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_secret_env();
+        unsafe {
+            std::env::set_var("DB_PASSWORD", "test-db-pass");
+            std::env::set_var("SECRET_KEY", "test-jwt-signing-secret");
+            std::env::set_var("DISCORD_BOT_TOKEN", "test-discord-bot-token");
+        }
+        let cli = CliConfig::parse_from(["svc-action"]);
+        let cfg = Config::from_cli(cli).expect("secrets are set");
+        assert_eq!(
+            cfg.discord_bot_token.as_ref().map(Secret::expose),
+            Some("test-discord-bot-token")
+        );
+        clear_secret_env();
+    }
+
+    #[test]
     fn debug_never_prints_secret_bytes() {
         let secret = Secret::new("super-secret-value");
         let rendered = format!("{secret:?}");
@@ -608,12 +661,14 @@ mod tests {
         unsafe {
             std::env::set_var("DB_PASSWORD", "super-secret-db-pass");
             std::env::set_var("SECRET_KEY", "super-secret-jwt-signing-key");
+            std::env::set_var("DISCORD_BOT_TOKEN", "super-secret-discord-bot-token");
         }
         let cli = CliConfig::parse_from(["svc-action"]);
         let cfg = Config::from_cli(cli).expect("secrets are set");
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("super-secret-db-pass"));
         assert!(!rendered.contains("super-secret-jwt-signing-key"));
+        assert!(!rendered.contains("super-secret-discord-bot-token"));
         clear_secret_env();
     }
 
