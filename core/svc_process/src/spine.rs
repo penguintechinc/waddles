@@ -37,7 +37,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use penguin_bundle_host::wire::{ErrorCode, ExportKind, InvokeBody, Message, TraceContext};
+use penguin_bundle_host::wire::{
+    ErrorCode, ExportKind, InvokeBody, LoadBody, LoadLimits, LoadedBody, Message, TraceContext,
+};
 use penguin_spine::{
     Delivered, DlqError, DlqErrorKind, Grant, GroupReader, PlatformEvent, Scope, SpineClient,
     SpineConfig, SpineError, SpineMetrics, Stage, StageEnvelope,
@@ -118,6 +120,78 @@ pub enum InvokeError {
     ExecutorError { code: ErrorCode, message: String },
     #[error("transform payload encode/decode failed: {0}")]
     MalformedPayload(String),
+}
+
+/// Sends `load` for one bundle over `conn` and returns the executor's
+/// `loaded` reply (spec §6.6). A direct port of `core/svc_action/src/
+/// dispatch.rs::ensure_loaded` (the M3 reference this crate's own module
+/// doc names as the drain-loop shape to mirror) -- identical wire-level
+/// behavior, just returning this module's own [`InvokeError`] instead of
+/// `svc_action::dispatch::InvokeError`.
+pub async fn ensure_loaded(
+    conn: &Connection,
+    app_id: &str,
+    version: &str,
+    digest: &str,
+    component_key: &str,
+    sidecar_key: &str,
+    limits: LoadLimits,
+) -> Result<LoadedBody, InvokeError> {
+    let reply = conn
+        .request(Message::Load(LoadBody {
+            app_id: app_id.to_string(),
+            version: version.to_string(),
+            digest: digest.to_string(),
+            component_key: component_key.to_string(),
+            sidecar_key: sidecar_key.to_string(),
+            capabilities: vec![],
+            limits,
+        }))
+        .await?;
+    match reply.message {
+        Message::Loaded(body) => Ok(body),
+        Message::Error(e) => Err(InvokeError::ExecutorError {
+            code: e.code,
+            message: e.message,
+        }),
+        _ => Err(InvokeError::MalformedPayload(
+            "expected loaded or error frame".to_string(),
+        )),
+    }
+}
+
+/// Tracks whether [`ProcessDeps::digest`] has already been successfully
+/// `load`ed onto the currently active executor connection, so
+/// [`handle_delivered`] sends `load` at most once per (connection, digest)
+/// pair rather than on every single invoke (spec §7.6's `load` path
+/// re-fetches from the bucket and re-instantiates the WASM component --
+/// far too expensive to repeat per event). A freshly (re)connected
+/// executor always starts with nothing loaded (spec §7.5), so identity is
+/// tracked by `Arc::ptr_eq` against the stored [`Connection`]: `crate::
+/// host_api::ConnectionRegistry::set_active` constructs a brand-new
+/// `Connection` for every accepted TCP connection, so a reconnect is
+/// always a different `Arc` allocation and this cache correctly "forgets"
+/// the stale load.
+#[derive(Default)]
+pub struct LoadState {
+    loaded: std::sync::Mutex<Option<(Arc<Connection>, String)>>,
+}
+
+impl LoadState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn is_loaded_on(&self, connection: &Arc<Connection>, digest: &str) -> bool {
+        matches!(
+            &*self.loaded.lock().unwrap_or_else(|e| e.into_inner()),
+            Some((c, d)) if Arc::ptr_eq(c, connection) && d == digest
+        )
+    }
+
+    fn mark_loaded(&self, connection: Arc<Connection>, digest: String) {
+        *self.loaded.lock().unwrap_or_else(|e| e.into_inner()) = Some((connection, digest));
+    }
 }
 
 /// The bundle's `transform` export's classified return value (spec §6.5:
@@ -303,11 +377,30 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `UNKNOWN_BUNDLE`, mapped to `DlqErrorKind::BundleError` like any
     /// other unloaded-bundle invoke -- the same "caller's responsibility
     /// until the poll client lands" scope `svc_action::dispatch::
-    /// ensure_loaded`'s doc comment documents for its own crate.
+    /// ensure_loaded`'s doc comment documents for its own crate. Sent via
+    /// [`ensure_loaded`] before the first invoke that needs it -- see
+    /// [`ProcessDeps::load_state`].
     pub digest: String,
+    /// `PROCESS_BUNDLE_VERSION` -- the `load` frame's `version` field
+    /// (spec §6.6). Distinct from `digest`: the executor's `loaded` reply
+    /// echoes both back, and hot-swap reconciliation (TODO(M4+)) keys off
+    /// the digest, not the version string.
+    pub version: String,
+    /// `PROCESS_BUNDLE_COMPONENT_KEY` -- the bucket key `ensure_loaded`
+    /// asks the executor to fetch the compiled component from (spec §7.6
+    /// step 3's naming convention; `crate::config::CliConfig`'s doc names
+    /// the source poll this interim substitute stands in for).
+    pub component_key: String,
+    /// `PROCESS_BUNDLE_SIDECAR_KEY` -- the bucket key for the bundle's
+    /// manifest sidecar, same convention as [`ProcessDeps::component_key`].
+    pub sidecar_key: String,
     pub key_ring: KeyRing,
     pub connections: Arc<ConnectionRegistry>,
     pub call_timeout_ms: u64,
+    /// Caches whether [`ProcessDeps::digest`] is already loaded on the
+    /// currently active connection -- see [`LoadState`]'s doc for why this
+    /// exists (never re-`load` on every invoke).
+    pub load_state: Arc<LoadState>,
     /// See `crate::builtins::resolve_cross_app_route`'s doc for the
     /// `target_app_id -> approved tenant` shape and its TODO(M4+) real
     /// source.
@@ -334,15 +427,21 @@ pub struct ProcessDeps<S: SpineOps> {
 /// matching `svc_action::dispatch::handle_delivered`'s identical
 /// error-handling shape.
 ///
+/// Sends [`ensure_loaded`] for [`ProcessDeps::digest`] before the first
+/// `transform` invoke that needs it (cached per connection by
+/// [`ProcessDeps::load_state`], see that type's doc for why) -- this is
+/// what actually makes the executor hold the configured bundle at all;
+/// without it every invoke would hit `UNKNOWN_BUNDLE` because nothing
+/// upstream of this loop ever sends `load` (bug fix: previously the only
+/// callers of `PROCESS_BUNDLE_*` were this crate's own default-value unit
+/// tests).
+///
 /// **Not yet wired here (documented, not silently skipped):** the
 /// content-moderation gate (`crate::builtins::run_moderation_gate`, an
 /// honest TODO(M4+) seam that always returns "no match" today, so wiring
 /// it in would currently be a no-op); spec §5.3's consumer-side `consumes.
 /// event_types`/`filters` cheap-skip optimization (needs the bundle's
-/// resolved manifest, itself blocked on the same distribution poll gap);
-/// and calling `svc_action::dispatch`-style `ensure_loaded` before invoke
-/// (same "caller's responsibility until the poll lands" scope as that
-/// crate's own M3 landing -- see [`ProcessDeps::digest`]'s doc).
+/// resolved manifest, itself blocked on the same distribution poll gap).
 async fn handle_delivered<S: SpineOps>(
     d: &Delivered,
     deps: &ProcessDeps<S>,
@@ -385,6 +484,41 @@ async fn handle_delivered<S: SpineOps>(
         };
         return deps.spine.dead_letter(d, &err).await;
     };
+
+    // Send `load` at most once per (connection, digest) -- see
+    // `LoadState`'s doc. An empty digest means no bundle is configured yet
+    // (`PROCESS_BUNDLE_DIGEST` unset): skip straight to invoking, exactly
+    // as before this fix, so the executor's own `UNKNOWN_BUNDLE` reply
+    // still drives the existing `BundleError` DLQ path below.
+    if !deps.digest.is_empty() && !deps.load_state.is_loaded_on(&connection, &deps.digest) {
+        if let Err(e) = ensure_loaded(
+            &connection,
+            &deps.app_id,
+            &deps.version,
+            &deps.digest,
+            &deps.component_key,
+            &deps.sidecar_key,
+            LoadLimits {
+                timeout_ms: deps.call_timeout_ms,
+                memory_mb: 64,
+            },
+        )
+        .await
+        {
+            tracing::error!(app_id = %deps.app_id, digest = %deps.digest, error = %e, "bundle load failed, dead-lettering");
+            let err = DlqError {
+                kind: DlqErrorKind::BundleError,
+                code: "LOAD_FAILED".to_string(),
+                message: e.to_string(),
+                detail: None,
+                artifact_digest: Some(deps.digest.clone()),
+                consumer_id: deps.consumer_id.clone(),
+            };
+            return deps.spine.dead_letter(d, &err).await;
+        }
+        deps.load_state
+            .mark_loaded(Arc::clone(&connection), deps.digest.clone());
+    }
 
     // Per-invoke capability scope (see `crate::host_api`/`crate::
     // capabilities`'s per-invoke-scoping design): built fresh from THIS
@@ -835,10 +969,21 @@ mod tests {
         let metrics = Arc::new(RecordingSpineMetrics::default());
         let deps = ProcessDeps {
             app_id: "waddles.bot.commands.default".to_string(),
-            digest: "sha256:00".to_string(),
+            // Empty by default -- see `ProcessDeps::digest`'s doc: an empty
+            // digest skips `ensure_loaded` entirely, which is what every
+            // pre-existing test in this module (fixed before this fix's
+            // `Load` call was added) already assumes of its fake executor
+            // (`connected_registry_with_fake_executor` answers exactly one
+            // `invoke`, no `load`). Tests exercising `ensure_loaded` itself
+            // set `digest`/`component_key`/`sidecar_key` explicitly.
+            digest: String::new(),
+            version: "1".to_string(),
+            component_key: String::new(),
+            sidecar_key: String::new(),
             key_ring: test_ring(),
             connections,
             call_timeout_ms: 2000,
+            load_state: Arc::new(LoadState::new()),
             approved_targets: HashMap::new(),
             consumer_id: "test-pod-consumer".to_string(),
             spine,
@@ -961,6 +1106,284 @@ mod tests {
         let registry = Arc::new(ConnectionRegistry::new());
         registry.set_active(connection);
         registry
+    }
+
+    /// Drives a fake executor over an in-memory duplex that expects `load`
+    /// **before** any `invoke`: completes the `hello`/`hello-ok` handshake,
+    /// answers exactly one `load` with `loaded` (recording the `LoadBody`
+    /// it received onto `load_count`/`last_load`), then answers
+    /// `invoke_count` `invoke`s in sequence with `result.payload =
+    /// response`. Panics if an `invoke` arrives before the `load` --
+    /// exactly the shape a real executor would reject with
+    /// `UNKNOWN_BUNDLE` (spec §7.6), proving `handle_delivered` sends
+    /// `load` first rather than skipping straight to `invoke` (Blocker B).
+    async fn connected_registry_with_fake_executor_expecting_load_first(
+        response: serde_json::Value,
+        invoke_count: usize,
+    ) -> (
+        Arc<ConnectionRegistry>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<Mutex<Option<LoadBody>>>,
+    ) {
+        use crate::capabilities::DenyAllCapabilities;
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, Frame, HelloBody, HelloOkBody, ResultBody, SandboxInfo,
+        };
+
+        let load_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let last_load = Arc::new(Mutex::new(None));
+        let load_count_task = Arc::clone(&load_count);
+        let last_load_task = Arc::clone(&last_load);
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            let hello_ok = read_frame(&mut executor_io).await.unwrap();
+            assert!(matches!(hello_ok.message, Message::HelloOk(_)));
+
+            let load = read_frame(&mut executor_io).await.unwrap();
+            let (load_id, load_body) = match load.message {
+                Message::Load(b) => (load.id, b),
+                other => panic!("expected load before any invoke, got {other:?}"),
+            };
+            load_count_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *last_load_task.lock().unwrap() = Some(load_body.clone());
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    load_id,
+                    Message::Loaded(LoadedBody {
+                        app_id: load_body.app_id,
+                        digest: load_body.digest,
+                        precompile_ms: 1,
+                        exports: vec!["transform".to_string()],
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+
+            for _ in 0..invoke_count {
+                let invoke = read_frame(&mut executor_io).await.unwrap();
+                write_frame(
+                    &mut executor_io,
+                    &Frame::new(
+                        invoke.id,
+                        Message::Result(ResultBody {
+                            payload: response.clone(),
+                            duration_ms: 1,
+                            fuel_used: 0,
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+            }
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-process".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let registry = Arc::new(ConnectionRegistry::new());
+        registry.set_active(connection);
+        (registry, load_count, last_load)
+    }
+
+    /// **The regression test for Blocker B**: `handle_delivered` must send
+    /// a real `load` frame -- carrying `ProcessDeps::app_id`/`version`/
+    /// `digest`/`component_key`/`sidecar_key` -- to the executor before its
+    /// first `invoke` for a configured bundle. Before this fix, nothing in
+    /// this crate ever sent `load` at all (`PROCESS_BUNDLE_*` were read by
+    /// `crate::config` and used nowhere else), so every invoke would have
+    /// hit the executor's real `UNKNOWN_BUNDLE` error in production; this
+    /// test's fake executor panics on that exact ordering violation instead
+    /// of silently accepting it.
+    #[tokio::test]
+    async fn handle_delivered_sends_load_before_the_first_invoke_for_a_configured_bundle() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let (connections, load_count, last_load) =
+            connected_registry_with_fake_executor_expecting_load_first(serde_json::json!(null), 1)
+                .await;
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.digest =
+            "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string();
+        deps.version = "3".to_string();
+        deps.component_key = "bundles/waddles.bot.commands.default/3/deadbeef.wasm".to_string();
+        deps.sidecar_key = "bundles/waddles.bot.commands.default/3/deadbeef.json".to_string();
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert_eq!(
+            load_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly one load must be sent"
+        );
+        let load_body = last_load
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("load must have been observed");
+        assert_eq!(load_body.app_id, deps.app_id);
+        assert_eq!(load_body.version, "3");
+        assert_eq!(load_body.digest, deps.digest);
+        assert_eq!(load_body.component_key, deps.component_key);
+        assert_eq!(load_body.sidecar_key, deps.sidecar_key);
+
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+    }
+
+    /// Sending `load` on every single invoke would re-fetch the bundle from
+    /// the bucket and re-instantiate the WASM component per event -- far
+    /// too expensive (see [`LoadState`]'s doc). Two entries handled in
+    /// sequence on the same connection must trigger exactly one `load`.
+    #[tokio::test]
+    async fn handle_delivered_sends_load_at_most_once_per_connection_for_two_entries() {
+        let ring = test_ring();
+        let d1 = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let mut d2 = d1.clone();
+        d2.entry_id = "1234567890-1".to_string();
+
+        let (connections, load_count, _last_load) =
+            connected_registry_with_fake_executor_expecting_load_first(serde_json::json!(null), 2)
+                .await;
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.digest = "sha256:00".to_string();
+        deps.component_key = "k".to_string();
+        deps.sidecar_key = "s".to_string();
+
+        handle_delivered(&d1, &deps).await.unwrap();
+        handle_delivered(&d2, &deps).await.unwrap();
+
+        assert_eq!(
+            load_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "load must be sent exactly once across two entries on the same connection"
+        );
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 2);
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+    }
+
+    /// A `load` failure (executor-reported error) must dead-letter as
+    /// `BundleError` rather than proceeding to `invoke` against a bundle
+    /// the executor never actually holds.
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_as_bundle_error_when_load_fails() {
+        use crate::capabilities::DenyAllCapabilities;
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, ErrorBody, Frame, HelloBody, HelloOkBody, SandboxInfo,
+        };
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            read_frame(&mut executor_io).await.unwrap();
+
+            let load = read_frame(&mut executor_io).await.unwrap();
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    load.id,
+                    Message::Error(ErrorBody {
+                        code: ErrorCode::LoadFailed,
+                        message: "bucket fetch failed".to_string(),
+                        detail: None,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-process".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let registry = Arc::new(ConnectionRegistry::new());
+        registry.set_active(connection);
+
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, registry);
+        deps.digest = "sha256:00".to_string();
+        deps.component_key = "k".to_string();
+        deps.sidecar_key = "s".to_string();
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert!(deps.spine.acked.lock().unwrap().is_empty());
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, DlqErrorKind::BundleError);
     }
 
     #[tokio::test]
