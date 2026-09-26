@@ -108,12 +108,24 @@ penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", re
 penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f642e0695046386ca674e47eb9e6f7d6283ac531", package = "penguin-licensing", version = "=0.1.0" }
 # `penguin-connector-twitch`: IRC chat receive (`src/ingest/twitch.rs`) and
 # the outbound relay sender (`src/outbound.rs`, `TwitchIrcSender`) -- rev
-# carries the pin-alignment fix, penguin-libs PR #98 (see the comment
-# above). EventSub webhook verification remains a separate `// TODO(M5)`
-# seam.
-penguin-connector-twitch = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "a542873b8b594b530f99e1eab48e479d705b5100", package = "penguin-connector-twitch", version = "=0.1.0" }
+# carries penguin-libs PR #102 (discord message-drop fix, see the comment
+# below) fast-forwarded past the prior pin-alignment fix, PR #98. No
+# functional change to twitch itself; kept in lockstep with
+# penguin-connector-discord's rev below rather than diverging the two
+# same-repo git pins. EventSub webhook verification remains a separate
+# `// TODO(M5)` seam.
+penguin-connector-twitch = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "4a7619720615ea0df6731f5ae278eb8b03021ca6", package = "penguin-connector-twitch", version = "=0.1.0" }
 # `penguin-connector-discord`: Gateway chat receive (`src/ingest/discord.rs`).
-penguin-connector-discord = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "a542873b8b594b530f99e1eab48e479d705b5100", package = "penguin-connector-discord", version = "=0.1.0" }
+# rev carries penguin-libs PR #102: `normalize_message_create` was
+# silently dropping every real, non-self message whenever Discord's
+# `MESSAGE_CREATE` payload didn't carry `author.username`/message `id`/
+# `content` as a parseable string (all three were hard-required via `?`,
+# same as `author.id`/`channel_id`) -- a live-confirmed incident where a
+# real human `!ping` (author id != the bot's own id, self-filter correctly
+# not triggering) never reached svc-process. Those three fields are now
+# read leniently (empty-string default); only `author`/`author.id`/
+# `channel_id` remain hard-required.
+penguin-connector-discord = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "4a7619720615ea0df6731f5ae278eb8b03021ca6", package = "penguin-connector-discord", version = "=0.1.0" }
 # Named directly (not just transitive via penguin-connector-discord) only
 # because `src/ingest/discord.rs`'s `GatewayConnector for
 # DiscordGatewayReceiver` impl names `tokio_tungstenite::MaybeTlsStream` in
