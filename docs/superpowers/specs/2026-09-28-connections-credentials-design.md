@@ -1,17 +1,17 @@
 # Waddles v3 CONNECTIONS Registry, Credentials & Relay Authorization — Design
 
-**Date:** 2026-09-28 (rev. 2 — platform limits verified against official docs, broker HA, revocation latency, multi-tenant isolation, kill-switch flags)
+**Date:** 2026-09-28 (rev. 5 — Twitch redesigned on EventSub webhook transport built on the existing `core/svc_ingest/eventsub.py` receiver, generic per-app webhook receiver added with asymmetric-first signing (RFC 9421/ES256, Standard Webhooks v1a/Ed25519, HMAC v1 as opt-in fallback), outbound webhook signing, IRC scope narrowed to a bounded pool, subscription management moved to a control-plane reconciler)
 **Status:** Proposed design
-**Scope:** `hub_api` (registry RW + credential broker), `core/svc_ingest`, `core/svc_action`, `core/svc_process` (registry RO consumption), `core/bundle_executor` (relay-authz enforcement point)
-**Principle:** hub-api is the only read-write path for connections and credentials. The data plane (`svc_ingest`, `svc_action`, `svc_process`) reads connection metadata from a read-only replica/role and never sees plaintext secrets directly — it resolves live credentials through a broker call.
+**Scope:** `hub_api` (registry RW + credential broker + Twitch subscription reconciler), `core/svc_ingest` (both webhook receivers + IRC pool + Discord Gateway), `core/svc_action` (outbound relay/authz + Twitch Send Chat Message calls), `core/svc_process` (registry RO consumption), `core/bundle_executor` (relay-authz enforcement point)
+**Principle:** hub-api is the only read-write path for connections and credentials. The data plane reads connection metadata from a read-only replica/role and never sees plaintext secrets directly — it resolves live credentials through a broker call.
 
-**Sizing target (design math below is built to this):** ~300 tenants, ~20,000 communities, ~60,000 app-bundle installs, ~10,000 connections/sources split (illustratively) 6,000 Discord guilds / 3,500 Twitch channels / 500 other platforms.
+**Sizing target:** ~300 tenants, ~20,000 communities, ~60,000 app-bundle installs, ~10,000 connections/sources split (illustratively) 6,000 Discord guilds / 3,500 Twitch channels / 500 other platforms, with explicit headroom to 10,000 total Twitch channels.
 
 ---
 
 ## 1. Registry schema evolution: `ingest_sources` → `connections`
 
-`ingest_sources` (migration 0020) is inbound-only, has no `direction`, `status`, `external_kind`, or `created_by`, and its `secret_ciphertext`/`secret_iv` columns sit in the same table the RO data-plane roles will eventually be granted `SELECT` on — a plaintext-adjacent column can never live in a table a replica-scoped role reads. `connections` generalizes and replaces it; outbound-only rows (e.g. a Twitch bot account with no inbound IRC receiver) and platform-shared rows (bot tokens configured once, not per-tenant) both need a home this table didn't have.
+`ingest_sources` (migration 0020) is inbound-only, has no `direction`, `status`, `external_kind`, or `created_by`, and its `secret_ciphertext`/`secret_iv` columns sit in the same table the RO data-plane roles will eventually be granted `SELECT` on. `connections` generalizes and replaces it — including a new `kind='webhook'` row shape for the generic per-app webhook receiver (§4.2).
 
 ```sql
 -- migration 0026_connections_registry
@@ -19,9 +19,9 @@ CREATE TABLE connections (
     id BIGSERIAL PRIMARY KEY,
     tenant_id INTEGER NOT NULL REFERENCES tenants(id),
     community_id INTEGER REFERENCES communities(id),      -- NULL = tenant-wide
-    platform VARCHAR(50) NOT NULL,
-    external_kind VARCHAR(20) NOT NULL,                    -- 'guild' | 'channel' | 'account'
-    external_id VARCHAR(255) NOT NULL,                     -- guild id / twitch login / channel id
+    platform VARCHAR(50) NOT NULL,                         -- 'discord' | 'twitch' | 'webhook' | ...
+    external_kind VARCHAR(20) NOT NULL,                    -- 'guild' | 'channel' | 'account' | 'webhook'
+    external_id VARCHAR(255) NOT NULL,                     -- guild id / twitch broadcaster id / opaque webhook_id
     label VARCHAR(255) NOT NULL,
     direction VARCHAR(10) NOT NULL
         CHECK (direction IN ('inbound', 'outbound', 'both')),
@@ -29,127 +29,151 @@ CREATE TABLE connections (
         CHECK (status IN ('pending', 'healthy', 'degraded', 'error', 'disabled')),
     last_health_at TIMESTAMPTZ,
     last_health_error TEXT,
-    shard_assignment JSONB,        -- {"shard_id":3,"replica":"svc-ingest-1"} -- svc-ingest-owned, hub-api never interprets it
-    rate_limit_meta JSONB,         -- platform-specific budget bookkeeping (join budget, EventSub cost used, etc.)
-    credential_id BIGINT REFERENCES connection_credentials(id),  -- NULL = shared platform credential, not per-connection
-    mapping JSONB,
+    shard_assignment JSONB,        -- {"conduit_id":..,"shard_id":..,"replica":"svc-ingest-1"} -- svc-ingest-owned
+    rate_limit_meta JSONB,         -- platform-specific budget bookkeeping (EventSub cost observed, etc.)
+    credential_id BIGINT REFERENCES connection_credentials(id),  -- NULL = shared platform credential
+    mapping JSONB,                 -- for kind='webhook': bound app_id, event_type mapping
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    created_by VARCHAR(255) NOT NULL,   -- OIDC sub that registered it (admin or seeder service account)
+    created_by VARCHAR(255) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (tenant_id, platform, external_id, direction)
 );
 
-CREATE INDEX ix_connections_shard_scan ON connections (platform, enabled, id);      -- svc-ingest's sharding-assignment poll
-CREATE INDEX ix_connections_tenant_community ON connections (tenant_id, community_id);  -- admin list/webui
+CREATE INDEX ix_connections_shard_scan ON connections (platform, enabled, id);
+CREATE INDEX ix_connections_tenant_community ON connections (tenant_id, community_id);
 ```
 
 **Decisions**
 
-- **D1 — `connections` supersedes `ingest_sources`; migrate, don't dual-write.** Migration 0026 creates `connections`, backfills every `ingest_sources` row (`direction='inbound'`, `external_kind` derived from `platform`), then `ingest_source_service.py`'s callers move to a new `connection_service.py` in the same migration's PR. `ingest_sources` is dropped in a follow-up migration once `workstreams`' FK is repointed — kept one release behind as a safety window, never as a second source of truth.
-- **D2 — `credential_id` is a nullable FK, not inline columns.** Keeps secret material and rotation metadata in one narrow table (`connection_credentials`, §2) instead of spreading `secret_ciphertext`/`secret_iv`/expiry columns across `connections`, which is the table admin UIs list, filter and paginate — the RO role's grant surface for `connections` (metadata) must never overlap the grant surface for `connection_credentials` (secrets).
-- **D3 — `external_kind` disambiguates the id namespace per platform** (Discord guild id vs. channel id vs. a Twitch login) instead of a platform-specific column set, so adding a platform never means a migration.
-- **D4 — watermark poll, not a trigger-maintained counter.** Mirrors `core/bundle_active_set`'s `read_watermark`/`WatermarkTracker` (hash a cheap `(id, updated_at, enabled)` projection, compare to the last-seen hash, skip the full reload when unchanged) rather than inventing a second mechanism — `ix_connections_shard_scan` covers that projection query.
-- **Indexes at this scale need no partitioning.** ~10,000 `connections` rows and ~60,000-150,000 `app_source_bindings`-style rows (§3) are two to three orders of magnitude below where Postgres B-tree/partial-index performance degrades; partitioning is a documented future increment (§7), not a day-one need.
+- **D1 — `connections` supersedes `ingest_sources`; migrate, don't dual-write.** Backfill every `ingest_sources` row (`direction='inbound'`), then `ingest_source_service.py`'s callers move to `connection_service.py`. `ingest_sources` drops in a follow-up migration.
+- **D2 — `credential_id` is a nullable FK, not inline columns** — keeps secrets in one narrow table (§2), never in the table admin UIs list/paginate.
+- **D3 — `external_kind` disambiguates the id namespace per platform** (including `'webhook'` for opaque webhook ids, §4.2) so adding a platform/receiver type never means a migration.
+- **D4 — watermark poll, not a trigger-maintained counter** — mirrors `core/bundle_active_set`'s `read_watermark`/`WatermarkTracker`.
+- **No partitioning at this scale** — ~10,000 `connections` rows, orders of magnitude below where Postgres indexing degrades.
 
 ---
 
 ## 2. Credentials
 
-**Never plaintext in a replica-exposed table.** Three options considered:
+**Never plaintext in a replica-exposed table.**
 
-| Option | Mechanism | Verdict |
-|---|---|---|
-| A. Envelope encryption, RO-readable ciphertext | Per-tenant DEK wraps each secret; ciphertext lives in `connections`/a joined table any RO role can `SELECT` | **Rejected.** Ciphertext-at-rest is necessary but not sufficient — a compromised RO credential still exfiltrates every tenant's ciphertext, and defense in depth requires the RO role to have no path to plaintext at all, not just an extra decrypt step. |
-| B. Secret references (Vault/K8s Secret per connection) | `connections` stores a Vault path/K8s Secret name; data plane authenticates to Vault directly | **Rejected at this scale.** 10,000 connections × credential rotation/refresh means 10,000 Vault paths or K8s Secrets, each independently ACL'd and rotated — policy/Secret sprawl becomes its own operational problem, and per-tenant OAuth refresh-token rotation (rewritten every few hours) has no clean K8s-Secret story. |
-| **C. Narrow credentials table, RO role has zero grant, credential broker mediates** | `connection_credentials` (envelope-encrypted at rest, defense in depth) exists only inside hub-api's schema; the RO role is never granted `SELECT` on it; svc-ingest/svc-action never touch it directly — they call hub-api's internal credential-broker endpoint | **Chosen.** |
-
-**Why C, concretely:** `rbac-matrix.yaml` already grants `svc_ingest`/`svc_action` `privileges: []` on `ingest_sources` (lines 227-235) — the RO-role-can't-read-secrets posture is already the checked-in intent, just unimplemented. C completes that intent instead of walking it back to grant-then-decrypt (Option A).
+| Option | Verdict |
+|---|---|
+| A. Envelope encryption, RO-readable ciphertext | **Rejected** — RO role still has a path to plaintext given a decrypt step. |
+| B. Secret references (Vault/K8s Secret per connection) | **Rejected at scale** — 10,000 independently-rotated Vault paths/Secrets is its own sprawl problem, and no clean rewrite-every-few-hours story for OAuth refresh tokens. |
+| **C. Narrow credentials table, RO role zero grant, credential broker mediates** | **Chosen** — matches `rbac-matrix.yaml`'s already-checked-in `privileges: []` for `svc_ingest`/`svc_action` on `ingest_sources`. |
 
 ```sql
 CREATE TABLE connection_credentials (
     id BIGSERIAL PRIMARY KEY,
     tenant_id INTEGER NOT NULL REFERENCES tenants(id),
-    kind VARCHAR(20) NOT NULL,           -- 'bot_token' | 'oauth' | 'webhook_secret' | 'twitch_broadcaster_grant'
-    dek_version INTEGER NOT NULL,        -- which per-tenant DEK version wrapped this row
+    kind VARCHAR(20) NOT NULL,    -- 'bot_token' | 'oauth' | 'webhook_secret' | 'twitch_broadcaster_grant'
+    dek_version INTEGER NOT NULL,
     ciphertext BYTEA NOT NULL,
     iv BYTEA NOT NULL,
-    oauth_refresh_ciphertext BYTEA,      -- NULL for non-OAuth kinds
+    oauth_refresh_ciphertext BYTEA,
     oauth_refresh_iv BYTEA,
-    expires_at TIMESTAMPTZ,              -- access-token expiry, drives refresh-ahead scheduling
+    expires_at TIMESTAMPTZ,
     rotated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
--- rbac-matrix.yaml: hub_api gets SELECT/INSERT/UPDATE/DELETE; every other role, including
--- svc_ingest/svc_action/webui/migration_runner's usual RW, gets privileges: [] -- no exceptions.
+-- hub_api: SELECT/INSERT/UPDATE/DELETE. Every other role: privileges: [] -- no exceptions.
 ```
 
-**Envelope encryption, one level in:** each tenant has one active DEK, itself wrapped by an app-wide KEK. Baseline (every environment) = platform-managed KEK (KMS default-key envelope, `security.md` Storage baseline). **Enterprise upsell** = customer/external KMS wraps the KEK instead (`critical-rules.md` Feature Flags & License Tiers) — additive to the baseline, not a substitute for it.
+Envelope encryption: per-tenant DEK wrapped by an app-wide KEK (platform-managed KMS baseline; Enterprise upsell = customer/external KMS wraps the KEK, additive).
 
-### 2.1 Credential broker — HA, not a SPOF
+### 2.1 Credential broker — HA, stateless replicas, no split-brain
 
-The broker is a blueprint on hub-api, not a separate singleton service — hub-api already runs ≥2 replicas behind a Service with a `PodDisruptionBudget` (standard ops baseline), so no single pod loss interrupts it. The real risk is the **whole hub-api deployment** degrading (DB contention, KMS outage, rollout) while thousands of connections need to (re)resolve credentials around a redeploy. Because credential resolution happens only at **connect-time and refresh-ahead time**, never per message (relay-authz, the actual per-message path, is fully client-side cached — §5), the broker's availability bar is "connect/refresh cadence," not "message-rate," which the following absorb:
+The broker is a hub-api blueprint, not a singleton — hub-api runs ≥2 replicas with a `PodDisruptionBudget`. **Every replica is stateless w.r.t. credentials**: `connection_credentials` (Postgres) plus the KMS-wrapped DEK is the sole shared source of truth; no replica holds state another lacks, so there is no split-brain to resolve — every replica independently derives the same answer from the same row plus the same KMS unwrap.
 
-- **Per-replica local cache with stale-while-revalidate.** Each svc-ingest/svc-action replica caches its own resolved secrets in memory alongside a hard TTL and a `known_good_until`. On a broker-call failure, serve the cached secret past its TTL up to an explicit **max-staleness bound**: `min(now + max_stale_window, expires_at)` — `max_stale_window` defaults to 2× the normal refresh-ahead interval (§2.2). A bot token with no `expires_at` can be served stale indefinitely during an outage (it never expires on its own); an OAuth access token is never served past its own `expires_at` — an expired token is useless regardless of cache policy.
-- **Bulk/batched resolve on cold start.** A new or restarting replica resolves its whole assigned connection set via one `POST /internal/v1/credentials/resolve-batch` (list of `connection_id`s) instead of N individual calls — turns a fleet-wide cold start into "one batched call per replica," not "10,000 calls in a burst."
-- **Circuit breaking.** The broker client wraps calls in a standard breaker (open after N consecutive failures, half-open probe, closed on success); an open breaker serves from the stale-while-revalidate cache and never blocks the caller — same "a dead exporter never breaks the app" posture `critical-rules.md` Observability already mandates for telemetry, applied to the broker too.
+Two cache layers, both pure read-through, both invalidated by the **same Valkey pub/sub bus** the relay-authz fast path uses (§6.1): hub-api's per-replica DEK cache (`dek-rotated:{tenant_id}`, §2.2) and each data-plane replica's per-connection secret cache (`connection-revoked:{connection_id}`). A missed event is caught by the bounded watermark-poll fallback (§3.3) — no replica-to-replica RPC or leader election needed.
 
-### 2.2 OAuth refresh & rotation
+Credential resolution happens only at **connect-time and refresh-ahead time**, never per message (relay-authz, the per-message path, is fully client-side cached — §6):
 
-- **Rotation fan-out is O(tenants), not O(connections).** DEK rotation re-wraps every `connection_credentials` row for a tenant under a new `dek_version` (hub-api-owned background job) and bumps the broker's cache-invalidation watermark; per-connection secret material is untouched.
-- **Refresh-ahead with jitter.** The broker refreshes each OAuth token at ~75% of its TTL, with per-connection random jitter spread across the remaining TTL window, plus a single-flight lock per `(tenant_id, connection_id)` so concurrent resolves never issue duplicate refresh calls — this is what prevents a refresh storm at 10,000s of connections (§4).
-- **Audit.** Every `resolve()`/refresh call logs `{tenant_id, connection_id, caller_service, cache_hit}` at INFO (OTel span + penguin logging) — no secret material in the log body.
+- **Per-replica stale-while-revalidate cache.** On broker-call failure, serve past TTL up to `min(now + max_stale_window, expires_at)`; `max_stale_window` = 2× the refresh-ahead interval.
+- **Batched cold-start resolve** — one `POST /internal/v1/credentials/resolve-batch` per replica instead of N individual calls.
+- **Circuit breaking** — standard breaker; an open breaker serves stale-cache, never blocks the caller.
 
-### 2.3 Why not a Rust sidecar
+### 2.2 DEK cache: versioned, bounded, fails closed
 
-A Rust credential-resolution sidecar would only pay for itself if credential lookups sat on the per-message hot path — they don't, by design (§2.1, §5). The Python/hub-api broker only gates connect/reconnect and refresh-ahead cadence, both already absorbed by the per-replica cache + batch resolve + circuit breaker above. Moving it to Rust would add a second deployable, a second RBAC surface, and a second place `connection_credentials` grants must be audited, to solve a latency problem that doesn't exist once relay-authz (the thing that actually runs per message) is excluded from the broker's path entirely.
+- Cache key includes `dek_version`, not just `tenant_id` — a rotation produces a clean miss, never a version-mismatched decrypt.
+- Rotation publishes `dek-rotated:{tenant_id}` on the invalidation bus at re-wrap time — every hub-api replica evicts immediately, not on next TTL tick.
+- **Bounded TTL regardless** (10 min) — no indefinite plaintext caching even absent a rotation event.
+- **Decrypt failure:** one re-resolve (fresh KMS unwrap + fresh row read, bypassing cache); if that also fails, `resolve()` fails closed — an error, never a stale/partial secret.
+
+### 2.3 OAuth refresh & rotation
+
+Rotation fan-out is O(tenants), never O(connections). Refresh-ahead at ~75% of TTL with per-connection jitter + single-flight lock per `(tenant_id, connection_id)`. Every resolve/refresh audit-logs `{tenant_id, connection_id, caller_service, cache_hit}` — no secret material in the body.
+
+### 2.4 Why not a Rust sidecar
+
+Credential resolution never sits on the per-message hot path (§2.1, §6) — a Rust sidecar would solve a latency problem that doesn't exist once relay-authz is excluded from the broker's path entirely.
 
 ---
 
 ## 3. Data-plane consumption at scale
 
-### 3.1 Discord Gateway sharding — verified against official docs
+### 3.1 Discord Gateway sharding — verified
 
-Source: [Discord Developer Docs — Gateway, Sharding](https://discord.com/developers/docs/events/gateway) (canonical URL; redirects to `docs.discord.com/developers/events/gateway`), fetched 2026-09-28.
+Source: [Discord Developer Docs — Gateway, Sharding](https://discord.com/developers/docs/events/gateway), fetched 2026-09-28.
 
-- **Hard cap, confirmed:** "Each shard can only support a maximum of 2500 guilds" — apps exceeding that ratio on connect get a `4010 Invalid Shard` close code. This is a **maximum guilds-per-shard** (i.e. a **minimum shard count**), not a fixed ratio to hit exactly: `min_shards = ceil(guild_count / 2500)`.
-- **max_concurrency** = "the number of identify requests allowed per 5 seconds"; shards bucket via `rate_limit_key = shard_id % max_concurrency` and must IDENTIFY "by bucket, in order." Standard bots get `max_concurrency: 1`; larger buckets (e.g. 16) require Discord's large-bot-sharding approval.
-- **IDENTIFY limits, two layers:** 120 gateway events/connection/60s, and a global **1000 IDENTIFY calls per 24h**; exceeding the global limit **terminates every active session for the app and resets the bot token** — materially worse than a soft budget, so reconnect logic must prefer RESUME over a fresh IDENTIFY on any recoverable disconnect.
+- **Hard cap:** 2,500 guilds/shard max (`4010 Invalid Shard` on breach) — a **floor**, `min_shards = ceil(guild_count / 2500)`, not a ratio to hit exactly.
+- **max_concurrency** = IDENTIFYs/5s; `rate_limit_key = shard_id % max_concurrency`. Standard bots: `max_concurrency: 1`.
+- **IDENTIFY:** 120 events/connection/60s; global **1000/24h**, breach **terminates every session and resets the bot token**.
 
-**Correction to the reviewer's claim:** 8 shards for 6,000 guilds is **compliant, not a violation** — 6,000/8 = 750 guilds/shard, well under the 2,500 cap. The cap only sets a *floor* (`ceil(6000/2500) = 3` shards minimum); choosing more shards than the floor for headroom is always allowed, it just means fewer guilds per shard, never more. The math from the original draft stands:
+8 shards for 6,000 guilds (750/shard, ≪2,500 cap) is **compliant** — more shards than the floor is always allowed.
 
-| Quantity | Value | Basis |
+| Quantity | Value |
+|---|---|
+| Guild-backed connections | 6,000 |
+| Minimum shards | 3 (`ceil(6000/2500)`) |
+| Operational shards | 8 (≈750/shard) |
+| Cold-start (8 shards, `max_concurrency=1`) | 40s |
+| Shard→replica | `shard_id % replica_count`; 8/4 = 2/replica |
+
+**Discord's second inbound path — Interactions webhooks.** Slash-command interactions arrive as their own signed HTTPS webhook (Ed25519 signature over `X-Signature-Ed25519`/`X-Signature-Timestamp`), entirely separate from the Gateway socket. It is a **platform-ingest webhook** in the same family as Twitch EventSub (§4.1) — same shape (platform-issued signature, platform-managed subscription/registration, fixed URL), different crypto (Ed25519, not HMAC-SHA256) and different trigger (a user invoking a command, not a chat/channel event). Out of this revision's implementation scope, but the receiver design in §4.1/§4.4 (stateless, horizontally scaled, shared hardening) is meant to house it without a new architecture when it lands.
+
+### 3.2 Twitch — redesigned on EventSub webhook transport (production), Conduits, IRC bounded, WebSocket dev/test only
+
+Sources: [Twitch — Handling Conduit Events](https://dev.twitch.tv/docs/eventsub/handling-conduit-events/), [Twitch Forum — "Available today: Twitch Chat on EventSub, an API for sending chat, and the Conduit transport method"](https://discuss.dev.twitch.com/t/available-today-twitch-chat-on-eventsub-an-api-for-sending-chat-and-the-conduit-transport-method-for-eventsub/54596), [Twitch — Managing EventSub Subscriptions](https://dev.twitch.tv/docs/eventsub/manage-subscriptions/), [Twitch Forum — cost-based system / RFC 0014](https://discuss.dev.twitch.com/t/eventsub-subscription-limit-cost-based-system-and-limit-field-deprecation/31377), [Twitch Forum — dropped subscriptions and token changes](https://discuss.dev.twitch.com/t/eventsub-managing-dropped-subscriptions-and-token-changes/64089), [Twitch — IRC rate limits](https://dev.twitch.tv/docs/irc/), [Twitch Forum — concurrent join limits for IRC and EventSub](https://discuss.dev.twitch.com/t/giving-broadcasters-control-concurrent-join-limits-for-irc-and-eventsub/54997). Fetched 2026-09-28.
+
+**Build on the existing receiver, don't design a new one.** `core/svc_ingest/eventsub.py`'s `TwitchEventSubHandler`, mounted at `POST /eventsub/twitch/webhook` (`app.py`), already does real HMAC-SHA256 signature verification (constant-time `hmac.compare_digest`, `sha256=` + HMAC over `message_id + timestamp + body`), the `webhook_callback_verification` challenge handshake, and event normalization/fan-out via `fanout.fan_out_event`. This is production-shaped webhook transport already — Conduits/webhook-shards route notifications to this same URL, they don't require a new endpoint. **Gaps against the requirements, called out by the module's own docstring or by inspection, planned as increments (§8):**
+
+| Gap | Today | Fix |
 |---|---|---|
-| Guild-backed connections | 6,000 | sizing assumption |
-| Discord-mandated minimum shards | `ceil(6000/2500)` = **3** | Discord API floor (cited above) |
-| Operational shard count (headroom) | **8** (≈750 guilds/shard, ≪ 2,500 cap) | keeps per-shard event volume down and leaves room to grow to ~20,000 guilds before the *mandatory* floor even reaches 8 |
-| `max_concurrency` | 1 (standard bucket) | one IDENTIFY per 5s per bucket |
-| Cold-start time, 8 shards, `max_concurrency=1` | 8 × 5s = **40s** | serialized IDENTIFYs |
-| IDENTIFY budget | 1000/24h (token-wide); breach = full session reset + bot token reset | reconnects must prefer RESUME; an 8-shard full restart costs 8 IDENTIFYs |
-| Shard→replica mapping | `shard_id % replica_count`; 8 shards / 4 replicas = 2 shards/replica | matches the existing `bundle_loader` per-replica ownership model |
-| Rebalance trigger | crossing the next 2,500-guild floor increase, or a deliberate replica-count change | step-function, not per-connection — reassigning a shard means dropping/reconnecting that websocket, so it's a planned deploy-time action |
+| Message-id dedup | Explicitly **not ported** ("Deliberately does NOT port that legacy module's own duplicate-message-id in-memory cache") | Valkey `SET NX PX <ttl>` on `Twitch-Eventsub-Message-Id`, ~15 min TTL (covers Twitch's own redelivery window) |
+| Replay window | Not enforced — `timestamp` header is read but never bounds-checked | Reject `Twitch-Eventsub-Message-Timestamp` older than **10 minutes** |
+| Revocation handling | Logs a WARN and acks 200; no downstream effect | On `revocation`, mark the `connections` row `status='error'`, publish `connection-revoked:{connection_id}` on the invalidation bus (§6.1) |
+| Secret sourcing | Single `TWITCH_EVENTSUB_SECRET` env var, single-tenant (`Config.RUNNER_TENANT_SLUG`) | Per-connection secret from the credential broker (§2), keyed by the subscription's `broadcaster_user_id` → `connections.tenant_id` |
+| Subscription management | Explicitly out of scope ("subscription management is a one-time setup operation... out of scope for this MVP") | Control-plane reconciler, hub-api-owned (below) — never per-replica |
+| Rust port | `core/svc_ingest/src/ingest/twitch.rs` is IRC-only; EventSub is an open `// TODO(M5)` seam | Port `eventsub.py`'s verified logic (signature, challenge, normalization) to the Rust receiver as part of M5, carrying the fixes above forward rather than porting the gaps too |
 
-### 3.2 Twitch — redone: IRC alone does not scale to 3,500 channels
+**Why webhook transport, not WebSocket, for production:** a WebSocket EventSub transport is a stateful, per-process persistent connection — losing it means every subscription on it needs re-establishing, and it does not horizontally scale past however many sockets one process/replica can hold. A webhook receiver is stateless HTTP — it scales the same way any other ingress-fronted service does (K8s HPA on request rate), survives pod restarts without losing subscriptions (Twitch redelivers on a missed 2xx, and Conduit shard reassignment is Twitch-side, not ours), and needs no reconnect/backoff/session bookkeeping. **WebSocket transport is retained only for local dev/test** (`waddles.core.twitch-websocket-devtest` — an internal dev convenience, never a production connection strategy) where standing up a public HTTPS endpoint isn't convenient.
 
-Sources: [Twitch — IRC guide, rate limits](https://dev.twitch.tv/docs/irc/), [Twitch Developer Forums — "Giving broadcasters control; concurrent join limits for IRC and EventSub"](https://discuss.dev.twitch.com/t/giving-broadcasters-control-concurrent-join-limits-for-irc-and-eventsub/54997), [Twitch — Managing EventSub Subscriptions](https://dev.twitch.tv/docs/eventsub/manage-subscriptions/), [Twitch Developer Forums — RFC 0014, EventSub Subscription Limit Changes](https://discuss.dev.twitch.com/t/rfc-0014-eventsub-subscription-limit-changes/30312). Fetched 2026-09-28.
+- **Conduits + webhook shards.** One conduit; each shard's transport is a webhook pointed at the same `/eventsub/twitch/webhook` URL (Twitch's own conduit model routes by channel→shard affinity server-side — "an attempt is made to send notifications for a particular channel ID to the same shard for consistency" — but since every shard resolves to the same stateless receiver URL, shard identity matters for Twitch's own internal bookkeeping and shard-level health/retry, not for our routing). Confirmed ceiling: **5 enabled conduits/client, 20,000 shards/conduit** — not binding at 3,500-10,000 channels.
+- **Subscription management lives in hub-api, not per-replica.** A new control-plane component (hub-api blueprint or a small dedicated reconciler job) owns: conduit/shard creation, `channel.chat.message` subscription create/renew/delete per authorized connection, cost-budget tracking (reads `total_cost` back from `GET /eventsub/subscriptions`, alerts at 80% of `max_total_cost`), and `user.authorization.revoke` subscription handling (a dedicated EventSub topic notifying when a user revokes the app's authorization — subscribed proactively rather than waiting to observe `authorization_revoked` on the affected subscription). svc-ingest's webhook receiver only *receives and validates deliveries* — it never creates/manages subscriptions.
+- **Cost model — verified but ambiguous at the edge, so tracked dynamically either way.** Twitch's documented rule: "by default, the cost of a subscription is 1, but is reduced to 0 if you have a user access token from the channel related to the subscription." Whether the broadcaster's `channel:bot` grant + an App Access Token reaches that cost-0 path, or cost-0 specifically requires the channel's own user access token, is **not conclusively resolved from available docs** — verify against a live subscription-creation response's `cost` field before finalizing budget headroom. The reconciler records every subscription's actual `cost` from Twitch's response (never assumes a constant) and re-reads `total_cost` on any revocation, rather than computing a local delta.
+- **Revocation — verified; the reviewer's cost-cascade claim does not match documented Twitch behavior.** "The `authorization_revoked` status occurs when Twitch revokes your subscription because the user(s) in the condition object revoked their authorization... or changed their password" — a **per-subscription** teardown with its own status field, not a cost change cascading to sibling subscriptions. No documented mechanism produces that cascade. Design still re-reads `total_cost` from Twitch after any revocation defensively (belt-and-suspenders given the cost-model ambiguity above), never trusting an assumed delta.
+- **IRC — bounded, and outbound moves off it entirely.** Twitch enforces a **100-concurrent-chat-room cap per bot account**, and per the forum announcement this is **no longer waived for verified bots** — the only exemptions are joining as broadcaster/moderator or a broadcaster-authorized EventSub subscription. IRC is therefore scoped to exactly: the **≤100-channel unauthorized/trial pool** (channels whose broadcaster hasn't yet completed OAuth authorization) — comfortably within both the 100-room cap and the 20-joins/10s unverified rate limit for a slowly-growing pool. **Outbound chat sends use the Send Chat Message Helix API** (a stateless REST call, shipped alongside Conduits/EventSub-chat per the same Twitch announcement) instead of IRC `PRIVMSG` — this removes outbound's dependency on holding an IRC JOIN to every target channel entirely, so outbound scales with the same authorization model as inbound (broadcaster `channel:bot` grant), not with IRC's join cap.
+- **Capacity math, 3,500 channels with headroom to 10,000:**
 
-**The load-bearing correction:** the original draft only modeled the IRC **JOIN rate** (20/10s unverified, 2,000/10s verified) as the constraint. Twitch separately enforces a **concurrent join limit of 100 chat rooms per bot account, total** — "As of May 15th 2024, the limit is set to 100" — and per the forum announcement, **verified-bot status no longer exempts an account from this cap**; the only exemptions are joining as broadcaster/moderator, or a channel where the **broadcaster has explicitly authorized the bot** (granting the `channel:bot` scope for a `channel.chat.message` EventSub subscription created with an **App Access Token**). The reviewer's "~100-channel ceiling" is correct and is the real constraint, not IRC's join-rate throughput. Plain IRC (or unauthorized EventSub) is therefore architecturally insufficient by ~35× at 3,500 channels — this is a design change, not just a numbers correction.
-
-**Redone plan:**
-
-- **Connection registration requires broadcaster authorization.** Registering a Twitch `connections` row (direction inbound or both) requires the broadcaster to grant `channel:bot` via OAuth at registration time in the `/api/v1/connections` flow; the resulting authorization is recorded as a `connection_credentials` row (`kind='twitch_broadcaster_grant'`) tied to that specific `connections.id`. Channels without a completed grant are **not eligible to activate** past the shared 100-channel unauthorized pool (kept as a small always-available buffer for trial/quick-add flows, tracked and capped by hub-api at registration time so we never discover the 100 ceiling by hitting it at connect time).
-- **Ingest via EventSub, App Access Token, not raw IRC JOIN, for authorized channels.** Each authorized channel becomes a `channel.chat.message` EventSub subscription over a WebSocket transport, created with the app's own App Access Token — these do not count against the 100-channel cap and are billed against the **app-wide subscription cost budget**, not the crippling per-user-token budget (a user-access-token subscription defaults to `max_total_cost: 10` per client-user pair; App Access Token subscriptions default to **10,000** total cost per client — confirmed via RFC 0014/Managing Subscriptions).
-- **WebSocket fan-out:** each EventSub WebSocket connection supports **300 enabled subscriptions max**. 3,500 channels / 300 ≈ **12 WebSocket connections**, spread across e.g. 4 svc-ingest replicas (3/replica) — the same connection-pool-per-replica shape the original IRC plan used, just re-pointed at EventSub sockets instead of IRC sockets.
-- **Cost budget:** at cost 1/subscription (the commonly documented per-subscription cost for standard channel-scoped types — **verify the exact `cost` field for `channel.chat.message` in the current subscription-types table before locking capacity**, since Twitch's docs example payloads were inconclusive on this point at fetch time), 3,500 subscriptions ≈ 3,500 cost, within the 10,000 default budget. Adding further per-channel subscription types (follow/subscribe/raid) multiplies this — if total cost would exceed 10,000, split subscription types across multiple registered Twitch client-ids or request a Twitch cost-budget increase, rather than assume headroom that may not exist.
-- **IRC is retained only** for the ≤100-channel unauthorized pool and as a fallback transport for a broadcaster who declines authorization; it is not the scaling path.
+| Quantity | Value |
+|---|---|
+| Conduits / shards | 1 conduit, 8-12 shards (ceiling: 5 × 20,000 — not binding) |
+| `max_total_cost` used, 3,500 channels | ~3,500 worst case (cost=1); possibly less (cost-0 path unverified) |
+| `max_total_cost` used, 10,000-channel target | 10,000 worst case — **zero headroom**; request a budget increase or split across a 2nd client-id ahead of the 80% alert |
+| Webhook receiver throughput (new bottleneck once socket-count no longer applies) | worst case ~10,000 channels × 1 msg/s peak ≈ 10,000 req/s across all replicas — sized via HPA on request-rate/CPU, not a fixed connection count |
+| IRC pool | ≤100 channels (Twitch-enforced cap), 20 joins/10s | 
+| Outbound | Send Chat Message API (stateless), not IRC | 
 
 ### 3.3 Hot-add/remove: watermark poll + supervisor
 
-Same pattern as `svc_action::bundle_loader` (§1 D4): each svc-ingest replica polls `ix_connections_shard_scan`'s cheap projection on an interval (default 300s, 5s floor — `bundle_config_poll_seconds`/`bundle_config_poll_interval`, the existing config knob this reuses), hashes it via `WatermarkTracker`, and only re-runs the full shard/subscription-assignment recompute when the hash moves. A newly registered connection is picked up on the next poll tick.
+Same pattern as `svc_action::bundle_loader`: poll `ix_connections_shard_scan`'s cheap projection (proposed 15s interval — tighter than `bundle_loader`'s 300s default, since this poll doubles as the revocation fallback, §6.1), hash via `WatermarkTracker`, only recompute on change.
 
 ### 3.4 svc-action outbound connection selection
 
-For outbound (Twitch EventSub-authorized send / `LPUSH` where IRC is still in play / Discord bot REST send), svc-action resolves the connection to use from `app_outbound_bindings` (§5) — never from bundle-supplied identifiers — then calls the credential broker (§2) for that connection's live token, with the refresh-ahead jitter (§2.2) spread across each token's TTL window.
+Resolves the connection from `app_outbound_bindings` (§6) — never from bundle-supplied identifiers — then calls the credential broker for the live token (Twitch: the App Access Token used for Send Chat Message calls, §3.2).
 
 ### 3.5 Capacity table
 
@@ -157,37 +181,74 @@ For outbound (Twitch EventSub-authorized send / `LPUSH` where IRC is still in pl
 |---|---|---|
 | Tenants | 100s | 300 |
 | Communities | 10,000s | 20,000 |
-| App-bundle installs (`app_source_bindings`-style rows) | 10,000s | ~60,000 rows |
-| Connections (`connections` rows) | ~10,000 | 6,000 Discord / 3,500 Twitch / 500 other |
-| Discord shards | — | 8 (750 guilds/shard, floor is 3), 4 replicas, 40s cold-start |
-| Twitch EventSub WebSocket connections | — | 12 (300 subs/conn), 4 replicas; IRC only for ≤100-channel unauthorized pool |
-| Twitch EventSub cost used (chat-only) | ≤10,000 default budget | ~3,500 (verify per-type cost before adding more subscription types) |
-| KMS unwrap calls, steady state | — | ~300 tenants / 10-min DEK TTL ≈ 0.5 calls/sec |
-| KMS unwrap calls, cold start (batched resolve, 3 broker-serving replicas) | — | ≤900, one-time burst — jitter warm-up over 30s |
-| DEK rotation fan-out | — | O(tenants) = 300 re-wraps per rotation event, never O(connections) |
-| Relay-authz cache entries (§5) | — | 20,000-100,000, a few MB/replica |
-| Relay-authz DB hits per message | must be O(1)/cached | **0** — in-memory hash-map lookup |
-| Revocation latency, fast path (Valkey pub/sub) | — | sub-second, typical |
-| Revocation latency, degraded/fallback (poll only) | — | bounded by `max(replica_lag, poll_interval)`; poll interval proposed at 15s for connections/bindings (tighter than bundle_loader's 300s default — security-relevant, not just config-freshness) |
+| App-bundle installs | 10,000s | ~60,000 rows |
+| Connections | ~10,000 | 6,000 Discord / 3,500 Twitch / 500 other |
+| Discord shards | — | 8 (750/shard, floor 3), 4 replicas, 40s cold-start |
+| Twitch conduits/shards | — | 1 conduit, 8-12 webhook shards (ceiling 5×20,000) |
+| Twitch `max_total_cost`, 3,500→10,000 channels | ≤10,000 default | 3,500 → 10,000 (zero headroom at 10k) |
+| Twitch webhook receiver req/s, worst case | — | ~10,000 req/s across replicas, HPA-sized |
+| IRC pool | Twitch-enforced ≤100 | unauthorized/trial channels only |
+| KMS unwrap calls, steady state | — | ~300 tenants / 10-min DEK TTL ≈ 0.5/sec |
+| KMS unwrap calls, cold start (batched) | — | ≤900 one-time, 30s jittered warm-up |
+| DEK rotation fan-out | — | O(tenants)=300, `dek-rotated`-event-driven |
+| Relay-authz cache entries | — | 20,000-100,000, a few MB/replica |
+| Relay-authz DB hits/message | O(1) required | **0** |
+| Revocation latency, fast path | — | sub-second |
+| Revocation latency, degraded fallback | — | `max(replica_lag, 15s poll)` |
 
 ---
 
-## 4. Multi-tenant isolation per pod
+## 4. Inbound webhook receivers: platform-ingest vs. generic per-app
 
-A single svc-ingest/svc-action replica multiplexes many tenants' shards/connections and `invoke`s (per `capabilities.rs`'s own module doc: "one host-API connection multiplexes many invokes, potentially for different (tenant, community, app_id) activations"). Without per-tenant bounds, one noisy tenant degrades every other tenant sharing that replica.
+Two receivers, deliberately kept separate — different auth, different secrets, different rate limits, different trust model.
 
-- **Per-tenant connection quotas.** Enforced at registration time by hub-api (`connections` INSERT), tied to license tier — a hard cap on connections/tenant prevents one tenant from consuming a disproportionate share of the 10,000-connection budget.
-- **Per-tenant outbound rate limiting.** `svc_action`'s existing `UsageBatcher` (`capabilities.rs`, already recording relay-call usage per tenant/app) is extended from metering-only to a token-bucket limiter keyed by `tenant_id` — independent of the platform-level Twitch/Discord limits (§3), this protects other tenants' outbound throughput from one tenant's bundle saturating a shared IRC connection or eating into the shared Discord IDENTIFY budget via reconnect storms.
-- **Fair shard/connection scheduling.** Shard→replica and EventSub-connection→replica assignment (§3.1, §3.2) is computed by the same watermark-poll supervisor but weighted by each connection's recent message-volume metric (greedy least-loaded-replica assignment), not a blind `id % replica_count` — so one very active tenant's guilds/channels don't concentrate on a single replica. Rebalance remains deploy-time only (§3.1), never a live migration.
-- **Noisy-neighbor isolation in the executor.** A per-tenant semaphore bounds in-flight `invoke`s per svc-action replica, alongside the existing per-`app_id` `EgressGuard` bucket (`capabilities.rs`, `http.send` policy) — extend the same bucket-per-`app_id` pattern to relay pushes, with a tenant-level ceiling layered on top of the app-level one, so one tenant's slow/backed-up bundle can't starve other tenants' invokes on the same executor pool.
+### 4.1 Platform-ingest webhooks (Twitch EventSub today; Discord Interactions, future)
+
+**Path:** Twitch EventSub → `POST /eventsub/twitch/webhook` (existing, §3.2) → normalize → `fanout.fan_out_event` by `consumes_tag` → every app bound to that platform/source via `app_source_bindings`. **Trust model:** the sender is the platform itself (Twitch/Discord), signature-verified against a secret Twitch/Discord issued at subscription-creation time, subscription lifecycle managed by our own control-plane reconciler (§3.2) — the receiver never has to guess who's calling, only verify the signature and dedup/replay-guard the delivery.
+
+### 4.2 Generic per-app inbound webhooks (new)
+
+For a third-party sender a tenant wants to feed directly into one specific app bundle — not a pre-built platform connector.
+
+- **Route:** `POST /hooks/v1/{webhook_id}` — `webhook_id` is an **opaque, unguessable ≥128-bit id** (e.g. a UUIDv4 or 22-char base62 token) issued by hub-api at creation time. It resolves server-side, via a read-only cached view of `connections` (`kind='webhook'`), directly to `(tenant_id, app_id)` — **no caller-supplied tenant/app-id header is ever trusted for routing.**
+- **Auth — asymmetric-first, so a hub-api breach can never forge an inbound delivery** (we store only the sender's *public* key/verification material; nothing an attacker steals from us lets them sign as the sender). Three modes, in preference order:
+  - **Mode A (preferred): RFC 9421 HTTP Message Signatures, `ecdsa-p256-sha256` (ES256)** — FIPS-approved, the Enterprise/FedRAMP-required mode. Covered components, minimum: `@method`, `@target-uri` (or `@path`), `content-digest` (RFC 9530, over the raw body), `content-type`, and a `created` timestamp bound into the signature — not just present as a header, but part of what's signed, so it can't be swapped post-signing. `keyid` in the `Signature-Input` resolves to a registered key (below).
+  - **Mode B: Standard Webhooks `v1a` (Ed25519)** — same `webhook-id`/`webhook-timestamp`/`webhook-signature` headers as `v1`, asymmetric signature instead of HMAC.
+  - **Mode C (fallback only): Standard Webhooks `v1` HMAC-SHA256`** over `{id}.{timestamp}.{body}`, for senders that genuinely cannot do asymmetric signing — **opt-in per webhook row**, flagged as the weakest of the three modes in the admin UI and in `connections.rate_limit_meta`/audit log (a compromised secret *can* forge deliveries, unlike A/B). Secret sourced from the credential broker (§2) and never logged; constant-time compare (`hmac.compare_digest`-equivalent).
+  - **Shared regardless of mode:** **±5 minute replay window** on the signed timestamp; **dedup on the delivery id** (`webhook-id`/RFC 9421's own id) via Valkey `SET NX` with TTL (mirrors §3.2's Twitch dedup).
+- **Key registration (hub-api, per webhook):** either **pinned public keys** — multiple concurrent entries keyed by `kid`, so rotation is "register the new key, wait for the sender to switch, retire the old one" with zero delivery-loss window — or a **pinned JWKS URL** (HTTPS only, fetched and cached with a TTL, key looked up by `kid` in the fetched set). **Algorithm is fixed per registered key at registration time, never negotiated from the incoming request** — a key registered as ES256 or Ed25519 rejects any request claiming `HS256`/`none`/any other `alg`, closing the classic algorithm-confusion hole (an attacker can't downgrade an asymmetric-keyed webhook to "just HMAC it with the public key"). Mode C's HMAC secret is the only credential-broker-backed row here; A/B's public keys/JWKS URLs are not secrets and live directly on the `connections` row.
+- **Model:** each webhook is a `connections` row, `kind='webhook'`, `direction='inbound'`, bound to **exactly one** app installation (a single `app_outbound_bindings`-shaped row is overkill here — the binding is 1:1 by construction, carried directly in `connections.mapping`, alongside the registered mode/keys). hub-api's RW routes (`/api/v1/connections`) handle create/rotate/disable, tenant-scoped like every other connection.
+- **Delivery:** the validated payload is wrapped as a `PlatformEvent` (`platform='webhook'`, `event_type` from the webhook's configured mapping or a declared header) and `XADD`'d to the partition stream that only the bound app consumes — **no fan-out-by-tag**, unlike §4.1, because the binding is already 1:1. **202 Accepted** once validation + `XADD` succeed (async processing downstream, not synchronous). **Body-size limit** (e.g. 256KB) and **strict `Content-Type: application/json` allowlist** reject anything else before signature verification even runs (cheapest checks first). **Uniform 401/404 policy:** an unknown `webhook_id` and a known-but-badly-signed one return the **same** response shape and timing (constant-time lookup-or-compare) — the endpoint never reveals whether a given id exists.
+
+### 4.3 Outbound platform webhooks (waddles → external endpoint)
+
+Symmetric with §4.2's asymmetric-first inbound design, for the direction where waddles is the sender (e.g. a tenant-configured "notify my external system" delivery): every outbound webhook is signed with **ES256 (RFC 9421 HTTP Message Signatures)** using a platform signing key. The private key material lives in **KMS/HSM** — prefer KMS-side asymmetric signing (the private key never leaves the KMS/HSM boundary at all; hub-api sends the digest, gets back a signature) over loading key material into application memory. The public verification key is published at a platform JWKS endpoint (`https://waddles.app/.well-known/jwks.json` or product-equivalent) that receivers pin or fetch; **rotation** = publish the new key under a new `kid` first, sign new deliveries with it, keep the old key in the JWKS until receivers have rolled over, then retire it — the same zero-delivery-loss shape as inbound key rotation (§4.2).
+
+### 4.4 Shared hardening (all receivers)
+
+Both are internet-facing and share a hardening baseline, layered per-path where the trust models diverge:
+
+- **Rate limiting** — per-tenant + per-connection/webhook token buckets (§5), plus a coarser global bucket per path at the ingress layer. Twitch's sender population is one known platform; `/hooks/v1`'s is arbitrary third parties, so its global bucket is stricter and its per-webhook bucket is mandatory, not optional.
+- **Body-size limits and strict content-type allowlists** on both paths, checked before any HMAC computation (cheap rejects first, avoids wasting CPU on oversized/malformed bodies).
+- **Deployment topology:** both mount on svc-ingest — stateless HTTP handlers, no reason to split into a separate edge service today, since neither needs anything svc-ingest doesn't already have (Valkey for dedup, the credential broker for secrets). Exposed as **two distinct Ingress path rules** (`/eventsub/*`, `/hooks/v1/*`) so rate limits/WAF rules are configured independently per path even though both terminate in the same backend Service; **CiliumNetworkPolicy** scopes external ingress to exactly these two paths/ports on svc-ingest, default-deny everything else, per `security.md`'s Kubernetes Network Security baseline. If load profiles diverge enough in practice (e.g. `/hooks/v1` traffic dwarfing platform-ingest traffic, or wanting independent HPA curves), splitting into a dedicated edge deployment is a follow-on, not a day-one requirement.
 
 ---
 
-## 5. Relay authorization
+## 5. Multi-tenant isolation per pod
 
-**Today:** `core/svc_action/src/capabilities.rs::handle_relay` already has `InvokeScope{tenant, community, app_id}` resolved per-call (never per-connection, per the module's own post-M3 fix) — but for Twitch it takes `channel` straight from the bundle's own `message_json` with zero ownership check. Discord already avoids the worst of this by construction (`scope.origin_channel_id`, reply-only, never bundle-chosen) — Twitch, and any future non-reply-shaped provider, does not.
+- **Per-tenant connection quotas**, enforced at registration time by hub-api, tied to license tier.
+- **Per-tenant outbound rate limiting** — `svc_action`'s existing `UsageBatcher` extended from metering-only to a token-bucket keyed by `tenant_id`, independent of platform-level limits (§3).
+- **Per-webhook and per-tenant rate limits on `/hooks/v1`** (§4.4) — the same isolation principle applied to inbound third-party traffic, not just outbound.
+- **Fair shard/connection scheduling** — weighted by recent message-volume, not blind `id % replica_count`, so one active tenant's guilds/channels don't concentrate on one replica. Deploy-time rebalance only.
+- **Noisy-neighbor isolation in the executor** — a per-tenant semaphore on in-flight `invoke`s, alongside the existing per-`app_id` `EgressGuard` bucket extended to relay pushes, tenant ceiling layered on top of the app-level one.
 
-**Design:** extend `handle_relay` with a stage-side authorization check before the send, using an outbound-binding join generalizing migration 0025's inbound pattern:
+---
+
+## 6. Relay authorization
+
+**Today:** `handle_relay` resolves `InvokeScope{tenant, community, app_id}` per-call but takes Twitch `channel` straight from the bundle's `message_json`, unchecked. Discord already avoids this (`scope.origin_channel_id`, reply-only).
+
+**Design:** `app_outbound_bindings` join (generalizing migration 0025's inbound pattern):
 
 ```sql
 CREATE TABLE app_outbound_bindings (
@@ -200,47 +261,54 @@ CREATE TABLE app_outbound_bindings (
 );
 ```
 
-`handle_relay`'s check becomes: `(scope.tenant, scope.community, scope.app_id, provider, channel)` → is there a `connections` row for this tenant with `external_id == channel` AND an `app_outbound_bindings` row joining it to `scope.app_id`? **Deny + audit-log otherwise** (`denied("channel_not_bound", ...)`, matching the existing `HostResultError` shape).
+Deny + audit-log unless `(tenant, community, app_id, provider, channel)` has a matching `connections` + `app_outbound_bindings` row. **O(1)**: svc-action loads the join into an in-memory map via the watermark-poll supervisor (§3.3) — a hash-map lookup on the hot path, never a query.
 
-**O(1) lookup:** svc-action loads this join into an in-memory map, `(tenant_id, community_id, app_id, provider, external_id) → bool`, via the watermark-poll supervisor (§3.3). `handle_relay` becomes a hash-map lookup on the hot path, never a synchronous query.
+### 6.1 Revocation latency — bounded, with a fast path
 
-### 5.1 Revocation latency — bounded, with a fast path
+- **Fast-path invalidation** — hub-api publishes `connection-revoked:{connection_id}` on Valkey pub/sub on every disable/binding-delete; data-plane replicas evict immediately (**sub-second typical**). The 15s poll (§3.3) is the self-healing fallback.
+- **Fail-closed on cache uncertainty, asymmetrically** — if the fast-path channel's health is uncertain, **ALLOW verdicts get a short freshness bound**; **DENY verdicts remain valid indefinitely** — uncertainty narrows what's trusted, never widens it.
 
-A poll-only design bounds revocation latency at `max(replica_lag, poll_interval)` — at `bundle_loader`'s existing 300s default this is far too slow for a security-relevant disable/revoke; even a tightened 15s connections/bindings poll (§3.5) is not "seconds" in the worst case. Two additions:
+### 6.2 Rollout: shadow mode, not a permanent kill switch
 
-- **Fast-path invalidation.** hub-api publishes to a Valkey pub/sub channel (or a small revocation `XADD` stream) on every connection disable and every `app_outbound_bindings` delete. svc-action/svc-ingest subscribe and evict the affected cache entry immediately — **typical revocation latency is sub-second**, independent of Postgres replica lag or the poll cycle. The poll remains the self-healing fallback if a pub/sub message is ever missed (subscriber restart, network blip).
-- **Fail-closed on cache uncertainty, asymmetrically.** If the fast-path channel's health is uncertain (missed heartbeat, subscriber disconnected), **ALLOW verdicts get a short freshness bound** — an allow entry older than one poll interval is no longer trusted and is re-verified on next poll before being served again, rather than trusted indefinitely. **DENY verdicts remain valid indefinitely** — a stale deny just means a legitimately-rebound app is briefly blocked (an availability cost), never a security cost. This is the concrete fail-closed rule: uncertainty narrows what's trusted, it never widens it.
+**Security controls must never be switchable off in steady state** — relay-authz ships with **no `disable-relay-authz` flag, ever**:
+
+1. **Shadow/log-only mode** (bounded soak, proposed 2-4 weeks): evaluates the check, **logs + alerts every would-be-deny at WARN**, never blocks.
+2. **Enforcement** once the soak shows clean results — `handle_relay` starts returning `denied("channel_not_bound", ...)` for real.
+3. **The shadow-mode flag and its branch are deleted from the codebase** at that point — never left in place as a lever. A regression is fixed by shipping a fix, not by flipping a flag.
 
 ---
 
-## 6. Feature flag rollout — opt-out kill-switches, not default-OFF
+## 7. Feature flag rollout — opt-out kill-switches, not default-OFF (except relay-authz, §6.2)
 
-Per the house convention already in this codebase (`core/svc_action/src/flags.rs::DISABLE_DB_BUNDLE_CONFIG_FLAG`, `waddles.core.disable-db-bundle-config` — "inverted... the DB-driven path is the default, and this raw flag being ON is what opts back OUT of it"), every mechanism below ships as an **opt-out kill-switch, ON by default (mechanism enabled), flag raw-ON disables it** — not an opt-in flag defaulted OFF:
+Per the house convention (`core/svc_action/src/flags.rs::DISABLE_DB_BUNDLE_CONFIG_FLAG`):
 
-| Flag | Mechanism it can disable | Default state |
+| Flag | Mechanism it can disable | Default |
 |---|---|---|
-| `waddles.core.disable-connections-registry` | svc-ingest/svc-action read from `connections`/broker; raw-ON reverts to legacy env/secret config | mechanism ON |
-| `waddles.core.disable-credential-broker` | broker-mediated resolution; raw-ON reverts to legacy env-sourced tokens | mechanism ON |
-| `waddles.core.disable-relay-authz` | the stage-side relay ownership check (§5); raw-ON reopens the M4 gap | mechanism ON — **security-sensitive: raw-ON must alert, not just log**, since it is a live authorization bypass, not a routine rollback |
-| `waddles.core.disable-fast-revocation` | Valkey pub/sub fast-path invalidation (§5.1); raw-ON falls back to poll-only revocation latency | mechanism ON |
-| `waddles.core.disable-tenant-quotas` | per-tenant rate limiting/fair scheduling (§4); raw-ON reverts to unweighted assignment | mechanism ON |
+| `waddles.core.disable-connections-registry` | svc-ingest/svc-action read from `connections`/broker | ON |
+| `waddles.core.disable-credential-broker` | broker-mediated resolution | ON |
+| `waddles.core.disable-fast-revocation` | Valkey fast-path invalidation (§6.1); **latency only**, never the check itself | ON |
+| `waddles.core.disable-tenant-quotas` | per-tenant rate limiting/fair scheduling (§5) | ON |
+| `waddles.core.twitch-websocket-devtest` | dev/test-only WebSocket transport (§3.2) — **never enabled in beta/gamma/prod** | OFF |
 
-License-server/PostHog unreachable ⇒ fail-closed to the flag's own raw `false` per `penguin_licensing::LicenseClient`'s existing semantics, which negates to "mechanism enabled" — consistent with every other kill-switch in this crate, and correct here too: an unreachable flag server must never silently reopen `disable-relay-authz`'s gap.
-
----
-
-## 7. Increment plan
-
-Security-critical items first; each step is independently shippable and independently reviewable.
-
-1. **`connection_credentials` table + RBAC grants (`privileges: []` for every non-hub_api role)** — no broker yet, just the RO-can't-read boundary established at the schema/grant level.
-2. **Credential broker endpoint in hub-api** — HA-ready from day one: per-replica stale-while-revalidate cache, batch resolve, circuit breaker (§2.1) — behind `waddles.core.disable-credential-broker`.
-3. **`connections` table + migration/backfill from `ingest_sources`; `connection_service.py`** — registry RW lands; `/api/v1/connections` (feature/connections-api) and the core-bundle seeder (feature/core-bundle-seeder) build against this shape — behind `waddles.core.disable-connections-registry`.
-4. **Relay-authz stage-side check** (`app_outbound_bindings` + `handle_relay` deny-by-default + audit log) + fast-path revocation (Valkey pub/sub) — closes the M4 gap — behind `waddles.core.disable-relay-authz` and `waddles.core.disable-fast-revocation` (both alerting on raw-ON).
-5. **svc-ingest/svc-action wired to the broker**; Twitch broadcaster-authorization flow (`channel:bot` OAuth grant at connection registration) replacing the plain-IRC assumption (§3.2).
-6. **Discord shard supervisor + Twitch EventSub-connection-pool supervisor**, watermark-poll hot-add/remove, weighted fair scheduling across replicas (§4) — behind `waddles.core.disable-tenant-quotas` for the weighting specifically.
-7. **Scale hardening (deferred, not day-one):** `connections`/`app_outbound_bindings` partitioning if per-tenant row counts approach 10^6; EventSub multi-client-id cost-budget sharding if subscription-type coverage grows past the 10,000-cost default; verify the exact per-type EventSub `cost` values and per-connection WebSocket subscription cap against Twitch's current docs before locking final capacity numbers.
+Relay-authz has **no row here** — see §6.2.
 
 ---
 
-*Illustrative sizing numbers (300 tenants, 6,000/3,500/500 platform split, etc.) are assumptions for capacity math, not committed targets. Discord and Twitch limits above are cited to official docs/forum posts fetched 2026-09-28; the exact per-subscription-type EventSub cost value was not conclusively confirmed at fetch time and must be re-verified against the current subscription-types table before implementation locks final Twitch capacity numbers.*
+## 8. Increment plan
+
+Security-critical items first; each step independently shippable.
+
+1. **`connection_credentials` table + RBAC grants** (`privileges: []` for every non-hub_api role).
+2. **Credential broker** — versioned DEK cache with `dek-rotated` invalidation and decrypt-fail-closed handling (§2.2), per-replica stale-while-revalidate secret cache, batch resolve, circuit breaker — behind `waddles.core.disable-credential-broker`.
+3. **`connections` table + migration/backfill; `connection_service.py`** — behind `waddles.core.disable-connections-registry`.
+4. **Twitch EventSub receiver hardening** (§3.2 gap table): dedup, replay window, revocation → status update + fast-path invalidation, per-connection broker-sourced secrets replacing `TWITCH_EVENTSUB_SECRET`.
+5. **Twitch control-plane reconciler** in hub-api: conduit/shard setup, subscription create/renew/delete, cost-budget tracking + 80% alert, `user.authorization.revoke` handling, broadcaster `channel:bot` OAuth grant flow at connection registration.
+6. **Generic per-app webhook receiver** (`POST /hooks/v1/{webhook_id}`, §4.2): RFC 9421/ES256 and Standard Webhooks `v1a`/Ed25519 as the preferred asymmetric modes, HMAC `v1` as opt-in fallback; pinned-key/JWKS registration with fixed per-key algorithm (no `none`/`HS*` on an asymmetric key); replay window, dedup, 202-accept + XADD, uniform 401/404 policy. Outbound platform-webhook signing (§4.3: ES256/RFC 9421, KMS/HSM-backed platform key, JWKS publication) ships alongside it wherever outbound webhook delivery exists.
+7. **Relay-authz stage-side check, shipped in shadow/log-only mode first** (§6.2) — no kill switch; bounded soak, then permanent enforcement with the shadow branch deleted. Fast-path revocation ships alongside it, behind `waddles.core.disable-fast-revocation`.
+8. **Discord shard supervisor + Twitch conduit/shard supervisor**, watermark-poll hot-add/remove, weighted fair scheduling (§5) — behind `waddles.core.disable-tenant-quotas` for the weighting.
+9. **Rust port of the EventSub receiver** (`core/svc_ingest/src/ingest/twitch.rs`'s open `TODO(M5)` seam) and IRC's Send Chat Message API swap-out for outbound.
+10. **Scale hardening (deferred):** partitioning if per-tenant row counts approach 10^6; verify the Twitch cost-0 condition empirically ahead of the 80%-of-`max_total_cost` alert; register a second Twitch client-id if the 10,000-channel target needs the headroom; Discord Interactions webhook receiver (§3.1) reusing §4.4's shared hardening.
+
+---
+
+*Illustrative sizing numbers are assumptions for capacity math, not committed targets. Discord/Twitch facts are cited to official docs/forum posts fetched 2026-09-28; the exact cost-0 condition for `channel:bot`-authorized conduit subscriptions was not conclusively confirmed and must be verified against a live subscription-creation response before finalizing the 10,000-channel cost budget.*
