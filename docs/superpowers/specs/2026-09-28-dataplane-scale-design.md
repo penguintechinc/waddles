@@ -5,6 +5,12 @@ correct for one tenant per deployment; this document removes that ceiling. It do
 change the wire protocol, envelope contracts, WIT world, or trust boundaries — only
 *how many* of each thing a replica owns and *when* it loads a bundle.
 
+**Revision note.** This revision replaces rev 1's completion-gated source ack (head-of-
+line blocking risk) with a durable per-app hand-off, adds lease fencing and rebalance-
+storm controls, adds an explicit multi-tenant fairness layer, adds bundle-cache
+hit-rate math/pinning/DoS protection/authz, fixes a change-log sequence-gap bug, and
+switches the migration flags to PostHog opt-out kill-switches per house rules.
+
 ## 0. Sizing targets (authoritative, illustrative math throughout is order-of-magnitude)
 
 | Dimension | Target |
@@ -21,9 +27,8 @@ The install-count vs. digest-count gap is load-bearing: §3 depends on it.
 ## 1. Multi-tenant replicas + work partitioning
 
 **Problem.** `BUNDLE_SCOPE_TENANT_ID` (`core/svc_process/src/lib.rs:461`) hardcodes one
-tenant per Deployment. At 500 tenants that's 500 Deployments of svc-process and
-svc-action each — a Kubernetes object count and control-loop cost nobody should carry,
-and it caps replica reuse at exactly the tenants that happen to share a pod.
+tenant per Deployment — 500 tenants would mean 500 Deployments of svc-process and
+svc-action each.
 
 **Decision: shared replica pool, hash-partitioned by source stream, ownership via
 Valkey lease.**
@@ -32,238 +37,285 @@ Valkey lease.**
   hundreds of replicas without repartitioning the hash space itself).
   `partition(source_id) = rendezvous_hash(source_id) % 2048` — HRW (highest random
   weight) hashing, not `hash % replica_count`, because replica count changes constantly
-  under HPA and HRW only reassigns the fraction of keys that must move, not everything.
-- Ownership: `SET waddles:lease:partition:{n} {replica_id} NX PX {LEASE_TTL_MS}`
+  under HPA and HRW only reassigns the fraction of keys that must move.
+- Ownership: `SET waddles:lease:partition:{n} {replica_id}:{epoch} NX PX {LEASE_TTL_MS}`
   (default TTL `30000`), renewed every `LEASE_RENEW_MS` (default `10000`) with a
-  compare-and-renew Lua script (renew only if still the holder). A replica reconciles
-  its owned-partition set every tick: claim unowned/expired partitions whose sources
-  hash to them, release partitions it holds but whose sources no longer hash to it
-  (post-rebalance), and release everything on graceful shutdown (`DEL`, not wait-for-TTL)
-  so scale-down is near-instant.
-- **Why Valkey leases over alternatives:** (a) a `StatefulSet` ordinal / `hash %
-  replica_count` scheme was considered and rejected — it doesn't survive scale up/down
-  without a coordinated rehash, and HPA replica churn would thrash it constantly; (b) an
-  external coordinator (Raft group, dedicated scheduler) was considered and rejected —
-  unjustified new infra when Valkey already provides atomic `SET NX`/Lua and is already a
-  hard dependency; (c) client-side ring computed from a heartbeat set (no explicit lease,
-  Kafka-consumer-group style) was considered — lower renewal traffic, but needs a
-  handoff/fencing protocol to avoid double-ownership during membership-view skew right
-  after a scale event. Leases give that mutual exclusion for free via Valkey atomicity;
-  revisit (c) only if lease-renewal traffic itself becomes the bottleneck.
-- **Rebalance bound:** worst case a moved partition sits unclaimed for `LEASE_TTL_MS`
-  after its old owner dies ungracefully; a graceful scale-down releases immediately.
-  Reconciliation tick (`10s`) + TTL (`30s`) bounds total reassignment latency to ~40s.
+  compare-and-renew Lua script.
+- **Why Valkey leases over alternatives:** (a) `hash % replica_count` was rejected — it
+  doesn't survive scale up/down without a coordinated rehash, and HPA churn would thrash
+  it; (b) an external coordinator (Raft group, dedicated scheduler) was rejected —
+  unjustified new infra when Valkey already provides atomic `SET NX`/Lua; (c) a
+  client-side ring computed from a heartbeat set (no explicit lease) was considered —
+  lower renewal traffic, but needs a handoff/fencing protocol to avoid double-ownership
+  during membership-view skew right after a scale event; revisit only if lease-renewal
+  traffic itself becomes the bottleneck.
 
-**RO-DB watermark across all tenants.** §Watermark in `bundle_active_set/src/query.rs`
-already scopes to one `(tenant_id, community_id)` pair — that part is *not* the alpha
-bug. The bug is cardinality: a replica now touches however many `(tenant, community)`
-pairs its owned partitions' sources belong to (could be hundreds), and polling each
-pair's watermark separately every 5s doesn't scale, while a single hash over the *entire*
-global active set (naively "fix" this by going coarser) would be worse — any tenant's
-change anywhere would force every replica to re-read its whole scope, and at 20,000
-communities that recomputation is neither cheap nor localized to what actually moved.
+**Fencing (epochs).** Valkey has no native fenced-write primitive for arbitrary keys, so
+enforcement is layered:
+- **Hard CAS at the lease itself.** Acquire mints an epoch via
+  `INCR waddles:lease:epoch:{partition}`; the lease value is `{replica_id}:{epoch}`.
+  Renewal extends TTL only if the stored value's `(replica_id, epoch)` still matches the
+  caller's — a replica that lost and reacquired (or a duplicate replica_id) fails
+  renewal, not merely a different replica_id winning.
+- **Soft fencing on the client for everything else.** `XACK`/`XADD` have no
+  conditional-on-arbitrary-value form, so the owning replica keeps a local `fenced`
+  flag, flipped `false` the instant a renewal fails or a claim is lost; every
+  partition-scoped write (source `XACK`, work-stream `XADD`, bundle load/unload from
+  that partition's diff) checks the flag immediately before issuing the command and is
+  skipped if unset. This **bounds, not eliminates**, the double-ownership window to the
+  gap between renewal failure and the next write attempt (one poll tick, ≤ a few hundred
+  ms).
+- **Idempotency is the backstop** for that residual window, exactly as it already is for
+  ordinary at-least-once redelivery (§5.4 base spec, message-id keyed) — a duplicate
+  write during the fencing gap is a duplicate delivery, not a correctness violation.
 
-**Decision: an additive change-log/version counter, not a coarser hash.**
+**Rebalance storms.** A replica dying frees all its leases at once; every survivor's
+next tick would otherwise race to claim the same partitions simultaneously.
+- **Jittered ticks** (±50% random) spread claim attempts instead of lockstep.
+- **Rate-limited claims** — `MAX_PARTITION_CLAIMS_PER_TICK` (default `10`) caps how many
+  new partitions one replica acquires per tick, so a mass failure doesn't fan a single
+  survivor's cold-load burst into one instant.
+- **Shuffled candidate order** per tick reduces repeated collisions with the same
+  competitors.
+- **Rate-limited release on graceful scale-down** — a draining replica releases leases
+  in the same batch size over a few ticks, not one `DEL` burst.
+- **Why this bounds the herd, not just slows it:** a failed `SET NX` is one cheap
+  rejected command — no bundle load, fetch, or compute is triggered by losing a race.
+  Real work only happens on a *successful* claim, and successful claims are capped at
+  `replicas × MAX_PARTITION_CLAIMS_PER_TICK` per tick fleet-wide.
 
-```sql
--- new, additive — no existing table's shape changes
-CREATE TABLE bundle_active_set_changes (
-  seq          BIGSERIAL PRIMARY KEY,     -- global monotonic order
-  tenant_id    INT NOT NULL,
-  community_id INT NOT NULL,
-  changed_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-);
--- trigger on app_active_versions and app_source_bindings INSERT/UPDATE/DELETE
--- appends one row per (tenant_id, community_id) touched, not per changed column
+**RO-DB watermark across all tenants.** A per-`(tenant, community)` scoped watermark
+already exists (`bundle_active_set/src/query.rs`); the fix at this cardinality is an
+additive change-log/version-counter, not a coarser hash — full design, including the
+sequence-gap and retention issues, is §7.
+
+## 2. Consumer model: shared source read, durable per-app hand-off, isolated fan-out
+
+**Rev-1 flaw (head-of-line blocking).** Rev 1 acked a shared source entry only once
+every locally-subscribed app reached a terminal state. That couples the shared group's
+PEL to the *slowest* app on that source: a poison/slow app inflates PEL for every other
+app sharing it, forces `XAUTOCLAIM` to re-deliver the whole entry (re-processing apps
+that already succeeded), and — because the executor's concurrency ceiling is
+fleet-shared — can degrade throughput for tenants unrelated to the stuck app. **Ack must
+not wait on downstream processing.**
+
+**Decision: ack the source stream on durable hand-off, not on completion — insert a
+per-app work stream with its own group/PEL, mirroring the process→action pattern the
+base spec already uses (§5.9).**
+
+```
+source stream (group="stage", shared)
+   read → filter → XADD to each matched app's work stream (awaited, fast) → XACK source
+                                     │
+                                     ▼
+waddles:t:{tenant}:c:{community}:app:{app_id}:work   (stream, one group: {app_id})
+   read → invoke → XACK work entry (per app, independent PEL)  →  action stream (§5.9, unchanged)
 ```
 
-Each replica keeps `last_seen_seq` (in-memory, resets to `0` on restart — a cold replica
-re-reads everything it owns once, which is correct and bounded by its own partition
-size, not the fleet's). Every poll tick: one query,
-`SELECT DISTINCT tenant_id, community_id FROM bundle_active_set_changes WHERE seq >
-$last_seen_seq ORDER BY seq`, cost proportional to **changes since last tick**, not to
-total tenants/communities/rows. Intersect that list against the `(tenant, community)`
-pairs reachable from the replica's currently-owned partitions, and run the existing
-`read_active_set` (unchanged) only for those. A pair outside the changed set is never
-re-read — this is what makes per-tenant polling affordable at 500×20,000 scale instead
-of the existing per-scope query becoming either O(tenants) round trips or one dangerously
-coarse global fingerprint.
+- The shared source reader's only job per entry: evaluate filters, `XADD` the matching
+  envelope (same `message-id`, unmodified) to every matched app's `:work` stream, then
+  `XACK` the source entry. All three sub-steps are fast, bounded-latency Valkey writes —
+  no invoke, no wait on any app's outcome. Source PEL depth now reflects only
+  write-availability, never app health.
+- Each app's `:work` stream has its **own** group (`{app_id}`) and PEL, independent of
+  every other app sharing the source. A slow/poison app inflates only its own PEL, trips
+  only its own three-strike disable (§7.5 base spec), and DLQs only its own entries.
+- **Ordering, stated explicitly.** One source's entries are read by exactly one reader
+  (the partition owner) in stream order and `XADD`ed to a given app's work stream in
+  that order by that single-threaded reader — per-`(source, app)` FIFO holds.
+  Cross-source ordering into one app's work stream is still not guaranteed (unchanged
+  from the base spec, inherent to fan-in from independent readers).
+- **At-least-once across the new hop.** A crash between the work-stream `XADD`(s)
+  succeeding and the source `XACK` re-processes the source entry, re-`XADD`ing to the
+  same app(s) — a duplicate work-stream entry, caught by the existing message-id
+  idempotency contract (§5.4 base spec), not a new failure mode.
 
-## 2. Consumer model: one group per source, in-process fan-out
+**Capacity math holds at target scale.** A naive "one stream per install" reading would
+be ~30,000 streams+groups — worse than groups alone suggests, since Valkey groups are
+cheap metadata. The scarce resource was never group count, it was **dedicated blocking
+connections** (§5.7 base spec forbids sharing one). `XREADGROUP` accepts multiple stream
+keys in one blocking call: a replica's work-stream readers multiplex up to
+`WORK_QUEUE_BATCH_SIZE` (default `500`) locally-owned work streams per blocking
+connection, each still keeping its own independent group/PEL.
 
-**Problem, with the math.** Today `source_supervisor.rs` spawns one task — one
-`GroupReader`, one dedicated blocking Valkey connection (§5.7 of the base spec forbids
-sharing that connection) — per `(app_id, platform, source_id)` binding, group name =
-`app_id`. Illustrative math at target scale: 20,000 communities × ~5 installed apps ×
-~1.5 sources/community ≈ **150,000 consumer groups and blocking connections**
-fleet-wide. That number grows with every install, forever, and is already well past
-what any Valkey deployment should be asked to hold in blocking clients.
+| Layer | Streams/groups | Blocking connections |
+|---|---|---|
+| Source stage (shared group) | ~10,000 | ~10,000 (one per active source, spread across replicas) |
+| Per-app work queue | ~30,000 (= install count) | ≈ `replicas × workers/replica` (e.g. `50 × 4 = 200`) via multiplexed `XREADGROUP`, **not** one per install |
 
-**Decision: one consumer group per source stream (fixed group name, e.g. `stage`), one
-blocking `XREADGROUP` per owned stream, in-process fan-out to every locally-subscribed
-app's bounded queue.**
-
-- Groups/connections fleet-wide ≈ **10,000** (one per configured source), independent
-  of install count — adding the 10,000th bundle to an existing source costs zero new
-  groups or connections, only a new fan-out target in memory.
-- Read loop: `XREADGROUP GROUP stage {consumer_id} ... STREAMS {stream} >`, owned
-  exclusively by whichever replica's lease covers that source's partition (§1) — this
-  preserves the existing per-stream FIFO guarantee unchanged, since exactly one reader
-  ever holds the group's PEL for that stream at a time.
-- Fan-out: for each entry, evaluate every locally-subscribed app's `consumes` filter
-  (unchanged, §5.3 of the base spec), then dispatch concurrently (not serially) to each
-  matching app's bounded `mpsc` queue (default depth `256`, `PROCESS_APP_QUEUE_DEPTH`).
-  A full queue is a **per-app** backpressure event — `waddles_fanout_queue_full_total
-  {app_id}` +1, that app's copy is dropped straight to its own DLQ, other apps on the
-  same entry are unaffected.
-- **Ack semantics.** Since the PEL is per-*entry*, not per-*(entry, app)*, the shared
-  group acks once every locally-subscribed app has reached a terminal state for that
-  entry (success, per-app DLQ, or filter-skip) — dispatched **concurrently**, so wait
-  time is `max(latencies)`, not `sum(latencies)`, bounded by `EXECUTOR_CALL_TIMEOUT_MS`
-  (2000ms default, 10000ms hard ceiling, §7.3 base spec). A permanently slow/broken app
-  cannot stall the entry indefinitely: the existing three-strike trip/disable (§7.5 base
-  spec) routes its future entries straight to its own DLQ without waiting, removing it
-  from the ack-blocking set within its `EXECUTOR_TRIP_WINDOW_S` (300s).
-- **Isolation preserved, DLQ per app.** Re-delivery via `XAUTOCLAIM` after a crash
-  re-fans-out to every locally-subscribed app again, including ones that already
-  succeeded — this is safe *because* the base spec already requires bundle idempotency
-  keyed on `message-id` (§5.4); a shared group does not create a new correctness
-  requirement, it exercises an existing one harder.
-- **Ordering vs. throughput.** Per-source FIFO is unchanged (single owning reader).
-  Throughput scales by adding partitions/replicas across *sources*, not within one hot
-  source — a single very active source is still bottlenecked by one replica's
-  read+fan-out loop for that stream specifically, same ceiling the alpha design had.
+Connections stay flat against install growth on both hops; only work-stream *group*
+count grows with installs, and that is metadata, not the scarce resource.
 
 ## 3. Bundle lifecycle at scale
 
-**Problem.** `bundle_loader.rs::run_tick` loads every row the active-set query returns
-for its scope — at 30,000 installs across all tenants (even after §1's partitioning
-narrows "its scope" to one replica's touched tenants/communities), a busy partition can
-still span hundreds of communities, and "every active bundle for my partition" is not
-automatically small. Separately, cold compiles are real: the spec's own measurement is
-21.6MB components, ~3.3–4.5s **uncached** vs. ~4.5–5.4ms from a precompiled `.cwasm`
-(§7.2 base spec) — a bulk-approve of one bundle version across hundreds of communities at
-once is a thundering herd if every replica independently fetches and (worse) recompiles.
+**Problem.** Loading every active row for a replica's scope, and cold Cranelift
+compiles, don't survive a bulk-approve across hundreds of communities.
 
-**Decision: lazy load + LRU by digest, on top of §1's partition scoping — two
-independent levers, not one.**
+**Decision: lazy load + LRU by digest, on top of §1's partition scoping.**
 
-- Partition scoping (§1) bounds the *candidate* set a replica could ever need.
-- LRU-by-digest bounds what's actually *resident*: track last-invoked time per digest;
-  evict least-recently-invoked when `EXECUTOR_BUNDLE_CACHE_BUDGET_MB` (per-replica memory
-  budget, not entry count — components vary in size) is exceeded. A cache miss triggers
-  fetch-on-demand rather than eagerly loading the whole scope up front.
-- **Digest dedup makes this affordable.** 30,000 installs, low-thousands of distinct
-  digests (§0) — a replica's actually-hot working set at any moment is bounded by how
-  many *distinct* digests its owned communities use concurrently, typically far fewer
-  than its install count, since most communities run the same first-party catalog
-  versions. Size the cache (illustrative: 200–300 resident digests, ~30–50MB each
-  including `EXECUTOR_INSTANCES_PER_BUNDLE` warm stores) against that, not against total
-  installs.
-- **Cold-start latency budget.** Because `bundle_compiler` (§4.6 base spec) precompiles
-  the `.cwasm` once at **publish** time and stores it keyed by `{digest}-{wasmtime_abi}-
-  {collector}`, a cache miss on any replica is an object-store `GET` (~21MB, target
-  <300ms in-cluster) + ~5–10ms deserialize — **not** a 3–4s Cranelift compile. That path
-  only triggers on a genuine cache-key mismatch (wasmtime/collector upgrade), which
-  should be rare and is exactly the case the base spec already treats as "discard and
-  recompile."
-- **Thundering herd on bulk-approve.** Precompilation already happening once at publish
-  time removes the *compile* herd. What remains is N replicas' first `GET` for the same
-  digest landing at once: mitigate with **single-flight dedup per digest** (one in-flight
-  fetch per digest per replica-local cache; concurrent waiters join it rather than each
-  issuing their own `GET`) — the natural place for this is the cache component in the
-  next bullet. Proactive pre-warm (hub-api pushing a load hint ahead of the poll tick on
-  bulk activation) is a worthwhile follow-up, not required for correctness.
-- **Fetch decoupled from the executor (this is a boundary change, not just a cache).**
-  Today `ComponentSource::fetch` (`bundle_executor/src/invoke.rs`) runs inside the
-  executor's `on_load`, and the executor's network policy already allows it a bucket
-  `GET` (§7.1 base spec). Decision: move fetch, digest verification, single-flight dedup,
-  and the LRU/precompiled-artifact cache into a **separate local component** — a sidecar
-  in the executor's pod, sharing a read-only-to-the-executor cache volume — so the
-  executor process itself never holds bucket credentials or bucket network egress at
-  all; its `on_load` becomes "read a local path the sidecar already verified," full stop.
-  - *Rejected alternative:* embed component bytes directly in the `Load` wire frame.
-    Frame size is capped at `EXECUTOR_MAX_FRAME_BYTES` (1MiB default) versus a ~21MB
-    component — would require raising that ceiling fleet-wide for every frame type to
-    accommodate a rare cold-load path, not worth the DoS-surface increase.
-  - *Rejected alternative:* keep fetch in the executor as-is. Works, but every replica
-    independently fetches and independently owns bucket egress, which is both a larger
-    attack surface for an escaped guest (§7.1's "executor → bucket ALLOW" stays live even
-    though the executor never needs to *initiate* that call itself) and a missed chance
-    to dedup fetches across the executor's own instance pool.
-  - Net effect: tighter network policy (executor pod: stage mTLS only, zero bucket
-    egress; sidecar: bucket GET only, zero stage access) *and* the scale fix, from one
-    change.
-  - Trust: the sidecar verifies `sha256(bytes) == digest` before ever writing to the
-    shared cache path (fail-closed, unchanged verification rule from `invoke.rs::
-    verify_digest`); the executor is not required to re-verify since it has no network
-    path to have been handed anything else, but re-checks anyway as defense-in-depth at
-    negligible cost (one hash over bytes already in memory).
+- Partition scoping bounds the *candidate* set; LRU-by-digest bounds what's actually
+  *resident*: evict least-recently-invoked when `EXECUTOR_BUNDLE_CACHE_BUDGET_MB` is
+  exceeded; a miss fetches on demand.
+- **Working-set / hit-rate math.** At illustrative `replicas=50`, one replica owns
+  `2048/50 ≈ 40` partitions × ~5 sources/partition ≈ 200 sources, spanning maybe
+  100–150 distinct communities. At ~5 apps/community but heavy digest reuse across the
+  shared first-party catalog (§0), the *distinct-digest* working set is bounded by
+  catalog size long before `communities × apps` — illustrative ~100–150 digests hot at
+  once. Size the LRU to ~1.5–2× that (`250` entries) to absorb rotation; target **≥95%
+  steady-state hit rate**, alerted via `waddles_bundle_cache_hit_ratio`.
+- **Admission/pinning.** A burst of cold long-tail digests must not evict the shared
+  first-party catalog every replica needs constantly. Track invocation frequency per
+  digest and pin the fleet-wide top-`K` (default `50`) from eviction; pins recompute on
+  a slow cadence (`15m`) and never block admission of a new digest, only protect
+  already-hot ones from a transient spike.
+- **Cold-start latency budget.** `bundle_compiler` (§4.6 base spec) precompiles the
+  `.cwasm` once at **publish** time, keyed `{digest}-{wasmtime_abi}-{collector}` — a
+  cache miss on any replica is an object-store `GET` (~21MB, target <300ms in-cluster) +
+  ~5–10ms deserialize, **not** a 3–4s Cranelift compile (§7.2 base spec measurement).
+  That path only triggers on a genuine cache-key mismatch, which should be rare.
+- **Cold-start DoS protection.** Single-flight dedup covers concurrent fetches of the
+  *same* digest; it does not stop one tenant triggering many *distinct* cold loads
+  (rapid activate/deactivate, or a burst of unique custom bundles) and starving the
+  fetch path or evicting other tenants' pinned entries. Add a **per-tenant cold-load
+  rate limit** (`TENANT_BUNDLE_LOAD_RATE_LIMIT`, default `5/s`, token bucket) in the
+  cache component; over-limit loads queue briefly, then fail retryable.
+- **Fetch decoupled from the executor.** Move fetch, digest verification, single-flight
+  dedup, and the LRU/precompiled-artifact cache into a **sidecar** in the executor's
+  pod, sharing a read-only-to-the-executor cache volume — the executor process holds no
+  bucket credentials or bucket egress at all; `on_load` becomes "read a local path the
+  sidecar already verified."
+  - *Rejected:* embedding component bytes in the `Load` wire frame — `EXECUTOR_MAX_
+    FRAME_BYTES` (1MiB) versus ~21MB components, not worth raising for a rare cold path.
+  - *Rejected:* status quo (fetch inside the executor) — every replica independently
+    owns bucket egress (larger attack surface for an escaped guest) and independently
+    fetches with no cross-instance dedup.
+  - Net effect: tighter network policy (executor: stage mTLS only; sidecar: bucket GET
+    only) *and* the scale fix, from one change.
+- **Per-tenant authz in the fetch path.** The sidecar fetches only digests present in
+  the active set of a `(tenant, community)` the calling replica currently owns
+  (cross-checked against the replica's own partition-scoped active-set cache, refreshed
+  via §7) — belt-and-suspenders against a crafted or buggy `Load` frame naming a digest
+  outside the caller's authority, consistent with "the stage never trusts a
+  cross-boundary reference alone" (§5.9 base spec).
 
 ## 4. svc_action under the same model
 
-**Problem.** `svc_action`'s distribution poll (`distribution.rs::run_poll_loop`) is
-configured with one `action_app_id` — one Deployment per app bundle. At 10,000s of
-active bundles that's 10,000s of Deployments, which is not a Kubernetes topology anyone
-should run.
+**Problem.** One `action_app_id` per Deployment (`distribution.rs::run_poll_loop`) means
+10,000s of Deployments at target bundle-install scale.
 
-**Decision:** apply §1's partition-lease model to `svc_action`, partitioned by
-`app_id` (action streams are already `waddles:t:{tenant}:c:{community}:app:{app_id}:
-action` with exactly one group, `{app_id}` — §5.9 base spec) instead of by source. No
-fan-out complexity here: action is already 1:1 (stream, group, app), so §2's shared-group
-machinery isn't needed — only §1's ownership/rebalancing and §3's lazy-load/LRU bundle
-lifecycle carry over unchanged. A shared `svc-action` replica pool claims a shard of
-`app_id`s via the same Valkey leases, each owned `app_id`'s action stream read by
-whichever replica holds its partition, same rebalance bound (~40s).
+**Decision:** apply §1's partition-lease model (including fencing and jittered
+rebalance, unchanged) to `svc_action`, partitioned by `app_id` — action streams are
+already 1:1 `(stream, group={app_id}, app)` (§5.9 base spec), so §2's durable-hand-off
+machinery isn't needed there; only §1's ownership/rebalancing, §3's lazy-load/LRU, and
+§5's tenant fairness carry over.
 
-## 5. Capacity table, HPA signals, failure modes
+## 5. Multi-tenant fairness & isolation (every pod is multi-tenant)
+
+Partitioning (§1) isolates *ownership*, and the per-app work queue (§2) isolates a
+poison app's *blast radius* — neither stops one tenant's aggregate volume from
+starving another tenant sharing the same replica's shared resources (executor
+concurrency ceiling, work-queue reader threads, fan-out CPU).
+
+| Mechanism | Where | Default |
+|---|---|---|
+| Per-tenant event-rate limit | Work-queue consumer, before dispatch | `TENANT_RATE_LIMIT_EPS` token bucket, illustrative `200/s` |
+| Weighted fair dispatch | Multiplexed `XREADGROUP` result loop (§2) | Round-robin **across tenants first, then apps within a tenant** — one entry per tenant per pass, never drain-one-stream-then-next; equal weight by default, override for contractual SLAs |
+| Per-tenant executor concurrency sub-ceiling | Instance-pool checkout (§7.2 base spec) | `EXECUTOR_MAX_CONCURRENT_CALLS_PER_TENANT` ≤ global ceiling (e.g. `8` of `32`) — no tenant claims the whole pool |
+| Per-tenant aggregate trip | Extends the per-`(app_id, digest)` trip (§7.5 base spec) | A tenant whose apps collectively trip above `TENANT_TRIP_RATE` gets a lower rate limit, never a full tenant-wide disable — backpressure, not an outage |
+| Per-tenant metrics | OTel | `waddles_tenant_events_processed_total{tenant}`, `waddles_tenant_queue_depth{tenant}`, `waddles_tenant_executor_concurrency{tenant}`, `waddles_tenant_rate_limited_total{tenant}` — tenant cardinality (100s) is within budget |
+
+Isolation is layered, cheapest-first: per-app work queue (structural) → per-tenant rate
+limit (rejects before any resource is spent) → weighted dispatch (fairness among
+admitted work) → per-tenant concurrency sub-ceiling (hard cap in the executor, the last
+line before one tenant's compute reaches another's).
+
+## 6. Capacity table, HPA signals, failure modes
 
 | Signal | Metric | Alpha shape | New shape (worked example) |
 |---|---|---|---|
 | Deployments (process+action) | k8s objects | ~500 tenants × 2 = 1,000+, growing with tenants | fixed replica pool, independent of tenant count |
-| Consumer groups / blocking conns | `waddles_group_pending`, conn count | ~150,000 (§2 math), grows with installs | ~10,000 (= source count), flat vs. installs |
-| Resident bundle digests/replica | `waddles_bundle_cache_*` | every active bundle in scope (unbounded growth) | ~200–300, budget-capped, LRU-evicted |
-| Watermark poll cost/tick | DB rows touched | O(tenant's whole active set) × replicas | O(changes since last tick) (§1 changelog) |
-| Partition rebalance latency | `waddles_partition_reassignments_total` | N/A (static scope) | ≤ ~40s (renew 10s + TTL 30s) |
+| Source-stream groups/conns | `waddles_group_pending`, conn count | ~150,000 (per-(app,source) groups) | ~10,000 (= source count), flat vs. installs |
+| Work-queue groups/conns | conn count | N/A | ~30,000 groups / ~200 blocking conns (§2) |
+| Resident bundle digests/replica | `waddles_bundle_cache_*` | every active bundle in scope (unbounded) | ~100–150 hot, `250`-entry LRU budget |
+| Watermark poll cost/tick | DB rows touched | O(tenant's whole active set) × replicas | O(changes since last tick, delayed-cutoff safe, §7) |
+| Partition rebalance latency | `waddles_partition_reassignments_total` | N/A (static scope) | ≤ ~40s, jittered + rate-limited (§1) |
+| Fencing gap window | — | N/A | ≤ one poll tick after renewal failure |
 
-**HPA signals:** scale svc-process/svc-action on `avg(waddles_partition_lag)` per
-replica (sum of `XPENDING`+backlog across owned streams, target e.g. 500 sustained 2min)
-— not on CPU alone, since a replica can be CPU-idle while its owned partition backs up.
-Track `waddles_owned_partitions{replica}` to catch hashing/lease skew, and
-`waddles_bundle_cache_hit_ratio` to catch an undersized cache budget before it shows up
-as latency.
+**HPA signals:** scale on **partition-level** source-stream lag and **tenant-level**
+aggregate work-queue lag (excluding tripped/disabled apps) — never on a single app's
+queue depth, so one poison app cannot trigger fleet-wide scale-out; that case is handled
+by the app's own trip/disable (§7.5 base spec), not by adding replicas. Track
+`waddles_owned_partitions{replica}` for hashing/lease skew and
+`waddles_bundle_cache_hit_ratio` for an undersized cache budget.
 
 **Failure modes:**
 
 | Failure | Behavior |
 |---|---|
-| Valkey lease store unreachable | Replicas keep serving currently-owned partitions (no self-eviction); cannot claim freed ones. Degrades to static ownership until recovery — never drops in-flight work. |
-| RO-DB changelog query fails | Fall back to last-known active set, never crash, never speculatively unload (existing flag/license graceful-degradation pattern). |
-| Fetch/cache sidecar down | Executor `on_load` fails closed (`LOAD_FAILED`); already-resident bundles keep serving until evicted; new loads retry with backoff. |
-| Partition flapping | `waddles_partition_reassignments_total` rate alert; usually undersized lease TTL vs. GC pause/network jitter — runbook: raise TTL. |
+| Valkey lease store unreachable | Replicas keep serving currently-owned partitions (no self-eviction); cannot claim freed ones. Degrades to static ownership until recovery. |
+| Lease renewal fails (fencing trip) | Local `fenced` flag flips false immediately; in-flight writes for that partition stop; partition becomes claimable within the reconcile+TTL bound (~40s) — the old holder never double-acts past its next attempted write. |
+| Mass replica loss (rebalance storm) | Jittered, rate-limited claims (§1) bound cold-load fan-in to `MAX_PARTITION_CLAIMS_PER_TICK × replicas` per tick — no synchronized cache-eviction/compile spike. |
+| RO-DB change-log query fails | Fall back to last-known active set, never crash, never speculatively unload. |
+| Fetch/cache sidecar down | Executor `on_load` fails closed (`LOAD_FAILED`); resident bundles keep serving until evicted; new loads retry with backoff. |
+| One tenant over its rate limit | Excess events rejected with a retryable backpressure signal at the work-queue consumer (§5); other tenants on the same replica are unaffected. |
 
-## 6. Migration path (each increment independently shippable, flag-gated, opt-out default OFF)
+## 7. Change-log correctness, retention, and full-reconcile safety net
 
-1. **Additive changelog table + trigger** (§1) — schema-only, inert until read; no
-   runtime behavior change.
-2. **Multi-tenant watermark polling** — replace the `BUNDLE_SCOPE_TENANT_ID` single-scope
-   gate with changelog-driven polling across a configured tenant set. Flag:
-   `PROCESS_MULTI_TENANT_WATERMARK_ENABLED` (default off; off = today's single-tenant
-   env-scoped behavior, unchanged).
-3. **Shared source-stream consumer groups + in-process fan-out** (§2), replacing
-   per-(app,source) groups. Flag: `PROCESS_SHARED_SOURCE_GROUPS_ENABLED` (default off).
-4. **Partition ownership via Valkey leases** (§1) across source streams; wire HPA to
-   `waddles_partition_lag`. Requires #3 (nothing to own until groups are shared). Flag:
-   `PROCESS_PARTITION_LEASES_ENABLED` (default off).
-5. **Bundle fetch/cache sidecar** (§3) — decouple fetch out of `bundle_executor`,
-   tighten the executor pod's network policy. Flag: `EXECUTOR_LOCAL_CACHE_ENABLED`
-   (default off; off = today's direct in-executor fetch path).
-6. **Lazy load + LRU eviction** in the DB bundle loader, built on #5's cache. Flag:
-   `PROCESS_LAZY_BUNDLE_LOAD_ENABLED` (default off).
-7. **svc_action multi-app partitioning** (§4), same lease model over `app_id`. Flag:
-   `ACTION_MULTI_APP_ENABLED` (default off).
-8. **Decommission the single-tenant/single-app topology** — remove
-   `BUNDLE_SCOPE_TENANT_ID`/`action_app_id` single-scope code paths and hub-api's
-   per-(app,source) group provisioning, once 1–7 have soaked green at representative load
-   (beta/gamma load test approximating §0's sizing table). This step is a deletion after
-   a full soak, not itself a kill-switched feature.
+**Sequence-gap / in-flight-transaction visibility.** A `BIGSERIAL seq` can be allocated
+by a transaction that commits *after* a later-`seq` transaction commits. A replica that
+polls `WHERE seq > last_seen_seq` and advances `last_seen_seq` to the max `seq` observed
+would permanently skip the earlier, late-committing row. **Decision: advance the
+watermark on a delayed, commit-safe cutoff, not the raw max observed** — poll
+`WHERE seq > last_seen_seq AND changed_at <= now() - CHANGELOG_SAFETY_MARGIN`
+(default `5s`, comfortably longer than any realistic transaction on this table), and
+only advance `last_seen_seq` up to that cutoff. Cost: up to `5s` extra propagation
+latency on a poll that was already background/eventual, never on the request path.
+*Rejected:* reading Postgres's `xmin`/snapshot horizon directly for an exact safe
+sequence — more precise, materially more coupling to Postgres internals; revisit only
+if `5s` proves operationally too slow.
+
+**Retention.** `bundle_active_set_changes` grows unboundedly otherwise. A retention job
+(hub-api cron) deletes rows older than `CHANGELOG_RETENTION` (default `48h`) — safe
+unconditionally past that horizon because any replica down longer than `48h` is already
+past the point where full reconcile, not changelog replay, is the correct recovery.
+
+**Periodic full reconcile — the safety net for both of the above.** Independent of
+change-log correctness, every replica re-runs `read_active_set` in full for every
+`(tenant, community)` its owned partitions touch on a slow cadence
+(`FULL_RECONCILE_INTERVAL`, default `15m`), and immediately upon acquiring a new
+partition. This bounds the blast radius of any change-log gap, trigger bug, or missed
+row to at most one reconcile interval — the same trust-but-verify pattern the rest of
+this design relies on, and cheap here because a partition's touched-scope row count is
+small by construction (§1).
+
+## 8. Migration path
+
+**Flag mechanism (house rule).** Every increment ships behind a PostHog **opt-out
+kill-switch**, `waddles.core.disable-<mechanism>` — not an env-var default-off flag.
+Unseen or unreachable resolves to **not disabled** (new mechanism stays ON — fail-safe,
+not fail-open); flipping it ON is the operator's rollback to the legacy path it
+replaces. This still matches the house default ("never-seen flags default OFF"): these
+are *disable* switches, so OFF-by-default is exactly "new path active by default."
+
+1. **Additive change-log table + trigger, delayed-cutoff read** (§7) — schema-only,
+   inert until read, no flag.
+2. **Multi-tenant watermark polling** (§1, §7). `waddles.core.disable-multi-tenant-watermark`.
+3. **Shared source-stream read + durable per-app work-queue hand-off** (§2), replacing
+   both the alpha per-(app,source) groups and the completion-gated ack this revision
+   removed. `waddles.core.disable-shared-source-fanout`.
+4. **Partition ownership via fenced Valkey leases, jittered/rate-limited rebalance**
+   (§1). Requires #3. `waddles.core.disable-partition-leases`.
+5. **Bundle fetch/cache sidecar, with per-tenant fetch authz** (§3).
+   `waddles.core.disable-bundle-cache-sidecar`.
+6. **Lazy load + LRU with hot-digest pinning and per-tenant cold-load rate limits**
+   (§3), built on #5. `waddles.core.disable-lazy-bundle-load`.
+7. **svc_action multi-app partitioning** (§4), same lease/fencing model over `app_id`.
+   `waddles.core.disable-action-multi-app`.
+8. **Multi-tenant fairness controls** (§5) — per-tenant rate limits, weighted dispatch,
+   executor concurrency sub-ceiling, per-tenant metrics; layers onto #3/#4/#7 and can
+   ship independently once those land. `waddles.core.disable-tenant-fairness`.
+9. **Decommission the legacy topology** — delete `BUNDLE_SCOPE_TENANT_ID`/`action_app_id`
+   single-scope paths, hub-api's per-(app,source) group provisioning, and the
+   completion-gated ack path, once 1–8 have soaked green at representative load
+   (beta/gamma load test approximating §0's sizing table). Deletes the kill switches for
+   2–8 rather than leaving them permanently dark.
