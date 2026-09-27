@@ -282,6 +282,51 @@ async def test_approve_version_reactivation_upserts_the_pointer(install_dal: Any
     assert active_rows.first().version_id == upload_v2.app_version_id
 
 
+async def test_approve_version_rolls_back_the_approval_if_activation_fails(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Security-review regression: the approval write and activation must be one transaction.
+
+    Simulates a failure in the `app_active_versions` INSERT half of
+    `_write_approval_and_activate()`'s single `engine.begin()` block --
+    the whole transaction must roll back, leaving no orphan
+    `app_install_approvals` row (previously: the approval row committed
+    in its own auto-committing session before activation ever ran).
+    """
+    from sqlalchemy import Table
+
+    await _seed_published(install_dal)
+
+    original_insert = Table.insert
+
+    def _failing_insert(self: Table, *args: Any, **kwargs: Any) -> Any:
+        if self.name == "app_active_versions":
+            raise RuntimeError("simulated activation failure")
+        return original_insert(self, *args, **kwargs)
+
+    monkeypatch.setattr(Table, "insert", _failing_insert)
+
+    with pytest.raises(RuntimeError, match="simulated activation failure"):
+        await approve_version(
+            install_dal,
+            app_id="waddles.socials.music.default",
+            version="3.0.1",
+            tenant_id=1,
+            community_id=None,
+            approved_by=1,
+        )
+
+    monkeypatch.undo()
+
+    approvals = await install_dal(
+        install_dal.app_install_approvals.app_id == "waddles.socials.music.default"
+    ).select()
+    assert not approvals, "the approval row must roll back together with the failed activation"
+
+    active = await _active_rows(install_dal, app_id="waddles.socials.music.default", tenant_id=1)
+    assert not active
+
+
 async def test_approve_version_missing_app_version_id_is_500(install_dal: Any) -> None:
     """A PUBLISHED row with no digest pointer is a data-integrity bug, refused loudly."""
     now = datetime.now(UTC)

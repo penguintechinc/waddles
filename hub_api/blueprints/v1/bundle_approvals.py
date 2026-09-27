@@ -68,6 +68,14 @@ class MessageResponse:
     message: str
 
 
+@dataclass(slots=True, frozen=True)
+class ApproveResponse:
+    """Response DTO for a successful `POST .../approve` (security.md Output Validation)."""
+
+    success: bool
+    permissionHash: str
+
+
 @bundle_approvals_bp.route("/<app_id>/versions/<version>/permissions", methods=["GET"])
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("platform:admin")  # type: ignore[untyped-decorator]
@@ -90,9 +98,10 @@ async def get_permissions(
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("platform:admin")  # type: ignore[untyped-decorator]
 @validate_request(ApproveRequest)
+@validate_response(ApproveResponse)
 async def post_approve(
     data: ApproveRequest, app_id: str, version: str
-) -> tuple[dict[str, object], int]:
+) -> tuple[ApproveResponse | dict[str, object], int]:
     """Approve a version. A headless caller supplies `permissionHash`; a mismatch fails closed."""
     install_dal = _install_dal()
     ctx = get_tenant_context(request)
@@ -123,7 +132,7 @@ async def post_approve(
                 409,
             )
         return _err(exc)
-    return {"success": True, "permissionHash": row.permission_hash}, 200
+    return ApproveResponse(success=True, permissionHash=row.permission_hash), 200
 
 
 @bundle_approvals_bp.route("/<app_id>/versions/<version>/deny", methods=["POST"])
