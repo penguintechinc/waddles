@@ -655,10 +655,13 @@ fn try_start_db_bundle_loader(
         return;
     };
 
-    let flag = flags::boxed(flags::NegatedFlag(flag_or_closed(
-        &license,
-        flags::DISABLE_DB_BUNDLE_CONFIG_FLAG,
-    )));
+    // `flags::db_bundle_config_flag` (not the generic `flag_or_closed` +
+    // `NegatedFlag` composition) -- this crate's own hardcoded
+    // license-bypass domain (`build_license_client` above) makes
+    // `flag_enabled` read `true` for ANY key, so a bare negation would
+    // report the DB-driven path permanently DISABLED for every deployment
+    // of this service; see `flags::DisableDbBundleConfigFlag`'s doc.
+    let flag = flags::db_bundle_config_flag(&license);
     let reader_cfg = bundle_active_set::ReaderConfig {
         host: config.cli.db_reader_host.clone(),
         port: config.cli.db_reader_port,

@@ -2934,6 +2934,7 @@ dependencies = [
  "penguin-spine",
  "prometheus",
  "rcgen",
+ "redis",
  "reqwest 0.12.28",
  "rustls",
  "rustls-pki-types",

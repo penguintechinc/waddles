@@ -63,6 +63,17 @@ fn binding_key(b: &SourceBinding) -> BindingKey {
 /// doc for the NOGROUP case specifically.
 const CONSUMER_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
+/// True when `err` is Valkey's `NOGROUP` reply -- the bound stream's
+/// consumer group hasn't been provisioned yet (hub-api owns `XGROUP
+/// CREATE` when it grants the binding). Matches on
+/// [`redis::RedisError::code`] (the raw server-reported error code the
+/// `redis` crate parses once from the `-NOGROUP ...` reply line) rather
+/// than a substring match on the full `Display` text, so a wording change
+/// in the trailing human-readable detail can never break this check.
+fn is_nogroup_error(err: &SpineError) -> bool {
+    matches!(err, SpineError::Redis(e) if e.code() == Some("NOGROUP"))
+}
+
 /// Everything every per-binding consumer task needs that does NOT vary by
 /// binding -- built once by `crate::lib::try_start_db_bundle_loader` and
 /// shared (via `Arc`) across every spawned [`run_binding_consumer`] task,
@@ -238,7 +249,7 @@ async fn run_binding_consumer(
                     // via the branch above -- unreachable in practice, but
                     // handled the same way (return) rather than looping.
                     Ok(()) => return,
-                    Err(SpineError::Redis(e)) if e.to_string().contains("NOGROUP") => {
+                    Err(err) if is_nogroup_error(&err) => {
                         tracing::warn!(
                             app_id = %app_id, platform = %platform, source_id = %source_id,
                             "source-binding consumer: consumer group not yet provisioned (NOGROUP), retrying"
@@ -500,6 +511,48 @@ mod tests {
             platform: platform.to_string(),
             source_id: source_id.to_string(),
         }
+    }
+
+    /// The NOGROUP-detection regression test: a real `RedisError` carrying
+    /// the server's own `"NOGROUP"` code (built via `redis::
+    /// make_extension_error`, the same public constructor the `redis`
+    /// crate's own parser uses internally for a `-NOGROUP ...` reply line)
+    /// must be recognized regardless of the trailing detail text's exact
+    /// wording.
+    #[test]
+    fn is_nogroup_error_matches_on_the_redis_error_code_not_message_wording() {
+        let err = SpineError::Redis(redis::make_extension_error(
+            "NOGROUP".to_string(),
+            Some(
+                "No such key 'waddles:t:acme:c:_tenant:src:twitch:tw-x:events' or consumer \
+                 group 'waddles.bot.commands.default' in XREADGROUP with GROUP option"
+                    .to_string(),
+            ),
+        ));
+        assert!(is_nogroup_error(&err));
+
+        // A totally different wording for the same code must still match --
+        // proves this is a code check, not a disguised substring match.
+        let err_different_wording = SpineError::Redis(redis::make_extension_error(
+            "NOGROUP".to_string(),
+            Some("some completely different detail text".to_string()),
+        ));
+        assert!(is_nogroup_error(&err_different_wording));
+    }
+
+    #[test]
+    fn is_nogroup_error_rejects_a_different_redis_error_code() {
+        let err = SpineError::Redis(redis::make_extension_error(
+            "WRONGTYPE".to_string(),
+            Some("Operation against a key holding the wrong kind of value".to_string()),
+        ));
+        assert!(!is_nogroup_error(&err));
+    }
+
+    #[test]
+    fn is_nogroup_error_rejects_a_non_redis_spine_error() {
+        let err = SpineError::Config("unrelated config error".to_string());
+        assert!(!is_nogroup_error(&err));
     }
 
     #[tokio::test]

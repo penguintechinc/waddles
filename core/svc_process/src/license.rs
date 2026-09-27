@@ -94,6 +94,20 @@ pub const DISABLE_DB_BUNDLE_CONFIG_FLAG: &str = "waddles.core.disable-db-bundle-
 /// FixedGate`/`ToggleGate` (this trait takes no flag parameter, so the
 /// same fakes serve both gates) -- constructing those directly with the
 /// *already-inverted* boolean they want [`enabled`] to report.
+///
+/// **Bypass-awareness fix:** [`build_license_client`] always registers
+/// this service's own [`DEPLOYMENT_DOMAIN`] against [`BYPASS_DOMAIN`], so
+/// `LicenseClient::bypass_active()` is `true` for every deployment of this
+/// service (`build_license_client_hardcoded_domain_bypasses_flag_checks`'s
+/// own proof) -- and a bypassed client's `flag_enabled` reads `true` for
+/// *any* key, `RUST_DATA_PLANE_FLAG` included, since bypass means "this
+/// PenguinTech-owned deployment gets every feature unlocked". Naively
+/// negating that raw `true` for this OPT-OUT kill-switch would read as
+/// "bypass -> kill-switch raw-ON -> DB path permanently DISABLED" -- the
+/// exact opposite of what bypass is supposed to mean. [`enabled`] checks
+/// [`LicenseClient::bypass_active`] first and short-circuits to `true`
+/// (DB path enabled, the correct "unlocked" outcome) before ever reading
+/// the raw flag.
 pub struct DbBundleConfigGate(Arc<LicenseClient>);
 
 impl DbBundleConfigGate {
@@ -104,7 +118,12 @@ impl DbBundleConfigGate {
 
 impl FeatureGate for DbBundleConfigGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move { !self.0.flag_enabled(DISABLE_DB_BUNDLE_CONFIG_FLAG).await })
+        Box::pin(async move {
+            if self.0.bypass_active() {
+                return true;
+            }
+            !self.0.flag_enabled(DISABLE_DB_BUNDLE_CONFIG_FLAG).await
+        })
     }
 }
 
@@ -279,6 +298,32 @@ mod tests {
         assert!(
             gate.enabled().await,
             "an unseen kill-switch flag must leave the DB-driven path enabled"
+        );
+    }
+
+    /// Bypass-awareness regression test: `build_license_client`'s hardcoded
+    /// self-domain bypass (see `build_license_client_hardcoded_domain_
+    /// bypasses_flag_checks` above) makes `flag_enabled` read `true` for
+    /// ANY key on this client, including
+    /// [`DISABLE_DB_BUNDLE_CONFIG_FLAG`] -- naively negating that raw
+    /// `true` would report the DB-driven path DISABLED for every
+    /// deployment of this service, permanently, which is the exact bug
+    /// this test guards against. `DbBundleConfigGate::enabled` must check
+    /// `bypass_active()` first and report `true` (DB path enabled).
+    #[tokio::test]
+    async fn db_bundle_config_gate_stays_enabled_under_the_hardcoded_domain_bypass() {
+        let client = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            build_license_client("waddles-test-db-bundle-config-bypass").expect("valid defaults")
+        };
+        assert!(
+            client.bypass_active(),
+            "sanity check: this client must actually be bypassed"
+        );
+        let gate = DbBundleConfigGate::new(client);
+        assert!(
+            gate.enabled().await,
+            "bypass must leave the DB-driven path enabled, not disabled"
         );
     }
 

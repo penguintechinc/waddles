@@ -107,16 +107,65 @@ pub fn boxed(flag: impl FeatureFlag + 'static) -> Arc<dyn FeatureFlag> {
 }
 
 /// Wraps another [`FeatureFlag`] and reports the boolean negation of its
-/// current value -- the adapter [`DISABLE_DB_BUNDLE_CONFIG_FLAG`]'s doc
-/// describes: turns a raw opt-out kill-switch flag (ON = disabled) into
-/// the "is this feature enabled" question every call site actually asks,
-/// without needing a dedicated per-flag wrapper type the way
-/// `core/svc_process/src/license.rs::DbBundleConfigGate` has.
+/// current value -- a general-purpose adapter for a plain opt-out
+/// kill-switch flag (ON = disabled). **Not used for
+/// [`DISABLE_DB_BUNDLE_CONFIG_FLAG`]** -- see [`DisableDbBundleConfigFlag`]'s
+/// own doc for why a bare negation is wrong for a flag whose raw value can
+/// be forced `true` by this crate's own hardcoded license-bypass domain.
 pub struct NegatedFlag(pub Arc<dyn FeatureFlag>);
 
 impl FeatureFlag for NegatedFlag {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move { !self.0.enabled().await })
+    }
+}
+
+/// Production [`FeatureFlag`] for [`DISABLE_DB_BUNDLE_CONFIG_FLAG`] --
+/// checks `LicenseClient::bypass_active()` directly rather than going
+/// through the generic [`NegatedFlag`] wrapper, mirroring
+/// `core/svc_process/src/license.rs::DbBundleConfigGate`'s identical fix.
+///
+/// **Bypass-awareness fix:** `crate::lib::build_license_client` always
+/// registers this service's own hardcoded deployment domain against its
+/// bypass suffix, so `bypass_active()` is `true` for every deployment of
+/// this service -- and a bypassed client's `flag_enabled` reads `true` for
+/// ANY key, since bypass means "this PenguinTech-owned deployment gets
+/// every feature unlocked". Naively negating that raw `true` for this
+/// OPT-OUT kill-switch would read as "bypass -> kill-switch raw-ON -> DB
+/// path permanently DISABLED" -- the exact opposite of what bypass is
+/// supposed to mean. [`enabled`] checks bypass first and short-circuits to
+/// `true` (DB path enabled, the correct "unlocked" outcome).
+pub struct DisableDbBundleConfigFlag(Arc<penguin_licensing::LicenseClient>);
+
+impl DisableDbBundleConfigFlag {
+    pub fn new(client: Arc<penguin_licensing::LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureFlag for DisableDbBundleConfigFlag {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            if self.0.bypass_active() {
+                return true;
+            }
+            !self.0.flag_enabled(DISABLE_DB_BUNDLE_CONFIG_FLAG).await
+        })
+    }
+}
+
+/// Builds the [`FeatureFlag`] `crate::lib::try_start_db_bundle_loader` (and
+/// the startup path-selection dispatch) gates on: [`DisableDbBundleConfigFlag`]
+/// over a real client, or a fixed "DB path enabled" answer when no license
+/// client is available at all (mirrors `crate::lib::flag_or_closed`'s own
+/// `None` branch, just with the final, already-inverted boolean this
+/// specific flag's callers expect).
+pub fn db_bundle_config_flag(
+    license: &Option<Arc<penguin_licensing::LicenseClient>>,
+) -> Arc<dyn FeatureFlag> {
+    match license {
+        Some(client) => boxed(DisableDbBundleConfigFlag::new(Arc::clone(client))),
+        None => boxed(StaticFlag(true)),
     }
 }
 
@@ -147,19 +196,59 @@ mod tests {
     /// state, and a permanently-unreachable license server's steady state)
     /// must leave the DB-driven path ENABLED, not disabled -- the opposite
     /// of the retired `waddles.core.db-bundle-config` flag's own
-    /// default-OFF contract.
+    /// default-OFF contract. Built via a non-bypassed client
+    /// (`LicenseConfig::new` directly, no deployment-domain bypass) so this
+    /// isolates the underlying fail-closed contract from the bypass fix
+    /// below.
     #[tokio::test]
-    async fn negated_disable_db_bundle_config_flag_defaults_enabled_when_never_seen() {
-        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-negated-kill-switch")
+    async fn disable_db_bundle_config_flag_defaults_enabled_when_never_seen() {
+        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-kill-switch-default")
             .expect("default LicenseConfig::new never fails");
         let client = penguin_licensing::LicenseClient::new(cfg)
             .expect("LicenseClient::new with a valid default config never fails");
-        let raw = LicenseFlag::new(client, DISABLE_DB_BUNDLE_CONFIG_FLAG);
-        let negated = NegatedFlag(boxed(raw));
+        let flag = DisableDbBundleConfigFlag::new(client);
         assert!(
-            negated.enabled().await,
+            flag.enabled().await,
             "an unseen kill-switch flag must leave the DB-driven path enabled"
         );
+    }
+
+    /// Bypass-awareness regression test: `crate::lib::build_license_client`'s
+    /// hardcoded self-domain bypass makes `flag_enabled` read `true` for
+    /// ANY key, `DISABLE_DB_BUNDLE_CONFIG_FLAG` included -- naively negating
+    /// that raw `true` (what the generic [`NegatedFlag`] would do) would
+    /// report the DB-driven path DISABLED for every deployment of this
+    /// service, permanently. [`DisableDbBundleConfigFlag::enabled`] must
+    /// check `bypass_active()` first and report `true` instead.
+    #[tokio::test]
+    async fn disable_db_bundle_config_flag_stays_enabled_under_a_bypassed_client() {
+        // Self-contained apex-domain bypass (mirrors `crate::lib`'s own
+        // `build_license_client_hardcoded_domain_bypasses_flag_checks`
+        // "apex" case) rather than reaching into that module's private
+        // `build_license_client`/`BYPASS_DOMAIN`/`DEPLOYMENT_DOMAIN` --
+        // this test only needs *a* bypassed client, not this crate's exact
+        // production domain values.
+        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-flags-bypass")
+            .expect("default LicenseConfig::new never fails")
+            .with_bypass_domain("waddles.app")
+            .with_deployment_domain("waddles.app");
+        let client = penguin_licensing::LicenseClient::new(cfg)
+            .expect("LicenseClient::new with a valid config never fails");
+        assert!(
+            client.bypass_active(),
+            "sanity check: this client must actually be bypassed"
+        );
+        let flag = DisableDbBundleConfigFlag::new(client);
+        assert!(
+            flag.enabled().await,
+            "bypass must leave the DB-driven path enabled, not disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn db_bundle_config_flag_defaults_enabled_when_no_license_client_is_available() {
+        let flag = db_bundle_config_flag(&None);
+        assert!(flag.enabled().await);
     }
 
     /// Proves `LicenseFlag` genuinely calls through to a real
