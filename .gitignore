@@ -100,6 +100,11 @@ bundles/rust/*/src/bindings.rs
 # core/bundle_executor/tests/fixtures/README.md, never hand-edited.
 core/bundle_executor/tests/fixtures/hostile-fixture-src/src/bindings.rs
 
+# Same rule for hand-built Python WASI 0.2 bundle components -- built with
+# `componentize-py componentize` (see bundles/python/*/README or bundle.yaml),
+# a build artifact like target/, never hand-edited or committed.
+bundles/python/*/*.wasm
+
 # Jupyter Notebook
 .ipynb_checkpoints
 

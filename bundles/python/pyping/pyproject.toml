@@ -1,0 +1,13 @@
+[project]
+name = "waddle-bundle-pyping"
+version = "1.0.0"
+description = "Minimal real `!pyping` -> `pong (py)` process/action-stage bundle, compiled to a WASI 0.2 component with componentize-py against wit/waddle-bundle/stage.wit. Python equivalent of bundles/rust/ping."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
