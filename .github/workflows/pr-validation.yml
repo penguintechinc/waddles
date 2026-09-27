@@ -53,6 +53,28 @@ jobs:
           PYTHON_BIN: python
         run: scripts/ci/install-unit-test-deps.sh
 
+      # hub_api/tests/test_bundle_component_validator.py::test_real_conformant_component_validates_ok
+      # runs the real bytecodealliance/wasm-tools CLI against a real compiled
+      # component fixture (not a mocked subprocess boundary) -- it is only
+      # skipped when the fixture file is absent, never when the binary is
+      # missing, so this runner needs the same pinned version hub_api/Dockerfile
+      # installs at image build time. Same pinned-version + install-action
+      # pattern as node-waddle-sdk-js.yml's wasm-tools step; continue-on-error
+      # only covers the install step -- the next step turns a failed install
+      # into a loud, clearly-labeled job failure, never a silent skip.
+      - name: Install wasm-tools 1.259.0 (hub_api bundle-component conformance test)
+        id: install-wasm-tools
+        continue-on-error: true
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375  # v2.87.12
+        with:
+          tool: wasm-tools@1.259.0
+
+      - name: wasm-tools unavailable (fail loud, not a silent skip)
+        if: steps.install-wasm-tools.outcome != 'success'
+        run: |
+          echo "::error::wasm-tools failed to install -- hub_api/tests/test_bundle_component_validator.py::test_real_conformant_component_validates_ok needs it and has no missing-binary skip guard (only a missing-fixture one). Failing loudly rather than letting the suite silently pass without running it."
+          exit 1
+
       - name: Run unit tests
         env:
           PYTHON_BIN: python
