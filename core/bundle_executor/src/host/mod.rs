@@ -8,11 +8,12 @@
 pub mod bridge;
 pub mod imports;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tracing::debug;
 use wasmtime::component::ResourceTable;
-use wasmtime::{StoreLimits, StoreLimitsBuilder};
+use wasmtime::{ResourceLimiter, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 pub use bridge::HostBridge;
@@ -42,7 +43,17 @@ pub struct ExecState {
     /// leaves `memory_size` unset) so every `ExecState::new` call site
     /// that never opts into [`Self::with_memory_limit_mb`] -- every test
     /// in this crate except `crate::invoke`'s own -- is unaffected.
-    pub limits: StoreLimits,
+    ///
+    /// Wrapped in [`CapTrackingLimits`] (rather than a bare
+    /// `wasmtime::StoreLimits`) so a denied `memory.grow`/`table.grow` is
+    /// recorded via a host-only flag *before* wasmtime turns it into a
+    /// trap -- `crate::invoke::trap_to_error_body` reads
+    /// [`Self::memory_cap_hit`] to classify `MEMORY_LIMIT`, instead of
+    /// pattern-matching the trap's formatted message (gh security review
+    /// MED finding: a malicious guest can embed "memory"/"epoch" in an
+    /// error string surfaced through a host-call failure to spoof or
+    /// evade classification -- see `CapTrackingLimits`'s own doc).
+    pub limits: CapTrackingLimits,
 }
 
 impl ExecState {
@@ -57,7 +68,7 @@ impl ExecState {
             bridge,
             app_id,
             call_id,
-            limits: StoreLimitsBuilder::new().build(),
+            limits: CapTrackingLimits::new(StoreLimitsBuilder::new().build()),
         }
     }
 
@@ -75,11 +86,104 @@ impl ExecState {
     #[must_use]
     pub fn with_memory_limit_mb(mut self, memory_limit_mb: u32) -> Self {
         let bytes = (memory_limit_mb as usize).saturating_mul(1024 * 1024);
-        self.limits = StoreLimitsBuilder::new()
-            .memory_size(bytes)
-            .trap_on_grow_failure(true)
-            .build();
+        self.limits = CapTrackingLimits::new(
+            StoreLimitsBuilder::new()
+                .memory_size(bytes)
+                .trap_on_grow_failure(true)
+                .build(),
+        );
         self
+    }
+
+    /// Whether this instance's configured memory/table cap denied at
+    /// least one growth request (`CapTrackingLimits::memory_growing`/
+    /// `table_growing` below) -- read by `crate::invoke::on_invoke` after
+    /// a call traps to drive `MEMORY_LIMIT` classification from this
+    /// host-only, guest-unreachable signal rather than the trap's
+    /// formatted text.
+    #[must_use]
+    pub fn memory_cap_hit(&self) -> bool {
+        self.limits.cap_hit()
+    }
+}
+
+/// Wraps `wasmtime::StoreLimits` to record, in [`Self::cap_hit`], the
+/// exact moment a `memory.grow`/`table.grow` request is denied by this
+/// instance's configured cap -- set only from inside
+/// [`ResourceLimiter::memory_growing`]/[`ResourceLimiter::table_growing`]
+/// below, i.e. only by this executor's own trusted host code reacting to
+/// the numeric growth request wasmtime passes it, never from any
+/// guest-supplied string. `crate::invoke::trap_to_error_body` reads this
+/// flag instead of substring-matching the trap's formatted message (gh
+/// security review MED finding: matching on "memory"/"epoch" text is
+/// spoofable -- a guest can drive an arbitrary string into the error
+/// chain, e.g. via a host-call argument a capability handler echoes back
+/// on failure, letting it force or evade a `MEMORY_LIMIT`/
+/// `EXECUTOR_DEADLINE` classification that has nothing to do with an
+/// actual cap or deadline).
+pub struct CapTrackingLimits {
+    inner: StoreLimits,
+    hit: Arc<AtomicBool>,
+}
+
+impl CapTrackingLimits {
+    fn new(inner: StoreLimits) -> Self {
+        Self {
+            inner,
+            hit: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn cap_hit(&self) -> bool {
+        self.hit.load(Ordering::Relaxed)
+    }
+}
+
+impl ResourceLimiter for CapTrackingLimits {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        let result = self.inner.memory_growing(current, desired, maximum);
+        if result.is_err() {
+            self.hit.store(true, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn memory_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.inner.memory_grow_failed(error)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        let result = self.inner.table_growing(current, desired, maximum);
+        if result.is_err() {
+            self.hit.store(true, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn table_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.inner.table_grow_failed(error)
+    }
+
+    fn instances(&self) -> usize {
+        self.inner.instances()
+    }
+
+    fn tables(&self) -> usize {
+        self.inner.tables()
+    }
+
+    fn memories(&self) -> usize {
+        self.inner.memories()
     }
 }
 
@@ -169,24 +273,55 @@ mod tests {
     /// assertion fast and independent of the wasm fixture.
     #[test]
     fn with_memory_limit_mb_denies_growth_past_the_cap() {
-        use wasmtime::ResourceLimiter;
-
         let mut state =
             ExecState::new(None, "waddles.test.app".to_string(), 1).with_memory_limit_mb(1);
         let one_mib = 1024 * 1024;
+        assert!(!state.memory_cap_hit(), "no growth has been denied yet");
         assert!(state
             .limits
             .memory_growing(0, one_mib, None)
             .expect("growth to exactly the cap is a decision, not an error"));
+        assert!(
+            !state.memory_cap_hit(),
+            "growth within the cap must not flip the flag"
+        );
 
-        let err = state
+        state
             .limits
             .memory_growing(one_mib, one_mib + 1, None)
             .expect_err("growth past the cap must trap, not return Ok(false)");
+        // The typed, guest-unreachable signal `trap_to_error_body` (see
+        // `crate::invoke`) actually classifies on, in place of matching
+        // the trap's formatted text (gh security review MED finding).
         assert!(
-            err.to_string().contains("memory"),
-            "trap message must classify as a memory limit: {err}"
+            state.memory_cap_hit(),
+            "growth past the cap must flip the host-only cap_hit flag"
         );
+    }
+
+    /// `memory_grow_failed`/`table_grow_failed` fire only when a grow
+    /// *permitted* by `memory_growing`/`table_growing` subsequently fails
+    /// at the OS/allocator level (real allocation failure) -- a distinct,
+    /// much rarer path from this instance's configured cap denying the
+    /// request outright (covered above). `CapTrackingLimits` must still
+    /// delegate them to the wrapped `StoreLimits` (whose own default
+    /// ignores-and-logs) rather than dropping the notification, and must
+    /// NOT flip `cap_hit` for them -- that flag is reserved for an actual
+    /// configured-cap denial `trap_to_error_body` can trust, not an
+    /// unrelated allocator failure it never decided.
+    #[test]
+    fn cap_tracking_limits_delegates_grow_failed_hooks_without_marking_the_flag() {
+        let mut limits = CapTrackingLimits::new(StoreLimitsBuilder::new().build());
+
+        limits
+            .memory_grow_failed(wasmtime::Error::msg("simulated allocator failure"))
+            .expect("default StoreLimits::memory_grow_failed ignores the notification");
+        assert!(!limits.cap_hit());
+
+        limits
+            .table_grow_failed(wasmtime::Error::msg("simulated allocator failure"))
+            .expect("default StoreLimits::table_grow_failed ignores the notification");
+        assert!(!limits.cap_hit());
     }
 
     /// Negative sandbox test #1 (spec SS14.6), isolated to the exact
