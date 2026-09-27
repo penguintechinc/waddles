@@ -1350,6 +1350,47 @@ mod tests {
         try_start_env_bundle_loader(&cli, connections);
     }
 
+    /// Security review fix regression test: `db_reader_password: None` (the
+    /// value `config::Config::from_cli` now produces for both a genuinely
+    /// unset `DB_READER_PASSWORD` and Helm's always-rendered-but-empty
+    /// default) must take `try_start_db_bundle_loader`'s documented no-op
+    /// branch rather than attempting a DB connection -- fire-and-forget,
+    /// same shape as `try_start_env_bundle_loader_disabled_without_digest`
+    /// above.
+    #[tokio::test]
+    async fn try_start_db_bundle_loader_noop_when_db_reader_password_unset() {
+        let cli = CliConfig::parse_from(["svc-action"]);
+        let config = Config {
+            cli,
+            db_password: Secret::new("test-password"),
+            envelope_binding_keys: None,
+            secret_key: Secret::new("test-jwt-signing-secret"),
+            discord_bot_token: None,
+            db_reader_password: None,
+        };
+        let connections = Arc::new(host_api::ConnectionRegistry::new());
+        try_start_db_bundle_loader(&config, connections, None);
+    }
+
+    /// Same no-op contract, the other independent startup gate:
+    /// `BUNDLE_SCOPE_TENANT_ID` unset (`0`, `CliConfig`'s default) even
+    /// with a real reader password present.
+    #[tokio::test]
+    async fn try_start_db_bundle_loader_noop_when_tenant_id_unset() {
+        let cli = CliConfig::parse_from(["svc-action"]);
+        assert_eq!(cli.bundle_scope_tenant_id, 0);
+        let config = Config {
+            cli,
+            db_password: Secret::new("test-password"),
+            envelope_binding_keys: None,
+            secret_key: Secret::new("test-jwt-signing-secret"),
+            discord_bot_token: None,
+            db_reader_password: Some(Secret::new("real-ro-password")),
+        };
+        let connections = Arc::new(host_api::ConnectionRegistry::new());
+        try_start_db_bundle_loader(&config, connections, None);
+    }
+
     /// The core of this PR's fix: once a host-API connection is active,
     /// [`env_bundle_loader_loop`] sends `load` for the `ACTION_BUNDLE_*`
     /// env-configured bundle over it -- entirely independent of the

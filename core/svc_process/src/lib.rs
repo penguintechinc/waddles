@@ -511,6 +511,35 @@ mod tests {
         }
     }
 
+    /// Security review fix regression test: `db_reader_password: None` (the
+    /// value `config::Config::from_cli` now produces for both a genuinely
+    /// unset `DB_READER_PASSWORD` and Helm's always-rendered-but-empty
+    /// default) must take the documented no-op branch rather than
+    /// attempting a DB connection. Mirrors `try_start_process_loop_noop_
+    /// when_process_app_id_unset`'s style -- no OTel subscriber installed,
+    /// so `tracing::info!` is a harmless no-op; success is simply that this
+    /// returns without panicking or spawning a task that reaches the
+    /// license-client/DB-connect code path.
+    #[tokio::test]
+    async fn try_start_db_bundle_loader_noop_when_db_reader_password_unset() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        let mut config = test_config(cli);
+        config.db_reader_password = None;
+        try_start_db_bundle_loader(&config, Arc::new(host_api::ConnectionRegistry::new()));
+    }
+
+    /// Same no-op contract, the other independent startup gate:
+    /// `BUNDLE_SCOPE_TENANT_ID` unset (`0`, `CliConfig`'s default) even
+    /// with a real reader password present.
+    #[tokio::test]
+    async fn try_start_db_bundle_loader_noop_when_tenant_id_unset() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert_eq!(cli.bundle_scope_tenant_id, 0);
+        let mut config = test_config(cli);
+        config.db_reader_password = Some(crate::config::Secret::new("real-ro-password"));
+        try_start_db_bundle_loader(&config, Arc::new(host_api::ConnectionRegistry::new()));
+    }
+
     #[tokio::test]
     async fn try_start_process_loop_noop_when_process_app_id_unset() {
         // Deliberately does not call `telemetry::init` (a process-global

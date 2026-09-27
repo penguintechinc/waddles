@@ -29,3 +29,10 @@ tracing = "=0.1.44"
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }
 sea-orm = { version = "=2.0.2", default-features = false, features = ["mock"] }
+# Test-only: parses `reader::connection_url`'s output with the same URL
+# parser `sqlx_postgres::PgConnectOptions::parse_from_url` uses, so the
+# read-only startup-option test asserts against real query-string parsing
+# rather than a raw substring match. Already a transitive dependency (via
+# sqlx) at this exact version -- declared directly here only because it's
+# now referenced by name in test code.
+url = "=2.5.8"

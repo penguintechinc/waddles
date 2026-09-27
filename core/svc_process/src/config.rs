@@ -330,7 +330,18 @@ impl Config {
         let cache_password = std::env::var("CACHE_PASSWORD").ok().map(Secret::new);
         let service_api_key = Secret::new(env_required("SERVICE_API_KEY")?);
         let envelope_binding_keys = std::env::var("ENVELOPE_BINDING_KEYS").ok().map(Secret::new);
-        let db_reader_password = std::env::var("DB_READER_PASSWORD").ok().map(Secret::new);
+        // Security review fix: Helm always renders the DB_READER_PASSWORD
+        // secret key (`templates/secrets.yaml`), defaulting to "" until the
+        // RO Postgres role is actually provisioned -- so the env var is
+        // always *set*, just empty. Without `.filter(|s| !s.is_empty())`
+        // this would be `Some(Secret::new(""))`, never `None`, and
+        // `try_start_db_bundle_loader`'s documented "DB_READER_PASSWORD
+        // unset -> loader disabled" branch could never fire; an empty
+        // value must be treated the same as unset.
+        let db_reader_password = std::env::var("DB_READER_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(Secret::new);
         Ok(Self {
             cli,
             db_password,
@@ -361,6 +372,7 @@ mod tests {
             "CACHE_PASSWORD",
             "SERVICE_API_KEY",
             "ENVELOPE_BINDING_KEYS",
+            "DB_READER_PASSWORD",
         ] {
             // SAFETY: serialized by ENV_LOCK, no concurrent readers/writers
             // of these specific variables within the test process.
@@ -505,6 +517,51 @@ mod tests {
         assert_eq!(
             cfg.envelope_binding_keys.as_ref().map(Secret::expose),
             Some("k1:aabbcc")
+        );
+        clear_secret_env();
+    }
+
+    /// Security review fix: Helm always renders `DB_READER_PASSWORD` (empty
+    /// by default until the RO role is provisioned, `templates/
+    /// secrets.yaml`) -- an empty value must load as `None`, the same as
+    /// truly unset, so `try_start_db_bundle_loader`'s documented
+    /// "DB_READER_PASSWORD unset -> loader disabled" branch actually fires
+    /// for Helm's real rendered output, not just for a genuinely-absent
+    /// env var.
+    #[test]
+    fn db_reader_password_empty_string_loads_as_none() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_secret_env();
+        // SAFETY: serialized by ENV_LOCK above.
+        unsafe {
+            std::env::set_var("DB_PASSWORD", "test-db-pass");
+            std::env::set_var("SERVICE_API_KEY", "test-api-key");
+            std::env::set_var("DB_READER_PASSWORD", "");
+        }
+        let cli = CliConfig::parse_from(["svc-process"]);
+        let cfg = Config::from_cli(cli).expect("secrets are set");
+        assert!(
+            cfg.db_reader_password.is_none(),
+            "an empty DB_READER_PASSWORD must load as None, not Some(\"\")"
+        );
+        clear_secret_env();
+    }
+
+    #[test]
+    fn db_reader_password_nonempty_string_loads_as_some() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_secret_env();
+        // SAFETY: serialized by ENV_LOCK above.
+        unsafe {
+            std::env::set_var("DB_PASSWORD", "test-db-pass");
+            std::env::set_var("SERVICE_API_KEY", "test-api-key");
+            std::env::set_var("DB_READER_PASSWORD", "real-ro-password");
+        }
+        let cli = CliConfig::parse_from(["svc-process"]);
+        let cfg = Config::from_cli(cli).expect("secrets are set");
+        assert_eq!(
+            cfg.db_reader_password.as_ref().map(Secret::expose),
+            Some("real-ro-password")
         );
         clear_secret_env();
     }
