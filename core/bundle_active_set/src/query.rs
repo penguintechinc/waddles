@@ -5,8 +5,8 @@
 //! `app_id` -- callers pass `None` to manage the whole scope's active set
 //! (spec's multi-app requirement) or `Some(app_id)` to scope to one bundle.
 
-use sea_orm::sea_query::{Expr, Func};
-use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QuerySelect};
+use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::entities::{app_active_versions, app_install_approvals, app_versions};
@@ -29,63 +29,64 @@ pub struct ActiveBundleRow {
     pub sidecar_key: String,
 }
 
-/// A cheap, single-query change signal for one `(tenant_id, community_id)`
-/// scope: the row count and the sum of `version_id` across
-/// `app_active_versions`. Comparing this to the previous tick's value
-/// detects every kind of change a full active-set read would (activation,
-/// deactivation, and rollback/roll-forward alike) without needing
-/// `app_active_versions` to carry its own `updated_at` column (it doesn't
-/// -- migration `0022_app_versions_and_rbac` gives it only `activated_at`,
-/// set by `DEFAULT NOW()` on INSERT with no confirmed guarantee that a
-/// future activation-service's rollback UPDATE also bumps it -- see this
-/// module's own doc and the crate root's flagged gap). `version_sum`
-/// changes on ANY row's `version_id` UPDATE (a rollback to an older
-/// `version_id` still changes the sum, since PK `(app_id, tenant_id,
-/// community_id)` is unique -- the row's old `version_id` is replaced, not
-/// duplicated) and `count` changes on any INSERT/DELETE, so the pair
-/// covers activate/deactivate/rollback without relying on `activated_at`
-/// semantics this crate doesn't control.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
-pub struct Watermark {
-    pub count: i64,
-    pub version_sum: i64,
-}
+/// A cheap change signal for one `(tenant_id, community_id)` scope: a
+/// SHA-256 fingerprint over every `(app_id, version_id)` pair currently
+/// active in that scope, sorted by `app_id` for a deterministic byte
+/// sequence regardless of the row order Postgres happens to return.
+///
+/// **Not `COUNT(*) + SUM(version_id)` (security review fix -- that
+/// approach silently cancels):** if app A's `version_id` decreases by N in
+/// the same tick app B's increases by N, both the count and the sum stay
+/// identical, so that watermark would never move and the hot-swap would
+/// miss the change until an unrelated row nudged the sum back out of
+/// coincidental alignment -- proven by
+/// `read_watermark_moves_when_two_rows_shift_by_equal_and_opposite_amounts`
+/// below, which is the exact regression this type exists to prevent. A
+/// cryptographic hash over every row's *own* identity (not an aggregate
+/// that discards which row changed) cannot cancel this way: two distinct
+/// active sets hashing to the same digest would require a genuine SHA-256
+/// collision, not a coincidental arithmetic identity.
+///
+/// Also sidesteps the `count`/`version_sum` design's other documented
+/// concern: `app_active_versions` has no `updated_at` column to fall back
+/// to (only `activated_at`, `DEFAULT NOW()` on INSERT only, with no
+/// confirmed guarantee a future activation-service's rollback UPDATE also
+/// bumps it) -- this fingerprint depends on neither column.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Watermark(String);
 
-/// Reads [`Watermark`] for `(tenant_id, community_id)` -- one indexed
-/// aggregate query, no join. Cheap enough to run every poll tick even when
-/// nothing has changed.
+/// Reads [`Watermark`] for `(tenant_id, community_id)` -- one query
+/// (`app_active_versions` only, no join), small result set (bounded by the
+/// number of apps active in this one scope). Cheap enough to run every
+/// poll tick even when nothing has changed; still meaningfully cheaper
+/// than [`read_active_set`], which additionally joins `app_versions` and
+/// `app_install_approvals`.
 pub async fn read_watermark(
     conn: &DatabaseConnection,
     tenant_id: i32,
     community_id: i32,
 ) -> Result<Watermark, ActiveSetError> {
-    #[derive(sea_orm::FromQueryResult)]
-    struct Agg {
-        cnt: i64,
-        vsum: Option<i64>,
-    }
-
-    let agg = app_active_versions::Entity::find()
+    let rows = app_active_versions::Entity::find()
         .filter(app_active_versions::Column::TenantId.eq(tenant_id))
         .filter(app_active_versions::Column::CommunityId.eq(community_id))
-        .select_only()
-        .column_as(
-            Expr::from(Func::count(Expr::col(app_active_versions::Column::AppId))),
-            "cnt",
-        )
-        .column_as(
-            Expr::from(Func::sum(Expr::col(app_active_versions::Column::VersionId))),
-            "vsum",
-        )
-        .into_model::<Agg>()
-        .one(conn)
-        .await?
-        .unwrap_or(Agg { cnt: 0, vsum: None });
+        .order_by_asc(app_active_versions::Column::AppId)
+        .all(conn)
+        .await?;
 
-    Ok(Watermark {
-        count: agg.cnt,
-        version_sum: agg.vsum.unwrap_or(0),
-    })
+    let mut hasher = Sha256::new();
+    for row in &rows {
+        // `app_id` is the natural unique key within this one `(tenant_id,
+        // community_id)` scope (the table's own PK), so sorting by it
+        // alone -- no secondary sort needed -- yields a deterministic
+        // sequence. A `\0`/`\n` separator between fields/rows prevents a
+        // pathological app_id boundary shift (e.g. "ab"+"1" vs "a"+"b1")
+        // from ever producing the same byte stream for two different sets.
+        hasher.update(row.app_id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(row.version_id.to_le_bytes());
+        hasher.update(b"\n");
+    }
+    Ok(Watermark(format!("{:x}", hasher.finalize())))
 }
 
 /// Content-addressed `component_key`/`sidecar_key` derivation --
@@ -107,6 +108,49 @@ pub fn derive_component_keys(digest: &str) -> (String, String) {
     )
 }
 
+/// Why one `app_active_versions` row was excluded from
+/// [`ActiveSetRead::rows`] -- ops-visibility fix (security review):
+/// exclusion used to be a `debug!`/`warn!` log line only, easy to miss when
+/// a feature silently goes dark (e.g. an approval expiring/getting
+/// superseded with nothing re-approving it). Returned alongside the rows
+/// so each service's own `bundle_loader` can drive a Prometheus counter
+/// from it (`telemetry::register_bundle_loader_excluded_metrics`), not
+/// just a log line.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ExclusionReason {
+    /// `app_active_versions.version_id` points at no row in `app_versions`
+    /// at all -- a referential-integrity gap, never expected in a healthy
+    /// system.
+    MissingVersionRow,
+    /// No current (`superseded_by IS NULL`) `app_install_approvals` row
+    /// matches -- the version is active but not (or no longer) approved.
+    NoApproval,
+    /// The `app_versions` row has no `artifact_digest` yet (not published,
+    /// or a race with a concurrent publish).
+    MissingDigest,
+}
+
+impl ExclusionReason {
+    /// Stable label value for the Prometheus counter -- never the `Debug`
+    /// form, which is not a contract callers should depend on.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingVersionRow => "missing_version_row",
+            Self::NoApproval => "no_approval",
+            Self::MissingDigest => "missing_digest",
+        }
+    }
+}
+
+/// [`read_active_set`]'s full result: the ACTIVE+APPROVED rows to load,
+/// plus every row this tick excluded and why -- see [`ExclusionReason`]'s
+/// doc for why exclusions are data, not just a log line.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ActiveSetRead {
+    pub rows: Vec<ActiveBundleRow>,
+    pub excluded: Vec<(String, ExclusionReason)>,
+}
+
 /// Reads the full ACTIVE, APPROVED set for `(tenant_id, community_id)`,
 /// optionally narrowed to one `app_id`. Three sequential queries (no
 /// SeaORM `Relation` wiring -- see `crate::entities`'s module doc) joined
@@ -122,15 +166,16 @@ pub fn derive_component_keys(digest: &str) -> (String, String) {
 ///
 /// A version with no current approval, or an `app_versions` row with no
 /// `artifact_digest` set (not yet published, or a data race with a
-/// concurrent publish), is silently excluded rather than erroring the
-/// whole read -- one bad/incomplete row must never block every other
-/// bundle's hot-swap.
+/// concurrent publish), is excluded from [`ActiveSetRead::rows`] (recorded
+/// in [`ActiveSetRead::excluded`], never silently dropped) rather than
+/// erroring the whole read -- one bad/incomplete row must never block
+/// every other bundle's hot-swap.
 pub async fn read_active_set(
     conn: &DatabaseConnection,
     tenant_id: i32,
     community_id: i32,
     app_id: Option<&str>,
-) -> Result<Vec<ActiveBundleRow>, ActiveSetError> {
+) -> Result<ActiveSetRead, ActiveSetError> {
     let mut active_q = app_active_versions::Entity::find()
         .filter(app_active_versions::Column::TenantId.eq(tenant_id))
         .filter(app_active_versions::Column::CommunityId.eq(community_id));
@@ -139,7 +184,7 @@ pub async fn read_active_set(
     }
     let active_rows = active_q.all(conn).await?;
     if active_rows.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ActiveSetRead::default());
     }
 
     let version_ids: Vec<i64> = active_rows.iter().map(|r| r.version_id).collect();
@@ -156,14 +201,17 @@ pub async fn read_active_set(
         .all(conn)
         .await?;
 
-    let mut out = Vec::with_capacity(active_rows.len());
+    let mut rows = Vec::with_capacity(active_rows.len());
+    let mut excluded = Vec::new();
     for active in &active_rows {
         let Some(version_row) = versions_by_id.get(&active.version_id) else {
             tracing::warn!(
                 app_id = %active.app_id,
                 version_id = active.version_id,
-                "active_versions points at a version_id with no app_versions row; skipping"
+                reason = ExclusionReason::MissingVersionRow.as_str(),
+                "excluding from active set: active_versions points at a version_id with no app_versions row"
             );
+            excluded.push((active.app_id.clone(), ExclusionReason::MissingVersionRow));
             continue;
         };
 
@@ -174,11 +222,16 @@ pub async fn read_active_set(
                     || (appr.community_id.is_none() && active.community_id == 0))
         });
         if !approved {
-            tracing::debug!(
+            // Ops-visibility fix (security review): a bundle silently
+            // losing its approval is a feature going dark, not routine
+            // background noise -- this was `debug!` and easy to miss.
+            tracing::warn!(
                 app_id = %active.app_id,
                 version = %version_row.version,
-                "active version has no current install approval; excluding from active set"
+                reason = ExclusionReason::NoApproval.as_str(),
+                "excluding from active set: active version has no current install approval"
             );
+            excluded.push((active.app_id.clone(), ExclusionReason::NoApproval));
             continue;
         }
 
@@ -186,13 +239,15 @@ pub async fn read_active_set(
             tracing::warn!(
                 app_id = %active.app_id,
                 version = %version_row.version,
-                "active, approved version has no artifact_digest yet; excluding from active set"
+                reason = ExclusionReason::MissingDigest.as_str(),
+                "excluding from active set: active, approved version has no artifact_digest yet"
             );
+            excluded.push((active.app_id.clone(), ExclusionReason::MissingDigest));
             continue;
         };
 
         let (component_key, sidecar_key) = derive_component_keys(&digest);
-        out.push(ActiveBundleRow {
+        rows.push(ActiveBundleRow {
             app_id: active.app_id.clone(),
             version: version_row.version.clone(),
             digest,
@@ -201,7 +256,7 @@ pub async fn read_active_set(
         });
     }
 
-    Ok(out)
+    Ok(ActiveSetRead { rows, excluded })
 }
 
 /// Tracks the last-seen [`Watermark`] for one poller instance and decides
@@ -225,7 +280,7 @@ impl WatermarkTracker {
     /// previously recorded watermark (or there was none yet). Callers do
     /// the full [`read_active_set`] read only when this returns `true`.
     pub fn observe(&mut self, current: Watermark) -> bool {
-        let changed = self.last != Some(current);
+        let changed = self.last.as_ref() != Some(&current);
         self.last = Some(current);
         changed
     }
@@ -236,49 +291,43 @@ mod tests {
     use super::*;
     use sea_orm::{DatabaseBackend, MockDatabase};
 
+    fn watermark_of(pairs: &[(&str, i64)]) -> Watermark {
+        let mut hasher = Sha256::new();
+        for (app_id, version_id) in pairs {
+            hasher.update(app_id.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(version_id.to_le_bytes());
+            hasher.update(b"\n");
+        }
+        Watermark(format!("{:x}", hasher.finalize()))
+    }
+
     #[test]
     fn watermark_tracker_reports_changed_on_the_first_observation() {
         let mut tracker = WatermarkTracker::new();
-        assert!(tracker.observe(Watermark {
-            count: 1,
-            version_sum: 10
-        }));
+        assert!(tracker.observe(watermark_of(&[("waddles.a", 10)])));
     }
 
     #[test]
     fn watermark_tracker_reports_unchanged_when_the_watermark_repeats() {
         let mut tracker = WatermarkTracker::new();
-        let w = Watermark {
-            count: 1,
-            version_sum: 10,
-        };
-        assert!(tracker.observe(w));
+        let w = watermark_of(&[("waddles.a", 10)]);
+        assert!(tracker.observe(w.clone()));
         assert!(
-            !tracker.observe(w),
+            !tracker.observe(w.clone()),
             "an unchanged watermark must skip the full read"
         );
         assert!(!tracker.observe(w));
     }
 
     #[test]
-    fn watermark_tracker_reports_changed_when_count_or_sum_moves() {
+    fn watermark_tracker_reports_changed_when_the_active_set_moves() {
         let mut tracker = WatermarkTracker::new();
-        assert!(tracker.observe(Watermark {
-            count: 1,
-            version_sum: 10
-        }));
-        assert!(tracker.observe(Watermark {
-            count: 2,
-            version_sum: 10
-        }));
-        assert!(tracker.observe(Watermark {
-            count: 2,
-            version_sum: 99
-        }));
-        assert!(!tracker.observe(Watermark {
-            count: 2,
-            version_sum: 99
-        }));
+        assert!(tracker.observe(watermark_of(&[("waddles.a", 10)])));
+        assert!(tracker.observe(watermark_of(&[("waddles.a", 10), ("waddles.b", 1)])));
+        let third = watermark_of(&[("waddles.a", 10), ("waddles.b", 2)]);
+        assert!(tracker.observe(third.clone()));
+        assert!(!tracker.observe(third));
     }
 
     #[test]
@@ -298,44 +347,83 @@ mod tests {
         assert_eq!(component, "bundles/deadbeef/component.wasm");
     }
 
+    fn active_model(
+        app_id: &str,
+        tenant_id: i32,
+        community_id: i32,
+        version_id: i64,
+    ) -> app_active_versions::Model {
+        app_active_versions::Model {
+            app_id: app_id.to_string(),
+            tenant_id,
+            community_id,
+            version_id,
+        }
+    }
+
     #[tokio::test]
-    async fn read_watermark_reads_count_and_version_sum() -> Result<(), ActiveSetError> {
+    async fn read_watermark_matches_the_pure_fingerprint_of_its_rows() -> Result<(), ActiveSetError>
+    {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([[maplit_row(3, Some(42))]])
+            .append_query_results([vec![
+                active_model("waddles.a", 1, 0, 10),
+                active_model("waddles.b", 1, 0, 3),
+            ]])
             .into_connection();
         let watermark = read_watermark(&db, 1, 0).await?;
         assert_eq!(
             watermark,
-            Watermark {
-                count: 3,
-                version_sum: 42
-            }
+            watermark_of(&[("waddles.a", 10), ("waddles.b", 3)])
         );
         Ok(())
     }
 
     #[tokio::test]
-    async fn read_watermark_defaults_to_zero_on_an_empty_scope() -> Result<(), ActiveSetError> {
+    async fn read_watermark_is_a_fixed_empty_hash_on_an_empty_scope() -> Result<(), ActiveSetError>
+    {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([[maplit_row(0, None)]])
+            .append_query_results([Vec::<app_active_versions::Model>::new()])
             .into_connection();
         let watermark = read_watermark(&db, 1, 0).await?;
-        assert_eq!(watermark, Watermark::default());
+        // The empty-scope watermark is SHA-256 of zero bytes, NOT
+        // `Watermark::default()`'s derived empty string -- `Default` on
+        // this type exists only so `WatermarkTracker` can hold `Option
+        // <Watermark>`'s `None` case cleanly, never as a stand-in for "the
+        // hash of an empty active set".
+        assert_eq!(watermark, watermark_of(&[]));
         Ok(())
     }
 
-    /// Builds a mocked aggregate row for `read_watermark`'s
-    /// `into_model::<Agg>()` -- `sea_orm`'s `MockDatabase` accepts rows as
-    /// `BTreeMap<String, sea_orm::Value>` (`IntoMockRow`), keyed by the
-    /// exact column aliases `read_watermark` selects (`cnt`/`vsum`).
-    fn maplit_row(
-        cnt: i64,
-        vsum: Option<i64>,
-    ) -> std::collections::BTreeMap<String, sea_orm::Value> {
-        let mut m = std::collections::BTreeMap::new();
-        m.insert("cnt".to_string(), sea_orm::Value::BigInt(Some(cnt)));
-        m.insert("vsum".to_string(), sea_orm::Value::BigInt(vsum));
-        m
+    /// Security review fix: **the regression this `Watermark` type exists
+    /// to prevent.** The retired `COUNT(*) + SUM(version_id)` watermark
+    /// canceled here -- app A's `version_id` drops by 1 (10 -> 9) in the
+    /// same tick app B's rises by 1 (5 -> 6): `COUNT` stays 2, `SUM` stays
+    /// 15 both before and after, so that watermark would never move and
+    /// the hot-swap would silently miss this change. The SHA-256
+    /// fingerprint hashes each row's own `(app_id, version_id)` identity,
+    /// not an aggregate that discards which row changed, so it cannot
+    /// cancel this way.
+    #[tokio::test]
+    async fn read_watermark_moves_when_two_rows_shift_by_equal_and_opposite_amounts(
+    ) -> Result<(), ActiveSetError> {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![
+                active_model("waddles.a", 1, 0, 10),
+                active_model("waddles.b", 1, 0, 5),
+            ]])
+            .append_query_results([vec![
+                active_model("waddles.a", 1, 0, 9),
+                active_model("waddles.b", 1, 0, 6),
+            ]])
+            .into_connection();
+
+        let before = read_watermark(&db, 1, 0).await?;
+        let after = read_watermark(&db, 1, 0).await?;
+        assert_ne!(
+            before, after,
+            "A-1/B+1 in the same tick must still move the watermark"
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -343,8 +431,9 @@ mod tests {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([Vec::<app_active_versions::Model>::new()])
             .into_connection();
-        let rows = read_active_set(&db, 1, 0, None).await?;
-        assert!(rows.is_empty());
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert!(result.rows.is_empty());
+        assert!(result.excluded.is_empty());
         Ok(())
     }
 
@@ -373,8 +462,16 @@ mod tests {
             }]])
             .append_query_results([Vec::<app_install_approvals::Model>::new()])
             .into_connection();
-        let rows = read_active_set(&db, 1, 0, None).await?;
-        assert!(rows.is_empty(), "no approval row -> excluded, got {rows:?}");
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert!(
+            result.rows.is_empty(),
+            "no approval row -> excluded, got {:?}",
+            result.rows
+        );
+        assert_eq!(
+            result.excluded,
+            vec![("waddles.test.app".to_string(), ExclusionReason::NoApproval)]
+        );
         Ok(())
     }
 
@@ -408,10 +505,11 @@ mod tests {
                 superseded_by: None,
             }]])
             .into_connection();
-        let rows = read_active_set(&db, 1, 0, None).await?;
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].app_id, "waddles.test.app");
-        assert_eq!(rows[0].digest, digest);
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].app_id, "waddles.test.app");
+        assert_eq!(result.rows[0].digest, digest);
+        assert!(result.excluded.is_empty());
         Ok(())
     }
 
@@ -440,8 +538,15 @@ mod tests {
                 superseded_by: None,
             }]])
             .into_connection();
-        let rows = read_active_set(&db, 1, 0, None).await?;
-        assert!(rows.is_empty());
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert!(result.rows.is_empty());
+        assert_eq!(
+            result.excluded,
+            vec![(
+                "waddles.test.app".to_string(),
+                ExclusionReason::MissingDigest
+            )]
+        );
         Ok(())
     }
 }

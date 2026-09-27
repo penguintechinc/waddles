@@ -40,7 +40,9 @@
 //! GRANT SELECT ON app_install_approvals TO svc_process_ro, svc_action_ro;
 //! -- No INSERT/UPDATE/DELETE grant on any table, ever -- enforced at the
 //! -- database in addition to `crate::reader::connect`'s own defense-in-
-//! -- depth `SET default_transaction_read_only = on`.
+//! -- depth `options[default_transaction_read_only]=on` startup parameter
+//! -- (applied to every physical connection in the pool, not a one-shot
+//! -- post-connect `SET`).
 //! ```
 //!
 //! `app_catalog` itself is never queried directly by this crate (only
@@ -55,6 +57,6 @@ pub mod reader;
 pub use diff::{plan, DiffPlan};
 pub use query::{
     derive_component_keys, read_active_set, read_watermark, ActiveBundleRow, ActiveSetError,
-    Watermark, WatermarkTracker,
+    ActiveSetRead, ExclusionReason, Watermark, WatermarkTracker,
 };
 pub use reader::ReaderConfig;

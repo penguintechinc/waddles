@@ -118,6 +118,7 @@ pub async fn run_tick(
     tracker: &mut WatermarkTracker,
     loaded: &mut HashMap<String, String>,
     sink: Option<&dyn BundleSink>,
+    excluded_metric: &prometheus::IntCounterVec,
 ) {
     if !gate.enabled().await {
         tracing::debug!("waddles.core.db-bundle-config off; skipping tick");
@@ -135,13 +136,26 @@ pub async fn run_tick(
         return;
     }
 
-    let active = match bundle_active_set::read_active_set(db, tenant_id, community_id, None).await {
-        Ok(rows) => rows,
+    let bundle_active_set::ActiveSetRead {
+        rows: active,
+        excluded,
+    } = match bundle_active_set::read_active_set(db, tenant_id, community_id, None).await {
+        Ok(result) => result,
         Err(err) => {
             tracing::warn!(error = %err, "db bundle-config: active-set read failed");
             return;
         }
     };
+    // Ops-visibility fix (security review): `read_active_set` already logs
+    // a structured `warn!` per excluded row (`bundle_active_set::query`) --
+    // this additionally drives a Prometheus counter so a feature silently
+    // going dark (e.g. an approval expiring with nothing re-approving it)
+    // is visible on a dashboard/alert, not just in a log stream.
+    for (app_id, reason) in &excluded {
+        excluded_metric
+            .with_label_values(&[app_id, reason.as_str()])
+            .inc();
+    }
 
     let plan = diff::plan(loaded, &active);
     if plan.is_empty() {
@@ -199,6 +213,7 @@ pub async fn run(
     call_timeout_ms: u64,
     gate: Arc<dyn FeatureGate>,
     connections: Arc<crate::host_api::ConnectionRegistry>,
+    excluded_metric: prometheus::IntCounterVec,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
     let mut tracker = WatermarkTracker::new();
@@ -221,6 +236,7 @@ pub async fn run(
                     &mut tracker,
                     &mut loaded,
                     sink.as_ref().map(|s| s as &dyn BundleSink),
+                    &excluded_metric,
                 )
                 .await;
             }
@@ -309,6 +325,7 @@ mod tests {
             &mut tracker,
             &mut loaded,
             None,
+            &test_metric(),
         )
         .await;
         assert!(loaded.is_empty());
@@ -328,11 +345,11 @@ mod tests {
         // queue would silently log+return either way).
         let digest = format!("sha256:{}", "d".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([[watermark_row(1, Some(10))]])
+            .append_query_results([vec![active_row("waddles.a")]])
             .append_query_results([vec![active_row("waddles.a")]])
             .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
             .append_query_results([vec![approval_row("waddles.a", "1")]])
-            .append_query_results([[watermark_row(1, Some(10))]])
+            .append_query_results([vec![active_row("waddles.a")]])
             // Trap: only consumed if tick 2 incorrectly performs a full
             // read despite the unchanged watermark above.
             .append_query_results([vec![active_row("waddles.trap")]])
@@ -341,6 +358,7 @@ mod tests {
         let mut loaded = HashMap::new();
         let gate = FixedGate(true);
         let sink = FakeSink::default();
+        let metric = test_metric();
 
         run_tick(
             &db,
@@ -350,6 +368,7 @@ mod tests {
             &mut tracker,
             &mut loaded,
             Some(&sink as &dyn BundleSink),
+            &metric,
         )
         .await;
         run_tick(
@@ -360,6 +379,7 @@ mod tests {
             &mut tracker,
             &mut loaded,
             Some(&sink as &dyn BundleSink),
+            &metric,
         )
         .await;
 
@@ -374,14 +394,24 @@ mod tests {
     async fn run_tick_defers_when_no_executor_connection_is_active() {
         let digest = format!("sha256:{}", "a".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([[watermark_row(1, Some(10))]])
+            .append_query_results([vec![active_row("waddles.a")]])
             .append_query_results([vec![active_row("waddles.a")]])
             .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
             .append_query_results([vec![approval_row("waddles.a", "1")]])
             .into_connection();
         let mut tracker = WatermarkTracker::new();
         let mut loaded = HashMap::new();
-        run_tick(&db, 1, 0, &FixedGate(true), &mut tracker, &mut loaded, None).await;
+        run_tick(
+            &db,
+            1,
+            0,
+            &FixedGate(true),
+            &mut tracker,
+            &mut loaded,
+            None,
+            &test_metric(),
+        )
+        .await;
         assert!(
             loaded.is_empty(),
             "no connection -> nothing recorded as loaded yet"
@@ -392,7 +422,7 @@ mod tests {
     async fn run_tick_loads_a_newly_active_bundle_through_the_sink() {
         let digest = format!("sha256:{}", "b".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([[watermark_row(1, Some(10))]])
+            .append_query_results([vec![active_row("waddles.a")]])
             .append_query_results([vec![active_row("waddles.a")]])
             .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
             .append_query_results([vec![approval_row("waddles.a", "1")]])
@@ -408,6 +438,7 @@ mod tests {
             &mut tracker,
             &mut loaded,
             Some(&sink as &dyn BundleSink),
+            &test_metric(),
         )
         .await;
         assert_eq!(loaded.get("waddles.a"), Some(&digest));
@@ -417,7 +448,9 @@ mod tests {
     #[tokio::test]
     async fn run_tick_unloads_a_bundle_removed_from_the_active_set() {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([[watermark_row(0, None)]])
+            .append_query_results([
+                Vec::<bundle_active_set::entities::app_active_versions::Model>::new(),
+            ])
             .append_query_results([
                 Vec::<bundle_active_set::entities::app_active_versions::Model>::new(),
             ])
@@ -434,6 +467,7 @@ mod tests {
             &mut tracker,
             &mut loaded,
             Some(&sink as &dyn BundleSink),
+            &test_metric(),
         )
         .await;
         assert!(loaded.is_empty());
@@ -447,7 +481,7 @@ mod tests {
     async fn run_tick_leaves_loaded_untouched_when_the_sink_load_fails() {
         let digest = format!("sha256:{}", "c".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([[watermark_row(1, Some(10))]])
+            .append_query_results([vec![active_row("waddles.a")]])
             .append_query_results([vec![active_row("waddles.a")]])
             .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
             .append_query_results([vec![approval_row("waddles.a", "1")]])
@@ -464,6 +498,7 @@ mod tests {
             &mut tracker,
             &mut loaded,
             Some(&sink as &dyn BundleSink),
+            &test_metric(),
         )
         .await;
         assert!(
@@ -479,18 +514,31 @@ mod tests {
         let mut tracker = WatermarkTracker::new();
         let mut loaded = HashMap::new();
         toggle.set(false);
-        run_tick(&db, 1, 0, &toggle, &mut tracker, &mut loaded, None).await;
+        run_tick(
+            &db,
+            1,
+            0,
+            &toggle,
+            &mut tracker,
+            &mut loaded,
+            None,
+            &test_metric(),
+        )
+        .await;
         assert!(loaded.is_empty());
     }
 
-    fn watermark_row(
-        cnt: i64,
-        vsum: Option<i64>,
-    ) -> std::collections::BTreeMap<String, sea_orm::Value> {
-        let mut m = std::collections::BTreeMap::new();
-        m.insert("cnt".to_string(), sea_orm::Value::BigInt(Some(cnt)));
-        m.insert("vsum".to_string(), sea_orm::Value::BigInt(vsum));
-        m
+    /// A standalone, unregistered `IntCounterVec` -- valid to `.inc()`
+    /// against without a `prometheus::Registry` (registration only matters
+    /// for `/metrics` exposition, not internal correctness), so tests don't
+    /// need to thread `telemetry::register_bundle_loader_excluded_metrics`
+    /// through just to satisfy `run_tick`'s signature.
+    fn test_metric() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_bundle_active_set_excluded_total", "test"),
+            &["app_id", "reason"],
+        )
+        .expect("valid metric definition")
     }
 
     fn version_row(
@@ -520,5 +568,64 @@ mod tests {
             version: version.to_string(),
             superseded_by: None,
         }
+    }
+
+    /// Ops-visibility fix (security review): an excluded active row must
+    /// increment the caller-supplied Prometheus counter, not just log --
+    /// this is the regression test for that behavior. `waddles.excluded`
+    /// is active but has no matching approval row queued, so it's excluded
+    /// while `waddles.a` (which does have one) loads normally.
+    #[tokio::test]
+    async fn run_tick_increments_the_excluded_metric_for_an_unapproved_row() {
+        let digest = format!("sha256:{}", "e".repeat(64));
+        // Distinct `version_id`s (11/12, not `active_row`'s hardcoded 10)
+        // -- `versions_by_id` is keyed by `id`, so two active rows sharing
+        // one `version_id` would collapse to a single `app_versions` row
+        // and defeat this test's two-distinct-apps setup.
+        let excluded_active = bundle_active_set::entities::app_active_versions::Model {
+            app_id: "waddles.excluded".to_string(),
+            tenant_id: 1,
+            community_id: 0,
+            version_id: 12,
+        };
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a"), excluded_active.clone()]])
+            .append_query_results([vec![active_row("waddles.a"), excluded_active]])
+            .append_query_results([vec![
+                version_row("waddles.a", 10, "1", &digest),
+                version_row("waddles.excluded", 12, "1", &digest),
+            ]])
+            .append_query_results([vec![approval_row("waddles.a", "1")]])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        let sink = FakeSink::default();
+        let metric = test_metric();
+        run_tick(
+            &db,
+            1,
+            0,
+            &FixedGate(true),
+            &mut tracker,
+            &mut loaded,
+            Some(&sink as &dyn BundleSink),
+            &metric,
+        )
+        .await;
+        assert_eq!(loaded.get("waddles.a"), Some(&digest));
+        assert_eq!(
+            metric
+                .with_label_values(&["waddles.excluded", "no_approval"])
+                .get(),
+            1,
+            "the excluded row must increment the metric labeled with its own app_id/reason"
+        );
+        assert_eq!(
+            metric
+                .with_label_values(&["waddles.a", "no_approval"])
+                .get(),
+            0,
+            "only the actually-excluded app_id must be incremented"
+        );
     }
 }

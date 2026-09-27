@@ -25,6 +25,11 @@ sea-orm = { version = "=2.0.2", default-features = false, features = [
 ] }
 thiserror = "=2.0.20"
 tracing = "=0.1.44"
+# `Watermark`'s SHA-256 fingerprint over the active row set (security
+# review fix -- replaces a `COUNT(*) + SUM(version_id)` watermark that
+# could silently cancel, see query.rs's module doc). Same exact version
+# pin `core/svc_action`/`core/bundle_executor` already use.
+sha2 = "=0.10.9"
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }

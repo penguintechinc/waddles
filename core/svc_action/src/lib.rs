@@ -143,6 +143,13 @@ where
         drop(client.spawn_refresh());
     }
 
+    // Registered before `prom_registry` is moved into `AppState::new`
+    // below (`register_bundle_loader_excluded_metrics` only borrows it) --
+    // ops-visibility fix (security review): the DB-driven bundle loader's
+    // excluded-row counter.
+    let bundle_loader_excluded_metric =
+        telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
+
     let state = http::AppState::new(config.clone(), prom_registry);
 
     let connections = try_start_host_api(
@@ -155,7 +162,12 @@ where
     );
     try_start_env_bundle_loader(&config.cli, Arc::clone(&connections));
     try_start_distribution_poll(&config, Arc::clone(&connections), Arc::clone(&catalog));
-    try_start_db_bundle_loader(&config, Arc::clone(&connections), license.clone());
+    try_start_db_bundle_loader(
+        &config,
+        Arc::clone(&connections),
+        license.clone(),
+        bundle_loader_excluded_metric,
+    );
     try_start_dispatch(&config, connections, catalog, usage, license);
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
@@ -626,6 +638,7 @@ fn try_start_db_bundle_loader(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
+    excluded_metric: prometheus::IntCounterVec,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
@@ -674,6 +687,7 @@ fn try_start_db_bundle_loader(
             call_timeout_ms,
             flag,
             connections,
+            excluded_metric,
             shutdown_rx,
         )
         .await;
@@ -1369,7 +1383,7 @@ mod tests {
             db_reader_password: None,
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
-        try_start_db_bundle_loader(&config, connections, None);
+        try_start_db_bundle_loader(&config, connections, None, test_excluded_metric());
     }
 
     /// Same no-op contract, the other independent startup gate:
@@ -1388,7 +1402,19 @@ mod tests {
             db_reader_password: Some(Secret::new("real-ro-password")),
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
-        try_start_db_bundle_loader(&config, connections, None);
+        try_start_db_bundle_loader(&config, connections, None, test_excluded_metric());
+    }
+
+    /// A standalone, unregistered `IntCounterVec` for
+    /// `try_start_db_bundle_loader` tests -- see `bundle_loader::tests::
+    /// test_metric`'s identical rationale (no `Registry` needed for
+    /// `.inc()` to work correctly).
+    fn test_excluded_metric() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_bundle_active_set_excluded_total", "test"),
+            &["app_id", "reason"],
+        )
+        .expect("valid metric definition")
     }
 
     /// The core of this PR's fix: once a host-API connection is active,

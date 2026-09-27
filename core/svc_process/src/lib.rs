@@ -105,10 +105,21 @@ where
         "starting {SERVICE_NAME}"
     );
 
+    // Registered before `prom_registry` is moved into `AppState::new`
+    // below (`register_bundle_loader_excluded_metrics` only borrows it) --
+    // ops-visibility fix (security review): the DB-driven bundle loader's
+    // excluded-row counter.
+    let bundle_loader_excluded_metric =
+        telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
+
     let state = http::AppState::new(config.clone(), prom_registry);
 
     let connections = try_start_host_api(&config.cli);
-    try_start_db_bundle_loader(&config, Arc::clone(&connections));
+    try_start_db_bundle_loader(
+        &config,
+        Arc::clone(&connections),
+        bundle_loader_excluded_metric,
+    );
     try_start_process_loop(&config, connections);
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
@@ -321,6 +332,7 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
 fn try_start_db_bundle_loader(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
+    excluded_metric: prometheus::IntCounterVec,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
@@ -378,6 +390,7 @@ fn try_start_db_bundle_loader(
             call_timeout_ms,
             gate,
             connections,
+            excluded_metric,
             shutdown_rx,
         )
         .await;
@@ -525,7 +538,11 @@ mod tests {
         let cli = CliConfig::parse_from(["svc-process"]);
         let mut config = test_config(cli);
         config.db_reader_password = None;
-        try_start_db_bundle_loader(&config, Arc::new(host_api::ConnectionRegistry::new()));
+        try_start_db_bundle_loader(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            test_excluded_metric(),
+        );
     }
 
     /// Same no-op contract, the other independent startup gate:
@@ -537,7 +554,23 @@ mod tests {
         assert_eq!(cli.bundle_scope_tenant_id, 0);
         let mut config = test_config(cli);
         config.db_reader_password = Some(crate::config::Secret::new("real-ro-password"));
-        try_start_db_bundle_loader(&config, Arc::new(host_api::ConnectionRegistry::new()));
+        try_start_db_bundle_loader(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            test_excluded_metric(),
+        );
+    }
+
+    /// A standalone, unregistered `IntCounterVec` for
+    /// `try_start_db_bundle_loader` tests -- see `bundle_loader::tests::
+    /// test_metric`'s identical rationale (no `Registry` needed for
+    /// `.inc()` to work correctly).
+    fn test_excluded_metric() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_bundle_active_set_excluded_total", "test"),
+            &["app_id", "reason"],
+        )
+        .expect("valid metric definition")
     }
 
     #[tokio::test]

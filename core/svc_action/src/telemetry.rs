@@ -123,6 +123,33 @@ pub fn register_egress_metrics(registry: &prometheus::Registry) -> prometheus::I
     denied_total
 }
 
+/// Ops-visibility fix (security review): the DB-driven active-bundle
+/// loader (`crate::bundle_loader`) previously only logged when
+/// `bundle_active_set::read_active_set` excluded an active row (no current
+/// approval / missing digest / referential-integrity gap) -- a feature
+/// silently going dark (e.g. an approval expiring with nothing
+/// re-approving it) is easy to miss in a log stream alone. Incremented
+/// once per excluded row by `bundle_loader::run_tick`, labeled by
+/// `app_id`/`reason` (`bundle_active_set::ExclusionReason::as_str`), same
+/// shape as [`register_egress_metrics`] above.
+pub fn register_bundle_loader_excluded_metrics(
+    registry: &prometheus::Registry,
+) -> prometheus::IntCounterVec {
+    let excluded_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_action_bundle_active_set_excluded_total",
+            "Active app_active_versions rows excluded from the DB-driven bundle loader's \
+             active set, by app_id/reason",
+        ),
+        &["app_id", "reason"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(excluded_total.clone()))
+        .expect("register svc_action_bundle_active_set_excluded_total");
+    excluded_total
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +191,19 @@ mod tests {
         let rendered = render_metrics(&registry).expect("registry with metrics must encode");
         assert!(rendered.contains("svc_action_egress_denied_total"));
         assert!(rendered.contains("host_not_declared"));
+    }
+
+    #[test]
+    fn register_bundle_loader_excluded_metrics_produces_a_labeled_counter() {
+        let registry = prometheus::Registry::new();
+        let excluded_total = register_bundle_loader_excluded_metrics(&registry);
+        excluded_total
+            .with_label_values(&["waddles.a", "no_approval"])
+            .inc();
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_action_bundle_active_set_excluded_total"));
+        assert!(rendered.contains(r#"app_id="waddles.a""#));
+        assert!(rendered.contains(r#"reason="no_approval""#));
     }
 
     #[test]
