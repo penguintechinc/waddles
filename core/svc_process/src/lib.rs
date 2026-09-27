@@ -493,7 +493,9 @@ fn try_start_db_bundle_loader(
     // listener (`try_start_host_api`'s own registry, threaded through this
     // function's `connections` parameter) -- a per-consumer registry of its
     // own would never see the executor connection the listener actually
-    // accepts.
+    // accepts. Tenant/community scope is deliberately NOT included here --
+    // see [`SupervisorPrereqs`]'s own doc for why that half can only be
+    // resolved once the RO reader connection exists.
     let supervisor_prereqs =
         build_source_supervisor_prereqs(config, Arc::clone(&connections), Arc::clone(&gate));
 
@@ -524,7 +526,46 @@ fn try_start_db_bundle_loader(
             bundle_loader_shutdown_rx,
         );
 
-        match supervisor_prereqs {
+        let Some(prereqs) = supervisor_prereqs else {
+            bundle_loader_task.await;
+            return;
+        };
+
+        // Tenant-isolation fix: resolve the real tenant slug/community name
+        // for THIS process's own numeric scope through the same RO reader
+        // connection, rather than ever hardcoding a fixed scope -- see
+        // `bundle_active_set::scope::resolve_scope`'s own fail-closed
+        // contract. A resolution failure (missing row, cross-tenant
+        // community id, or a query error) disables ONLY the supervisor;
+        // bundle load/unload has no scope-string dependency and keeps
+        // running.
+        let resolved =
+            match bundle_active_set::scope::resolve_scope(&db, tenant_id, community_id).await {
+                Ok(Some(resolved)) => Some(resolved),
+                Ok(None) => {
+                    tracing::error!(
+                    tenant_id,
+                    community_id,
+                    "tenant/community scope could not be resolved via the RO reader connection \
+                     (missing row, or a community id belonging to a different tenant); \
+                     source-binding supervisor not started (fail-closed -- never defaulting to a \
+                     hardcoded scope)"
+                );
+                    None
+                }
+                Err(err) => {
+                    tracing::error!(
+                        error = %err,
+                        tenant_id,
+                        community_id,
+                        "tenant/community scope resolution query failed; source-binding supervisor \
+                         not started (fail-closed)"
+                    );
+                    None
+                }
+            };
+
+        match resolved.map(|r| finish_supervisor_deps(prereqs, r)) {
             Some(deps) => {
                 let (supervisor_shutdown_tx, supervisor_shutdown_rx) =
                     tokio::sync::oneshot::channel();
@@ -553,17 +594,34 @@ fn try_start_db_bundle_loader(
     });
 }
 
-/// Builds [`source_supervisor::SupervisorDeps`] from `config`'s optional
-/// dependencies, or `None` (logged) if either is unavailable -- split out
-/// of [`try_start_db_bundle_loader`] so that function's own control flow
-/// reads as "two independent startup gates, then dispatch" rather than
-/// nesting the supervisor's setup inline. Never touches the network itself
+/// Everything the source-binding supervisor needs EXCEPT its tenant/
+/// community scope -- deliberately split from [`source_supervisor::
+/// SupervisorDeps`] because those two fields can only be resolved (
+/// `bundle_active_set::scope::resolve_scope`) once the RO reader
+/// connection exists, whereas everything else here is built eagerly, with
+/// no network I/O, at startup. [`finish_supervisor_deps`] combines the two
+/// halves once resolution succeeds.
+struct SupervisorPrereqs {
+    spine_cfg: penguin_spine::SpineConfig,
+    key_ring: hop::KeyRing,
+    connections: Arc<host_api::ConnectionRegistry>,
+    call_timeout_ms: u64,
+    approved_targets: std::collections::HashMap<String, String>,
+    metrics: Arc<dyn penguin_spine::SpineMetrics>,
+    license: Arc<dyn license::FeatureGate>,
+}
+
+/// Builds [`SupervisorPrereqs`] from `config`'s optional dependencies, or
+/// `None` (logged) if either is unavailable -- split out of
+/// [`try_start_db_bundle_loader`] so that function's own control flow reads
+/// as "two independent startup gates, then dispatch" rather than nesting
+/// the supervisor's setup inline. Never touches the network itself
 /// (`penguin_spine::SpineConfig::from_env` only parses env vars).
 fn build_source_supervisor_prereqs(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
     gate: Arc<dyn license::FeatureGate>,
-) -> Option<source_supervisor::SupervisorDeps> {
+) -> Option<SupervisorPrereqs> {
     let Some(keys_raw) = config.envelope_binding_keys.as_ref() else {
         tracing::warn!(
             "ENVELOPE_BINDING_KEYS not set; source-binding supervisor disabled (hop verification must never fail open)"
@@ -588,7 +646,7 @@ fn build_source_supervisor_prereqs(
     let approved_targets = builtins::parse_approved_targets(&config.cli.process_routes_to_approved);
     let metrics: Arc<dyn penguin_spine::SpineMetrics> = Arc::new(penguin_spine::NoopMetrics);
 
-    Some(source_supervisor::SupervisorDeps {
+    Some(SupervisorPrereqs {
         spine_cfg,
         key_ring,
         connections,
@@ -596,13 +654,32 @@ fn build_source_supervisor_prereqs(
         approved_targets,
         metrics,
         license: gate,
-        // TODO(M4+): tenant/community scope hardcoded to the tenant-wide
-        // `global` activation -- the same interim scope
-        // `try_start_process_loop` already documents, blocked on the real
-        // distribution/activation poll (spec §6.7), not re-solved here.
-        tenant: "global".to_string(),
-        community: None,
     })
+}
+
+/// Combines [`SupervisorPrereqs`] with a successfully-[`resolve_scope`]d
+/// tenant slug/community name into the final [`source_supervisor::
+/// SupervisorDeps`]. Pure (no I/O, no logging of its own -- the caller
+/// already logged the resolution outcome) so the "does resolution feed
+/// through correctly" contract is unit-testable without a live reader
+/// connection.
+///
+/// [`resolve_scope`]: bundle_active_set::scope::resolve_scope
+fn finish_supervisor_deps(
+    prereqs: SupervisorPrereqs,
+    resolved: bundle_active_set::scope::ResolvedScope,
+) -> source_supervisor::SupervisorDeps {
+    source_supervisor::SupervisorDeps {
+        spine_cfg: prereqs.spine_cfg,
+        key_ring: prereqs.key_ring,
+        connections: prereqs.connections,
+        call_timeout_ms: prereqs.call_timeout_ms,
+        approved_targets: prereqs.approved_targets,
+        metrics: prereqs.metrics,
+        license: prereqs.license,
+        tenant: resolved.tenant_slug,
+        community: resolved.community_name,
+    }
 }
 
 /// Waits for SIGINT (Ctrl-C) or SIGTERM (Kubernetes pod termination) and
@@ -730,6 +807,71 @@ mod tests {
             envelope_binding_keys: Some(crate::config::Secret::new("k1:aabbcc")),
             db_reader_password: None,
         }
+    }
+
+    /// A minimal, syntactically valid [`SupervisorPrereqs`] -- guarded by
+    /// `ENV_LOCK` since `penguin_spine::SpineConfig::from_env` reads
+    /// `VALKEY_URL`/`VALKEY_PASSWORD`, same rationale as
+    /// `try_start_process_loop_spawns_when_spine_config_is_valid`'s
+    /// identical setup.
+    fn test_supervisor_prereqs() -> SupervisorPrereqs {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by ENV_LOCK above.
+        unsafe {
+            std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
+            std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
+        }
+        let spine_cfg = penguin_spine::SpineConfig::from_env().expect("valid spine config");
+        // SAFETY: serialized by ENV_LOCK above.
+        unsafe {
+            std::env::remove_var("VALKEY_URL");
+            std::env::remove_var("VALKEY_PASSWORD");
+        }
+        SupervisorPrereqs {
+            spine_cfg,
+            key_ring: crate::hop::KeyRing::new(vec![("k1".to_string(), vec![9u8; 32])]),
+            connections: Arc::new(host_api::ConnectionRegistry::new()),
+            call_timeout_ms: 2000,
+            approved_targets: std::collections::HashMap::new(),
+            metrics: Arc::new(penguin_spine::NoopMetrics),
+            license: Arc::new(crate::license::test_support::FixedGate(true)),
+        }
+    }
+
+    /// Tenant-isolation regression test, resolved half: `finish_supervisor_
+    /// deps` must carry the DB-resolved tenant slug/community name through
+    /// into `SupervisorDeps` verbatim -- this is what
+    /// `source_supervisor::binding_grant` then renders into the actual
+    /// Valkey stream key (see that module's own regression test).
+    #[test]
+    fn finish_supervisor_deps_uses_the_resolved_tenant_slug_and_community() {
+        let prereqs = test_supervisor_prereqs();
+        let resolved = bundle_active_set::scope::ResolvedScope {
+            tenant_slug: "acme".to_string(),
+            community_name: Some("main".to_string()),
+        };
+        let deps = finish_supervisor_deps(prereqs, resolved);
+        assert_eq!(deps.tenant, "acme");
+        assert_eq!(deps.community.as_deref(), Some("main"));
+    }
+
+    /// Tenant-isolation regression test, fail-closed half ("unresolved ->
+    /// DB path not started"): this is the exact `Option::map` expression
+    /// `try_start_db_bundle_loader`'s spawned task runs against
+    /// `bundle_active_set::scope::resolve_scope`'s own `None` result --
+    /// proving a failed resolution can never produce a `SupervisorDeps`, so
+    /// the `None` match arm (bundle load/unload only, no supervisor spawn)
+    /// is the only path reachable.
+    #[test]
+    fn supervisor_deps_are_never_built_when_scope_resolution_fails() {
+        let prereqs = test_supervisor_prereqs();
+        let resolved: Option<bundle_active_set::scope::ResolvedScope> = None;
+        let deps = resolved.map(|r| finish_supervisor_deps(prereqs, r));
+        assert!(
+            deps.is_none(),
+            "an unresolved scope must never produce SupervisorDeps -- the source-binding \
+             supervisor must not start"
+        );
     }
 
     #[test]

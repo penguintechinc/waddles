@@ -28,8 +28,8 @@
 //! follow-up so this Rust-focused change doesn't also own a schema/RBAC
 //! migration)
 //!
-//! This crate's queries (`crate::query`/`crate::bindings`) touch exactly
-//! four tables, all `SELECT`-only:
+//! This crate's queries (`crate::query`/`crate::bindings`/`crate::scope`)
+//! touch exactly six tables, all `SELECT`-only:
 //!
 //! ```sql
 //! CREATE ROLE svc_process_ro LOGIN PASSWORD '<secret>';
@@ -39,12 +39,20 @@
 //! GRANT SELECT ON app_versions          TO svc_process_ro, svc_action_ro;
 //! GRANT SELECT ON app_install_approvals TO svc_process_ro, svc_action_ro;
 //! GRANT SELECT ON app_source_bindings   TO svc_process_ro, svc_action_ro;
+//! GRANT SELECT ON tenants               TO svc_process_ro, svc_action_ro;
+//! GRANT SELECT ON communities           TO svc_process_ro, svc_action_ro;
 //! -- No INSERT/UPDATE/DELETE grant on any table, ever -- enforced at the
 //! -- database in addition to `crate::reader::connect`'s own defense-in-
 //! -- depth `options[default_transaction_read_only]=on` startup parameter
 //! -- (applied to every physical connection in the pool, not a one-shot
 //! -- post-connect `SET`).
 //! ```
+//!
+//! `tenants`/`communities` (migration `058_tenants_and_claims.sql`) are the
+//! same tables hub-api's own auth chain reads (`hub_api/app.py::
+//! _bind_reference_tables`) -- `crate::scope::resolve_scope` reads them to
+//! translate the numeric `BUNDLE_SCOPE_TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID`
+//! scope into the tenant slug/community name `penguin_spine::Scope` needs.
 //!
 //! `app_catalog` itself is never queried directly by this crate (only
 //! joined-through via `app_id` FKs already resolved on the rows it does
@@ -55,6 +63,7 @@ pub mod diff;
 pub mod entities;
 pub mod query;
 pub mod reader;
+pub mod scope;
 
 pub use bindings::{read_source_bindings, SourceBinding};
 pub use diff::{plan, DiffPlan};
@@ -63,3 +72,4 @@ pub use query::{
     ActiveSetRead, DegradedReason, ExclusionReason, Watermark, WatermarkTracker,
 };
 pub use reader::ReaderConfig;
+pub use scope::{resolve_scope, ResolvedScope};

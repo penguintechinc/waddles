@@ -74,6 +74,25 @@ fn is_nogroup_error(err: &SpineError) -> bool {
     matches!(err, SpineError::Redis(e) if e.code() == Some("NOGROUP"))
 }
 
+/// Builds the [`Grant`] for one binding under `tenant`/`community` --
+/// pulled out of [`run_binding_consumer`] as a pure function purely so the
+/// tenant-isolation fix (`crate::lib::resolve_scope`'s resolved slug/name
+/// actually reaching the stream key `penguin_spine::GroupReader` reads) is
+/// directly unit-testable without a live Valkey connection.
+fn binding_grant(
+    tenant: &str,
+    community: &Option<String>,
+    platform: &str,
+    source_id: &str,
+) -> Grant {
+    let scope = Scope::new(tenant.to_string(), community.clone());
+    Grant {
+        stream: scope.source_stream(platform, source_id),
+        platform: platform.to_string(),
+        source_id: source_id.to_string(),
+    }
+}
+
 /// Everything every per-binding consumer task needs that does NOT vary by
 /// binding -- built once by `crate::lib::try_start_db_bundle_loader` and
 /// shared (via `Arc`) across every spawned [`run_binding_consumer`] task,
@@ -87,12 +106,13 @@ pub struct SupervisorDeps {
     pub approved_targets: HashMap<String, String>,
     pub metrics: Arc<dyn SpineMetrics>,
     pub license: Arc<dyn FeatureGate>,
-    /// Tenant/community scope for `penguin_spine::Scope::source_stream`.
-    /// Hardcoded to the tenant-wide `global` activation by this module's
-    /// only caller today -- the same interim scope
-    /// `crate::lib::try_start_process_loop` already documents (TODO(M4+):
-    /// blocked on the real distribution/activation poll, not something
-    /// this change re-solves).
+    /// Tenant slug / community name for `penguin_spine::Scope::
+    /// source_stream` -- resolved from the numeric `BUNDLE_SCOPE_TENANT_ID`/
+    /// `BUNDLE_SCOPE_COMMUNITY_ID` scope via `bundle_active_set::scope::
+    /// resolve_scope` (`crate::lib::finish_supervisor_deps`), NEVER
+    /// hardcoded: this module's only caller fails closed (does not build a
+    /// `SupervisorDeps` at all, see `crate::lib::try_start_db_bundle_loader`)
+    /// when resolution fails, rather than falling back to a guessed value.
     pub tenant: String,
     pub community: Option<String>,
 }
@@ -187,12 +207,7 @@ async fn run_binding_consumer(
     mut shutdown: oneshot::Receiver<()>,
 ) {
     loop {
-        let scope = Scope::new(deps.tenant.clone(), deps.community.clone());
-        let grant = Grant {
-            stream: scope.source_stream(&platform, &source_id),
-            platform: platform.clone(),
-            source_id: source_id.clone(),
-        };
+        let grant = binding_grant(&deps.tenant, &deps.community, &platform, &source_id);
 
         let spine_client =
             match SpineClient::connect(deps.spine_cfg.clone(), deps.metrics.clone()).await {
@@ -553,6 +568,30 @@ mod tests {
     fn is_nogroup_error_rejects_a_non_redis_spine_error() {
         let err = SpineError::Config("unrelated config error".to_string());
         assert!(!is_nogroup_error(&err));
+    }
+
+    /// Tenant-isolation regression test: the DB-resolved tenant slug/
+    /// community name (`crate::lib::resolve_scope`, never a hardcoded
+    /// scope) must be exactly what ends up in the Valkey stream key a
+    /// consumer actually reads.
+    #[test]
+    fn binding_grant_uses_the_resolved_tenant_slug_and_community_name() {
+        let grant = binding_grant("acme", &Some("main".to_string()), "twitch", "tw-channelA");
+        assert_eq!(
+            grant.stream,
+            "waddles:t:acme:c:main:src:twitch:tw-channelA:events"
+        );
+        assert_eq!(grant.platform, "twitch");
+        assert_eq!(grant.source_id, "tw-channelA");
+    }
+
+    #[test]
+    fn binding_grant_renders_the_tenant_wide_segment_for_no_community() {
+        let grant = binding_grant("acme", &None, "discord", "dg-x");
+        assert_eq!(
+            grant.stream,
+            "waddles:t:acme:c:_tenant:src:discord:dg-x:events"
+        );
     }
 
     #[tokio::test]
