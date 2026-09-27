@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Installs every Python dependency `make test-unit` / tests/k8s/alpha/05-unit-tests.sh
 # needs to collect and run the full unit suite (legacy tests/unit +
-# identity_core_module, hub_api, libs/* (flask_core + SCCEMBS module
-# libraries), and every core/svc_* stage-runner container).
+# identity_core_module, workflow_core_module, hub_api, libs/* (flask_core +
+# SCCEMBS module libraries), and every core/svc_* stage-runner container).
 #
 # Each subproject ships its own requirements.txt with its own pins -- most
 # are hash-pinned (--require-hashes) and some legitimately disagree on
@@ -30,6 +30,16 @@ PIP=("$PYTHON_BIN" -m pip install --disable-pip-version-check)
 
 echo "[install-unit-test-deps] core/identity_core_module + editable libs/flask_core"
 "${PIP[@]}" -r core/identity_core_module/requirements.txt -e libs/flask_core
+
+# core/workflow_core_module's requirements.txt is loose-pinned (like
+# identity_core_module's above), not hash-pinned like the core/svc_*
+# containers in the loop below -- installed the same unhashed way. It also
+# needs grpc_tools.protoc at test-collection time (tests/conftest.py
+# generates workflow_pb2*.py from proto/workflow.proto on the fly, mirroring
+# the Dockerfile's build-time codegen step) -- grpcio-tools is already
+# declared in this requirements.txt for exactly that reason.
+echo "[install-unit-test-deps] core/workflow_core_module"
+"${PIP[@]}" -r core/workflow_core_module/requirements.txt
 
 # libs/waddle_transports is the first libs/* module carrying its own
 # runtime dependencies beyond flask_core (websockets/aiosmtplib/httpx[http2]

@@ -37,7 +37,12 @@ APScheduler==3.10.4
 redis==5.0.1
 
 # Authentication & Security
-python-jose[cryptography]>=3.5.0
+# PyJWT, not python-jose -- matches the repo-wide migration already applied
+# to sibling gRPC handlers (core/browser_source_core_module,
+# core/reputation_module/services/grpc_handler.py, commit c038a602) and to
+# services/module_executor.py in this same module; grpc_handler.py was
+# missed by that migration and was the last python-jose holdout here.
+pyjwt>=2.12.1
 cryptography>=46.0.6
 
 # Environment
