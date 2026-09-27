@@ -30,14 +30,33 @@ spec:
       restartPolicy: Never
       serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      # Explicit (not a `toYaml .Values.podSecurityContext` reference) so this Job's rootless
+      # posture is self-evident from this file alone, per devops-kubernetes.md's mandatory
+      # baseline -- values match .Values.podSecurityContext's own defaults verbatim.
       securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: core-bundle-seeder
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "core-bundle-seeder" "imageTag" .Values.global.imageTag) }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        # Explicit (not a `toYaml .Values.securityContext` reference) for the same reason as
+        # the pod-level securityContext above -- also adds a container-level seccompProfile,
+        # which the shared .Values.securityContext does not itself carry (only the pod-level
+        # block does); belt-and-suspenders since seccomp is inherited from the pod either way.
         securityContext:
-          {{- toYaml .Values.securityContext | nindent 10 }}
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
         envFrom:
         - configMapRef:
             name: {{ include "waddlebot.fullname" . }}-config

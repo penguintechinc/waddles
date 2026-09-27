@@ -110,6 +110,32 @@ async def test_seed_one_refuses_before_touching_the_database(
     assert not rows
 
 
+@pytest.mark.parametrize(
+    "app_id",
+    [
+        pytest.param("waddles.corex.example.ping", id="near-miss-not-a-dot-boundary"),
+        pytest.param("waddles.core.example.pÿng", id="latin-supplement-not-ascii"),
+        # Fullwidth 'l' (U+FF4C) NFKC-normalizes to ASCII 'l' -- normalization changes the
+        # string, so it is refused outright regardless of what it visually resembles.
+        pytest.param("waddles.core.exampｌe.ping", id="nfkc-changing-fullwidth-l"),
+        # Cyrillic 'а' (U+0430) is NOT touched by NFKC (different script, not canonically
+        # equivalent to Latin 'a') -- caught by the ASCII-only charset regex instead.
+        pytest.param("wаddles.core.example.ping", id="cyrillic-homoglyph-a"),
+        pytest.param("Waddles.Core.Example.Ping", id="uppercase"),
+        pytest.param("waddles..core.example.ping", id="consecutive-dots-empty-segment"),
+        pytest.param("waddles.core.example.p_ng", id="underscore-not-in-charset"),
+        pytest.param("waddles.core.example.ping.", id="trailing-dot-empty-segment"),
+    ],
+)
+def test_guard_core_namespace_refuses_lookalike_and_malformed_app_ids(app_id: str) -> None:
+    with pytest.raises(CoreBundleSeederError):
+        seeder._guard_core_namespace(app_id)
+
+
+def test_guard_core_namespace_accepts_a_well_formed_core_app_id() -> None:
+    seeder._guard_core_namespace("waddles.core.example.ping")  # must not raise
+
+
 # ---------------------------------------------------------------------------
 # Happy path: publish + activate under the SYSTEM actor
 # ---------------------------------------------------------------------------

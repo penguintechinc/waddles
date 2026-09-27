@@ -56,7 +56,9 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -95,6 +97,12 @@ _TENANT_SLUGS_OVERRIDE_ENV = "CORE_BUNDLES_TENANT_SLUGS"
 #: static list -- how a deploy-time-only value (e.g. an alpha cluster's real Discord guild
 #: id) reaches the seeder without baking it into the image. See module docstring.
 _PLATFORM_CONNECTIONS_ENV = "CORE_BUNDLES_PLATFORM_CONNECTIONS"
+
+#: Strict lowercase-alnum-dot-hyphen charset for a well-formed dotted app_id -- the segment
+#: shape every real `waddles.core.*` app_id already uses (`bundle_manifest_v2._APP_ID_RE`'s
+#: own `[a-z0-9][a-z0-9_-]*` segments, minus underscores: no legitimate core app_id has ever
+#: used one). Deliberately ASCII-only -- see `_guard_core_namespace()`'s own docstring.
+_APP_ID_CHARSET_RE = re.compile(r"^[a-z0-9]+(\.[a-z0-9-]+)+$")
 
 
 @dataclass(slots=True, frozen=True)
@@ -225,7 +233,33 @@ def _resolve_activation_targets(entry: CatalogEntry) -> tuple[ActivationTarget, 
 
 
 def _guard_core_namespace(app_id: str) -> None:
-    """Refuse an `app_id` outside the reserved `waddles.core.*` namespace (see module docstring)."""
+    """Refuse an `app_id` outside the reserved `waddles.core.*` namespace (see module docstring).
+
+    Hardened against lookalike/homoglyph app_ids (security review, 2026-09-27): two checks run
+    BEFORE the prefix comparison itself, so a crafted app_id can never reach that comparison in
+    a form that could confuse it.
+
+      1. NFKC-normalizing `app_id` must be a no-op. A confusable character that NFKC folds
+         toward a different byte sequence (e.g. a fullwidth or ligature form of an ASCII
+         letter) would otherwise let an app_id LOOK different from `waddles.core.*` to this
+         raw `.startswith()` check while a downstream consumer using normalized/collated
+         comparison (a DB index, a case/width-insensitive lookup) could treat it as the same
+         string -- rejecting any app_id normalization would actually change closes that gap
+         outright, independent of what any downstream consumer happens to do.
+      2. `_APP_ID_CHARSET_RE` requires plain ASCII lowercase/digits/dot/hyphen -- the exact
+         segment shape every real `waddles.core.*` app_id already uses. This independently
+         rejects every non-ASCII homoglyph (Cyrillic/Greek lookalikes, etc.) that NFKC leaves
+         untouched (NFKC does not fold across scripts), plus malformed shapes (empty segments,
+         uppercase, leading/trailing/consecutive dots) a bare prefix check would not catch.
+
+    `"waddles.corex.*"` (a near-miss, not a homoglyph) is refused by the prefix check itself,
+    same as before -- covered here only for the charset/normalization checks' own scope.
+    """
+    if unicodedata.normalize("NFKC", app_id) != app_id or not _APP_ID_CHARSET_RE.match(app_id):
+        raise CoreBundleSeederError(
+            f"refusing to seed {app_id!r}: not a well-formed lowercase dotted app_id "
+            "(ASCII a-z0-9.- only, NFKC-normalization must be a no-op)"
+        )
     if not app_id.startswith(vendor_bundle_authz.CORE_NAMESPACE_PREFIX):
         raise CoreBundleSeederError(
             f"refusing to seed {app_id!r}: core-bundle-seeder only seeds "
