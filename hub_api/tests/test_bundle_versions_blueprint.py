@@ -237,7 +237,10 @@ async def test_vendor_can_onboard_a_component_in_their_own_namespace(
     assert response.status_code == 202
     body = await response.get_json()
     assert body["status"] == "PUBLISHED"
-    assert mock_component_pipeline.xgroup_create.await_count == 2
+    # Only the `action`-stage group is provisioned at onboard time -- the
+    # `process` key is unused (svc-process reads granted source streams
+    # instead; see app_source_binding_service.py's module docstring).
+    assert mock_component_pipeline.xgroup_create.await_count == 1
 
 
 async def test_vendor_cannot_onboard_the_core_namespace(
