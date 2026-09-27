@@ -1,0 +1,79 @@
+# Core-bundle seeder -- post-install/post-upgrade hook Job that activates first-party
+# `waddles.core.*` App Bundles (hub_api/cli/seed_core_bundles.py) under the platform's SYSTEM
+# identity, no human global-admin approval. Runs AFTER templates/migrations-job.yaml (a
+# pre-install/pre-upgrade hook -- Helm always finishes the pre-* hook phase before starting the
+# post-* phase, so 0020-0026's tables are guaranteed to exist here with no explicit weight
+# ordering needed against that other Job) and independently of the hub-api Deployment's own
+# readiness -- this Job talks to Postgres/MinIO/Valkey directly, never hub-api's HTTP API.
+{{- if .Values.pipeline.coreBundleSeeder.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-core-bundle-seeder
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: core-bundle-seeder
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.pipeline.coreBundleSeeder.backoffLimit }}
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: core-bundle-seeder
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: core-bundle-seeder
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "core-bundle-seeder" "imageTag" .Values.global.imageTag) }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+        envFrom:
+        - configMapRef:
+            name: {{ include "waddlebot.fullname" . }}-config
+        - secretRef:
+            name: {{ include "waddlebot.fullname" . }}-secrets
+        env:
+        - name: MODULE_NAME
+          value: "core-bundle-seeder"
+        # Platform connections (services/ingest_source_service.py::ensure_ingest_source(),
+        # NO credentials/tokens stored -- see hub_api/cli/seed_core_bundles.py's own module
+        # docstring) -- built from the SAME values already wired to svc-ingest's Discord guild
+        # (templates/svc-process-rust.yaml's processIngestPlatform/processIngestSourceId env),
+        # never a second, hand-maintained copy of the guild id. Omitted entirely (no env var)
+        # when that value isn't set, so the seeder falls back to `bundles/core-bundles.yaml`'s
+        # own (empty by default) static `platform_connections:` list.
+        {{- if .Values.pipeline.rustDataPlane.svcProcess.processIngestSourceId }}
+        {{- $connections := list (dict
+              "tenant_slug" (.Values.pipeline.coreBundleSeeder.defaultTenantSlug | default "global")
+              "community_id" nil
+              "platform" .Values.pipeline.rustDataPlane.svcProcess.processIngestPlatform
+              "source_id" .Values.pipeline.rustDataPlane.svcProcess.processIngestSourceId
+              "label" "svc-ingest platform connection"
+            ) }}
+        - name: CORE_BUNDLES_PLATFORM_CONNECTIONS
+          value: {{ toJson $connections | quote }}
+        {{- end }}
+        {{- if .Values.pipeline.coreBundleSeeder.tenantSlugs }}
+        - name: CORE_BUNDLES_TENANT_SLUGS
+          value: {{ .Values.pipeline.coreBundleSeeder.tenantSlugs | quote }}
+        {{- end }}
+        resources:
+          {{- toYaml .Values.pipeline.coreBundleSeeder.resources | nindent 10 }}
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+{{- end }}

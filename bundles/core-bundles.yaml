@@ -1,0 +1,48 @@
+# Catalog of first-party waddles.core.* App Bundles the core-bundle-seeder
+# (hub_api/cli/seed_core_bundles.py) activates at deploy time, under the platform's SYSTEM
+# identity -- no human global-admin approval (that stays reserved for third-party vendor
+# bundles, services/vendor_bundle_authz.py::CORE_NAMESPACE_PREFIX).
+#
+# `manifest_path`/`artifact_path` are resolved relative to this file's own directory --
+# bundles/Dockerfile.core-bundles flattens every built artifact + its hub-api manifest into
+# `/core-bundles/` alongside a copy of this file, so the same relative paths work unchanged
+# in the built image and in a local checkout (CORE_BUNDLES_DIR env var points the seeder at
+# either).
+#
+# `activation_targets` is the default target list; CORE_BUNDLES_TENANT_SLUGS (env, comma
+# separated) overrides it for every bundle in this file with a tenant-wide activation per
+# listed slug, for a deployment that needs a different tenant list than the one below.
+#
+# `platform_connections` registers `ingest_sources` rows BEFORE any bundle above activates, so
+# auto-bind (app_source_binding_service.sync_bindings()) has a matching row to grant a
+# `consumes` rule against on the bundle's very first activation. This list is static/baked
+# into the seeder image -- empty here since every connection this repo knows about today (e.g.
+# svc-ingest's alpha Discord guild) is deploy-specific, never a fixed value safe to bake into a
+# shared image; it is added at deploy time via the CORE_BUNDLES_PLATFORM_CONNECTIONS env var
+# (a JSON array of this exact object shape), which the Helm chart populates from the SAME
+# values already wired to svc-ingest (see k8s/helm/waddlebot/templates/core-bundle-seeder-
+# job.yaml) -- never hardcoded here or in Python. NO credentials/tokens are ever stored by this
+# step; the platform's own client (e.g. svc-ingest's Discord bot token) authenticates
+# independently (services/ingest_source_service.py::ensure_ingest_source()'s own docstring).
+#
+# Object shape (one entry): {tenant_slug, platform, source_id, label, community_id (optional,
+# null = tenant-wide)}.
+platform_connections: []
+
+bundles:
+  - app_id: waddles.core.example.ping
+    version: "1.0.0"
+    language: rust
+    manifest_path: ping.manifest.yaml
+    artifact_path: ping.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.pyping
+    version: "1.0.0"
+    language: python
+    manifest_path: pyping.manifest.yaml
+    artifact_path: pyping.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
