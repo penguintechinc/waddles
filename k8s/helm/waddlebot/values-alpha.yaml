@@ -269,6 +269,22 @@ pipeline:
     bundleExecutor:
       replicas: 1
       stageTarget: "svc-process-rust"
+      # stagePort must follow stageTarget -- svcProcess.hostApiPort is 8301, not
+      # svcAction's 8302 (values.yaml's own bundleExecutor.stagePort default,
+      # correct only for the svc-action-rust target it assumes). Missing this
+      # override left the process-stage executor dialing svc-process-rust:8302,
+      # a port nothing listens on -- every connection attempt timed out
+      # ("Connection timed out (os error 110)") and svc-process never got an
+      # active host-api connection, so every process-stage invoke dead-lettered
+      # with executor_unavailable. Confirmed live: alpha was `kubectl set env`
+      # patched with this same fix; formalizing it here so a future `helm
+      # upgrade -f values-alpha.yaml` doesn't regress it back to 8302.
+      stagePort: 8301
+      # Bucket config explicitly aligned to bundleExecutorAction -- same MinIO
+      # in-cluster instance and credentials (MINIO_ROOT_USER/PASSWORD from
+      # waddlebot-secrets). Prevents regression if values.yaml defaults diverge.
+      bucketName: "waddles-bundles"
+      bucketRegion: "us-east-1"
       resources:
         requests: { cpu: "100m", memory: "64Mi" }
         limits: { cpu: "500m", memory: "256Mi" }
