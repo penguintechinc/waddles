@@ -43,6 +43,7 @@ pub mod hop;
 pub mod host_api;
 pub mod http;
 pub mod license;
+pub mod source_supervisor;
 pub mod spine;
 pub mod telemetry;
 
@@ -111,6 +112,8 @@ where
     // excluded-row counter.
     let bundle_loader_excluded_metric =
         telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
+    let source_supervisor_metrics =
+        telemetry::register_source_binding_supervisor_metrics(&prom_registry);
 
     let state = http::AppState::new(config.clone(), prom_registry);
 
@@ -119,6 +122,7 @@ where
         &config,
         Arc::clone(&connections),
         bundle_loader_excluded_metric,
+        source_supervisor_metrics,
     );
     try_start_process_loop(&config, connections);
 
@@ -176,19 +180,35 @@ fn try_start_host_api(cli: &config::CliConfig) -> Arc<host_api::ConnectionRegist
     registry
 }
 
-/// Attempts to start the process-stage drain loop (`crate::spine::run`) as
-/// its own background task, mirroring `core/svc_action::try_start_dispatch`'s
-/// shape: three independent reasons this never starts, all logged and none
-/// an error -- `PROCESS_APP_ID` unset (no bundle assigned yet, multi-bundle
-/// scheduling is blocked on the distribution poll); `penguin_spine::
-/// SpineConfig::from_env()`/`ENVELOPE_BINDING_KEYS` parsing failing (hop
-/// verification must never silently fail open, so a missing keyring
-/// disables the loop rather than starting it unverified); or the license
-/// client failing to construct (a malformed `LICENSE_SERVER_URL`/
-/// `POSTHOG_HOST` -- see `crate::license`). Once started, the loop itself
-/// is additionally gated per-batch on `waddles.core.rust-data-plane`
-/// (spec §13.5) -- OFF drains nothing without stopping the loop or
-/// affecting `/health`/`/metrics`, see `crate::spine::drain_batch`.
+/// Attempts to start the **legacy, single-consumer** process-stage drain
+/// loop (`crate::spine::run`) as its own background task, mirroring
+/// `core/svc_action::try_start_dispatch`'s shape: three independent reasons
+/// this never starts, all logged and none an error -- `PROCESS_APP_ID`
+/// unset (no bundle assigned yet, multi-bundle scheduling is blocked on the
+/// distribution poll); `penguin_spine::SpineConfig::from_env()`/
+/// `ENVELOPE_BINDING_KEYS` parsing failing (hop verification must never
+/// silently fail open, so a missing keyring disables the loop rather than
+/// starting it unverified); or the license client failing to construct (a
+/// malformed `LICENSE_SERVER_URL`/`POSTHOG_HOST` -- see `crate::license`).
+/// Once started, the loop itself is additionally gated per-batch on
+/// `waddles.core.rust-data-plane` (spec §13.5) -- OFF drains nothing
+/// without stopping the loop or affecting `/health`/`/metrics`, see
+/// `crate::spine::drain_batch`.
+///
+/// **Superseded as the primary source-consumption path by
+/// `crate::source_supervisor` (one dedicated consumer per DB-driven
+/// `(app_id, platform, source_id)` binding, `try_start_db_bundle_loader`).**
+/// This function now exists ONLY as the kill-switch/missing-config
+/// fallback (`crate::license::DISABLE_DB_BUNDLE_CONFIG_FLAG`'s doc, point
+/// 4): it still starts unconditionally whenever `PROCESS_APP_ID` is set,
+/// exactly as before, so operators relying on the env-configured single
+/// stream (no DB bindings provisioned yet, or the kill-switch flipped ON)
+/// keep working unchanged; once `app_source_bindings` rows exist for this
+/// tenant/scope, operators should stop setting `PROCESS_APP_ID`/
+/// `PROCESS_INGEST_*` -- otherwise this loop and `crate::source_supervisor`
+/// would both run a `GroupReader` against the same stream/group/consumer
+/// identity, an unsupported operational overlap this landing does not
+/// attempt to detect or reconcile.
 ///
 /// **TODO(M4+), interim substitutes for the `GET /api/v1/distribution/
 /// bundles?stage=process` poll (spec §6.7):**
@@ -316,33 +336,46 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
 }
 
 /// Attempts to start the DB-driven active-bundle loader
-/// (`crate::bundle_loader`, spec: hub-api is the sole writer, this stage
-/// reads ACTIVE, APPROVED bundle config from a READ-ONLY Postgres and
-/// hot-swaps in/out with no pod restart). Two independent reasons this
-/// never starts, both logged and neither an error -- `DB_READER_PASSWORD`
-/// unset (the RO account hasn't been provisioned yet in this environment)
-/// or `BUNDLE_SCOPE_TENANT_ID` unset (`None` -- see `config::TenantScopeId`'s
+/// (`crate::bundle_loader`) AND the DB-driven source-binding supervisor
+/// (`crate::source_supervisor`) as sibling background tasks sharing one
+/// read-only Postgres connection -- spec: hub-api is the sole writer, this
+/// stage reads ACTIVE, APPROVED bundle config (and, now, source-stream
+/// bindings) from a READ-ONLY Postgres and hot-swaps both in/out with no
+/// pod restart. Two independent reasons neither ever starts, both logged
+/// and neither an error -- `DB_READER_PASSWORD` unset (the RO account
+/// hasn't been provisioned yet in this environment) or
+/// `BUNDLE_SCOPE_TENANT_ID` unset (`None` -- see `config::TenantScopeId`'s
 /// own doc for why this is no longer collapsed onto `0`, a real, selectable
 /// tenant). Either way, `try_start_process_loop`'s existing
 /// `PROCESS_APP_ID`/`PROCESS_BUNDLE_*` env selection remains the sole
-/// source; this loader only supplements it once actually configured, and
-/// is additionally gated per-tick on `waddles.core.db-bundle-config`
-/// (default OFF) inside `bundle_loader::run_tick` regardless of whether
-/// this function's own startup gates pass.
+/// source; both loaders only supplement it once actually configured, and
+/// are additionally gated per-tick on the `waddles.core.disable-db-bundle-config`
+/// kill-switch (`crate::license::DbBundleConfigGate` -- already the
+/// negated "is the DB path enabled" answer, enabled by default) inside
+/// `bundle_loader::run_tick`/`source_supervisor::run_tick` regardless of
+/// whether this function's own startup gates pass.
+///
+/// The source-binding supervisor has its own additional, independent
+/// startup gates -- `ENVELOPE_BINDING_KEYS` (hop verification must never
+/// silently fail open, same rule as `try_start_process_loop`) and
+/// `penguin_spine::SpineConfig::from_env()` (Valkey connectivity). Missing
+/// either disables ONLY the supervisor, logged the same way; bundle
+/// load/unload (`bundle_loader::run`) needs neither and still starts.
 fn try_start_db_bundle_loader(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
     excluded_metric: prometheus::IntCounterVec,
+    source_supervisor_metrics: telemetry::SourceBindingSupervisorMetrics,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
-            "DB_READER_PASSWORD not set; DB-driven bundle loader not started (env selection remains authoritative)"
+            "DB_READER_PASSWORD not set; DB-driven bundle loader/source-binding supervisor not started (env selection remains authoritative)"
         );
         return;
     };
     let Some(tenant_id) = config.cli.bundle_scope_tenant_id.get() else {
         tracing::info!(
-            "BUNDLE_SCOPE_TENANT_ID not set; DB-driven bundle loader not started (env selection remains authoritative)"
+            "BUNDLE_SCOPE_TENANT_ID not set; DB-driven bundle loader/source-binding supervisor not started (env selection remains authoritative)"
         );
         return;
     };
@@ -350,7 +383,7 @@ fn try_start_db_bundle_loader(
     let license_client = match license::build_license_client("waddles") {
         Ok(c) => c,
         Err(err) => {
-            tracing::warn!(error = %err, "license client config invalid; DB-driven bundle loader not started");
+            tracing::warn!(error = %err, "license client config invalid; DB-driven bundle loader/source-binding supervisor not started");
             return;
         }
     };
@@ -368,32 +401,123 @@ fn try_start_db_bundle_loader(
     let poll_interval = config.cli.bundle_config_poll_interval();
     let call_timeout_ms = config.cli.executor_call_timeout_ms;
 
+    // The source-binding supervisor's own optional dependencies -- built
+    // eagerly (no network I/O) so a missing/invalid one only disables the
+    // supervisor half, never the bundle load/unload half above. Shares the
+    // SAME `connections` registry as `bundle_loader::run`/the host-api
+    // listener (`try_start_host_api`'s own registry, threaded through this
+    // function's `connections` parameter) -- a per-consumer registry of its
+    // own would never see the executor connection the listener actually
+    // accepts.
+    let supervisor_prereqs =
+        build_source_supervisor_prereqs(config, Arc::clone(&connections), Arc::clone(&gate));
+
     tokio::spawn(async move {
         let db = match bundle_active_set::reader::connect(&reader_cfg, &password).await {
             Ok(db) => db,
             Err(err) => {
-                tracing::error!(error = %err, "db-reader connection failed; DB-driven bundle loader not started");
+                tracing::error!(error = %err, "db-reader connection failed; DB-driven bundle loader/source-binding supervisor not started");
                 return;
             }
         };
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let (bundle_loader_shutdown_tx, bundle_loader_shutdown_rx) =
+            tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             shutdown_signal().await;
-            let _ = shutdown_tx.send(());
+            let _ = bundle_loader_shutdown_tx.send(());
         });
-        bundle_loader::run(
-            db,
+        let bundle_loader_task = bundle_loader::run(
+            db.clone(),
             tenant_id,
             community_id,
             poll_interval,
             call_timeout_ms,
-            gate,
+            Arc::clone(&gate),
             connections,
             excluded_metric,
-            shutdown_rx,
-        )
-        .await;
+            bundle_loader_shutdown_rx,
+        );
+
+        match supervisor_prereqs {
+            Some(deps) => {
+                let (supervisor_shutdown_tx, supervisor_shutdown_rx) =
+                    tokio::sync::oneshot::channel();
+                tokio::spawn(async move {
+                    shutdown_signal().await;
+                    let _ = supervisor_shutdown_tx.send(());
+                });
+                let spawner: Arc<dyn source_supervisor::ConsumerSupervisor> =
+                    Arc::new(source_supervisor::SpineConsumerSupervisor {
+                        deps: Arc::new(deps),
+                    });
+                let supervisor_task = source_supervisor::run(
+                    db,
+                    tenant_id,
+                    community_id,
+                    poll_interval,
+                    gate,
+                    spawner,
+                    source_supervisor_metrics,
+                    supervisor_shutdown_rx,
+                );
+                tokio::join!(bundle_loader_task, supervisor_task);
+            }
+            None => bundle_loader_task.await,
+        }
     });
+}
+
+/// Builds [`source_supervisor::SupervisorDeps`] from `config`'s optional
+/// dependencies, or `None` (logged) if either is unavailable -- split out
+/// of [`try_start_db_bundle_loader`] so that function's own control flow
+/// reads as "two independent startup gates, then dispatch" rather than
+/// nesting the supervisor's setup inline. Never touches the network itself
+/// (`penguin_spine::SpineConfig::from_env` only parses env vars).
+fn build_source_supervisor_prereqs(
+    config: &config::Config,
+    connections: Arc<host_api::ConnectionRegistry>,
+    gate: Arc<dyn license::FeatureGate>,
+) -> Option<source_supervisor::SupervisorDeps> {
+    let Some(keys_raw) = config.envelope_binding_keys.as_ref() else {
+        tracing::warn!(
+            "ENVELOPE_BINDING_KEYS not set; source-binding supervisor disabled (hop verification must never fail open)"
+        );
+        return None;
+    };
+    let key_ring = match hop::KeyRing::parse(keys_raw.expose()) {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::warn!(error = %err, "ENVELOPE_BINDING_KEYS invalid; source-binding supervisor disabled");
+            return None;
+        }
+    };
+    let spine_cfg = match penguin_spine::SpineConfig::from_env() {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(error = %err, "spine config unavailable; source-binding supervisor disabled");
+            return None;
+        }
+    };
+
+    let approved_targets = builtins::parse_approved_targets(&config.cli.process_routes_to_approved);
+    let metrics: Arc<dyn penguin_spine::SpineMetrics> = Arc::new(penguin_spine::NoopMetrics);
+
+    Some(source_supervisor::SupervisorDeps {
+        spine_cfg,
+        key_ring,
+        connections,
+        call_timeout_ms: config.cli.executor_call_timeout_ms,
+        approved_targets,
+        metrics,
+        license: gate,
+        // TODO(M4+): tenant/community scope hardcoded to the tenant-wide
+        // `global` activation -- the same interim scope
+        // `try_start_process_loop` already documents, blocked on the real
+        // distribution/activation poll (spec §6.7), not re-solved here.
+        tenant: "global".to_string(),
+        community: None,
+    })
 }
 
 /// Waits for SIGINT (Ctrl-C) or SIGTERM (Kubernetes pod termination) and
@@ -541,6 +665,7 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             test_excluded_metric(),
+            test_source_supervisor_metrics(),
         );
     }
 
@@ -557,6 +682,7 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             test_excluded_metric(),
+            test_source_supervisor_metrics(),
         );
     }
 
@@ -578,6 +704,7 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             test_excluded_metric(),
+            test_source_supervisor_metrics(),
         );
     }
 
@@ -591,6 +718,23 @@ mod tests {
             &["app_id", "reason"],
         )
         .expect("valid metric definition")
+    }
+
+    /// A standalone, unregistered [`telemetry::SourceBindingSupervisorMetrics`]
+    /// -- same rationale as [`test_excluded_metric`].
+    fn test_source_supervisor_metrics() -> telemetry::SourceBindingSupervisorMetrics {
+        telemetry::SourceBindingSupervisorMetrics {
+            active_consumers: prometheus::IntGauge::new(
+                "test_source_binding_consumers_active",
+                "test",
+            )
+            .expect("valid metric definition"),
+            consumer_transitions_total: prometheus::IntCounterVec::new(
+                prometheus::Opts::new("test_source_binding_consumer_transitions_total", "test"),
+                &["action"],
+            )
+            .expect("valid metric definition"),
+        }
     }
 
     #[tokio::test]

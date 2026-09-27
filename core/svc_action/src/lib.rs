@@ -629,8 +629,9 @@ async fn env_bundle_loader_loop(
 /// tenant). Either way, the existing `ACTION_APP_ID`/`ACTION_BUNDLE_*` env
 /// selection and the `crate::distribution` catalog poll remain the sole
 /// sources; this loader only supplements them once actually configured,
-/// and is additionally gated per-tick on `waddles.core.db-bundle-config`
-/// (default OFF, `flags::DB_BUNDLE_CONFIG_FLAG`) inside
+/// and is additionally gated per-tick on the `waddles.core.disable-db-bundle-config`
+/// kill-switch (enabled by default, `flags::DISABLE_DB_BUNDLE_CONFIG_FLAG`
+/// negated via `flags::NegatedFlag`) inside
 /// `bundle_loader::run_tick` regardless of whether this function's own
 /// startup gates pass. Reuses the already-built, already-refreshing
 /// `license` client (`run_with_shutdown`'s own `build_license_client`
@@ -654,7 +655,10 @@ fn try_start_db_bundle_loader(
         return;
     };
 
-    let flag = flag_or_closed(&license, flags::DB_BUNDLE_CONFIG_FLAG);
+    let flag = flags::boxed(flags::NegatedFlag(flag_or_closed(
+        &license,
+        flags::DISABLE_DB_BUNDLE_CONFIG_FLAG,
+    )));
     let reader_cfg = bundle_active_set::ReaderConfig {
         host: config.cli.db_reader_host.clone(),
         port: config.cli.db_reader_port,

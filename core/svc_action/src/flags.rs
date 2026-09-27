@@ -32,14 +32,30 @@ pub const RUST_DATA_PLANE_FLAG: &str = "waddles.core.rust-data-plane";
 /// OFF ⇒ every egress call is denied `feature_disabled`.
 pub const BUNDLE_EGRESS_FLAG: &str = "waddles.core.bundle-egress";
 
-/// Gates the DB-driven active-bundle loader (`crate::bundle_loader`). OFF
-/// (default) ⇒ the existing `ACTION_APP_ID`/`ACTION_BUNDLE_*` env
-/// selection and the `crate::distribution` catalog poll remain the sole
-/// bundle sources; this loader never runs its DB read at all while off
-/// (`crate::bundle_loader::run_tick`'s first check). `LicenseFlag::new`
-/// takes this key directly -- no new wrapper type needed, unlike
-/// `core/svc_process`'s per-flag `FeatureGate` impls.
-pub const DB_BUNDLE_CONFIG_FLAG: &str = "waddles.core.db-bundle-config";
+/// Opt-out kill-switch for the DB-driven active-bundle loader
+/// (`crate::bundle_loader`) -- **inverted from the retired
+/// `waddles.core.db-bundle-config` flag it replaces** (user decision,
+/// 2026-09-27, mirrors `core/svc_process/src/license.rs`'s identical
+/// `DISABLE_DB_BUNDLE_CONFIG_FLAG`/`DbBundleConfigGate` inversion). The
+/// retired flag's semantics were "ON enables the DB-driven path"
+/// (opt-in, default OFF); this flag's semantics are the opposite: the
+/// DB-driven path is the default, and this raw flag being ON is what opts
+/// back OUT of it.
+///
+/// Unlike `core/svc_process`, this crate has no dedicated `FeatureGate`
+/// wrapper type per flag -- callers build the *negated* `FeatureFlag` via
+/// [`NegatedFlag`] instead of reading this flag's raw value directly, so
+/// `crate::bundle_loader::run_tick`'s `flag.enabled()` still asks "is the
+/// DB-driven path enabled?", not "is the kill-switch flag raw-ON?". Never
+/// seen / license server unreachable ⇒ `LicenseFlag`'s own fail-closed
+/// `false` negates to `true` (DB-driven path enabled, the default); the
+/// existing `ACTION_APP_ID`/`ACTION_BUNDLE_*` env selection and the
+/// `crate::distribution` catalog poll remain the sole bundle sources only
+/// while this negated value is `false` (kill-switch raw-ON) or the DB
+/// loader's own `DB_READER_*`/`BUNDLE_SCOPE_TENANT_ID` prerequisites are
+/// unset (`crate::lib::try_start_db_bundle_loader`'s own startup gates,
+/// unaffected by this flag).
+pub const DISABLE_DB_BUNDLE_CONFIG_FLAG: &str = "waddles.core.disable-db-bundle-config";
 
 /// One flag's live enabled/disabled state. Object-safe (a manually-boxed
 /// future, matching every other async trait in this crate) so callers can
@@ -90,6 +106,20 @@ pub fn boxed(flag: impl FeatureFlag + 'static) -> Arc<dyn FeatureFlag> {
     Arc::new(flag)
 }
 
+/// Wraps another [`FeatureFlag`] and reports the boolean negation of its
+/// current value -- the adapter [`DISABLE_DB_BUNDLE_CONFIG_FLAG`]'s doc
+/// describes: turns a raw opt-out kill-switch flag (ON = disabled) into
+/// the "is this feature enabled" question every call site actually asks,
+/// without needing a dedicated per-flag wrapper type the way
+/// `core/svc_process/src/license.rs::DbBundleConfigGate` has.
+pub struct NegatedFlag(pub Arc<dyn FeatureFlag>);
+
+impl FeatureFlag for NegatedFlag {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { !self.0.enabled().await })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +134,32 @@ mod tests {
     async fn boxed_wraps_a_flag_as_an_arc_dyn() {
         let flag: Arc<dyn FeatureFlag> = boxed(StaticFlag(true));
         assert!(flag.enabled().await);
+    }
+
+    #[tokio::test]
+    async fn negated_flag_reports_the_opposite_of_the_wrapped_flag() {
+        assert!(!NegatedFlag(boxed(StaticFlag(true))).enabled().await);
+        assert!(NegatedFlag(boxed(StaticFlag(false))).enabled().await);
+    }
+
+    /// The kill-switch inversion's core regression test: a never-seen
+    /// `DISABLE_DB_BUNDLE_CONFIG_FLAG` (every fresh deployment's starting
+    /// state, and a permanently-unreachable license server's steady state)
+    /// must leave the DB-driven path ENABLED, not disabled -- the opposite
+    /// of the retired `waddles.core.db-bundle-config` flag's own
+    /// default-OFF contract.
+    #[tokio::test]
+    async fn negated_disable_db_bundle_config_flag_defaults_enabled_when_never_seen() {
+        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-negated-kill-switch")
+            .expect("default LicenseConfig::new never fails");
+        let client = penguin_licensing::LicenseClient::new(cfg)
+            .expect("LicenseClient::new with a valid default config never fails");
+        let raw = LicenseFlag::new(client, DISABLE_DB_BUNDLE_CONFIG_FLAG);
+        let negated = NegatedFlag(boxed(raw));
+        assert!(
+            negated.enabled().await,
+            "an unseen kill-switch flag must leave the DB-driven path enabled"
+        );
     }
 
     /// Proves `LicenseFlag` genuinely calls through to a real

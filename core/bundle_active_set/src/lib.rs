@@ -28,8 +28,8 @@
 //! follow-up so this Rust-focused change doesn't also own a schema/RBAC
 //! migration)
 //!
-//! This crate's queries (`crate::query`) touch exactly three tables, all
-//! `SELECT`-only:
+//! This crate's queries (`crate::query`/`crate::bindings`) touch exactly
+//! four tables, all `SELECT`-only:
 //!
 //! ```sql
 //! CREATE ROLE svc_process_ro LOGIN PASSWORD '<secret>';
@@ -38,6 +38,7 @@
 //! GRANT SELECT ON app_active_versions   TO svc_process_ro, svc_action_ro;
 //! GRANT SELECT ON app_versions          TO svc_process_ro, svc_action_ro;
 //! GRANT SELECT ON app_install_approvals TO svc_process_ro, svc_action_ro;
+//! GRANT SELECT ON app_source_bindings   TO svc_process_ro, svc_action_ro;
 //! -- No INSERT/UPDATE/DELETE grant on any table, ever -- enforced at the
 //! -- database in addition to `crate::reader::connect`'s own defense-in-
 //! -- depth `options[default_transaction_read_only]=on` startup parameter
@@ -49,11 +50,13 @@
 //! joined-through via `app_id` FKs already resolved on the rows it does
 //! read), so it needs no grant here.
 
+pub mod bindings;
 pub mod diff;
 pub mod entities;
 pub mod query;
 pub mod reader;
 
+pub use bindings::{read_source_bindings, SourceBinding};
 pub use diff::{plan, DiffPlan};
 pub use query::{
     derive_component_keys, read_active_set, read_watermark, ActiveBundleRow, ActiveSetError,
