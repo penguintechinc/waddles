@@ -1,0 +1,489 @@
+//! The DB-driven active-bundle loader (spec: hub-api is the sole writer;
+//! this stage reads ACTIVE, APPROVED bundle config from a READ-ONLY
+//! Postgres and hot-swaps bundles in/out with no pod restart). Gated
+//! behind `waddles.core.db-bundle-config`
+//! (`crate::flags::DB_BUNDLE_CONFIG_FLAG`, default OFF) -- while off or
+//! unavailable, the existing `ACTION_APP_ID`/`ACTION_BUNDLE_*` env
+//! selection and the `crate::distribution` catalog poll remain the sole
+//! sources; this loader never deletes or overrides either path, only
+//! supplements them by driving `Load`/`Unload` onto whatever the executor
+//! connection already is.
+//!
+//! Direct port of `core/svc_process/src/bundle_loader.rs` (same query/diff
+//! logic from the shared `bundle_active_set` crate) with the wire calls
+//! adapted to this crate's own `dispatch::ensure_loaded`/`ensure_unloaded`
+//! and `flags::FeatureFlag` -- see that module's doc for the full
+//! short-circuit-order rationale, reproduced here only where it differs.
+
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use bundle_active_set::{diff, ActiveBundleRow, WatermarkTracker};
+use sea_orm::DatabaseConnection;
+
+use crate::dispatch::InvokeError;
+use crate::flags::FeatureFlag;
+use crate::host_api::Connection;
+
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Abstraction over "load/unload a bundle onto the executor" -- lets
+/// [`run_tick`]'s decision logic be unit-tested against a fake sink,
+/// without a live mTLS host-API connection. Production wires
+/// [`ExecutorSink`].
+pub trait BundleSink: Send + Sync {
+    fn load<'a>(&'a self, row: &'a ActiveBundleRow) -> BoxFuture<'a, Result<(), InvokeError>>;
+    fn unload<'a>(
+        &'a self,
+        app_id: &'a str,
+        digest: &'a str,
+    ) -> BoxFuture<'a, Result<(), InvokeError>>;
+}
+
+/// Production [`BundleSink`]: `crate::dispatch::ensure_loaded`/
+/// `ensure_unloaded` over one already-active `Connection`. A fresh
+/// `ExecutorSink` is built every tick (never cached across ticks) so a
+/// mid-poll reconnect is always driven against the *current* connection.
+pub struct ExecutorSink {
+    pub connection: Arc<Connection>,
+    pub call_timeout_ms: u64,
+}
+
+impl BundleSink for ExecutorSink {
+    fn load<'a>(&'a self, row: &'a ActiveBundleRow) -> BoxFuture<'a, Result<(), InvokeError>> {
+        Box::pin(async move {
+            crate::dispatch::ensure_loaded(
+                &self.connection,
+                &row.app_id,
+                &row.version,
+                &row.digest,
+                &row.component_key,
+                &row.sidecar_key,
+                penguin_bundle_host::wire::LoadLimits {
+                    timeout_ms: self.call_timeout_ms,
+                    memory_mb: 64,
+                },
+            )
+            .await
+            .map(|_| ())
+        })
+    }
+
+    fn unload<'a>(
+        &'a self,
+        app_id: &'a str,
+        digest: &'a str,
+    ) -> BoxFuture<'a, Result<(), InvokeError>> {
+        Box::pin(async move {
+            crate::dispatch::ensure_unloaded(&self.connection, app_id, digest)
+                .await
+                .map(|_| ())
+        })
+    }
+}
+
+/// One poll tick's worth of work, split out from [`run`] so it is directly
+/// testable against a `MockDatabase`-backed `DatabaseConnection`, a fake
+/// [`FeatureFlag`], and a fake [`BundleSink`]. See
+/// `core/svc_process/src/bundle_loader.rs::run_tick`'s doc for the full
+/// short-circuit-order rationale (flag off -> watermark read -> unchanged
+/// skip -> full read -> empty-diff skip -> no-connection defer -> apply).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_tick(
+    db: &DatabaseConnection,
+    tenant_id: i32,
+    community_id: i32,
+    flag: &dyn FeatureFlag,
+    tracker: &mut WatermarkTracker,
+    loaded: &mut HashMap<String, String>,
+    sink: Option<&dyn BundleSink>,
+) {
+    if !flag.enabled().await {
+        tracing::debug!("waddles.core.db-bundle-config off; skipping tick");
+        return;
+    }
+
+    let watermark = match bundle_active_set::read_watermark(db, tenant_id, community_id).await {
+        Ok(w) => w,
+        Err(err) => {
+            tracing::warn!(error = %err, "db bundle-config: watermark read failed");
+            return;
+        }
+    };
+    if !tracker.observe(watermark) {
+        return;
+    }
+
+    let active = match bundle_active_set::read_active_set(db, tenant_id, community_id, None).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!(error = %err, "db bundle-config: active-set read failed");
+            return;
+        }
+    };
+
+    let plan = diff::plan(loaded, &active);
+    if plan.is_empty() {
+        return;
+    }
+
+    let Some(sink) = sink else {
+        tracing::debug!(
+            to_load = plan.to_load.len(),
+            to_unload = plan.to_unload.len(),
+            "db bundle-config: active set changed but no executor connection yet; deferring"
+        );
+        return;
+    };
+
+    for row in &plan.to_load {
+        match sink.load(row).await {
+            Ok(()) => {
+                tracing::info!(app_id = %row.app_id, digest = %row.digest, "db bundle-config: loaded");
+                loaded.insert(row.app_id.clone(), row.digest.clone());
+            }
+            Err(err) => {
+                tracing::warn!(app_id = %row.app_id, digest = %row.digest, error = %err, "db bundle-config: load failed, will retry next tick");
+            }
+        }
+    }
+    for (app_id, digest) in &plan.to_unload {
+        match sink.unload(app_id, digest).await {
+            Ok(()) => {
+                tracing::info!(app_id, digest, "db bundle-config: unloaded");
+                loaded.remove(app_id);
+            }
+            Err(err) => {
+                tracing::warn!(app_id, digest, error = %err, "db bundle-config: unload failed, will retry next tick");
+            }
+        }
+    }
+    tracing::info!(
+        active_count = active.len(),
+        loaded_count = loaded.len(),
+        "db bundle-config: tick applied"
+    );
+}
+
+/// The live interval/shutdown loop `crate::lib::try_start_db_bundle_loader`
+/// spawns: builds a fresh [`ExecutorSink`] every tick from whatever
+/// connection is currently active (`None` when the executor hasn't
+/// connected yet) and delegates the actual decision to [`run_tick`].
+#[allow(clippy::too_many_arguments)]
+pub async fn run(
+    db: DatabaseConnection,
+    tenant_id: i32,
+    community_id: i32,
+    poll_interval: std::time::Duration,
+    call_timeout_ms: u64,
+    flag: Arc<dyn FeatureFlag>,
+    connections: Arc<crate::host_api::ConnectionRegistry>,
+    mut shutdown: tokio::sync::oneshot::Receiver<()>,
+) {
+    let mut tracker = WatermarkTracker::new();
+    let mut loaded: HashMap<String, String> = HashMap::new();
+    let mut interval = tokio::time::interval(poll_interval);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return,
+            _ = interval.tick() => {
+                let sink = connections.active().map(|connection| ExecutorSink {
+                    connection,
+                    call_timeout_ms,
+                });
+                run_tick(
+                    &db,
+                    tenant_id,
+                    community_id,
+                    flag.as_ref(),
+                    &mut tracker,
+                    &mut loaded,
+                    sink.as_ref().map(|s| s as &dyn BundleSink),
+                )
+                .await;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flags::StaticFlag;
+    use sea_orm::{DatabaseBackend, MockDatabase};
+    use std::sync::Mutex as StdMutex;
+
+    /// Records every `load`/`unload` call it receives and answers each
+    /// with a fixed, caller-chosen result -- no network, no wasmtime, no
+    /// live executor.
+    #[derive(Default)]
+    struct FakeSink {
+        calls: StdMutex<Vec<String>>,
+        fail_loads: StdMutex<std::collections::HashSet<String>>,
+    }
+
+    impl FakeSink {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn fail_load(&self, app_id: &str) {
+            self.fail_loads.lock().unwrap().insert(app_id.to_string());
+        }
+    }
+
+    impl BundleSink for FakeSink {
+        fn load<'a>(&'a self, row: &'a ActiveBundleRow) -> BoxFuture<'a, Result<(), InvokeError>> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("load:{}:{}", row.app_id, row.digest));
+                if self.fail_loads.lock().unwrap().contains(&row.app_id) {
+                    return Err(InvokeError::NoExecutor);
+                }
+                Ok(())
+            })
+        }
+
+        fn unload<'a>(
+            &'a self,
+            app_id: &'a str,
+            digest: &'a str,
+        ) -> BoxFuture<'a, Result<(), InvokeError>> {
+            let call = format!("unload:{app_id}:{digest}");
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(call);
+                Ok(())
+            })
+        }
+    }
+
+    fn active_row(app_id: &str) -> bundle_active_set::entities::app_active_versions::Model {
+        bundle_active_set::entities::app_active_versions::Model {
+            app_id: app_id.to_string(),
+            tenant_id: 1,
+            community_id: 0,
+            version_id: 10,
+        }
+    }
+
+    fn version_row(
+        app_id: &str,
+        id: i64,
+        version: &str,
+        digest: &str,
+    ) -> bundle_active_set::entities::app_versions::Model {
+        bundle_active_set::entities::app_versions::Model {
+            id,
+            app_id: app_id.to_string(),
+            version: version.to_string(),
+            artifact_digest: Some(digest.to_string()),
+            scan_status: "scanned".to_string(),
+        }
+    }
+
+    fn approval_row(
+        app_id: &str,
+        version: &str,
+    ) -> bundle_active_set::entities::app_install_approvals::Model {
+        bundle_active_set::entities::app_install_approvals::Model {
+            id: 1,
+            tenant_id: 1,
+            community_id: None,
+            app_id: app_id.to_string(),
+            version: version.to_string(),
+            superseded_by: None,
+        }
+    }
+
+    fn watermark_row(
+        cnt: i64,
+        vsum: Option<i64>,
+    ) -> std::collections::BTreeMap<String, sea_orm::Value> {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("cnt".to_string(), sea_orm::Value::BigInt(Some(cnt)));
+        m.insert("vsum".to_string(), sea_orm::Value::BigInt(vsum));
+        m
+    }
+
+    #[tokio::test]
+    async fn run_tick_skips_all_db_work_when_the_flag_is_off() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        run_tick(
+            &db,
+            1,
+            0,
+            &StaticFlag(false),
+            &mut tracker,
+            &mut loaded,
+            None,
+        )
+        .await;
+        assert!(loaded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_tick_skips_the_full_read_when_the_watermark_is_unchanged() {
+        // Trap technique (see `core/svc_process`'s identical test): tick 1
+        // legitimately loads `waddles.a`; tick 2's watermark is IDENTICAL,
+        // so the trap rows queued for it (which would load `waddles.trap`
+        // if read) must never be consumed.
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([[watermark_row(1, Some(10))]])
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
+            .append_query_results([vec![approval_row("waddles.a", "1")]])
+            .append_query_results([[watermark_row(1, Some(10))]])
+            .append_query_results([vec![active_row("waddles.trap")]])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        let flag = StaticFlag(true);
+        let sink = FakeSink::default();
+
+        run_tick(
+            &db,
+            1,
+            0,
+            &flag,
+            &mut tracker,
+            &mut loaded,
+            Some(&sink as &dyn BundleSink),
+        )
+        .await;
+        run_tick(
+            &db,
+            1,
+            0,
+            &flag,
+            &mut tracker,
+            &mut loaded,
+            Some(&sink as &dyn BundleSink),
+        )
+        .await;
+
+        assert_eq!(
+            sink.calls(),
+            vec![format!("load:waddles.a:{digest}")],
+            "tick 2's unchanged watermark must skip the full read -- the trap row must never load"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_tick_defers_when_no_executor_connection_is_active() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([[watermark_row(1, Some(10))]])
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
+            .append_query_results([vec![approval_row("waddles.a", "1")]])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        run_tick(
+            &db,
+            1,
+            0,
+            &StaticFlag(true),
+            &mut tracker,
+            &mut loaded,
+            None,
+        )
+        .await;
+        assert!(
+            loaded.is_empty(),
+            "no connection -> nothing recorded as loaded yet"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_tick_loads_a_newly_active_bundle_through_the_sink() {
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([[watermark_row(1, Some(10))]])
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
+            .append_query_results([vec![approval_row("waddles.a", "1")]])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        let sink = FakeSink::default();
+        run_tick(
+            &db,
+            1,
+            0,
+            &StaticFlag(true),
+            &mut tracker,
+            &mut loaded,
+            Some(&sink as &dyn BundleSink),
+        )
+        .await;
+        assert_eq!(loaded.get("waddles.a"), Some(&digest));
+        assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+    }
+
+    #[tokio::test]
+    async fn run_tick_unloads_a_bundle_removed_from_the_active_set() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([[watermark_row(0, None)]])
+            .append_query_results([
+                Vec::<bundle_active_set::entities::app_active_versions::Model>::new(),
+            ])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        loaded.insert("waddles.gone".to_string(), "sha256:old".to_string());
+        let sink = FakeSink::default();
+        run_tick(
+            &db,
+            1,
+            0,
+            &StaticFlag(true),
+            &mut tracker,
+            &mut loaded,
+            Some(&sink as &dyn BundleSink),
+        )
+        .await;
+        assert!(loaded.is_empty());
+        assert_eq!(
+            sink.calls(),
+            vec!["unload:waddles.gone:sha256:old".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_tick_leaves_loaded_untouched_when_the_sink_load_fails() {
+        let digest = format!("sha256:{}", "c".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([[watermark_row(1, Some(10))]])
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
+            .append_query_results([vec![approval_row("waddles.a", "1")]])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        let sink = FakeSink::default();
+        sink.fail_load("waddles.a");
+        run_tick(
+            &db,
+            1,
+            0,
+            &StaticFlag(true),
+            &mut tracker,
+            &mut loaded,
+            Some(&sink as &dyn BundleSink),
+        )
+        .await;
+        assert!(
+            loaded.is_empty(),
+            "a failed load must not be recorded as loaded -- retried next tick"
+        );
+    }
+}

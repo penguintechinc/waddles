@@ -32,6 +32,15 @@ pub const RUST_DATA_PLANE_FLAG: &str = "waddles.core.rust-data-plane";
 /// OFF ⇒ every egress call is denied `feature_disabled`.
 pub const BUNDLE_EGRESS_FLAG: &str = "waddles.core.bundle-egress";
 
+/// Gates the DB-driven active-bundle loader (`crate::bundle_loader`). OFF
+/// (default) ⇒ the existing `ACTION_APP_ID`/`ACTION_BUNDLE_*` env
+/// selection and the `crate::distribution` catalog poll remain the sole
+/// bundle sources; this loader never runs its DB read at all while off
+/// (`crate::bundle_loader::run_tick`'s first check). `LicenseFlag::new`
+/// takes this key directly -- no new wrapper type needed, unlike
+/// `core/svc_process`'s per-flag `FeatureGate` impls.
+pub const DB_BUNDLE_CONFIG_FLAG: &str = "waddles.core.db-bundle-config";
+
 /// One flag's live enabled/disabled state. Object-safe (a manually-boxed
 /// future, matching every other async trait in this crate) so callers can
 /// hold `Arc<dyn FeatureFlag>` without an `async_trait` dependency.

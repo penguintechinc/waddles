@@ -119,6 +119,14 @@ rustls-pki-types = "=1.15.1"
 # `StageEnvelope`), so this is a second, direct `redis` connection, same
 # crate/feature pins `penguin-spine` itself uses internally.
 redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp"] }
+# The DB-driven active-bundle loader's shared, read-only Postgres query +
+# diff logic (`src/bundle_loader.rs`) -- a same-repo `path` dependency, NOT
+# a `penguin-libs` git dependency: this schema
+# (app_active_versions/app_versions/app_install_approvals) is owned by
+# *this* repo's own Alembic migrations, not penguin-libs. `core/svc_process`
+# declares the identical dependency so the query/diff logic is written and
+# tested exactly once. See `core/bundle_active_set/Cargo.toml`.
+bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
 
 [dev-dependencies]
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks

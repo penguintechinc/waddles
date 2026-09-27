@@ -179,6 +179,49 @@ pub struct CliConfig {
     /// `crate::builtins::parse_approved_targets`/`resolve_cross_app_route`.
     #[arg(long, env = "PROCESS_ROUTES_TO_APPROVED", default_value = "")]
     pub process_routes_to_approved: String,
+
+    // -- DB-driven active-bundle loader (spec: hub-api is the sole writer,
+    // this stage reads ACTIVE, APPROVED bundle config from a READ-ONLY
+    // Postgres and hot-swaps in/out with no pod restart) -- gated OFF by
+    // default behind `waddles.core.db-bundle-config` (`crate::license`);
+    // when the flag is off/unavailable, `PROCESS_APP_ID`/`PROCESS_BUNDLE_*`
+    // above remain the sole selection mechanism. See `crate::bundle_loader`.
+    /// Reader-endpoint Postgres host for the DB-driven loader -- separate
+    /// from `DB_HOST` (the primary, read-write connection above) so a read
+    /// replica can be introduced later without touching the primary's own
+    /// config; defaults to the primary host in alpha (no replica yet).
+    #[arg(long, env = "DB_READER_HOST", default_value = "localhost")]
+    pub db_reader_host: String,
+    #[arg(long, env = "DB_READER_PORT", default_value_t = 5432)]
+    pub db_reader_port: u16,
+    #[arg(long, env = "DB_READER_NAME", default_value = "waddlebot")]
+    pub db_reader_name: String,
+    /// A distinct, SELECT-only Postgres role -- never the primary `DB_USER`
+    /// account. See `bundle_active_set`'s crate-root doc for the exact
+    /// grants this role needs.
+    #[arg(long, env = "DB_READER_USER", default_value = "svc_process_ro")]
+    pub db_reader_user: String,
+    /// Tenant scope for the active-set read. `0` means "not configured" --
+    /// `tenants.id` is a real `SERIAL` starting at 1, so `0` can never be a
+    /// legitimate tenant and safely doubles as the loader's own "unset,
+    /// stay disabled" sentinel (unlike `community_id`, where `0` is itself
+    /// the valid tenant-wide value -- see `app_active_versions`'s own
+    /// sentinel convention).
+    #[arg(long, env = "BUNDLE_SCOPE_TENANT_ID", default_value_t = 0)]
+    pub bundle_scope_tenant_id: i32,
+    /// Community scope for the active-set read; `0` is the tenant-wide
+    /// sentinel (matches `app_active_versions.community_id`'s own
+    /// convention, migration `0022_app_versions_and_rbac`).
+    #[arg(long, env = "BUNDLE_SCOPE_COMMUNITY_ID", default_value_t = 0)]
+    pub bundle_scope_community_id: i32,
+    /// Poll interval, in whole seconds, for the DB-driven loader's cheap
+    /// watermark check (`bundle_active_set::read_watermark`) -- the full
+    /// active-set re-read only runs when the watermark actually moves, so
+    /// this can stay coarse. Clamped to a 5s floor by
+    /// [`CliConfig::bundle_config_poll_interval`] so a misconfigured
+    /// `0`/negative value can never hot-loop against the reader database.
+    #[arg(long, env = "BUNDLE_CONFIG_POLL_SECONDS", default_value_t = 300)]
+    pub bundle_config_poll_seconds: i64,
 }
 
 impl CliConfig {
@@ -211,6 +254,13 @@ impl CliConfig {
         }
         Ok(())
     }
+
+    /// [`Self::bundle_config_poll_seconds`] clamped to a 5s floor -- a
+    /// misconfigured `0`/negative `BUNDLE_CONFIG_POLL_SECONDS` must never
+    /// hot-loop the watermark check against the reader database.
+    pub fn bundle_config_poll_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.bundle_config_poll_seconds.max(5) as u64)
+    }
 }
 
 /// Fully-loaded runtime configuration: operational settings plus secrets
@@ -227,6 +277,17 @@ pub struct Config {
     /// hop verification without it rather than silently accepting every
     /// envelope (a missing keyring must never fail open).
     pub envelope_binding_keys: Option<Secret>,
+    /// `DB_READER_PASSWORD` for the DB-driven active-bundle loader's
+    /// read-only Postgres role (`crate::bundle_loader`). Deliberately
+    /// `Option`, unlike `db_password`/`service_api_key`: this loader is
+    /// gated OFF by default (`waddles.core.db-bundle-config`), so a fresh
+    /// alpha deployment that hasn't provisioned the RO role yet must not
+    /// fail startup over it -- `crate::bundle_loader::try_start` logs a
+    /// warning and stays disabled (falling back to the existing
+    /// `PROCESS_APP_ID`/`PROCESS_BUNDLE_*` env selection) when this is
+    /// unset, the same graceful-degradation contract as
+    /// `envelope_binding_keys` above.
+    pub db_reader_password: Option<Secret>,
 }
 
 impl fmt::Debug for Config {
@@ -239,6 +300,10 @@ impl fmt::Debug for Config {
                 &self.cache_password.as_ref().map(|_| Secret::new("")),
             )
             .field("service_api_key", &Secret::new(""))
+            .field(
+                "db_reader_password",
+                &self.db_reader_password.as_ref().map(|_| Secret::new("")),
+            )
             .field(
                 "envelope_binding_keys",
                 &self.envelope_binding_keys.as_ref().map(|_| "<redacted>"),
@@ -265,12 +330,14 @@ impl Config {
         let cache_password = std::env::var("CACHE_PASSWORD").ok().map(Secret::new);
         let service_api_key = Secret::new(env_required("SERVICE_API_KEY")?);
         let envelope_binding_keys = std::env::var("ENVELOPE_BINDING_KEYS").ok().map(Secret::new);
+        let db_reader_password = std::env::var("DB_READER_PASSWORD").ok().map(Secret::new);
         Ok(Self {
             cli,
             db_password,
             cache_password,
             service_api_key,
             envelope_binding_keys,
+            db_reader_password,
         })
     }
 }
