@@ -1,13 +1,15 @@
 //! The DB-driven active-bundle loader (spec: hub-api is the sole writer;
 //! this stage reads ACTIVE, APPROVED bundle config from a READ-ONLY
-//! Postgres and hot-swaps bundles in/out with no pod restart). Gated
-//! behind `waddles.core.db-bundle-config` (`crate::license::
-//! DbBundleConfigGate`, default OFF) -- while off or unavailable, the
-//! existing `PROCESS_APP_ID`/`PROCESS_BUNDLE_*` env selection
-//! (`crate::lib::try_start_process_loop`) remains the sole source; this
-//! loader never deletes or overrides that path, only supplements it by
-//! driving `Load`/`Unload` onto whatever the executor connection already
-//! is.
+//! Postgres and hot-swaps bundles in/out with no pod restart). Enabled by
+//! default; opt out via the `waddles.core.disable-db-bundle-config`
+//! kill-switch (`crate::license::DbBundleConfigGate` -- `enabled()` there
+//! is already the negated, "is the DB path enabled" answer). While the
+//! kill-switch is on, or the DB path is unavailable (missing `DB_READER_*`/
+//! `BUNDLE_SCOPE_TENANT_ID`), the existing `PROCESS_APP_ID`/
+//! `PROCESS_BUNDLE_*` env selection (`crate::lib::try_start_process_loop`)
+//! remains the sole source; this loader never deletes or overrides that
+//! path, only supplements it by driving `Load`/`Unload` onto whatever the
+//! executor connection already is.
 //!
 //! Query/diff logic (`bundle_active_set`, a same-repo shared crate) is
 //! DB-only and pure; this module owns the actual `Load`/`Unload` wire
@@ -121,7 +123,9 @@ pub async fn run_tick(
     excluded_metric: &prometheus::IntCounterVec,
 ) {
     if !gate.enabled().await {
-        tracing::debug!("waddles.core.db-bundle-config off; skipping tick");
+        tracing::debug!(
+            "db-bundle-config disabled (waddles.core.disable-db-bundle-config kill-switch on); skipping tick"
+        );
         return;
     }
 
@@ -317,6 +321,17 @@ mod tests {
         }
     }
 
+    /// `bundle_active_set::read_watermark` now issues a second query
+    /// (`app_source_bindings`, folded into the same fingerprint as
+    /// `app_active_versions` -- see that function's own doc) after every
+    /// watermark-only `app_active_versions` read; every `run_tick` test
+    /// below that exercises the watermark path queues this empty result
+    /// right after it, since none of these tests care about source
+    /// bindings themselves (`crate::source_supervisor`'s own tests do).
+    fn empty_bindings() -> Vec<bundle_active_set::entities::app_source_bindings::Model> {
+        Vec::new()
+    }
+
     #[tokio::test]
     async fn run_tick_skips_all_db_work_when_the_flag_is_off() {
         // No `append_query_results` at all -- if `run_tick` issued even
@@ -357,10 +372,12 @@ mod tests {
         let digest = format!("sha256:{}", "d".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
             .append_query_results([vec![active_row("waddles.a")]])
             .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
             .append_query_results([vec![approval_row("waddles.a", "1")]])
             .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
             // Trap: only consumed if tick 2 incorrectly performs a full
             // read despite the unchanged watermark above.
             .append_query_results([vec![active_row("waddles.trap")]])
@@ -406,6 +423,7 @@ mod tests {
         let digest = format!("sha256:{}", "a".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
             .append_query_results([vec![active_row("waddles.a")]])
             .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
             .append_query_results([vec![approval_row("waddles.a", "1")]])
@@ -434,6 +452,7 @@ mod tests {
         let digest = format!("sha256:{}", "b".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
             .append_query_results([vec![active_row("waddles.a")]])
             .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
             .append_query_results([vec![approval_row("waddles.a", "1")]])
@@ -462,6 +481,7 @@ mod tests {
             .append_query_results([
                 Vec::<bundle_active_set::entities::app_active_versions::Model>::new(),
             ])
+            .append_query_results([empty_bindings()])
             .append_query_results([
                 Vec::<bundle_active_set::entities::app_active_versions::Model>::new(),
             ])
@@ -493,6 +513,7 @@ mod tests {
         let digest = format!("sha256:{}", "c".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
             .append_query_results([vec![active_row("waddles.a")]])
             .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
             .append_query_results([vec![approval_row("waddles.a", "1")]])
@@ -631,6 +652,7 @@ mod tests {
         };
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![active_row("waddles.a"), excluded_active.clone()]])
+            .append_query_results([empty_bindings()])
             .append_query_results([vec![active_row("waddles.a"), excluded_active]])
             .append_query_results([vec![
                 version_row("waddles.a", 10, "1", &digest),
@@ -682,6 +704,7 @@ mod tests {
         let digest = format!("sha256:{}", "f".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
             .append_query_results([vec![active_row("waddles.a")]])
             .append_query_results([vec![version_row_without_component_key(
                 "waddles.a",

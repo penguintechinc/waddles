@@ -214,10 +214,13 @@ pub struct CliConfig {
 
     // -- DB-driven active-bundle loader (spec: hub-api is the sole writer,
     // this stage reads ACTIVE, APPROVED bundle config from a READ-ONLY
-    // Postgres and hot-swaps in/out with no pod restart) -- gated OFF by
-    // default behind `waddles.core.db-bundle-config` (`crate::license`);
-    // when the flag is off/unavailable, `PROCESS_APP_ID`/`PROCESS_BUNDLE_*`
-    // above remain the sole selection mechanism. See `crate::bundle_loader`.
+    // Postgres and hot-swaps in/out with no pod restart) -- ENABLED by
+    // default; opt out via the `waddles.core.disable-db-bundle-config`
+    // kill-switch (`crate::license::DbBundleConfigGate`). When the
+    // kill-switch is ON, or the license server is unreachable and this
+    // stays on its last-known value, `PROCESS_APP_ID`/`PROCESS_BUNDLE_*`
+    // above remain the sole selection mechanism. See `crate::bundle_loader`,
+    // `crate::source_supervisor`.
     /// Reader-endpoint Postgres host for the DB-driven loader -- separate
     /// from `DB_HOST` (the primary, read-write connection above) so a read
     /// replica can be introduced later without touching the primary's own
@@ -318,8 +321,8 @@ pub struct Config {
     /// `DB_READER_PASSWORD` for the DB-driven active-bundle loader's
     /// read-only Postgres role (`crate::bundle_loader`). Deliberately
     /// `Option`, unlike `db_password`/`service_api_key`: this loader is
-    /// gated OFF by default (`waddles.core.db-bundle-config`), so a fresh
-    /// alpha deployment that hasn't provisioned the RO role yet must not
+    /// enabled by default (opt out via `waddles.core.disable-db-bundle-config`),
+    /// so a fresh alpha deployment that hasn't provisioned the RO role yet must not
     /// fail startup over it -- `crate::bundle_loader::try_start` logs a
     /// warning and stays disabled (falling back to the existing
     /// `PROCESS_APP_ID`/`PROCESS_BUNDLE_*` env selection) when this is

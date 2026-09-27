@@ -54,22 +54,60 @@ impl FeatureGate for LicenseFeatureGate {
     }
 }
 
-/// Flag key gating the DB-driven active-bundle loader (`crate::
-/// bundle_loader`): default OFF, graceful fallback to the existing
-/// `PROCESS_APP_ID`/`PROCESS_BUNDLE_*` env selection when off or the
-/// license server is unreachable. Flag-key convention:
+/// Opt-out kill-switch flag for the DB-driven active-bundle loader
+/// (`crate::bundle_loader`) and the DB-driven source-binding supervisor
+/// (`crate::source_supervisor`) -- **inverted from the retired
+/// `waddles.core.db-bundle-config` flag it replaces** (user decision,
+/// 2026-09-27): that flag's semantics were "ON enables the DB-driven
+/// path", requiring an explicit opt-in per deployment before the DB path
+/// would ever run. This flag's semantics are the opposite: the DB-driven
+/// path is the default, and this flag exists only to opt back OUT of it.
+///
+/// | This flag's raw value | `DbBundleConfigGate::enabled()` | Behavior |
+/// |---|---|---|
+/// | unseen / OFF / license server unreachable | `true` | DB-driven path enabled (default) |
+/// | ON | `false` | fall back to `PROCESS_APP_ID`/`PROCESS_BUNDLE_*` env selection |
+///
+/// This falls straight out of `penguin_licensing::LicenseClient::
+/// flag_enabled`'s own existing fail-closed-to-OFF contract ("never-seen
+/// flags are OFF") -- [`DbBundleConfigGate::enabled`] simply negates the
+/// raw flag read, so "never seen"/"unreachable" naturally resolve to "DB
+/// path enabled" with no separate default-value logic needed here. The DB
+/// path additionally requires `DB_READER_*` credentials and
+/// `BUNDLE_SCOPE_TENANT_ID` to be configured regardless of this flag's
+/// value -- missing either still falls back to the env path with its own
+/// clear startup log (`crate::lib::try_start_db_bundle_loader`), same as
+/// before this flag was inverted. Flag-key convention:
 /// `{product}.{feature-name}` (`rules/critical-rules.md` Feature Flags &
-/// License Tiers) -- same `waddles` product as [`RUST_DATA_PLANE_FLAG`],
-/// a distinct feature within it.
-pub const DB_BUNDLE_CONFIG_FLAG: &str = "waddles.core.db-bundle-config";
+/// License Tiers) -- same `waddles` product as [`RUST_DATA_PLANE_FLAG`].
+pub const DISABLE_DB_BUNDLE_CONFIG_FLAG: &str = "waddles.core.disable-db-bundle-config";
 
-/// Production [`FeatureGate`] for [`DB_BUNDLE_CONFIG_FLAG`] -- same
+/// Production [`FeatureGate`] for [`DISABLE_DB_BUNDLE_CONFIG_FLAG`] -- same
 /// `penguin_licensing::LicenseClient::flag_enabled` contract as
 /// [`LicenseFeatureGate`] (non-blocking, fail-closed default OFF,
-/// last-known-cached on an unreachable license server), just gating a
-/// different flag. `crate::bundle_loader`'s own tests reuse
-/// `test_support::FixedGate`/`ToggleGate` (this trait takes no flag
-/// parameter, so the same fakes serve both gates).
+/// last-known-cached on an unreachable license server) underneath, but
+/// [`FeatureGate::enabled`] here reports the *negation* of the raw flag
+/// read (see this constant's own doc for the semantics table) -- callers
+/// (`crate::bundle_loader::run_tick`, `crate::source_supervisor::run_tick`)
+/// ask "is the DB-driven path enabled?", not "is the kill-switch flag
+/// raw-ON?". `crate::bundle_loader`'s own tests reuse `test_support::
+/// FixedGate`/`ToggleGate` (this trait takes no flag parameter, so the
+/// same fakes serve both gates) -- constructing those directly with the
+/// *already-inverted* boolean they want [`enabled`] to report.
+///
+/// **Bypass-awareness fix:** [`build_license_client`] always registers
+/// this service's own [`DEPLOYMENT_DOMAIN`] against [`BYPASS_DOMAIN`], so
+/// `LicenseClient::bypass_active()` is `true` for every deployment of this
+/// service (`build_license_client_hardcoded_domain_bypasses_flag_checks`'s
+/// own proof) -- and a bypassed client's `flag_enabled` reads `true` for
+/// *any* key, `RUST_DATA_PLANE_FLAG` included, since bypass means "this
+/// PenguinTech-owned deployment gets every feature unlocked". Naively
+/// negating that raw `true` for this OPT-OUT kill-switch would read as
+/// "bypass -> kill-switch raw-ON -> DB path permanently DISABLED" -- the
+/// exact opposite of what bypass is supposed to mean. [`enabled`] checks
+/// [`LicenseClient::bypass_active`] first and short-circuits to `true`
+/// (DB path enabled, the correct "unlocked" outcome) before ever reading
+/// the raw flag.
 pub struct DbBundleConfigGate(Arc<LicenseClient>);
 
 impl DbBundleConfigGate {
@@ -80,7 +118,12 @@ impl DbBundleConfigGate {
 
 impl FeatureGate for DbBundleConfigGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move { self.0.flag_enabled(DB_BUNDLE_CONFIG_FLAG).await })
+        Box::pin(async move {
+            if self.0.bypass_active() {
+                return true;
+            }
+            !self.0.flag_enabled(DISABLE_DB_BUNDLE_CONFIG_FLAG).await
+        })
     }
 }
 
@@ -225,6 +268,63 @@ mod tests {
     #[test]
     fn rust_data_plane_flag_matches_the_product_flag_key_convention() {
         assert_eq!(RUST_DATA_PLANE_FLAG, "waddles.core.rust-data-plane");
+    }
+
+    #[test]
+    fn disable_db_bundle_config_flag_matches_the_product_flag_key_convention() {
+        assert_eq!(
+            DISABLE_DB_BUNDLE_CONFIG_FLAG,
+            "waddles.core.disable-db-bundle-config"
+        );
+    }
+
+    /// The kill-switch inversion's core regression test: a never-seen flag
+    /// (the state every fresh deployment starts in, and the state a
+    /// permanently-unreachable license server leaves a pod in forever)
+    /// reports the DB-driven path ENABLED, not disabled -- the opposite of
+    /// the retired `waddles.core.db-bundle-config` flag's own default-OFF
+    /// contract. Built directly via `LicenseConfig::new` (no bypass), same
+    /// pattern as `license_feature_gate_defaults_off_for_a_non_bypassed_
+    /// client_with_no_snapshot` -- a cold client has never fetched
+    /// anything, so `flag_enabled` returns its own fail-closed `false` for
+    /// the raw kill-switch flag, and `DbBundleConfigGate::enabled` negates
+    /// that to `true`.
+    #[tokio::test]
+    async fn db_bundle_config_gate_defaults_enabled_for_a_never_seen_kill_switch_flag() {
+        let cfg =
+            LicenseConfig::new("waddles-test-db-bundle-config-default").expect("valid defaults");
+        let client = LicenseClient::new(cfg).expect("client construction");
+        let gate = DbBundleConfigGate::new(client);
+        assert!(
+            gate.enabled().await,
+            "an unseen kill-switch flag must leave the DB-driven path enabled"
+        );
+    }
+
+    /// Bypass-awareness regression test: `build_license_client`'s hardcoded
+    /// self-domain bypass (see `build_license_client_hardcoded_domain_
+    /// bypasses_flag_checks` above) makes `flag_enabled` read `true` for
+    /// ANY key on this client, including
+    /// [`DISABLE_DB_BUNDLE_CONFIG_FLAG`] -- naively negating that raw
+    /// `true` would report the DB-driven path DISABLED for every
+    /// deployment of this service, permanently, which is the exact bug
+    /// this test guards against. `DbBundleConfigGate::enabled` must check
+    /// `bypass_active()` first and report `true` (DB path enabled).
+    #[tokio::test]
+    async fn db_bundle_config_gate_stays_enabled_under_the_hardcoded_domain_bypass() {
+        let client = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            build_license_client("waddles-test-db-bundle-config-bypass").expect("valid defaults")
+        };
+        assert!(
+            client.bypass_active(),
+            "sanity check: this client must actually be bypassed"
+        );
+        let gate = DbBundleConfigGate::new(client);
+        assert!(
+            gate.enabled().await,
+            "bypass must leave the DB-driven path enabled, not disabled"
+        );
     }
 
     #[test]
