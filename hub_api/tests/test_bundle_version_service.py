@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
@@ -18,6 +19,7 @@ from services.bundle_version_service import (
     STATUS_ADDRESSING,
     STATUS_INSPECTING,
     STATUS_PUBLISHED,
+    STATUS_PUBLISHING,
     STATUS_REJECTED,
     STATUS_UPLOADED,
     STATUS_VALIDATING,
@@ -256,6 +258,12 @@ def test_valid_transition_terminal_states_have_no_edges() -> None:
     assert valid_transition(STATUS_REJECTED, STATUS_VALIDATING) is False
 
 
+def test_valid_transition_addressing_direct_to_published() -> None:
+    """Coordinator contract: the prebuilt-component path publishes directly from ADDRESSING."""
+    assert valid_transition(STATUS_ADDRESSING, STATUS_PUBLISHED) is True
+    assert valid_transition(STATUS_ADDRESSING, STATUS_PUBLISHING) is True  # still legal too
+
+
 async def test_advance_state_moves_a_row_forward(install_dal: Any) -> None:
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
@@ -340,10 +348,14 @@ async def test_process_prebuilt_component_happy_path(
         "validate_component",
         AsyncMock(return_value=ComponentValidationResult(ok=True)),
     )
+    expected_digest = hashlib.sha256(_COMPONENT_BYTES).hexdigest()
+    _prefix = f"bundles/{_COMPONENT_APP_ID}/{_COMPONENT_VERSION}/{expected_digest}"
+    expected_component_key = f"{_prefix}.wasm"
+    expected_sidecar_key = f"{_prefix}.json"
     monkeypatch.setattr(
         svc.storage_service,
         "upload_bundle_component",
-        AsyncMock(return_value="bundles/waddles.vendor.42.mybundle/1.0.0/deadbeef.wasm"),
+        AsyncMock(return_value=expected_component_key),
     )
     fake_client = AsyncMock()
 
@@ -356,8 +368,24 @@ async def test_process_prebuilt_component_happy_path(
         valkey_client=fake_client,
     )
 
-    assert row.status == STATUS_ADDRESSING
-    assert row.staging_component_key == "bundles/waddles.vendor.42.mybundle/1.0.0/deadbeef.wasm"
+    # Coordinator contract: a successfully-staged prebuilt component is
+    # published immediately (ADDRESSING -> PUBLISHED), not left at
+    # ADDRESSING -- the loader only serves ACTIVE + APPROVED + PUBLISHED.
+    assert row.status == STATUS_PUBLISHED
+
+    upload = await get_version(install_dal, app_id=_COMPONENT_APP_ID, version=_COMPONENT_VERSION)
+    assert upload.staging_component_key == expected_component_key
+    assert upload.app_version_id is not None
+
+    published = (
+        await install_dal(install_dal.app_versions.id == upload.app_version_id).select()
+    ).first()
+    assert published is not None
+    assert published.component_key == expected_component_key
+    assert published.sidecar_key == expected_sidecar_key
+    assert published.artifact_digest == expected_digest
+    assert published.artifact_kind == "prebuilt"
+    assert published.language == "python"
 
     assert fake_client.xgroup_create.await_count == 2
     called_streams = {call.args[0] for call in fake_client.xgroup_create.await_args_list}
@@ -459,4 +487,4 @@ async def test_process_prebuilt_component_is_idempotent_on_busygroup(
         tenant_slug="acme",
         valkey_client=fake_client,
     )
-    assert row.status == STATUS_ADDRESSING  # never raised despite BUSYGROUP on every call
+    assert row.status == STATUS_PUBLISHED  # never raised despite BUSYGROUP on every call

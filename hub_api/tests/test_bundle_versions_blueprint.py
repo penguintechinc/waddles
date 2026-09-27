@@ -236,7 +236,7 @@ async def test_vendor_can_onboard_a_component_in_their_own_namespace(
     )
     assert response.status_code == 202
     body = await response.get_json()
-    assert body["status"] == "ADDRESSING"
+    assert body["status"] == "PUBLISHED"
     assert mock_component_pipeline.xgroup_create.await_count == 2
 
 
@@ -350,7 +350,7 @@ async def test_reonboarding_a_second_version_tolerates_busygroup(
         )
         assert response.status_code == 202
         body = await response.get_json()
-        assert body["status"] == "ADDRESSING"
+        assert body["status"] == "PUBLISHED"
 
 
 async def test_list_versions_route(app: Quart) -> None:

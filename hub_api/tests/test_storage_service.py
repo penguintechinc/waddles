@@ -7,12 +7,22 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from services.storage_service import bundle_component_key, upload_bundle_component
+from services.storage_service import (
+    bundle_component_key,
+    bundle_sidecar_key,
+    upload_bundle_component,
+)
 
 
 def test_bundle_component_key_matches_the_documented_layout() -> None:
     key = bundle_component_key("waddles.integrations.vendor-42.mybundle", "1.0.0", "abc123")
     assert key == "bundles/waddles.integrations.vendor-42.mybundle/1.0.0/abc123.wasm"
+
+
+def test_bundle_sidecar_key_matches_the_documented_layout() -> None:
+    """The `app_versions.sidecar_key` value (migration 0024) -- same stem, `.json` extension."""
+    key = bundle_sidecar_key("waddles.integrations.vendor-42.mybundle", "1.0.0", "abc123")
+    assert key == "bundles/waddles.integrations.vendor-42.mybundle/1.0.0/abc123.json"
 
 
 async def test_upload_bundle_component_puts_the_component_and_a_json_sidecar() -> None:

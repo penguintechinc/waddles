@@ -67,6 +67,7 @@ from sqlalchemy import (
     MetaData,
     String,
     Table,
+    Text,
 )
 
 from services.schema import (
@@ -1316,6 +1317,11 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("badge", String(100)),
         Column("approval_id", BigInteger),
         Column("created_at", DateTime),
+        # migration 0024 -- the staged MinIO object keys (storage_service.
+        # bundle_component_key()/bundle_sidecar_key()), written by
+        # bundle_version_service.py::_publish_prebuilt_version().
+        Column("component_key", Text),
+        Column("sidecar_key", Text),
     )
     Table(
         "app_active_versions",

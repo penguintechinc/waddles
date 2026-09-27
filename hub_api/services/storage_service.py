@@ -114,9 +114,21 @@ def bundle_component_key(app_id: str, version: str, sha256_hex: str) -> str:
     Not a public URL (unlike avatars/community assets): a staged bundle
     artifact is never web-public -- the executor's bucket poller (spec
     Sec7.6) reads it directly from the bucket via this same key, never
-    through `_public_base_url()`.
+    through `_public_base_url()`. This is also the exact value persisted
+    to `app_versions.component_key` (migration 0024) -- the data-plane
+    loader resolves a published version's staged bytes straight from that
+    column, with no digest-to-key re-derivation on that side.
     """
     return f"bundles/{app_id}/{version}/{sha256_hex}.wasm"
+
+
+def bundle_sidecar_key(app_id: str, version: str, sha256_hex: str) -> str:
+    """`bundles/{app_id}/{version}/{sha256}.json` -- the `.json` sidecar next to the component.
+
+    Same path stem as `bundle_component_key()`; the value persisted to
+    `app_versions.sidecar_key` (migration 0024).
+    """
+    return f"bundles/{app_id}/{version}/{sha256_hex}.json"
 
 
 async def upload_bundle_component(app_id: str, version: str, sha256_hex: str, data: bytes) -> str:
@@ -128,10 +140,10 @@ async def upload_bundle_component(app_id: str, version: str, sha256_hex: str, da
     validation of its own. The sidecar is a `{}` stub for now (a future
     milestone's scan-result/signature metadata slot); returns the
     component's own bucket key, recorded on `app_version_uploads.
-    staging_component_key`.
+    staging_component_key` and (once published) `app_versions.component_key`.
     """
     key = bundle_component_key(app_id, version, sha256_hex)
-    sidecar_key = f"bundles/{app_id}/{version}/{sha256_hex}.json"
+    sidecar_key = bundle_sidecar_key(app_id, version, sha256_hex)
 
     def _put() -> None:
         client = _client()
