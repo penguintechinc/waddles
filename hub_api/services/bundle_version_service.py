@@ -346,13 +346,22 @@ async def process_prebuilt_component(
          sha256 digest, record `staging_component_key`, advance to
          `ADDRESSING` (spec Sec9.1: "ADDRESSING: sha256 over the
          component bytes").
-      4. Provision both the `process` and `action` consumer groups,
-         tenant-scoped via `tenant_slug` (the tenant-middleware-derived
-         value ONLY -- never client-supplied) and community-less
-         (`community=None`, spec's tenant-wide `_tenant` segment): a
-         version upload happens at the catalog level, before any
-         community-specific install/activation (spec Sec9.5, out of this
-         follow-on's scope).
+      4. Provision the `action` consumer group, tenant-scoped via
+         `tenant_slug` (the tenant-middleware-derived value ONLY -- never
+         client-supplied) and community-less (`community=None`, spec's
+         tenant-wide `_tenant` segment): a version upload happens at the
+         catalog level, before any community-specific install/activation
+         (spec Sec9.5, out of this follow-on's scope). The `process`-stage
+         group is deliberately NOT provisioned here -- svc-process reads
+         each granted ingest-source's own stream
+         (`waddles:t:{tenant}:c:{community|_tenant}:src:{platform}:
+         {source_id}:events`, penguin-spine `Scope::source_stream`), not a
+         per-app `...:app:{app_id}:process` key; provisioning that key
+         instead grouped on a stream nothing ever writes to
+         (`services/app_source_binding_service.py`'s own module docstring).
+         `bundle_approval_service.approve_version()` provisions the real
+         process-stage groups (AUTO-BIND) once an app is actually
+         approved+installed and its consumed sources are known.
       5. `_publish_prebuilt_version()`: create the `app_versions` row
          (`component_key`/`sidecar_key` = the exact keys step 3 uploaded
          to, migration 0024) and advance `ADDRESSING` -> `PUBLISHED` --
@@ -426,7 +435,7 @@ async def process_prebuilt_component(
 
         client = valkey_client if valkey_client is not None else valkey_admin_client.build_client()
         try:
-            for stage in ("process", "action"):
+            for stage in ("action",):
                 stream_key = bundle_stream_key(tenant_slug, None, app_id, stage)
                 await valkey_admin_client.ensure_group(client, stream=stream_key, group=app_id)
                 logger.info(

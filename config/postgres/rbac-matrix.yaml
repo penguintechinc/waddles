@@ -33,6 +33,7 @@ tables:
   - app_versions_audit_log
   - workstreams
   - workstream_usage_hourly
+  - app_source_bindings
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -322,4 +323,34 @@ grants:
     privileges: []
   - role: migration_runner
     table: workstream_usage_hourly
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # app_source_bindings (migration 0025): hub-api-owned AUTO-BIND record,
+  # only hub_api writes. `waddles_bundle_reader` (the Rust data-plane's
+  # own read role) is granted SELECT directly by that migration, guarded
+  # by IF EXISTS -- it is not part of this matrix's `roles:` list since
+  # it is provisioned by a separate (parallel) migration, not this one.
+  - role: hub_api
+    table: app_source_bindings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: app_source_bindings
+    privileges: []
+  - role: svc_ingest
+    table: app_source_bindings
+    privileges: []
+  - role: svc_process
+    table: app_source_bindings
+    privileges: []
+  - role: svc_action
+    table: app_source_bindings
+    privileges: []
+  - role: svc_streaming
+    table: app_source_bindings
+    privileges: []
+  - role: webui
+    table: app_source_bindings
+    privileges: []
+  - role: migration_runner
+    table: app_source_bindings
     privileges: [SELECT, INSERT, UPDATE, DELETE]

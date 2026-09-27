@@ -387,12 +387,16 @@ async def test_process_prebuilt_component_happy_path(
     assert published.artifact_kind == "prebuilt"
     assert published.language == "python"
 
-    assert fake_client.xgroup_create.await_count == 2
+    # Only the `action`-stage group is provisioned here -- the `process`
+    # key is unused (svc-process reads granted source streams instead, see
+    # app_source_binding_service.py's own module docstring); regression
+    # guard for the removed key stays explicit as a negative assertion.
+    assert fake_client.xgroup_create.await_count == 1
     called_streams = {call.args[0] for call in fake_client.xgroup_create.await_args_list}
     assert called_streams == {
-        f"waddles:t:acme:c:_tenant:app:{_COMPONENT_APP_ID}:process",
         f"waddles:t:acme:c:_tenant:app:{_COMPONENT_APP_ID}:action",
     }
+    assert f"waddles:t:acme:c:_tenant:app:{_COMPONENT_APP_ID}:process" not in called_streams
     for call in fake_client.xgroup_create.await_args_list:
         assert call.args[1] == _COMPONENT_APP_ID  # group == app_id
     # caller-supplied client is never closed by process_prebuilt_component itself

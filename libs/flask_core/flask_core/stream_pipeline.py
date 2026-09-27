@@ -98,6 +98,29 @@ def bundle_stream_key(
     return f"{_bundle_key_base(tenant, community, app_id)}:{stage}"
 
 
+def source_stream_key(
+    tenant: str, community: Optional[str], platform: str, source_id: str
+) -> str:
+    """Build the per-ingest-source event stream key svc-ingest XADDs onto and svc-process reads.
+
+    `waddles:t:{tenant}:c:{community|_tenant}:src:{platform}:{source_id}:events`
+    -- mirrors penguin-spine's Rust `Scope::source_stream` EXACTLY
+    (`penguin-libs` `packages/rust-spine/src/scope.rs`); the two must
+    never drift, since hub-api (this function) provisions the consumer
+    group svc-process (that Rust code) reads from. `community=None` ->
+    tenant-wide, rendered as `c:_tenant` (never omitted), same convention
+    as `bundle_stream_key` above. This is a DIFFERENT key family from
+    `bundle_stream_key` -- source streams are keyed by (platform,
+    source_id), not (app_id, stage); an app's `app_source_bindings` row
+    (hub-api migration 0025) resolves which source streams a given app_id
+    is granted a consumer group on.
+    """
+    return (
+        f"waddles:t:{tenant}:c:{_bundle_community_segment(community)}"
+        f":src:{platform}:{source_id}:events"
+    )
+
+
 def bundle_config_key(tenant: str, community: Optional[str], app_id: str) -> str:
     """Build the per-(community x app) bundle config key (`...:cfg`)."""
     return f"{_bundle_key_base(tenant, community, app_id)}:cfg"

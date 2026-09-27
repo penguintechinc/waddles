@@ -1406,6 +1406,20 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("tenant_id", Integer, nullable=False),
         Column("name", String(255)),
     )
+    # app_source_bindings (migration 0025) -- AUTO-BIND record of which
+    # ingest_sources an approved app consumes (services/app_source_
+    # binding_service.py::sync_bindings(), called from
+    # bundle_approval_service._write_approval_and_activate()).
+    Table(
+        "app_source_bindings",
+        metadata,
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer, nullable=False, server_default="0"),
+        Column("app_id", String(255), nullable=False),
+        Column("platform", String(50), nullable=False),
+        Column("source_id", String(255), nullable=False),
+        Column("created_at", DateTime),
+    )
     # `audit_log` is a pre-existing production table (services/schema.py's
     # `bind_admin_tables()`), reflected here as its sqlite-compatible
     # mirror because this fixture has no full pydal schema bootstrap --

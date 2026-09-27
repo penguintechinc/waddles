@@ -10,13 +10,13 @@ are pure-function tests with no fixture dependencies.
 from __future__ import annotations
 
 import pytest
-
 from flask_core.stream_pipeline import (
     BundleIsolationKeys,
     bundle_config_key,
     bundle_consumer_group,
     bundle_state_key,
     bundle_stream_key,
+    source_stream_key,
 )
 
 TENANT = "tenant-1"
@@ -162,3 +162,70 @@ def test_bundle_isolation_keys_is_slotted_and_frozen() -> None:
 def test_bundle_isolation_keys_tenant_wide() -> None:
     keys = BundleIsolationKeys(tenant=TENANT, community=None, app_id=APP_ID)
     assert keys.config_key == f"waddles:t:{TENANT}:c:_tenant:app:{APP_ID}:cfg"
+
+
+# ---------------------------------------------------------------------------
+# source_stream_key -- the per-ingest-source event stream (hub-api migration
+# 0025 AUTO-BIND, spec Sec5.1/Sec9.5). MUST stay byte-identical to
+# penguin-spine's Rust `Scope::source_stream()` (packages/rust-spine/src/
+# scope.rs) -- the literal fixture values below are copied from that crate's
+# own doctest/unit-test fixtures so the two can never silently drift.
+# ---------------------------------------------------------------------------
+
+
+def test_source_stream_key_matches_the_penguin_spine_fixture_community_scoped() -> None:
+    assert (
+        source_stream_key("acme", "main", "twitch", "tw-channelA")
+        == "waddles:t:acme:c:main:src:twitch:tw-channelA:events"
+    )
+
+
+def test_source_stream_key_matches_the_penguin_spine_fixture_tenant_wide() -> None:
+    assert (
+        source_stream_key("acme", None, "twitch", "tw-channelA")
+        == "waddles:t:acme:c:_tenant:src:twitch:tw-channelA:events"
+    )
+    assert (
+        source_stream_key("acme", None, "discord", "dg-111")
+        == "waddles:t:acme:c:_tenant:src:discord:dg-111:events"
+    )
+
+
+def test_source_stream_key_is_a_different_key_family_from_bundle_stream_key() -> None:
+    """Source streams are keyed by (platform, source_id), never (app_id, stage)."""
+    source_key = source_stream_key(TENANT, COMMUNITY, "twitch", "tw-a")
+    assert ":src:twitch:tw-a:events" in source_key
+    assert ":app:" not in source_key
+
+
+@pytest.mark.parametrize(
+    (
+        "community_a",
+        "platform_a",
+        "source_id_a",
+        "community_b",
+        "platform_b",
+        "source_id_b",
+    ),
+    [
+        # differ only by community
+        (COMMUNITY, "twitch", "tw-a", "community-2", "twitch", "tw-a"),
+        # differ only by platform
+        (COMMUNITY, "twitch", "tw-a", COMMUNITY, "discord", "tw-a"),
+        # differ only by source_id
+        (COMMUNITY, "twitch", "tw-a", COMMUNITY, "twitch", "tw-b"),
+        # community vs tenant-wide
+        (COMMUNITY, "twitch", "tw-a", None, "twitch", "tw-a"),
+    ],
+)
+def test_distinct_triples_yield_distinct_source_stream_keys(
+    community_a: str | None,
+    platform_a: str,
+    source_id_a: str,
+    community_b: str | None,
+    platform_b: str,
+    source_id_b: str,
+) -> None:
+    key_a = source_stream_key(TENANT, community_a, platform_a, source_id_a)
+    key_b = source_stream_key(TENANT, community_b, platform_b, source_id_b)
+    assert key_a != key_b

@@ -31,6 +31,7 @@ from penguin_dal import AsyncDB
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
 
+from services import app_source_binding_service, valkey_admin_client
 from services.bundle_manifest_v2 import BundleManifestV2, ConsumeRule, EgressRule, Limits
 from services.bundle_version_service import STATUS_PUBLISHED, STATUS_REJECTED, advance_state
 from services.errors import ApiError, not_found
@@ -130,7 +131,7 @@ async def _audit_routes_to_refusal(
 
 async def _validate_community_tenant(
     install_dal: AsyncDB, *, community_id: int, tenant_id: int
-) -> None:
+) -> Any:
     """Refuse a `communityId` that does not exist or belongs to a different tenant.
 
     404 (not 403) deliberately masks whether the community exists at all
@@ -139,13 +140,32 @@ async def _validate_community_tenant(
     pre-existing table, reachable read-only through `install_dal` since
     `reflect()` discovers the entire live schema (see this module's own
     R52 docstring note above `_validate_routes_to`'s `app_catalog` read).
+
+    Returns the `communities` row -- `approve_version()` reuses its
+    `.name` as the stream-key community segment, rather than a second
+    query for the same row.
     """
     rows = await install_dal(
         (install_dal.communities.id == community_id)
         & (install_dal.communities.tenant_id == tenant_id)
     ).select()
-    if not rows:
+    row = rows.first()
+    if row is None:
         raise not_found("community not found")
+    return row
+
+
+async def _tenant_slug(install_dal: AsyncDB, tenant_id: int) -> str:
+    """The `tenants.slug` for `tenant_id` -- the tenant segment `source_stream_key` builds from.
+
+    Never client-supplied -- `tenant_id` here is always the
+    tenant-middleware-derived value `approve_version()` was called with.
+    """
+    rows = await install_dal(install_dal.tenants.id == tenant_id).select()
+    row = rows.first()
+    if row is None or not row.slug:
+        raise ApiError(f"tenant {tenant_id} has no slug configured", 500, "tenant_slug_missing")
+    return str(row.slug)
 
 
 async def _validate_routes_to(
@@ -278,8 +298,9 @@ async def _write_approval_and_activate(
     computed_hash: str,
     summary: dict[str, Any],
     version_id: int,
-) -> int:
-    """Write `app_install_approvals` + upsert `app_active_versions` in ONE transaction.
+    manifest: BundleManifestV2,
+) -> tuple[int, dict[str, list[str]]]:
+    """Write `app_install_approvals` + upsert `app_active_versions` + AUTO-BIND sources, in one tx.
 
     Security-review fix: every `install_dal(...)`/`TableProxy` call
     (the ordinary query-builder path used everywhere else in this
@@ -299,9 +320,13 @@ async def _write_approval_and_activate(
     types (e.g. `summary_json`'s JSON/JSONB) are bound correctly by the
     dialect instead of needing a manual cast.
 
-    Returns the new `app_install_approvals.id`. Both writes commit
-    together, or (on any exception before the `async with` block exits)
-    neither does -- verified by
+    Returns `(new_id, bound)`: the new `app_install_approvals.id`, and
+    `app_source_binding_service.sync_bindings()`'s own return value (the
+    caller uses `bound` to provision consumer groups AFTER this
+    transaction commits -- see `approve_version()`). All three writes
+    (approval, AUTO-BIND, activation) commit together, or (on any
+    exception before the `async with` block exits) none does -- verified
+    by
     `test_bundle_approval_service.py::test_approve_version_rolls_back_the_approval_if_activation_fails`.
     """
     approvals_table = install_dal.metadata.tables["app_install_approvals"]
@@ -342,6 +367,22 @@ async def _write_approval_and_activate(
                 .values(superseded_by=new_id)
             )
 
+        # AUTO-BIND: replace app_id's ingest-source bindings for this
+        # (tenant, community) inside the SAME transaction as the approval
+        # + activation writes above/below -- a failure anywhere in this
+        # `engine.begin()` block (including the active_table write that
+        # follows) rolls the bindings back too, never leaving a
+        # committed binding with no matching approval/activation.
+        bound = await app_source_binding_service.sync_bindings(
+            conn,
+            tenant_id=tenant_id,
+            community_id=community_id,
+            app_id=app_id,
+            manifest=manifest,
+            bindings_table=install_dal.metadata.tables["app_source_bindings"],
+            ingest_sources_table=install_dal.metadata.tables["ingest_sources"],
+        )
+
         active_where = (
             (active_table.c.app_id == app_id)
             & (active_table.c.tenant_id == tenant_id)
@@ -368,7 +409,7 @@ async def _write_approval_and_activate(
                 )
             )
 
-    return int(new_id)
+    return int(new_id), bound
 
 
 async def approve_version(
@@ -380,8 +421,15 @@ async def approve_version(
     community_id: int | None,
     approved_by: int,
     expected_permission_hash: str | None = None,
+    valkey_client: Any | None = None,
 ) -> Any:
-    """Record an `app_install_approvals` row and activate the version (spec Sec9.7, Sec6.10).
+    """Record an `app_install_approvals` row, activate the version, and AUTO-BIND its sources.
+
+    `valkey_client`, when passed (tests only), is used as-is and left
+    open for the caller to manage; when `None` (the real call site) a
+    fresh client is built via `valkey_admin_client.build_client()` and
+    always closed here -- same convention as `bundle_version_service.
+    process_prebuilt_component()`.
 
     Vendor separation (Justin's ruling, 2026-09-27): a vendor SUBMITS
     (`bundle_version_service.create_version`/`process_prebuilt_component`,
@@ -411,8 +459,9 @@ async def approve_version(
     `TENANT_WIDE_COMMUNITY_SENTINEL` for the activation pointer only; the
     approval record itself keeps the nullable `community_id` as given.
     """
+    community_row = None
     if community_id is not None:
-        await _validate_community_tenant(
+        community_row = await _validate_community_tenant(
             install_dal, community_id=community_id, tenant_id=tenant_id
         )
 
@@ -465,7 +514,7 @@ async def approve_version(
             "missing_app_version",
         )
 
-    new_id = await _write_approval_and_activate(
+    new_id, bound = await _write_approval_and_activate(
         install_dal,
         app_id=app_id,
         version=version,
@@ -475,6 +524,7 @@ async def approve_version(
         computed_hash=computed_hash,
         summary=summary,
         version_id=upload.app_version_id,
+        manifest=manifest,
     )
     logger.info(
         "bundle approval: version activated",
@@ -486,6 +536,26 @@ async def approve_version(
             "approved_by": approved_by,
         },
     )
+
+    # PROVISION -- AFTER the transaction above committed: ensure_group is a
+    # Valkey side effect with no rollback, so it must never run inside a
+    # DB transaction that might still abort (see app_source_binding_
+    # service.py's own module docstring).
+    if bound:
+        tenant_slug = await _tenant_slug(install_dal, tenant_id)
+        community_segment = community_row.name if community_row is not None else None
+        client = valkey_client if valkey_client is not None else valkey_admin_client.build_client()
+        try:
+            await app_source_binding_service.provision_source_stream_groups(
+                client,
+                tenant_slug=tenant_slug,
+                community_segment=community_segment,
+                app_id=app_id,
+                bound=bound,
+            )
+        finally:
+            if valkey_client is None:
+                await client.aclose()
 
     return (await install_dal(install_dal.app_install_approvals.id == new_id).select()).first()
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -22,6 +23,7 @@ from services.bundle_approval_service import (
 )
 from services.bundle_install_dal import raw_sql_rows
 from services.errors import ApiError
+from tests.conftest import TENANT_SLUG
 
 _MANIFEST = {
     "schema_version": 2,
@@ -727,3 +729,191 @@ async def test_approve_version_allows_a_community_in_the_same_tenant(install_dal
         approved_by=1,
     )
     assert row.community_id == community_id
+
+
+# ---------------------------------------------------------------------------
+# AUTO-BIND + PROVISION (app_source_bindings, spec Sec5.1/Sec9.5) --
+# _MANIFEST's own `stages.process.consumes` is a single `platform: twitch`
+# rule (see this file's own module-level fixture above).
+# ---------------------------------------------------------------------------
+
+
+async def _seed_ingest_source(
+    install_dal: Any,
+    *,
+    tenant_id: int = 1,
+    community_id: int | None = None,
+    platform: str = "twitch",
+    source_id: str = "tw-a",
+    enabled: bool = True,
+) -> None:
+    now = datetime.now(UTC)
+    await install_dal.ingest_sources.async_insert(
+        tenant_id=tenant_id,
+        community_id=community_id,
+        platform=platform,
+        source_id=source_id,
+        label=source_id,
+        enabled=enabled,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+async def _bindings(install_dal: Any, *, app_id: str) -> Any:
+    return await install_dal(install_dal.app_source_bindings.app_id == app_id).select()
+
+
+async def test_approve_version_auto_binds_matching_sources_and_provisions_groups(
+    install_dal: Any,
+) -> None:
+    await _seed_published(install_dal)
+    await _seed_ingest_source(install_dal, source_id="tw-a")
+    await _seed_ingest_source(install_dal, source_id="tw-b")
+    fake_client = AsyncMock()
+
+    await approve_version(
+        install_dal,
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        community_id=None,
+        approved_by=1,
+        valkey_client=fake_client,
+    )
+
+    rows = await _bindings(install_dal, app_id="waddles.socials.music.default")
+    assert {r.source_id for r in rows} == {"tw-a", "tw-b"}
+    assert all(r.platform == "twitch" and r.community_id == 0 for r in rows)
+
+    assert fake_client.xgroup_create.await_count == 2
+    called = {call.args[0]: call.args[1] for call in fake_client.xgroup_create.await_args_list}
+    app_id = "waddles.socials.music.default"
+    assert called == {
+        f"waddles:t:{TENANT_SLUG}:c:_tenant:src:twitch:tw-a:events": app_id,
+        f"waddles:t:{TENANT_SLUG}:c:_tenant:src:twitch:tw-b:events": app_id,
+    }
+    fake_client.aclose.assert_not_called()  # caller-supplied client is never closed here
+
+
+async def test_approve_version_zero_matching_sources_binds_nothing_and_provisions_nothing(
+    install_dal: Any,
+) -> None:
+    await _seed_published(install_dal)  # _MANIFEST consumes twitch; no ingest_sources configured
+    fake_client = AsyncMock()
+
+    await approve_version(
+        install_dal,
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        community_id=None,
+        approved_by=1,
+        valkey_client=fake_client,
+    )
+
+    assert not await _bindings(install_dal, app_id="waddles.socials.music.default")
+    fake_client.xgroup_create.assert_not_called()
+
+
+async def test_approve_version_reapproval_replaces_bindings(install_dal: Any) -> None:
+    await _seed_published(install_dal)
+    await _seed_ingest_source(install_dal, source_id="tw-a")
+    await approve_version(
+        install_dal,
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        community_id=None,
+        approved_by=1,
+        valkey_client=AsyncMock(),
+    )
+    first_rows = await _bindings(install_dal, app_id="waddles.socials.music.default")
+    assert {r.source_id for r in first_rows} == {"tw-a"}
+
+    # tw-a is removed, tw-b is added, then the same app/tenant/community is re-approved
+    await install_dal(install_dal.ingest_sources.source_id == "tw-a").delete()
+    await _seed_ingest_source(install_dal, source_id="tw-b")
+    newer_manifest = {**_MANIFEST, "version": "3.0.2"}
+    await _seed_published(install_dal, manifest=newer_manifest)
+
+    await approve_version(
+        install_dal,
+        app_id="waddles.socials.music.default",
+        version="3.0.2",
+        tenant_id=1,
+        community_id=None,
+        approved_by=1,
+        valkey_client=AsyncMock(),
+    )
+    rows = await _bindings(install_dal, app_id="waddles.socials.music.default")
+    assert {r.source_id for r in rows} == {"tw-b"}  # tw-a's stale binding is gone, not appended-to
+
+
+async def test_approve_version_community_scoped_binds_with_the_community_segment(
+    install_dal: Any,
+) -> None:
+    await _seed_published(install_dal)
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
+    await _seed_ingest_source(install_dal, community_id=community_id, source_id="tw-community")
+    fake_client = AsyncMock()
+
+    await approve_version(
+        install_dal,
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        community_id=community_id,
+        approved_by=1,
+        valkey_client=fake_client,
+    )
+
+    rows = await _bindings(install_dal, app_id="waddles.socials.music.default")
+    assert rows.first().community_id == community_id
+    fake_client.xgroup_create.assert_awaited_once_with(
+        f"waddles:t:{TENANT_SLUG}:c:acme-community:src:twitch:tw-community:events",
+        "waddles.socials.music.default",
+        id="$",
+        mkstream=True,
+    )
+
+
+async def test_approve_version_rollback_also_rolls_back_bindings(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Extends the activation-rollback regression: AUTO-BIND runs in the SAME transaction.
+
+    A matching `ingest_sources` row is seeded so `sync_bindings()` writes
+    a real row inside the transaction BEFORE the simulated
+    `app_active_versions` insert failure -- proving the whole
+    `engine.begin()` block (approval + AUTO-BIND + activation) rolls back
+    together, not just the approval/activation half.
+    """
+    from sqlalchemy import Table
+
+    await _seed_published(install_dal)
+    await _seed_ingest_source(install_dal, source_id="tw-a")
+
+    original_insert = Table.insert
+
+    def _failing_insert(self: Table, *args: Any, **kwargs: Any) -> Any:
+        if self.name == "app_active_versions":
+            raise RuntimeError("simulated activation failure")
+        return original_insert(self, *args, **kwargs)
+
+    monkeypatch.setattr(Table, "insert", _failing_insert)
+
+    with pytest.raises(RuntimeError, match="simulated activation failure"):
+        await approve_version(
+            install_dal,
+            app_id="waddles.socials.music.default",
+            version="3.0.1",
+            tenant_id=1,
+            community_id=None,
+            approved_by=1,
+            valkey_client=AsyncMock(),
+        )
+
+    monkeypatch.undo()
+
+    assert not await _bindings(install_dal, app_id="waddles.socials.music.default")
