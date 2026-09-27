@@ -4,11 +4,19 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
 
+from services import bundle_version_service as svc
+from services.bundle_component_validator import (
+    ComponentValidationResult,
+    ComponentValidatorUnavailableError,
+)
 from services.bundle_version_service import (
+    STATUS_ADDRESSING,
+    STATUS_INSPECTING,
     STATUS_PUBLISHED,
     STATUS_REJECTED,
     STATUS_UPLOADED,
@@ -17,6 +25,7 @@ from services.bundle_version_service import (
     create_version,
     get_version,
     list_versions,
+    process_prebuilt_component,
     valid_transition,
 )
 from services.errors import ApiError
@@ -297,3 +306,157 @@ async def test_advance_state_unknown_version_raises_404(install_dal: Any) -> Non
             install_dal, app_id="waddles.x.y.default", version="9.9.9", target=STATUS_VALIDATING
         )
     assert exc.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# process_prebuilt_component() -- the pre-built-component follow-on
+# ---------------------------------------------------------------------------
+
+_COMPONENT_APP_ID = "waddles.vendor.42.mybundle"
+_COMPONENT_VERSION = "1.0.0"
+_COMPONENT_BYTES = b"fake-wasm-component-bytes"
+
+
+async def _seed_prebuilt_upload(install_dal: Any) -> None:
+    now = datetime.now(UTC)
+    await install_dal.app_version_uploads.async_insert(
+        app_id=_COMPONENT_APP_ID,
+        version=_COMPONENT_VERSION,
+        tenant_id=1,
+        artifact_kind="prebuilt",
+        language="python",
+        status=STATUS_UPLOADED,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+async def test_process_prebuilt_component_happy_path(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _seed_prebuilt_upload(install_dal)
+    monkeypatch.setattr(
+        svc,
+        "validate_component",
+        AsyncMock(return_value=ComponentValidationResult(ok=True)),
+    )
+    monkeypatch.setattr(
+        svc.storage_service,
+        "upload_bundle_component",
+        AsyncMock(return_value="bundles/waddles.vendor.42.mybundle/1.0.0/deadbeef.wasm"),
+    )
+    fake_client = AsyncMock()
+
+    row = await process_prebuilt_component(
+        install_dal,
+        app_id=_COMPONENT_APP_ID,
+        version=_COMPONENT_VERSION,
+        component_bytes=_COMPONENT_BYTES,
+        tenant_slug="acme",
+        valkey_client=fake_client,
+    )
+
+    assert row.status == STATUS_ADDRESSING
+    assert row.staging_component_key == "bundles/waddles.vendor.42.mybundle/1.0.0/deadbeef.wasm"
+
+    assert fake_client.xgroup_create.await_count == 2
+    called_streams = {call.args[0] for call in fake_client.xgroup_create.await_args_list}
+    assert called_streams == {
+        f"waddles:t:acme:c:_tenant:app:{_COMPONENT_APP_ID}:process",
+        f"waddles:t:acme:c:_tenant:app:{_COMPONENT_APP_ID}:action",
+    }
+    for call in fake_client.xgroup_create.await_args_list:
+        assert call.args[1] == _COMPONENT_APP_ID  # group == app_id
+    # caller-supplied client is never closed by process_prebuilt_component itself
+    fake_client.aclose.assert_not_called()
+
+
+async def test_process_prebuilt_component_rejects_nonconformant(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _seed_prebuilt_upload(install_dal)
+    monkeypatch.setattr(
+        svc,
+        "validate_component",
+        AsyncMock(
+            return_value=ComponentValidationResult(ok=False, reason="disallowed_import:wasi:http/x")
+        ),
+    )
+    upload_spy = AsyncMock()
+    monkeypatch.setattr(svc.storage_service, "upload_bundle_component", upload_spy)
+    fake_client = AsyncMock()
+
+    row = await process_prebuilt_component(
+        install_dal,
+        app_id=_COMPONENT_APP_ID,
+        version=_COMPONENT_VERSION,
+        component_bytes=_COMPONENT_BYTES,
+        tenant_slug="acme",
+        valkey_client=fake_client,
+    )
+
+    assert row.status == STATUS_REJECTED
+    assert row.reject_reason is not None and "disallowed_import" in row.reject_reason
+    upload_spy.assert_not_called()
+    fake_client.xgroup_create.assert_not_called()
+
+
+async def test_process_prebuilt_component_validator_unavailable_is_503_not_rejected(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _seed_prebuilt_upload(install_dal)
+    monkeypatch.setattr(
+        svc,
+        "validate_component",
+        AsyncMock(side_effect=ComponentValidatorUnavailableError("wasm-tools not found")),
+    )
+
+    with pytest.raises(ApiError) as exc:
+        await process_prebuilt_component(
+            install_dal,
+            app_id=_COMPONENT_APP_ID,
+            version=_COMPONENT_VERSION,
+            component_bytes=_COMPONENT_BYTES,
+            tenant_slug="acme",
+            valkey_client=AsyncMock(),
+        )
+    assert exc.value.status_code == 503
+    assert exc.value.code == "component_validator_unavailable"
+
+    row = await get_version(install_dal, app_id=_COMPONENT_APP_ID, version=_COMPONENT_VERSION)
+    assert row.status == STATUS_INSPECTING  # left mid-pipeline, not REJECTED, for a retry
+
+
+async def test_process_prebuilt_component_is_idempotent_on_busygroup(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-onboarding the same app_id/version tolerates BUSYGROUP via ensure_group's own contract."""
+    await _seed_prebuilt_upload(install_dal)
+    monkeypatch.setattr(
+        svc, "validate_component", AsyncMock(return_value=ComponentValidationResult(ok=True))
+    )
+    monkeypatch.setattr(
+        svc.storage_service,
+        "upload_bundle_component",
+        AsyncMock(return_value="bundles/x/1.0.0/y.wasm"),
+    )
+    import redis.exceptions
+
+    fake_client = AsyncMock()
+    fake_client.xgroup_create.side_effect = redis.exceptions.ResponseError(
+        "BUSYGROUP Consumer Group name already exists"
+    )
+
+    # First advance the row to INSPECTING out from under process_prebuilt_component
+    # so a second call re-drives it from UPLOADED again is unnecessary -- this
+    # asserts the BUSYGROUP tolerance in isolation, matching
+    # test_valkey_admin_client.py::test_ensure_group_is_busygroup_tolerant.
+    row = await process_prebuilt_component(
+        install_dal,
+        app_id=_COMPONENT_APP_ID,
+        version=_COMPONENT_VERSION,
+        component_bytes=_COMPONENT_BYTES,
+        tenant_slug="acme",
+        valkey_client=fake_client,
+    )
+    assert row.status == STATUS_ADDRESSING  # never raised despite BUSYGROUP on every call

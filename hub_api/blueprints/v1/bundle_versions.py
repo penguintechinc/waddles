@@ -24,7 +24,6 @@ from dataclasses import dataclass
 from typing import cast
 
 from flask_core.api_utils import error_response
-from flask_core.authz import require_scope
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from penguin_dal import AsyncDB
 from quart import Blueprint, current_app, request
@@ -34,6 +33,7 @@ from werkzeug.datastructures import FileStorage
 from services import bundle_version_service as svc
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request
+from services.vendor_bundle_authz import authorize_onboarding_scope, enforce_vendor_namespace
 
 bundle_versions_bp = Blueprint("v1_bundle_versions", __name__, url_prefix="/api/v1/apps")
 
@@ -95,12 +95,31 @@ class VersionDTO:
 
 @bundle_versions_bp.route("/<app_id>/versions", methods=["POST"])
 @tenant_middleware  # type: ignore[untyped-decorator]
-@require_scope("platform:admin")  # type: ignore[untyped-decorator]
 async def post_version(app_id: str) -> tuple[dict[str, object], int]:
-    """Upload a new bundle version (multipart: `manifest` + `source` XOR `component`)."""
+    """Upload a new bundle version (multipart: `manifest` + `source` XOR `component`).
+
+    Authorization (spec Sec9.2 follow-on, `services/vendor_bundle_authz.py`):
+    `platform:admin` (unrestricted `app_id`, this endpoint's original
+    behavior) OR `vendor:onboard` scoped to the caller's own
+    `waddles.integrations.vendor-{caller_id}.*` namespace -- checked
+    BEFORE any multipart part is read (security.md: never buffer an
+    unauthorized caller's payload). A vendor's `source` part is refused
+    outright: the
+    compile+SAST pipeline for untrusted source (spec Sec9.1's SCANNING/
+    COMPILING states) is a separate, not-yet-built increment, so vendors
+    are limited to the pre-built `component` path this follow-on
+    completes; admins keep their existing, unrestricted `source` upload
+    behavior unchanged.
+    """
     install_dal = _install_dal()
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
+
+    try:
+        auth = authorize_onboarding_scope(request, app_id=app_id)
+    except ApiError as exc:
+        return _err(exc)
+
     files = await request.files
     manifest_file = files.get("manifest")
     if manifest_file is None:
@@ -109,6 +128,22 @@ async def post_version(app_id: str) -> tuple[dict[str, object], int]:
     component_file = files.get("component")
 
     caller_id = get_current_user_id(request)
+
+    if not auth.is_admin:
+        try:
+            enforce_vendor_namespace(app_id=app_id, caller_id=caller_id)
+        except ApiError as exc:
+            return _err(exc)
+        if source_file is not None:
+            return _err(
+                ApiError(
+                    "vendor source-code onboarding is not yet supported; "
+                    "upload a pre-built component",
+                    400,
+                    "vendor_source_not_supported",
+                )
+            )
+
     try:
         manifest_bytes = _read_capped(
             manifest_file, svc.BUNDLE_MAX_MANIFEST_BYTES, "manifest exceeds 1 MiB"
@@ -135,10 +170,24 @@ async def post_version(app_id: str) -> tuple[dict[str, object], int]:
             allow_wildcard_consumes=False,
             allow_prebuilt=await _allow_prebuilt(install_dal),
         )
+        if row.artifact_kind == "prebuilt":
+            assert component_bytes is not None  # nosec B101 -- create_version already enforced this
+            row = await svc.process_prebuilt_component(
+                install_dal,
+                app_id=app_id,
+                version=row.version,
+                component_bytes=component_bytes,
+                tenant_slug=ctx.tenant_slug,
+            )
     except ApiError as exc:
         return _err(exc)
     return (
-        {"success": True, "versionId": row.id, "status": row.status},
+        {
+            "success": True,
+            "versionId": row.id,
+            "status": row.status,
+            "rejectReason": getattr(row, "reject_reason", None),
+        },
         202,
     )
 

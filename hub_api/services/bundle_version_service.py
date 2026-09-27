@@ -18,18 +18,46 @@ write (as the approval-service tests do) until that follow-on wires a
 real callback path; `advance_state()` below is the transition-table
 guard so that follow-on has a single, tested place to call into rather
 than hand-rolling status writes.
+
+**Follow-on: `process_prebuilt_component()`.** This is that follow-on
+for the `artifact: prebuilt` (pre-built component) branch only -- it
+drives a freshly-`UPLOADED` row through `VALIDATING` -> `INSPECTING`
+(WIT world conformance, `bundle_component_validator.validate_component`)
+-> `ADDRESSING` (stage to the bucket keyed by sha256, per spec Sec9.1's
+own "ADDRESSING: sha256 over the component bytes"), provisioning both
+the `process` and `action` consumer groups along the way. The
+`artifact: source` branch (compiler Job + SAST, spec Sec9.1's SCANNING/
+COMPILING states) is still out of scope -- `blueprints/v1/bundle_versions.
+py` never calls this function for a source upload.
 """
 
 from __future__ import annotations
 
+import hashlib
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
 import yaml
+from flask_core.stream_pipeline import bundle_stream_key
 from penguin_dal import AsyncDB
 
+from services import storage_service, valkey_admin_client
+from services.bundle_component_validator import (
+    ComponentValidatorUnavailableError,
+    validate_component,
+)
 from services.bundle_manifest_v2 import ManifestV2Error, parse_bundle_manifest_v2
+from services.bundle_telemetry import bundle_span, get_meter
 from services.errors import ApiError, conflict, not_found
+
+logger = logging.getLogger(__name__)
+
+_meter = get_meter()
+_onboarding_counter = _meter.create_counter(
+    "waddles_hub_component_onboarding_total",
+    description="pre-built component onboarding attempts, by outcome",
+)
 
 STATUS_UPLOADED = "UPLOADED"
 STATUS_VALIDATING = "VALIDATING"
@@ -217,3 +245,131 @@ async def list_versions(install_dal: AsyncDB, *, app_id: str) -> list[Any]:
         orderby=~install_dal.app_version_uploads.created_at,
     )
     return list(rows)
+
+
+async def _set_staging_component_key(
+    install_dal: AsyncDB, *, app_id: str, version: str, key: str
+) -> None:
+    """Record the bucket key `upload_bundle_component()` returned, independent of `advance_state()`.
+
+    `advance_state()`'s own contract is the FSM guard only (status +
+    `reject_reason`); this is a plain column write alongside it, kept as
+    its own tiny helper rather than widening `advance_state()`'s
+    signature and risking its existing, tested callers.
+    """
+    await install_dal(
+        (install_dal.app_version_uploads.app_id == app_id)
+        & (install_dal.app_version_uploads.version == version)
+    ).update(staging_component_key=key, updated_at=datetime.now(UTC))
+
+
+async def process_prebuilt_component(
+    install_dal: AsyncDB,
+    *,
+    app_id: str,
+    version: str,
+    component_bytes: bytes,
+    tenant_slug: str,
+    valkey_client: Any | None = None,
+) -> Any:
+    """Drive a freshly-`UPLOADED` prebuilt-component row through `INSPECTING` -> `ADDRESSING`.
+
+    Only ever called for `artifact_kind == "prebuilt"`; the caller
+    (`blueprints/v1/bundle_versions.py`) never invokes this for a
+    `source` upload. Order matters (this IS the security posture,
+    matching this repo's own AUTHZ-before-body-work convention):
+
+      1. `UPLOADED` -> `VALIDATING` -> `INSPECTING` (FSM entry).
+      2. WIT world conformance check
+         (`bundle_component_validator.validate_component`) -- a failure
+         moves the row to `REJECTED` with the validator's reason and
+         returns immediately, never reaching the bucket or Valkey.
+      3. Stage the (now-validated) bytes to the bucket keyed by their own
+         sha256 digest, record `staging_component_key`, advance to
+         `ADDRESSING` (spec Sec9.1: "ADDRESSING: sha256 over the
+         component bytes").
+      4. Provision both the `process` and `action` consumer groups,
+         tenant-scoped via `tenant_slug` (the tenant-middleware-derived
+         value ONLY -- never client-supplied) and community-less
+         (`community=None`, spec's tenant-wide `_tenant` segment): a
+         version upload happens at the catalog level, before any
+         community-specific install/activation (spec Sec9.5, out of this
+         follow-on's scope).
+
+    `valkey_client`, when passed (tests only), is used as-is and left
+    open for the caller to manage; when `None` (the real call site) a
+    fresh client is built via `valkey_admin_client.build_client()` and
+    always closed here.
+
+    Raises `ApiError` 503 `component_validator_unavailable` -- NOT a
+    `REJECTED` transition -- when the validator itself could not run
+    (`ComponentValidatorUnavailableError`, e.g. `wasm-tools` missing): an
+    infra problem is retriable and must never be conflated with "this
+    component is non-conformant". The row is left at `INSPECTING` for a
+    retry once the tool is available again.
+    """
+    async with bundle_span("hub.bundle.onboard_component", app_id=app_id, tenant=tenant_slug):
+        await advance_state(install_dal, app_id=app_id, version=version, target=STATUS_VALIDATING)
+        await advance_state(install_dal, app_id=app_id, version=version, target=STATUS_INSPECTING)
+        logger.info(
+            "bundle onboarding: inspecting component",
+            extra={"app_id": app_id, "tenant": tenant_slug, "version": version},
+        )
+
+        try:
+            result = await validate_component(component_bytes)
+        except ComponentValidatorUnavailableError as exc:
+            logger.error(
+                "bundle onboarding: component validator unavailable",
+                extra={"app_id": app_id, "tenant": tenant_slug, "version": version},
+            )
+            _onboarding_counter.add(1, {"outcome": "validator_unavailable"})
+            raise ApiError(str(exc), 503, "component_validator_unavailable") from exc
+
+        if not result.ok:
+            logger.warning(
+                "bundle onboarding: component rejected",
+                extra={
+                    "app_id": app_id,
+                    "tenant": tenant_slug,
+                    "version": version,
+                    "reason": result.reason,
+                },
+            )
+            _onboarding_counter.add(1, {"outcome": "rejected"})
+            return await advance_state(
+                install_dal,
+                app_id=app_id,
+                version=version,
+                target=STATUS_REJECTED,
+                reject_reason=(result.reason or "wit_conformance_failed")[:100],
+            )
+
+        digest = hashlib.sha256(component_bytes).hexdigest()
+        key = await storage_service.upload_bundle_component(
+            app_id, version, digest, component_bytes
+        )
+        await _set_staging_component_key(install_dal, app_id=app_id, version=version, key=key)
+        row = await advance_state(
+            install_dal, app_id=app_id, version=version, target=STATUS_ADDRESSING
+        )
+        logger.info(
+            "bundle onboarding: component staged",
+            extra={"app_id": app_id, "tenant": tenant_slug, "version": version, "key": key},
+        )
+
+        client = valkey_client if valkey_client is not None else valkey_admin_client.build_client()
+        try:
+            for stage in ("process", "action"):
+                stream_key = bundle_stream_key(tenant_slug, None, app_id, stage)
+                await valkey_admin_client.ensure_group(client, stream=stream_key, group=app_id)
+                logger.info(
+                    "bundle onboarding: consumer group provisioned",
+                    extra={"app_id": app_id, "tenant": tenant_slug, "stage": stage},
+                )
+        finally:
+            if valkey_client is None:
+                await client.aclose()
+
+        _onboarding_counter.add(1, {"outcome": "addressed"})
+        return row

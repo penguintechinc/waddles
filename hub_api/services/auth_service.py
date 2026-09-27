@@ -144,6 +144,14 @@ async def create_session_token(
             scopes.update(SCOPE_BUNDLES["global"]["admin"])
         if user.is_vendor:
             roles.append("vendor")
+            # `vendor:onboard` gates `POST /apps/{app_id}/versions`'s
+            # vendor path (`services/vendor_bundle_authz.py`) -- same
+            # pattern as `is_analytics_consumer` below: a boolean flag on
+            # `hub_users` needs a real scope grant at mint time, not just
+            # an audit-only `roles` entry, before any `require_scope`-style
+            # check can key off it (security.md: scopes only, never role
+            # names).
+            scopes.add("vendor:onboard")
         if user.is_analytics_consumer:
             # Analytics-module port (M9): `analytics:read` is the pre-
             # existing scope name from security.md's own SCOPE_BUNDLES
