@@ -139,6 +139,7 @@ pub async fn run_tick(
     let bundle_active_set::ActiveSetRead {
         rows: active,
         excluded,
+        degraded,
     } = match bundle_active_set::read_active_set(db, tenant_id, community_id, None).await {
         Ok(result) => result,
         Err(err) => {
@@ -152,6 +153,16 @@ pub async fn run_tick(
     // going dark (e.g. an approval expiring with nothing re-approving it)
     // is visible on a dashboard/alert, not just in a log stream.
     for (app_id, reason) in &excluded {
+        excluded_metric
+            .with_label_values(&[app_id, reason.as_str()])
+            .inc();
+    }
+    // component_key contract: a row that loaded via `derive_component_keys`'s
+    // fallback (NULL `component_key` column, un-backfilled row) is still
+    // active -- shares the same counter/label space as `excluded` (both are
+    // `(app_id, &'static str)` reasons) so an un-backfilled row is visible
+    // during rollout without a second metric.
+    for (app_id, reason) in &degraded {
         excluded_metric
             .with_label_values(&[app_id, reason.as_str()])
             .inc();
@@ -541,7 +552,35 @@ mod tests {
         .expect("valid metric definition")
     }
 
+    /// A published, fully-backfilled `app_versions` row -- real
+    /// `component_key`/`sidecar_key` columns set, exactly
+    /// `bundles/{app_id}/{version}/{sha256}.wasm` per the contract, so
+    /// existing tests exercise the primary (non-fallback) path by default.
+    /// `version_row_without_component_key` below is the dedicated
+    /// fallback-path fixture.
     fn version_row(
+        app_id: &str,
+        id: i64,
+        version: &str,
+        digest: &str,
+    ) -> bundle_active_set::entities::app_versions::Model {
+        let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+        bundle_active_set::entities::app_versions::Model {
+            id,
+            app_id: app_id.to_string(),
+            version: version.to_string(),
+            artifact_digest: Some(digest.to_string()),
+            scan_status: "scanned".to_string(),
+            component_key: Some(format!("bundles/{app_id}/{version}/{hex}.wasm")),
+            sidecar_key: Some(format!("bundles/{app_id}/{version}/{hex}.json")),
+        }
+    }
+
+    /// A published `app_versions` row from before the `component_key`
+    /// migration/backfill landed -- `component_key`/`sidecar_key` both
+    /// `NULL`, exercising `bundle_active_set::derive_component_keys`'s
+    /// fallback path.
+    fn version_row_without_component_key(
         app_id: &str,
         id: i64,
         version: &str,
@@ -553,6 +592,8 @@ mod tests {
             version: version.to_string(),
             artifact_digest: Some(digest.to_string()),
             scan_status: "scanned".to_string(),
+            component_key: None,
+            sidecar_key: None,
         }
     }
 
@@ -626,6 +667,63 @@ mod tests {
                 .get(),
             0,
             "only the actually-excluded app_id must be incremented"
+        );
+    }
+
+    /// component_key contract: a row with a `NULL` `component_key` column
+    /// still loads (never excluded), goes through the sink with the
+    /// `derive_component_keys`-derived component key, and increments the
+    /// shared metric labeled `missing_component_key` -- proving `run_tick`
+    /// actually surfaces `ActiveSetRead::degraded`, not just
+    /// `ActiveSetRead::excluded`.
+    #[tokio::test]
+    async fn run_tick_loads_via_the_fallback_and_increments_the_degraded_metric_when_component_key_is_null(
+    ) {
+        let digest = format!("sha256:{}", "f".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([vec![version_row_without_component_key(
+                "waddles.a",
+                10,
+                "1",
+                &digest,
+            )]])
+            .append_query_results([vec![approval_row("waddles.a", "1")]])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        let sink = FakeSink::default();
+        let metric = test_metric();
+        run_tick(
+            &db,
+            1,
+            0,
+            &FixedGate(true),
+            &mut tracker,
+            &mut loaded,
+            Some(&sink as &dyn BundleSink),
+            &metric,
+        )
+        .await;
+        assert_eq!(
+            loaded.get("waddles.a"),
+            Some(&digest),
+            "an un-backfilled row must still load via the fallback, never be dropped"
+        );
+        let (expected_component, _) = bundle_active_set::derive_component_keys(&digest);
+        assert_eq!(
+            sink.calls(),
+            vec![format!("load:waddles.a:{digest}")],
+            "sink sees app_id/digest only; the fallback component_key ({expected_component}) is \
+             asserted directly against bundle_active_set::read_active_set's own tests"
+        );
+        assert_eq!(
+            metric
+                .with_label_values(&["waddles.a", "missing_component_key"])
+                .get(),
+            1,
+            "a NULL component_key must increment the shared metric with the degraded reason"
         );
     }
 }

@@ -57,6 +57,6 @@ pub mod reader;
 pub use diff::{plan, DiffPlan};
 pub use query::{
     derive_component_keys, read_active_set, read_watermark, ActiveBundleRow, ActiveSetError,
-    ActiveSetRead, ExclusionReason, Watermark, WatermarkTracker,
+    ActiveSetRead, DegradedReason, ExclusionReason, Watermark, WatermarkTracker,
 };
 pub use reader::ReaderConfig;

@@ -90,16 +90,16 @@ pub async fn read_watermark(
 }
 
 /// Content-addressed `component_key`/`sidecar_key` derivation --
-/// **documented interim substitute for a confirmed schema gap**:
-/// `app_versions` has no persisted bucket-key column at all (see
-/// `crate::entities::app_versions`'s module doc). `expected` is the
-/// `sha256:<64 hex>` `artifact_digest`; this strips the `sha256:` prefix
-/// and keys both objects by the raw hex digest under `bundles/`, matching
-/// the `ADDRESSING` state name in hub-api's publish state machine
-/// (`hub_api/services/bundle_version_service.py`) -- i.e. this assumes
-/// the eventual publish step will store bundles content-addressed by
-/// digest. Replace this function's body (not its callers) once hub-api's
-/// publish step lands and persists real bucket keys.
+/// **defensive fallback only**, used by [`read_active_set`] exclusively
+/// when `app_versions.component_key` is `NULL` (a row published before the
+/// column-adding migration and/or hub-api's publish-step backfill landed;
+/// see `crate::entities::app_versions`'s module doc for the full
+/// contract). No longer the primary path -- `read_active_set` reads the
+/// real `component_key`/`sidecar_key` columns directly when set. `digest`
+/// is the `sha256:<64 hex>` `artifact_digest`; this strips the `sha256:`
+/// prefix and keys both objects by the raw hex digest under `bundles/`,
+/// the same convention this crate used before the real columns existed --
+/// kept only so an un-backfilled row still loads instead of being dropped.
 pub fn derive_component_keys(digest: &str) -> (String, String) {
     let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
     (
@@ -142,13 +142,45 @@ impl ExclusionReason {
     }
 }
 
+/// Why one row's `component_key`/`sidecar_key` came from
+/// [`derive_component_keys`]'s fallback rather than the real
+/// `app_versions` columns -- rollout visibility (component_key contract):
+/// the row still loads (never excluded), but an un-backfilled row is a
+/// signal worth surfacing, not silently patched over. Shares the same
+/// `(app_id, reason)` shape and Prometheus label space as
+/// [`ExclusionReason`] (both plug into the same
+/// `bundle_active_set_excluded_total`-style counter via `as_str`), kept as
+/// a separate type since a degraded row is a distinct condition from an
+/// excluded one.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DegradedReason {
+    /// `app_versions.component_key` is `NULL` -- published before the
+    /// column-adding migration and/or hub-api's publish-step backfill
+    /// landed. Expected during rollout, not a steady-state condition.
+    MissingComponentKey,
+}
+
+impl DegradedReason {
+    /// Stable label value for the Prometheus counter -- same convention as
+    /// [`ExclusionReason::as_str`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingComponentKey => "missing_component_key",
+        }
+    }
+}
+
 /// [`read_active_set`]'s full result: the ACTIVE+APPROVED rows to load,
-/// plus every row this tick excluded and why -- see [`ExclusionReason`]'s
-/// doc for why exclusions are data, not just a log line.
+/// every row this tick excluded and why (see [`ExclusionReason`]'s doc),
+/// and every row that loaded but via [`derive_component_keys`]'s fallback
+/// rather than a real `component_key` column value (see
+/// [`DegradedReason`]'s doc) -- exclusions and degradations are both data,
+/// never just a log line.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ActiveSetRead {
     pub rows: Vec<ActiveBundleRow>,
     pub excluded: Vec<(String, ExclusionReason)>,
+    pub degraded: Vec<(String, DegradedReason)>,
 }
 
 /// Reads the full ACTIVE, APPROVED set for `(tenant_id, community_id)`,
@@ -169,7 +201,9 @@ pub struct ActiveSetRead {
 /// concurrent publish), is excluded from [`ActiveSetRead::rows`] (recorded
 /// in [`ActiveSetRead::excluded`], never silently dropped) rather than
 /// erroring the whole read -- one bad/incomplete row must never block
-/// every other bundle's hot-swap.
+/// every other bundle's hot-swap. A row that loads but with a `NULL`
+/// `component_key` (derived via [`derive_component_keys`]'s fallback
+/// instead) is recorded in [`ActiveSetRead::degraded`], not excluded.
 pub async fn read_active_set(
     conn: &DatabaseConnection,
     tenant_id: i32,
@@ -203,6 +237,7 @@ pub async fn read_active_set(
 
     let mut rows = Vec::with_capacity(active_rows.len());
     let mut excluded = Vec::new();
+    let mut degraded = Vec::new();
     for active in &active_rows {
         let Some(version_row) = versions_by_id.get(&active.version_id) else {
             tracing::warn!(
@@ -246,7 +281,35 @@ pub async fn read_active_set(
             continue;
         };
 
-        let (component_key, sidecar_key) = derive_component_keys(&digest);
+        // component_key contract (data-plane half; hub-api half is the
+        // migration + publish-step backfill landing in parallel): use the
+        // real `app_versions.component_key`/`sidecar_key` columns
+        // directly when set -- `derive_component_keys` is now a defensive
+        // fallback for rows published before either lands, never the
+        // primary path. `sidecar_key` falls back independently of
+        // `component_key` (a present component with no sidecar is a
+        // distinct, non-degraded case -- not every bundle ships a
+        // sidecar).
+        let (component_key, sidecar_key) = match version_row.component_key.clone() {
+            Some(component_key) => {
+                let sidecar_key = version_row
+                    .sidecar_key
+                    .clone()
+                    .unwrap_or_else(|| derive_component_keys(&digest).1);
+                (component_key, sidecar_key)
+            }
+            None => {
+                tracing::warn!(
+                    app_id = %active.app_id,
+                    version = %version_row.version,
+                    reason = DegradedReason::MissingComponentKey.as_str(),
+                    "app_versions.component_key is NULL; falling back to content-addressed \
+                     derivation (row published before the migration/backfill landed)"
+                );
+                degraded.push((active.app_id.clone(), DegradedReason::MissingComponentKey));
+                derive_component_keys(&digest)
+            }
+        };
         rows.push(ActiveBundleRow {
             app_id: active.app_id.clone(),
             version: version_row.version.clone(),
@@ -256,7 +319,11 @@ pub async fn read_active_set(
         });
     }
 
-    Ok(ActiveSetRead { rows, excluded })
+    Ok(ActiveSetRead {
+        rows,
+        excluded,
+        degraded,
+    })
 }
 
 /// Tracks the last-seen [`Watermark`] for one poller instance and decides
@@ -459,6 +526,8 @@ mod tests {
                 version: "1".to_string(),
                 artifact_digest: Some(digest),
                 scan_status: "scanned".to_string(),
+                component_key: None,
+                sidecar_key: None,
             }]])
             .append_query_results([Vec::<app_install_approvals::Model>::new()])
             .into_connection();
@@ -475,8 +544,12 @@ mod tests {
         Ok(())
     }
 
+    /// `component_key` contract: a `NULL` column value falls back to
+    /// [`derive_component_keys`] and records a [`DegradedReason::
+    /// MissingComponentKey`] entry -- the row still loads (never
+    /// excluded), but the fallback is visible, not silent.
     #[tokio::test]
-    async fn read_active_set_includes_an_active_and_approved_tenant_wide_version(
+    async fn read_active_set_falls_back_to_derived_keys_when_component_key_is_null(
     ) -> Result<(), ActiveSetError> {
         let digest = format!("sha256:{}", "c".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
@@ -492,6 +565,8 @@ mod tests {
                 version: "1".to_string(),
                 artifact_digest: Some(digest.clone()),
                 scan_status: "scanned".to_string(),
+                component_key: None,
+                sidecar_key: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -509,7 +584,113 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0].app_id, "waddles.test.app");
         assert_eq!(result.rows[0].digest, digest);
+        let (expected_component, expected_sidecar) = derive_component_keys(&digest);
+        assert_eq!(result.rows[0].component_key, expected_component);
+        assert_eq!(result.rows[0].sidecar_key, expected_sidecar);
         assert!(result.excluded.is_empty());
+        assert_eq!(
+            result.degraded,
+            vec![(
+                "waddles.test.app".to_string(),
+                DegradedReason::MissingComponentKey
+            )]
+        );
+        Ok(())
+    }
+
+    /// `component_key` contract, the primary (non-fallback) path: a
+    /// non-`NULL` `component_key`/`sidecar_key` column value is used
+    /// directly, verbatim -- `derive_component_keys` is never consulted,
+    /// and no degraded entry is recorded.
+    #[tokio::test]
+    async fn read_active_set_uses_the_real_component_key_column_when_present(
+    ) -> Result<(), ActiveSetError> {
+        let digest = format!("sha256:{}", "f".repeat(64));
+        let real_component_key = "bundles/waddles.test.app/1/real.wasm".to_string();
+        let real_sidecar_key = "bundles/waddles.test.app/1/real.json".to_string();
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.test.app".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(digest.clone()),
+                scan_status: "scanned".to_string(),
+                component_key: Some(real_component_key.clone()),
+                sidecar_key: Some(real_sidecar_key.clone()),
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 1,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].component_key, real_component_key);
+        assert_eq!(result.rows[0].sidecar_key, real_sidecar_key);
+        // Never the derived fallback -- proves the real column value won,
+        // not a coincidental match.
+        let (derived_component, _) = derive_component_keys(&digest);
+        assert_ne!(result.rows[0].component_key, derived_component);
+        assert!(result.excluded.is_empty());
+        assert!(
+            result.degraded.is_empty(),
+            "a present component_key must never be recorded as degraded"
+        );
+        Ok(())
+    }
+
+    /// `sidecar_key` falls back independently of `component_key`: a real
+    /// `component_key` with a `NULL` `sidecar_key` uses the real component
+    /// key verbatim and only derives the sidecar half -- not treated as
+    /// degraded (many bundles have no sidecar at all).
+    #[tokio::test]
+    async fn read_active_set_derives_only_the_sidecar_when_component_key_is_present_but_sidecar_is_null(
+    ) -> Result<(), ActiveSetError> {
+        let digest = format!("sha256:{}", "a1".repeat(32));
+        let real_component_key = "bundles/waddles.test.app/1/real.wasm".to_string();
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.test.app".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(digest.clone()),
+                scan_status: "scanned".to_string(),
+                component_key: Some(real_component_key.clone()),
+                sidecar_key: None,
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 1,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert_eq!(result.rows[0].component_key, real_component_key);
+        let (_, expected_sidecar) = derive_component_keys(&digest);
+        assert_eq!(result.rows[0].sidecar_key, expected_sidecar);
+        assert!(
+            result.degraded.is_empty(),
+            "a present component_key must never be recorded as degraded, even with a null sidecar_key"
+        );
         Ok(())
     }
 
@@ -528,6 +709,8 @@ mod tests {
                 version: "1".to_string(),
                 artifact_digest: None,
                 scan_status: "not_scanned".to_string(),
+                component_key: None,
+                sidecar_key: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
