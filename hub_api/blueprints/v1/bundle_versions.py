@@ -77,6 +77,7 @@ class CreateVersionResponse:
     success: bool
     versionId: int
     status: str
+    rejectReason: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -95,7 +96,10 @@ class VersionDTO:
 
 @bundle_versions_bp.route("/<app_id>/versions", methods=["POST"])
 @tenant_middleware  # type: ignore[untyped-decorator]
-async def post_version(app_id: str) -> tuple[dict[str, object], int]:
+@validate_response(CreateVersionResponse, 202)
+async def post_version(
+    app_id: str,
+) -> tuple[CreateVersionResponse | dict[str, object], int]:
     """Upload a new bundle version (multipart: `manifest` + `source` XOR `component`).
 
     Authorization (spec Sec9.2 follow-on, `services/vendor_bundle_authz.py`):
@@ -182,12 +186,12 @@ async def post_version(app_id: str) -> tuple[dict[str, object], int]:
     except ApiError as exc:
         return _err(exc)
     return (
-        {
-            "success": True,
-            "versionId": row.id,
-            "status": row.status,
-            "rejectReason": getattr(row, "reject_reason", None),
-        },
+        CreateVersionResponse(
+            success=True,
+            versionId=row.id,
+            status=row.status,
+            rejectReason=getattr(row, "reject_reason", None),
+        ),
         202,
     )
 

@@ -167,6 +167,169 @@ async def test_approve_version_supersedes_the_previous_current_approval(install_
     assert refreshed_first.superseded_by == second.id
 
 
+async def _active_rows(install_dal: Any, *, app_id: str, tenant_id: int) -> Any:
+    return await install_dal(
+        (install_dal.app_active_versions.app_id == app_id)
+        & (install_dal.app_active_versions.tenant_id == tenant_id)
+    ).select()
+
+
+async def test_version_is_inactive_until_approved(install_dal: Any) -> None:
+    """A PUBLISHED, un-approved version has no `app_active_versions` row (Justin's ruling)."""
+    await _seed_published(install_dal)
+    before = await _active_rows(install_dal, app_id="waddles.socials.music.default", tenant_id=1)
+    assert not before
+
+    await approve_version(
+        install_dal,
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        community_id=None,
+        approved_by=1,
+    )
+    after = await _active_rows(install_dal, app_id="waddles.socials.music.default", tenant_id=1)
+    assert len(after) == 1
+
+
+async def test_approve_version_activates_it_tenant_wide(install_dal: Any) -> None:
+    """`community_id=None` activates tenant-wide, using the `0` sentinel (migration 0022)."""
+    await _seed_published(install_dal)
+    row = await approve_version(
+        install_dal,
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        community_id=None,
+        approved_by=7,
+    )
+    upload = (
+        await install_dal(install_dal.app_version_uploads.version == "3.0.1").select()
+    ).first()
+    active = (
+        await install_dal(
+            (install_dal.app_active_versions.app_id == "waddles.socials.music.default")
+            & (install_dal.app_active_versions.tenant_id == 1)
+            & (install_dal.app_active_versions.community_id == 0)
+        ).select()
+    ).first()
+    assert active is not None
+    assert active.version_id == upload.app_version_id
+    assert active.activated_by == 7
+    assert row.approved_by == 7
+
+
+async def test_approve_version_activates_for_a_specific_community(install_dal: Any) -> None:
+    await _seed_published(install_dal)
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
+    await approve_version(
+        install_dal,
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        community_id=community_id,
+        approved_by=1,
+    )
+    active = (
+        await install_dal(
+            (install_dal.app_active_versions.app_id == "waddles.socials.music.default")
+            & (install_dal.app_active_versions.tenant_id == 1)
+            & (install_dal.app_active_versions.community_id == community_id)
+        ).select()
+    ).first()
+    assert active is not None
+    # tenant-wide sentinel row is untouched by a community-scoped approval
+    tenant_wide = (
+        await install_dal(
+            (install_dal.app_active_versions.app_id == "waddles.socials.music.default")
+            & (install_dal.app_active_versions.tenant_id == 1)
+            & (install_dal.app_active_versions.community_id == 0)
+        ).select()
+    ).first()
+    assert tenant_wide is None
+
+
+async def test_approve_version_reactivation_upserts_the_pointer(install_dal: Any) -> None:
+    """Re-approving a newer version updates the same `(app_id, tenant_id, community_id)` row."""
+    await _seed_published(install_dal)
+    await approve_version(
+        install_dal,
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        community_id=None,
+        approved_by=1,
+    )
+    newer_manifest = {**_MANIFEST, "version": "3.0.2"}
+    await _seed_published(install_dal, manifest=newer_manifest)
+    await approve_version(
+        install_dal,
+        app_id="waddles.socials.music.default",
+        version="3.0.2",
+        tenant_id=1,
+        community_id=None,
+        approved_by=1,
+    )
+    active_rows = await install_dal(
+        (install_dal.app_active_versions.app_id == "waddles.socials.music.default")
+        & (install_dal.app_active_versions.tenant_id == 1)
+        & (install_dal.app_active_versions.community_id == 0)
+    ).select()
+    assert len(active_rows) == 1
+    upload_v2 = (
+        await install_dal(install_dal.app_version_uploads.version == "3.0.2").select()
+    ).first()
+    assert active_rows.first().version_id == upload_v2.app_version_id
+
+
+async def test_approve_version_missing_app_version_id_is_500(install_dal: Any) -> None:
+    """A PUBLISHED row with no digest pointer is a data-integrity bug, refused loudly."""
+    now = datetime.now(UTC)
+    await install_dal.app_version_uploads.async_insert(
+        app_id="waddles.socials.music.default",
+        version="4.0.0",
+        tenant_id=1,
+        artifact_kind="source",
+        language="python",
+        status="PUBLISHED",
+        manifest_json={**_MANIFEST, "version": "4.0.0"},
+        app_version_id=None,
+        created_at=now,
+        updated_at=now,
+    )
+    with pytest.raises(ApiError) as exc:
+        await approve_version(
+            install_dal,
+            app_id="waddles.socials.music.default",
+            version="4.0.0",
+            tenant_id=1,
+            community_id=None,
+            approved_by=1,
+        )
+    assert exc.value.status_code == 500
+    assert exc.value.code == "missing_app_version"
+
+
+async def test_deny_version_does_not_activate(install_dal: Any) -> None:
+    now = datetime.now(UTC)
+    await install_dal.app_version_uploads.async_insert(
+        app_id="waddles.socials.music.default",
+        version="9.9.9",
+        tenant_id=1,
+        artifact_kind="source",
+        language="python",
+        status="UPLOADED",
+        manifest_json={**_MANIFEST, "version": "9.9.9"},
+        created_at=now,
+        updated_at=now,
+    )
+    await deny_version(
+        install_dal, app_id="waddles.socials.music.default", version="9.9.9", reason="bad"
+    )
+    active = await _active_rows(install_dal, app_id="waddles.socials.music.default", tenant_id=1)
+    assert not active
+
+
 def test_classify_diff_widened_when_a_new_table_is_added() -> None:
     previous = {
         "database": [{"table": "music_queue"}],
@@ -298,6 +461,14 @@ async def _seed_uploaded_version_with_routes_to(install_dal: Any, *, routes_to: 
         },
     }
     now = datetime.now(UTC)
+    version_id = await install_dal.app_versions.async_insert(
+        app_id="waddles.socials.music.default",
+        version="3.0.2",
+        artifact_digest="sha256:" + "c" * 64,
+        language="python",
+        artifact_kind="source",
+        scan_status="scanned",
+    )
     await install_dal.app_version_uploads.async_insert(
         app_id="waddles.socials.music.default",
         version="3.0.2",
@@ -306,6 +477,7 @@ async def _seed_uploaded_version_with_routes_to(install_dal: Any, *, routes_to: 
         language="python",
         status="PUBLISHED",
         manifest_json=manifest,
+        app_version_id=version_id,
         created_at=now,
         updated_at=now,
     )

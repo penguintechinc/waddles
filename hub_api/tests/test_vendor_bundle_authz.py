@@ -74,3 +74,20 @@ def test_vendor_cannot_onboard_an_unrelated_namespace() -> None:
     with pytest.raises(ApiError) as exc:
         enforce_vendor_namespace(app_id="waddles.socials.music.default", caller_id=42)
     assert exc.value.status_code == 403
+
+
+def test_vendor_numeric_prefix_collision_is_not_a_match() -> None:
+    """`vendor-4` must not satisfy `vendor-42`'s namespace check, or vice versa.
+
+    A bare `str.startswith()` on `"waddles.integrations.vendor-4"` (no
+    trailing separator) would wrongly match `"...vendor-42.mybundle"` --
+    `vendor_namespace_prefix()`'s own trailing `"."` is what prevents
+    this; this is the regression test for that property.
+    """
+    with pytest.raises(ApiError) as exc:
+        enforce_vendor_namespace(app_id="waddles.integrations.vendor-42.mybundle", caller_id=4)
+    assert exc.value.status_code == 403
+
+    with pytest.raises(ApiError) as exc:
+        enforce_vendor_namespace(app_id="waddles.integrations.vendor-4.mybundle", caller_id=42)
+    assert exc.value.status_code == 403

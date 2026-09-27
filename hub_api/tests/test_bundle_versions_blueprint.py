@@ -116,6 +116,20 @@ async def test_post_version_happy_path(app: Quart) -> None:
     assert body["versionId"] is not None
 
 
+async def test_post_version_response_matches_dto_shape(app: Quart) -> None:
+    """`@validate_response(CreateVersionResponse, 202)` -- exact field set, no drift."""
+    token = make_token(scope="platform:admin", user_id="1")
+    client = app.test_client()
+    response = await client.post(
+        "/api/v1/apps/waddles.socials.music.default/versions",
+        headers={"Authorization": f"Bearer {token}"},
+        files=_upload_files(),
+    )
+    assert response.status_code == 202
+    body = await response.get_json()
+    assert set(body.keys()) == {"success", "versionId", "status", "rejectReason"}
+
+
 async def test_post_version_missing_manifest_is_400(app: Quart) -> None:
     token = make_token(scope="platform:admin")
     client = app.test_client()

@@ -23,15 +23,19 @@ records the consent record only, it does not grant DB privileges.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
 from penguin_dal import AsyncDB
 
+from services.bundle_install_dal import raw_sql_write
 from services.bundle_manifest_v2 import BundleManifestV2, ConsumeRule, EgressRule, Limits
 from services.bundle_version_service import STATUS_PUBLISHED, STATUS_REJECTED, advance_state
 from services.errors import ApiError, not_found
 from services.permission_summary_service import build_permission_summary, permission_hash
+
+logger = logging.getLogger(__name__)
 
 
 def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
@@ -252,6 +256,73 @@ def classify_diff(new_summary: dict[str, Any], previous_summary: dict[str, Any] 
     return "widened"  # mixed add+remove is treated as widening -- the conservative choice
 
 
+#: `app_active_versions.community_id` sentinel for "tenant-wide" (migration
+#: 0022: `communities.id` is a real SERIAL starting at 1, so it never
+#: collides with 0). `approve_version()` maps a caller's `community_id=None`
+#: (tenant-wide approval) to this sentinel before writing the activation
+#: pointer -- `app_install_approvals.community_id` stays a nullable FK
+#: (unaffected), only the separate `app_active_versions` row uses the
+#: sentinel, matching that table's own NOT NULL DEFAULT 0 column.
+TENANT_WIDE_COMMUNITY_SENTINEL = 0
+
+
+async def _activate_version(
+    install_dal: AsyncDB,
+    *,
+    app_id: str,
+    tenant_id: int,
+    community_id: int,
+    version_id: int,
+    activated_by: int,
+) -> None:
+    """Upsert the `app_active_versions` activation pointer (spec Sec6.10, migration 0022).
+
+    That table's own PK is `(app_id, tenant_id, community_id)` --
+    (re)activation and rollback are always an UPDATE of `version_id` on
+    the existing row, never a second row per version (migration 0022's
+    own docstring: "rollback updates version_id, never edits a digest").
+    This is the one and only place a version goes ACTIVE -- vendors never
+    reach this function; only `approve_version()` (itself gated on
+    `platform:admin` by `blueprints/v1/bundle_approvals.py`) calls it.
+
+    The INSERT branch goes through `raw_sql_write()`, not
+    `TableProxy.async_insert()` -- that convenience method assumes a
+    single-column autoincrement PK (`RETURNING`'s `inserted_primary_key[0]`)
+    and this table's PK is the composite `(app_id, tenant_id,
+    community_id)` above, exactly the "single-table Query/TableProxy
+    builder cannot express" case `bundle_install_dal.py`'s own docstring
+    names this escape hatch for.
+    """
+    now = datetime.now(UTC)
+    existing = await install_dal(
+        (install_dal.app_active_versions.app_id == app_id)
+        & (install_dal.app_active_versions.tenant_id == tenant_id)
+        & (install_dal.app_active_versions.community_id == community_id)
+    ).select()
+    if existing:
+        await install_dal(
+            (install_dal.app_active_versions.app_id == app_id)
+            & (install_dal.app_active_versions.tenant_id == tenant_id)
+            & (install_dal.app_active_versions.community_id == community_id)
+        ).update(version_id=version_id, activated_by=activated_by, activated_at=now)
+    else:
+        await raw_sql_write(
+            install_dal,
+            "INSERT INTO app_active_versions "
+            "(app_id, tenant_id, community_id, version_id, activated_by, activated_at) "
+            "VALUES "
+            "(:app_id, :tenant_id, :community_id, :version_id, :activated_by, :activated_at)",
+            {
+                "app_id": app_id,
+                "tenant_id": tenant_id,
+                "community_id": community_id,
+                "version_id": version_id,
+                "activated_by": activated_by,
+                "activated_at": now,
+            },
+        )
+
+
 async def approve_version(
     install_dal: AsyncDB,
     *,
@@ -262,7 +333,18 @@ async def approve_version(
     approved_by: int,
     expected_permission_hash: str | None = None,
 ) -> Any:
-    """Record an `app_install_approvals` row. Fails closed on a headless hash mismatch (Sec9.7.5).
+    """Record an `app_install_approvals` row and activate the version (spec Sec9.7, Sec6.10).
+
+    Vendor separation (Justin's ruling, 2026-09-27): a vendor SUBMITS
+    (`bundle_version_service.create_version`/`process_prebuilt_component`,
+    reachable via `vendor:onboard`) but only a GLOBAL ADMIN may APPROVE +
+    INSTALL -- this function is reachable exclusively through
+    `blueprints/v1/bundle_approvals.py::post_approve`, gated on
+    `@require_scope("platform:admin")`; no vendor-scoped code path calls
+    it or `_activate_version()`. A submitted version therefore stays
+    absent from `app_active_versions` (INACTIVE) from upload through
+    every FSM state up to and including PUBLISHED, until this function
+    runs successfully.
 
     Refuses (404) a `community_id` that does not belong to the caller's
     tenant, before anything else -- an IDOR a client-supplied
@@ -272,6 +354,13 @@ async def approve_version(
     exist or is installed in a different tenant, before recording
     anything (spec Sec5.9, D30) -- the runtime independently drops such
     a redirect at the stage as well; this is the install-time half.
+
+    Activation (writing/upserting `app_active_versions`) happens only
+    after the `app_install_approvals` row is durably recorded -- the
+    consent record is the audit trail of *why* a version went active, so
+    it must exist first. `community_id=None` (tenant-wide) maps to
+    `TENANT_WIDE_COMMUNITY_SENTINEL` for the activation pointer only; the
+    approval record itself keeps the nullable `community_id` as given.
     """
     if community_id is not None:
         await _validate_community_tenant(
@@ -311,6 +400,22 @@ async def approve_version(
             "permission_hash_mismatch",
         )
 
+    if upload.app_version_id is None:
+        # Defensive only -- every real PUBLISHED row's publish step (a
+        # separate, not-yet-built milestone, see this module's own scope
+        # note) sets `app_version_id` before advancing to PUBLISHED. A
+        # PUBLISHED row with no digest pointer is a data-integrity bug,
+        # never a legitimate caller state -- checked here, after every
+        # other refusal (routes_to, hash mismatch) but BEFORE the approval
+        # row is written, so a failure here never leaves a dangling
+        # `app_install_approvals` row (or a wrongly-superseded previous
+        # one) with no matching activation.
+        raise ApiError(
+            f"version {version} of {app_id} is PUBLISHED but has no app_versions row",
+            500,
+            "missing_app_version",
+        )
+
     previous_rows = await install_dal(
         (install_dal.app_install_approvals.app_id == app_id)
         & (install_dal.app_install_approvals.tenant_id == tenant_id)
@@ -333,6 +438,27 @@ async def approve_version(
         await install_dal(install_dal.app_install_approvals.id == previous.id).update(
             superseded_by=new_id
         )
+
+    active_community_id = TENANT_WIDE_COMMUNITY_SENTINEL if community_id is None else community_id
+    await _activate_version(
+        install_dal,
+        app_id=app_id,
+        tenant_id=tenant_id,
+        community_id=active_community_id,
+        version_id=upload.app_version_id,
+        activated_by=approved_by,
+    )
+    logger.info(
+        "bundle approval: version activated",
+        extra={
+            "app_id": app_id,
+            "version": version,
+            "tenant_id": tenant_id,
+            "community_id": community_id,
+            "approved_by": approved_by,
+        },
+    )
+
     return (await install_dal(install_dal.app_install_approvals.id == new_id).select()).first()
 
 
