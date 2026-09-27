@@ -9,7 +9,9 @@ use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::entities::{app_active_versions, app_install_approvals, app_versions};
+use crate::entities::{
+    app_active_versions, app_install_approvals, app_source_bindings, app_versions,
+};
 
 #[derive(Debug, Error)]
 pub enum ActiveSetError {
@@ -55,12 +57,21 @@ pub struct ActiveBundleRow {
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Watermark(String);
 
-/// Reads [`Watermark`] for `(tenant_id, community_id)` -- one query
-/// (`app_active_versions` only, no join), small result set (bounded by the
-/// number of apps active in this one scope). Cheap enough to run every
-/// poll tick even when nothing has changed; still meaningfully cheaper
-/// than [`read_active_set`], which additionally joins `app_versions` and
-/// `app_install_approvals`.
+/// Reads [`Watermark`] for `(tenant_id, community_id)` -- two queries
+/// (`app_active_versions` and `app_source_bindings`, no join), small
+/// result sets (bounded by the number of apps/bindings active in this one
+/// scope). Cheap enough to run every poll tick even when nothing has
+/// changed; still meaningfully cheaper than [`read_active_set`], which
+/// additionally joins `app_versions` and `app_install_approvals`.
+///
+/// `app_source_bindings` rows are folded into the same fingerprint as
+/// `app_active_versions` (rather than a second, independent watermark) so
+/// a binding add/remove alone -- with no `app_active_versions` change at
+/// all -- still moves the one watermark both `crate::query::read_active_set`
+/// callers (bundle load/unload) and `svc_process`'s source-binding
+/// supervisor poll against; the two callers already tolerate reading a
+/// larger row set than they individually need (mirrors `read_active_set`
+/// itself, which every caller re-reads in full on any scope-wide change).
 pub async fn read_watermark(
     conn: &DatabaseConnection,
     tenant_id: i32,
@@ -86,6 +97,34 @@ pub async fn read_watermark(
         hasher.update(row.version_id.to_le_bytes());
         hasher.update(b"\n");
     }
+
+    let mut binding_rows = app_source_bindings::Entity::find()
+        .filter(app_source_bindings::Column::TenantId.eq(tenant_id))
+        .filter(app_source_bindings::Column::CommunityId.eq(community_id))
+        .all(conn)
+        .await?;
+    // `(app_id, platform, source_id)` is the table's own composite PK
+    // (alongside tenant/community, both already fixed by this scope), so
+    // sorting by all three -- in Rust, not `order_by_asc` chaining, kept
+    // simple since this list is always small -- yields the same
+    // deterministic-sequence guarantee `app_active_versions`'s own
+    // `app_id`-only sort relies on above.
+    binding_rows.sort_by(|a, b| {
+        (a.app_id.as_str(), a.platform.as_str(), a.source_id.as_str()).cmp(&(
+            b.app_id.as_str(),
+            b.platform.as_str(),
+            b.source_id.as_str(),
+        ))
+    });
+    for row in &binding_rows {
+        hasher.update(row.app_id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(row.platform.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(row.source_id.as_bytes());
+        hasher.update(b"\n");
+    }
+
     Ok(Watermark(format!("{:x}", hasher.finalize())))
 }
 
@@ -436,6 +475,7 @@ mod tests {
                 active_model("waddles.a", 1, 0, 10),
                 active_model("waddles.b", 1, 0, 3),
             ]])
+            .append_query_results([Vec::<app_source_bindings::Model>::new()])
             .into_connection();
         let watermark = read_watermark(&db, 1, 0).await?;
         assert_eq!(
@@ -450,6 +490,7 @@ mod tests {
     {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([Vec::<app_active_versions::Model>::new()])
+            .append_query_results([Vec::<app_source_bindings::Model>::new()])
             .into_connection();
         let watermark = read_watermark(&db, 1, 0).await?;
         // The empty-scope watermark is SHA-256 of zero bytes, NOT
@@ -478,10 +519,12 @@ mod tests {
                 active_model("waddles.a", 1, 0, 10),
                 active_model("waddles.b", 1, 0, 5),
             ]])
+            .append_query_results([Vec::<app_source_bindings::Model>::new()])
             .append_query_results([vec![
                 active_model("waddles.a", 1, 0, 9),
                 active_model("waddles.b", 1, 0, 6),
             ]])
+            .append_query_results([Vec::<app_source_bindings::Model>::new()])
             .into_connection();
 
         let before = read_watermark(&db, 1, 0).await?;
@@ -489,6 +532,84 @@ mod tests {
         assert_ne!(
             before, after,
             "A-1/B+1 in the same tick must still move the watermark"
+        );
+        Ok(())
+    }
+
+    fn binding_model(
+        app_id: &str,
+        tenant_id: i32,
+        community_id: i32,
+        platform: &str,
+        source_id: &str,
+    ) -> app_source_bindings::Model {
+        app_source_bindings::Model {
+            tenant_id,
+            community_id,
+            app_id: app_id.to_string(),
+            platform: platform.to_string(),
+            source_id: source_id.to_string(),
+        }
+    }
+
+    /// Regression test for the source-binding supervisor's own change-
+    /// detection dependency: an `app_source_bindings` row appearing with NO
+    /// `app_active_versions` change at all must still move the watermark --
+    /// otherwise a newly-added binding for an already-active app would
+    /// never be picked up until some unrelated activation churn happened to
+    /// also occur.
+    #[tokio::test]
+    async fn read_watermark_moves_when_a_binding_is_added_with_no_active_versions_change(
+    ) -> Result<(), ActiveSetError> {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_model("waddles.a", 1, 0, 10)]])
+            .append_query_results([Vec::<app_source_bindings::Model>::new()])
+            .append_query_results([vec![active_model("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![binding_model(
+                "waddles.a",
+                1,
+                0,
+                "twitch",
+                "tw-channelA",
+            )]])
+            .into_connection();
+
+        let before = read_watermark(&db, 1, 0).await?;
+        let after = read_watermark(&db, 1, 0).await?;
+        assert_ne!(
+            before, after,
+            "a binding add with no active_versions change must still move the watermark"
+        );
+        Ok(())
+    }
+
+    /// Complementary regression: the same two rows in a *different* order
+    /// off the mock's own return sequence must still fingerprint identically
+    /// -- proves the in-Rust `sort_by` before hashing (not incidental query
+    /// ordering) is what makes the binding half of the watermark
+    /// deterministic, mirroring `app_active_versions`'s own `order_by_asc`
+    /// guarantee.
+    #[tokio::test]
+    async fn read_watermark_binding_order_does_not_affect_the_fingerprint(
+    ) -> Result<(), ActiveSetError> {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_model("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![
+                binding_model("waddles.a", 1, 0, "twitch", "tw-channelA"),
+                binding_model("waddles.a", 1, 0, "discord", "dg-x"),
+            ]])
+            .append_query_results([vec![active_model("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![
+                binding_model("waddles.a", 1, 0, "discord", "dg-x"),
+                binding_model("waddles.a", 1, 0, "twitch", "tw-channelA"),
+            ]])
+            .into_connection();
+
+        let first = read_watermark(&db, 1, 0).await?;
+        let second = read_watermark(&db, 1, 0).await?;
+        assert_eq!(
+            first, second,
+            "the same binding set in a different query-return order must hash identically"
         );
         Ok(())
     }

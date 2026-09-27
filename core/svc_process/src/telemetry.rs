@@ -132,6 +132,52 @@ pub fn register_bundle_loader_excluded_metrics(
     excluded_total
 }
 
+/// Prometheus handles for `crate::source_supervisor`: a gauge tracking how
+/// many per-`(app_id, platform, source_id)` binding consumer tasks are
+/// currently running, and a counter (labeled `action` = `"spawn"`/`"stop"`)
+/// tracking every spawn/stop transition -- so a flapping binding (spawned
+/// and stopped repeatedly, e.g. a NOGROUP retry loop against a
+/// not-yet-provisioned stream) is visible on a dashboard, not just the
+/// point-in-time gauge value.
+#[derive(Clone)]
+pub struct SourceBindingSupervisorMetrics {
+    pub active_consumers: prometheus::IntGauge,
+    pub consumer_transitions_total: prometheus::IntCounterVec,
+}
+
+/// Registers [`SourceBindingSupervisorMetrics`] against `registry`. Must be
+/// called exactly once per `registry` -- see
+/// [`register_bundle_loader_excluded_metrics`]'s identical constraint.
+pub fn register_source_binding_supervisor_metrics(
+    registry: &prometheus::Registry,
+) -> SourceBindingSupervisorMetrics {
+    let active_consumers = prometheus::IntGauge::new(
+        "svc_process_source_binding_consumers_active",
+        "Number of per-(app_id, platform, source_id) source-binding consumer tasks currently running",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(active_consumers.clone()))
+        .expect("register svc_process_source_binding_consumers_active");
+
+    let consumer_transitions_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_source_binding_consumer_transitions_total",
+            "Source-binding consumer spawn/stop transitions, labeled by action",
+        ),
+        &["action"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(consumer_transitions_total.clone()))
+        .expect("register svc_process_source_binding_consumer_transitions_total");
+
+    SourceBindingSupervisorMetrics {
+        active_consumers,
+        consumer_transitions_total,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +227,20 @@ mod tests {
         let registry = prometheus::Registry::new();
         let rendered = render_metrics(&registry).expect("empty registry still encodes");
         assert!(rendered.is_empty());
+    }
+
+    #[test]
+    fn register_source_binding_supervisor_metrics_produces_a_gauge_and_labeled_counter() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_source_binding_supervisor_metrics(&registry);
+        metrics.active_consumers.inc();
+        metrics
+            .consumer_transitions_total
+            .with_label_values(&["spawn"])
+            .inc();
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_process_source_binding_consumers_active 1"));
+        assert!(rendered.contains("svc_process_source_binding_consumer_transitions_total"));
+        assert!(rendered.contains(r#"action="spawn""#));
     }
 }

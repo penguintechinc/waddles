@@ -286,11 +286,12 @@ pub struct CliConfig {
 
     // -- DB-driven active-bundle loader (spec: hub-api is the sole writer,
     // this stage reads ACTIVE, APPROVED bundle config from a READ-ONLY
-    // Postgres and hot-swaps in/out with no pod restart) -- gated OFF by
-    // default behind `waddles.core.db-bundle-config` (`crate::license`);
-    // when the flag is off/unavailable, the existing `ACTION_APP_ID`/
-    // `ACTION_BUNDLE_*` env selection and the `crate::distribution` catalog
-    // poll remain the sole selection mechanisms. See `crate::bundle_loader`.
+    // Postgres and hot-swaps in/out with no pod restart) -- ENABLED by
+    // default; opt out via the `waddles.core.disable-db-bundle-config`
+    // kill-switch (`crate::flags`). When the kill-switch is on or the DB
+    // path is unavailable, the existing `ACTION_APP_ID`/`ACTION_BUNDLE_*`
+    // env selection and the `crate::distribution` catalog poll remain the
+    // sole selection mechanisms. See `crate::bundle_loader`.
     // Field shapes/defaults mirror `core/svc_process::config::CliConfig`'s
     // identical additions exactly -- same env var names across both
     // services, kept consistent per that crate's own doc rationale.
@@ -413,9 +414,9 @@ pub struct Config {
     pub discord_bot_token: Option<Secret>,
     /// `DB_READER_PASSWORD` for the DB-driven active-bundle loader's
     /// read-only Postgres role (`crate::bundle_loader`). Deliberately
-    /// `Option`, unlike `db_password`/`secret_key`: this loader is gated
-    /// OFF by default (`waddles.core.db-bundle-config`), so a fresh alpha
-    /// deployment that hasn't provisioned the RO role yet must not fail
+    /// `Option`, unlike `db_password`/`secret_key`: this loader is enabled
+    /// by default (opt out via `waddles.core.disable-db-bundle-config`), so
+    /// a fresh alpha deployment that hasn't provisioned the RO role yet must not fail
     /// startup over it -- `crate::lib::try_start_db_bundle_loader` logs a
     /// warning and stays disabled (falling back to the existing
     /// `ACTION_APP_ID`/`ACTION_BUNDLE_*`/catalog-poll selection) when this
