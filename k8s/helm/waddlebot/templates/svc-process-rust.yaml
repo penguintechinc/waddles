@@ -168,8 +168,16 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: DB_READER_PASSWORD
+        {{- /* Bug fix: rendered only when explicitly set -- never defaulted to 0.
+        core/svc_process/src/config.rs's TenantScopeId treats an unset/empty env var
+        as None ("not configured") and Some(0) as the real, legitimate global tenant;
+        defaulting this to the string "0" here would make the loader indistinguishable
+        from "explicitly scoped to tenant 0" and reintroduce the exact bug this chart
+        change is paired with. */}}
+        {{- if ne (.Values.pipeline.rustDataPlane.svcProcess.bundleScopeTenantId | toString) "" }}
         - name: BUNDLE_SCOPE_TENANT_ID
-          value: {{ .Values.pipeline.rustDataPlane.svcProcess.bundleScopeTenantId | default 0 | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.bundleScopeTenantId | quote }}
+        {{- end }}
         - name: BUNDLE_SCOPE_COMMUNITY_ID
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.bundleScopeCommunityId | default 0 | quote }}
         - name: BUNDLE_CONFIG_POLL_SECONDS

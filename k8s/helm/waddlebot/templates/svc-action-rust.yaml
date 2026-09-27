@@ -138,8 +138,13 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: DB_READER_PASSWORD
+        {{- /* Bug fix: rendered only when explicitly set -- see
+        templates/svc-process-rust.yaml's identical block for the full rationale
+        (core/svc_action/src/config.rs TenantScopeId mirrors svc_process's own). */}}
+        {{- if ne (.Values.pipeline.rustDataPlane.svcAction.bundleScopeTenantId | toString) "" }}
         - name: BUNDLE_SCOPE_TENANT_ID
-          value: {{ .Values.pipeline.rustDataPlane.svcAction.bundleScopeTenantId | default 0 | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.bundleScopeTenantId | quote }}
+        {{- end }}
         - name: BUNDLE_SCOPE_COMMUNITY_ID
           value: {{ .Values.pipeline.rustDataPlane.svcAction.bundleScopeCommunityId | default 0 | quote }}
         - name: BUNDLE_CONFIG_POLL_SECONDS
