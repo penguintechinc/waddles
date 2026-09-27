@@ -820,12 +820,19 @@ pipeline:
       # the exact GRANT statements this role needs; provisioning the role itself is a
       # follow-up (not a Helm change) tracked outside this chart.
       dbReaderUser: "svc_process_ro"
-      # 0 = "not configured" (tenants.id is a real SERIAL starting at 1) -- the loader
-      # stays disabled until a real tenant scope is set, same fail-safe posture as every
-      # other interim env-driven substitute in this block.
-      bundleScopeTenantId: 0
+      # Bug fix: left unset ("") rather than defaulted to 0 -- the Rust side
+      # (core/svc_process/src/config.rs TenantScopeId) now distinguishes "not
+      # configured" (None) from the real, legitimate global tenant `0`
+      # (Some(0)), so this chart must not collapse those two states by
+      # defaulting to 0 either. templates/svc-process-rust.yaml only renders
+      # BUNDLE_SCOPE_TENANT_ID at all when this is non-empty; the loader
+      # stays disabled (same fail-safe posture as every other interim
+      # env-driven substitute in this block) until a values file
+      # (e.g. values-alpha.yaml) sets a real tenant scope, `0` included.
+      bundleScopeTenantId: ""
       # 0 = tenant-wide (matches app_active_versions.community_id's own sentinel,
-      # migration 0022_app_versions_and_rbac).
+      # migration 0022_app_versions_and_rbac). Unlike bundleScopeTenantId above, 0
+      # really is the intended default here, so this one keeps its literal default.
       bundleScopeCommunityId: 0
       # Whole seconds; clamped to a 5s floor in code (CliConfig::
       # bundle_config_poll_interval) so a misconfigured 0/negative value here can never
@@ -876,7 +883,9 @@ pipeline:
       dbReaderPort: ""
       dbReaderName: ""
       dbReaderUser: "svc_action_ro"
-      bundleScopeTenantId: 0
+      # Bug fix: left unset ("") rather than defaulted to 0 -- see svcProcess's
+      # identical field's own comment above for the full rationale.
+      bundleScopeTenantId: ""
       bundleScopeCommunityId: 0
       bundleConfigPollSeconds: 300
       resources:

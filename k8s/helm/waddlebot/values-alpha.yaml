@@ -228,15 +228,18 @@ pipeline:
       processBundleComponentKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.wasm"
       processBundleSidecarKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.json"
       # DB-driven active-bundle loader (core/svc_process/src/config.rs,
-      # core/bundle_active_set) -- gated OFF by default (waddles.core.db-bundle-config)
-      # and additionally disabled here by bundleScopeTenantId staying unset (0): the RO
-      # Postgres role (svc_process_ro) and a real tenant scope aren't provisioned in this
-      # cluster yet, so PROCESS_APP_ID/PROCESS_BUNDLE_* above remain this alpha e2e
-      # proof's sole bundle source, unaffected by this block. Only overriding the poll
-      # interval here (tunable per deployment, per the task's own instruction) -- a
-      # shorter interval than the 300s chart default so a future alpha e2e proof of the
-      # hot-swap path itself doesn't need a multi-minute wait between DB writes and the
-      # loader noticing.
+      # core/bundle_active_set) -- gated OFF by default (waddles.core.db-bundle-config).
+      # bundleScopeTenantId is set to 0 here (the global/default tenant) for this
+      # cluster's own scope, but the RO Postgres role (svc_process_ro) still isn't
+      # provisioned yet -- DB_READER_PASSWORD stays empty (templates/secrets.yaml
+      # default), which is `try_start_db_bundle_loader`'s own independent disable gate
+      # (core/svc_process/src/lib.rs). So PROCESS_APP_ID/PROCESS_BUNDLE_* above remain
+      # this alpha e2e proof's sole bundle source, unaffected by this block, until that
+      # role exists. Only overriding the poll interval here (tunable per deployment, per
+      # the task's own instruction) -- a shorter interval than the 300s chart default so
+      # a future alpha e2e proof of the hot-swap path itself doesn't need a
+      # multi-minute wait between DB writes and the loader noticing.
+      bundleScopeTenantId: 0
       bundleConfigPollSeconds: 30
       resources:
         requests: { cpu: "100m", memory: "128Mi" }
@@ -254,6 +257,7 @@ pipeline:
       actionBundleComponentKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.wasm"
       actionBundleSidecarKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.json"
       # DB-driven active-bundle loader -- see svcProcess's identical comment above.
+      bundleScopeTenantId: 0
       bundleConfigPollSeconds: 30
       resources:
         requests: { cpu: "100m", memory: "128Mi" }

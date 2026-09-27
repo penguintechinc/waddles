@@ -321,9 +321,9 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
 /// hot-swaps in/out with no pod restart). Two independent reasons this
 /// never starts, both logged and neither an error -- `DB_READER_PASSWORD`
 /// unset (the RO account hasn't been provisioned yet in this environment)
-/// or `BUNDLE_SCOPE_TENANT_ID` unset (`0`, the "not configured" sentinel --
-/// `tenants.id` is a real `SERIAL` starting at 1, see `config::CliConfig`'s
-/// own doc). Either way, `try_start_process_loop`'s existing
+/// or `BUNDLE_SCOPE_TENANT_ID` unset (`None` -- see `config::TenantScopeId`'s
+/// own doc for why this is no longer collapsed onto `0`, a real, selectable
+/// tenant). Either way, `try_start_process_loop`'s existing
 /// `PROCESS_APP_ID`/`PROCESS_BUNDLE_*` env selection remains the sole
 /// source; this loader only supplements it once actually configured, and
 /// is additionally gated per-tick on `waddles.core.db-bundle-config`
@@ -340,12 +340,12 @@ fn try_start_db_bundle_loader(
         );
         return;
     };
-    if config.cli.bundle_scope_tenant_id == 0 {
+    let Some(tenant_id) = config.cli.bundle_scope_tenant_id.get() else {
         tracing::info!(
             "BUNDLE_SCOPE_TENANT_ID not set; DB-driven bundle loader not started (env selection remains authoritative)"
         );
         return;
-    }
+    };
 
     let license_client = match license::build_license_client("waddles") {
         Ok(c) => c,
@@ -364,7 +364,6 @@ fn try_start_db_bundle_loader(
         user: config.cli.db_reader_user.clone(),
     };
     let password = password.expose().to_string();
-    let tenant_id = config.cli.bundle_scope_tenant_id;
     let community_id = config.cli.bundle_scope_community_id;
     let poll_interval = config.cli.bundle_config_poll_interval();
     let call_timeout_ms = config.cli.executor_call_timeout_ms;
@@ -546,12 +545,33 @@ mod tests {
     }
 
     /// Same no-op contract, the other independent startup gate:
-    /// `BUNDLE_SCOPE_TENANT_ID` unset (`0`, `CliConfig`'s default) even
+    /// `BUNDLE_SCOPE_TENANT_ID` unset (`None`, `CliConfig`'s default) even
     /// with a real reader password present.
     #[tokio::test]
     async fn try_start_db_bundle_loader_noop_when_tenant_id_unset() {
         let cli = CliConfig::parse_from(["svc-process"]);
-        assert_eq!(cli.bundle_scope_tenant_id, 0);
+        assert_eq!(cli.bundle_scope_tenant_id.get(), None);
+        let mut config = test_config(cli);
+        config.db_reader_password = Some(crate::config::Secret::new("real-ro-password"));
+        try_start_db_bundle_loader(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            test_excluded_metric(),
+        );
+    }
+
+    /// Bug fix regression: tenant `0` is a real, legitimate tenant (not the
+    /// "unset" sentinel the old bare-`i32` field collapsed it onto) and
+    /// must clear this gate rather than being treated as not-configured.
+    /// This only asserts the gate is cleared (no panic / hang from the
+    /// synchronous portion of the function); the spawned task's own DB
+    /// connection failure against an unreachable host is covered by
+    /// `try_start_db_bundle_loader_noop_when_db_reader_password_unset`'s
+    /// sibling contract, not re-asserted here.
+    #[tokio::test]
+    async fn try_start_db_bundle_loader_clears_tenant_gate_when_tenant_id_is_zero() {
+        let cli = CliConfig::parse_from(["svc-process", "--bundle-scope-tenant-id", "0"]);
+        assert_eq!(cli.bundle_scope_tenant_id.get(), Some(0));
         let mut config = test_config(cli);
         config.db_reader_password = Some(crate::config::Secret::new("real-ro-password"));
         try_start_db_bundle_loader(
