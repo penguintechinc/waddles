@@ -41,8 +41,8 @@ use penguin_bundle_host::wire::{
     ErrorCode, ExportKind, InvokeBody, LoadBody, LoadLimits, LoadedBody, Message, TraceContext,
 };
 use penguin_spine::{
-    Delivered, DlqError, DlqErrorKind, Grant, GroupReader, PlatformEvent, Scope, SpineClient,
-    SpineConfig, SpineError, SpineMetrics, Stage, StageEnvelope,
+    Delivered, DlqError, DlqErrorKind, Grant, GroupReader, PlatformEvent, Scope, Source,
+    SpineClient, SpineConfig, SpineError, SpineMetrics, Stage, StageEnvelope,
 };
 
 use crate::builtins::RouteDecision;
@@ -74,9 +74,25 @@ fn wire_platform_event(event: &PlatformEvent) -> Result<serde_json::Value, serde
 /// input would be -- a bundle's return value is guest-controlled and must
 /// never be trusted more than wire input from any other untrusted source.
 /// `source` is never populated from bundle output (spec §6.5's WIT record
-/// has no `source` field at all -- it is stage-injected provenance, not a
-/// bundle-settable value).
-fn platform_event_from_wire(wire: &serde_json::Value) -> Result<PlatformEvent, InvokeError> {
+/// has no `source` field at all -- a bundle cannot set one on the wire).
+/// It IS stage-injected here, though, from `origin_source` -- the
+/// ORIGINAL inbound event's own `source` (passed in by
+/// [`invoke_transform`]'s caller, which still holds it) -- so a relay
+/// reply (e.g. Discord `!ping` -> `pong`) carries forward the origin
+/// platform connection/channel the bundle itself never had a way to
+/// supply. Only stamped when the reply's `platform` still matches the
+/// origin's (`Source::platform` must equal its owning event's `platform`,
+/// enforced by `PlatformEvent`'s own `Deserialize`); a reply naming a
+/// DIFFERENT platform than the inbound event gets no origin, never a
+/// stamped-but-wrong one. Before this fix `source` was unconditionally
+/// hardcoded to `null` here, so `core/svc_action/src/dispatch.rs`'s
+/// `origin_channel_id` (read from exactly this field) was always `None`
+/// and every Discord relay failed with "discord relay requires an origin
+/// channel id".
+fn platform_event_from_wire(
+    wire: &serde_json::Value,
+    origin_source: Option<&Source>,
+) -> Result<PlatformEvent, InvokeError> {
     let obj = wire.as_object().ok_or_else(|| {
         InvokeError::MalformedPayload("transform reply is not a JSON object".to_string())
     })?;
@@ -97,8 +113,21 @@ fn platform_event_from_wire(wire: &serde_json::Value) -> Result<PlatformEvent, I
         "occurred_at": obj.get("occurred_at"),
         "source": null,
     });
-    serde_json::from_value(reconstructed)
-        .map_err(|e| InvokeError::MalformedPayload(format!("invalid platform-event: {e}")))
+    let mut event: PlatformEvent = serde_json::from_value(reconstructed)
+        .map_err(|e| InvokeError::MalformedPayload(format!("invalid platform-event: {e}")))?;
+    if let Some(source) = origin_source {
+        if source.platform == event.platform {
+            event.source = Some(source.clone());
+        } else {
+            tracing::debug!(
+                reply_platform = %event.platform,
+                origin_platform = %source.platform,
+                "transform reply platform differs from the origin event's platform, \
+                 leaving source unset"
+            );
+        }
+    }
+    Ok(event)
 }
 
 /// Errors invoking the bundle's `transform` export over the host-API
@@ -284,8 +313,8 @@ pub async fn invoke_transform(
                     return Ok(TransformOutcome::UnsupportedStage);
                 }
             }
-            let event = platform_event_from_wire(&body.payload)?;
-            Ok(TransformOutcome::Reply(Box::new(event)))
+            let reply_event = platform_event_from_wire(&body.payload, event.source.as_ref())?;
+            Ok(TransformOutcome::Reply(Box::new(reply_event)))
         }
         Message::Error(e) => Err(InvokeError::ExecutorError {
             code: e.code,
@@ -767,6 +796,68 @@ mod tests {
         }
     }
 
+    /// Same shape as [`fixture_delivered`], but a Discord `MESSAGE_CREATE`-
+    /// derived inbound event carrying a populated `source` (origin
+    /// platform/account/channel) -- the shape svc-ingest's Discord
+    /// connector actually stamps, and what
+    /// [`platform_event_from_wire_propagates_the_origin_events_source_when_platforms_match`]
+    /// and the `handle_delivered_*` origin-channel-propagation regression
+    /// test below exercise end to end.
+    fn fixture_delivered_discord(
+        tenant: &str,
+        community: Option<&str>,
+        ring: &KeyRing,
+        kid: &str,
+        channel_id: &str,
+    ) -> Delivered {
+        let mac = penguin_spine::compute_binding_mac(
+            ring,
+            kid,
+            tenant,
+            community,
+            "00000000-0000-0000-0000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+            None,
+        )
+        .unwrap();
+        let community_segment = community.unwrap_or(penguin_spine::TENANT_WIDE_SEGMENT);
+        Delivered {
+            stream: format!(
+                "waddles:t:{tenant}:c:{community_segment}:src:discord:dc-guildA:events"
+            ),
+            entry_id: "1234567890-0".to_string(),
+            env: serde_json::from_value(serde_json::json!({
+                "schema_version": 2,
+                "tenant": tenant,
+                "community": community,
+                "app_id": "waddles.bot.commands.default",
+                "stage": "process",
+                "event": {
+                    "platform": "discord",
+                    "event_type": "message.create",
+                    "actor": "some_user",
+                    "payload": {"text": "!ping"},
+                    "occurred_at": "2026-09-22T00:00:00.000Z",
+                    "source": {
+                        "platform": "discord",
+                        "account_id": "bot-primary",
+                        "channel_id": channel_id
+                    }
+                },
+                "ts": "2026-09-22T00:00:00.000Z",
+                "target_app_id": null,
+                "workstream_id": "00000000-0000-0000-0000-000000000001",
+                "event_id": "00000000-0000-4000-8000-000000000002",
+                "session_id": null,
+                "trace": null,
+                "binding": {"kid": kid, "mac": mac}
+            }))
+            .unwrap(),
+            deliveries: 1,
+            group: "waddles.bot.commands.default".to_string(),
+        }
+    }
+
     fn test_ring() -> KeyRing {
         KeyRing::new(vec![("k1".to_string(), vec![9u8; 32])])
     }
@@ -800,15 +891,74 @@ mod tests {
             source: None,
         };
         let wire = wire_platform_event(&event).unwrap();
-        let round_tripped = platform_event_from_wire(&wire).unwrap();
+        let round_tripped = platform_event_from_wire(&wire, None).unwrap();
         assert_eq!(round_tripped.platform, "discord");
         assert_eq!(round_tripped.actor, None);
         assert_eq!(round_tripped.payload.get("a"), Some(&serde_json::json!(1)));
+        assert_eq!(round_tripped.source, None);
+    }
+
+    /// **The regression test for the origin-channel-propagation bug**: a
+    /// `transform` reply on the SAME platform as the original inbound
+    /// event must carry that inbound event's `source` forward (stage-
+    /// injected provenance -- the WIT wire shape has no `source` field for
+    /// a bundle to set one itself). Before this fix `source` was
+    /// unconditionally `null`, which is exactly what made
+    /// `core/svc_action/src/dispatch.rs`'s `origin_channel_id` (read from
+    /// this same field) always `None` and every Discord relay fail with
+    /// "discord relay requires an origin channel id".
+    #[test]
+    fn platform_event_from_wire_propagates_the_origin_events_source_when_platforms_match() {
+        let reply = PlatformEvent {
+            platform: "discord".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: Some("bot".to_string()),
+            payload: serde_json::from_value(serde_json::json!({"text": "pong"})).unwrap(),
+            occurred_at: "2026-09-22T00:00:00.000Z".to_string(),
+            source: None,
+        };
+        let wire = wire_platform_event(&reply).unwrap();
+        let origin_source = Source {
+            platform: "discord".to_string(),
+            account_id: "bot-primary".to_string(),
+            channel_id: Some("123456789012345678".to_string()),
+        };
+
+        let event = platform_event_from_wire(&wire, Some(&origin_source)).unwrap();
+
+        assert_eq!(event.source, Some(origin_source));
+    }
+
+    /// A reply naming a DIFFERENT platform than the origin event gets no
+    /// stamped `source` at all -- never a stamped-but-wrong one (`Source::
+    /// platform` must equal its owning event's `platform`, enforced by
+    /// `PlatformEvent`'s own `Deserialize`).
+    #[test]
+    fn platform_event_from_wire_leaves_source_unset_on_platform_mismatch() {
+        let reply = PlatformEvent {
+            platform: "twitch".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: None,
+            payload: serde_json::from_value(serde_json::json!({})).unwrap(),
+            occurred_at: "2026-09-22T00:00:00.000Z".to_string(),
+            source: None,
+        };
+        let wire = wire_platform_event(&reply).unwrap();
+        let origin_source = Source {
+            platform: "discord".to_string(),
+            account_id: "bot-primary".to_string(),
+            channel_id: Some("123456789012345678".to_string()),
+        };
+
+        let event = platform_event_from_wire(&wire, Some(&origin_source)).unwrap();
+
+        assert_eq!(event.source, None);
     }
 
     #[test]
     fn platform_event_from_wire_rejects_missing_payload_json() {
-        let err = platform_event_from_wire(&serde_json::json!({"platform": "x"})).unwrap_err();
+        let err =
+            platform_event_from_wire(&serde_json::json!({"platform": "x"}), None).unwrap_err();
         assert!(matches!(err, InvokeError::MalformedPayload(_)));
     }
 
@@ -821,12 +971,12 @@ mod tests {
             "payload_json": "{}",
             "occurred_at": "2026-09-22T00:00:00.000Z",
         });
-        assert!(platform_event_from_wire(&wire).is_err());
+        assert!(platform_event_from_wire(&wire, None).is_err());
     }
 
     #[test]
     fn platform_event_from_wire_rejects_a_non_object_wire_value() {
-        let err = platform_event_from_wire(&serde_json::json!("not-an-object")).unwrap_err();
+        let err = platform_event_from_wire(&serde_json::json!("not-an-object"), None).unwrap_err();
         assert!(matches!(err, InvokeError::MalformedPayload(_)));
     }
 
@@ -839,7 +989,7 @@ mod tests {
             "payload_json": "not-valid-json{{{",
             "occurred_at": "2026-09-22T00:00:00.000Z",
         });
-        let err = platform_event_from_wire(&wire).unwrap_err();
+        let err = platform_event_from_wire(&wire, None).unwrap_err();
         assert!(
             matches!(err, InvokeError::MalformedPayload(msg) if msg.contains("not valid JSON"))
         );
@@ -1437,6 +1587,62 @@ mod tests {
         assert_eq!(
             appended[0].1.event.payload.get("text"),
             Some(&serde_json::json!("pong"))
+        );
+    }
+
+    /// **End-to-end regression test for the origin-channel-propagation
+    /// bug**: a Discord `MESSAGE_CREATE`-derived inbound envelope (`source`
+    /// populated by svc-ingest's Discord connector) must produce an
+    /// enqueued action-stage envelope whose `event.source` is non-null and
+    /// carries the SAME origin channel id -- exactly the field
+    /// `core/svc_action/src/dispatch.rs::invoke_dispatch` reads
+    /// (`env.event.source.as_ref().and_then(|s| s.channel_id.clone())`) to
+    /// build the `InvokeScope.origin_channel_id` a Discord relay `!ping` ->
+    /// `pong` needs. Before this fix `event.source` was always `null` here,
+    /// so that read always produced `None` and `svc_action::capabilities`'s
+    /// Discord relay always failed with "discord relay requires an origin
+    /// channel id on the delivered envelope".
+    #[tokio::test]
+    async fn handle_delivered_propagates_the_origin_discord_channel_id_onto_the_enqueued_envelope()
+    {
+        let ring = test_ring();
+        let origin_channel_id = "123456789012345678";
+        let d = fixture_delivered_discord("acme", Some("main"), &ring, "k1", origin_channel_id);
+        let reply = wire_platform_event(&PlatformEvent {
+            platform: "discord".to_string(),
+            event_type: "message.create".to_string(),
+            actor: Some("bot".to_string()),
+            payload: serde_json::from_value(serde_json::json!({"text": "pong"})).unwrap(),
+            occurred_at: "2026-09-22T00:00:01.000Z".to_string(),
+            // A bundle's reply never carries a `source` -- the WIT wire
+            // shape has no such field (see `platform_event_from_wire`'s
+            // doc); it is stage-injected from the ORIGINAL inbound event.
+            source: None,
+        })
+        .unwrap();
+        let connections = connected_registry_with_fake_executor(reply).await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+        let appended = deps.spine.appended.lock().unwrap();
+        assert_eq!(appended.len(), 1);
+        let enqueued_event = &appended[0].1.event;
+        assert_eq!(
+            enqueued_event.source.as_ref().map(|s| s.platform.as_str()),
+            Some("discord")
+        );
+        // The exact read `dispatch.rs::invoke_dispatch` performs to build
+        // `InvokeScope.origin_channel_id`.
+        let dispatched_origin_channel_id = enqueued_event
+            .source
+            .as_ref()
+            .and_then(|s| s.channel_id.clone());
+        assert_eq!(
+            dispatched_origin_channel_id,
+            Some(origin_channel_id.to_string())
         );
     }
 
