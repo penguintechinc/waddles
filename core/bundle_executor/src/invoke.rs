@@ -328,7 +328,10 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                     Ok(Ok(reply)) => serde_json::to_value(reply),
                     Ok(Err(unsupported)) => serde_json::to_value(unsupported)
                         .map(|v| serde_json::json!({"unsupported_stage": v})),
-                    Err(trap) => return Err(trap_to_error_body(trap)),
+                    Err(trap) => {
+                        let memory_cap_hit = store.data().memory_cap_hit();
+                        return Err(trap_to_error_body(trap, memory_cap_hit));
+                    }
                 }
             }
             ExportKind::Dispatch => {
@@ -342,7 +345,10 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                     Ok(Ok(reply)) => serde_json::to_value(reply),
                     Ok(Err(transport_error)) => serde_json::to_value(transport_error)
                         .map(|v| serde_json::json!({"transport_error": v})),
-                    Err(trap) => return Err(trap_to_error_body(trap)),
+                    Err(trap) => {
+                        let memory_cap_hit = store.data().memory_cap_hit();
+                        return Err(trap_to_error_body(trap, memory_cap_hit));
+                    }
                 }
             }
         }
@@ -404,25 +410,46 @@ struct EnvelopeAndConfig {
 /// malformed-payload error so the caller reports `EXECUTOR_DEADLINE`/
 /// `MEMORY_LIMIT`/`WASM_TRAP` rather than a generic failure (spec SS7.3).
 ///
-/// Classifies against the **full error chain** (`{err:#}`), not just
-/// `err`'s own top-level `Display`: a real wasmtime trap's outermost
-/// message is generic backtrace text (`"error while executing at wasm
-/// backtrace: ..."`), with the actual cause -- e.g.
-/// `StoreLimits`'s `"forcing trap when growing memory to N bytes"`
-/// (`ExecState::with_memory_limit_mb`) or the epoch interruption's own
-/// deadline message -- one level down in `err.chain()`. Matching only the
-/// top level (the pre-fix behavior) meant every real trap fell through to
-/// the generic `WasmTrap` branch regardless of cause; only a hand-built
-/// `wasmtime::Error::msg(...)` in a unit test ever exercised the
-/// `ExecutorDeadline`/`MemoryLimit` branches.
-fn trap_to_error_body(err: wasmtime::Error) -> ErrorBody {
+/// Classifies by **typed signal only**, never by pattern-matching the
+/// trap's formatted message -- gh security review MED finding: the
+/// pre-fix version matched `format!("{err:#}")` against the substrings
+/// "epoch"/"deadline"/"memory"/"allocation", which a malicious guest can
+/// spoof (or evade) by driving arbitrary text into the error chain -- e.g.
+/// a `db`/`kv`/`http` capability handler that echoes a guest-supplied
+/// argument back into an `ExecutorError` on failure, which then surfaces
+/// as part of this same trap's `{err:#}` chain. Worse, the *real* epoch
+/// trap's message is just `"wasm trap: interrupt"` (`wasmtime::Trap::
+/// Interrupt`'s `Display`, spec `wasmtime-environ`'s trap table) -- it
+/// never contained "epoch"/"deadline" even before any guest was involved,
+/// so the substring match silently misclassified every genuine deadline
+/// trap as `WASM_TRAP`, own-goal independent of spoofing.
+///
+/// Two typed sources instead:
+/// - **Deadline**: `err.downcast_ref::<wasmtime::Trap>()` against the
+///   exact `Trap::Interrupt` variant wasmtime raises for
+///   `Store::epoch_deadline_trap` (only a compiled-in wasm trap code the
+///   engine itself produces -- never a value a guest or a host-call
+///   handler can construct by choosing a string).
+/// - **Memory/table cap**: `memory_cap_hit`, a `bool` snapshotted from
+///   `ExecState::memory_cap_hit()` (`crate::host::CapTrackingLimits`)
+///   *before* this function is called -- flipped only inside
+///   `ResourceLimiter::memory_growing`/`table_growing` by this executor's
+///   own trusted host code reacting to the numeric growth request
+///   wasmtime passes it, never from guest-supplied text.
+///
+/// Anything else (`unreachable`, integer overflow, an `OutOfFuel`/
+/// `AllocationTooLarge` trap this executor doesn't otherwise arm, a
+/// bridge/host-call failure that surfaced as a trap) falls through to the
+/// generic `WasmTrap` code -- never silently reclassified by content.
+fn trap_to_error_body(err: wasmtime::Error, memory_cap_hit: bool) -> ErrorBody {
     let full_chain = format!("{err:#}");
-    let code = if full_chain.contains("epoch") || full_chain.contains("deadline") {
-        ErrorCode::ExecutorDeadline
-    } else if full_chain.contains("memory") || full_chain.contains("allocation") {
+    let code = if memory_cap_hit {
         ErrorCode::MemoryLimit
     } else {
-        ErrorCode::WasmTrap
+        match err.downcast_ref::<wasmtime::Trap>() {
+            Some(wasmtime::Trap::Interrupt) => ErrorCode::ExecutorDeadline,
+            _ => ErrorCode::WasmTrap,
+        }
     };
     error_body(code, full_chain)
 }
@@ -836,16 +863,66 @@ mod tests {
         Ok(())
     }
 
+    /// Positive cases: the exact typed signals `trap_to_error_body`
+    /// classifies on. `wasmtime::Trap::Interrupt` is the genuine, engine-
+    /// produced epoch-deadline trap (never a hand-built string -- see the
+    /// function's own doc for why the pre-fix substring match never even
+    /// matched this real trap's `"wasm trap: interrupt"` message);
+    /// `memory_cap_hit=true` is exactly the signal
+    /// `ExecState::memory_cap_hit()` reports after a denied grow
+    /// (`crate::host` module's own test covers that flag directly).
     #[test]
     fn trap_to_error_body_classifies_deadline_memory_and_generic_traps() {
-        let deadline = trap_to_error_body(wasmtime::Error::msg("epoch deadline exceeded"));
+        let deadline = trap_to_error_body(wasmtime::Trap::Interrupt.into(), false);
         assert!(matches!(deadline.code, ErrorCode::ExecutorDeadline));
 
-        let memory = trap_to_error_body(wasmtime::Error::msg("out of memory allocation failed"));
+        let memory = trap_to_error_body(
+            wasmtime::Error::msg("forcing trap when growing memory to 999 bytes"),
+            true,
+        );
         assert!(matches!(memory.code, ErrorCode::MemoryLimit));
 
-        let generic = trap_to_error_body(wasmtime::Error::msg("unreachable executed"));
+        let generic = trap_to_error_body(wasmtime::Trap::UnreachableCodeReached.into(), false);
         assert!(matches!(generic.code, ErrorCode::WasmTrap));
+    }
+
+    /// Negative/regression test for gh security review MED finding
+    /// "trap classification by substring is spoofable": a crafted guest-
+    /// controlled error message containing the exact words "epoch" and
+    /// "memory" -- the pre-fix substrings -- must NOT be classified as
+    /// `EXECUTOR_DEADLINE`/`MEMORY_LIMIT` when it is neither a real
+    /// `Trap::Interrupt` nor accompanied by `memory_cap_hit=true`. This is
+    /// exactly the attack the typed classification closes: a bundle
+    /// panicking with (or driving a host-call failure containing) text
+    /// like "please increase my memory epoch allocation quota" must fall
+    /// through to the generic `WASM_TRAP` code, never spoof a deadline or
+    /// memory-cap classification it didn't actually hit.
+    #[test]
+    fn trap_to_error_body_is_not_spoofed_by_guest_controlled_epoch_or_memory_text() {
+        let spoofed = trap_to_error_body(
+            wasmtime::Error::msg(
+                "please increase my memory epoch allocation quota before the deadline",
+            ),
+            false,
+        );
+        assert!(
+            matches!(spoofed.code, ErrorCode::WasmTrap),
+            "a guest-controlled message containing \"epoch\"/\"memory\" must not spoof \
+             a deadline or memory-limit classification: got {:?}",
+            spoofed.code
+        );
+    }
+
+    /// Negative/regression test for the flip side: a real memory-cap
+    /// denial's evidence is a `bool` snapshotted from `ExecState::
+    /// memory_cap_hit()`, not a message a guest could try to *suppress*.
+    /// Even if the accompanying trap message were entirely generic
+    /// (no "memory" substring at all), `memory_cap_hit=true` still forces
+    /// `MEMORY_LIMIT` -- classification cannot be evaded by wording either.
+    #[test]
+    fn trap_to_error_body_classifies_on_the_flag_even_with_a_generic_message() {
+        let result = trap_to_error_body(wasmtime::Error::msg("something failed"), true);
+        assert!(matches!(result.code, ErrorCode::MemoryLimit));
     }
 
     #[tokio::test]
