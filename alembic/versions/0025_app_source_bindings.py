@@ -39,6 +39,15 @@ table, provisioned by a parallel migration on the Rust side) is granted
 side lands first in a given environment, so the grant must be a safe
 no-op when the role doesn't exist yet, never a hard failure.
 
+svc-process also resolves the tenant slug and community name (the
+`source_stream_key` segments) itself, via its own read-only connection --
+it fails closed if it can't, so `waddles_bundle_reader` additionally gets
+`SELECT` on `tenants` and `communities` (pre-existing tables owned by
+earlier migrations), each guarded by both the role's `IF EXISTS` and a
+`to_regclass()` check on the table -- never assumes either exists yet.
+`downgrade()` revokes both grants (also guarded) before the reader's own
+`app_source_bindings` grant implicitly disappears with the dropped table.
+
 Revision ID: 0025_app_source_bindings
 Revises: 0024_app_versions_component_key
 Create Date: 2026-09-27
@@ -66,6 +75,35 @@ _MATRIX_TABLES = frozenset({"app_source_bindings"})
 #: separate (parallel) migration. Guarded by IF EXISTS below so this
 #: migration never depends on ordering against that one.
 _BUNDLE_READER_ROLE = "waddles_bundle_reader"
+
+#: Pre-existing tables (owned by earlier migrations, not this one)
+#: svc-process's read-only connection resolves the `source_stream_key`
+#: segments from directly -- see module docstring.
+_BUNDLE_READER_EXTRA_TABLES = ("tenants", "communities")
+
+
+def _bundle_reader_table_grant_sql(table: str) -> str:
+    """Guarded `GRANT SELECT ON {table} TO waddles_bundle_reader` -- role AND table must both exist."""
+    return (
+        f"DO $$ BEGIN\n"  # noqa: S608  # nosec B608 -- role/table names are fixed literals, never user input
+        f"  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{_BUNDLE_READER_ROLE}')\n"
+        f"     AND to_regclass('{table}') IS NOT NULL THEN\n"
+        f"    GRANT SELECT ON {table} TO {_BUNDLE_READER_ROLE};\n"
+        f"  END IF;\n"
+        f"END $$;"
+    )
+
+
+def _bundle_reader_table_revoke_sql(table: str) -> str:
+    """Guarded `REVOKE SELECT ON {table} FROM waddles_bundle_reader` -- the `upgrade()` grant's inverse."""
+    return (
+        f"DO $$ BEGIN\n"  # noqa: S608  # nosec B608 -- role/table names are fixed literals, never user input
+        f"  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{_BUNDLE_READER_ROLE}')\n"
+        f"     AND to_regclass('{table}') IS NOT NULL THEN\n"
+        f"    REVOKE SELECT ON {table} FROM {_BUNDLE_READER_ROLE};\n"
+        f"  END IF;\n"
+        f"END $$;"
+    )
 
 
 def _load_matrix_module():  # type: ignore[no-untyped-def]
@@ -108,7 +146,9 @@ def upgrade() -> None:
 
     # Rust data-plane reader -- not in the hub-api RBAC matrix (see module
     # docstring); guarded so this is a no-op wherever the role doesn't
-    # exist yet.
+    # exist yet. Also grants SELECT on tenants/communities -- svc-process
+    # resolves the source_stream_key tenant-slug/community-name segments
+    # itself, via this same read-only connection.
     op.execute(
         f"DO $$ BEGIN\n"  # noqa: S608  # nosec B608 -- role name is a fixed literal, never user input
         f"  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{_BUNDLE_READER_ROLE}') THEN\n"
@@ -116,7 +156,13 @@ def upgrade() -> None:
         f"  END IF;\n"
         f"END $$;"
     )
+    for table in _BUNDLE_READER_EXTRA_TABLES:
+        op.execute(_bundle_reader_table_grant_sql(table))
 
 
 def downgrade() -> None:
+    # Inverse of the extra grants above -- revoked before the table (and
+    # its own implicit app_source_bindings grant) is dropped.
+    for table in reversed(_BUNDLE_READER_EXTRA_TABLES):
+        op.execute(_bundle_reader_table_revoke_sql(table))
     op.execute("DROP TABLE IF EXISTS app_source_bindings")
