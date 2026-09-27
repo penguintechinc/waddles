@@ -110,6 +110,18 @@ pub struct IngestMetrics {
     pub events_published_total: prometheus::IntCounterVec,
     pub publish_errors_total: prometheus::IntCounterVec,
     pub receiver_reconnects_total: prometheus::IntCounterVec,
+    /// Twitch EventSub webhook verification outcomes, labeled by result
+    /// (`ok`/`bad_signature`/`replay_rejected`/`secret_not_found`/
+    /// `missing_header`/`bad_content_type`/`oversized_body`) --
+    /// `crate::ingest::twitch_eventsub::handle_webhook`.
+    pub eventsub_verifications_total: prometheus::IntCounterVec,
+    /// Twitch EventSub message-ids rejected as duplicates by the dedup
+    /// guard.
+    pub eventsub_dedup_hits_total: prometheus::IntCounter,
+    /// Twitch EventSub webhook handler latency, labeled by outcome -- the
+    /// fast-path histogram `rules/critical-rules.md` Observability requires
+    /// (load/latency histograms first, not just a counter).
+    pub eventsub_request_duration_seconds: prometheus::HistogramVec,
 }
 
 /// Registers this service's ingest-path metrics against `registry`. Must be
@@ -151,10 +163,72 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         .register(Box::new(receiver_reconnects_total.clone()))
         .expect("register svc_ingest_receiver_reconnects_total");
 
+    let eventsub_verifications_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_ingest_eventsub_verifications_total",
+            "Total Twitch EventSub webhook verification attempts, labeled by outcome",
+        ),
+        &["outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(eventsub_verifications_total.clone()))
+        .expect("register svc_ingest_eventsub_verifications_total");
+
+    let eventsub_dedup_hits_total = prometheus::IntCounter::new(
+        "svc_ingest_eventsub_dedup_hits_total",
+        "Total Twitch EventSub deliveries rejected as duplicate message-ids",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(eventsub_dedup_hits_total.clone()))
+        .expect("register svc_ingest_eventsub_dedup_hits_total");
+
+    let eventsub_request_duration_seconds = prometheus::HistogramVec::new(
+        prometheus::HistogramOpts::new(
+            "svc_ingest_eventsub_request_duration_seconds",
+            "Twitch EventSub webhook handler latency in seconds, labeled by outcome",
+        ),
+        &["outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(eventsub_request_duration_seconds.clone()))
+        .expect("register svc_ingest_eventsub_request_duration_seconds");
+
     IngestMetrics {
         events_published_total,
         publish_errors_total,
         receiver_reconnects_total,
+        eventsub_verifications_total,
+        eventsub_dedup_hits_total,
+        eventsub_request_duration_seconds,
+    }
+}
+
+impl IngestMetrics {
+    /// Records one Twitch EventSub webhook verification outcome --
+    /// `crate::ingest::twitch_eventsub::handle_webhook`.
+    pub fn record_eventsub_verification(&self, outcome: &str) {
+        self.eventsub_verifications_total
+            .with_label_values(&[outcome])
+            .inc();
+    }
+
+    /// Records one Twitch EventSub duplicate-message-id rejection.
+    pub fn record_eventsub_dedup_hit(&self) {
+        self.eventsub_dedup_hits_total.inc();
+    }
+
+    /// Observes one Twitch EventSub webhook handler's end-to-end latency,
+    /// labeled by `outcome` (mirrors [`Self::record_eventsub_verification`]'s
+    /// label set, plus the terminal response outcomes: `ack`/
+    /// `duplicate_ignored`/`acknowledged`/`ignored`/`unknown_type`/
+    /// `challenge`/an error variant name).
+    pub fn observe_eventsub_duration(&self, outcome: &str, seconds: f64) {
+        self.eventsub_request_duration_seconds
+            .with_label_values(&[outcome])
+            .observe(seconds);
     }
 }
 
@@ -230,6 +304,29 @@ mod tests {
                 .get(),
             2
         );
+    }
+
+    #[test]
+    fn eventsub_metrics_record_and_render() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_ingest_metrics(&registry);
+        metrics.record_eventsub_verification("ok");
+        metrics.record_eventsub_verification("bad_signature");
+        metrics.record_eventsub_dedup_hit();
+        metrics.observe_eventsub_duration("ack", 0.002);
+
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_ingest_eventsub_verifications_total"));
+        assert!(rendered.contains("svc_ingest_eventsub_dedup_hits_total"));
+        assert!(rendered.contains("svc_ingest_eventsub_request_duration_seconds"));
+        assert_eq!(
+            metrics
+                .eventsub_verifications_total
+                .with_label_values(&["ok"])
+                .get(),
+            1
+        );
+        assert_eq!(metrics.eventsub_dedup_hits_total.get(), 1);
     }
 
     #[test]
