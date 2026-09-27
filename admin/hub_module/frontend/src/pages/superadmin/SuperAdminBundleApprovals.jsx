@@ -3,13 +3,27 @@ import { CheckCircleIcon, XCircleIcon, ClockIcon, EyeIcon } from '@heroicons/rea
 import { bundleAdminApi, bundleApi } from '../../services/api';
 
 /**
- * Global-admin bundle-version approval queue -- lists `app_version_uploads`
- * rows awaiting a platform:admin decision (`GET /api/v1/admin/bundle-versions`,
- * hub_api/blueprints/v1/bundle_admin.py) across every vendor/first-party
- * `app_id`, and drives the per-version approve/deny actions
- * (hub_api/blueprints/v1/bundle_approvals.py). "Review" fetches the
- * permission summary + hash on demand so Approve always sends the hash it
- * just displayed (fails closed, 409, if the manifest changed meanwhile).
+ * Global-admin bundle-version INSTALL queue (three-tier app lifecycle,
+ * tier 1 of 3 -- Justin's 2026-09-27 ruling): lists `app_version_uploads`
+ * rows awaiting a platform:admin install/deny decision
+ * (`GET /api/v1/admin/bundle-versions`, hub_api/blueprints/v1/bundle_admin.py)
+ * across every vendor/first-party `app_id`, and drives the per-version
+ * approve/deny actions (hub_api/blueprints/v1/bundle_approvals.py).
+ * "Review" fetches the permission summary + hash on demand so Install
+ * always sends the hash it just displayed (fails closed, 409, if the
+ * manifest changed meanwhile).
+ *
+ * Tier boundary: this page installs a version into the PLATFORM CATALOG
+ * only -- it deliberately does NOT ask for a target tenant/community.
+ * Tier 2 (tenant admin: make an installed app available/hidden in the
+ * tenant marketplace) and tier 3 (community admin: activate/deactivate an
+ * available app for their community) are separate, not-yet-built backend
+ * endpoints (see TenantModules.jsx / AdminModules.jsx follow-up notes) --
+ * this page must never invent a communityId/tenantId field to bridge that
+ * gap itself. Today's `bundle_approvals.py::approve_version` still accepts
+ * an optional `communityId` for backward compatibility with its pre-tier
+ * behavior; this page always omits it (server default: tenant-wide), and
+ * should switch to a dedicated install-only endpoint once tier 2/3 land.
  */
 function SuperAdminBundleApprovals() {
   const [versions, setVersions] = useState([]);
@@ -22,7 +36,6 @@ function SuperAdminBundleApprovals() {
   const [reviewing, setReviewing] = useState(null);
   const [summary, setSummary] = useState(null);
   const [permissionHash, setPermissionHash] = useState(null);
-  const [communityId, setCommunityId] = useState('');
   const [denyReason, setDenyReason] = useState('');
   const [panelError, setPanelError] = useState(null);
   const [panelLoading, setPanelLoading] = useState(false);
@@ -56,7 +69,6 @@ function SuperAdminBundleApprovals() {
     setReviewing(row);
     setSummary(null);
     setPermissionHash(null);
-    setCommunityId('');
     setDenyReason('');
     setPanelError(null);
     setPanelLoading(true);
@@ -78,23 +90,22 @@ function SuperAdminBundleApprovals() {
     setPanelError(null);
   }
 
-  async function handleApprove() {
+  async function handleInstall() {
     if (!reviewing) return;
     setActionPending(true);
     setPanelError(null);
     try {
-      await bundleApi.approveVersion(reviewing.appId, reviewing.version, {
-        communityId: communityId.trim() ? Number(communityId.trim()) : null,
-        permissionHash,
-      });
-      console.debug('[SuperAdminBundleApprovals] Approve', {
+      // Tier 1 only -- platform-catalog install, no communityId/tenantId.
+      // See this file's module docstring for the tier-2/3 boundary.
+      await bundleApi.approveVersion(reviewing.appId, reviewing.version, { permissionHash });
+      console.debug('[SuperAdminBundleApprovals] Install', {
         appId: reviewing.appId,
         version: reviewing.version,
       });
       closePanel();
       await loadVersions();
     } catch (err) {
-      setPanelError(err.response?.data?.error?.message || 'Failed to approve version');
+      setPanelError(err.response?.data?.error?.message || 'Failed to install version');
     } finally {
       setActionPending(false);
     }
@@ -140,9 +151,11 @@ function SuperAdminBundleApprovals() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-white">Bundle Version Approvals</h1>
+        <h1 className="text-3xl font-bold text-white">Bundle Version Install Queue</h1>
         <p className="text-navy-300 mt-1">
-          Review vendor/first-party bundle-version uploads across every app namespace.
+          Review vendor/first-party bundle-version uploads and install them into the platform
+          catalog, or deny them. Making an installed app available to tenants/communities is a
+          separate, later step (tenant + community admin pages).
         </p>
       </div>
 
@@ -274,21 +287,6 @@ function SuperAdminBundleApprovals() {
                 </pre>
 
                 <div className="mb-4">
-                  <label htmlFor="communityId" className="block text-sm font-medium text-navy-300 mb-1">
-                    Target Community ID (optional -- blank installs tenant-wide)
-                  </label>
-                  <input
-                    id="communityId"
-                    data-testid="bundle-approvals-community-id"
-                    type="text"
-                    value={communityId}
-                    onChange={(e) => setCommunityId(e.target.value)}
-                    placeholder="e.g. 12"
-                    className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-gold-400"
-                  />
-                </div>
-
-                <div className="mb-4">
                   <label htmlFor="denyReason" className="block text-sm font-medium text-navy-300 mb-1">
                     Denial Reason (required only to deny)
                   </label>
@@ -321,12 +319,12 @@ function SuperAdminBundleApprovals() {
                 Deny
               </button>
               <button
-                onClick={handleApprove}
+                onClick={handleInstall}
                 disabled={actionPending || !summary}
-                data-testid="bundle-approvals-approve-button"
+                data-testid="bundle-approvals-install-button"
                 className="px-4 py-2 rounded bg-gold-500 text-navy-900 font-semibold hover:bg-gold-400 disabled:opacity-50"
               >
-                Approve
+                Install
               </button>
             </div>
           </div>

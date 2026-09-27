@@ -1,7 +1,9 @@
 /**
- * Tests for the global-admin bundle-version approval queue: list load
- * (`GET /api/v1/admin/bundle-versions`), status-filter refetch, the
- * review-panel permission-summary fetch, and the approve/deny actions.
+ * Tests for the global-admin bundle-version INSTALL queue (tier 1 of 3):
+ * list load (`GET /api/v1/admin/bundle-versions`), status-filter refetch,
+ * the review-panel permission-summary fetch, and the install/deny actions.
+ * Install deliberately never sends a tenant/community target -- that is
+ * tier 2/3's job (TenantModules.jsx / AdminModules.jsx follow-ups).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -106,7 +108,7 @@ describe('SuperAdminBundleApprovals', () => {
     expect(await screen.findByTestId('bundle-approvals-summary')).toHaveTextContent('egress');
   });
 
-  it('approves with the fetched permission hash and an optional community id', async () => {
+  it('installs with the fetched permission hash and no tenant/community target', async () => {
     bundleAdminApi.listPendingVersions.mockResolvedValue(listResponse());
     bundleApi.getPermissions.mockResolvedValue({
       data: { success: true, summary: { egress: [] }, permissionHash: 'sha256:abc' },
@@ -120,18 +122,16 @@ describe('SuperAdminBundleApprovals', () => {
     });
     await screen.findByTestId('bundle-approvals-summary');
 
-    fireEvent.change(screen.getByTestId('bundle-approvals-community-id'), {
-      target: { value: '12' },
-    });
+    expect(screen.queryByTestId('bundle-approvals-community-id')).not.toBeInTheDocument();
 
     await act(async () => {
-      fireEvent.click(screen.getByTestId('bundle-approvals-approve-button'));
+      fireEvent.click(screen.getByTestId('bundle-approvals-install-button'));
     });
 
     expect(bundleApi.approveVersion).toHaveBeenCalledWith(
       'waddles.integrations.vendor-42.mybundle',
       '1.0.0',
-      { communityId: 12, permissionHash: 'sha256:abc' },
+      { permissionHash: 'sha256:abc' },
     );
     await waitFor(() => expect(bundleAdminApi.listPendingVersions).toHaveBeenCalledTimes(2));
   });
