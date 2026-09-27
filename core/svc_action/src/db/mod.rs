@@ -94,6 +94,7 @@ mod tests {
             envelope_binding_keys: None,
             secret_key: Secret::new("test-jwt-signing-secret"),
             discord_bot_token: None,
+            db_reader_password: None,
         }
     }
 
@@ -137,6 +138,7 @@ mod tests {
             envelope_binding_keys: None,
             secret_key: Secret::new("unused"),
             discord_bot_token: None,
+            db_reader_password: None,
         };
         let first = get_or_connect(&config).await.expect("connects");
         // Second call returns the cached connection rather than

@@ -39,6 +39,7 @@ use std::sync::Arc;
 
 use penguin_bundle_host::wire::{
     ErrorCode, ExportKind, InvokeBody, LoadBody, LoadLimits, LoadedBody, Message, TraceContext,
+    UnloadBody, UnloadedBody,
 };
 use penguin_spine::{
     Delivered, DlqError, DlqErrorKind, Grant, GroupReader, PlatformEvent, Scope, SpineClient,
@@ -156,6 +157,38 @@ pub async fn ensure_loaded(
         }),
         _ => Err(InvokeError::MalformedPayload(
             "expected loaded or error frame".to_string(),
+        )),
+    }
+}
+
+/// Sends `unload` for one bundle over `conn` and returns the executor's
+/// `unloaded` reply (spec §6.6) -- the counterpart [`ensure_loaded`] never
+/// needed until the DB-driven active-bundle loader (`crate::
+/// bundle_loader`): a single-bundle-per-instance drain loop had nothing to
+/// unload; a hot-swappable multi-bundle registry does. `digest` must match
+/// what the executor actually has loaded for `app_id`
+/// (`core/bundle_executor/src/invoke.rs::on_unload`'s own digest check) --
+/// callers pass the digest they last successfully `load`ed, never a
+/// freshly-read DB value that might already differ.
+pub async fn ensure_unloaded(
+    conn: &Connection,
+    app_id: &str,
+    digest: &str,
+) -> Result<UnloadedBody, InvokeError> {
+    let reply = conn
+        .request(Message::Unload(UnloadBody {
+            app_id: app_id.to_string(),
+            digest: digest.to_string(),
+        }))
+        .await?;
+    match reply.message {
+        Message::Unloaded(body) => Ok(body),
+        Message::Error(e) => Err(InvokeError::ExecutorError {
+            code: e.code,
+            message: e.message,
+        }),
+        _ => Err(InvokeError::MalformedPayload(
+            "expected unloaded or error frame".to_string(),
         )),
     }
 }

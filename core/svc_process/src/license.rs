@@ -54,6 +54,36 @@ impl FeatureGate for LicenseFeatureGate {
     }
 }
 
+/// Flag key gating the DB-driven active-bundle loader (`crate::
+/// bundle_loader`): default OFF, graceful fallback to the existing
+/// `PROCESS_APP_ID`/`PROCESS_BUNDLE_*` env selection when off or the
+/// license server is unreachable. Flag-key convention:
+/// `{product}.{feature-name}` (`rules/critical-rules.md` Feature Flags &
+/// License Tiers) -- same `waddles` product as [`RUST_DATA_PLANE_FLAG`],
+/// a distinct feature within it.
+pub const DB_BUNDLE_CONFIG_FLAG: &str = "waddles.core.db-bundle-config";
+
+/// Production [`FeatureGate`] for [`DB_BUNDLE_CONFIG_FLAG`] -- same
+/// `penguin_licensing::LicenseClient::flag_enabled` contract as
+/// [`LicenseFeatureGate`] (non-blocking, fail-closed default OFF,
+/// last-known-cached on an unreachable license server), just gating a
+/// different flag. `crate::bundle_loader`'s own tests reuse
+/// `test_support::FixedGate`/`ToggleGate` (this trait takes no flag
+/// parameter, so the same fakes serve both gates).
+pub struct DbBundleConfigGate(Arc<LicenseClient>);
+
+impl DbBundleConfigGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for DbBundleConfigGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { self.0.flag_enabled(DB_BUNDLE_CONFIG_FLAG).await })
+    }
+}
+
 /// PenguinTech/Waddles-owned bypass suffix -- the sole license/flag
 /// bypass lever, and it must be a hardcoded source-level constant, never
 /// an env var, CLI flag, or Helm-templated value (`rules/critical-

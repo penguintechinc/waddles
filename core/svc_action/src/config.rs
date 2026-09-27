@@ -252,6 +252,48 @@ pub struct CliConfig {
     /// §8.2 step 11).
     #[arg(long, env = "EGRESS_MAX_RESPONSE_BYTES", default_value_t = 1_048_576)]
     pub egress_max_response_bytes: usize,
+
+    // -- DB-driven active-bundle loader (spec: hub-api is the sole writer,
+    // this stage reads ACTIVE, APPROVED bundle config from a READ-ONLY
+    // Postgres and hot-swaps in/out with no pod restart) -- gated OFF by
+    // default behind `waddles.core.db-bundle-config` (`crate::license`);
+    // when the flag is off/unavailable, the existing `ACTION_APP_ID`/
+    // `ACTION_BUNDLE_*` env selection and the `crate::distribution` catalog
+    // poll remain the sole selection mechanisms. See `crate::bundle_loader`.
+    // Field shapes/defaults mirror `core/svc_process::config::CliConfig`'s
+    // identical additions exactly -- same env var names across both
+    // services, kept consistent per that crate's own doc rationale.
+    /// Reader-endpoint Postgres host for the DB-driven loader -- separate
+    /// from `DB_HOST` (the primary, read-write connection above); defaults
+    /// to the primary host in alpha (no replica yet).
+    #[arg(long, env = "DB_READER_HOST", default_value = "localhost")]
+    pub db_reader_host: String,
+    #[arg(long, env = "DB_READER_PORT", default_value_t = 5432)]
+    pub db_reader_port: u16,
+    #[arg(long, env = "DB_READER_NAME", default_value = "waddlebot")]
+    pub db_reader_name: String,
+    /// A distinct, SELECT-only Postgres role -- never the primary `DB_USER`
+    /// account. See `bundle_active_set`'s crate-root doc for the exact
+    /// grants this role needs.
+    #[arg(long, env = "DB_READER_USER", default_value = "svc_action_ro")]
+    pub db_reader_user: String,
+    /// Tenant scope for the active-set read. `0` means "not configured" --
+    /// `tenants.id` is a real `SERIAL` starting at 1, so `0` can never be a
+    /// legitimate tenant and safely doubles as the loader's own "unset,
+    /// stay disabled" sentinel.
+    #[arg(long, env = "BUNDLE_SCOPE_TENANT_ID", default_value_t = 0)]
+    pub bundle_scope_tenant_id: i32,
+    /// Community scope for the active-set read; `0` is the tenant-wide
+    /// sentinel (matches `app_active_versions.community_id`'s own
+    /// convention, migration `0022_app_versions_and_rbac`).
+    #[arg(long, env = "BUNDLE_SCOPE_COMMUNITY_ID", default_value_t = 0)]
+    pub bundle_scope_community_id: i32,
+    /// Poll interval, in whole seconds, for the DB-driven loader's cheap
+    /// watermark check. Clamped to a 5s floor by
+    /// [`CliConfig::bundle_config_poll_interval`] so a misconfigured
+    /// `0`/negative value can never hot-loop against the reader database.
+    #[arg(long, env = "BUNDLE_CONFIG_POLL_SECONDS", default_value_t = 300)]
+    pub bundle_config_poll_seconds: i64,
 }
 
 impl CliConfig {
@@ -283,6 +325,13 @@ impl CliConfig {
             });
         }
         Ok(())
+    }
+
+    /// [`Self::bundle_config_poll_seconds`] clamped to a 5s floor -- a
+    /// misconfigured `0`/negative `BUNDLE_CONFIG_POLL_SECONDS` must never
+    /// hot-loop the watermark check against the reader database.
+    pub fn bundle_config_poll_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.bundle_config_poll_seconds.max(5) as u64)
     }
 }
 
@@ -328,6 +377,17 @@ pub struct Config {
     /// `relay_unavailable` (graceful degradation, not a startup failure;
     /// mirrors `envelope_binding_keys` above).
     pub discord_bot_token: Option<Secret>,
+    /// `DB_READER_PASSWORD` for the DB-driven active-bundle loader's
+    /// read-only Postgres role (`crate::bundle_loader`). Deliberately
+    /// `Option`, unlike `db_password`/`secret_key`: this loader is gated
+    /// OFF by default (`waddles.core.db-bundle-config`), so a fresh alpha
+    /// deployment that hasn't provisioned the RO role yet must not fail
+    /// startup over it -- `crate::lib::try_start_db_bundle_loader` logs a
+    /// warning and stays disabled (falling back to the existing
+    /// `ACTION_APP_ID`/`ACTION_BUNDLE_*`/catalog-poll selection) when this
+    /// is unset, the same graceful-degradation contract as
+    /// `envelope_binding_keys`/`discord_bot_token` above.
+    pub db_reader_password: Option<Secret>,
 }
 
 impl fmt::Debug for Config {
@@ -343,6 +403,10 @@ impl fmt::Debug for Config {
             .field(
                 "discord_bot_token",
                 &self.discord_bot_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "db_reader_password",
+                &self.db_reader_password.as_ref().map(|_| Secret::new("")),
             )
             .finish()
     }
@@ -366,12 +430,25 @@ impl Config {
         let envelope_binding_keys = std::env::var("ENVELOPE_BINDING_KEYS").ok().map(Secret::new);
         let secret_key = Secret::new(env_required("SECRET_KEY")?);
         let discord_bot_token = std::env::var("DISCORD_BOT_TOKEN").ok().map(Secret::new);
+        // Security review fix: Helm always renders the DB_READER_PASSWORD
+        // secret key (`templates/secrets.yaml`), defaulting to "" until the
+        // RO Postgres role is actually provisioned -- so the env var is
+        // always *set*, just empty. Without `.filter(|s| !s.is_empty())`
+        // this would be `Some(Secret::new(""))`, never `None`, and
+        // `try_start_db_bundle_loader`'s documented "DB_READER_PASSWORD
+        // unset -> loader disabled" branch could never fire; an empty
+        // value must be treated the same as unset.
+        let db_reader_password = std::env::var("DB_READER_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(Secret::new);
         Ok(Self {
             cli,
             db_password,
             envelope_binding_keys,
             secret_key,
             discord_bot_token,
+            db_reader_password,
         })
     }
 }
@@ -396,6 +473,7 @@ mod tests {
             std::env::remove_var("DB_PASSWORD");
             std::env::remove_var("SECRET_KEY");
             std::env::remove_var("DISCORD_BOT_TOKEN");
+            std::env::remove_var("DB_READER_PASSWORD");
         }
     }
 
@@ -641,6 +719,49 @@ mod tests {
         assert_eq!(
             cfg.discord_bot_token.as_ref().map(Secret::expose),
             Some("test-discord-bot-token")
+        );
+        clear_secret_env();
+    }
+
+    /// Security review fix: Helm always renders `DB_READER_PASSWORD` (empty
+    /// by default until the RO role is provisioned, `templates/
+    /// secrets.yaml`) -- an empty value must load as `None`, the same as
+    /// truly unset, so `try_start_db_bundle_loader`'s documented
+    /// "DB_READER_PASSWORD unset -> loader disabled" branch actually fires
+    /// for Helm's real rendered output, not just for a genuinely-absent
+    /// env var.
+    #[test]
+    fn db_reader_password_empty_string_loads_as_none() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_secret_env();
+        unsafe {
+            std::env::set_var("DB_PASSWORD", "test-db-pass");
+            std::env::set_var("SECRET_KEY", "test-jwt-signing-secret");
+            std::env::set_var("DB_READER_PASSWORD", "");
+        }
+        let cli = CliConfig::parse_from(["svc-action"]);
+        let cfg = Config::from_cli(cli).expect("secrets are set");
+        assert!(
+            cfg.db_reader_password.is_none(),
+            "an empty DB_READER_PASSWORD must load as None, not Some(\"\")"
+        );
+        clear_secret_env();
+    }
+
+    #[test]
+    fn db_reader_password_nonempty_string_loads_as_some() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_secret_env();
+        unsafe {
+            std::env::set_var("DB_PASSWORD", "test-db-pass");
+            std::env::set_var("SECRET_KEY", "test-jwt-signing-secret");
+            std::env::set_var("DB_READER_PASSWORD", "real-ro-password");
+        }
+        let cli = CliConfig::parse_from(["svc-action"]);
+        let cfg = Config::from_cli(cli).expect("secrets are set");
+        assert_eq!(
+            cfg.db_reader_password.as_ref().map(Secret::expose),
+            Some("real-ro-password")
         );
         clear_secret_env();
     }

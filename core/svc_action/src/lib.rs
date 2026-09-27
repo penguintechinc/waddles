@@ -43,6 +43,7 @@
 //! eventual source; the env override is strictly the interim fallback
 //! (`config::CliConfig::action_bundle_digest`'s doc).
 
+pub mod bundle_loader;
 pub mod capabilities;
 pub mod config;
 pub(crate) mod crypto;
@@ -142,6 +143,13 @@ where
         drop(client.spawn_refresh());
     }
 
+    // Registered before `prom_registry` is moved into `AppState::new`
+    // below (`register_bundle_loader_excluded_metrics` only borrows it) --
+    // ops-visibility fix (security review): the DB-driven bundle loader's
+    // excluded-row counter.
+    let bundle_loader_excluded_metric =
+        telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
+
     let state = http::AppState::new(config.clone(), prom_registry);
 
     let connections = try_start_host_api(
@@ -154,6 +162,12 @@ where
     );
     try_start_env_bundle_loader(&config.cli, Arc::clone(&connections));
     try_start_distribution_poll(&config, Arc::clone(&connections), Arc::clone(&catalog));
+    try_start_db_bundle_loader(
+        &config,
+        Arc::clone(&connections),
+        license.clone(),
+        bundle_loader_excluded_metric,
+    );
     try_start_dispatch(&config, connections, catalog, usage, license);
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
@@ -604,6 +618,82 @@ async fn env_bundle_loader_loop(
     }
 }
 
+/// Attempts to start the DB-driven active-bundle loader
+/// (`crate::bundle_loader`, spec: hub-api is the sole writer, this stage
+/// reads ACTIVE, APPROVED bundle config from a READ-ONLY Postgres and
+/// hot-swaps in/out with no pod restart). Two independent reasons this
+/// never starts, both logged and neither an error -- `DB_READER_PASSWORD`
+/// unset (the RO account hasn't been provisioned yet in this environment)
+/// or `BUNDLE_SCOPE_TENANT_ID` unset (`0`, the "not configured" sentinel).
+/// Either way, the existing `ACTION_APP_ID`/`ACTION_BUNDLE_*` env
+/// selection and the `crate::distribution` catalog poll remain the sole
+/// sources; this loader only supplements them once actually configured,
+/// and is additionally gated per-tick on `waddles.core.db-bundle-config`
+/// (default OFF, `flags::DB_BUNDLE_CONFIG_FLAG`) inside
+/// `bundle_loader::run_tick` regardless of whether this function's own
+/// startup gates pass. Reuses the already-built, already-refreshing
+/// `license` client (`run_with_shutdown`'s own `build_license_client`
+/// call) rather than constructing a second one.
+fn try_start_db_bundle_loader(
+    config: &config::Config,
+    connections: Arc<host_api::ConnectionRegistry>,
+    license: Option<Arc<penguin_licensing::LicenseClient>>,
+    excluded_metric: prometheus::IntCounterVec,
+) {
+    let Some(password) = config.db_reader_password.as_ref() else {
+        tracing::info!(
+            "DB_READER_PASSWORD not set; DB-driven bundle loader not started (env/catalog selection remains authoritative)"
+        );
+        return;
+    };
+    if config.cli.bundle_scope_tenant_id == 0 {
+        tracing::info!(
+            "BUNDLE_SCOPE_TENANT_ID not set; DB-driven bundle loader not started (env/catalog selection remains authoritative)"
+        );
+        return;
+    }
+
+    let flag = flag_or_closed(&license, flags::DB_BUNDLE_CONFIG_FLAG);
+    let reader_cfg = bundle_active_set::ReaderConfig {
+        host: config.cli.db_reader_host.clone(),
+        port: config.cli.db_reader_port,
+        name: config.cli.db_reader_name.clone(),
+        user: config.cli.db_reader_user.clone(),
+    };
+    let password = password.expose().to_string();
+    let tenant_id = config.cli.bundle_scope_tenant_id;
+    let community_id = config.cli.bundle_scope_community_id;
+    let poll_interval = config.cli.bundle_config_poll_interval();
+    let call_timeout_ms = config.cli.executor_call_timeout_ms;
+
+    tokio::spawn(async move {
+        let db = match bundle_active_set::reader::connect(&reader_cfg, &password).await {
+            Ok(db) => db,
+            Err(err) => {
+                tracing::error!(error = %err, "db-reader connection failed; DB-driven bundle loader not started");
+                return;
+            }
+        };
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            let _ = shutdown_tx.send(());
+        });
+        bundle_loader::run(
+            db,
+            tenant_id,
+            community_id,
+            poll_interval,
+            call_timeout_ms,
+            flag,
+            connections,
+            excluded_metric,
+            shutdown_rx,
+        )
+        .await;
+    });
+}
+
 /// Starts the action-stage dispatch loop (`crate::dispatch::run`) as its
 /// own background task, mirroring `core/svc_process`'s
 /// `try_start_spine_drain` exactly: two independent reasons this never
@@ -893,6 +983,7 @@ mod tests {
             envelope_binding_keys: None,
             secret_key: Secret::new("test-jwt-signing-secret"),
             discord_bot_token: None,
+            db_reader_password: None,
         }
     }
 
@@ -1234,6 +1325,7 @@ mod tests {
             envelope_binding_keys: None,
             secret_key: Secret::new("test-jwt-signing-secret"),
             discord_bot_token: None,
+            db_reader_password: None,
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
         let catalog = Arc::new(distribution::BundleCatalog::new());
@@ -1254,6 +1346,7 @@ mod tests {
             envelope_binding_keys: None,
             secret_key: Secret::new("test-jwt-signing-secret"),
             discord_bot_token: None,
+            db_reader_password: None,
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
         let catalog = Arc::new(distribution::BundleCatalog::new());
@@ -1269,6 +1362,59 @@ mod tests {
         let cli = CliConfig::parse_from(["svc-action"]);
         let connections = Arc::new(host_api::ConnectionRegistry::new());
         try_start_env_bundle_loader(&cli, connections);
+    }
+
+    /// Security review fix regression test: `db_reader_password: None` (the
+    /// value `config::Config::from_cli` now produces for both a genuinely
+    /// unset `DB_READER_PASSWORD` and Helm's always-rendered-but-empty
+    /// default) must take `try_start_db_bundle_loader`'s documented no-op
+    /// branch rather than attempting a DB connection -- fire-and-forget,
+    /// same shape as `try_start_env_bundle_loader_disabled_without_digest`
+    /// above.
+    #[tokio::test]
+    async fn try_start_db_bundle_loader_noop_when_db_reader_password_unset() {
+        let cli = CliConfig::parse_from(["svc-action"]);
+        let config = Config {
+            cli,
+            db_password: Secret::new("test-password"),
+            envelope_binding_keys: None,
+            secret_key: Secret::new("test-jwt-signing-secret"),
+            discord_bot_token: None,
+            db_reader_password: None,
+        };
+        let connections = Arc::new(host_api::ConnectionRegistry::new());
+        try_start_db_bundle_loader(&config, connections, None, test_excluded_metric());
+    }
+
+    /// Same no-op contract, the other independent startup gate:
+    /// `BUNDLE_SCOPE_TENANT_ID` unset (`0`, `CliConfig`'s default) even
+    /// with a real reader password present.
+    #[tokio::test]
+    async fn try_start_db_bundle_loader_noop_when_tenant_id_unset() {
+        let cli = CliConfig::parse_from(["svc-action"]);
+        assert_eq!(cli.bundle_scope_tenant_id, 0);
+        let config = Config {
+            cli,
+            db_password: Secret::new("test-password"),
+            envelope_binding_keys: None,
+            secret_key: Secret::new("test-jwt-signing-secret"),
+            discord_bot_token: None,
+            db_reader_password: Some(Secret::new("real-ro-password")),
+        };
+        let connections = Arc::new(host_api::ConnectionRegistry::new());
+        try_start_db_bundle_loader(&config, connections, None, test_excluded_metric());
+    }
+
+    /// A standalone, unregistered `IntCounterVec` for
+    /// `try_start_db_bundle_loader` tests -- see `bundle_loader::tests::
+    /// test_metric`'s identical rationale (no `Registry` needed for
+    /// `.inc()` to work correctly).
+    fn test_excluded_metric() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_bundle_active_set_excluded_total", "test"),
+            &["app_id", "reason"],
+        )
+        .expect("valid metric definition")
     }
 
     /// The core of this PR's fix: once a host-API connection is active,

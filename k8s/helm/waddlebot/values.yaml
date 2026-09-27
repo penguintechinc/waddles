@@ -801,6 +801,36 @@ pipeline:
       # of its svc-action-rust default. Matches HOST_API_PORT's own CliConfig default
       # (core/svc_process/src/config.rs).
       hostApiPort: 8301
+      # DB-driven active-bundle loader (core/svc_process/src/config.rs,
+      # core/bundle_active_set) -- hub-api is the sole writer, this stage reads ACTIVE,
+      # APPROVED bundle config from a READ-ONLY Postgres and hot-swaps in/out with no pod
+      # restart. Gated OFF by default behind waddles.core.db-bundle-config; while off or
+      # BUNDLE_SCOPE_TENANT_ID is unset (0, "not configured"), PROCESS_APP_ID/
+      # PROCESS_BUNDLE_* above remain the sole selection mechanism -- these defaults are
+      # safe to ship even before the RO Postgres role exists.
+      # dbReaderHost/Port/Name default to the SAME primary Postgres alpha already runs
+      # (no read replica provisioned yet, task's own documented interim posture) --
+      # infrastructure.postgresql.service.name/port/database, not hardcoded here so a
+      # future replica is a values-only change.
+      dbReaderHost: ""
+      dbReaderPort: ""
+      dbReaderName: ""
+      # A distinct, SELECT-only Postgres role -- never infrastructure.postgresql.username
+      # (the primary read-write account). See core/bundle_active_set's crate-root doc for
+      # the exact GRANT statements this role needs; provisioning the role itself is a
+      # follow-up (not a Helm change) tracked outside this chart.
+      dbReaderUser: "svc_process_ro"
+      # 0 = "not configured" (tenants.id is a real SERIAL starting at 1) -- the loader
+      # stays disabled until a real tenant scope is set, same fail-safe posture as every
+      # other interim env-driven substitute in this block.
+      bundleScopeTenantId: 0
+      # 0 = tenant-wide (matches app_active_versions.community_id's own sentinel,
+      # migration 0022_app_versions_and_rbac).
+      bundleScopeCommunityId: 0
+      # Whole seconds; clamped to a 5s floor in code (CliConfig::
+      # bundle_config_poll_interval) so a misconfigured 0/negative value here can never
+      # hot-loop the watermark check against the reader database.
+      bundleConfigPollSeconds: 300
       resources:
         requests:
           cpu: "100m"
@@ -838,6 +868,17 @@ pipeline:
       actionBundleSidecarKey: ""
       # D32: false is the documented default posture, not a fallback (see config.rs).
       sandboxGvisor: false
+      # DB-driven active-bundle loader (core/svc_action/src/config.rs,
+      # core/bundle_active_set) -- field-for-field mirror of svcProcess's own block above;
+      # see its comments for the full rationale (hub-api sole writer, READ-ONLY Postgres,
+      # gated OFF by default, safe defaults before the RO role exists).
+      dbReaderHost: ""
+      dbReaderPort: ""
+      dbReaderName: ""
+      dbReaderUser: "svc_action_ro"
+      bundleScopeTenantId: 0
+      bundleScopeCommunityId: 0
+      bundleConfigPollSeconds: 300
       resources:
         requests:
           cpu: "100m"

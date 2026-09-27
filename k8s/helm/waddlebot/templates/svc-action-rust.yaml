@@ -122,6 +122,28 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcAction.actionBundleComponentKey | default "" | quote }}
         - name: ACTION_BUNDLE_SIDECAR_KEY
           value: {{ .Values.pipeline.rustDataPlane.svcAction.actionBundleSidecarKey | default "" | quote }}
+        # DB-driven active-bundle loader (core/svc_action/src/config.rs,
+        # core/bundle_active_set) -- see values.yaml's comment on this block. Field-for-
+        # field mirror of svc-process-rust.yaml's own identical block.
+        - name: DB_READER_HOST
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.dbReaderHost | default .Values.infrastructure.postgresql.service.name | quote }}
+        - name: DB_READER_PORT
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.dbReaderPort | default .Values.infrastructure.postgresql.service.port | quote }}
+        - name: DB_READER_NAME
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.dbReaderName | default .Values.infrastructure.postgresql.database | quote }}
+        - name: DB_READER_USER
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.dbReaderUser | default "svc_action_ro" | quote }}
+        - name: DB_READER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: DB_READER_PASSWORD
+        - name: BUNDLE_SCOPE_TENANT_ID
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.bundleScopeTenantId | default 0 | quote }}
+        - name: BUNDLE_SCOPE_COMMUNITY_ID
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.bundleScopeCommunityId | default 0 | quote }}
+        - name: BUNDLE_CONFIG_POLL_SECONDS
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.bundleConfigPollSeconds | default 300 | quote }}
         - name: ENVELOPE_BINDING_KEYS
           valueFrom:
             secretKeyRef:

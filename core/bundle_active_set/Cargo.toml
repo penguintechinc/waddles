@@ -1,0 +1,43 @@
+[package]
+name = "bundle-active-set"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Shared, read-only Postgres query + diff logic for the data-plane's DB-driven active-bundle loader (svc_process + svc_action). A path dependency within this repo -- NOT a penguin-libs crate: it depends only on this repo's own hub-api-owned schema (app_active_versions/app_versions/app_install_approvals, migrations 0022/0023), so a penguin-libs cross-repo release cycle would only add friction for a schema this repo itself owns and evolves. See src/lib.rs module doc for the RO account SQL grants this crate's queries require."
+
+[lib]
+name = "bundle_active_set"
+path = "src/lib.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- rules/critical-rules.md
+# Dependency Pinning. Cargo.lock is committed in every crate that depends
+# on this one (svc_process, svc_action) alongside this file. Versions
+# mirror core/svc_process's and core/svc_action's own pins for the same
+# crates -- both already depend on this exact `sea-orm` version, so a path
+# dependency on this crate introduces no second pin of the same package.
+[dependencies]
+sea-orm = { version = "=2.0.2", default-features = false, features = [
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+    "macros",
+] }
+thiserror = "=2.0.20"
+tracing = "=0.1.44"
+# `Watermark`'s SHA-256 fingerprint over the active row set (security
+# review fix -- replaces a `COUNT(*) + SUM(version_id)` watermark that
+# could silently cancel, see query.rs's module doc). Same exact version
+# pin `core/svc_action`/`core/bundle_executor` already use.
+sha2 = "=0.10.9"
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }
+sea-orm = { version = "=2.0.2", default-features = false, features = ["mock"] }
+# Test-only: parses `reader::connection_url`'s output with the same URL
+# parser `sqlx_postgres::PgConnectOptions::parse_from_url` uses, so the
+# read-only startup-option test asserts against real query-string parsing
+# rather than a raw substring match. Already a transitive dependency (via
+# sqlx) at this exact version -- declared directly here only because it's
+# now referenced by name in test code.
+url = "=2.5.8"

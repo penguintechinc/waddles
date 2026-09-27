@@ -35,6 +35,7 @@
 //! router and config loader directly instead of spawning a subprocess.
 
 pub mod builtins;
+pub mod bundle_loader;
 pub mod capabilities;
 pub mod config;
 pub mod error;
@@ -104,9 +105,21 @@ where
         "starting {SERVICE_NAME}"
     );
 
+    // Registered before `prom_registry` is moved into `AppState::new`
+    // below (`register_bundle_loader_excluded_metrics` only borrows it) --
+    // ops-visibility fix (security review): the DB-driven bundle loader's
+    // excluded-row counter.
+    let bundle_loader_excluded_metric =
+        telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
+
     let state = http::AppState::new(config.clone(), prom_registry);
 
     let connections = try_start_host_api(&config.cli);
+    try_start_db_bundle_loader(
+        &config,
+        Arc::clone(&connections),
+        bundle_loader_excluded_metric,
+    );
     try_start_process_loop(&config, connections);
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
@@ -302,6 +315,88 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
     });
 }
 
+/// Attempts to start the DB-driven active-bundle loader
+/// (`crate::bundle_loader`, spec: hub-api is the sole writer, this stage
+/// reads ACTIVE, APPROVED bundle config from a READ-ONLY Postgres and
+/// hot-swaps in/out with no pod restart). Two independent reasons this
+/// never starts, both logged and neither an error -- `DB_READER_PASSWORD`
+/// unset (the RO account hasn't been provisioned yet in this environment)
+/// or `BUNDLE_SCOPE_TENANT_ID` unset (`0`, the "not configured" sentinel --
+/// `tenants.id` is a real `SERIAL` starting at 1, see `config::CliConfig`'s
+/// own doc). Either way, `try_start_process_loop`'s existing
+/// `PROCESS_APP_ID`/`PROCESS_BUNDLE_*` env selection remains the sole
+/// source; this loader only supplements it once actually configured, and
+/// is additionally gated per-tick on `waddles.core.db-bundle-config`
+/// (default OFF) inside `bundle_loader::run_tick` regardless of whether
+/// this function's own startup gates pass.
+fn try_start_db_bundle_loader(
+    config: &config::Config,
+    connections: Arc<host_api::ConnectionRegistry>,
+    excluded_metric: prometheus::IntCounterVec,
+) {
+    let Some(password) = config.db_reader_password.as_ref() else {
+        tracing::info!(
+            "DB_READER_PASSWORD not set; DB-driven bundle loader not started (env selection remains authoritative)"
+        );
+        return;
+    };
+    if config.cli.bundle_scope_tenant_id == 0 {
+        tracing::info!(
+            "BUNDLE_SCOPE_TENANT_ID not set; DB-driven bundle loader not started (env selection remains authoritative)"
+        );
+        return;
+    }
+
+    let license_client = match license::build_license_client("waddles") {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(error = %err, "license client config invalid; DB-driven bundle loader not started");
+            return;
+        }
+    };
+    let gate: Arc<dyn license::FeatureGate> =
+        Arc::new(license::DbBundleConfigGate::new(license_client));
+
+    let reader_cfg = bundle_active_set::ReaderConfig {
+        host: config.cli.db_reader_host.clone(),
+        port: config.cli.db_reader_port,
+        name: config.cli.db_reader_name.clone(),
+        user: config.cli.db_reader_user.clone(),
+    };
+    let password = password.expose().to_string();
+    let tenant_id = config.cli.bundle_scope_tenant_id;
+    let community_id = config.cli.bundle_scope_community_id;
+    let poll_interval = config.cli.bundle_config_poll_interval();
+    let call_timeout_ms = config.cli.executor_call_timeout_ms;
+
+    tokio::spawn(async move {
+        let db = match bundle_active_set::reader::connect(&reader_cfg, &password).await {
+            Ok(db) => db,
+            Err(err) => {
+                tracing::error!(error = %err, "db-reader connection failed; DB-driven bundle loader not started");
+                return;
+            }
+        };
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            let _ = shutdown_tx.send(());
+        });
+        bundle_loader::run(
+            db,
+            tenant_id,
+            community_id,
+            poll_interval,
+            call_timeout_ms,
+            gate,
+            connections,
+            excluded_metric,
+            shutdown_rx,
+        )
+        .await;
+    });
+}
+
 /// Waits for SIGINT (Ctrl-C) or SIGTERM (Kubernetes pod termination) and
 /// returns, letting `axum::serve`'s graceful shutdown drain in-flight
 /// requests rather than dropping connections mid-response.
@@ -425,7 +520,57 @@ mod tests {
             cache_password: None,
             service_api_key: crate::config::Secret::new("x"),
             envelope_binding_keys: Some(crate::config::Secret::new("k1:aabbcc")),
+            db_reader_password: None,
         }
+    }
+
+    /// Security review fix regression test: `db_reader_password: None` (the
+    /// value `config::Config::from_cli` now produces for both a genuinely
+    /// unset `DB_READER_PASSWORD` and Helm's always-rendered-but-empty
+    /// default) must take the documented no-op branch rather than
+    /// attempting a DB connection. Mirrors `try_start_process_loop_noop_
+    /// when_process_app_id_unset`'s style -- no OTel subscriber installed,
+    /// so `tracing::info!` is a harmless no-op; success is simply that this
+    /// returns without panicking or spawning a task that reaches the
+    /// license-client/DB-connect code path.
+    #[tokio::test]
+    async fn try_start_db_bundle_loader_noop_when_db_reader_password_unset() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        let mut config = test_config(cli);
+        config.db_reader_password = None;
+        try_start_db_bundle_loader(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            test_excluded_metric(),
+        );
+    }
+
+    /// Same no-op contract, the other independent startup gate:
+    /// `BUNDLE_SCOPE_TENANT_ID` unset (`0`, `CliConfig`'s default) even
+    /// with a real reader password present.
+    #[tokio::test]
+    async fn try_start_db_bundle_loader_noop_when_tenant_id_unset() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert_eq!(cli.bundle_scope_tenant_id, 0);
+        let mut config = test_config(cli);
+        config.db_reader_password = Some(crate::config::Secret::new("real-ro-password"));
+        try_start_db_bundle_loader(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            test_excluded_metric(),
+        );
+    }
+
+    /// A standalone, unregistered `IntCounterVec` for
+    /// `try_start_db_bundle_loader` tests -- see `bundle_loader::tests::
+    /// test_metric`'s identical rationale (no `Registry` needed for
+    /// `.inc()` to work correctly).
+    fn test_excluded_metric() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_bundle_active_set_excluded_total", "test"),
+            &["app_id", "reason"],
+        )
+        .expect("valid metric definition")
     }
 
     #[tokio::test]
@@ -586,6 +731,7 @@ mod tests {
             cache_password: None,
             service_api_key: crate::config::Secret::new("x"),
             envelope_binding_keys: None,
+            db_reader_password: None,
         };
         let state = crate::http::AppState::new(config, prometheus::Registry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
