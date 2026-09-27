@@ -49,9 +49,15 @@ WORKDIR /repo
 COPY wit wit
 COPY sdk/waddle-sdk/src sdk/waddle-sdk/src
 COPY bundles/python/pyping/src bundles/python/pyping/src
+# waddle_sdk._component_entry -- the shared SDK entry module every Python bundle points
+# componentize-py at (PR #382, fix/python-sdk-two-export-entry, merged into release/v3.0.X);
+# supersedes this bundle's own now-deleted _wit_app.py stand-in. bundles/python/pyping/src/
+# _entry_wiring.py (added by that same merge) supplies the static bundle_transform/
+# bundle_dispatch wiring _component_entry.py expects from the bundle's own source directory.
 RUN componentize-py \
         -d wit/waddle-bundle -w stage \
-        componentize -p sdk/waddle-sdk/src -p bundles/python/pyping/src _wit_app \
+        componentize -p sdk/waddle-sdk/src -p bundles/python/pyping/src \
+        waddle_sdk._component_entry \
         -o pyping.wasm
 
 # ---------------------------------------------------------------------------
