@@ -10,7 +10,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.bundle_approvals import BLUEPRINTS
-from tests.conftest import make_token
+from tests.conftest import make_token, make_user_token
 
 _MANIFEST = {
     "schema_version": 2,
@@ -162,3 +162,51 @@ async def test_deny_requires_platform_admin(app: Quart) -> None:
         json={"reason": "nope"},
     )
     assert response.status_code == 403
+
+
+async def test_vendor_cannot_self_approve(app: Quart) -> None:
+    """A vendor (`vendor:onboard` only, no `platform:admin`) must not be able to approve/install.
+
+    Justin's ruling: vendors SUBMIT, only a GLOBAL ADMIN may APPROVE + INSTALL.
+    """
+    token = make_user_token(user_id=42, scope="vendor:onboard")
+    client = app.test_client()
+    response = await client.post(
+        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/approve",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"communityId": None, "permissionHash": None},
+    )
+    assert response.status_code == 403
+
+
+async def test_vendor_cannot_reject_either(app: Quart) -> None:
+    """`platform:admin` gates both approve AND deny -- a vendor cannot self-reject either."""
+    token = make_user_token(user_id=42, scope="vendor:onboard")
+    client = app.test_client()
+    response = await client.post(
+        "/api/v1/apps/waddles.socials.music.default/versions/1.0.0/deny",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"reason": "nope"},
+    )
+    assert response.status_code == 403
+
+
+async def test_approve_activates_the_version(app: Quart, install_dal: Any) -> None:
+    """The admin-only approve endpoint writes the `app_active_versions` activation pointer."""
+    token = make_token(scope="platform:admin", user_id="1")
+    client = app.test_client()
+    response = await client.post(
+        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/approve",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"communityId": None, "permissionHash": None},
+    )
+    assert response.status_code == 200
+    active = (
+        await install_dal(
+            (install_dal.app_active_versions.app_id == "waddles.socials.music.default")
+            & (install_dal.app_active_versions.tenant_id == 1)
+            & (install_dal.app_active_versions.community_id == 0)
+        ).select()
+    ).first()
+    assert active is not None
+    assert active.activated_by == 1

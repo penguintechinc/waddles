@@ -23,15 +23,20 @@ records the consent record only, it does not grant DB privileges.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
 from penguin_dal import AsyncDB
+from sqlalchemy import select
+from sqlalchemy import update as sa_update
 
 from services.bundle_manifest_v2 import BundleManifestV2, ConsumeRule, EgressRule, Limits
 from services.bundle_version_service import STATUS_PUBLISHED, STATUS_REJECTED, advance_state
 from services.errors import ApiError, not_found
 from services.permission_summary_service import build_permission_summary, permission_hash
+
+logger = logging.getLogger(__name__)
 
 
 def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
@@ -252,6 +257,120 @@ def classify_diff(new_summary: dict[str, Any], previous_summary: dict[str, Any] 
     return "widened"  # mixed add+remove is treated as widening -- the conservative choice
 
 
+#: `app_active_versions.community_id` sentinel for "tenant-wide" (migration
+#: 0022: `communities.id` is a real SERIAL starting at 1, so it never
+#: collides with 0). `approve_version()` maps a caller's `community_id=None`
+#: (tenant-wide approval) to this sentinel before writing the activation
+#: pointer -- `app_install_approvals.community_id` stays a nullable FK
+#: (unaffected), only the separate `app_active_versions` row uses the
+#: sentinel, matching that table's own NOT NULL DEFAULT 0 column.
+TENANT_WIDE_COMMUNITY_SENTINEL = 0
+
+
+async def _write_approval_and_activate(
+    install_dal: AsyncDB,
+    *,
+    app_id: str,
+    version: str,
+    tenant_id: int,
+    community_id: int | None,
+    approved_by: int,
+    computed_hash: str,
+    summary: dict[str, Any],
+    version_id: int,
+) -> int:
+    """Write `app_install_approvals` + upsert `app_active_versions` in ONE transaction.
+
+    Security-review fix: every `install_dal(...)`/`TableProxy` call
+    (the ordinary query-builder path used everywhere else in this
+    module) opens and auto-commits its OWN session --
+    `penguin_dal.AsyncDB.commit()`'s own docstring says so explicitly
+    ("commit is a no-op since AsyncQuerySet methods auto-commit"). Two
+    such calls composed in sequence (write the approval, then activate)
+    can never be atomic: a failure in the second call leaves a durably
+    committed "approved" row with no matching activation -- exactly the
+    dangling state this module claims to prevent. The one primitive this
+    DAL exposes that spans multiple statements in a single transaction
+    is the raw SQLAlchemy `engine.begin()` block (the same escape hatch
+    `bundle_install_dal.raw_sql_write()` documents) -- used here via
+    SQLAlchemy Core against the already-reflected `Table` objects
+    (`install_dal.metadata.tables[...]`, the same `Table` a `TableProxy`
+    wraps internally) rather than hand-written SQL strings, so column
+    types (e.g. `summary_json`'s JSON/JSONB) are bound correctly by the
+    dialect instead of needing a manual cast.
+
+    Returns the new `app_install_approvals.id`. Both writes commit
+    together, or (on any exception before the `async with` block exits)
+    neither does -- verified by
+    `test_bundle_approval_service.py::test_approve_version_rolls_back_the_approval_if_activation_fails`.
+    """
+    approvals_table = install_dal.metadata.tables["app_install_approvals"]
+    active_table = install_dal.metadata.tables["app_active_versions"]
+    active_community_id = TENANT_WIDE_COMMUNITY_SENTINEL if community_id is None else community_id
+    now = datetime.now(UTC)
+
+    async with install_dal.engine.begin() as conn:
+        previous_id = (
+            await conn.execute(
+                select(approvals_table.c.id).where(
+                    (approvals_table.c.app_id == app_id)
+                    & (approvals_table.c.tenant_id == tenant_id)
+                    & (approvals_table.c.community_id == community_id)
+                    & (approvals_table.c.superseded_by.is_(None))
+                )
+            )
+        ).scalar_one_or_none()
+
+        insert_result = await conn.execute(
+            approvals_table.insert().values(
+                tenant_id=tenant_id,
+                community_id=community_id,
+                app_id=app_id,
+                version=version,
+                permission_hash=computed_hash,
+                summary_json=summary,
+                approved_by=approved_by,
+                approved_at=now,
+            )
+        )
+        new_id = insert_result.inserted_primary_key[0]
+
+        if previous_id is not None:
+            await conn.execute(
+                sa_update(approvals_table)
+                .where(approvals_table.c.id == previous_id)
+                .values(superseded_by=new_id)
+            )
+
+        active_where = (
+            (active_table.c.app_id == app_id)
+            & (active_table.c.tenant_id == tenant_id)
+            & (active_table.c.community_id == active_community_id)
+        )
+        existing_active = (
+            await conn.execute(select(active_table.c.app_id).where(active_where))
+        ).first()
+        if existing_active is not None:
+            await conn.execute(
+                sa_update(active_table)
+                .where(active_where)
+                .values(version_id=version_id, activated_by=approved_by, activated_at=now)
+            )
+        else:
+            await conn.execute(
+                active_table.insert().values(
+                    app_id=app_id,
+                    tenant_id=tenant_id,
+                    community_id=active_community_id,
+                    version_id=version_id,
+                    activated_by=approved_by,
+                    activated_at=now,
+                )
+            )
+
+    return int(new_id)
+
+
 async def approve_version(
     install_dal: AsyncDB,
     *,
@@ -262,7 +381,18 @@ async def approve_version(
     approved_by: int,
     expected_permission_hash: str | None = None,
 ) -> Any:
-    """Record an `app_install_approvals` row. Fails closed on a headless hash mismatch (Sec9.7.5).
+    """Record an `app_install_approvals` row and activate the version (spec Sec9.7, Sec6.10).
+
+    Vendor separation (Justin's ruling, 2026-09-27): a vendor SUBMITS
+    (`bundle_version_service.create_version`/`process_prebuilt_component`,
+    reachable via `vendor:onboard`) but only a GLOBAL ADMIN may APPROVE +
+    INSTALL -- this function is reachable exclusively through
+    `blueprints/v1/bundle_approvals.py::post_approve`, gated on
+    `@require_scope("platform:admin")`; no vendor-scoped code path calls
+    it or `_write_approval_and_activate()`. A submitted version therefore stays
+    absent from `app_active_versions` (INACTIVE) from upload through
+    every FSM state up to and including PUBLISHED, until this function
+    runs successfully.
 
     Refuses (404) a `community_id` that does not belong to the caller's
     tenant, before anything else -- an IDOR a client-supplied
@@ -272,6 +402,14 @@ async def approve_version(
     exist or is installed in a different tenant, before recording
     anything (spec Sec5.9, D30) -- the runtime independently drops such
     a redirect at the stage as well; this is the install-time half.
+
+    The `app_install_approvals` write and the `app_active_versions`
+    upsert commit in a single transaction (`_write_approval_and_activate()`)
+    -- both happen or neither does; a failure activating never leaves a
+    durably-committed approval row with no matching activation.
+    `community_id=None` (tenant-wide) maps to
+    `TENANT_WIDE_COMMUNITY_SENTINEL` for the activation pointer only; the
+    approval record itself keeps the nullable `community_id` as given.
     """
     if community_id is not None:
         await _validate_community_tenant(
@@ -311,28 +449,44 @@ async def approve_version(
             "permission_hash_mismatch",
         )
 
-    previous_rows = await install_dal(
-        (install_dal.app_install_approvals.app_id == app_id)
-        & (install_dal.app_install_approvals.tenant_id == tenant_id)
-        & (install_dal.app_install_approvals.community_id == community_id)
-        & (install_dal.app_install_approvals.superseded_by == None)  # noqa: E711 -- penguin-dal IS NULL operator
-    ).select()
-    previous = previous_rows.first()
-    now = datetime.now(UTC)
-    new_id = await install_dal.app_install_approvals.async_insert(
-        tenant_id=tenant_id,
-        community_id=community_id,
+    if upload.app_version_id is None:
+        # Defensive only -- every real PUBLISHED row's publish step (a
+        # separate, not-yet-built milestone, see this module's own scope
+        # note) sets `app_version_id` before advancing to PUBLISHED. A
+        # PUBLISHED row with no digest pointer is a data-integrity bug,
+        # never a legitimate caller state -- checked here, after every
+        # other refusal (routes_to, hash mismatch) but BEFORE the approval
+        # row is written, so a failure here never leaves a dangling
+        # `app_install_approvals` row (or a wrongly-superseded previous
+        # one) with no matching activation.
+        raise ApiError(
+            f"version {version} of {app_id} is PUBLISHED but has no app_versions row",
+            500,
+            "missing_app_version",
+        )
+
+    new_id = await _write_approval_and_activate(
+        install_dal,
         app_id=app_id,
         version=version,
-        permission_hash=computed_hash,
-        summary_json=summary,
+        tenant_id=tenant_id,
+        community_id=community_id,
         approved_by=approved_by,
-        approved_at=now,
+        computed_hash=computed_hash,
+        summary=summary,
+        version_id=upload.app_version_id,
     )
-    if previous is not None:
-        await install_dal(install_dal.app_install_approvals.id == previous.id).update(
-            superseded_by=new_id
-        )
+    logger.info(
+        "bundle approval: version activated",
+        extra={
+            "app_id": app_id,
+            "version": version,
+            "tenant_id": tenant_id,
+            "community_id": community_id,
+            "approved_by": approved_by,
+        },
+    )
+
     return (await install_dal(install_dal.app_install_approvals.id == new_id).select()).first()
 
 

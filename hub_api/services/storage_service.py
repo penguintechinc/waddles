@@ -108,6 +108,64 @@ async def upload_community_asset(
     return f"{_public_base_url()}/{key}"
 
 
+def bundle_component_key(app_id: str, version: str, sha256_hex: str) -> str:
+    """`bundles/{app_id}/{version}/{sha256}.wasm` -- the bucket layout every consumer expects.
+
+    Not a public URL (unlike avatars/community assets): a staged bundle
+    artifact is never web-public -- the executor's bucket poller (spec
+    Sec7.6) reads it directly from the bucket via this same key, never
+    through `_public_base_url()`. This is also the exact value persisted
+    to `app_versions.component_key` (migration 0024) -- the data-plane
+    loader resolves a published version's staged bytes straight from that
+    column, with no digest-to-key re-derivation on that side.
+    """
+    return f"bundles/{app_id}/{version}/{sha256_hex}.wasm"
+
+
+def bundle_sidecar_key(app_id: str, version: str, sha256_hex: str) -> str:
+    """`bundles/{app_id}/{version}/{sha256}.json` -- the `.json` sidecar next to the component.
+
+    Same path stem as `bundle_component_key()`; the value persisted to
+    `app_versions.sidecar_key` (migration 0024).
+    """
+    return f"bundles/{app_id}/{version}/{sha256_hex}.json"
+
+
+async def upload_bundle_component(app_id: str, version: str, sha256_hex: str, data: bytes) -> str:
+    """Stage a validated component's bytes + a `{}` JSON sidecar to the bucket.
+
+    Only called after `bundle_component_validator.validate_component()`
+    has already approved `data` (spec Sec9.1's INSPECTING -> ADDRESSING
+    edge, "sha256 over the component bytes") -- this function does no
+    validation of its own. The sidecar is a `{}` stub for now (a future
+    milestone's scan-result/signature metadata slot); returns the
+    component's own bucket key, recorded on `app_version_uploads.
+    staging_component_key` and (once published) `app_versions.component_key`.
+    """
+    key = bundle_component_key(app_id, version, sha256_hex)
+    sidecar_key = bundle_sidecar_key(app_id, version, sha256_hex)
+
+    def _put() -> None:
+        client = _client()
+        client.put_object(
+            Bucket=_bucket(),
+            Key=key,
+            Body=data,
+            ContentType="application/wasm",
+            ServerSideEncryption="AES256",  # security.md: default server-side encryption
+        )
+        client.put_object(
+            Bucket=_bucket(),
+            Key=sidecar_key,
+            Body=b"{}",
+            ContentType="application/json",
+            ServerSideEncryption="AES256",
+        )
+
+    await asyncio.to_thread(_put)
+    return key
+
+
 async def delete_object(url: str) -> None:
     """Delete a previously-uploaded object given its public URL. Never raises on not-found."""
     base = _public_base_url().rstrip("/") + "/"

@@ -15,6 +15,29 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 COPY libs/flask_core /app/libs/flask_core
 RUN pip install --no-cache-dir /app/libs/flask_core
 
+# wasm-tools -- `services/bundle_component_validator.py`'s WIT world
+# conformance check (`wasm-tools component wit --json`) on every vendor
+# component upload (spec Sec9.1's INSPECTING state). Pinned exact version +
+# SHA256 verification per critical-rules.md Dependency Pinning ("Build
+# tools, SDKs, compilers: pin to exact version with SHA256 hash"); fetched
+# from the upstream bytecodealliance GitHub release, never apt (no Debian
+# package exists). Multi-arch: this Dockerfile's own multi-arch contract
+# (devops.md) selects the matching tarball by `dpkg --print-architecture`.
+ARG WASM_TOOLS_VERSION=1.259.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) wt_arch=x86_64; wt_sha256=3e9b374b4c7715b771b69bf0d65a337990ed4546ec5e97e01c0ff587dfc52160 ;; \
+      arm64) wt_arch=aarch64; wt_sha256=9e1644f3841f2b783dd8af82de054667388e46689806fba4909ed45f3182800f ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS_VERSION}/wasm-tools-${WASM_TOOLS_VERSION}-${wt_arch}-linux.tar.gz"; \
+    python3 -c "import urllib.request; urllib.request.urlretrieve('${url}', '/tmp/wasm-tools.tar.gz')"; \
+    echo "${wt_sha256}  /tmp/wasm-tools.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/wasm-tools.tar.gz -C /tmp; \
+    install -m 0755 "/tmp/wasm-tools-${WASM_TOOLS_VERSION}-${wt_arch}-linux/wasm-tools" /usr/local/bin/wasm-tools; \
+    rm -rf /tmp/wasm-tools.tar.gz "/tmp/wasm-tools-${WASM_TOOLS_VERSION}-${wt_arch}-linux"
+
 FROM python:3.13-slim-bookworm@sha256:f13a6b7565175da40695e8109f64cbc4d2e65f4c9ef2e3b321c3a44fa3c06fe7
 WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
