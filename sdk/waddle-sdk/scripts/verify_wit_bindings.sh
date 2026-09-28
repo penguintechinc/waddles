@@ -110,7 +110,14 @@ check "wit_world/imports/types.py" "class TransportResult:" "types.TransportResu
 check "wit_world/imports/types.py" "class TransportError:" "types.TransportError"
 check "wit_world/imports/types.py" "class UnsupportedStage:" "types.UnsupportedStage"
 
-# wit_world/exports/__init__.py -- waddle_sdk/_component_entry.py's WitWorld.transform/dispatch
+# wit_world/exports/__init__.py -- waddle_sdk/_component_entry.py's ProcessStage/ActionStage
+# app classes. Two SEPARATE classes, one per exported interface -- not one
+# combined class -- because `world stage` exports two interfaces
+# (process-stage + action-stage). componentize-py resolves each by
+# `getattr(app_module, "<InterfaceName>")`, so a single combined class fails
+# componentization outright (see _component_entry.py's module docstring).
+check "wit_world/exports/__init__.py" "class ProcessStage(Protocol):" "exports.ProcessStage class"
+check "wit_world/exports/__init__.py" "class ActionStage(Protocol):" "exports.ActionStage class"
 check "wit_world/exports/__init__.py" "def transform(self, event: types.PlatformEvent) -> Optional[types.PlatformEvent]:" "exports.transform signature"
 check "wit_world/exports/__init__.py" "def dispatch(self, envelope: types.StageEnvelope, config: str) -> types.TransportResult:" "exports.dispatch signature"
 

@@ -2,6 +2,33 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { tenantApi } from '../../services/api';
 
+/**
+ * Tier-2 follow-up placeholder (three-tier app lifecycle, Justin's
+ * 2026-09-27 ruling): once a global admin installs a bundle version into
+ * the platform catalog (SuperAdminBundleApprovals.jsx, tier 1), a TENANT
+ * admin should be able to mark it available/hidden in this tenant's
+ * marketplace here -- tier 3 (community admin activate/deactivate) lives
+ * in AdminModules.jsx. No such tenant-level availability endpoint exists
+ * in hub-api yet (no `app_active_versions`/tenant-visibility read or
+ * write route as of this commit) -- this section is deliberately a
+ * placeholder, not a call against an invented endpoint, until that
+ * backend lands.
+ */
+function BundleAppsAvailabilityFollowUp() {
+  return (
+    <div
+      className="bg-navy-800 border border-navy-700 border-dashed rounded-xl p-6 text-center"
+      data-testid="tenant-bundle-apps-followup"
+    >
+      <p className="text-gold-400 font-semibold mb-1">Bundle Apps (Coming Soon)</p>
+      <p className="text-navy-400 text-sm">
+        Making installed bundle-catalog apps available or hidden for this tenant&apos;s communities
+        will appear here once the tenant-availability backend endpoint ships.
+      </p>
+    </div>
+  );
+}
+
 function TenantModules() {
   const { tenantSlug } = useParams();
   const [allModules, setAllModules] = useState([]);
@@ -141,6 +168,8 @@ function TenantModules() {
           Module permissions saved successfully.
         </div>
       )}
+
+      <BundleAppsAvailabilityFollowUp />
 
       {/* Allow All Toggle */}
       <div className="bg-navy-800 border border-navy-700 rounded-xl p-5">
