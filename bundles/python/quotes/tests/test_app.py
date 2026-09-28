@@ -184,16 +184,45 @@ def test_dispatch_random_with_no_quotes_reports_none(fakes) -> None:
     assert "no quotes yet" in json.loads(message_json)["text"]
 
 
-def test_dispatch_random_picks_from_the_index(fakes, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dispatch_random_picks_a_stored_quote(fakes, monkeypatch: pytest.MonkeyPatch) -> None:
     _dispatch({"quote_action": "add", "quote_text": "first", "channel_id": "chan-1"})
     _dispatch({"quote_action": "add", "quote_text": "second", "channel_id": "chan-1"})
     _fake_kv, _fake_log, fake_relay, _fake_flags = fakes
     fake_relay.calls.clear()
 
-    monkeypatch.setattr(app.random, "choice", lambda seq: seq[-1])
+    monkeypatch.setattr(app.random, "randint", lambda lo, hi: 2)
     _dispatch({"quote_action": "random", "channel_id": "chan-1"})
     provider, message_json = fake_relay.calls[0]
     assert json.loads(message_json)["text"] == 'quote #2: "second"'
+
+
+def test_dispatch_random_retries_past_a_deleted_id(fakes, monkeypatch: pytest.MonkeyPatch) -> None:
+    _dispatch({"quote_action": "add", "quote_text": "first", "channel_id": "chan-1"})
+    _dispatch({"quote_action": "add", "quote_text": "second", "channel_id": "chan-1"})
+    _dispatch({"quote_action": "delete", "quote_id": 1, "channel_id": "chan-1", "is_mod": True})
+    _fake_kv, _fake_log, fake_relay, _fake_flags = fakes
+    fake_relay.calls.clear()
+
+    # First two attempts land on the now-deleted id 1; the third finds id 2.
+    picks = iter([1, 1, 2])
+    monkeypatch.setattr(app.random, "randint", lambda lo, hi: next(picks))
+    _dispatch({"quote_action": "random", "channel_id": "chan-1"})
+    provider, message_json = fake_relay.calls[0]
+    assert json.loads(message_json)["text"] == 'quote #2: "second"'
+
+
+def test_dispatch_random_gives_up_after_max_attempts(
+    fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _dispatch({"quote_action": "add", "quote_text": "only one", "channel_id": "chan-1"})
+    _dispatch({"quote_action": "delete", "quote_id": 1, "channel_id": "chan-1", "is_mod": True})
+    _fake_kv, _fake_log, fake_relay, _fake_flags = fakes
+    fake_relay.calls.clear()
+
+    monkeypatch.setattr(app.random, "randint", lambda lo, hi: 1)
+    _dispatch({"quote_action": "random", "channel_id": "chan-1"})
+    provider, message_json = fake_relay.calls[0]
+    assert "no quotes yet" in json.loads(message_json)["text"]
 
 
 def test_dispatch_delete_denied_without_moderator_flag(fakes) -> None:
@@ -255,14 +284,13 @@ def test_dispatch_raises_when_channel_id_is_missing(fakes) -> None:
         _dispatch({"quote_action": "random", "channel_id": None})
 
 
-def test_quotes_are_isolated_per_community(fakes) -> None:
-    _dispatch(
-        {"quote_action": "add", "quote_text": "for community 42", "channel_id": "chan-1"},
-        community="42",
-    )
-    _fake_kv, _fake_log, fake_relay, _fake_flags = fakes
-    fake_relay.calls.clear()
+def test_add_quote_keys_carry_no_community_segment(fakes) -> None:
+    """Guest-side keys are bare `quotes:...`.
 
-    _dispatch({"quote_action": "get", "quote_id": 1, "channel_id": "chan-1"}, community="99")
-    provider, message_json = fake_relay.calls[0]
-    assert json.loads(message_json)["text"] == "no quote #1"
+    The host's own `kv` scoping (per `(tenant, community, app_id)`) is what
+    isolates communities, not this bundle.
+    """
+    _dispatch({"quote_action": "add", "quote_text": "hi", "channel_id": "chan-1"})
+    _fake_kv, _fake_log, _fake_relay, _fake_flags = fakes
+    assert set(_fake_kv.store.keys()) == {"quotes:q:1"}
+    assert set(_fake_kv.counters.keys()) == {"quotes:seq"}

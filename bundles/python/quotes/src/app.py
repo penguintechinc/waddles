@@ -29,25 +29,43 @@ instead, per that in-flight work's direction, and documented here rather than
 against a capability with no near-term host wiring. See "Known limitation"
 below.
 
-Key layout, all scoped by this bundle's own `(tenant, community, app_id)`
-via the host's `kv` scoping (spec SS7.4/SS6.5) PLUS an explicit
-`community_id` segment in every key this module builds (defensive: this
-module does not assume community-level kv isolation beyond what the host
-capability doc commits to):
+**No index -- no read-modify-write race.** An earlier revision of this
+bundle kept a `quotes:{community_id}:index` JSON array of live ids, updated
+via read-modify-write on every add/delete; that's a lost-update race under
+concurrent adds (`kv` has no compare-and-swap/transaction primitive), so it
+is gone. Key layout instead:
 
-  - `quotes:{community_id}:seq` -- an atomic counter (`kv.increment`) handing
-    out the next quote id.
-  - `quotes:{community_id}:index` -- a JSON array of live quote ids, read-
-    modify-written on every add/delete. **Not atomic** -- `kv` has no
-    compare-and-swap or transaction primitive, so two adds/deletes racing on
-    the same community can drop an index entry. Acceptable for this
-    migration's scope (a chat-quote board, not a ledger); a future `kv`
-    capability revision with a list/set primitive would remove this gap.
-  - `quotes:{community_id}:q:{id}` -- one quote's JSON blob
-    (`{"id", "text", "created_at"}`). No user-identifying field is stored at
-    all (see PII note below) -- `!quote delete` hard-deletes this key (no
-    Postgres-style `deleted_at` tombstone; `kv` has no query language to
-    filter tombstones by, so keeping one would need bespoke maintenance).
+  - `quotes:seq` -- an atomic counter (`kv.increment`, delta 1) handing out
+    the next quote id; `kv.increment(key, 0, 0)` (delta 0) doubles as an
+    atomic *peek* at the current high-water mark, used by `!quote random`
+    below.
+  - `quotes:q:{id}` -- one quote's JSON blob (`{"id", "text", "created_at"}`).
+    No user-identifying field is stored at all (see PII note below).
+    `!quote delete` hard-deletes this key -- no Postgres-style `deleted_at`
+    tombstone; `kv` has no query language to filter tombstones by.
+
+No `community_id` segment in either key: the host's own `kv` capability
+already namespaces every key by `(tenant, community, app_id)` server-side
+(spec SS6.5/SS7.4, "bundle-scoped key/value, stored under the bundle's own
+`...:state` key") -- an earlier revision added a redundant guest-side
+`community_id` segment defensively; dropped per review, since duplicating
+scoping the host already guarantees just adds a second, unverified
+assumption about the id's shape rather than removing one.
+
+**`!quote random` without an index.** Peek the current max id via
+`kv.increment(seq_key, 0, 0)`, pick a uniform random id in `[1, max_id]`, and
+retry up to `_MAX_RANDOM_ATTEMPTS` times if that id was deleted (`kv.get`
+returns nothing) -- cheap for a chat-quote board (ids are dense; only
+deleted ones miss) and needs no separate live-id index to stay correct
+under concurrent adds/deletes. Reports "no quotes yet" if every attempt
+misses, same as a genuinely empty board.
+
+**Follow-up once `db` lands.** This bundle is expected to move off `kv`
+entirely onto the bundle-owns-tables `db` mechanism once it's implemented
+(manifest `data.tables` + RLS, `wit/waddle-bundle/stage.wit`'s own `db`
+interface doc comment) -- a single `core-<app-id>`-scoped table, not the
+legacy `quotes` Postgres table, replacing every key above with real rows.
+Tracked as a follow-up, not part of this PR.
 
 **PII note.** No user identity is persisted anywhere by this bundle -- not
 even the non-UUID platform display name the legacy `quotes.quoted_username`/
@@ -263,8 +281,7 @@ async def dispatch(
     elif envelope.community is None:
         text = _COMMUNITY_REQUIRED_MSG
     else:
-        community_id = int(envelope.community)
-        text = await _run_action(action, envelope.event, community_id, payload)
+        text = await _run_action(action, envelope.event, payload)
 
     if not channel_id:
         raise ValueError("quote reply requires a channel_id from the inbound chat.message")
@@ -273,9 +290,7 @@ async def dispatch(
     return DispatchResult(transport=provider, detail="relayed")
 
 
-async def _run_action(
-    action: str, event: PlatformEvent, community_id: int, payload: dict[str, Any]
-) -> str:
+async def _run_action(action: str, event: PlatformEvent, payload: dict[str, Any]) -> str:
     """Execute one already-validated quote action and return the reply text.
 
     Every kv call is wrapped so a backend failure replies with an error
@@ -285,8 +300,8 @@ async def _run_action(
     try:
         if action == "add":
             quote_text = payload.get("quote_text") or ""
-            new_quote_id = await _add_quote(community_id, quote_text)
-            log.info("quotes.added", community_id=community_id, quote_id=new_quote_id)
+            new_quote_id = await _add_quote(quote_text)
+            log.info("quotes.added", quote_id=new_quote_id)
             return f"quote #{new_quote_id} added"
 
         if action == "get":
@@ -294,11 +309,11 @@ async def _run_action(
             if not isinstance(raw_quote_id, int):
                 return _USAGE
             quote_id = raw_quote_id
-            quote = await _get_quote(community_id, quote_id)
+            quote = await _get_quote(quote_id)
             return _format_quote(quote) if quote is not None else f"no quote #{quote_id}"
 
         if action == "random":
-            quote = await _random_quote(community_id)
+            quote = await _random_quote()
             return _format_quote(quote) if quote is not None else _NO_QUOTES_MSG
 
         if action == "delete":
@@ -307,11 +322,9 @@ async def _run_action(
                 return _USAGE
             quote_id = raw_quote_id
             if not _caller_is_moderator_or_admin(payload):
-                log.debug(
-                    "quotes.delete_denied", actor=event.actor or "", community_id=community_id
-                )
+                log.debug("quotes.delete_denied", actor=event.actor or "")
                 return _PERMISSION_DENIED_MSG
-            removed = await _delete_quote(community_id, quote_id)
+            removed = await _delete_quote(quote_id)
             return f"quote #{quote_id} deleted" if removed else f"no quote #{quote_id}"
     except Exception as exc:  # noqa: BLE001 -- a quote command must reply, never crash the bot
         log.error("quotes.action_failed", action=action, error=str(exc))
@@ -331,54 +344,36 @@ def _caller_is_moderator_or_admin(payload: dict[str, Any]) -> bool:
     return any(bool(payload.get(flag)) for flag in _MODERATOR_PAYLOAD_FLAGS)
 
 
-def _seq_key(community_id: int) -> str:
-    """The `kv` key holding this community's next-quote-id counter."""
-    return f"quotes:{community_id}:seq"
+#: `!quote random` retry budget when a picked id was previously deleted --
+#: see module docstring's "`!quote random` without an index" section.
+_MAX_RANDOM_ATTEMPTS = 5
+
+#: The `kv` key holding the bundle's next-quote-id counter. No `community_id`
+#: segment -- the host's own `kv` scoping already namespaces this per
+#: `(tenant, community, app_id)`, see module docstring.
+_SEQ_KEY = "quotes:seq"
 
 
-def _index_key(community_id: int) -> str:
-    """The `kv` key holding this community's JSON array of live quote ids."""
-    return f"quotes:{community_id}:index"
-
-
-def _quote_key(community_id: int, quote_id: int) -> str:
+def _quote_key(quote_id: int) -> str:
     """The `kv` key holding one quote's JSON blob."""
-    return f"quotes:{community_id}:q:{quote_id}"
+    return f"quotes:q:{quote_id}"
 
 
-async def _read_index(community_id: int) -> list[int]:
-    """Return this community's current list of live quote ids, or `[]` if unset/corrupt."""
-    raw = await kv.get(_index_key(community_id))
-    if not raw:
-        return []
-    try:
-        ids = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return []
-    return [int(i) for i in ids if isinstance(i, int)]
+async def _add_quote(text: str) -> int:
+    """Insert a new quote (unattributed -- see module docstring's PII note).
 
-
-async def _write_index(community_id: int, ids: list[int]) -> None:
-    """Persist this community's list of live quote ids. See module docstring: not atomic."""
-    await kv.set(_index_key(community_id), json.dumps(ids).encode("utf-8"), 0)
-
-
-async def _add_quote(community_id: int, text: str) -> int:
-    """Insert a new quote (unattributed -- see module docstring's PII note) and index it."""
-    quote_id = await kv.increment(_seq_key(community_id), 1, 0)
+    `kv.increment` is the sole source of new ids -- atomic, so two concurrent
+    adds always get distinct ids, no read-modify-write involved.
+    """
+    quote_id = await kv.increment(_SEQ_KEY, 1, 0)
     blob = {"id": quote_id, "text": text, "created_at": datetime.now(UTC).isoformat()}
-    await kv.set(_quote_key(community_id, quote_id), json.dumps(blob).encode("utf-8"), 0)
-
-    ids = await _read_index(community_id)
-    if quote_id not in ids:
-        ids.append(quote_id)
-        await _write_index(community_id, ids)
+    await kv.set(_quote_key(quote_id), json.dumps(blob).encode("utf-8"), 0)
     return quote_id
 
 
-async def _get_quote(community_id: int, quote_id: int) -> dict[str, Any] | None:
+async def _get_quote(quote_id: int) -> dict[str, Any] | None:
     """Fetch one quote's JSON blob by id, or `None` if it doesn't exist (or was deleted)."""
-    raw = await kv.get(_quote_key(community_id, quote_id))
+    raw = await kv.get(_quote_key(quote_id))
     if not raw:
         return None
     try:
@@ -388,29 +383,35 @@ async def _get_quote(community_id: int, quote_id: int) -> dict[str, Any] | None:
     return blob
 
 
-async def _random_quote(community_id: int) -> dict[str, Any] | None:
-    """Return one random live quote for `community_id`, or `None` if there are none."""
-    ids = await _read_index(community_id)
-    if not ids:
+async def _random_quote() -> dict[str, Any] | None:
+    """Return one random live quote, or `None` if there are none.
+
+    No index to pick from -- peek the current high-water mark (an atomic
+    `kv.increment(..., delta=0, ...)`, never mutating it) and retry a few
+    uniform-random ids in `[1, max_id]` until one hits a quote that hasn't
+    been deleted (see module docstring).
+    """
+    max_id = await kv.increment(_SEQ_KEY, 0, 0)
+    if max_id < 1:
         return None
-    # A quote pick, not a security/crypto decision -- stdlib random is correct here.
-    return await _get_quote(community_id, random.choice(ids))  # noqa: S311
+    for _ in range(_MAX_RANDOM_ATTEMPTS):
+        # A quote pick, not a security/crypto decision -- stdlib random is correct here.
+        candidate_id = random.randint(1, max_id)  # noqa: S311
+        quote = await _get_quote(candidate_id)
+        if quote is not None:
+            return quote
+    return None
 
 
-async def _delete_quote(community_id: int, quote_id: int) -> bool:
+async def _delete_quote(quote_id: int) -> bool:
     """Hard-delete one quote by id (see module docstring: `kv` has no tombstone query surface).
 
     `False` if no such quote exists.
     """
-    existing = await _get_quote(community_id, quote_id)
+    existing = await _get_quote(quote_id)
     if existing is None:
         return False
-
-    await kv.delete(_quote_key(community_id, quote_id))
-    ids = await _read_index(community_id)
-    if quote_id in ids:
-        ids.remove(quote_id)
-        await _write_index(community_id, ids)
+    await kv.delete(_quote_key(quote_id))
     return True
 
 
