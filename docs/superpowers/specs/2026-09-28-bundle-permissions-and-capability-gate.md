@@ -21,6 +21,24 @@
 
 ---
 
+## 0. Gemini review resolution (PASS-WITH-CONDITIONS)
+
+Gemini reviewed PR #419 and returned PASS-WITH-CONDITIONS. Every condition below is folded into this spec as a **normative requirement**, not a suggestion — none are optional follow-ups.
+
+| # | Condition | Resolved in |
+|---|---|---|
+| 1 | Confused deputy: `InvokeScope` must be host-constructed only, from the immutable execution context, never guest-influenced — the guest API must have no scope parameters at all. Requires a test. | §5.1 (new subsection); test requirement in §5.1 |
+| 2 | Revocation TOCTOU: a 300s poll alone leaves too wide a window. Push-based invalidation (Valkey stream/pub-sub) required, <1s; poll stays only as fallback. In-flight calls finish, but a revoke blocks further host calls within the same invocation. | §4 (grant storage, rewritten), §5.3 (defense in depth), §5.5 (performance budget) |
+| 3 | PII: `core/svc_ingest/src/normalize.rs` puts raw usernames/logins in `platform-event.actor` today — a live leak, HARD BLOCKER. Must be Phase 1, Task 1. | §10.1 (hard invariant, strengthened), §12 Phase 1 Task 1 |
+| 4 | Reputation: a global per-bundle and per-publisher daily cap across ALL communities, plus distribution/entropy anomaly detection, with an auto-suspend threshold notifying the global admin. | §7.3 (anti-abuse controls, expanded) |
+| 5 | Detokenizer: single-pass, non-recursive; strict placeholder grammar; brace-sequence escaping before tokenizing; per-sink HTML escaping; overlay renders in a sandboxed iframe (`sandbox="allow-scripts"`, no `allow-same-origin`) under a strict CSP. | §10.4 (output detokenization, hardened) |
+| 6 | Upgrades: auto-upgrade hard-blocked on ANY permission delta (added or broadened); re-consent can't be bypassed, not even by a tenant default. | §3.4 (version upgrade, strengthened) |
+| 7 | `storage.objects`: a per-tenant bucket for Enterprise; shared bucket + prefixes for other tiers; per-tenant rate/IOPS limits; per-tenant SSE keys. | §6 (object storage, tiered) |
+| 8 | WASM limits are already implemented (epoch deadline + memory limiter via `new_bounded_store`, PR #406) — reference it, don't redesign it. | §5.3 (defense in depth, referenced) |
+| 9 | Artifact signing: hub-api signs the approved component digest (Ed25519, platform KMS key) at approval; the executor verifies against the platform public key before instantiating; fail closed. Vendor-side signing is optional and additional. | §5.6 (new subsection) |
+
+---
+
 ## 1. Permission catalog
 
 Android-style: every permission has a stable id, a risk level, and a default quota. `normal` permissions are shown but not blocked on; `dangerous` permissions require explicit reviewer action at every tier that sees them for the first time (§3).
@@ -183,6 +201,7 @@ vendor SUBMITS ──▶ GLOBAL admin (platform:admin)   reviews permission cata
 
 - `classify_diff()` (already live, `bundle_approval_service.py:253-278`) is extended to diff the full permission catalog, not just the 8 capability names + egress/tables/routes.
 - `widened` (new permission id, or a `params` change that raises a bound — e.g. `delta_max` increases, a quota increases, a new `net.http`/`overlay.media` host) **requires the same 3-tier re-consent as a first install**: the global admin re-approves the new/changed dangerous permissions, and every tenant/community that had the prior version active **stays pinned to the prior version** until each tier re-consents at its own level — never auto-upgraded.
+- **Hard-blocked on ANY permission delta, `normal` or `dangerous` (Gemini condition 6).** Auto-upgrade is refused the moment `classify_diff()` reports anything other than `narrowed`/`unchanged` — an *added* permission blocks exactly like a *broadened* one, and the block **cannot be bypassed by a tenant-level default or blanket-approval setting** (e.g. a tenant admin's "auto-approve minor updates" convenience toggle, if one ever exists for non-permission-affecting changes, has no effect here). Re-consent is always an explicit, per-version, per-tier action.
 - `narrowed`/`unchanged` upgrades auto-apply at the community's next poll cycle (§4) — no re-consent needed, consistent with today's non-permission upgrade behavior.
 - A community that never re-consents simply never receives the new version — `app_active_versions` keeps pointing at the last-consented `version_id`, exactly the existing FK-pointer mechanism, no new state machine.
 
@@ -197,7 +216,7 @@ vendor SUBMITS ──▶ GLOBAL admin (platform:admin)   reviews permission cata
 ### 3.7 Revocation
 
 - Any tier can revoke a previously-granted permission at any time (tenant admin adds a restriction; community admin deactivates a specific permission without deactivating the whole bundle — new `deactivate_permission(app_id, permission_id)` alongside the existing `deactivate_bundle`).
-- Revocation takes effect at the data plane's next poll (§4) — bounded by `BUNDLE_CONFIG_POLL_SECONDS`, never instant, same staleness window the rest of the 3-tier config already accepts.
+- Revocation takes effect within ~1s via the push-invalidation path (§4, Gemini condition 2) — not the old `BUNDLE_CONFIG_POLL_SECONDS`-bounded staleness window; that poll remains only as a fallback for a dropped notification. An invocation already in flight when the revocation lands finishes its current host call, but the gate blocks every subsequent host call in that same invocation (§5.3).
 - A revoked `dangerous` permission that a bundle's declared manifest requires (not opportunistic) auto-deactivates the whole bundle for that community, logged `WARN`, rather than running the bundle in a state its own manifest says it can't function in.
 
 ---
@@ -216,7 +235,7 @@ vendor SUBMITS ──▶ GLOBAL admin (platform:admin)   reviews permission cata
 
 **Versioning:** a grant is scoped to `(app_id, version)`, not just `app_id` — re-using `app_permission_grant_versions.permission_snapshot_hash` (same `canonical_json`/sha256 pattern as `permission_hash()`) as the single value the data plane compares to know whether its cached grant set for a given active version is current, without re-fetching the full row set on every poll tick.
 
-**Data-plane read path (hot-swap polling):** `svc_process`/`svc_action` already poll bundle config every `BUNDLE_CONFIG_POLL_SECONDS` (default 300, confirmed live at `core/svc_action/src/config.rs:293`, `core/svc_process/src/config.rs:264`). Extend that same poll to also refresh an in-memory `GrantSnapshot` keyed `(tenant, community, app_id) -> {permission_id -> params}`, sourced from `community_permission_grants` JOIN `app_permission_requests` (never trusting a request-time claim). This is the snapshot §5's gate reads — zero per-invoke DB round trips.
+**Data-plane read path — push-invalidated, poll as fallback only (Gemini condition 2, resolving the TOCTOU gap a pure 300s poll leaves).** Every write to `app_permission_requests`/`app_tenant_permission_restrictions`/`community_permission_grants` publishes a change notification (`(app_id, tenant_id, community_id, permission_id)`) onto a Valkey stream/pub-sub channel (`waddles:permission-grants:changed`) in the same hub-api transaction that writes the row. `svc_process`/`svc_action` subscribe and, on receipt, re-fetch just that `(tenant, community, app_id)`'s grant set and refresh the in-memory `GrantSnapshot` — **p99 < 1s** from write to the data plane observing it. `svc_process`/`svc_action`'s existing `BUNDLE_CONFIG_POLL_SECONDS` poll (default 300, confirmed live at `core/svc_action/src/config.rs:293`, `core/svc_process/src/config.rs:264`) is **retained only as a fallback** — a full reconciliation pass covering any dropped/missed pub-sub message, never the primary invalidation path. `GrantSnapshot` is keyed `(tenant, community, app_id) -> {permission_id -> params}`, sourced from `community_permission_grants` JOIN `app_permission_requests` (never trusting a request-time claim) either way. This is the snapshot §5's gate reads — zero per-invoke DB round trips regardless of which path refreshed it.
 
 ---
 
@@ -235,7 +254,13 @@ pub fn authorize(
 - `CapabilityHandler::handle` in both `svc_process/src/capabilities.rs` and `svc_action/src/capabilities.rs` calls `authorize()` as the very first statement in every match arm, replacing today's ad hoc "check `data.tables` non-empty" style gating and the hardcoded `db`/`kv` denials.
 - `AuthorizedCall` carries the resolved, server-derived resource (schema name, kv key prefix, object prefix, overlay token, or verified target-user) so the capability implementation never re-derives it from bundle args — the gate is the only place resource derivation happens.
 
-### 5.1 Two scope types
+### 5.1 `InvokeScope` construction (confused-deputy prevention) — Gemini condition 1
+
+**`InvokeScope` is constructed ONLY by the host, from the immutable execution context — never from guest arguments, and never influenceable by them.** Concretely: the executor connection's pinned stage identity (which manifest/component this connection was instantiated for) plus the invocation's server-side envelope (the delivered event's own `tenant`/`community`/`app_id`, resolved before the guest is ever invoked) are the sole two inputs. The guest-facing WIT API **has no scope parameters at all** — no capability function in any interface (`kv`, `db`, `objects`, `http`, `overlay`, `ai`, `reputation`, `users`, `telemetry`) accepts a tenant, community, app_id, or connection-identity argument of any kind; `target_user` (`ReputationScoped`) is the only guest-suppliable identity-shaped argument anywhere in the catalog, and it names a *target*, never the scope the call executes under. This is what makes the `AppScoped`/`ReputationScoped` split in §5.2 sound: a bundle cannot become a confused deputy for another app/tenant/community because there is no argument through which it could try.
+
+**Test requirement:** (1) a static/type-level test enumerates every WIT interface's every function signature and asserts none contains a tenant/community/app_id-shaped parameter (a schema-shape check against `wit/waddle-bundle/stage.wit`, run in CI, not just at spec-review time); (2) a runtime test drives a `host-call` frame carrying a forged or mismatched scope-shaped value inside its `args` JSON (e.g. an extraneous `"tenant": "other-tenant"` key) and asserts `authorize()`'s decision is identical to the same call without it — the connection's own pinned `InvokeScope` is authoritative regardless of `args` content, confirmed by observation, not by absence of a parameter alone.
+
+### 5.2 Two scope types
 
 | Scope | Resource derivation | Examples | Guarantee |
 |---|---|---|---|
@@ -244,26 +269,35 @@ pub fn authorize(
 
 `users.profile.read` (§10.2) is deliberately modeled as `ReputationScoped`-style rather than a third scope type — same membership check, same snapshot, a read instead of a write.
 
-### 5.2 Defense in depth
+### 5.3 Defense in depth
 
 | Layer | Mechanism |
 |---|---|
 | Compile/link time | Per-component `Linker` (wit-v1.1 §5, reused verbatim) registers only host functions for permissions the manifest declares **and** the community has actually granted (not just requested) — an ungranted function is never linked; a call to it fails at instantiation, before any guest code runs |
-| Runtime (every call) | `core/bundle_capability_gate::authorize()` re-checks the grant against the current `GrantSnapshot` (§4) — catches a mid-poll-interval revocation the linker (built at instantiation, which may predate the revocation) hasn't yet caught up to |
+| Instantiation time | Artifact integrity check (§5.6, Gemini condition 9) — the executor refuses to instantiate a component whose Ed25519 signature over the approved digest doesn't verify against the platform public key, before the linker step above even runs |
+| Resource bounds (existing, referenced not redesigned) | Per-invoke epoch deadline + `new_bounded_store` memory limiter (PR #406) — already implemented, independent of `authorize()`; bounds runaway guest compute/memory regardless of what capabilities are granted (Gemini condition 8) |
+| Runtime (every call) | `core/bundle_capability_gate::authorize()` re-checks the grant against the current `GrantSnapshot` (§4) — a push-invalidated cache (§4, Gemini condition 2), not just the 300s poll, so a mid-connection revocation is caught within ~1s, not up to 300s |
 | Post-authorize | Capability-specific validation continues exactly as designed elsewhere (sqlparser-rs AST gate for `db`, content-type/size checks for `storage.objects`, host/duration checks for `overlay.media`, prompt/PII checks for `ai.generate`, delta-bound/rate-limit for `reputation`) — the gate answers "is this call allowed at all," not "is this specific SQL/object/delta/prompt valid" |
 
 **No kill-switch.** Per `critical-rules.md`'s security-sensitive-mechanism rule, there is no env var, CLI flag, or config setting that disables `authorize()` — the only sanctioned bypass is the core-bundle system-approval path (§3.6), which still goes through the same table and the same gate, just with a distinguishable `approval_source`.
 
-### 5.3 Denials
+**Revocation mid-invocation (Gemini condition 2):** an in-flight host call that has already started is allowed to finish — `authorize()` doesn't preempt a call in progress. But a revocation that lands mid-invocation blocks every *subsequent* host call within that same invocation: the gate re-checks the grant version on every call, not once per invocation, so a guest making several `db.execute` calls in one execution gets cut off after the revoked permission's next use, never rides out the whole invocation on a stale grant.
+
+### 5.4 Denials
 
 - Typed WIT error variant per capability interface (`denied(string)` already the pattern for `http`/`db`/`relay`; extended with a stable `reason` string: `not_granted`, `resource_scope_mismatch`, `quota_exceeded`, `rate_limited`, `user_not_in_scope`, `delta_out_of_bounds`, `unsupported_platform`, `contains_pii`).
 - Every denial: (1) audit-logged (`tracing` + OTel, sanitized per existing `capabilities.rs` pattern), (2) counted (`waddles_bundle_capability_denied_total{app_id, permission, reason}`), (3) returned to the guest as `access-denied`, never a fabricated success — same posture PR #415 and wit-v1.1 already commit to for their own denial paths.
 
-### 5.4 Performance budget
+### 5.5 Performance budget
 
 - Grant lookup: one hashmap read against the in-memory `GrantSnapshot` (§4), O(1), no lock contention beyond a `RwLock` read guard already used for the existing bundle-config hot-swap — sub-microsecond, no allocation on the hot path.
-- Reputation/profile membership check: one additional hashmap read against a `(community_id) -> HashSet<user_uuid>` membership snapshot, refreshed on the same `BUNDLE_CONFIG_POLL_SECONDS` cadence as everything else — never a synchronous DB call inside `authorize()`.
+- Reputation/profile membership check: one additional hashmap read against a `(community_id) -> HashSet<user_uuid>` membership snapshot, refreshed on the same push-invalidated cadence as the grant snapshot (§4).
 - Target: `authorize()` adds ≤ 5µs p99 to a host-call round trip — validated by a criterion benchmark in the gate crate's own test suite (`writing-rust-tests` skill pattern), gating merge the same way wit-v1.1's other performance-sensitive paths do.
+- Revocation propagation target: p99 < 1s from hub-api's write to the data plane's `GrantSnapshot` reflecting it (§4's push channel), with the existing `BUNDLE_CONFIG_POLL_SECONDS` (300s) retained only as a fallback for a missed/dropped push message — never the primary mechanism.
+
+### 5.6 Artifact integrity (Ed25519 signing) — Gemini condition 9
+
+hub-api signs the **approved component digest** at global-tier approval (§3.1) — Ed25519, signing key held in the platform KMS, never in application config. The executor verifies that signature against the platform's public key **before instantiating** any component, for every load — a missing or invalid signature fails closed (the component is never instantiated, not degraded to a warning). This closes the gap between "hub-api approved this exact digest" and "the executor is actually running that exact digest," independent of transport integrity (TLS) or storage integrity (bucket checksums) alone. Vendor-side signing (a vendor's own key, checked additionally) is optional and additive — it never substitutes for the platform signature, which is the mandatory gate.
 
 ---
 
@@ -271,17 +305,18 @@ pub fn authorize(
 
 | Aspect | Design |
 |---|---|
-| Bucket/prefix | New dedicated bucket `waddles-bundle-objects` (parallels PR #415's dedicated `bundle-data` Postgres DB — blast-radius isolation from the existing control-plane `_bucket()` used for bundle artifacts/community logos), prefixed `tenant/{tenant_id}/community/{community_id}/app/{app_id}/` — server-derived (`AppScoped`, §5.1), a bundle-supplied `key` is appended under this prefix only after rejecting `..`/leading `/`/absolute paths |
-| Quotas | `max_object_bytes`, `max_total_bytes`, object-count ceiling — manifest-declared within the catalog default ceiling (§1), enforced pre-write via a periodic size/count scan job, same "cached last-known, fail closed on exceed" pattern as PR #415 §6's row/byte quota gate |
+| Bucket/prefix, **tiered (Gemini condition 7)** | **Enterprise tenants:** a dedicated per-tenant bucket (`waddles-bundle-objects-tenant-{tenant_id}`), matching the per-tenant isolation posture `critical-rules.md`'s KMS upsell already establishes for Enterprise. **Free/Professional tenants:** the single shared bucket `waddles-bundle-objects`, prefixed `tenant/{tenant_id}/community/{community_id}/app/{app_id}/`. Either way, the prefix/bucket is server-derived (`AppScoped`, §5.2) — a bundle-supplied `key` is appended only after rejecting `..`/leading `/`/absolute paths |
+| Quotas | `max_object_bytes`, `max_total_bytes`, object-count ceiling — manifest-declared within the catalog default ceiling (§1), enforced pre-write via a periodic size/count scan job, same "cached last-known, fail closed on exceed" pattern as PR #415 §6's row/byte quota gate. **Per-tenant rate and IOPS limits** (Gemini condition 7) apply independent of bucket topology — a shared-bucket tenant's burst never starves another tenant's sequential throughput |
 | Content-type allowlist | Manifest `content_types[]`, validated against a small platform allowlist (`image/png`, `image/jpeg`, `image/webp`, `application/json`, `text/plain` — no `application/octet-stream`/executable types without an explicit, dangerous-risk override) |
 | Max object size | Catalog default 5 MB per object, manifest may request lower, never higher, without a dangerous-risk re-ack |
-| Encryption | Per-tenant, at rest — same MinIO server-side encryption baseline `security.md` already mandates for every bucket; no new KMS integration |
-| Deletion on uninstall | Same lifecycle as PR #415 §8's table deletion: per-tenant uninstall deletes that tenant's prefix immediately (audited); last-tenant-uninstalled retains the app's objects for the same 30-day grace window, then a background sweep deletes the whole `app/{app_id}/` prefix |
+| Encryption | **Per-tenant SSE key** (Gemini condition 7) — a tenant-specific server-side encryption key, not a platform-shared one, regardless of bucket topology; same MinIO SSE baseline `security.md` already mandates, scoped per tenant rather than per-deployment. Customer-managed/external KMS remains the separate Enterprise upsell on top of this baseline per `critical-rules.md` |
+| Deletion on uninstall | Same lifecycle as PR #415 §8's table deletion: per-tenant uninstall deletes that tenant's prefix (or, for Enterprise, empties/retires that tenant's dedicated bucket) immediately (audited); last-tenant-uninstalled retains the app's objects for the same 30-day grace window, then a background sweep deletes the whole `app/{app_id}/` prefix (or bucket) |
 | Guest WIT interface | `put`/`get`/`list`/`delete`, scoped exactly as sketched below |
 
 ```wit
 /// Bundle-scoped object storage under the app's own tenant/community
-/// prefix (server-derived, never bundle-supplied — spec SS5.1 AppScoped).
+/// prefix or dedicated Enterprise bucket (server-derived, never
+/// bundle-supplied — spec SS5.2 AppScoped).
 /// Capability: granted only when `storage.objects` is declared and granted.
 interface objects {
   record object-meta {
@@ -313,7 +348,7 @@ interface objects {
 
 ## 7. Reputation (`reputation.*`)
 
-**No existing capability lets a WASM bundle touch either reputation score** (`community_members.reputation` or `reputation_global.score`). This spec routes bundle-originated changes through the **existing** `core/reputation_module` gRPC service rather than a raw table write, reusing its clamping/weighting/audit logic instead of duplicating it. `target-user` is always the tenant-tokenized UUID (§10.1) — reputation and `users.profile.read` (§10.2) share the identical `ReputationScoped` membership mechanism (§5.1).
+**No existing capability lets a WASM bundle touch either reputation score** (`community_members.reputation` or `reputation_global.score`). This spec routes bundle-originated changes through the **existing** `core/reputation_module` gRPC service rather than a raw table write, reusing its clamping/weighting/audit logic instead of duplicating it. `target-user` is always the tenant-tokenized UUID (§10.1) — reputation and `users.profile.read` (§10.2) share the identical `ReputationScoped` membership mechanism (§5.2).
 
 ### 7.1 WIT interface
 
@@ -347,7 +382,7 @@ interface reputation {
 
 ### 7.2 Call path
 
-1. `core/bundle_capability_gate::authorize()` — `ReputationScoped(target_user)`: verify `target_user` belongs to the invocation's community (or tenant, for `tenant` scope) via the membership snapshot (§5.4). Not in scope → `user-not-in-scope`, no RPC attempted.
+1. `core/bundle_capability_gate::authorize()` — `ReputationScoped(target_user)`: verify `target_user` belongs to the invocation's community (or tenant, for `tenant` scope) via the membership snapshot (§5.5). Not in scope → `user-not-in-scope`, no RPC attempted.
 2. Delta bound check against the manifest's granted `delta_min`/`delta_max` (community admin's own bound, §3.3, never looser than the global-approved ceiling). Out of bounds → `delta-out-of-bounds`.
 3. Rate-limit check — per-app-per-user-per-day and per-app-per-community/tenant-per-day aggregate token buckets (`UsageBatcher`, same primitive `relay`/`moderation` already use). Exceeded → `rate-limited`, **before** any RPC, matching moderation's "rate-limit strictly before the external call" merge gate (wit-v1.1 §7.1).
 4. `reason_code` allowlist check against the manifest's declared `reason_codes`.
@@ -360,9 +395,12 @@ interface reputation {
 |---|---|
 | Per-user cap | `|delta| <= delta_max` per call, plus a per-app-per-user-per-day aggregate cap (catalog default ±5, §1) |
 | Per-community/tenant cap | Aggregate daily cap across all users (catalog default ±50 community / ±200 tenant, §1) — bounds a bundle distributing many small adjustments across many users to avoid the per-user cap |
+| **Global per-bundle cap** (Gemini condition 4) | Aggregate daily delta cap for a given `(app_id, version)` **summed across every community and tenant it's activated in**, independent of the per-community/per-tenant caps above — bounds a single bundle install-base-wide farming pattern that stays under every individual community's cap by spreading across many communities |
+| **Global per-publisher cap** (Gemini condition 4) | Same aggregation, one level up: a daily delta cap summed across **every app a single vendor/publisher has activated anywhere on the platform** — bounds a publisher operating several bundles each individually under the per-bundle cap |
 | Mandatory reason code | Every `adjust()` requires a manifest-declared `reason_code` — no free-text, no blank reason; makes bulk-reversal and audit trivial |
 | Reversibility | Every adjustment is a ledger row (`bundle_reputation_adjustments`), never an in-place score edit outside `reputation_module`'s own clamp logic; a reversal is a new `adjust()` call with the negated delta and `reason_code = "reversal:<original_id>"`, itself audited — never a destructive delete of the original row |
-| Statistical anomaly flag | A background hub-api job flags an app whose daily adjustment distribution deviates > 3σ from its own trailing 30-day baseline for tenant-admin review (surfaced as a dashboard warning, never an automatic grant revocation — a human decides) |
+| Statistical anomaly flag | A background hub-api job flags an app whose daily adjustment **distribution and entropy** (Gemini condition 4 — not magnitude alone: a low-entropy pattern, e.g. always exactly `+1` to a rotating small set of accounts, is exactly as suspicious as a large-magnitude outlier) deviates from its own trailing 30-day baseline, for tenant-admin review (dashboard warning, human decides) |
+| **Auto-suspend threshold** (Gemini condition 4) | A **harder**, automatic tier above the statistical flag: an app crossing a fixed, platform-wide anomaly threshold (e.g. an absolute global-per-bundle-cap breach, or an entropy/distribution deviation beyond the flag's own 3σ-equivalent ceiling) has its `reputation.*` grants **automatically suspended platform-wide** (not just flagged) and the **global admin is notified** immediately — distinct from the softer statistical flag, which stays a human-reviewed dashboard warning; reinstatement is a global-admin action, not automatic |
 | Scope containment | `community.write` can never touch `reputation_global.score` — only `tenant.write` can, and only for users within that tenant — enforced by the gate's membership check, not by convention |
 | Auto-ban interaction | A bundle-driven adjustment that would cross `REPUTATION_AUTO_BAN_THRESHOLD` (450) is **not** treated as a bundle-triggerable side effect — `reputation_module`'s own auto-ban logic runs downstream of any write, unchanged; bundles never get a distinct "ban" verb here (that's `moderation.ban`, wit-v1.1 §2) |
 
@@ -374,7 +412,7 @@ Built on the existing `core/browser_source_core_module` gRPC surface — `Browse
 
 | Aspect | Design |
 |---|---|
-| Token/community resolution | Server-derived (`AppScoped`, §5.1) from `(tenant, community, app_id)` — the bundle never sees or supplies the overlay token |
+| Token/community resolution | Server-derived (`AppScoped`, §5.2) from `(tenant, community, app_id)` — the bundle never sees or supplies the overlay token |
 | Host allowlist | Manifest `allowed_hosts[]` (e.g. `www.youtube.com`, `kick.com`) — `play-media`'s `url` host must match; reuses the same `_EGRESS_HOST_RE` validator `net.http` already has (§2.3), applied to a second manifest field rather than a new regex |
 | Duration cap | Manifest `max_duration_seconds`, catalog ceiling 30s; the host clamps, never trusts the guest's own claim |
 | Rate limit | 1 item/10s/app/community, `UsageBatcher` token bucket (same primitive as `relay`/`moderation`) |
@@ -429,7 +467,7 @@ interface ai {
 - **Sideways (host-mediated lookups):** `users.profile.read` (§10.2) returns only non-identifying attributes; a platform-identity-requiring call (e.g. a Helix clip lookup) never round-trips a platform handle through the guest (§10.3, last bullet).
 - **Outbound:** a bundle emits `{user:<uuid>}` placeholders only; rendering to a display name happens exactly once, host-side, at the sink (§10.4).
 
-**Today's gap this spec requires fixed as a prerequisite, not a follow-up:** `core/svc_ingest/src/normalize.rs:150,185,263` currently populates `platform-event.actor` with the raw platform username/login (`msg.sender`, `msg.author_username`, `user_login`). No `dangerous` permission in this catalog is safe to grant to any bundle until §10.3's tokenization lands — an already-shipped process-stage bundle reading `actor` today is reading PII.
+**HARD BLOCKER (Gemini condition 3), not a follow-up:** `core/svc_ingest/src/normalize.rs:150,185,263` currently populates `platform-event.actor` with the raw platform username/login (`msg.sender`, `msg.author_username`, `user_login`) — a live PII leak today, not a theoretical gap. **No permission in this catalog — `normal` or `dangerous` — ships to any bundle until this is fixed**, per §12 Phase 1, Task 1. The fix: `actor` and any target user are tokenized to a canonical UUID, or an ephemeral pseudonym for an unlinked identity (§10.3), before the event ever reaches the process-stage or action-stage bundle; the raw platform username/login is retained only inside the PII boundary (hub-api's `hub_users` mapping and the sink-side detokenizer, §10.4), never forwarded past `svc_ingest`/`svc_process`'s pre-dispatch pass into guest-visible data.
 
 ### 10.2 `users.profile.read`: non-identifying attributes only
 
@@ -484,27 +522,29 @@ interface users {
 
 A bundle only ever emits `{user:<uuid>}` placeholders — never a rendered name — in any text/data handed to a host capability (`relay.push`, a future `overlay` text/leaderboard capability, a future webhook-out or Discord-embed sink). **Detokenization happens exactly once, inside the trusted component that owns the sink, immediately before the payload leaves that component — never earlier, never inside the bundle.**
 
+**Detokenizer hardening (Gemini condition 5).** The renderer is a **single-pass, non-recursive** tokenizer — it scans the payload exactly once and never re-scans its own substitution output (a resolved display name is never fed back through the placeholder grammar, closing off a self-referential injection where a crafted "display name" itself contains `{user:...}`-shaped text). Placeholders are recognized **only** against a strict grammar (`{user:<uuid-v4-or-v5-shape>}`, nothing looser) — any bundle-supplied text containing a brace sequence that merely *resembles* the grammar (e.g. literal `{user:not-a-uuid}` typed by a guest, or an attacker-influenced string smuggled through a manifest justification field) is **escaped before tokenizing** (braces entity-escaped) so it can never be misidentified as a real placeholder or trigger a second substitution pass. The rendered output is then **HTML/markup-escaped per sink** — each sink's own escaping rules (IRC-safe for chat, HTML-entity for overlay/DOM), not one shared escaper assumed safe everywhere.
+
 | Sink | Renders in | Detail |
 |---|---|---|
 | Chat (`relay.push`) | `core/svc_action` (`handle_relay`/`handle_discord_relay`) | The existing outbound trust boundary (`sanitize_irc_component`'s pattern) gains a detokenize-then-sanitize step before `LPUSH`/REST send |
-| Overlay (`overlay.play-media`, future overlay text/leaderboard capabilities) | The component actually feeding the browser source over its websocket/SSE connection (`core/browser_source_core_module`) | Renders at the point of streaming the frame to the browser — a raw UUID must never appear in the DOM, a URL, or a socket frame. The `overlay` WIT capability in `svc_action` passes `{user:<uuid>}` through **unresolved**; resolution is `browser_source_core_module`'s job, since it is the component actually adjacent to the untrusted browser context, not `svc_action` |
+| Overlay (`overlay.play-media`, future overlay text/leaderboard capabilities) | The component actually feeding the browser source over its websocket/SSE connection (`core/browser_source_core_module`) | Renders at the point of streaming the frame to the browser — a raw UUID must never appear in the DOM, a URL, or a socket frame. The `overlay` WIT capability in `svc_action` passes `{user:<uuid>}` through **unresolved**; resolution is `browser_source_core_module`'s job, since it is the component actually adjacent to the untrusted browser context, not `svc_action`. The browser source itself renders inside a **sandboxed `<iframe sandbox="allow-scripts">`** (deliberately **without** `allow-same-origin`) under a **strict CSP** (no inline script execution beyond what the sandbox already isolates, no arbitrary external resource loads) — defense in depth against the rendered content itself, independent of the detokenizer's own escaping (Gemini condition 5) |
 | Future sinks (webhooks out, Discord embeds) | Whichever component makes the final outbound call | Same rule by construction — a new sink is not compliant until it detokenizes at its own egress point |
 
 - **Batched, cached resolution.** Each rendering component resolves UUIDs via a small per-tenant `{uuid -> display_name}` cache (one batched lookup, not one query per mention), TTL 5 minutes default, invalidated immediately on a rename event rather than waiting out the TTL.
 - **Erased or unknown users** render as a fixed neutral label (`"a former viewer"`) — never the UUID, never a blank string, never a visible error.
-- **HTML/markup escaping is mandatory on every rendered name before it reaches an overlay** (XSS-sensitive: an attacker-chosen display name is exactly the injection vector this closes) — the same escaping code path chat-relay text already goes through, not a second, separately-maintained escaping step.
-- **Test:** a data-plane regression test asserts no UUID-shaped string appears in any overlay `event_data` payload or any chat `relay.push` payload, across a fixed corpus of synthetic bundle outputs — reported with the corpus size (`critical-rules.md` Verification Integrity: a zero-payload test proves nothing).
+- **HTML/markup escaping is mandatory on every rendered name before it reaches an overlay** (XSS-sensitive: an attacker-chosen display name is exactly the injection vector this closes) — per-sink escaping (above), not one shared escaper assumed safe everywhere, plus the overlay's own sandboxed-iframe/CSP layer as a second, independent control.
+- **Test:** a data-plane regression test asserts (1) no UUID-shaped string appears in any overlay `event_data` payload or any chat `relay.push` payload, (2) a crafted brace-sequence in guest-supplied text (`{user:not-a-real-uuid}`, or a nested/self-referential placeholder) is escaped rather than substituted or re-scanned, and (3) the renderer never runs a second substitution pass over its own output — across a fixed corpus of synthetic bundle outputs, reported with the corpus size (`critical-rules.md` Verification Integrity: a zero-payload test proves nothing).
 
 Bundles stay PII-free in both directions: inbound tokenized at ingest/pre-dispatch (§10.3), outbound detokenized at the sink (§10.4) — never inside the WASM boundary either way.
 
 ### 10.5 `user_ref` columns & erasure cascade
 
-PR #415's manifest DSL (already one-table-only per §1.1, commit `e35c2db0` round-3) owns column typing; this spec adds one DSL annotation: a `uuid`-typed column may be flagged `user_ref: true` (e.g. PR #414's fishing table's `user_ref` column). hub-api's schema compiler validates that a `user_ref`-flagged column only ever receives UUIDs resolving within the bundle's own invocation tenant — the same tenant-membership check `authorize()` already performs for `ReputationScoped`/`users.profile.read` calls (§5.1) — a bundle cannot smuggle a foreign tenant's UUID into its own table. On a DSAR/erasure request, hub-api's existing erasure job (the single place that already walks every PII-adjacent table for a `hub_users` row, per `critical-rules.md` PII Tokenization) is extended to also walk every bundle's single table for `user_ref`-flagged columns matching the erased UUID, deleting/nulling those rows in the same transaction — automatic and bundle-agnostic, since there is always exactly one table and the annotation is declarative.
+PR #415's manifest DSL (already one-table-only per §1.1, commit `e35c2db0` round-3) owns column typing; this spec adds one DSL annotation: a `uuid`-typed column may be flagged `user_ref: true` (e.g. PR #414's fishing table's `user_ref` column). hub-api's schema compiler validates that a `user_ref`-flagged column only ever receives UUIDs resolving within the bundle's own invocation tenant — the same tenant-membership check `authorize()` already performs for `ReputationScoped`/`users.profile.read` calls (§5.2) — a bundle cannot smuggle a foreign tenant's UUID into its own table. On a DSAR/erasure request, hub-api's existing erasure job (the single place that already walks every PII-adjacent table for a `hub_users` row, per `critical-rules.md` PII Tokenization) is extended to also walk every bundle's single table for `user_ref`-flagged columns matching the erased UUID, deleting/nulling those rows in the same transaction — automatic and bundle-agnostic, since there is always exactly one table and the annotation is declarative.
 
 ### 10.6 Enforcement & tests
 
-- `authorize()` denies a `users.profile.read` call whose target UUID isn't tenant/community-scoped, identical mechanism to `reputation.read` (§5.1).
-- Linker isolation (§5.2) applies identically — a component without `users.profile.read` granted never gets `users.read` linked at all.
+- `authorize()` denies a `users.profile.read` call whose target UUID isn't tenant/community-scoped, identical mechanism to `reputation.read` (§5.2).
+- Linker isolation (§5.3) applies identically — a component without `users.profile.read` granted never gets `users.read` linked at all.
 - Two count-asserted regression gates are required, not optional (`critical-rules.md` Verification Integrity):
   1. **Inbound:** no field in any WIT record delivered to a guest matches the PII sanitizer's `SENSITIVE_KEYS` denylist or an explicit username/display-name/email/avatar pattern, across a fixed corpus of synthetic ingest events.
   2. **Outbound:** §10.4's no-UUID-in-egress-payload test.
@@ -525,49 +565,55 @@ PR #415's manifest DSL (already one-table-only per §1.1, commit `e35c2db0` roun
 
 ## 12. Phased implementation plan (agent-sized, ≤30 min each)
 
+**Renumbered against Gemini's PASS-WITH-CONDITIONS review (§0): the PII fix is now Phase 1, Task 1 — the single highest-priority item in this entire plan, per condition 3.**
+
 | Phase | Task | Component | Depends on |
 |---|---|---|---|
 | 0 | Define `Permission`/`PermissionId`/`Risk` enums + catalog table (§1) as a shared Rust module in the new `core/bundle_capability_gate` crate; unit tests for id parsing (`net.http:<host>`, `chat.send:<platform>`) | Rust | none |
 | 0 | Add `_PERMISSION_ID_RE` + catalog validation to `bundle_manifest_v2.py`, replacing dead `permissions: []` parsing (§2.3) | hub-api | Phase 0 (catalog agreed) |
 | 0 | Migration: `app_permission_requests`, `app_tenant_permission_restrictions`, `community_permission_grants`, `app_permission_grant_versions`, `bundle_reputation_adjustments` (§4) | hub-api (raw migration, control-plane DB) | none |
-| 1 | Extend `permission_summary_service.build_permission_summary()` to render the full catalog instead of `_derive_capabilities()`'s 8 names; update `classify_diff()`'s flatten set to include permission ids + params | hub-api | Phase 0 |
-| 1 | `bundle_approvals.py::post_approve` gains `approved_permissions[]` ack requirement + `incomplete_dangerous_ack` refusal (§3.1) | hub-api | previous task |
-| 2 | `marketplace_lifecycle_service.make_available()` gains `restricted_permissions[]` + the `ai.generate` Enterprise auto-restriction (§3.2); `activate_bundle()` gains mandatory `granted_permissions[]` + `consent_required` refusal (§3.3) | hub-api | Phase 1 |
-| 2 | `deactivate_permission(app_id, permission_id)` endpoint + service function (§3.7) | hub-api | previous task |
-| 2 | `seed_core_bundles.py` extended to also write `app_permission_requests` rows with `approval_source="system:core-seeder"` (§3.6) | hub-api | Phase 0 |
-| 3 | `core/bundle_capability_gate` crate: `authorize()`, `InvokeScope`, `AppScoped`/`ReputationScoped` resource derivation, `GrantSnapshot` type, unit tests against fixed grant fixtures | Rust | Phase 0 |
-| 3 | `GrantSnapshot` hydration wired into `svc_process`/`svc_action`'s existing `BUNDLE_CONFIG_POLL_SECONDS` poll loop (§4) | Rust (both stages) | previous task |
-| 3 | `svc_process`/`svc_action`'s `CapabilityHandler::handle` calls `authorize()` first in every match arm, replacing today's hardcoded `db`/`kv` `not_implemented` denials with `not_granted` where applicable | Rust (both stages) | previous task |
-| 4 | **Prerequisite for every Dangerous permission below:** tokenize `actor` in `core/svc_ingest::normalize.rs` (UUID via `hub_users`, replacing the raw-username assignment at lines 150/185/263) + the svc-process pre-dispatch mention-resolution pass + ephemeral-pseudonym minting (§10.3) | Rust (svc_ingest, svc_process) | none — highest priority, blocks Phases 6-9 |
-| 4 | Inbound PII regression test (§10.6.1): fixed corpus of synthetic ingest events, assert zero PII-shaped fields reach any WIT record | Rust (svc_ingest/svc_process tests) | previous task |
-| 5 | Wire `storage.kv` end-to-end through the gate (`feature/bundle-kv-capability` — currently zero commits; this phase **is** that branch's scope): `AppScoped` key-prefix derivation, quota enforcement, real Valkey hash get/set/delete/increment | Rust (both stages) | Phase 3 |
-| 5 | Wire `storage.tables` through the gate atop PR #415's `db.execute` implementation (already one-table-per-bundle, `app_core`/`app_community` schema naming — commit `e35c2db0`, round-3) — the gate supplies the `AppScoped` schema-qualified table resolution (§1.1) | Rust (both stages) | Phase 3, PR #415's Phase 3 |
-| 5 | `user_ref` DSL annotation + erasure-cascade extension to the existing hub-api erasure job (§10.5) | hub-api | previous task |
-| 6 | `storage.objects`: bucket/prefix provisioning at community activation, quota scan job, WIT interface (§6) wired into `bundle_executor`'s linker + both stages' `CapabilityHandler` | Rust + hub-api | Phase 3 |
-| 7 | `users.profile.read`: WIT interface (§10.2), per-platform field-availability table, gate wiring reusing the `ReputationScoped` membership check | Rust (svc_action) | Phase 3, Phase 4 |
-| 7 | `overlay.media`: WIT interface (§8) wired to `browser_source_core_module`'s existing `SendOverlayEvent` RPC, host-allowlist/duration-clamp/rate-limit | Rust (svc_action) | Phase 3, Phase 4 |
-| 7 | Output-detokenization renderer in `browser_source_core_module` (batched/cached name resolution, TTL+invalidation, neutral label for erased/unknown, HTML escaping) + the matching renderer step in `svc_action`'s `handle_relay`/`handle_discord_relay` (§10.4) | Python (browser_source) + Rust (svc_action) | Phase 4 |
-| 7 | Output-detokenization regression test (§10.6.2): no UUID-shaped string in any overlay/chat egress payload, fixed corpus, count-asserted | Rust + Python tests | previous task |
-| 8 | `ai.generate`: WIT interface (§9), host client reusing `prompt_safety.py`/`pii_redaction.py`, Enterprise-tier gate wired into `make_available()` (§3.2) | Rust (svc_action) + hub-api | Phase 2, Phase 4 |
-| 9 | `reputation.proto`: add `AdjustScore` RPC (§7.2 step 5, open question §13) | Python (`core/reputation_module`) | none — can start in parallel with Phase 0-3 |
-| 9 | `reputation` WIT interface (§7.1) + gate wiring (membership snapshot, delta/rate-limit checks) in `svc_action` only (action-stage-only) | Rust (svc_action) | Phase 3, Phase 4, previous task |
-| 9 | `bundle_reputation_adjustments` audit write path + anomaly-flag background job (§7.3) | hub-api | Phase 9 (schema exists) |
-| 9 | `telemetry.logs`/`telemetry.metrics`: wire the catalog grant into `authorize()` (§5); instrument declaration, cardinality caps, scrubbing, rate limits, and OTel conversion land on `docs/bundle-telemetry-capability`'s own schedule, not this plan | Rust (both stages) | Phase 3, `docs/bundle-telemetry-capability` |
-| 10 | hub-webui: catalog-approval dangerous-permission ack UI (§11 row 1) | React | Phase 1 |
-| 10 | hub-webui: marketplace restriction toggles + Enterprise badge for `ai.generate` (§11 row 2) | React | Phase 2, Phase 8 |
-| 10 | hub-webui: community activation Android-style consent screen + re-consent banner (§11 rows 3-4) | React | Phase 2 |
-| 10 | hub-webui: per-permission revoke UI (§11 row 5) | React | Phase 2 |
-| 11 | OTel metrics/logs/traces for `authorize()` denials and grant-snapshot refresh (§5.3) | Rust (both stages) | Phase 3 |
-| 12 | Fishing bundle (PR #414) re-requests permissions against the final catalog, including `storage.tables`'s single-table naming and `user_ref` annotation, once Phases 0-5 land | fishing spec owner | Phases 0-5 |
+| **1 (Task 1 — HARD BLOCKER, Gemini condition 3)** | Tokenize `actor` in `core/svc_ingest::normalize.rs` (UUID via `hub_users`, replacing the raw-username assignment at lines 150/185/263) + the svc-process pre-dispatch mention-resolution pass + ephemeral-pseudonym minting (§10.3); raw username/login is retained only inside the PII boundary (`hub_users` mapping, sink-side detokenizer) | Rust (svc_ingest, svc_process) | none — highest priority in this entire plan, blocks every phase below that touches a Dangerous permission |
+| 1 | Inbound PII regression test (§10.6): fixed corpus of synthetic ingest events, assert zero PII-shaped fields reach any WIT record | Rust (svc_ingest/svc_process tests) | previous task |
+| 2 | Extend `permission_summary_service.build_permission_summary()` to render the full catalog instead of `_derive_capabilities()`'s 8 names; update `classify_diff()`'s flatten set to include permission ids + params | hub-api | Phase 0 |
+| 2 | `bundle_approvals.py::post_approve` gains `approved_permissions[]` ack requirement + `incomplete_dangerous_ack` refusal (§3.1) | hub-api | previous task |
+| 3 | `marketplace_lifecycle_service.make_available()` gains `restricted_permissions[]` + the `ai.generate` Enterprise auto-restriction (§3.2); `activate_bundle()` gains mandatory `granted_permissions[]` + `consent_required` refusal (§3.3); both enforce the hard, non-bypassable upgrade block on any permission delta (§3.4, Gemini condition 6) | hub-api | Phase 2 |
+| 3 | `deactivate_permission(app_id, permission_id)` endpoint + service function (§3.7) | hub-api | previous task |
+| 3 | `seed_core_bundles.py` extended to also write `app_permission_requests` rows with `approval_source="system:core-seeder"` (§3.6) | hub-api | Phase 0 |
+| 4 | `core/bundle_capability_gate` crate: `authorize()`, `InvokeScope` constructed only from the host's pinned connection identity + server-side envelope (§5.1, Gemini condition 1 — never from guest args), `AppScoped`/`ReputationScoped` resource derivation, unit tests against fixed grant fixtures | Rust | Phase 0 |
+| 4 | Confused-deputy test suite (§5.1, Gemini condition 1): static WIT-schema check that no interface function accepts a scope-shaped parameter, plus a runtime test that a forged scope-shaped value inside `args` has no effect on `authorize()`'s decision | Rust | previous task |
+| 4 | hub-api: publish grant-change notifications onto `waddles:permission-grants:changed` (Valkey stream/pub-sub) on every write to the permission tables (§4, Gemini condition 2) | hub-api | Phase 0 |
+| 4 | `GrantSnapshot` push-subscriber wired into `svc_process`/`svc_action`, refreshing just the changed `(tenant, community, app_id)` on notification, p99 < 1s; existing `BUNDLE_CONFIG_POLL_SECONDS` poll retained as fallback-only reconciliation (§4, §5.5) | Rust (both stages) | previous task |
+| 4 | `svc_process`/`svc_action`'s `CapabilityHandler::handle` calls `authorize()` first in every match arm, replacing today's hardcoded `db`/`kv` `not_implemented` denials with `not_granted` where applicable; per-call version re-check so a revocation blocks subsequent calls within an already-in-flight invocation (§5.3) | Rust (both stages) | previous task |
+| 5 | Artifact signing (§5.6, Gemini condition 9): hub-api signs the approved component digest (Ed25519, platform KMS key) at global-tier approval (§3.1) | hub-api | Phase 0 |
+| 5 | Executor verifies the signature against the platform public key before instantiating any component — fail closed on missing/invalid signature, before the linker step (§5.3) runs | Rust (`core/bundle_executor`) | previous task |
+| 6 | Wire `storage.kv` end-to-end through the gate (`feature/bundle-kv-capability` — currently zero commits; this phase **is** that branch's scope): `AppScoped` key-prefix derivation, quota enforcement, real Valkey hash get/set/delete/increment | Rust (both stages) | Phase 4, Phase 1 |
+| 6 | Wire `storage.tables` through the gate atop PR #415's `db.execute` implementation (already one-table-per-bundle, `app_core`/`app_community` schema naming — commit `e35c2db0`, round-3) — the gate supplies the `AppScoped` schema-qualified table resolution (§1.1) | Rust (both stages) | Phase 4, Phase 1, PR #415's Phase 3 |
+| 6 | `user_ref` DSL annotation + erasure-cascade extension to the existing hub-api erasure job (§10.5) | hub-api | previous task |
+| 7 | `storage.objects`: shared-bucket provisioning + prefix scheme for Free/Professional tenants, WIT interface (§6) wired into `bundle_executor`'s linker + both stages' `CapabilityHandler` | Rust + hub-api | Phase 4, Phase 1 |
+| 7 | `storage.objects` Enterprise tier: dedicated per-tenant bucket provisioning, per-tenant SSE key, per-tenant rate/IOPS limits (§6, Gemini condition 7) | Rust + hub-api | previous task |
+| 8 | `users.profile.read`: WIT interface (§10.2), per-platform field-availability table, gate wiring reusing the `ReputationScoped` membership check | Rust (svc_action) | Phase 4, Phase 1 |
+| 8 | `overlay.media`: WIT interface (§8) wired to `browser_source_core_module`'s existing `SendOverlayEvent` RPC, host-allowlist/duration-clamp/rate-limit; browser source rendered in a sandboxed `<iframe sandbox="allow-scripts">` (no `allow-same-origin`) under a strict CSP (§10.4, Gemini condition 5) | Rust (svc_action) + browser_source | Phase 4, Phase 1 |
+| 8 | Output-detokenization renderer in `browser_source_core_module` and `svc_action`'s `handle_relay`/`handle_discord_relay`: single-pass non-recursive tokenizer, strict placeholder grammar, brace-sequence escaping before tokenizing, per-sink HTML/markup escaping, batched/cached name resolution with rename invalidation, neutral label for erased/unknown users (§10.4, Gemini condition 5) | Python (browser_source) + Rust (svc_action) | Phase 1 |
+| 8 | Output-detokenization regression test (§10.6): no UUID-shaped string in any overlay/chat egress payload; a crafted brace-sequence is escaped, not substituted or re-scanned; fixed corpus, count-asserted | Rust + Python tests | previous task |
+| 9 | `ai.generate`: WIT interface (§9), host client reusing `prompt_safety.py`/`pii_redaction.py`, Enterprise-tier gate wired into `make_available()` (§3.2) | Rust (svc_action) + hub-api | Phase 3, Phase 4, Phase 1 |
+| 10 | `reputation.proto`: add `AdjustScore` RPC (§7.2 step 5, open question §13) | Python (`core/reputation_module`) | none — can start in parallel with Phases 0-4 |
+| 10 | `reputation` WIT interface (§7.1) + gate wiring (membership snapshot, delta/rate-limit checks) in `svc_action` only (action-stage-only) | Rust (svc_action) | Phase 4, Phase 1, previous task |
+| 10 | `bundle_reputation_adjustments` audit write path + global per-bundle/per-publisher cap enforcement + distribution/entropy anomaly job + automatic platform-wide suspend-and-notify-global-admin threshold (§7.3, Gemini condition 4) | hub-api | Phase 10 (schema exists) |
+| 10 | `telemetry.logs`/`telemetry.metrics`: wire the catalog grant into `authorize()` (§4); instrument declaration, cardinality caps, scrubbing, rate limits, and OTel conversion land on `docs/bundle-telemetry-capability`'s own schedule, not this plan | Rust (both stages) | Phase 4, `docs/bundle-telemetry-capability` |
+| 11 | hub-webui: catalog-approval dangerous-permission ack UI (§11 row 1) | React | Phase 2 |
+| 11 | hub-webui: marketplace restriction toggles + Enterprise badge for `ai.generate` (§11 row 2) | React | Phase 3, Phase 9 |
+| 11 | hub-webui: community activation Android-style consent screen + re-consent banner, reflecting the hard any-delta upgrade block (§11 rows 3-4, §3.4) | React | Phase 3 |
+| 11 | hub-webui: per-permission revoke UI (§11 row 5) | React | Phase 3 |
+| 12 | OTel metrics/logs/traces for `authorize()` denials and grant-snapshot refresh, including push-invalidation latency (§5.4, §5.5) | Rust (both stages) | Phase 4 |
+| 13 | Fishing bundle (PR #414) re-requests permissions against the final catalog, including `storage.tables`'s schema naming and `user_ref` annotation, once Phases 0-6 land | fishing spec owner | Phases 0-6 |
 
-Phases 0-2 (hub-api schema + consent flow) and the `reputation.proto` RPC addition (Phase 9's first task) have no Rust dependency and can proceed fully in parallel with Phase 3 (the gate crate itself). **Phase 4 (PII tokenization) is a hard prerequisite for Phases 6-9** — no Dangerous permission touching user identity ships before it.
+Phases 0-3 (hub-api schema + consent flow) and the `reputation.proto` RPC addition (Phase 10's first task) have no Rust dependency and can proceed fully in parallel with Phase 4 (the gate crate itself) — but **Phase 1 (PII tokenization) is a hard prerequisite for every phase from 6 onward**, not just a subset: no permission that exposes or touches user identity ships before it, per Gemini condition 3.
 
 ---
 
 ## 13. Open questions (not blockers, flagged for follow-up)
 
 - **`reputation_module`'s `AdjustScore` RPC** (§7.2 step 5) is named but not designed here — needs its own short addendum covering how it interacts with `reputation_service.py::adjust()`'s existing weight/clamp pipeline (does a bundle-driven delta bypass weighting entirely, or get treated as a new weighted `event_type` per app?).
-- **`storage.objects` bucket topology** — a single `waddles-bundle-objects` bucket with tenant/community/app prefixes (this doc) vs. PR #415's "separate database" isolation philosophy applied to storage too (a bucket-per-tenant) is a cost/isolation tradeoff not fully resolved here; default to the single-bucket-with-prefixes model unless a security review calls for stronger isolation.
 - **Cross-bundle permission sharing** (e.g. fishing-shop's tables read by fishing-core, PR #415 §10) is out of scope for the permission *catalog* — it's an existing open question in PR #415, sharpened by §1.1's one-table-per-bundle rule (a cross-bundle FK is now structurally impossible, not just discouraged), unaffected otherwise by this design.
 - **`moderation.<platform>` catalog entry vs. wit-v1.1's bare `moderation` capability flag** — this doc assumes the fold happens in the same PR that lands wit-v1.1 (§2.4); if wit-v1.1 merges first with the bare flag, a follow-up migration renames it without changing enforcement semantics.
 - **Free-text PII scrubbing beyond recognized mentions** (§10.3) — general NLP-shaped detection of PII embedded in arbitrary chat text (an email address, a phone number typed into a message body) is explicitly not solved by the mention-tokenization pipeline; needs its own design if required.
