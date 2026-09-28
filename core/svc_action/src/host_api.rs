@@ -774,6 +774,7 @@ mod tests {
             NoopQueue,
             egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+            crate::detokenize::build_production_detokenizer(),
         ));
 
         let executor = tokio::spawn(async move {
@@ -991,6 +992,7 @@ mod tests {
             SharedQueue(Arc::clone(&relay_queue)),
             egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+            crate::detokenize::build_production_detokenizer(),
         ));
 
         let executor = tokio::spawn(async move {
@@ -1183,6 +1185,7 @@ mod tests {
             NoopQueue,
             egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+            crate::detokenize::build_production_detokenizer(),
         ));
 
         let executor = tokio::spawn(async move {
@@ -1287,6 +1290,7 @@ mod tests {
             NoopQueue,
             egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+            crate::detokenize::build_production_detokenizer(),
         ));
 
         let executor = tokio::spawn(async move {

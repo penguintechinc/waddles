@@ -37,6 +37,7 @@ use std::sync::{Arc, Mutex};
 
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
+use crate::detokenize::ChatDetokenizer;
 use crate::egress::EgressGuard;
 use crate::usage::UsageBatcher;
 
@@ -253,6 +254,15 @@ pub struct StageCapabilities<Q: RelayQueue> {
     /// See [`DiscordRelay`]'s doc; `None` until [`Self::with_discord`] is
     /// called.
     discord: Option<DiscordRelay>,
+    /// The single-pass, non-recursive output detokenizer (spec S10.4,
+    /// Gemini condition 5) every outbound chat send runs through before
+    /// [`Self::handle_relay`]/[`Self::handle_discord_relay`] ever queue or
+    /// send it -- see those methods' doc for the exact detokenize-then-
+    /// sanitize ordering. Mandatory (not an `Option`, unlike [`Self::
+    /// discord`]): unlike the Discord relay provider, which is allowed to
+    /// be genuinely absent, detokenization is a hard, non-bypassable step
+    /// on every send, so every constructor caller must supply one.
+    detokenizer: Arc<ChatDetokenizer>,
 }
 
 impl<Q: RelayQueue> StageCapabilities<Q> {
@@ -263,13 +273,21 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
     /// relay provider starts unconfigured (`relay_unavailable` until
     /// [`Self::with_discord`] is chained on) so every existing caller of
     /// this constructor -- production and test alike -- is unaffected by
-    /// this landing.
-    pub fn new(relay_queue: Q, egress: Arc<EgressGuard>, usage: Arc<Mutex<UsageBatcher>>) -> Self {
+    /// this landing. `detokenizer` is shared (one per process, per
+    /// [`crate::detokenize::ChatDetokenizer`]'s doc) so its per-tenant name
+    /// cache is actually shared across every connection's invokes.
+    pub fn new(
+        relay_queue: Q,
+        egress: Arc<EgressGuard>,
+        usage: Arc<Mutex<UsageBatcher>>,
+        detokenizer: Arc<ChatDetokenizer>,
+    ) -> Self {
         Self {
             relay_queue,
             egress,
             usage,
             discord: None,
+            detokenizer,
         }
     }
 
@@ -351,7 +369,21 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
             })?;
 
         if provider == "discord" {
-            return self.handle_discord_relay(scope, text).await;
+            // Detokenize-then-send (spec S10.4's chat sink row): a bundle
+            // only ever hands us `{user:<uuid>}` placeholders (S10.1) --
+            // this is the one point, host-side, where they ever become a
+            // rendered, Discord-markdown/mention-escaped display name.
+            // Deliberately no `sanitize_irc_component` here, unchanged
+            // from before this landing: Discord's JSON `content` field is
+            // not a raw IRC line, so a legitimate `\n` in a multi-line
+            // message is not the CRLF-injection risk it would be for
+            // Twitch (see `relay_send_discord_does_not_strip_newlines_
+            // from_text` in this module's tests).
+            let rendered = self
+                .detokenizer
+                .render(&scope.tenant, egress_detokenizer::Sink::ChatDiscord, text)
+                .await;
+            return self.handle_discord_relay(scope, &rendered).await;
         }
 
         // Twitch, the only other compiled-in provider: `channel` comes from
@@ -369,7 +401,15 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
             })?;
 
         let channel = sanitize_irc_component(channel);
-        let text = sanitize_irc_component(text);
+        // Detokenize-then-sanitize (spec S10.4's chat sink row): render
+        // `{user:<uuid>}` placeholders to a display name before the
+        // existing CRLF/control-character defense runs, so a resolved name
+        // is also covered by it, not just bundle-authored literal text.
+        let rendered = self
+            .detokenizer
+            .render(&scope.tenant, egress_detokenizer::Sink::ChatTwitch, text)
+            .await;
+        let text = sanitize_irc_component(&rendered);
         if channel.is_empty() || text.is_empty() {
             return Err(denied(
                 "invalid_args",
@@ -424,6 +464,10 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
     /// came from closes that off by construction, the same way `crate::
     /// senders::discord_webhook_url_from_config`'s doc reasons about a
     /// bundle-chosen webhook URL.
+    ///
+    /// `text` has already been detokenized and Discord-markdown/mention-
+    /// escaped by [`Self::handle_relay`]'s caller-side step (spec S10.4) --
+    /// this method never sees a raw `{user:<uuid>}` placeholder.
     async fn handle_discord_relay(
         &self,
         scope: &InvokeScope,
@@ -628,7 +672,9 @@ pub fn boxed(handler: impl CapabilityHandler + 'static) -> Arc<dyn CapabilityHan
 mod tests {
     use super::*;
     use crate::distribution::BundleCatalog;
+    use std::collections::HashMap;
     use std::sync::Mutex;
+    use uuid::Uuid;
 
     #[derive(Default)]
     struct FakeRelayQueue {
@@ -681,7 +727,55 @@ mod tests {
         queue: FakeRelayQueue,
         usage: Arc<Mutex<UsageBatcher>>,
     ) -> StageCapabilities<FakeRelayQueue> {
-        StageCapabilities::new(queue, test_egress(), usage)
+        StageCapabilities::new(
+            queue,
+            test_egress(),
+            usage,
+            crate::detokenize::build_production_detokenizer(),
+        )
+    }
+
+    fn caps_with_detokenizer(
+        queue: FakeRelayQueue,
+        detokenizer: Arc<ChatDetokenizer>,
+    ) -> StageCapabilities<FakeRelayQueue> {
+        StageCapabilities::new(
+            queue,
+            test_egress(),
+            Arc::new(Mutex::new(UsageBatcher::new())),
+            detokenizer,
+        )
+    }
+
+    /// A [`egress_detokenizer::NameResolver`] over a fixed map, for tests
+    /// that need an actual resolved display name rather than the
+    /// production [`crate::detokenize::HubUsersResolver`]'s always-neutral-
+    /// label behavior.
+    struct FixedNameResolver(HashMap<Uuid, String>);
+
+    #[async_trait::async_trait]
+    impl egress_detokenizer::NameResolver for FixedNameResolver {
+        async fn resolve_batch(
+            &self,
+            _tenant: &str,
+            users: &[Uuid],
+        ) -> Result<HashMap<Uuid, String>, egress_detokenizer::ResolveError> {
+            Ok(users
+                .iter()
+                .filter_map(|u| self.0.get(u).map(|name| (*u, name.clone())))
+                .collect())
+        }
+    }
+
+    fn detokenizer_with(names: &[(Uuid, &str)]) -> Arc<ChatDetokenizer> {
+        let map = names
+            .iter()
+            .map(|(u, name)| (*u, (*name).to_string()))
+            .collect();
+        Arc::new(egress_detokenizer::Detokenizer::new(
+            Arc::new(FixedNameResolver(map)) as Arc<dyn egress_detokenizer::NameResolver>,
+            egress_detokenizer::CacheConfig::default(),
+        ))
     }
 
     fn scope() -> InvokeScope {
@@ -823,6 +917,55 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
         assert_eq!(parsed["channel"], "#somechannel");
         assert_eq!(parsed["text"], "hi");
+    }
+
+    /// Wiring test for spec S10.4/S10.6 (Gemini condition 5): a
+    /// bundle-emitted `{user:<uuid>}` placeholder in Twitch relay text is
+    /// resolved to a real display name before it is ever `LPUSH`ed, and the
+    /// raw UUID never appears in the queued payload.
+    #[tokio::test]
+    async fn relay_send_detokenizes_a_placeholder_before_queuing() {
+        let user = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+        let caps = caps_with_detokenizer(
+            FakeRelayQueue::default(),
+            detokenizer_with(&[(user, "StreamerFan42")]),
+        );
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "twitch", "message_json": format!("{{\"channel\":\"#c\",\"text\":\"thanks {{user:{user}}}!\"}}")}),
+            ),
+        )
+        .await
+        .expect("relay send succeeds");
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
+        assert_eq!(parsed["text"], "thanks StreamerFan42!");
+        assert!(!pushed[0].1.contains(&user.to_string()));
+    }
+
+    /// A placeholder for a user the resolver has never heard of (unknown or
+    /// erased) renders the fixed neutral label, never the raw UUID.
+    #[tokio::test]
+    async fn relay_send_unresolvable_placeholder_renders_neutral_label() {
+        let user = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        let caps = caps_with_detokenizer(FakeRelayQueue::default(), detokenizer_with(&[]));
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "twitch", "message_json": format!("{{\"channel\":\"#c\",\"text\":\"hi {{user:{user}}}\"}}")}),
+            ),
+        )
+        .await
+        .expect("relay send succeeds");
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
+        assert_eq!(parsed["text"], "hi a former viewer");
+        assert!(!pushed[0].1.contains(&user.to_string()));
     }
 
     /// Regression coverage for the CRITICAL usage-metering finding:
@@ -1025,6 +1168,45 @@ mod tests {
         let body = req.body.as_ref().expect("body present");
         let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
         assert_eq!(parsed["content"], "pong");
+    }
+
+    /// Wiring test for spec S10.4/S10.6 on the Discord path: a placeholder
+    /// resolves to a display name (Discord-markdown/mention-escaped) before
+    /// the REST send, and the raw UUID never reaches Discord's API.
+    #[tokio::test]
+    async fn relay_send_discord_detokenizes_a_placeholder_before_sending() {
+        let user = Uuid::parse_str("33333333-3333-5333-9333-333333333333").unwrap();
+        let transport = Arc::new(FakeDiscordTransport::default());
+        let caps = caps_with_detokenizer(
+            FakeRelayQueue::default(),
+            detokenizer_with(&[(user, "@everyone_fan")]),
+        )
+        .with_discord(
+            transport.clone(),
+            crate::config::Secret::new("test-bot-token"),
+        );
+
+        caps.handle(
+            &discord_scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "discord", "message_json": format!("{{\"text\":\"gg {{user:{user}}}\"}}")}),
+            ),
+        )
+        .await
+        .expect("discord relay send succeeds");
+
+        let requests = transport.requests.lock().unwrap();
+        let body = requests[0].body.as_ref().expect("body present");
+        let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
+        let content = parsed["content"].as_str().unwrap();
+        assert!(!content.contains(&user.to_string()));
+        // The resolved name's own `@` is mention-escaped (zero-width space
+        // inserted) even though it came from the trusted resolver, not
+        // bundle text -- the sink escaper makes no such distinction.
+        assert!(!content.contains("@everyone_fan"));
+        assert!(content.contains("gg @"));
     }
 
     /// A bundle-supplied `channel` in `message_json` is silently ignored for

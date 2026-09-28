@@ -119,6 +119,21 @@ redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp"
 # declares the identical dependency so the query/diff logic is written and
 # tested exactly once. See `core/bundle_active_set/Cargo.toml`.
 bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
+# Output detokenizer (spec `2026-09-28-bundle-permissions-and-capability-
+# gate.md` S10.4/S10.6, Gemini condition 5): single-pass, non-recursive
+# `{user:<uuid>}` placeholder rendering for this stage's chat egress
+# (`src/detokenize.rs`, wired into `src/capabilities.rs`'s
+# `handle_relay`/`handle_discord_relay`). A path dependency within this
+# repo, same rationale as `bundle-active-set` above.
+egress-detokenizer = { path = "../egress_detokenizer", version = "=0.1.0" }
+# `src/detokenize.rs`'s `HubUsersResolver` trait impl -- same pin as
+# core/svc_ingest's/core/svc_streaming's `uuid` dependency.
+uuid = "=1.26.1"
+# `src/detokenize.rs`'s `#[async_trait] impl NameResolver for
+# HubUsersResolver` -- same pin as core/svc_streaming's `async-trait`
+# dependency (`egress_detokenizer::NameResolver`'s own trait definition
+# uses the same macro, so this crate's implementors must too).
+async-trait = "=0.1.92"
 
 [dev-dependencies]
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks

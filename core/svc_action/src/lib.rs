@@ -52,6 +52,7 @@ pub mod capabilities;
 pub mod config;
 pub(crate) mod crypto;
 pub mod db;
+pub mod detokenize;
 pub mod dispatch;
 pub mod distribution;
 pub mod egress;
@@ -363,7 +364,12 @@ async fn build_stage_capabilities(
         egress_denied_total,
         flag_or_closed(&license, flags::BUNDLE_EGRESS_FLAG),
     ));
-    let caps = capabilities::StageCapabilities::new(relay_conn, egress, usage);
+    let caps = capabilities::StageCapabilities::new(
+        relay_conn,
+        egress,
+        usage,
+        detokenize::build_production_detokenizer(),
+    );
     // Discord relay send (spec: relay providers, `discord`) -- graceful
     // degradation, not a startup requirement: a deployment that never sets
     // `DISCORD_BOT_TOKEN` simply never enables this provider, and a bundle

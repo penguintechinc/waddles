@@ -1,0 +1,44 @@
+[package]
+name = "egress-detokenizer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Single-pass, non-recursive output detokenizer for the PII boundary's `{user:<uuid>}` placeholder grammar (spec S10.4/S10.6, Gemini condition 5) -- resolves tokenized user identity to a display name exactly once, at the trusted component that owns the sink, with per-sink escaping and a per-tenant TTL name cache. A path dependency within this repo, consumed by core/svc_action's chat egress (handle_relay/handle_discord_relay) today and, in a future landing, core/browser_source_core_module's overlay renderer."
+
+[lib]
+name = "egress_detokenizer"
+path = "src/lib.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- rules/critical-rules.md
+# Dependency Pinning. Cargo.lock is committed in every crate that depends
+# on this one (svc_action) alongside this file. `uuid`/`async-trait` pins
+# mirror this repo's existing pins for the same crates (core/svc_ingest's
+# and core/svc_streaming's Cargo.toml respectively) so a path dependency
+# on this crate introduces no second pin of the same package.
+[dependencies]
+uuid = "=1.26.1"
+thiserror = "=2.0.20"
+tracing = "=0.1.44"
+async-trait = "=0.1.92"
+# Grapheme-cluster-safe truncation for the per-name and per-sink length
+# caps (`src/limits.rs`) -- a plain `str` char/byte cut can split a
+# combining-character or emoji ZWJ sequence in half; this is the standard,
+# pure-Rust (MIT/Apache-2.0, no C dependency) crate for grapheme
+# segmentation, not pinned anywhere else in this repo yet.
+unicode-segmentation = "=1.12.0"
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
+# Property/fuzz test (src/render.rs's `proptest_never_panics_or_leaks_uuid`)
+# -- generates adversarial brace/UUID/text combinations rather than a fixed
+# example list. Not used anywhere else in this repo yet; pure-Rust,
+# MIT/Apache-2.0, no C dependency.
+proptest = "=1.9.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
