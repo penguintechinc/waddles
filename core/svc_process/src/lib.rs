@@ -21,9 +21,10 @@
 //! - The content-moderation gate itself (`crate::builtins::
 //!   run_moderation_gate`) -- needs a Rust Ollama classifier client and
 //!   PostHog flag client, neither of which exists in this crate yet
-//! - The `db`/`kv`/`http`/`flags` host capabilities
+//! - The `db`/`kv`/`flags` host capabilities
 //!   (`crate::capabilities::StageCapabilities`) -- `context`/`clock`/`log`
-//!   are fully wired
+//!   and `http` (shared `bundle_host_http::egress::EgressGuard`, PR #459
+//!   follow-up) are fully wired
 //! - The `GET /api/v1/distribution/bundles?stage=process` activation poll
 //!   (spec §6.7) that would resolve `PROCESS_APP_ID`'s real granted-stream
 //!   list, bundle digest, and approved `routes_to` set -- see
@@ -116,6 +117,13 @@ where
         telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
     let source_supervisor_metrics =
         telemetry::register_source_binding_supervisor_metrics(&prom_registry);
+    // `crate::capabilities::StageCapabilities::egress`'s
+    // `svc_process_egress_denied_total{app_id,reason}` -- registered here,
+    // same "before `prom_registry` moves into `AppState::new`" constraint
+    // as the two metrics above, then threaded into whichever of
+    // `try_start_process_loop`/`try_start_db_bundle_loader` actually
+    // starts.
+    let egress_denied_metric = telemetry::register_egress_metrics(&prom_registry);
 
     let state = http::AppState::new(config.clone(), prom_registry);
 
@@ -140,6 +148,7 @@ where
             connections,
             bundle_loader_excluded_metric,
             source_supervisor_metrics,
+            egress_denied_metric,
         );
     } else {
         tracing::info!(
@@ -147,7 +156,7 @@ where
              DB_READER_*/BUNDLE_SCOPE_TENANT_ID not configured); using legacy \
              PROCESS_APP_ID/PROCESS_INGEST_* env selection"
         );
-        try_start_process_loop(&config, connections);
+        try_start_process_loop(&config, connections, egress_denied_metric);
     }
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
@@ -252,7 +261,11 @@ fn try_start_host_api(cli: &config::CliConfig) -> Arc<host_api::ConnectionRegist
 ///   downstream decision -- this hardcoding only affects which stream
 ///   `PROCESS_INGEST_PLATFORM`/`_SOURCE_ID` resolves to), identical scope
 ///   to `core/svc_action::try_start_dispatch`'s own documented gap.
-fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::ConnectionRegistry>) {
+fn try_start_process_loop(
+    config: &config::Config,
+    connections: Arc<host_api::ConnectionRegistry>,
+    egress_denied_metric: prometheus::IntCounterVec,
+) {
     if config.cli.process_app_id.is_empty() {
         tracing::info!(
             "PROCESS_APP_ID not set; process loop not started (blocked on distribution poll)"
@@ -295,6 +308,42 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
     };
     let license_gate: Arc<dyn license::FeatureGate> =
         Arc::new(license::LicenseFeatureGate::new(license_client));
+
+    // The `http` bundle capability's shared egress guard (`crate::
+    // capabilities::StageCapabilities::egress`) -- one per process, built
+    // once here and cloned into every per-invoke `StageCapabilities` (see
+    // that struct's doc). `HttpEgressCatalog::new()` starts empty: no
+    // writer populates it yet (`crate::capabilities::HttpEgressCatalog`'s
+    // doc, the same honest gap this module's own doc already documents
+    // for `db`/`kv`/`flags`), so every `app_id` is undeclared and `http`
+    // denies `host_not_declared` until a future DB-driven loader wires
+    // real manifest data in. Reuses this same `license_client`-derived
+    // gate for `waddles.core.bundle-egress` -- see `license::
+    // BundleEgressFlag`.
+    let bundle_egress_flag: Arc<dyn bundle_host_http::egress::FeatureFlag> =
+        match license::build_license_client("waddles") {
+            Ok(c) => bundle_host_http::egress::boxed(license::BundleEgressFlag::new(c)),
+            // Fail-closed: no client at all is the same "disable, don't
+            // start unverified" posture every other startup-config gate in
+            // this function already takes.
+            Err(_) => bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(false)),
+        };
+    let egress = Arc::new(bundle_host_http::egress::EgressGuard::new(
+        Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
+        bundle_host_http::egress::EgressLimits {
+            allow_private_hosts: false,
+            rate_limit_rps: 10,
+            rate_limit_burst: 20,
+            timeout: std::time::Duration::from_secs(10),
+            max_redirects: 3,
+            max_response_bytes: 1_048_576,
+            allowed_ports: vec![443],
+            proxy_url: None,
+        },
+        capabilities::HttpEgressCatalog::new(),
+        egress_denied_metric,
+        bundle_egress_flag,
+    ));
 
     let cli = config.cli.clone();
     let app_id = cli.process_app_id.clone();
@@ -345,6 +394,7 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
             },
             metrics,
             license: license_gate,
+            egress,
         };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -451,6 +501,7 @@ fn try_start_db_bundle_loader(
     connections: Arc<host_api::ConnectionRegistry>,
     excluded_metric: prometheus::IntCounterVec,
     source_supervisor_metrics: telemetry::SourceBindingSupervisorMetrics,
+    egress_denied_metric: prometheus::IntCounterVec,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
@@ -472,8 +523,29 @@ fn try_start_db_bundle_loader(
             return;
         }
     };
-    let gate: Arc<dyn license::FeatureGate> =
-        Arc::new(license::DbBundleConfigGate::new(license_client));
+    let gate: Arc<dyn license::FeatureGate> = Arc::new(license::DbBundleConfigGate::new(
+        Arc::clone(&license_client),
+    ));
+    // Same `bundle_host_http::egress::EgressGuard` wiring as
+    // `try_start_process_loop` (this crate's other, mutually-exclusive
+    // startup path) -- see that function's own doc for the deny-by-default
+    // `HttpEgressCatalog` seam.
+    let egress = Arc::new(bundle_host_http::egress::EgressGuard::new(
+        Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
+        bundle_host_http::egress::EgressLimits {
+            allow_private_hosts: false,
+            rate_limit_rps: 10,
+            rate_limit_burst: 20,
+            timeout: std::time::Duration::from_secs(10),
+            max_redirects: 3,
+            max_response_bytes: 1_048_576,
+            allowed_ports: vec![443],
+            proxy_url: None,
+        },
+        capabilities::HttpEgressCatalog::new(),
+        egress_denied_metric,
+        bundle_host_http::egress::boxed(license::BundleEgressFlag::new(license_client)),
+    ));
 
     let reader_cfg = bundle_active_set::ReaderConfig {
         host: config.cli.db_reader_host.clone(),
@@ -496,8 +568,12 @@ fn try_start_db_bundle_loader(
     // accepts. Tenant/community scope is deliberately NOT included here --
     // see [`SupervisorPrereqs`]'s own doc for why that half can only be
     // resolved once the RO reader connection exists.
-    let supervisor_prereqs =
-        build_source_supervisor_prereqs(config, Arc::clone(&connections), Arc::clone(&gate));
+    let supervisor_prereqs = build_source_supervisor_prereqs(
+        config,
+        Arc::clone(&connections),
+        Arc::clone(&gate),
+        Arc::clone(&egress),
+    );
 
     tokio::spawn(async move {
         let db = match bundle_active_set::reader::connect(&reader_cfg, &password).await {
@@ -609,6 +685,7 @@ struct SupervisorPrereqs {
     approved_targets: std::collections::HashMap<String, String>,
     metrics: Arc<dyn penguin_spine::SpineMetrics>,
     license: Arc<dyn license::FeatureGate>,
+    egress: Arc<bundle_host_http::egress::EgressGuard>,
 }
 
 /// Builds [`SupervisorPrereqs`] from `config`'s optional dependencies, or
@@ -621,6 +698,7 @@ fn build_source_supervisor_prereqs(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
     gate: Arc<dyn license::FeatureGate>,
+    egress: Arc<bundle_host_http::egress::EgressGuard>,
 ) -> Option<SupervisorPrereqs> {
     let Some(keys_raw) = config.envelope_binding_keys.as_ref() else {
         tracing::warn!(
@@ -654,6 +732,7 @@ fn build_source_supervisor_prereqs(
         approved_targets,
         metrics,
         license: gate,
+        egress,
     })
 }
 
@@ -677,6 +756,7 @@ fn finish_supervisor_deps(
         approved_targets: prereqs.approved_targets,
         metrics: prereqs.metrics,
         license: prereqs.license,
+        egress: prereqs.egress,
         tenant: resolved.tenant_slug,
         community: resolved.community_name,
     }
@@ -835,6 +915,22 @@ mod tests {
             approved_targets: std::collections::HashMap::new(),
             metrics: Arc::new(penguin_spine::NoopMetrics),
             license: Arc::new(crate::license::test_support::FixedGate(true)),
+            egress: Arc::new(bundle_host_http::egress::EgressGuard::new(
+                Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
+                bundle_host_http::egress::EgressLimits {
+                    allow_private_hosts: false,
+                    rate_limit_rps: 10,
+                    rate_limit_burst: 20,
+                    timeout: std::time::Duration::from_secs(5),
+                    max_redirects: 3,
+                    max_response_bytes: 1_048_576,
+                    allowed_ports: vec![443],
+                    proxy_url: None,
+                },
+                capabilities::HttpEgressCatalog::new(),
+                test_egress_denied_metric(),
+                bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(true)),
+            )),
         }
     }
 
@@ -964,6 +1060,7 @@ mod tests {
             Arc::new(host_api::ConnectionRegistry::new()),
             test_excluded_metric(),
             test_source_supervisor_metrics(),
+            test_egress_denied_metric(),
         );
     }
 
@@ -981,6 +1078,7 @@ mod tests {
             Arc::new(host_api::ConnectionRegistry::new()),
             test_excluded_metric(),
             test_source_supervisor_metrics(),
+            test_egress_denied_metric(),
         );
     }
 
@@ -1003,6 +1101,7 @@ mod tests {
             Arc::new(host_api::ConnectionRegistry::new()),
             test_excluded_metric(),
             test_source_supervisor_metrics(),
+            test_egress_denied_metric(),
         );
     }
 
@@ -1013,6 +1112,17 @@ mod tests {
     fn test_excluded_metric() -> prometheus::IntCounterVec {
         prometheus::IntCounterVec::new(
             prometheus::Opts::new("test_bundle_active_set_excluded_total", "test"),
+            &["app_id", "reason"],
+        )
+        .expect("valid metric definition")
+    }
+
+    /// A standalone, unregistered `IntCounterVec` for `try_start_process_loop`/
+    /// `try_start_db_bundle_loader` tests -- same rationale as
+    /// [`test_excluded_metric`].
+    fn test_egress_denied_metric() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_svc_process_egress_denied_total", "test"),
             &["app_id", "reason"],
         )
         .expect("valid metric definition")
@@ -1046,7 +1156,11 @@ mod tests {
         let cli = CliConfig::parse_from(["svc-process"]);
         assert_eq!(cli.process_app_id, "");
         let config = test_config(cli);
-        try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+        try_start_process_loop(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            test_egress_denied_metric(),
+        );
     }
 
     #[tokio::test]
@@ -1058,7 +1172,11 @@ mod tests {
         ]);
         let mut config = test_config(cli);
         config.envelope_binding_keys = None;
-        try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+        try_start_process_loop(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            test_egress_denied_metric(),
+        );
     }
 
     #[tokio::test]
@@ -1070,7 +1188,11 @@ mod tests {
         ]);
         let mut config = test_config(cli);
         config.envelope_binding_keys = Some(crate::config::Secret::new("not-kid-colon-hex"));
-        try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+        try_start_process_loop(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            test_egress_denied_metric(),
+        );
     }
 
     #[tokio::test]
@@ -1092,7 +1214,11 @@ mod tests {
             "waddles.bot.commands.default",
         ]);
         let config = test_config(cli);
-        try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+        try_start_process_loop(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            test_egress_denied_metric(),
+        );
     }
 
     #[tokio::test]
@@ -1121,7 +1247,11 @@ mod tests {
                 "waddles.bot.commands.default",
             ]);
             let config = test_config(cli);
-            try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+            try_start_process_loop(
+                &config,
+                Arc::new(host_api::ConnectionRegistry::new()),
+                test_egress_denied_metric(),
+            );
             unsafe {
                 std::env::remove_var("VALKEY_URL");
                 std::env::remove_var("VALKEY_PASSWORD");
@@ -1157,7 +1287,11 @@ mod tests {
                 "tw-channelA",
             ]);
             let config = test_config(cli);
-            try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+            try_start_process_loop(
+                &config,
+                Arc::new(host_api::ConnectionRegistry::new()),
+                test_egress_denied_metric(),
+            );
             unsafe {
                 std::env::remove_var("VALKEY_URL");
                 std::env::remove_var("VALKEY_PASSWORD");

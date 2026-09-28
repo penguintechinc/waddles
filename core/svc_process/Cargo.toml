@@ -142,6 +142,13 @@ governor = "=0.8.1"
 # declares the identical dependency so the query/diff logic is written
 # and tested exactly once. See `core/bundle_active_set/Cargo.toml`.
 bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
+# The bundle `http` host capability's shared, SSRF-hardened egress guard
+# (`src/capabilities.rs`'s `StageCapabilities::egress`) -- extracted from
+# `core/svc_action` (PR #459 follow-up) so this stage enforces the
+# identical allowlist/DNS-pinning/redirect-recheck/rate-limit pipeline
+# instead of a second copy. Same same-repo `path`-dependency rationale as
+# `bundle-active-set` above.
+bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"
