@@ -29,7 +29,7 @@ except ImportError:
     default_guarded_getiter = None
     guarded_iter_unpack_sequence = None
 
-from ..models.nodes import (
+from models.nodes import (
     NodeType,
     WorkflowNode,
     OperatorType,
@@ -62,14 +62,14 @@ from ..models.nodes import (
     FlowParallelConfig,
     FlowEndConfig,
 )
-from ..models.execution import (
+from models.execution import (
     NodeExecutionState,
     NodeExecutionStatus,
     ExecutionContext,
     PortData,
 )
-from ..config import Config
-from libs.flask_core import get_logger
+from config import Config
+from flask_core import get_logger
 
 logger = get_logger(__name__)
 
@@ -929,15 +929,24 @@ class NodeExecutor:
                 "RestrictedPython not available. Install with: pip install RestrictedPython"
             )
 
-        # Compile restricted code
-        byte_code = compile_restricted(
-            code,
-            filename='<workflow>',
-            mode='eval'
-        )
-
-        if byte_code.errors:
-            raise ValueError(f"Compilation errors: {byte_code.errors}")
+        # Compile restricted code. This installed RestrictedPython version
+        # (8.5) returns the compiled `types.CodeType` directly and raises
+        # `SyntaxError` on compile failure -- it does NOT return a
+        # `CompileResult(code, errors, ...)` wrapper. The previous
+        # `byte_code.errors` / `byte_code.code` access assumed that older
+        # wrapper shape, so this raised `AttributeError: 'code' object has
+        # no attribute 'errors'` on every single call, silently caught by
+        # execute_data_transform's except block -- DATA_TRANSFORM nodes
+        # never actually executed in production. Undetected because this
+        # file had 0% coverage on this path.
+        try:
+            byte_code = compile_restricted(
+                code,
+                filename='<workflow>',
+                mode='eval'
+            )
+        except SyntaxError as e:
+            raise ValueError(f"Compilation errors: {e}")
 
         # Build safe globals
         restricted_globals = {
@@ -954,7 +963,7 @@ class NodeExecutor:
         result = await loop.run_in_executor(
             None,
             eval,
-            byte_code.code,
+            byte_code,
             restricted_globals
         )
 
