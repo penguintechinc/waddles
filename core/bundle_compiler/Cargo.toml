@@ -38,6 +38,11 @@ sha2 = "=0.10.9"
 hex = "=0.4.3"
 reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "time"] }
+# `CSharpBuilder` (`src/build/csharp.rs`) assembles a throwaway `docker
+# build` context per build; promoted out of `[dev-dependencies]` (still
+# used there too) now that it's a real runtime dependency, not just a test
+# helper.
+tempfile = "=3.23.0"
 # `penguin-bundle-host`: the landed M1 crate providing the normative
 # bundle.yaml v2 manifest validator (31 rules) and the host-API wire
 # types. Not yet published to a private registry -- pinned to an exact
@@ -54,7 +59,6 @@ tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "time"] 
 penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "49f098caab95339bf8113ba5c3e9ad039d30d44b", package = "penguin-bundle-host", version = "=0.1.0" }
 
 [dev-dependencies]
-tempfile = "=3.23.0"
 mockito = "=1.7.0"
 tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "time", "test-util"] }
 

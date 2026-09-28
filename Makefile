@@ -1,7 +1,7 @@
 .PHONY: dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
-        verify-csping-fixture
+        verify-csping-fixture test-csharp-bundle-compile
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -96,6 +96,13 @@ run-ai-local: ## Run ai_interaction_module container locally (standalone, 1 work
 # committed binary auditable instead of a trust-me blob.
 verify-csping-fixture:
 	@bash scripts/verify-csping-fixture.sh
+
+# End-to-end: builds the real bundles/csharp/csping spike bundle through
+# CSharpBuilder (core/bundle_compiler/src/build/csharp.rs), the
+# builder_for("csharp") arm now returns -- ignored by default cargo test
+# (needs docker + network, ~1-2 minutes), so this is its only run path.
+test-csharp-bundle-compile:
+	@cd core/bundle_compiler && cargo test --locked builds_csping_via_docker -- --ignored --nocapture
 
 pre-commit:
 	@echo "=== Pre-commit checks ==="

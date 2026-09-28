@@ -37,7 +37,7 @@ _ALLOWED_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"})
 _RESERVED_TABLES = frozenset(
     {"users", "tenants", "communities", "app_catalog", "app_activations", "app_tenant_availability"}
 )
-_ALLOWED_LANGUAGES = frozenset({"python", "rust", "javascript", "typescript", "other"})
+_ALLOWED_LANGUAGES = frozenset({"python", "rust", "javascript", "typescript", "csharp", "other"})
 _ALLOWED_STAGES = frozenset({"process", "action", "presentation"})
 _MAX_TIMEOUT_MS = 10000
 _MAX_MEMORY_MB = 256
