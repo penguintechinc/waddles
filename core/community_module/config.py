@@ -21,6 +21,14 @@ class Config:
         'DATABASE_URL',
         'postgresql://waddlebot:password@localhost:5432/waddlebot'
     )
+    # Whether to issue CREATE TABLE DDL for the read-only tenants/
+    # communities/community_members subset `flask_core.
+    # bind_community_read_tables` binds for community-scoped authz
+    # (`install_community_scoped_auth`). Prod NEVER migrates these -- they
+    # are owned by hub-api's own migrations (000/058); tests against a
+    # throwaway sqlite DB set DB_MIGRATE=true. Matches
+    # `core/security_core_module/config.py`'s own convention.
+    DB_MIGRATE = os.getenv('DB_MIGRATE', 'false').strip().lower() in {'1', 'true', 'yes', 'on'}
     CORE_API_URL = os.getenv('CORE_API_URL', 'http://router-service:8000')
     ROUTER_API_URL = os.getenv('ROUTER_API_URL', 'http://router-service:8000/api/v1/router')
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
