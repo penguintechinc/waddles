@@ -30,12 +30,14 @@ from flask_core import (
     setup_aaa_logging,
 )
 from flask_core.mcp_routes import create_mcp_blueprint
+from flask_core.service_jwt import load_identities_from_env, load_issuer_from_env
 from pydal import Field
 from quart import Quart, request
 from quart_schema import Info, QuartSchema
 
 from blueprints import register_blueprints
 from config import HubAPIConfig
+from grpc_internal.server import start_internal_grpc_server, stop_internal_grpc_server
 from openapi.routes import register_openapi_docs
 from services.bundle_install_dal import build_install_dal
 from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
@@ -243,6 +245,24 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # rather than replacing it.
         install_dal = await build_install_dal(cfg.database_url, pool_size=cfg.db_pool_size)
         app.config["install_dal"] = install_dal
+
+        # Internal gRPC (waddles.hub.internal.v1) -- serves svc-ingest/
+        # svc-process/svc-action only, see grpc_internal/server.py. Fails
+        # OPEN for the surrounding Quart app (never crashes hub-api's HTTP
+        # surface over a gRPC misconfiguration) but fails CLOSED for the
+        # gRPC surface itself: a missing TLS cert or empty service-identity
+        # allow-list means the internal listener simply never starts, not
+        # that it starts unauthenticated.
+        app.config["grpc_server"] = None
+        if cfg.grpc_enabled:
+            try:
+                issuer = load_issuer_from_env(load_identities_from_env(env=cfg.deployment_env))
+                app.config["grpc_server"] = await start_internal_grpc_server(issuer=issuer)
+            except Exception as exc:  # noqa: BLE001 - see fail-open/fail-closed note above
+                logger.error(
+                    f"hub-api internal gRPC server did not start: {exc}",
+                    extra={"action": "grpc_startup_failed"},
+                )
         logger.system("hub-api started", action="startup", result="SUCCESS")
 
     @app.after_serving
@@ -276,6 +296,12 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             await rate_limiter.disconnect()
         except Exception as exc:  # noqa: BLE001 - shutdown must not raise
             logger.warning(f"Error closing rate limiter on shutdown: {exc}")
+        grpc_server = app.config.get("grpc_server")
+        if grpc_server is not None:
+            try:
+                await stop_internal_grpc_server(grpc_server)
+            except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+                logger.warning(f"Error stopping internal gRPC server on shutdown: {exc}")
         logger.system("hub-api shutdown complete", action="shutdown", result="SUCCESS")
 
     return app

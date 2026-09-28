@@ -1,0 +1,43 @@
+[package]
+name = "hub_client"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Rust client for hub-api's internal gRPC surface (waddles.hub.internal.v1: IdentityService, KeyService) -- feature/hub-api-internal-grpc. Wraps tonic-generated clients with core/service_auth's machine-JWT injector, connection pooling (a shared tonic Channel), per-RPC deadlines, retries on idempotent RPCs only, and a circuit breaker. Consumed by svc_ingest/svc_process/svc_action."
+
+[lib]
+name = "hub_client"
+path = "src/lib.rs"
+
+[build-dependencies]
+# tonic 0.14 moved prost codegen out of tonic-build into tonic-prost-build --
+# both pinned exact per rules/critical-rules.md Dependency Pinning.
+tonic-prost-build = "=0.14.6"
+
+# Exact-version pins only (no ^ / * ranges). tower/tower-http/jsonwebtoken
+# match core/svc_streaming's and core/service_auth's existing pins so a
+# future shared Cargo workspace doesn't carry two pins of the same crate.
+[dependencies]
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tonic = { version = "=0.14.6", features = ["tls-ring"] }
+tonic-prost = "=0.14.6"
+prost = "=0.14.4"
+tower = { version = "=0.5.3", features = ["util", "retry", "timeout"] }
+tracing = "=0.1.44"
+thiserror = "=2.0.21"
+async-trait = "=0.1.89"
+# Machine-JWT bootstrap + injection (feature/eddsa-machine-jwt) -- see
+# module docs in src/lib.rs for why this crate depends on it directly
+# rather than re-implementing token fetch/caching.
+service_auth = { path = "../service_auth", version = "=0.1.0" }
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -48,8 +48,13 @@ COPY hub_api/blueprints ./blueprints
 COPY hub_api/routers ./routers
 COPY hub_api/openapi ./openapi
 COPY hub_api/services ./services
+COPY hub_api/grpc_internal ./grpc_internal
 
 EXPOSE 8204
+# Internal-only gRPC listener (waddles.hub.internal.v1) -- ClusterIP +
+# CiliumNetworkPolicy-scoped to svc-ingest/svc-process/svc-action, see
+# k8s/helm/waddlebot/templates/hub-api-grpc-networkpolicy.yaml.
+EXPOSE 50204
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
   CMD python3 -c "import httpx; resp = httpx.get('http://localhost:8204/healthz'); exit(0 if resp.status_code == 200 else 1)" || exit 1
 
