@@ -137,49 +137,47 @@ async def _publish_invalidation(
             await client.aclose()
 
 
-async def _bump_grant_version(
-    install_dal: AsyncDB,
+async def _write_grant_version_row(
+    conn: Any,
+    table: Any,
     *,
     tenant_id: int,
     community_id: int,
     app_id: str,
     version: str,
     permission_ids: frozenset[str],
-    valkey_client: Any | None = None,
 ) -> int:
-    """Append a new grant-version row, publish invalidation, return the new grant_version."""
-    table = install_dal.metadata.tables["app_permission_grant_versions"]
-    async with install_dal.engine.begin() as conn:
-        current = (
-            await conn.execute(
-                select(func.max(table.c.grant_version)).where(
-                    (table.c.tenant_id == tenant_id)
-                    & (table.c.community_id == community_id)
-                    & (table.c.app_id == app_id)
-                )
-            )
-        ).scalar_one_or_none()
-        new_version = int(current or 0) + 1
+    """Compute+insert the next `app_permission_grant_versions` row on an ALREADY-OPEN `conn`.
+
+    No transaction of its own and no invalidation publish -- callers wrap
+    this together with their own grant-table write inside ONE
+    `engine.begin()` block (see `grant_community_permissions()`/
+    `deactivate_permission()`), so a grant-set change and its
+    version-ledger row can never commit independently of each other, then
+    publish invalidation only once that block has committed.
+    """
+    current = (
         await conn.execute(
-            table.insert().values(
-                tenant_id=tenant_id,
-                community_id=community_id,
-                app_id=app_id,
-                version=version,
-                grant_version=new_version,
-                permission_snapshot_hash=_permission_snapshot_hash(permission_ids),
-                effective_at=datetime.now(UTC),
+            select(func.max(table.c.grant_version)).where(
+                (table.c.tenant_id == tenant_id)
+                & (table.c.community_id == community_id)
+                & (table.c.app_id == app_id)
             )
         )
-    await _publish_invalidation(
-        tenant_id=tenant_id,
-        community_id=community_id,
-        app_id=app_id,
-        version=version,
-        grant_version=new_version,
-        valkey_client=valkey_client,
+    ).scalar_one_or_none()
+    new_version = int(current or 0) + 1
+    await conn.execute(
+        table.insert().values(
+            tenant_id=tenant_id,
+            community_id=community_id,
+            app_id=app_id,
+            version=version,
+            grant_version=new_version,
+            permission_snapshot_hash=_permission_snapshot_hash(permission_ids),
+            effective_at=datetime.now(UTC),
+        )
     )
-    return new_version
+    return int(new_version)
 
 
 async def _latest_grant_version_row(
@@ -314,6 +312,7 @@ async def restrict_tenant_permissions(
     version: str,
     restricted_permission_ids: frozenset[str],
     restricted_by: int | None,
+    valkey_client: Any | None = None,
 ) -> None:
     """TENANT tier (spec Sec3.2): set the tenant-wide exclusion list for `app_id`.
 
@@ -321,6 +320,18 @@ async def restrict_tenant_permissions(
     (an opt-out list, Sec3.2). Refuses a `permission_id` the global admin
     never approved (`permission_not_in_catalog_grant`, 422) -- a tenant
     can only narrow, never widen, the global ceiling.
+
+    Cascade (security review finding): the data plane never reads
+    `app_tenant_permission_restrictions` directly -- it only reads
+    `community_permission_grants` -- so a new restriction is meaningless
+    at runtime unless every community grant it now exceeds is revoked
+    too. In the SAME transaction as the restriction write, every
+    non-revoked `community_permission_grants` row under this tenant for
+    `app_id` whose `permission_id` is in the new restriction set is
+    revoked, and each affected community's grant version is bumped
+    (append-only ledger, Sec3.4/Sec4) -- invalidations are published,
+    and one audit entry per affected community is recorded, only after
+    the transaction commits.
     """
     approved = await get_approved_permission_ids(install_dal, app_id=app_id, version=version)
     unknown = restricted_permission_ids - approved
@@ -332,7 +343,10 @@ async def restrict_tenant_permissions(
         )
 
     table = install_dal.metadata.tables["app_tenant_permission_restrictions"]
+    grants_table = install_dal.metadata.tables["community_permission_grants"]
+    versions_table = install_dal.metadata.tables["app_permission_grant_versions"]
     now = datetime.now(UTC)
+    cascade_versions: dict[int, int] = {}
     async with install_dal.engine.begin() as conn:
         await conn.execute(
             table.delete().where((table.c.tenant_id == tenant_id) & (table.c.app_id == app_id))
@@ -351,13 +365,80 @@ async def restrict_tenant_permissions(
                     for pid in restricted_permission_ids
                 ],
             )
+
+            affected_rows = await conn.execute(
+                select(grants_table.c.community_id)
+                .where(
+                    (grants_table.c.tenant_id == tenant_id)
+                    & (grants_table.c.app_id == app_id)
+                    & (grants_table.c.permission_id.in_(restricted_permission_ids))
+                    & (grants_table.c.revoked_at.is_(None))
+                )
+                .distinct()
+            )
+            affected_community_ids = sorted({int(r.community_id) for r in affected_rows})
+            for community_id in affected_community_ids:
+                await conn.execute(
+                    grants_table.update()
+                    .where(
+                        (grants_table.c.community_id == community_id)
+                        & (grants_table.c.app_id == app_id)
+                        & (grants_table.c.permission_id.in_(restricted_permission_ids))
+                        & (grants_table.c.revoked_at.is_(None))
+                    )
+                    .values(revoked_by=restricted_by, revoked_at=now)
+                )
+                remaining_rows = await conn.execute(
+                    select(grants_table.c.permission_id).where(
+                        (grants_table.c.community_id == community_id)
+                        & (grants_table.c.app_id == app_id)
+                        & (grants_table.c.revoked_at.is_(None))
+                    )
+                )
+                remaining = frozenset(row.permission_id for row in remaining_rows)
+                cascade_versions[community_id] = await _write_grant_version_row(
+                    conn,
+                    versions_table,
+                    tenant_id=tenant_id,
+                    community_id=community_id,
+                    app_id=app_id,
+                    version=version,
+                    permission_ids=remaining,
+                )
+
+    for community_id, new_version in cascade_versions.items():
+        await _publish_invalidation(
+            tenant_id=tenant_id,
+            community_id=community_id,
+            app_id=app_id,
+            version=version,
+            grant_version=new_version,
+            valkey_client=valkey_client,
+        )
+        await bundle_audit.record(
+            install_dal,
+            actor_id=restricted_by,
+            action="community_permission_revoked_by_tenant_restriction",
+            target_type="community_permission_grants",
+            target_id=f"{app_id}@{version}",
+            details={
+                "tenant_id": tenant_id,
+                "community_id": community_id,
+                "restricted": sorted(restricted_permission_ids),
+                "grant_version": new_version,
+            },
+        )
     await bundle_audit.record(
         install_dal,
         actor_id=restricted_by,
         action="tenant_permissions_restricted",
         target_type="app_tenant_permission_restrictions",
         target_id=app_id,
-        details={"tenant_id": tenant_id, "restricted": sorted(restricted_permission_ids)},
+        details={
+            "tenant_id": tenant_id,
+            "restricted": sorted(restricted_permission_ids),
+            "cascaded_community_ids": sorted(cascade_versions),
+        },
     )
 
 
@@ -427,7 +508,13 @@ async def grant_community_permissions(
 
     params_by_id = params_by_id or {}
     table = install_dal.metadata.tables["community_permission_grants"]
+    versions_table = install_dal.metadata.tables["app_permission_grant_versions"]
     now = datetime.now(UTC)
+    # The grant-set write and its grant-version-ledger bump commit as ONE
+    # transaction -- a process crash between the two must never leave a
+    # grant change whose version counter (and push-invalidation event)
+    # never followed, or vice versa (security review LOW finding).
+    # Invalidation is published only after this block has committed.
     async with install_dal.engine.begin() as conn:
         await conn.execute(
             table.delete().where(
@@ -450,14 +537,22 @@ async def grant_community_permissions(
                     for pid in granted_permission_ids
                 ],
             )
+        new_version = await _write_grant_version_row(
+            conn,
+            versions_table,
+            tenant_id=tenant_id,
+            community_id=community_id,
+            app_id=app_id,
+            version=version,
+            permission_ids=granted_permission_ids,
+        )
 
-    new_version = await _bump_grant_version(
-        install_dal,
+    await _publish_invalidation(
         tenant_id=tenant_id,
         community_id=community_id,
         app_id=app_id,
         version=version,
-        permission_ids=granted_permission_ids,
+        grant_version=new_version,
         valkey_client=valkey_client,
     )
     await bundle_audit.record(
@@ -501,16 +596,21 @@ async def deactivate_permission(
 ) -> int:
     """Sec3.7: revoke one previously-granted permission -- without deactivating the whole bundle.
 
-    404 if the community has no active grant for `permission_id`. Bumps
-    the grant version and publishes invalidation the same as a fresh
-    grant -- a revocation is itself a grant-set change (Sec4). Whether a
-    revoked `dangerous`+required permission should auto-deactivate the
-    whole bundle (Sec3.7's last bullet) is the caller's decision -- this
-    function only performs the single-permission revoke; a caller
-    checking `resolve_risk(permission_id) == "dangerous"` against the
-    manifest's required set can act on the result.
+    404 if the community has no active grant for `permission_id`. The
+    revoke, the remaining-set read, and the grant-version-ledger bump all
+    commit as ONE transaction (security review LOW finding: a revoke must
+    never be visible without its matching version bump, or vice versa) --
+    invalidation is published only once that transaction has committed,
+    the same as a fresh grant (a revocation is itself a grant-set change,
+    Sec4). Whether a revoked `dangerous`+required permission should
+    auto-deactivate the whole bundle (Sec3.7's last bullet) is the
+    caller's decision -- this function only performs the
+    single-permission revoke; a caller checking `resolve_risk(
+    permission_id) == "dangerous"` against the manifest's required set
+    can act on the result.
     """
     table = install_dal.metadata.tables["community_permission_grants"]
+    versions_table = install_dal.metadata.tables["app_permission_grant_versions"]
     now = datetime.now(UTC)
     async with install_dal.engine.begin() as conn:
         existing = (
@@ -535,16 +635,31 @@ async def deactivate_permission(
             .values(revoked_by=deactivated_by, revoked_at=now)
         )
 
-    remaining = await get_community_granted_ids(
-        install_dal, community_id=community_id, app_id=app_id
-    )
-    new_version = await _bump_grant_version(
-        install_dal,
+        remaining_rows = await conn.execute(
+            select(table.c.permission_id).where(
+                (table.c.community_id == community_id)
+                & (table.c.app_id == app_id)
+                & (table.c.revoked_at.is_(None))
+            )
+        )
+        remaining = frozenset(row.permission_id for row in remaining_rows)
+
+        new_version = await _write_grant_version_row(
+            conn,
+            versions_table,
+            tenant_id=tenant_id,
+            community_id=community_id,
+            app_id=app_id,
+            version=version,
+            permission_ids=remaining,
+        )
+
+    await _publish_invalidation(
         tenant_id=tenant_id,
         community_id=community_id,
         app_id=app_id,
         version=version,
-        permission_ids=remaining,
+        grant_version=new_version,
         valkey_client=valkey_client,
     )
     await bundle_audit.record(

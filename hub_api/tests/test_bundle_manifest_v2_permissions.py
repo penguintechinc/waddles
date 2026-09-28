@@ -170,6 +170,93 @@ def test_reputation_write_invalid_reason_code_rejected() -> None:
     assert exc.value.reason == "invalid_reason_code"
 
 
+def test_net_http_requires_valid_methods() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(
+            [
+                {
+                    "id": "net.http:api.example.com",
+                    "justification": "Calls the example API.",
+                    "params": {"methods": ["TRACE"]},
+                }
+            ]
+        )
+    assert exc.value.reason == "invalid_net_http_method"
+
+
+def test_net_http_requires_methods_present() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(
+            [
+                {
+                    "id": "net.http:api.example.com",
+                    "justification": "Calls the example API.",
+                    "params": {},
+                }
+            ]
+        )
+    assert exc.value.reason == "invalid_net_http_method"
+
+
+def test_net_http_valid_methods_parses() -> None:
+    manifest = _parse(
+        [
+            {
+                "id": "net.http:api.example.com",
+                "justification": "Calls the example API.",
+                "params": {"methods": ["GET", "POST"]},
+            }
+        ]
+    )
+    decls = manifest.permission_declarations  # type: ignore[attr-defined]
+    assert decls[0].params["methods"] == ["GET", "POST"]
+
+
+def test_methods_param_rejected_on_non_net_http_permission() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(
+            [
+                {
+                    "id": "storage.kv",
+                    "justification": "x",
+                    "params": {"methods": ["GET"]},
+                }
+            ]
+        )
+    assert exc.value.reason == "invalid_net_http_method"
+
+
+def test_overlay_media_wildcard_host_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(
+            [
+                {
+                    "id": "overlay.media",
+                    "justification": "Plays a clip.",
+                    "params": {"allowed_hosts": ["*.evil.com"], "max_duration_seconds": 10},
+                }
+            ]
+        )
+    assert exc.value.reason == "invalid_overlay_hosts"
+
+
+def test_overlay_media_garbage_host_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(
+            [
+                {
+                    "id": "overlay.media",
+                    "justification": "Plays a clip.",
+                    "params": {
+                        "allowed_hosts": ["javascript://alert(1)"],
+                        "max_duration_seconds": 10,
+                    },
+                }
+            ]
+        )
+    assert exc.value.reason == "invalid_overlay_hosts"
+
+
 def test_reputation_write_valid_parses() -> None:
     manifest = _parse(
         [

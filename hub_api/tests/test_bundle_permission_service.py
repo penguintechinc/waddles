@@ -363,6 +363,72 @@ async def test_deactivate_permission_unknown_grant_is_404(install_dal: Any) -> N
     assert exc.value.status_code == 404
 
 
+async def test_restrict_tenant_permissions_cascades_revoke_to_exceeding_grants(
+    install_dal: Any,
+) -> None:
+    """A tenant restriction that excludes an already-granted permission revokes it too.
+
+    Regression for the security review's tenant-restriction-cascade
+    finding: the data plane only ever reads `community_permission_grants`
+    (never `app_tenant_permission_restrictions`), so the restriction must
+    itself revoke any community grant it now exceeds, in the SAME
+    transaction, and bump that community's grant version.
+    """
+    await _seed_upload(install_dal)
+    await _approve(install_dal)
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme")
+    manifest = _manifest()
+    fake_client = _FakeValkeyClient()
+    grant_version = await svc.grant_community_permissions(
+        install_dal,
+        tenant_id=1,
+        community_id=community_id,
+        app_id=_APP_ID,
+        version=_VERSION,
+        manifest=manifest,
+        granted_permission_ids=frozenset({"storage.kv", "ai.generate"}),
+        params_by_id=None,
+        granted_by=1,
+        valkey_client=fake_client,
+    )
+    assert grant_version == 1
+
+    await svc.restrict_tenant_permissions(
+        install_dal,
+        tenant_id=1,
+        app_id=_APP_ID,
+        version=_VERSION,
+        restricted_permission_ids=frozenset({"ai.generate"}),
+        restricted_by=1,
+        valkey_client=fake_client,
+    )
+
+    remaining = await svc.get_community_granted_ids(
+        install_dal, community_id=community_id, app_id=_APP_ID
+    )
+    assert remaining == frozenset({"storage.kv"})
+    # grant_community_permissions bumped to 1, cascade revoke bumps to 2
+    assert len(fake_client.published) == 2
+    assert fake_client.published[-1][1]["grant_version"] == "2"
+
+
+async def test_restrict_tenant_permissions_no_cascade_when_not_granted(install_dal: Any) -> None:
+    """Restricting a permission no community ever grabbed publishes no cascade event."""
+    await _seed_upload(install_dal)
+    await _approve(install_dal)
+    fake_client = _FakeValkeyClient()
+    await svc.restrict_tenant_permissions(
+        install_dal,
+        tenant_id=1,
+        app_id=_APP_ID,
+        version=_VERSION,
+        restricted_permission_ids=frozenset({"ai.generate"}),
+        restricted_by=1,
+        valkey_client=fake_client,
+    )
+    assert fake_client.published == []
+
+
 async def test_check_upgrade_reconsent_blocks_on_new_permission(install_dal: Any) -> None:
     await _seed_upload(install_dal, version="1.0.0")
     manifest_v1_raw = {

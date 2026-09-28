@@ -28,7 +28,7 @@ from flask_core.bundle_attribution import (
     valid_notice,
 )
 
-from services.bundle_permission_catalog import resolve_risk
+from services.bundle_permission_catalog import is_valid_egress_host, resolve_risk
 
 _SEGMENT = r"[a-z0-9][a-z0-9_-]*"
 _APP_ID_RE = re.compile(rf"^waddles\.{_SEGMENT}\.{_SEGMENT}\.{_SEGMENT}$")
@@ -235,6 +235,21 @@ def parse_permission_declarations(
 
         params = dict(entry.get("params") or {})
 
+        if permission_id.startswith("net.http:"):
+            methods = params.get("methods")
+            _require(
+                isinstance(methods, list) and bool(methods) and set(methods) <= _ALLOWED_METHODS,
+                "invalid_net_http_method",
+                f"{permission_id!r} params.methods must be a non-empty subset of "
+                f"{sorted(_ALLOWED_METHODS)}, got {methods!r}",
+            )
+        elif "methods" in params:
+            _require(
+                False,
+                "invalid_net_http_method",
+                "params.methods is only valid for a net.http:<host> permission",
+            )
+
         if permission_id == "storage.tables":
             _require(
                 bool(params.get("schema")),
@@ -253,6 +268,12 @@ def parse_permission_declarations(
             _require(
                 bool(allowed_hosts), "invalid_overlay_hosts", "overlay.media requires allowed_hosts"
             )
+            for host in allowed_hosts:
+                _require(
+                    is_valid_egress_host(host, allow_wildcard=False),
+                    "invalid_overlay_hosts",
+                    f"{host!r} is not a valid, non-wildcard host",
+                )
             max_duration = int(params.get("max_duration_seconds", 0))
             _require(
                 0 < max_duration <= _MAX_OVERLAY_DURATION_S,

@@ -77,6 +77,22 @@ def resolve_risk(permission_id: str) -> Risk | None:
     return None
 
 
+def is_valid_egress_host(host: str, *, allow_wildcard: bool = True) -> bool:
+    """`True` iff `host` matches the shared egress-host grammar (`_HOST_RE`), no `://` scheme.
+
+    `allow_wildcard=False` additionally rejects a leading `*.` label --
+    used by contexts (e.g. `overlay.media.allowed_hosts`, spec Sec2.2)
+    where a wildcard host is a real supply-chain risk (an iframe/overlay
+    source can point anywhere under it) rather than a narrow outbound
+    egress rule.
+    """
+    if not isinstance(host, str) or not host or "://" in host:
+        return False
+    if not allow_wildcard and "*" in host:
+        return False
+    return bool(_HOST_RE.match(host))
+
+
 def is_known_permission(permission_id: str) -> bool:
     """`True` iff `permission_id` resolves to a risk level -- i.e. is a catalog member."""
     return resolve_risk(permission_id) is not None
