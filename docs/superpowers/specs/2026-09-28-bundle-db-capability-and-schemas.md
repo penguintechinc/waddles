@@ -1,9 +1,9 @@
-# Bundle `db` Host Capability & Bundle-Owned Data Tables — Design (Rev 4)
+# Bundle `db` Host Capability & Bundle-Owned Data Tables — Design (Rev 5)
 
-**Status:** Proposed design (no code in this doc) — **Rev 4, supersedes Rev 3**, addresses Gemini review round 2 findings on Rev 2/3 plus Justin's architecture decision: bundle tables move into the **shared `waddles` Postgres** (no separate `bundle-data` database, no sharding).
+**Status:** Proposed design (no code in this doc) — **Rev 5, supersedes Rev 4** — folds in Gemini review round 3's PASS-WITH-CONDITIONS findings on #415 as normative requirements (§1 round 3 rows).
 **Date:** 2026-09-28
 **Scope:** `core/svc_process/src/capabilities.rs`, `core/svc_action/src/capabilities.rs`, `hub_api/services/bundle_manifest_v2.py`, `hub_api/services/bundle_approval_service.py`, hub-api's DSAR/erasure workflow, `waddles` Postgres: two new schemas (`app_core`, `app_community`), `waddles_bundle_runtime` and `waddles_bundle_migrator` roles.
-**Drivers:** Rev 1 (manifest-DSL-to-DDL, raw-SQL escape hatch, per-app schemas) failed Gemini round 1 (parser differential, pooling, catalog bloat). Rev 2 fixed those with a fixed jsonb+slot template in a separate `bundle-data` DB. Rev 3 added declared typed columns + `user_ref`/erasure for a new user-linked-column requirement. Rev 4 responds to Gemini round 2 + Justin's explicit call: no second database, two dedicated schemas in `waddles` instead, stronger defense-in-depth on the query path.
+**Drivers:** Rev 1 (manifest-DSL-to-DDL, raw-SQL escape hatch, per-app schemas) failed Gemini round 1 (parser differential, pooling, catalog bloat). Rev 2 fixed those with a fixed jsonb+slot template in a separate `bundle-data` DB. Rev 3 added declared typed columns + `user_ref`/erasure for a new user-linked-column requirement. Rev 4 responded to Gemini round 2 + Justin's explicit call: no second database, two dedicated schemas in `waddles` instead, stronger defense-in-depth on the query path. Rev 5 folds in Gemini round 3's PASS-WITH-CONDITIONS items (§1): static enum-mapping proof, `FORCE ROW LEVEL SECURITY`, literal-only column defaults, expanded `REVOKE`/default-privilege precision, `user_ref` cache TTL + erasure invalidation + nullability rule, a stronger PII name-heuristic, `jsonb` secondary review + key scanning, and concrete per-bundle ops thresholds.
 **Builds on (unchanged):** `docs/superpowers/specs/2026-09-28-wit-stage-v1-1-design.md` §7.2/§7.3 (`SET LOCAL` timeouts, RLS leak-proofing, per-component `Linker` isolation — **not** its §3/§7.4 sqlparser-rs path, retired since Rev 2). `docs/superpowers/specs/2026-09-28-tenant-envelope-encryption-design.md` for crypto-shred (§9).
 **Umbrella alignment (unchanged):** `docs/bundle-permissions-capability-gate` — `storage.tables`/`storage.objects` permission ids, `authorize(scope, permission, resource)`, `AppScoped` resources, `users.profile.read`'s non-identifying field set (referenced only).
 **PII boundary (unchanged):** hub-api's `users` table is the sole PII boundary. Bundle tables hold UUIDs only, never names/usernames/emails/phones. No join or lookup path from a bundle table to `users` exists at request time (§4, §5).
@@ -26,6 +26,15 @@
 | 2 | HIGH | `order_by` (and implicitly filter `column`) as a runtime string, even allowlist-checked, is more surface than needed | `order_by`/filter `column` become a closed WIT enum generated per app at provisioning time (`indexed-column`) — not a string compared at runtime at all | §6.1 |
 | 2 | HIGH | RLS-only isolation (`SET LOCAL` + `current_setting`) is a single mechanism; a pooled-connection GUC leak would be silently fatal | **Defense in depth:** every query template also carries an explicit `tenant_id = $n AND community_id = $m` predicate, bound from the same `InvokeScope` that feeds `SET LOCAL`, independently of it — plus the existing `RESET ALL`/`DISCARD ALL` at checkin | §6.2, §7 |
 | 2 | MED | Catalog-scale numbers were computed for an isolated `bundle-data` instance; sharing `waddles` changes the operational picture (shared autovacuum workers, shared connection/WAL budget with control-plane tables) | Restated numbers for the shared-instance case, with an autovacuum note, a monitoring threshold, and an explicit revisit trigger | §3.6 |
+| 3 (PASS-WITH-CONDITIONS) | C1.1 | `indexed-column` enum → column mapping must be provably static, not just "not a string at runtime" | The mapping is a static lookup table generated once at onboarding (provisioning time) — no bundle value is ever interpolated into it, at generation or at lookup | §6.2 |
+| 3 | C1.2 | RLS policies alone don't bind the table owner (`waddles_bundle_migrator`) itself | `ALTER TABLE ... FORCE ROW LEVEL SECURITY` on every app table, unconditionally, part of the fixed template | §3.4, §7 |
+| 3 | C2.1 | `now()`/`gen_random_uuid()` as bundle-declared column defaults are function calls, not literals — reopens a (small) expression-evaluation surface | Bundle-declared column defaults are scalar literals only (number, bool, quoted string ≤N chars, `NULL`), checked with a strict literal parser — no functions, casts, or expressions, ever. Platform-owned columns keep their function defaults (fixed template, not bundle input) | §3.2 |
+| 3 | C3.1–C3.3 | Runtime role's negative-grant surface (`REVOKE` list) and the `public` schema's default-permissive grants weren't fully enumerated | `REVOKE TEMP ON DATABASE waddles FROM waddles_bundle_runtime`; `REVOKE CREATE, USAGE ON SCHEMA public FROM PUBLIC`; `ALTER DEFAULT PRIVILEGES FOR ROLE waddles_bundle_migrator IN SCHEMA app_core, app_community GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO waddles_bundle_runtime` (role-scoped default privileges, not a bare schema-wide default) | §2 |
+| 3 | C4.1 | `user_ref` tenant-membership cache had no stated TTL or erasure-invalidation | TTL ≤30s; cache entry invalidated immediately on user erasure (§4's cascade sweep also clears it) | §4 |
+| 3 | C4.2 | A `NOT NULL user_ref` column paired with `on_erasure: anonymize` is unsatisfiable (anonymize needs to null the column) | `user_ref` columns must be `nullable`, unless `on_erasure` is `DELETE ROW` (the default) — a `NOT NULL user_ref` + `anonymize` combination is rejected at manifest validation | §3.2, §4 |
+| 3 | C5.1 | PII name-heuristic denylist was small and exact-match, missing separator/case variants and common synonyms | Normalized (case- and separator-insensitive) match against an expanded denylist: `email`, `e-mail`, `mail`, `name`, `username`, `handle`, `login`, `phone`, `address`, `ip`, and their compounds | §3.2 |
+| 3 | C5.2 | `jsonb` columns' 16 KiB cap addressed size, not content — a jsonb blob is the one place free-form PII could still land | `jsonb` columns are flagged for mandatory secondary human review at vendor approval (in addition to the size cap); write-time key-name scanning against the same PII denylist drops or rejects offending keys before the write reaches Postgres | §3.1, §2.1 |
+| 3 | Ops | Monitoring thresholds for the shared-instance model were qualitative, not actionable | Concrete revisit-per-bundle triggers: a single app table exceeding 50 GB, sustained >500 IOPS, or RLS-policy evaluation exceeding 15% of query CPU flags that specific bundle for remediation (index review, quota tightening, or promotion to a dedicated database) | §3.6 |
 
 ---
 
@@ -58,7 +67,9 @@
 | Role | Grants | Used by | When |
 |---|---|---|---|
 | `waddles_bundle_migrator` | `CREATE`/`ALTER`/`DROP` on `app_core`/`app_community` only; no DML grant needed (it never runs application queries) | hub-api only | Bundle approval, version migration, uninstall, DSAR erasure sweep |
-| `waddles_bundle_runtime` | `USAGE` on `app_core`/`app_community` only; `SELECT, INSERT, UPDATE, DELETE` on all tables in those two schemas (via `ALTER DEFAULT PRIVILEGES` so new bundle tables auto-grant without a manual step); explicit `REVOKE ALL` on every other schema and on the database's default `PUBLIC` grants; no `CREATE` anywhere | svc_process, svc_action (one pool per service, §7) | Every `tables.*` call |
+| `waddles_bundle_runtime` | `USAGE` on `app_core`/`app_community` only; `SELECT, INSERT, UPDATE, DELETE` on all tables in those two schemas via `ALTER DEFAULT PRIVILEGES FOR ROLE waddles_bundle_migrator IN SCHEMA app_core, app_community GRANT ... TO waddles_bundle_runtime` (role-scoped to the migrator's own future creations, not a bare schema-wide default, so a table created by any other role never silently grants); explicit `REVOKE ALL` on every other schema and on the database's default `PUBLIC` grants; **`REVOKE TEMP ON DATABASE waddles FROM waddles_bundle_runtime`** (no temp-table creation); no `CREATE` anywhere | svc_process, svc_action (one pool per service, §7) | Every `tables.*` call |
+
+**Instance-wide hardening (applies regardless of this role, standard baseline):** `REVOKE CREATE, USAGE ON SCHEMA public FROM PUBLIC` — no role, bundle-related or not, gets default access to `public` anymore.
 
 **This is a narrowly-scoped exception to "hub-api is the only RW path to control-plane data," not a repeal of it.** The invariant now reads: hub-api is the only RW path to every schema *except* `app_core`/`app_community`, where `waddles_bundle_runtime` gets DML-only, schema-scoped write access — a boundary enforced by Postgres `GRANT`/`REVOKE`, not by which database the connection happens to be pointed at.
 
@@ -74,7 +85,7 @@ The data-plane role (`waddles_bundle_runtime`) is real-time read/write only — 
 | world-conformance validation | Schema validation: `data.table.columns[]`/`indexes[]` checked against the type allowlist (§3.1), column/index/width caps, PII name-heuristic gate (§3.2) — rejects here, before anything is staged | hub-api (manifest validator) | Identical — validation doesn't distinguish provenance |
 | stage to MinIO | none (package artifact staging only) | — | — |
 | provision consumer groups | **Table provisioning happens in this same step** — schema+table name derived (§3.4), DDL plan computed | hub-api (`waddles_bundle_migrator`) | **Vendor (`app_community`):** DDL plan computed here, **execution deferred** until the approval step — a rejected upload never leaves a table behind. **Core (`app_core`):** provisioned immediately via the system seeder path (first-party code, no human-approval gate) |
-| approval | Global-admin approval decision | Global admin (human) | **Vendor:** approval is what unblocks the deferred DDL apply from the previous step — `CREATE TABLE`/indexes/RLS/grants execute now, inside the approval transaction. **Core:** no separate approval gate here — already provisioned via the seeder path, gated instead by the platform's normal code-review/merge process for `waddles.core.*` |
+| approval | Global-admin approval decision. **Any `jsonb`-typed column declared by a vendor bundle adds a mandatory secondary human review item** (in addition to write-time key-name PII scanning, §3.1/§3.2) — approval cannot complete on the primary reviewer's sign-off alone | Global admin (human) + secondary reviewer for `jsonb` columns | **Vendor:** approval is what unblocks the deferred DDL apply from the previous step — `CREATE TABLE`/indexes/RLS/grants execute now, inside the approval transaction. **Core:** no separate approval gate here — already provisioned via the seeder path, gated instead by the platform's normal code-review/merge process for `waddles.core.*` (a `jsonb` column in a core bundle still gets the same secondary-review flag in that review process) |
 | activation | Table becomes reachable to `tables.*` calls | svc_process/svc_action (`waddles_bundle_runtime` — grants already exist from provisioning, but `authorize()`/app-active checks, §8, gate actual traffic until this step) | Identical |
 | (new-version approval) | Upgrade: schema-version diff, additive auto-apply or destructive ack+transform (§11) | hub-api (`waddles_bundle_migrator`) | Same vendor/core split as initial approval |
 | (uninstall) | Teardown: hold-and-confirm, DEK crypto-shred, chunked delete, optional archive (§10) | hub-api (`waddles_bundle_migrator`) | Identical — teardown isn't provenance-gated |
@@ -89,15 +100,23 @@ Unchanged in shape from Rev 3 — one table per app bundle, declared typed colum
 
 ### 3.1 Type allowlist (unchanged from Rev 3)
 
-`user_ref` (uuid, platform user reference, §4), `uuid`, `int4`, `int8`, `numeric(p,s)` (`p≤38, s≤12`), `bool`, `text(max_len)` (`max_len≤8192`), `timestamptz`, `jsonb` (≤16 KiB, host-enforced pre-write). No other types.
+`user_ref` (uuid, platform user reference, §4), `uuid`, `int4`, `int8`, `numeric(p,s)` (`p≤38, s≤12`), `bool`, `text(max_len)` (`max_len≤8192`), `timestamptz`, `jsonb` (≤16 KiB, host-enforced pre-write; **also flagged for mandatory secondary human review at vendor approval** and write-time key-name PII scanning, §2.1/§3.2 — size alone doesn't address content). No other types.
 
 ### 3.2 Column declaration & limits (unchanged from Rev 3)
 
-Name `^[a-z][a-z0-9_]{0,62}$`, type from §3.1, `nullable`, tiny-literal `default` only. **PII name-heuristic gate**: column names matching `email`/`name`/`username`/`phone`/`address`/`ssn`/`dob`/`birth`(-substrings) are **rejected** at manifest validation (`column_name_suggests_pii`), not silently warned — a reviewer may only proceed by renaming and explicitly confirming no PII, per Rev 3. Caps: ≤32 declared columns, ≤8 indexes, ≤4 columns per composite index.
+Name `^[a-z][a-z0-9_]{0,62}$`, type from §3.1, `nullable`.
+
+**`default`: scalar literals only** — a number, `bool`, a quoted string (≤ the column's `max_len`), or `NULL`. Checked with a strict literal parser (a grammar that accepts exactly one of those four shapes and nothing else) — **no functions, casts, or expressions**, for any bundle-declared column, full stop. (Platform-owned columns, §3.3, keep their fixed function-based defaults — `gen_random_uuid()`, `now()` — because those are authored in the platform's own template, not bundle input; the literal-only rule applies to what a *bundle* can declare.)
+
+**PII name-heuristic gate:** column names are normalized (lower-cased, separators `-`/`_`/` ` collapsed) and matched against an expanded denylist — `email`, `e-mail`, `mail`, `name`, `username`, `handle`, `login`, `phone`, `address`, `ip`, `ssn`, `dob`, `birth` — plus their compounds (`first-name`, `display_name`, etc., all normalize to a `name` match). A match **rejects** the manifest at onboarding (`column_name_suggests_pii`), not a silent warning — a reviewer may only proceed by renaming and explicitly confirming no PII.
+
+**`user_ref` nullability:** a `user_ref` column must be declared `nullable`, unless the table's `on_erasure` action for that column is `DELETE ROW` (the default, §4). Declaring `NOT NULL` together with `on_erasure: anonymize` is unsatisfiable (anonymize nulls the column) and is **rejected at manifest validation**.
+
+Caps: ≤32 declared columns, ≤8 indexes, ≤4 columns per composite index.
 
 ### 3.3 Platform-owned (mandatory) columns (unchanged from Rev 3)
 
-`row_id` (PK), `tenant_id`, `community_id`, `version`, `created_at`, `updated_at` — host-managed, never bundle-writable.
+`row_id` (PK), `tenant_id`, `community_id`, `version`, `created_at`, `updated_at` — host-managed, never bundle-writable. Every table also gets `ALTER TABLE ... FORCE ROW LEVEL SECURITY` (§7) as part of the same fixed template step that attaches the RLS policy — without `FORCE`, the table's owning role (`waddles_bundle_migrator`) would bypass RLS by default; `FORCE` closes that even though the migrator never issues DML in normal operation.
 
 ### 3.4 Table naming and identifier safety
 
@@ -117,8 +136,8 @@ This is *in addition to* `waddles`'s existing control-plane relation count (a fe
 
 **Ops notes (new for the shared-instance case):**
 - **Autovacuum tuning for the app schemas:** set a lower `autovacuum_vacuum_cost_delay`/higher `autovacuum_vacuum_cost_limit` on `app_core`/`app_community` tables specifically (via `ALTER TABLE ... SET (...)`, applied by the same fixed template so it's uniform, not bundle-influenced) so bundle-table vacuum work doesn't starve control-plane tables of worker time during contention.
-- **Monitoring threshold:** alert if combined `app_core`+`app_community` relation count exceeds 50,000, or if `pg_stat_user_tables` shows control-plane table `last_autovacuum` lag increasing measurably relative to baseline (the actual signal that bundle tables are starving the shared worker pool, not just a raw table count).
-- **Revisit trigger:** either signal above firing, or app count approaching ~50-100k, means moving bundle tables to a dedicated database/instance (Rev 1-3's model, kept as a documented fallback, not deleted from institutional memory) — a schema-rename-and-`pg_dump`-restore migration, not a redesign, since the DDL/role model here was already schema-scoped.
+- **Monitoring:** table bloat (dead-tuple ratio per relation), RLS policy evaluation cost as a share of query CPU, and lock-wait time on `app_core`/`app_community` tables, alongside the existing combined-relation-count and `last_autovacuum`-lag signals.
+- **Revisit trigger — per-bundle, not just instance-wide:** any single app table crossing **50 GB**, sustained **>500 IOPS**, or **RLS evaluation exceeding 15% of that table's query CPU** flags *that specific bundle* for remediation — index review, quota tightening, or promotion to its own dedicated database — independent of the instance-wide 50,000-relation/50-100k-app trigger, which still applies for the aggregate case.
 
 ### 3.7 Limits of the model (unchanged from Rev 3)
 
@@ -126,9 +145,9 @@ No DB-enforced FK/CHECK — application-layer only via the event contract. Multi
 
 ---
 
-## 4. User reference columns & DSAR cascade erasure (unchanged from Rev 3)
+## 4. User reference columns & DSAR cascade erasure
 
-`user_ref` carries the platform user's UUID only, never PII. Write-time validation confirms `(tenant_id[, community_id])` membership against `waddles_bundle_reader`'s RO-replica connection before a `bundle-data` write proceeds (short-TTL cache permitted). `bundle_user_ref_columns` (hub-api control-plane table) registers every declared `user_ref` column at provisioning time; a DSAR/erasure request extends hub-api's existing erasure workflow with a chunked (`LIMIT`-batched) sweep — default `DELETE`, opt-in `on_erasure: anonymize` (nulls the column + any `pii_adjacent: true` column) — via `waddles_bundle_migrator`, fail closed on incompleteness.
+`user_ref` carries the platform user's UUID only, never PII. Write-time validation confirms `(tenant_id[, community_id])` membership against `waddles_bundle_reader`'s RO-replica connection before a `bundle-data` write proceeds. **Cache: TTL ≤30s, and the cached entry is invalidated immediately on user erasure** — the erasure workflow (below) clears it as its first step, so a write can't succeed against a stale "still a member" cache entry for a user mid-erasure. `bundle_user_ref_columns` (hub-api control-plane table) registers every declared `user_ref` column at provisioning time; a DSAR/erasure request extends hub-api's existing erasure workflow with a chunked (`LIMIT`-batched) sweep — default `DELETE ROW`, opt-in `on_erasure: anonymize` (nulls the column + any `pii_adjacent: true` column, only valid when the column is declared `nullable`, §3.2) — via `waddles_bundle_migrator`, fail closed on incompleteness.
 
 ---
 
@@ -154,7 +173,7 @@ No `execute`/`execute-batch`, no raw-SQL field, no DDL field.
 
 ### 6.2 Host implementation — query builder, not a parser, with explicit-predicate defense in depth
 
-The host maps each `indexed-column` enum variant to its pre-quoted, provisioning-time-derived column identifier (never a runtime string lookup) and builds one of a fixed set of parameterized SQL templates. **Two independent, non-substitutable enforcement layers on every statement, not one:**
+The enum-variant-to-column mapping is a **static lookup table generated once, at onboarding** (provisioning time, §2.1) — a fixed array/match indexed by the enum's own discriminant, built entirely from the app's already-validated, already-quoted column identifiers. **No bundle value is ever interpolated into this mapping, at generation time or at lookup time** — generation reads only hub-api's own provisioning-time metadata, and lookup is an enum match, not a string comparison against anything request-supplied. The host then builds one of a fixed set of parameterized SQL templates from the resolved identifier. **Two independent, non-substitutable enforcement layers on every statement, not one:**
 
 1. **RLS via `SET LOCAL`** — `waddles.tenant_id`/`community_id`/`app_id` set per transaction from `InvokeScope`, policy `USING (tenant_id = current_setting(...) AND community_id = current_setting(...))`.
 2. **Explicit `WHERE tenant_id = $n AND community_id = $m` predicate, in every query template, in addition to RLS** — bound from the *same* `InvokeScope` independently of the `SET LOCAL` call, so a bug or leak in one mechanism (e.g. a stale GUC surviving a pooled-connection checkin) does not silently fall through to the other. App scope is enforced by table/schema selection itself (each app has exactly one table — there is no column-level "app" predicate to add).
@@ -174,7 +193,7 @@ The host maps each `indexed-column` enum variant to its pre-quoted, provisioning
 | Pools | One per service (svc_process, svc_action) — two pools total |
 | `search_path` | Pinned to `app_core, app_community, pg_catalog` — never bundle-influenced, never includes any control-plane schema |
 | Scope injection | `SET LOCAL waddles.tenant_id/community_id/app_id` per transaction from `InvokeScope` |
-| RLS + explicit predicate | Both, always, per §6.2 |
+| RLS + explicit predicate | Both, always, per §6.2 — plus `FORCE ROW LEVEL SECURITY` on every table (§3.4) so the policy binds even the owning role |
 | Checkin | `RESET ALL` then `DISCARD ALL` under a `Drop`-guard |
 | DDL role | `waddles_bundle_migrator` — hub-api only, never request-time (§2) |
 
