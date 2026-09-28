@@ -466,6 +466,24 @@ pub struct ProcessDeps<S: SpineOps> {
     /// SS5) every per-invoke [`StageCapabilities`] this loop constructs is
     /// wired with.
     pub gate: Arc<bundle_capability_gate::CapabilityGate>,
+    /// Numeric `tenants.id`, resolved once at startup
+    /// (`crate::lib::try_start_process_loop`) via `bundle_active_set::
+    /// scope::resolve_scope` when `BUNDLE_SCOPE_TENANT_ID` and a DB reader
+    /// account are configured -- constant across every invoke this loop
+    /// handles, the same way [`ProcessDeps::digest`]/[`ProcessDeps::version`]
+    /// are. `0` when unconfigured (this loop's env-only mode, see that
+    /// function's doc) -- fails closed (denies every non-platform
+    /// permission) rather than matching a real tenant's grants.
+    pub tenant_id: i32,
+    /// See [`ProcessDeps::tenant_id`]'s doc. `0` is also the reserved
+    /// tenant-wide sentinel (`bundle_active_set`'s own convention) for a
+    /// genuinely-resolved tenant-wide scope -- distinguished from the
+    /// unconfigured case only by `tenant_id` also being `0` there.
+    pub community_id: i32,
+    /// The resolved `app_versions.id` for [`ProcessDeps::version`] (see
+    /// `crate::lib::resolve_app_version_id`) -- `0` when `version` is empty
+    /// (no bundle configured yet) or scope resolution is unconfigured.
+    pub app_version: i64,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -580,6 +598,9 @@ async fn handle_delivered<S: SpineOps>(
             d.env.tenant.clone(),
             d.env.community.clone(),
             deps.app_id.clone(),
+            deps.tenant_id,
+            deps.community_id,
+            deps.app_version,
             Arc::clone(&deps.gate),
         );
         let caps = match &deps.kv_conn {
@@ -1072,6 +1093,9 @@ mod tests {
             // instead of here.
             kv_conn: None,
             gate: test_gate(),
+            tenant_id: 0,
+            community_id: 0,
+            app_version: 0,
         };
         (deps, metrics)
     }

@@ -216,13 +216,20 @@ fn try_start_host_api(cli: &config::CliConfig) -> Arc<host_api::ConnectionRegist
 /// failure -- returns `None` (logged) so the caller can start every other
 /// capability regardless (`crate::capabilities::StageCapabilities::with_kv`'s
 /// doc).
-async fn connect_kv(cfg: &penguin_spine::SpineConfig) -> Option<redis::aio::MultiplexedConnection> {
+/// Builds (never connects) a [`redis::Client`] from `cfg`'s `VALKEY_URL`/
+/// username/password/TLS/CA-file settings -- shared by [`connect_kv`] (which
+/// opens a connection over it for the `kv` host capability) and
+/// `crate::grant_gate::build_production_gate`'s callers (which need the
+/// `redis::Client` itself, to hand to `run_grant_gate_refresh_loop`, not a
+/// pre-opened connection). `None` (logged) on a malformed `VALKEY_URL` or a
+/// TLS client-build failure -- never fatal to the caller.
+fn build_redis_client(cfg: &penguin_spine::SpineConfig) -> Option<redis::Client> {
     use redis::IntoConnectionInfo;
 
     let info: redis::ConnectionInfo = match cfg.valkey_url.as_str().into_connection_info() {
         Ok(info) => info,
         Err(err) => {
-            tracing::warn!(error = %err, "kv capability: invalid VALKEY_URL; kv disabled (not_implemented on every kv host-call)");
+            tracing::warn!(error = %err, "invalid VALKEY_URL; Valkey-backed features disabled");
             return None;
         }
     };
@@ -235,7 +242,7 @@ async fn connect_kv(cfg: &penguin_spine::SpineConfig) -> Option<redis::aio::Mult
     }
     let info = info.set_redis_settings(settings);
 
-    let client = if cfg.security_transport_tls {
+    if cfg.security_transport_tls {
         host_api::ensure_crypto_provider_installed();
         let root_cert = std::fs::read(&cfg.valkey_ca_file).ok();
         match redis::Client::build_with_tls(
@@ -245,22 +252,25 @@ async fn connect_kv(cfg: &penguin_spine::SpineConfig) -> Option<redis::aio::Mult
                 root_cert,
             },
         ) {
-            Ok(client) => client,
+            Ok(client) => Some(client),
             Err(err) => {
-                tracing::warn!(error = %err, "kv capability: TLS Valkey client build failed; kv disabled");
-                return None;
+                tracing::warn!(error = %err, "TLS Valkey client build failed; Valkey-backed features disabled");
+                None
             }
         }
     } else {
         match redis::Client::open(info) {
-            Ok(client) => client,
+            Ok(client) => Some(client),
             Err(err) => {
-                tracing::warn!(error = %err, "kv capability: Valkey client build failed; kv disabled");
-                return None;
+                tracing::warn!(error = %err, "Valkey client build failed; Valkey-backed features disabled");
+                None
             }
         }
-    };
+    }
+}
 
+async fn connect_kv(cfg: &penguin_spine::SpineConfig) -> Option<redis::aio::MultiplexedConnection> {
+    let client = build_redis_client(cfg)?;
     match client.get_multiplexed_async_connection().await {
         Ok(conn) => Some(conn),
         Err(err) => {
@@ -268,6 +278,32 @@ async fn connect_kv(cfg: &penguin_spine::SpineConfig) -> Option<redis::aio::Mult
             None
         }
     }
+}
+
+/// Resolves `app_versions.id` (the numeric id [`bundle_capability_gate::
+/// GrantScopeKey::app_version`]/`InvokeScope::app_version` actually uses --
+/// same value `app_active_versions.version_id` stores) for one
+/// `(app_id, version)` semver-text pair, through the same RO reader
+/// connection every other query in this function uses. `None` on no
+/// matching row OR a query error -- both mean "cannot safely resolve a real
+/// app_version," which every caller treats as fail-closed (process loop not
+/// started), never a `0` placeholder.
+async fn resolve_app_version_id(
+    db: &sea_orm::DatabaseConnection,
+    app_id: &str,
+    version: &str,
+) -> Option<i64> {
+    use bundle_active_set::entities::app_versions;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    app_versions::Entity::find()
+        .filter(app_versions::Column::AppId.eq(app_id.to_string()))
+        .filter(app_versions::Column::Version.eq(version.to_string()))
+        .one(db)
+        .await
+        .ok()
+        .flatten()
+        .map(|row| row.id)
 }
 
 /// Attempts to start the **legacy, single-consumer** process-stage drain
@@ -366,6 +402,37 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
     let app_id = cli.process_app_id.clone();
     let approved_targets = builtins::parse_approved_targets(&cli.process_routes_to_approved);
 
+    // Grant-gate scope resolution (spec SS4/SS5.1): when this process is
+    // ALSO configured with a real `BUNDLE_SCOPE_TENANT_ID` and a DB reader
+    // account -- both already used by `try_start_db_bundle_loader`, never
+    // exclusive to it -- resolve the numeric `tenant_id`/`community_id`/
+    // `app_version` this loop's own invocations authorize under from the
+    // SAME RO-replica tables, instead of the `(0, 0, 0)` placeholder
+    // `crate::capabilities::StageCapabilities::new` used to hardcode
+    // unconditionally (a placeholder that only ever matched a grant row
+    // ALSO written under tenant/community/version `0` -- not a real scope).
+    // `None` when unconfigured: this loop's env-only mode (this function's
+    // own doc) keeps running exactly as before, still fail-closed for every
+    // non-platform permission via the `(0, 0, 0)` sentinel -- but a
+    // resolution FAILURE once configured (below) stops the loop from
+    // starting at all, never silently falling back to that sentinel.
+    let scope_reader_cfg = cli.bundle_scope_tenant_id.get().and_then(|tenant_id| {
+        config.db_reader_password.as_ref().map(|password| {
+            (
+                tenant_id,
+                cli.bundle_scope_community_id,
+                password.expose().to_string(),
+            )
+        })
+    });
+    let reader_cfg = bundle_active_set::ReaderConfig {
+        host: cli.db_reader_host.clone(),
+        port: cli.db_reader_port,
+        name: cli.db_reader_name.clone(),
+        user: cli.db_reader_user.clone(),
+    };
+    let poll_interval = cli.bundle_config_poll_interval();
+
     tokio::spawn(async move {
         // TODO(M4+): tenant/community scope hardcoded to the tenant-wide
         // `global` activation until the distribution poll resolves the
@@ -387,6 +454,50 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
             Vec::new()
         };
 
+        // Fail-closed scope resolution -- see `scope_reader_cfg`'s doc.
+        // `grant_db` is the RO-replica connection `grant_gate::
+        // PgGrantLoader` reads through when scope resolution succeeds;
+        // `None` (unconfigured) falls back to `InMemoryGrantLoader` (always
+        // denies every non-platform permission, same posture as today).
+        let (grant_db, tenant_id, community_id, app_version) = match scope_reader_cfg {
+            Some((tenant_id, community_id, password)) => {
+                let db = match bundle_active_set::reader::connect(&reader_cfg, &password).await {
+                    Ok(db) => db,
+                    Err(err) => {
+                        tracing::error!(error = %err, "db-reader connection failed; process loop not started (fail-closed: BUNDLE_SCOPE_TENANT_ID is configured, so a (0, 0, 0) placeholder scope is never substituted)");
+                        return;
+                    }
+                };
+                match bundle_active_set::scope::resolve_scope(&db, tenant_id, community_id).await {
+                    Ok(Some(_resolved)) => {}
+                    Ok(None) => {
+                        tracing::error!(tenant_id, community_id, "BUNDLE_SCOPE_TENANT_ID/_COMMUNITY_ID could not be resolved via the RO reader connection (missing row, or a community id belonging to a different tenant); process loop not started (fail-closed)");
+                        return;
+                    }
+                    Err(err) => {
+                        tracing::error!(error = %err, tenant_id, community_id, "tenant/community scope resolution query failed; process loop not started (fail-closed)");
+                        return;
+                    }
+                }
+                let app_version = if cli.process_bundle_version.is_empty() {
+                    // No bundle configured yet -- same "empty means
+                    // unconfigured" sentinel `ProcessDeps::digest`'s doc
+                    // already documents, not a resolution failure.
+                    0
+                } else {
+                    match resolve_app_version_id(&db, &app_id, &cli.process_bundle_version).await {
+                        Some(id) => id,
+                        None => {
+                            tracing::error!(app_id = %app_id, version = %cli.process_bundle_version, "PROCESS_BUNDLE_VERSION has no matching app_versions row; process loop not started (fail-closed)");
+                            return;
+                        }
+                    }
+                };
+                (Some(db), tenant_id, community_id, app_version)
+            }
+            None => (None, 0, 0, 0),
+        };
+
         let metrics: Arc<dyn penguin_spine::SpineMetrics> = Arc::new(penguin_spine::NoopMetrics);
         // `kv` host capability: opened once here, cloned into every
         // per-invoke `StageCapabilities` (`spine::ProcessDeps::kv_conn`'s
@@ -394,6 +505,26 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
         // fatal to the process loop -- every `kv` host-call then sees
         // `not_implemented` instead (`connect_kv`'s doc).
         let kv_conn = connect_kv(&spine_cfg).await;
+        // Production grant gate (spec SS4/SS5): `PgGrantLoader` against the
+        // just-resolved RO-replica connection when scope was configured and
+        // resolved successfully, `InMemoryGrantLoader` (always denies every
+        // non-platform permission) otherwise -- `build_production_gate`
+        // unions the always-granted platform trio over either, and spawns
+        // the push-invalidation/poll-refresh loop when a Valkey client is
+        // available.
+        let redis_client = build_redis_client(&spine_cfg);
+        let gate: Arc<bundle_capability_gate::CapabilityGate> = match grant_db {
+            Some(db) => grant_gate::build_production_gate(
+                grant_gate::PgGrantLoader::new(db),
+                redis_client,
+                poll_interval,
+            ),
+            None => grant_gate::build_production_gate(
+                bundle_capability_gate::InMemoryGrantLoader::new(),
+                redis_client,
+                poll_interval,
+            ),
+        };
         let deps = spine::ProcessDeps {
             app_id: app_id.clone(),
             digest: cli.process_bundle_digest.clone(),
@@ -418,21 +549,10 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
             metrics,
             license: license_gate,
             kv_conn,
-            // `grant_gate::AlwaysGrantedLoader` over an empty
-            // `InMemoryGrantLoader` until the sibling grants migration
-            // (`feature/bundle-permission-grants`) lands and a
-            // `grant_gate::PgGrantLoader` against a real RO-replica
-            // connection replaces this: `context`/`clock`/`log` stay
-            // granted (spec SS3.5), every other permission fails closed.
-            gate: Arc::new(bundle_capability_gate::CapabilityGate::new(
-                Arc::new(bundle_capability_gate::GrantCache::new(Arc::new(
-                    grant_gate::AlwaysGrantedLoader::new(
-                        bundle_capability_gate::InMemoryGrantLoader::new(),
-                    ),
-                ))),
-                Arc::new(bundle_capability_gate::InMemoryMembership::new()),
-                Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
-            )),
+            tenant_id,
+            community_id,
+            app_version,
+            gate,
         };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -659,7 +779,29 @@ fn try_start_db_bundle_loader(
                 }
             };
 
-        match resolved.map(|r| finish_supervisor_deps(prereqs, r, kv_conn)) {
+        match resolved.map(|r| {
+            // Production grant gate for the DB-driven supervisor path (spec
+            // SS4/SS5): `PgGrantLoader` against the SAME RO-replica
+            // connection `resolve_scope`/`bundle_loader::run` above already
+            // opened, never the `AlwaysGrantedLoader`-over-
+            // `InMemoryGrantLoader` stand-in this used to hardcode
+            // unconditionally. Built only once resolution actually
+            // succeeds (no point opening a redis client / spawning a
+            // refresh loop for a supervisor that never starts).
+            let supervisor_gate = grant_gate::build_production_gate(
+                grant_gate::PgGrantLoader::new(db.clone()),
+                build_redis_client(&prereqs.spine_cfg),
+                poll_interval,
+            );
+            finish_supervisor_deps(
+                prereqs,
+                r,
+                kv_conn,
+                tenant_id,
+                community_id,
+                supervisor_gate,
+            )
+        }) {
             Some(deps) => {
                 let (supervisor_shutdown_tx, supervisor_shutdown_rx) =
                     tokio::sync::oneshot::channel();
@@ -763,6 +905,9 @@ fn finish_supervisor_deps(
     prereqs: SupervisorPrereqs,
     resolved: bundle_active_set::scope::ResolvedScope,
     kv_conn: Option<redis::aio::MultiplexedConnection>,
+    tenant_id: i32,
+    community_id: i32,
+    gate: Arc<bundle_capability_gate::CapabilityGate>,
 ) -> source_supervisor::SupervisorDeps {
     source_supervisor::SupervisorDeps {
         spine_cfg: prereqs.spine_cfg,
@@ -774,18 +919,10 @@ fn finish_supervisor_deps(
         license: prereqs.license,
         tenant: resolved.tenant_slug,
         community: resolved.community_name,
+        tenant_id,
+        community_id,
         kv_conn,
-        // See `spine::ProcessDeps::gate`'s doc for the interim
-        // AlwaysGrantedLoader wiring.
-        gate: Arc::new(bundle_capability_gate::CapabilityGate::new(
-            Arc::new(bundle_capability_gate::GrantCache::new(Arc::new(
-                grant_gate::AlwaysGrantedLoader::new(
-                    bundle_capability_gate::InMemoryGrantLoader::new(),
-                ),
-            ))),
-            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
-            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
-        )),
+        gate,
     }
 }
 
@@ -916,6 +1053,17 @@ mod tests {
         }
     }
 
+    /// A deny-all gate -- these tests only assert on `SupervisorDeps`'s own
+    /// plumbing (tenant/community/tenant_id/community_id passthrough), not
+    /// on any particular authorize() outcome.
+    fn test_gate() -> Arc<bundle_capability_gate::CapabilityGate> {
+        Arc::new(bundle_capability_gate::CapabilityGate::new(
+            Arc::new(bundle_capability_gate::InMemoryGrantSnapshot::new()),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+        ))
+    }
+
     /// A minimal, syntactically valid [`SupervisorPrereqs`] -- guarded by
     /// `ENV_LOCK` since `penguin_spine::SpineConfig::from_env` reads
     /// `VALKEY_URL`/`VALKEY_PASSWORD`, same rationale as
@@ -957,9 +1105,11 @@ mod tests {
             tenant_slug: "acme".to_string(),
             community_name: Some("main".to_string()),
         };
-        let deps = finish_supervisor_deps(prereqs, resolved, None);
+        let deps = finish_supervisor_deps(prereqs, resolved, None, 7, 3, test_gate());
         assert_eq!(deps.tenant, "acme");
         assert_eq!(deps.community.as_deref(), Some("main"));
+        assert_eq!(deps.tenant_id, 7);
+        assert_eq!(deps.community_id, 3);
     }
 
     /// Tenant-isolation regression test, fail-closed half ("unresolved ->
@@ -973,7 +1123,7 @@ mod tests {
     fn supervisor_deps_are_never_built_when_scope_resolution_fails() {
         let prereqs = test_supervisor_prereqs();
         let resolved: Option<bundle_active_set::scope::ResolvedScope> = None;
-        let deps = resolved.map(|r| finish_supervisor_deps(prereqs, r, None));
+        let deps = resolved.map(|r| finish_supervisor_deps(prereqs, r, None, 7, 3, test_gate()));
         assert!(
             deps.is_none(),
             "an unresolved scope must never produce SupervisorDeps -- the source-binding \

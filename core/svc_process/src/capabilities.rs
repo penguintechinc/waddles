@@ -136,17 +136,18 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     app_id: String,
     /// Numeric `tenants.id`/`communities.id` (spec
     /// `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
-    /// SS5.1/SS4 `GrantScopeKey`). **Interim placeholder** until a
-    /// tenant/community resolver is wired into this stage's general
-    /// (non-DB-bundle-mode) dispatch loop (follow-on work, tracked the same
-    /// way `crate::spine::ProcessDeps::digest`/`version` already document
-    /// their own interim substitutes): every invocation today resolves to
-    /// `0`, which only ever matches a grant row also written under tenant/
-    /// community `0` -- fails closed (denies every non-platform permission)
-    /// rather than silently matching the wrong tenant's grants.
+    /// SS5.1/SS4 `GrantScopeKey`) -- the caller's already-resolved scope
+    /// (`crate::spine::ProcessDeps::tenant_id`'s doc), set via
+    /// `bundle_active_set::scope::resolve_scope` at startup when
+    /// `BUNDLE_SCOPE_TENANT_ID` and a DB reader account are configured, `0`
+    /// otherwise (this stage's env-only dispatch mode) -- fails closed
+    /// (denies every non-platform permission) rather than silently matching
+    /// the wrong tenant's grants.
     tenant_id: i32,
     community_id: i32,
-    /// Interim placeholder -- see `tenant_id`'s doc; always `0` today.
+    /// The resolved `app_versions.id` for the caller's configured bundle
+    /// version -- see `crate::spine::ProcessDeps::app_version`'s doc. `0`
+    /// when no bundle version is configured.
     app_version: i64,
     /// See [`Self::with_kv`]'s doc; `None` until it is called (a bundle
     /// sees `not_implemented` rather than this loop failing to start if
@@ -164,21 +165,28 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// host call accepts a tenant or community argument at all"). `kv`
     /// starts unconfigured; see [`Self::with_kv`]. `gate` is mandatory:
     /// every arm calls `gate.authorize()` first (spec SS5), typically backed
-    /// by `crate::grant_gate::AlwaysGrantedLoader` so `context`/`clock`/
-    /// `log` keep working even before the sibling grants migration lands.
+    /// by `crate::grant_gate::build_production_gate` so `context`/`clock`/
+    /// `log` stay granted regardless of what the real grant tables answer.
+    /// `tenant_id`/`community_id`/`app_version` are the caller's
+    /// already-resolved numeric scope (`crate::spine::ProcessDeps::
+    /// tenant_id`'s doc) -- never guessed here, and never defaulted to `0`
+    /// internally the way this constructor used to.
     pub fn new(
         tenant: String,
         community: Option<String>,
         app_id: String,
+        tenant_id: i32,
+        community_id: i32,
+        app_version: i64,
         gate: Arc<CapabilityGate>,
     ) -> Self {
         Self {
             tenant,
             community,
             app_id,
-            tenant_id: 0,
-            community_id: 0,
-            app_version: 0,
+            tenant_id,
+            community_id,
+            app_version,
             kv: None,
             gate,
         }
@@ -626,6 +634,9 @@ mod tests {
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
+            0,
+            0,
+            0,
             permissive_gate(),
         )
     }
@@ -635,6 +646,9 @@ mod tests {
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
+            0,
+            0,
+            0,
             deny_all_gate(),
         )
     }
@@ -644,6 +658,9 @@ mod tests {
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
+            0,
+            0,
+            0,
             deny_all_gate(),
         )
         .with_kv(FakeKvBackend::default())
@@ -654,6 +671,9 @@ mod tests {
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
+            0,
+            0,
+            0,
             permissive_gate(),
         )
         .with_kv(FakeKvBackend::default())
@@ -1131,6 +1151,9 @@ mod tests {
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
+            0,
+            0,
+            0,
             gate,
         )
         .with_kv(FakeKvBackend::default());
@@ -1181,6 +1204,9 @@ mod tests {
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
+            0,
+            0,
+            0,
             gate,
         )
         .with_kv(FakeKvBackend::default());

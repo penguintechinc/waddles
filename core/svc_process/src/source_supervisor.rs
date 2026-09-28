@@ -115,6 +115,15 @@ pub struct SupervisorDeps {
     /// when resolution fails, rather than falling back to a guessed value.
     pub tenant: String,
     pub community: Option<String>,
+    /// The SAME numeric scope `tenant`/`community` above were resolved
+    /// from (`crate::lib::try_start_db_bundle_loader`'s own
+    /// `BUNDLE_SCOPE_TENANT_ID`/`_COMMUNITY_ID`) -- threaded into every
+    /// binding consumer's [`spine::ProcessDeps::tenant_id`]/`community_id`
+    /// so this DB-driven dispatch path authorizes under the real scope
+    /// too, not the `(0, 0)` sentinel `crate::spine::ProcessDeps` used to
+    /// hardcode unconditionally.
+    pub tenant_id: i32,
+    pub community_id: i32,
     /// See `spine::ProcessDeps::kv_conn`'s doc -- opened once by
     /// `crate::lib::try_start_db_bundle_loader` and cloned into every
     /// binding consumer's own `ProcessDeps` in [`run_binding_consumer`]
@@ -250,6 +259,16 @@ async fn run_binding_consumer(
             license: Arc::clone(&deps.license),
             kv_conn: deps.kv_conn.clone(),
             gate: Arc::clone(&deps.gate),
+            tenant_id: deps.tenant_id,
+            community_id: deps.community_id,
+            // No numeric `app_versions.id` source exists on this DB-driven
+            // per-binding path yet -- `version` above is itself still a
+            // hardcoded `"1"` placeholder (this function's own doc), a
+            // pre-existing gap this change does not extend to fixing.
+            // Fails closed exactly like the general dispatch loop's own
+            // unconfigured case: `0` only ever matches a grant row ALSO
+            // written under version `0`.
+            app_version: 0,
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();
