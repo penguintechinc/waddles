@@ -20,6 +20,13 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from waddle_sdk.db import AsyncDB
+from waddle_sdk.flask_core.bundle_runtime import (
+    bundle_context,
+    reset_bundle_dal_for_tests,
+    set_bundle_dal,
+)
+from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 from app import (
     _FEATURE_FLAG,
@@ -30,13 +37,6 @@ from app import (
     dispatch,
     transform,
 )
-from waddle_sdk.flask_core.bundle_runtime import (
-    bundle_context,
-    reset_bundle_dal_for_tests,
-    set_bundle_dal,
-)
-from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-from waddle_sdk.db import AsyncDB
 
 TENANT = "tenant-1"
 COMMUNITY = "42"
@@ -51,7 +51,9 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
-def _event(text: str, *, actor: str | None = MOD_ACTOR, **payload_overrides: object) -> PlatformEvent:
+def _event(
+    text: str, *, actor: str | None = MOD_ACTOR, **payload_overrides: object
+) -> PlatformEvent:
     payload: dict[str, object] = {
         "text": text,
         "channel_id": "12345",
@@ -227,13 +229,16 @@ class TestTransformCommandParsing:
         result = _run(transform(_event("!SO clubpenguinfan")))
         assert result is not None
 
-    @pytest.mark.parametrize("text", ["!sox something", "!vso someone", "hello", "", "   "])
+    @pytest.mark.parametrize("text", ["!sox something", "!vsoo someone", "hello", "", "   "])
     def test_non_matching_text_returns_none(self, harness: _Harness, text: str) -> None:
         assert _run(transform(_event(text))) is None
 
     def test_missing_text_field_raises(self, harness: _Harness) -> None:
         event = PlatformEvent(
-            platform="twitch", event_type="chat.message", actor=MOD_ACTOR, payload={},
+            platform="twitch",
+            event_type="chat.message",
+            actor=MOD_ACTOR,
+            payload={},
             occurred_at="2026-09-28T00:00:00.000Z",
         )
         with pytest.raises(ValueError, match="text"):
@@ -265,7 +270,9 @@ class TestTransformFeatureFlag:
         harness.db.execute = _boom  # type: ignore[method-assign]
         assert _run(transform(_event("!so clubpenguinfan"))) is None
 
-    def test_flag_checked_with_correct_key(self, harness: _Harness, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_flag_checked_with_correct_key(
+        self, harness: _Harness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         captured: dict[str, Any] = {}
 
         def _capture(key: str, default: bool) -> bool:
@@ -378,7 +385,9 @@ class TestTransformPermission:
         assert allowed is not None
         assert "target" in allowed.payload
 
-    def test_config_lookup_error_defaults_to_mod_and_denies_non_mod(self, harness: _Harness) -> None:
+    def test_config_lookup_error_defaults_to_mod_and_denies_non_mod(
+        self, harness: _Harness
+    ) -> None:
         def _boom(*_a: Any, **_k: Any) -> Any:
             raise RuntimeError("simulated shoutout_config outage")
 
@@ -427,8 +436,10 @@ class TestTransformCooldown:
         assert result.payload["target"] == "target_user"
 
     def test_kv_denied_degrades_to_not_on_cooldown(self, harness: _Harness) -> None:
-        """`kv` is currently hardcoded `denied` host-side (capabilities.rs) -- must degrade,
-        never block the shoutout. See `app._is_on_cooldown`'s own docstring for the gap."""
+        """`kv` is hardcoded `denied` host-side (capabilities.rs) -- must degrade.
+
+        Never block the shoutout. See `app._is_on_cooldown`'s own docstring for the gap.
+        """
         harness.db.roles_by_display_name[(COMMUNITY_ID, MOD_ACTOR)] = "moderator"
 
         def _denied(*_a: Any, **_k: Any) -> Any:
@@ -448,7 +459,12 @@ class TestTransformCooldown:
         assert result.payload["text"] == _PERMISSION_DENIED_REPLY
 
 
-def _sample_envelope(*, cooldown_minutes: int = 60, channel_id: str | None = "12345", target: str | None = "clubpenguinfan") -> StageEnvelope:
+def _sample_envelope(
+    *,
+    cooldown_minutes: int = 60,
+    channel_id: str | None = "12345",
+    target: str | None = "clubpenguinfan",
+) -> StageEnvelope:
     payload: dict[str, Any] = {"channel_id": channel_id, "cooldown_minutes": cooldown_minutes}
     if target is not None:
         payload["target"] = target
@@ -517,7 +533,10 @@ class TestDispatch:
         envelope = _sample_envelope()
         _run(dispatch(envelope, {}, http_client=None))
         _, message_json = harness.relay.calls[0]
-        assert json.loads(message_json)["text"] == "Shoutout to clubpenguinfan! Check them out at twitch.tv/clubpenguinfan"
+        assert (
+            json.loads(message_json)["text"]
+            == "Shoutout to clubpenguinfan! Check them out at twitch.tv/clubpenguinfan"
+        )
 
     def test_http_client_error_degrades_to_minimal_template(self, harness: _Harness) -> None:
         class _BoomHttpClient:
@@ -543,7 +562,9 @@ class TestDispatch:
         _, message_json = harness.relay.calls[0]
         assert "ClubPenguinFan" in json.loads(message_json)["text"]
 
-    def test_http_client_malformed_body_degrades_to_minimal_template(self, harness: _Harness) -> None:
+    def test_http_client_malformed_body_degrades_to_minimal_template(
+        self, harness: _Harness
+    ) -> None:
         class _MalformedBodyHttpClient:
             async def get(self, *_a: Any, **_k: Any) -> dict[str, Any]:
                 return {"status": 200, "body": b"not-json"}

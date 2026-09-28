@@ -71,12 +71,13 @@ what works, flag what doesn't):
    `ShoutoutService.DEFAULT_TEMPLATES['twitch']['minimal']`'s own
    "ultimate fallback") instead of `['live']`/`['offline']` -- the
    shoutout still posts, just without live viewer count / game name.
-3. **`!vso` (video/clip shoutout) is out of scope.** Legacy's
-   `VideoShoutoutService` (YouTube Data API + Twitch clips, its own
-   per-platform video lookup and a `channel.follow`/raid-triggered
-   auto-shoutout mode) is a materially larger surface than a single chat
-   command and is not ported here -- `!vso` is simply not matched by
-   this bundle's command regex, same as any other unrecognized command.
+3. **`!vso` (video/clip shoutout) is now implemented** (`video_shoutout.py`,
+   this same PR) -- see that module's own docstring for its own, separate
+   set of documented gaps (host-side UUID->channel resolver, Kick OAuth,
+   overlay video playback). Legacy's `VideoShoutoutService` (YouTube Data
+   API + Twitch clips, a `channel.follow`/raid-triggered auto-shoutout
+   mode) is still not ported in full -- only the explicit `!vso <user>`
+   chat command, not the raid-triggered auto mode.
 4. **Per-community custom templates are not read.** Legacy's
    `ShoutoutService._get_template()` read a `shoutout_templates` table
    for a community-custom message; this bundle only implements the two
@@ -92,13 +93,24 @@ import re
 from typing import Any
 
 from waddle_sdk import kv, relay
-from waddle_sdk.db import AsyncDB
 from waddle_sdk.flask_core.bundle_runtime import get_bundle_context, get_bundle_dal
 from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.http import resolve_secret
 
-#: Matches `!so`/`!shoutout`, either alias -- text shoutout only (see module docstring, gap 3).
+import video_shoutout
+from _shared import DEFAULT_COOLDOWN_MINUTES as _SHARED_DEFAULT_COOLDOWN_MINUTES
+from _shared import (
+    DispatchResult,
+    caller_role,
+    permission_satisfied,
+    shoutout_permission_and_cooldown,
+)
+from _shared import community_id as _shared_community_id
+
+__all__ = ["DispatchResult", "dispatch", "transform"]
+
+#: Matches `!so`/`!shoutout`, either alias -- text shoutout only.
 _SO_PREFIX_RE = re.compile(r"^!(so|shoutout)\b", re.IGNORECASE)
 
 #: Post-normalization (lowercased, leading `@` stripped) Twitch login character set -- same
@@ -113,34 +125,6 @@ _PERMISSION_DENIED_REPLY = "you don't have permission to shout out"
 #: PostHog flag key gating this entire bundle -- this task's own manifest requirement.
 #: Default OFF (contrast `social_shoutout_process.py`'s `waddles.bot.shoutout`, default ON).
 _FEATURE_FLAG = "waddles.shoutout-bundle"
-
-#: `shoutout_config.so_permission`'s own column default (migration 046) -- used whenever the
-#: table/row/connection isn't reachable, never raised or treated as a denial.
-_DEFAULT_PERMISSION = "mod"
-#: `shoutout_config.cooldown_minutes`'s own column default (migration 046).
-_DEFAULT_COOLDOWN_MINUTES = 60
-
-#: Permission levels this bundle can never evaluate for lack of badge data (`vip`/
-#: `subscriber`) plus the always-open `everyone` -- all three are satisfied unconditionally.
-#: Same documented gap as `social_shoutout_process.py` (no badge data on `PlatformEvent`).
-_ALWAYS_ALLOWED_PERMISSIONS = frozenset({"everyone", "vip", "subscriber"})
-#: `community_members.role` values satisfying `admin_only` -- owner/admin tiers only.
-_ADMIN_ONLY_ROLES = frozenset({"owner", "admin", "community-owner", "community-admin"})
-#: `community_members.role` values satisfying `mod` -- moderator or above.
-_MOD_OR_ABOVE_ROLES = frozenset(
-    {"owner", "admin", "moderator", "community-owner", "community-admin"}
-)
-
-_SHOUTOUT_CONFIG_SQL = (
-    "SELECT so_permission, cooldown_minutes FROM shoutout_config WHERE community_id = $1 LIMIT 1"
-)
-_ROLE_BY_PLATFORM_SQL = (
-    "SELECT role FROM community_members "
-    "WHERE community_id = $1 AND platform = $2 AND platform_user_id = $3 LIMIT 1"
-)
-_ROLE_BY_DISPLAY_NAME_SQL = (
-    "SELECT role FROM community_members WHERE community_id = $1 AND display_name = $2 LIMIT 1"
-)
 
 #: `waddle_sdk.kv` key prefix for the per-(community, target) cooldown set by a successful
 #: dispatch -- see module docstring's cooldown section.
@@ -169,85 +153,6 @@ def _text_reply(event: PlatformEvent, text: str) -> PlatformEvent:
         payload={**event.payload, "text": text},
         occurred_at=event.occurred_at,
     )
-
-
-def _community_id(community: str | None) -> int | None:
-    """Best-effort `int(community)` for the config/role lookups; unparseable/`None` -> `None`."""
-    if community is None:
-        return None
-    try:
-        return int(community)
-    except ValueError:
-        return None
-
-
-async def _shoutout_permission_and_cooldown(
-    dal: AsyncDB, community_id: int | None
-) -> tuple[str, int]:
-    """Read `(so_permission, cooldown_minutes)` from `shoutout_config`; defaults on any miss.
-
-    Degrades to `(_DEFAULT_PERMISSION, _DEFAULT_COOLDOWN_MINUTES)` on a missing community, a
-    missing row, or any DB error -- never raises, never denies outright on an infrastructure
-    problem (same degrade-not-deny contract as `social_shoutout_process._shoutout_permission`).
-    """
-    if community_id is None:
-        return _DEFAULT_PERMISSION, _DEFAULT_COOLDOWN_MINUTES
-    try:
-        rows = await dal.execute(_SHOUTOUT_CONFIG_SQL, [community_id])
-    except Exception:  # noqa: BLE001 -- must never block a shoutout, only degrade
-        return _DEFAULT_PERMISSION, _DEFAULT_COOLDOWN_MINUTES
-    if not rows:
-        return _DEFAULT_PERMISSION, _DEFAULT_COOLDOWN_MINUTES
-    row = rows[0]
-    permission = str(row.get("so_permission") or _DEFAULT_PERMISSION)
-    cooldown = row.get("cooldown_minutes")
-    cooldown_minutes = int(cooldown) if cooldown is not None else _DEFAULT_COOLDOWN_MINUTES
-    return permission, cooldown_minutes
-
-
-async def _caller_role(dal: AsyncDB, event: PlatformEvent, community_id: int | None) -> str | None:
-    """`community_members.role` for the caller, or `None` on any miss/error.
-
-    Same lookup convention as `social_shoutout_process._caller_role` (match by `(platform,
-    platform_user_id)` first, else `display_name == event.actor`). Fails closed (`None`) on a
-    missing community, any lookup error, or no matching row; never raises.
-    """
-    if community_id is None:
-        return None
-
-    raw_author_id = event.payload.get("author_id")
-    platform_user_id = raw_author_id if isinstance(raw_author_id, str) else None
-
-    try:
-        if platform_user_id:
-            rows = await dal.execute(
-                _ROLE_BY_PLATFORM_SQL, [community_id, event.platform, platform_user_id]
-            )
-            if rows:
-                return str(rows[0]["role"]).lower()
-        if event.actor:
-            rows = await dal.execute(_ROLE_BY_DISPLAY_NAME_SQL, [community_id, event.actor])
-            if rows:
-                return str(rows[0]["role"]).lower()
-    except Exception:  # noqa: BLE001 -- permission check must fail closed, never crash
-        return None
-
-    return None
-
-
-def _permission_satisfied(permission: str, role: str | None) -> bool:
-    """Evaluate `so_permission` against the caller's community role.
-
-    `everyone`/`vip`/`subscriber` are always-satisfied (see module docstring on the
-    `vip`/`subscriber` badge-data gap); `admin_only` requires owner/admin; `mod` requires
-    moderator or above. An unrecognized value falls back to the `mod` threshold.
-    """
-    normalized = permission.lower()
-    if normalized in _ALWAYS_ALLOWED_PERMISSIONS:
-        return True
-    if normalized == "admin_only":
-        return role in _ADMIN_ONLY_ROLES
-    return role in _MOD_OR_ABOVE_ROLES
 
 
 def _cooldown_key(community: str | None, target: str) -> str:
@@ -283,14 +188,11 @@ async def _set_cooldown(community: str | None, target: str, ttl_seconds: int) ->
 
 
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
-    """Implement `process-stage.transform`: parse `!so`/`!shoutout`, gate, and pass through.
+    """Implement `process-stage.transform`: parse `!so`/`!shoutout`/`!vso`, gate, pass through.
 
-    Order: prefix match -> feature flag (off -> `None`, no DB/kv touched) -> missing target ->
-    invalid login format -> self-shoutout -> permission (config read + role lookup) ->
-    cooldown (`kv` read only -- never set here; set on a successful `dispatch()` instead, so a
-    permission-denied or failed lookup never burns a cooldown window). Only a fully successful
-    parse is forwarded to this bundle's own `dispatch()`; every other reply (usage hint,
-    invalid login, self-shoutout, permission denied, on cooldown) is a plain chat reply.
+    Dispatches on prefix to `_transform_text_shoutout` (`!so`/`!shoutout`) or
+    `video_shoutout.transform_vso` (`!vso`) -- see each for its own gate order. Neither branch
+    touches the `text`-field validation below more than once.
 
     Raises:
         ValueError: The event payload is missing a string `text` field.
@@ -300,9 +202,26 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         raise ValueError("event payload missing required 'text' string field")
 
     text = text.strip()
-    if not text or not _SO_PREFIX_RE.match(text):
-        return None  # not a shoutout command, skip
+    if not text:
+        return None
 
+    if _SO_PREFIX_RE.match(text):
+        return await _transform_text_shoutout(event, text)
+    if video_shoutout.VSO_PREFIX_RE.match(text):
+        return await video_shoutout.transform_vso(event, text)
+    return None  # not a recognized shoutout command, skip
+
+
+async def _transform_text_shoutout(event: PlatformEvent, text: str) -> PlatformEvent | None:
+    """`!so`/`!shoutout` gate: feature flag, target parsing, self-check, permission, cooldown.
+
+    Order: feature flag -> missing target -> invalid login -> self-shoutout
+    -> permission (config read + role lookup) -> cooldown (`kv` read only -- never set here; set
+    on a successful `dispatch()` instead, so a permission-denied or failed lookup never burns a
+    cooldown window). Only a fully successful parse is forwarded to this bundle's own
+    `dispatch()`; every other reply (usage hint, invalid login, self-shoutout, permission
+    denied, on cooldown) is a plain chat reply.
+    """
     enabled = await feature_enabled(_FEATURE_FLAG, default=False)
     if not enabled:
         return None  # feature disabled -- behaves like an unrecognized command
@@ -321,12 +240,12 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return _text_reply(event, _SELF_SHOUTOUT_REPLY)
 
     ctx = get_bundle_context()
-    community_id = _community_id(ctx.community)
+    community_id = _shared_community_id(ctx.community)
     dal = get_bundle_dal()
 
-    permission, cooldown_minutes = await _shoutout_permission_and_cooldown(dal, community_id)
-    role = await _caller_role(dal, event, community_id)
-    if not _permission_satisfied(permission, role):
+    permission, cooldown_minutes = await shoutout_permission_and_cooldown(dal, community_id)
+    role = await caller_role(dal, event, community_id)
+    if not permission_satisfied(permission, role):
         return _text_reply(event, _PERMISSION_DENIED_REPLY)
 
     if await _is_on_cooldown(ctx.community, target):
@@ -344,22 +263,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         },
         occurred_at=event.occurred_at,
     )
-
-
-class DispatchResult:
-    """`waddle_transports.TransportResult`-shaped result -- see `bundles/python/pyping`'s
-    identical class for why this exact duck-typed shape (`transport`, `detail`, `sub_type`,
-    `http_status`) is what `waddle_sdk._component_entry.WitWorld.dispatch` reads off.
-    """
-
-    __slots__ = ("transport", "detail", "sub_type", "http_status")
-
-    def __init__(self, *, transport: str, detail: str, http_status: int | None = None) -> None:
-        """Record which provider the shoutout was relayed to, a short detail, and any HTTP status."""
-        self.transport = transport
-        self.detail = detail
-        self.sub_type = None
-        self.http_status = http_status
 
 
 async def _fetch_twitch_user(http_client: Any, login: str) -> dict[str, Any] | None:
@@ -405,18 +308,25 @@ def _render_shoutout_message(login: str, twitch_user: dict[str, Any] | None) -> 
 async def dispatch(
     envelope: StageEnvelope, config: dict[str, Any], *, http_client: Any
 ) -> DispatchResult:
-    """Implement `action-stage.dispatch`: enrich (best-effort), relay, and set the cooldown.
+    """Implement `action-stage.dispatch`, branching on `payload["kind"]`.
 
-    `config` is accepted but unused (no `required_config`, see `bundle.yaml`). Always relays
-    to the event's own origin platform (`envelope.event.platform`), never a hardcoded provider
-    -- mirrors `bundles/python/pyping`'s own regression-tested behavior for this exact
-    convention.
+    Dispatches to the `!vso` video path (`video_shoutout.dispatch_vso`) when present, else the
+    original `!so` text path below.
+
+    `config` is unused by the text path (no `required_config`, see `bundle.yaml`) but IS read
+    by the video path (`clip_source_order`/`overlay_push_host`, see `video_shoutout.py`).
+    Always relays to the event's own origin platform (`envelope.event.platform`), never a
+    hardcoded provider -- mirrors `bundles/python/pyping`'s own regression-tested behavior for
+    this exact convention.
 
     Raises:
-        ValueError: The envelope's payload has no `channel_id` or `target` (a malformed
-            hand-off from `transform()` -- should never happen in practice).
+        ValueError: The envelope's payload has no `channel_id` or `target`/`vso_target_user` (a
+            malformed hand-off from `transform()` -- should never happen in practice).
     """
     payload = envelope.event.payload
+    if payload.get("kind") == video_shoutout.KIND_VIDEO_SHOUTOUT:
+        return await video_shoutout.dispatch_vso(envelope, config, http_client=http_client)
+
     channel_id = payload.get("channel_id")
     target = payload.get("target")
     if not channel_id:
@@ -430,7 +340,7 @@ async def dispatch(
     provider = envelope.event.platform
     await relay.push(provider, {"channel": channel_id, "text": message})
 
-    cooldown_minutes = payload.get("cooldown_minutes", _DEFAULT_COOLDOWN_MINUTES)
+    cooldown_minutes = payload.get("cooldown_minutes", _SHARED_DEFAULT_COOLDOWN_MINUTES)
     ttl_seconds = int(cooldown_minutes) * 60
     await _set_cooldown(envelope.community, target, ttl_seconds)
 

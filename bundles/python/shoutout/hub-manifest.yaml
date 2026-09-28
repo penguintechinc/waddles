@@ -10,7 +10,7 @@
 schema_version: 2
 app_id: waddles.core.shoutout.default
 name: Shoutout Bundle (Python)
-version: 1.0.0
+version: 1.1.0
 feature: waddles.core.shoutout
 module: core
 provider: builtin
@@ -27,21 +27,37 @@ stages:
       - platform: twitch
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!so", "!shoutout"]
+          command_prefix: ["!so", "!shoutout", "!vso"]
       - platform: discord
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!so", "!shoutout"]
+          command_prefix: ["!so", "!shoutout", "!vso"]
+      - platform: kick
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!vso"]
+      - platform: youtube
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!vso"]
   action:
     entry: "waddle:bundle/action-stage#dispatch"
+# See bundle.yaml's own comment for why each of these hosts/tables/permissions is here --
+# this file mirrors it for hub-api's install-pipeline schema (see this file's own header).
 egress:
   - host: api.twitch.tv
     methods: ["GET"]
+  - host: api.kick.com
+    methods: ["GET"]
+  - host: www.googleapis.com
+    methods: ["GET"]
+  - host: svc-presentation
+    methods: ["POST"]
 data:
-  tables: []
+  tables: ["user_platform_identities"]
 limits:
   timeout_ms: 2000
   memory_mb: 64
   egress_rps: 10
-permissions: []
+permissions: ["overlay.media"]
 routes_to: []

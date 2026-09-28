@@ -1,5 +1,6 @@
-"""Test-only `sys.path` wiring so `app`/`_entry_wiring` and `waddle_sdk` import
-without a real componentize-py build or a package install.
+"""Test-only `sys.path` wiring so `app`/`_entry_wiring` and `waddle_sdk` import.
+
+No real componentize-py build or package install needed.
 
 Mirrors `bundles/python/pyping/tests/conftest.py` exactly (same
 `componentize-py componentize -p sdk/waddle-sdk/src -p

@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.shoutout.default
 name: Shoutout Bundle (Python)
-version: 1.0.0
+version: 1.1.0
 feature: waddles.core.shoutout
 module: core
 provider: builtin
@@ -15,7 +15,9 @@ license: Apache-2.0
 # `waddle_sdk.flask_core.feature_flags.feature_enabled()` -- default OFF, per this bundle's
 # own task requirement (contrast `waddles.core.example.*`'s always-on example bundles).
 # Informational only: hub-api's `bundle_manifest_v2.py` does not read this key today, the
-# actual gate lives in `src/app.py`'s `_FEATURE_FLAG` constant.
+# actual gate lives in `src/app.py`'s `_FEATURE_FLAG` constant. `!vso` (video shoutout) is
+# gated by its own, separate flag -- see `src/video_shoutout.py`'s `VIDEO_FEATURE_FLAG`
+# (`waddles.shoutout-video-bundle`), also default OFF, not listed here for the same reason.
 feature_flag: waddles.shoutout-bundle
 stages:
   process:
@@ -24,11 +26,23 @@ stages:
       - platform: twitch
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!so", "!shoutout"]
+          command_prefix: ["!so", "!shoutout", "!vso"]
       - platform: discord
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!so", "!shoutout"]
+          command_prefix: ["!so", "!shoutout", "!vso"]
+      # `!vso` only -- `!so`/`!shoutout` were never in scope for Kick/YouTube chat (see
+      # src/app.py's own module docstring); `!vso` needs these two platforms consuming so a
+      # video shoutout issued FROM Kick/YouTube chat can prefer its own origin platform's clips
+      # (src/video_shoutout.py::resolve_source_order).
+      - platform: kick
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!vso"]
+      - platform: youtube
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!vso"]
     produces: []
     config: {}
     spec:
@@ -38,19 +52,58 @@ stages:
     config: {}
     spec:
       required_config: []
-# Twitch Helix lookups only -- see src/app.py's module docstring "KNOWN GAPS" section for why
-# the OAuth token exchange itself (id.twitch.tv) is NOT egress this bundle ever performs.
+# Twitch Helix lookups (!so enrichment + !vso clips), Kick's public clips API, YouTube Data API
+# (!vso), and svc-presentation's overlay push (!vso, see src/video_shoutout.py's own module
+# docstring gaps 3-4 for why this last host is a `config.overlay_push_host` value, not a static
+# entry here -- egress is still allowlisted at the SCHEME+HOST level by the executor regardless
+# of which literal hostname a deployment configures, this list only pins the well-known public
+# APIs). See src/app.py's and src/video_shoutout.py's own "KNOWN GAPS" sections for why the
+# OAuth token exchanges themselves (id.twitch.tv, Kick's token endpoint) are NOT egress this
+# bundle ever performs.
 egress:
   - host: api.twitch.tv
     methods: ["GET"]
+  - host: api.kick.com
+    methods: ["GET"]
+  - host: www.googleapis.com
+    methods: ["GET"]
+  - host: svc-presentation
+    methods: ["POST"]
 data:
-  tables: []
+  # `user_platform_identities` does NOT exist in any migration yet -- declared here so the
+  # intent (and the DB grant it will eventually need) is explicit. See
+  # src/video_shoutout.py's module docstring gap 1: every query against it degrades to "target
+  # unresolved" until it (and a real population path) ship.
+  tables: ["user_platform_identities"]
 limits:
   timeout_ms: 2000
   memory_mb: 64
   egress_rps: 10
-permissions: []
-config_schema: {}
+# `overlay.media` does not exist yet in the capability-gate design
+# (docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md) -- forward-
+# declared here, informational only today (same posture as `feature_flag:` above), so this
+# bundle's actual need is visible to whoever finishes that design.
+permissions: ["overlay.media"]
+config_schema:
+  clip_source_order:
+    type: array
+    items:
+      type: string
+      enum: ["twitch", "kick", "youtube"]
+    default: ["twitch", "kick", "youtube"]
+    description: >-
+      Per-community override of the non-originating-platform clip lookup order for `!vso`.
+      Twitch/Kick may be reordered; the originating platform is always tried first and YouTube
+      is always tried last unless YouTube IS the originating platform -- see
+      src/video_shoutout.py::resolve_source_order, this invariant is enforced in code, not by
+      this schema.
+  overlay_push_host:
+    type: string
+    default: null
+    description: >-
+      svc-presentation's in-cluster hostname for this deployment (Helm-templated, not a fixed
+      name -- see src/video_shoutout.py module docstring gap 4). Unset skips the overlay push;
+      `!vso` still sends its chat message.
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
