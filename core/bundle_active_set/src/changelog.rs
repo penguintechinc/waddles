@@ -150,7 +150,7 @@ impl ChangeLogTracker {
     /// racing an already-applied advance -- reports `0`, not a misleading
     /// negative lag).
     pub fn lag(&self, safe_seq: i64) -> i64 {
-        (safe_seq - self.last_seq).max(0)
+        safe_seq.saturating_sub(self.last_seq).max(0)
     }
 }
 

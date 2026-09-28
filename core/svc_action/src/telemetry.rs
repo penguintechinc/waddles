@@ -161,7 +161,14 @@ pub struct ChangelogConsumerMetrics {
     pub changelog_lag: prometheus::IntGauge,
     pub reconcile_duration_seconds: prometheus::Histogram,
     pub tenant_active_apps: prometheus::IntGaugeVec,
-    pub flatten_conflicts_total: prometheus::IntCounter,
+    /// A scope evicted after failing its active-set re-read for longer than
+    /// `changelog_consumer::SCOPE_STALE_EVICTION_BOUND` -- fail-closed,
+    /// never silent.
+    pub scope_stale_evicted_total: prometheus::IntCounter,
+    /// A change-log gap detected (the lowest returned `seq` exceeded
+    /// `last_seq + 1`, most plausibly retention truncation) -- forces a full
+    /// reconcile instead of a partial apply, never silent.
+    pub changelog_gap_detected_total: prometheus::IntCounter,
 }
 
 /// Registers [`ChangelogConsumerMetrics`] against `registry`. Must be
@@ -224,14 +231,23 @@ pub fn register_changelog_consumer_metrics(
         .register(Box::new(tenant_active_apps.clone()))
         .expect("register svc_action_tenant_active_apps");
 
-    let flatten_conflicts_total = prometheus::IntCounter::new(
-        "svc_action_changelog_flatten_conflicts_total",
-        "Cross-tenant app_id/digest conflicts detected while flattening the multi-tenant active set",
+    let scope_stale_evicted_total = prometheus::IntCounter::new(
+        "svc_action_changelog_scope_stale_evicted_total",
+        "Scopes evicted after failing their active-set re-read longer than the staleness bound",
     )
     .expect("valid metric definition");
     registry
-        .register(Box::new(flatten_conflicts_total.clone()))
-        .expect("register svc_action_changelog_flatten_conflicts_total");
+        .register(Box::new(scope_stale_evicted_total.clone()))
+        .expect("register svc_action_changelog_scope_stale_evicted_total");
+
+    let changelog_gap_detected_total = prometheus::IntCounter::new(
+        "svc_action_changelog_gap_detected_total",
+        "Change-log gaps detected (likely retention truncation), forcing a full reconcile",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(changelog_gap_detected_total.clone()))
+        .expect("register svc_action_changelog_gap_detected_total");
 
     ChangelogConsumerMetrics {
         applied_scopes_total,
@@ -239,7 +255,8 @@ pub fn register_changelog_consumer_metrics(
         changelog_lag,
         reconcile_duration_seconds,
         tenant_active_apps,
-        flatten_conflicts_total,
+        scope_stale_evicted_total,
+        changelog_gap_detected_total,
     }
 }
 
@@ -311,7 +328,8 @@ mod tests {
         metrics.changelog_lag.set(42);
         metrics.reconcile_duration_seconds.observe(0.25);
         metrics.tenant_active_apps.with_label_values(&["7"]).set(3);
-        metrics.flatten_conflicts_total.inc();
+        metrics.scope_stale_evicted_total.inc();
+        metrics.changelog_gap_detected_total.inc();
 
         let rendered = render_metrics(&registry).expect("registry with metrics must encode");
         assert!(rendered.contains("svc_action_changelog_applied_scopes_total 1"));
@@ -319,7 +337,8 @@ mod tests {
         assert!(rendered.contains("svc_action_changelog_lag 42"));
         assert!(rendered.contains("svc_action_changelog_reconcile_duration_seconds"));
         assert!(rendered.contains(r#"tenant_id="7""#));
-        assert!(rendered.contains("svc_action_changelog_flatten_conflicts_total 1"));
+        assert!(rendered.contains("svc_action_changelog_scope_stale_evicted_total 1"));
+        assert!(rendered.contains("svc_action_changelog_gap_detected_total 1"));
     }
 
     #[test]

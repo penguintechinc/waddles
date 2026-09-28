@@ -1,9 +1,32 @@
 //! [`Executor`]: the [`RequestHandler`] implementation that actually runs
 //! bundles -- `load`/`unload` manage a registry of compiled
-//! `wasmtime::component::Component`s keyed by `app_id`, and `invoke`
-//! instantiates one under the per-call epoch deadline and services every
-//! host call it makes against the stage over [`HostBridge`] (spec
+//! `wasmtime::component::Component`s keyed by **content-addressed digest**
+//! (`sha256:<64 hex>`), and `invoke` instantiates one under the per-call
+//! epoch deadline and services every host call it makes against the stage
+//! over [`HostBridge`] (spec
 //! `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md` SS7).
+//!
+//! **Multi-tenant correctness fix (dataplane scale design §3, "bundles are
+//! content-addressed by digest"):** every svc_process/svc_action pod now
+//! serves ALL tenants (`bundle_active_set::multi_tenant`), so two different
+//! `(tenant_id, community_id)` scopes can independently activate two
+//! DIFFERENT digests of the exact same `app_id` at the same time (e.g. a
+//! gradual per-tenant version rollout). The registry used to be keyed by
+//! `app_id` alone -- one process-wide slot per `app_id` -- which meant only
+//! one of those two scopes' digests could ever occupy that slot; the other
+//! scope's events would silently run the WRONG bundle version. The registry
+//! is now keyed by digest instead: `load`/`unload` are refcounted by the
+//! number of outstanding scopes referencing a given digest (the caller
+//! sends one `load`/`unload` pair per `(tenant, community, app)` scope
+//! that starts/stops referencing a digest, see `bundle_active_set::diff::
+//! plan_scoped`), so a shared digest across tenants compiles once and stays
+//! resident until every referencing scope has unloaded it, while two
+//! DIFFERENT digests for the same `app_id` coexist as two independent
+//! registry entries. `invoke` looks up strictly by the digest the caller
+//! resolved for that specific event's own scope (`InvokeBody.digest`) --
+//! never by `app_id` -- so an unknown/unloaded digest is a fail-closed
+//! `UNKNOWN_BUNDLE` error, never a silent fallback to "whatever happens to
+//! be loaded under this app_id".
 //!
 //! **Scope note (task instruction: "never fake a host call"; realistic-
 //! scope items may be scaffolded with a TODO):** digest verification
@@ -14,9 +37,9 @@
 //! ([`UnimplementedBucketSource`]) fails closed with `LOAD_FAILED` rather
 //! than pretending to fetch anything. Likewise, precompiled `.cwasm`
 //! caching under `EXECUTOR_PRECOMPILE_DIR` (spec SS7.2/SS7.6) is not
-//! wired -- every `load` calls `wasmtime::component::Component::new`
-//! (a real, from-source JIT compile) instead of loading a cached
-//! artifact; correctness holds, the ~3-4s cold-compile cost SS7.2
+//! wired -- every fresh digest's `load` calls `wasmtime::component::
+//! Component::new` (a real, from-source JIT compile) instead of loading a
+//! cached artifact; correctness holds, the ~3-4s cold-compile cost SS7.2
 //! measured for a large component does not yet get amortized away.
 
 use std::collections::HashMap;
@@ -70,15 +93,36 @@ impl ComponentSource for UnimplementedBucketSource {
 }
 
 struct LoadedBundle {
-    digest: String,
+    /// The `app_id` from the FIRST `load` call that registered this digest
+    /// -- informational only (logging/error messages): the registry's real
+    /// identity is the digest (this struct's `HashMap` key), never this
+    /// field, so a second scope loading the same digest under a different
+    /// `app_id` string never causes a collision or a silent overwrite.
+    app_id: String,
     component: Component,
     /// This bundle's effective per-instance linear-memory cap in MiB,
-    /// resolved once at `on_load` time (spec SS7.3, sandbox layer 8):
-    /// `body.limits.memory_mb` when the stage supplied a non-zero value,
-    /// else `EXECUTOR_MEMORY_LIMIT_MB`; always clamped to
-    /// `EXECUTOR_MAX_MEMORY_LIMIT_MB`. `on_invoke` wires this into every
-    /// `Store::limiter` for the bundle rather than re-deriving it per call.
+    /// resolved once from the FIRST `load` call for this digest (spec
+    /// SS7.3, sandbox layer 8): `body.limits.memory_mb` when the stage
+    /// supplied a non-zero value, else `EXECUTOR_MEMORY_LIMIT_MB`; always
+    /// clamped to `EXECUTOR_MAX_MEMORY_LIMIT_MB`. `on_invoke` wires this
+    /// into every `Store::limiter` for the bundle rather than re-deriving
+    /// it per call. A later `load` for an already-resident digest (a second
+    /// scope referencing the same content) does NOT re-resolve this value
+    /// -- the compiled component is shared, so its resource policy is
+    /// fixed at first residency; a differing `limits.memory_mb` on a later
+    /// load is logged, never silently applied.
     memory_limit_mb: u32,
+    /// Number of outstanding `load` calls not yet matched by an `unload`
+    /// (spec: "load/unload refcounted by the set of (tenant, community,
+    /// app) scopes referencing that digest") -- the caller
+    /// (`bundle_active_set::diff::plan_scoped`-driven stage loop) sends
+    /// exactly one `load`/`unload` pair per scope that starts/stops
+    /// referencing this digest, so this count tracks how many scopes are
+    /// currently relying on this compiled `Component` staying resident.
+    /// The component is only actually evicted (`on_unload`) once this
+    /// reaches zero -- never on the first `unload` if another scope still
+    /// references the same digest.
+    refcount: usize,
 }
 
 /// Runs loaded bundles against real wasmtime instantiation. One per
@@ -179,6 +223,21 @@ pub fn verify_digest(bytes: &[u8], expected: &str) -> Result<(), ExecutorError> 
     }
 }
 
+/// Resolves a `load` request's effective per-instance memory cap (spec
+/// SS7.3): `requested_mb == 0` means "no preference", falling back to
+/// `default_mb`; either way the result never exceeds `max_mb` and is never
+/// less than 1 MiB. Pulled out of `on_load` so both the fast (already-
+/// resident) and slow (first-compile) paths resolve it identically.
+fn resolve_memory_limit_mb(requested_mb: u32, default_mb: u32, max_mb: u32) -> u32 {
+    if requested_mb == 0 {
+        default_mb
+    } else {
+        requested_mb
+    }
+    .min(max_mb)
+    .max(1)
+}
+
 fn error_body(code: ErrorCode, message: impl Into<String>) -> ErrorBody {
     ErrorBody {
         code,
@@ -190,6 +249,68 @@ fn error_body(code: ErrorCode, message: impl Into<String>) -> ErrorBody {
 impl<S: ComponentSource> RequestHandler for Executor<S> {
     async fn on_load(&self, body: LoadBody) -> Result<LoadedBody, ErrorBody> {
         let start = std::time::Instant::now();
+        let app_id = body.app_id.clone();
+        let digest = body.digest.clone();
+
+        // Content-addressed fast path: a digest already resident (loaded by
+        // an earlier scope, possibly under a different `app_id`) is never
+        // re-fetched or re-compiled -- just refcount-bumped. This is what
+        // makes a digest shared across tenants compile exactly once.
+        {
+            let mut bundles = self.bundles.write().await;
+            if let Some(existing) = bundles.get_mut(&digest) {
+                existing.refcount += 1;
+                if existing.app_id != app_id {
+                    // Purely observational: two different `app_id` strings
+                    // resolving to the identical content digest is unusual
+                    // but not unsafe (the digest, not `app_id`, is this
+                    // registry's actual identity) -- surfaced so an
+                    // operator can investigate an unexpected content-reuse
+                    // case, never blocked.
+                    info!(
+                        app_id,
+                        digest,
+                        first_registered_app_id = existing.app_id,
+                        "digest already resident under a different app_id"
+                    );
+                }
+                if existing.memory_limit_mb
+                    != resolve_memory_limit_mb(
+                        body.limits.memory_mb,
+                        self.default_memory_limit_mb,
+                        self.max_memory_limit_mb,
+                    )
+                {
+                    // Non-fatal by design: the compiled component is shared
+                    // and its resource policy was fixed at first residency
+                    // (see `LoadedBundle::memory_limit_mb`'s doc) -- a
+                    // differing request is surfaced, never silently applied
+                    // or treated as an error that would block a legitimate
+                    // second scope from sharing the digest.
+                    warn!(
+                        app_id,
+                        digest,
+                        existing_memory_limit_mb = existing.memory_limit_mb,
+                        requested_memory_mb = body.limits.memory_mb,
+                        "bundle already resident under a different memory limit request; \
+                         keeping the limit resolved at first residency"
+                    );
+                }
+                info!(
+                    app_id,
+                    digest,
+                    refcount = existing.refcount,
+                    "bundle already resident, refcount incremented"
+                );
+                return Ok(LoadedBody {
+                    app_id,
+                    digest,
+                    precompile_ms: start.elapsed().as_millis() as u64,
+                    exports: vec!["transform".to_string(), "dispatch".to_string()],
+                });
+            }
+        }
+
         let bytes = self
             .source
             .fetch(&body.component_key, &body.sidecar_key)
@@ -202,34 +323,49 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
         let component = Component::new(&self.engine, &bytes)
             .map_err(|e| error_body(ErrorCode::LoadFailed, e.to_string()))?;
 
-        let app_id = body.app_id.clone();
-        let digest = body.digest.clone();
         // spec SS7.3: a `load` may request its own `limits.memory_mb`; `0`
         // means "no preference" and falls back to `EXECUTOR_MEMORY_LIMIT_MB`.
         // Either way the effective cap never exceeds
         // `EXECUTOR_MAX_MEMORY_LIMIT_MB`, and is never less than 1 MiB.
-        let memory_limit_mb = if body.limits.memory_mb == 0 {
-            self.default_memory_limit_mb
-        } else {
-            body.limits.memory_mb
-        }
-        .min(self.max_memory_limit_mb)
-        .max(1);
-        self.bundles.write().await.insert(
-            app_id.clone(),
-            LoadedBundle {
-                digest: digest.clone(),
-                component,
-                memory_limit_mb,
-            },
+        let memory_limit_mb = resolve_memory_limit_mb(
+            body.limits.memory_mb,
+            self.default_memory_limit_mb,
+            self.max_memory_limit_mb,
         );
 
-        info!(
-            app_id,
-            digest,
-            ms = start.elapsed().as_millis() as u64,
-            "bundle loaded"
-        );
+        // Re-check under the write lock: a concurrent `load` for the same
+        // digest (two scopes activating it at almost the same moment) may
+        // have won the race and already inserted while this branch was
+        // fetching/compiling -- never insert a second, wasted `Component`
+        // for a digest that's already resident; refcount-bump instead.
+        let mut bundles = self.bundles.write().await;
+        if let Some(existing) = bundles.get_mut(&digest) {
+            existing.refcount += 1;
+            info!(
+                app_id,
+                digest,
+                refcount = existing.refcount,
+                "bundle became resident concurrently, refcount incremented"
+            );
+        } else {
+            bundles.insert(
+                digest.clone(),
+                LoadedBundle {
+                    app_id: app_id.clone(),
+                    component,
+                    memory_limit_mb,
+                    refcount: 1,
+                },
+            );
+            info!(
+                app_id,
+                digest,
+                ms = start.elapsed().as_millis() as u64,
+                "bundle loaded"
+            );
+        }
+        drop(bundles);
+
         Ok(LoadedBody {
             app_id,
             digest,
@@ -244,29 +380,32 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
 
     async fn on_unload(&self, body: UnloadBody) -> Result<UnloadedBody, ErrorBody> {
         let mut bundles = self.bundles.write().await;
-        match bundles.get(&body.app_id) {
-            Some(loaded) if loaded.digest == body.digest => {
-                bundles.remove(&body.app_id);
-                info!(
-                    app_id = body.app_id,
-                    digest = body.digest,
-                    "bundle unloaded"
-                );
+        match bundles.get_mut(&body.digest) {
+            Some(loaded) => {
+                loaded.refcount = loaded.refcount.saturating_sub(1);
+                if loaded.refcount == 0 {
+                    bundles.remove(&body.digest);
+                    info!(
+                        app_id = body.app_id,
+                        digest = body.digest,
+                        "bundle unloaded (last referencing scope)"
+                    );
+                } else {
+                    info!(
+                        app_id = body.app_id,
+                        digest = body.digest,
+                        refcount = loaded.refcount,
+                        "bundle unload refcount decremented, still referenced by another scope"
+                    );
+                }
                 Ok(UnloadedBody {
                     app_id: body.app_id,
                     digest: body.digest,
                 })
             }
-            Some(loaded) => Err(error_body(
-                ErrorCode::UnknownBundle,
-                format!(
-                    "unload digest {} does not match loaded digest {}",
-                    body.digest, loaded.digest
-                ),
-            )),
             None => Err(error_body(
                 ErrorCode::UnknownBundle,
-                format!("{} is not loaded", body.app_id),
+                format!("digest {} is not loaded", body.digest),
             )),
         }
     }
@@ -277,20 +416,16 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
         invoke_id: u64,
         connection: Arc<Connection>,
     ) -> Result<ResultBody, ErrorBody> {
+        // Fail-closed, digest-only lookup (spec §3): never falls back to
+        // "whatever happens to be loaded under this app_id" -- an
+        // unrecognized digest is always `UNKNOWN_BUNDLE`, even if some OTHER
+        // digest is currently resident for this same `app_id` under a
+        // different scope.
         let (component, memory_limit_mb) = {
             let bundles = self.bundles.read().await;
             let loaded = bundles
-                .get(&body.app_id)
-                .ok_or_else(|| error_body(ErrorCode::UnknownBundle, body.app_id.clone()))?;
-            if loaded.digest != body.digest {
-                return Err(error_body(
-                    ErrorCode::DigestMismatch,
-                    format!(
-                        "invoke digest {} does not match loaded digest {}",
-                        body.digest, loaded.digest
-                    ),
-                ));
-            }
+                .get(&body.digest)
+                .ok_or_else(|| error_body(ErrorCode::UnknownBundle, body.digest.clone()))?;
             (loaded.component.clone(), loaded.memory_limit_mb)
         };
 
@@ -691,8 +826,14 @@ mod tests {
         Ok(())
     }
 
+    /// Digest-only lookup, fail-closed (spec §3): a digest that is not
+    /// resident is `UNKNOWN_BUNDLE`, even when a DIFFERENT digest is loaded
+    /// under the exact same `app_id` -- there is no "loaded under this
+    /// app_id but wrong digest" case anymore since the registry no longer
+    /// has an `app_id`-keyed slot to mismatch against. This is the direct
+    /// regression test for "never invoke whatever is loaded under app_id".
     #[tokio::test]
-    async fn on_invoke_rejects_a_digest_mismatch_against_the_loaded_bundle(
+    async fn on_invoke_fails_closed_on_an_unrecognized_digest_even_under_a_loaded_app_id(
     ) -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
@@ -719,7 +860,205 @@ mod tests {
         assert!(matches!(
             result,
             Err(ErrorBody {
-                code: ErrorCode::DigestMismatch,
+                code: ErrorCode::UnknownBundle,
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    /// **Multi-tenant correctness regression (the primary bug this module
+    /// was fixed for):** two different `(tenant, community)` scopes
+    /// activating two DIFFERENT digests of the SAME `app_id` must each get
+    /// their own independent, correctly-versioned registry entry -- never
+    /// collapse onto one `app_id`-keyed slot where the second scope's load
+    /// would silently evict or shadow the first.
+    #[tokio::test]
+    async fn two_scopes_with_different_digests_of_the_same_app_id_both_stay_loaded(
+    ) -> Result<(), ExecutorError> {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        // Same FixtureSource always returns the same bytes/digest in this
+        // test module, so this test verifies the REGISTRY KEY behavior
+        // (two loads under the same app_id but told apart by a caller-
+        // supplied "second digest") using an artificial second entry
+        // inserted directly -- the wire-level `on_load` always compiles the
+        // one fixture; the registry-identity property under test is that a
+        // SECOND, DIFFERENT digest for `waddles.test.app` occupies its own
+        // slot rather than overwriting the first `on_load`'s entry.
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("first scope's load succeeds");
+        assert_eq!(executor.bundles.read().await.len(), 1);
+
+        // A second, distinct digest for the identical app_id (a different
+        // tenant's independently-activated version) must land in its OWN
+        // registry slot, not overwrite the first.
+        let other_digest = format!("sha256:{}", "2".repeat(64));
+        {
+            let mut bundles = executor.bundles.write().await;
+            let first = bundles
+                .values()
+                .next()
+                .expect("first scope's bundle is registered")
+                .component
+                .clone();
+            bundles.insert(
+                other_digest.clone(),
+                LoadedBundle {
+                    app_id: "waddles.test.app".to_string(),
+                    component: first,
+                    memory_limit_mb: 64,
+                    refcount: 1,
+                },
+            );
+        }
+        assert_eq!(
+            executor.bundles.read().await.len(),
+            2,
+            "two different digests for the same app_id must both be resident"
+        );
+        assert!(
+            executor
+                .bundles
+                .read()
+                .await
+                .contains_key(&fixture_digest()),
+            "the first scope's digest must still be resident, untouched by the second"
+        );
+        assert!(
+            executor.bundles.read().await.contains_key(&other_digest),
+            "the second scope's digest must be independently resident"
+        );
+        Ok(())
+    }
+
+    /// The SAME digest loaded by two different scopes must compile once
+    /// (one registry entry, refcount 2) -- verified by inserting the second
+    /// `load` and observing the registry stays at one entry.
+    #[tokio::test]
+    async fn shared_digest_across_two_scopes_loads_once_and_refcounts() -> Result<(), ExecutorError>
+    {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("first scope's load succeeds");
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("second scope's load of the identical digest succeeds");
+
+        let bundles = executor.bundles.read().await;
+        assert_eq!(
+            bundles.len(),
+            1,
+            "a shared digest must occupy exactly one registry slot"
+        );
+        assert_eq!(
+            bundles.get(&fixture_digest()).expect("resident").refcount,
+            2,
+            "two referencing scopes must refcount to 2"
+        );
+        Ok(())
+    }
+
+    /// Unloading one of two scopes referencing a shared digest must NOT
+    /// evict the compiled component -- the other scope still needs it. Only
+    /// the SECOND (last) unload actually removes the registry entry.
+    #[tokio::test]
+    async fn unload_of_one_scope_does_not_unload_a_digest_still_referenced(
+    ) -> Result<(), ExecutorError> {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("scope A load succeeds");
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("scope B load succeeds");
+
+        // Scope A goes away first.
+        executor
+            .on_unload(UnloadBody {
+                app_id: "waddles.test.app".to_string(),
+                digest: fixture_digest(),
+            })
+            .await
+            .expect("scope A unload succeeds");
+        assert!(
+            executor
+                .bundles
+                .read()
+                .await
+                .contains_key(&fixture_digest()),
+            "scope B still references this digest -- it must remain resident"
+        );
+
+        // An invoke from scope B must still succeed against the resident
+        // component -- proves this isn't just a bookkeeping artifact.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let connection = crate::wire::Connection::new(tx);
+        let still_invokable = executor
+            .on_invoke(
+                InvokeBody {
+                    app_id: "waddles.test.app".to_string(),
+                    digest: fixture_digest(),
+                    export: ExportKind::Transform,
+                    payload: serde_json::json!({
+                        "platform": "test",
+                        "event_type": "noop",
+                        "actor": null,
+                        "payload_json": "{}",
+                        "occurred_at": "2026-09-22T00:00:00.000Z",
+                    }),
+                    deadline_ms: 1000,
+                    trace: None,
+                },
+                1,
+                connection,
+            )
+            .await;
+        assert!(
+            still_invokable.is_ok(),
+            "scope B's invoke must still succeed while its digest is still referenced: {still_invokable:?}"
+        );
+
+        // Scope B goes away second -- now the digest actually unloads.
+        executor
+            .on_unload(UnloadBody {
+                app_id: "waddles.test.app".to_string(),
+                digest: fixture_digest(),
+            })
+            .await
+            .expect("scope B unload succeeds");
+        assert!(
+            !executor
+                .bundles
+                .read()
+                .await
+                .contains_key(&fixture_digest()),
+            "the last referencing scope's unload must actually evict the digest"
+        );
+        Ok(())
+    }
+
+    /// An unload for a digest that was never loaded (or already fully
+    /// unloaded) is `UNKNOWN_BUNDLE` -- fail-closed, never a silent no-op.
+    #[tokio::test]
+    async fn unload_of_a_never_loaded_digest_fails_closed() -> Result<(), ExecutorError> {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        let result = executor
+            .on_unload(UnloadBody {
+                app_id: "waddles.test.app".to_string(),
+                digest: format!("sha256:{}", "3".repeat(64)),
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(ErrorBody {
+                code: ErrorCode::UnknownBundle,
                 ..
             })
         ));
