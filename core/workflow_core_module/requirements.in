@@ -11,6 +11,13 @@ aiohttp>=3.14.3,<4.0.0
 
 # Database
 pydal>=20240906.1,<20250101
+# penguin-dal is a direct runtime import of flask_core/bundle_runtime.py
+# (Row/Rows/AsyncDB) -- flask_core imports it unconditionally, so this
+# module's `from flask_core... import ...` chain (config.py ->
+# flask_core.secrets -> flask_core/__init__.py -> bundle_runtime.py) fails
+# with ModuleNotFoundError unless it's declared here too. Pinned to match
+# hub_api/core/svc_action/core/svc_process's penguin-dal==0.4.1.
+penguin-dal==0.4.1
 
 # Workflow Execution
 RestrictedPython>=8.5
