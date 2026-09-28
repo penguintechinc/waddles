@@ -31,6 +31,7 @@ jobs:
           cache: pip
           cache-dependency-path: |
             core/identity_core_module/requirements.txt
+            core/workflow_core_module/requirements.txt
             core/community_module/requirements.txt
             libs/flask_core/requirements.txt
             hub_api/requirements.txt

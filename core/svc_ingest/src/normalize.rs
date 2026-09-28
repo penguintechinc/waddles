@@ -199,6 +199,85 @@ pub fn normalize_discord(msg: &penguin_connector_discord::gateway::ChatMessage) 
     }
 }
 
+/// Normalizes one Twitch EventSub `notification` event into a
+/// `PlatformEvent`. Byte-exact port of the legacy `eventsub.py::
+/// build_raw_event`'s payload shape (per-event-type metadata folded into a
+/// `metadata` sub-object), fed by `crate::ingest::twitch_eventsub::
+/// handle_webhook`'s already-verified, already-deduped `event`/
+/// `subscription.condition.broadcaster_user_id`.
+///
+/// `broadcaster_user_id_from_subscription` is the fallback used when the
+/// event payload itself omits `broadcaster_user_id` (matches the legacy
+/// module's own `event.get("broadcaster_user_id") or subscription.get(
+/// "condition", {}).get("broadcaster_user_id", "")` precedence).
+#[must_use]
+pub fn normalize_twitch_eventsub(
+    event_type: &str,
+    event: &serde_json::Value,
+    broadcaster_user_id_from_subscription: Option<&str>,
+) -> PlatformEvent {
+    let str_field = |key: &str| event.get(key).and_then(|v| v.as_str()).map(str::to_string);
+
+    let broadcaster_id = str_field("broadcaster_user_id")
+        .or_else(|| broadcaster_user_id_from_subscription.map(str::to_string))
+        .unwrap_or_default();
+    let broadcaster_login = str_field("broadcaster_user_login");
+    let user_id = str_field("user_id").or_else(|| str_field("from_broadcaster_user_id"));
+    let user_login = str_field("user_login").or_else(|| str_field("from_broadcaster_user_login"));
+    let user_display_name =
+        str_field("user_name").or_else(|| str_field("from_broadcaster_user_name"));
+
+    let metadata = match event_type {
+        "channel.subscribe" => serde_json::json!({
+            "tier": event.get("tier").and_then(|v| v.as_str()).unwrap_or("1000"),
+            "is_gift": event.get("is_gift").and_then(|v| v.as_bool()).unwrap_or(false),
+        }),
+        "channel.subscription.gift" => serde_json::json!({
+            "tier": event.get("tier").and_then(|v| v.as_str()).unwrap_or("1000"),
+            "total": event.get("total").and_then(|v| v.as_i64()).unwrap_or(1),
+            "is_anonymous": event.get("is_anonymous").and_then(|v| v.as_bool()).unwrap_or(false),
+        }),
+        "channel.raid" => serde_json::json!({
+            "viewers": event.get("viewers").and_then(|v| v.as_i64()).unwrap_or(0),
+        }),
+        "channel.cheer" => serde_json::json!({
+            "bits": event.get("bits").and_then(|v| v.as_i64()).unwrap_or(0),
+            "is_anonymous": event.get("is_anonymous").and_then(|v| v.as_bool()).unwrap_or(false),
+        }),
+        // gh #287 S10 parity: real Twitch payload is `{id,
+        // broadcaster_user_id, broadcaster_user_login,
+        // broadcaster_user_name, type, started_at}`.
+        "stream.online" => serde_json::json!({
+            "type": event.get("type").and_then(|v| v.as_str()).unwrap_or("live"),
+            "started_at": event.get("started_at").and_then(|v| v.as_str()).unwrap_or(""),
+        }),
+        // `stream.offline` carries no extra fields -- metadata is
+        // deliberately empty, matching the legacy module's own
+        // `test_normalizes_a_stream_offline_event` assertion.
+        _ => serde_json::json!({}),
+    };
+
+    PlatformEvent {
+        platform: "twitch".to_string(),
+        event_type: event_type.to_string(),
+        actor: user_login.clone().or_else(|| broadcaster_login.clone()),
+        payload: payload_map(serde_json::json!({
+            "broadcaster_id": broadcaster_id,
+            "broadcaster_login": broadcaster_login,
+            "user_id": user_id,
+            "user_login": user_login,
+            "user_display_name": user_display_name,
+            "metadata": metadata,
+        })),
+        occurred_at: now_rfc3339_millis(),
+        source: Some(Source {
+            platform: "twitch".to_string(),
+            account_id: broadcaster_id.clone(),
+            channel_id: Some(broadcaster_id),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,6 +497,90 @@ mod tests {
         let event = normalize_discord(&discord_msg());
         assert!(event.occurred_at.ends_with('Z'));
         assert!(chrono::DateTime::parse_from_rfc3339(&event.occurred_at).is_ok());
+    }
+
+    #[test]
+    fn eventsub_raid_normalizes_metadata_and_source() {
+        let event = serde_json::json!({
+            "broadcaster_user_id": "111",
+            "broadcaster_user_login": "somechannel",
+            "from_broadcaster_user_id": "222",
+            "from_broadcaster_user_login": "raider",
+            "from_broadcaster_user_name": "Raider",
+            "viewers": 42,
+        });
+        let platform_event = normalize_twitch_eventsub("channel.raid", &event, None);
+        assert_eq!(platform_event.platform, "twitch");
+        assert_eq!(platform_event.event_type, "channel.raid");
+        assert_eq!(platform_event.actor.as_deref(), Some("raider"));
+        assert_eq!(
+            platform_event
+                .payload
+                .get("broadcaster_id")
+                .and_then(|v| v.as_str()),
+            Some("111")
+        );
+        assert_eq!(
+            platform_event
+                .payload
+                .get("user_id")
+                .and_then(|v| v.as_str()),
+            Some("222")
+        );
+        assert_eq!(
+            platform_event
+                .payload
+                .get("metadata")
+                .and_then(|m| m.get("viewers"))
+                .and_then(|v| v.as_i64()),
+            Some(42)
+        );
+        let source = platform_event
+            .source
+            .expect("eventsub normalizer always sets source");
+        assert_eq!(source.account_id, "111");
+        assert_eq!(source.channel_id.as_deref(), Some("111"));
+    }
+
+    #[test]
+    fn eventsub_falls_back_to_subscription_broadcaster_id_when_event_omits_it() {
+        let event = serde_json::json!({});
+        let platform_event = normalize_twitch_eventsub("stream.offline", &event, Some("999"));
+        assert_eq!(
+            platform_event
+                .payload
+                .get("broadcaster_id")
+                .and_then(|v| v.as_str()),
+            Some("999")
+        );
+        assert_eq!(
+            platform_event.payload.get("metadata"),
+            Some(&serde_json::json!({}))
+        );
+    }
+
+    #[test]
+    fn eventsub_stream_online_carries_type_and_started_at() {
+        let event = serde_json::json!({
+            "broadcaster_user_id": "111",
+            "type": "live",
+            "started_at": "2026-09-28T00:00:00Z",
+        });
+        let platform_event = normalize_twitch_eventsub("stream.online", &event, None);
+        let metadata = platform_event.payload.get("metadata").unwrap();
+        assert_eq!(metadata.get("type").and_then(|v| v.as_str()), Some("live"));
+        assert_eq!(
+            metadata.get("started_at").and_then(|v| v.as_str()),
+            Some("2026-09-28T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn eventsub_occurred_at_is_valid_rfc3339_millis_z() {
+        let event = serde_json::json!({"broadcaster_user_id": "111"});
+        let platform_event = normalize_twitch_eventsub("channel.raid", &event, None);
+        assert!(platform_event.occurred_at.ends_with('Z'));
+        assert!(chrono::DateTime::parse_from_rfc3339(&platform_event.occurred_at).is_ok());
     }
 
     #[test]

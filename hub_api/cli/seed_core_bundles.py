@@ -411,9 +411,14 @@ async def _resolve_or_publish_version(
     if existing_row is not None:
         if existing_row.artifact_digest != expected_digest:
             raise ApiError(
-                f"{entry.app_id}@{entry.version} is already published with a different digest "
-                f"({existing_row.artifact_digest!r} != {expected_digest!r}) -- bump the "
-                "catalog's version alongside the artifact, never republish under the same version",
+                f"core-bundle-seeder: refusing to seed {entry.app_id}@{entry.version} -- "
+                f"app_versions already has this exact (app_id, version) published with a "
+                f"DIFFERENT digest (existing={existing_row.artifact_digest!r}, "
+                f"this_build={expected_digest!r}). app_versions is immutable per version "
+                "string, so this is NEVER auto-resolved. ACTION REQUIRED: bump the version "
+                "in bundles/core-bundles.yaml AND the bundle's own manifest "
+                f"(bundles/{entry.language}/.../hub-manifest.yaml) to a new version string, "
+                "then re-run the seeder.",
                 409,
                 "digest_conflict",
             )
@@ -680,6 +685,31 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                     extra={"app_id": entry.app_id, "version": entry.version, "reason": str(exc)},
                 )
                 counter.add(1, {"app_id": entry.app_id, "outcome": "refused"})
+                failures += 1
+                continue
+            except ApiError as exc:
+                # ApiError is a bare @dataclass(Exception) with no Exception.__init__() call
+                # (see services/errors.py) -- str(exc) renders the raw
+                # (message, status_code, code) args tuple, not the message text, which is
+                # exactly the operator-facing clarity gap this branch exists to close.
+                # `exc.code` (e.g. "digest_conflict") is a stable, actionable outcome label --
+                # keep it in both the log and the metric so an operator/dashboard sees the
+                # SAME word, not a generic "failed" that hides why. This is fail-closed by
+                # construction: the exception already means no DB write happened for this
+                # entry, and `failures += 1` below guarantees a non-zero process exit code
+                # (see main()/_run()'s own `return 1 if failures else 0`) -- a seeding run
+                # that hits this branch must never be reported as a clean success.
+                logger.error(
+                    "core-bundle-seeder: bundle failed",
+                    extra={
+                        "app_id": entry.app_id,
+                        "version": entry.version,
+                        "error_code": exc.code,
+                        "status_code": exc.status_code,
+                        "error": exc.message,
+                    },
+                )
+                counter.add(1, {"app_id": entry.app_id, "outcome": exc.code.lower()})
                 failures += 1
                 continue
             except Exception as exc:  # noqa: BLE001 -- one bundle's failure must not abort the batch or hide the exit code
