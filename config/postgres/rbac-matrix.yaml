@@ -14,6 +14,7 @@
 version: 1
 roles:
   - hub_api
+  - hub_api_keystore
   - waddles_publisher
   - svc_ingest
   - svc_process
@@ -34,7 +35,51 @@ tables:
   - workstreams
   - workstream_usage_hourly
   - app_source_bindings
+  - keystore.tenant_encryption_keys
+  - keystore.key_tombstones
 grants:
+  # hub_api_keystore (migration 0035): zero privileges on every table this
+  # role predates -- it is scoped exclusively to the `keystore` schema
+  # (rows further down this file), never any of the milestone's regular
+  # application tables. Listed explicitly, one row per pre-existing
+  # table, so the equality check sees an intentional absence.
+  - role: hub_api_keystore
+    table: app_versions
+    privileges: []
+  - role: hub_api_keystore
+    table: app_active_versions
+    privileges: []
+  - role: hub_api_keystore
+    table: app_version_uploads
+    privileges: []
+  - role: hub_api_keystore
+    table: app_install_approvals
+    privileges: []
+  - role: hub_api_keystore
+    table: app_stream_grants
+    privileges: []
+  - role: hub_api_keystore
+    table: custom_platforms
+    privileges: []
+  - role: hub_api_keystore
+    table: ingest_sources
+    privileges: []
+  - role: hub_api_keystore
+    table: platform_settings
+    privileges: []
+  - role: hub_api_keystore
+    table: app_versions_audit_log
+    privileges: []
+  - role: hub_api_keystore
+    table: workstreams
+    privileges: []
+  - role: hub_api_keystore
+    table: workstream_usage_hourly
+    privileges: []
+  - role: hub_api_keystore
+    table: app_source_bindings
+    privileges: []
+
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
   # sees an intentional absence, not an unexamined gap.
@@ -354,3 +399,73 @@ grants:
   - role: migration_runner
     table: app_source_bindings
     privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # keystore.tenant_encryption_keys / keystore.key_tombstones (migration
+  # 0035, tenant-envelope-encryption-design.md Sec4/Sec5a). Accessible
+  # ONLY to the dedicated `hub_api_keystore` role -- a SEPARATE Postgres
+  # role from `hub_api`'s own application-data role, authenticated via a
+  # SEPARATE connection (KEYSTORE_DATABASE_URL, never a fallback to the
+  # main DSN -- config.py::HubAPIConfig). Every other role, including
+  # plain `hub_api` and `migration_runner`, gets zero privileges: this
+  # schema is not "hub-api's tables plus everyone else denied", it is
+  # "one dedicated role, denied to hub_api's own primary role too" --
+  # the point of the separate key store (spec Sec4 intro: a compromised
+  # hub_api-role credential must not also unlock the key store).
+  # DELETE is intentionally never granted to any role -- key rows are
+  # retired/destroyed via UPDATE (status flip), never deleted; the
+  # tombstone table is append-only (INSERT only, no UPDATE/DELETE).
+  - role: hub_api_keystore
+    table: keystore.tenant_encryption_keys
+    privileges: [SELECT, INSERT, UPDATE]
+  - role: hub_api
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: waddles_publisher
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: svc_ingest
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: svc_process
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: svc_action
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: svc_streaming
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: webui
+    table: keystore.tenant_encryption_keys
+    privileges: []
+  - role: migration_runner
+    table: keystore.tenant_encryption_keys
+    privileges: []
+
+  - role: hub_api_keystore
+    table: keystore.key_tombstones
+    privileges: [SELECT, INSERT]
+  - role: hub_api
+    table: keystore.key_tombstones
+    privileges: []
+  - role: waddles_publisher
+    table: keystore.key_tombstones
+    privileges: []
+  - role: svc_ingest
+    table: keystore.key_tombstones
+    privileges: []
+  - role: svc_process
+    table: keystore.key_tombstones
+    privileges: []
+  - role: svc_action
+    table: keystore.key_tombstones
+    privileges: []
+  - role: svc_streaming
+    table: keystore.key_tombstones
+    privileges: []
+  - role: webui
+    table: keystore.key_tombstones
+    privileges: []
+  - role: migration_runner
+    table: keystore.key_tombstones
+    privileges: []

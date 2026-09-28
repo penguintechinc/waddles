@@ -239,14 +239,28 @@ class HubAPIConfig:
     connections_callback_base_url: str = "http://localhost:30879"
     connections_state_ttl_s: int = 600
 
-    # Dedicated connection for the `keystore` schema (migration 0027) --
-    # own role, own (short) backup-retention policy, deliberately never
-    # the same credential as `database_url`. See services/tenant_keystore.py
-    # module docstring. Empty-string default (rather than falling back to
-    # `database_url` here) keeps every pre-existing direct `HubAPIConfig(...)`
-    # test construction unaffected; `from_env()` below applies the real
-    # database_url fallback for actual runtime config.
+    # Dedicated connection for the `keystore` schema (migration 0035) --
+    # own role (`hub_api_keystore`), own (short) backup-retention policy,
+    # deliberately NEVER the same credential/DSN as `database_url` -- see
+    # services/tenant_keystore.py module docstring and
+    # tenant-envelope-encryption-design.md Sec4 ("a compromised hub_api
+    # application-data credential must not also unlock the key store").
+    #
+    # Empty-string default (rather than falling back to `database_url`
+    # here) keeps every pre-existing direct `HubAPIConfig(...)` test
+    # construction unaffected. `from_env()` below deliberately does NOT
+    # fall back to `database_url` either -- a missing `KEYSTORE_DATABASE_URL`
+    # while the keystore feature is enabled must fail closed at startup
+    # (`app.py`'s `startup()` raises), never silently reuse the main DSN.
+    # Reusing the main DSN would defeat the entire separate-key-store
+    # design: same Postgres role/connection means a compromised `hub_api`
+    # credential (or a hub_api-role query in `pg_stat_statements`) can see
+    # the key store too.
     keystore_database_url: str = ""
+    #: `waddles.core.tenant-envelope-encryption` (PostHog flag mirror, see
+    #: `critical-rules.md` Feature Flags & License Tiers) -- default OFF.
+    #: When true, `KEYSTORE_DATABASE_URL` is mandatory (fail-closed).
+    tenant_envelope_encryption_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> HubAPIConfig:
@@ -279,7 +293,10 @@ class HubAPIConfig:
             grpc_port=int(os.getenv("GRPC_PORT", "50204")),
             database_url=database_url,
             database_read_replica_url=read_replica_url,
-            keystore_database_url=os.getenv("KEYSTORE_DATABASE_URL", database_url),
+            keystore_database_url=os.getenv("KEYSTORE_DATABASE_URL", ""),
+            tenant_envelope_encryption_enabled=_bool_env(
+                "WADDLES_TENANT_ENVELOPE_ENCRYPTION_ENABLED", False
+            ),
             db_pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
             db_max_retries=int(os.getenv("DB_MAX_RETRIES", "5")),
             db_retry_delay=int(os.getenv("DB_RETRY_DELAY", "5")),

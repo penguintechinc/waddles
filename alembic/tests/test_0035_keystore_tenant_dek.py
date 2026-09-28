@@ -103,7 +103,11 @@ class TestUpgradeCreatesKeystoreSchema:
         assert "CREATE TABLE IF NOT EXISTS keystore.tenant_encryption_keys" in upgrade_sql
         assert "wrapped_dek   BYTEA" in upgrade_sql
         assert "usage_count   BIGINT NOT NULL DEFAULT 0" in upgrade_sql
-        assert "UNIQUE (tenant_id, dek_version)" in upgrade_sql
+        assert "UNIQUE (tenant_id, purpose, dek_version)" in upgrade_sql
+
+    def test_purpose_column_and_check_constraint(self, upgrade_sql) -> None:
+        assert "purpose       VARCHAR(30) NOT NULL DEFAULT 'at-rest'" in upgrade_sql
+        assert "CHECK (purpose IN ('at-rest', 'ingest-stream'))" in upgrade_sql
 
     def test_kek_kind_and_status_check_constraints(self, upgrade_sql) -> None:
         assert "CHECK (kek_kind IN ('platform', 'customer_kms'))" in upgrade_sql
@@ -124,6 +128,50 @@ class TestUpgradeCreatesKeystoreSchema:
         assert upgrade_sql.count("CREATE TABLE IF NOT EXISTS keystore.") == 2
 
 
+class TestUpgradeGrantsRbac:
+    def test_creates_dedicated_keystore_role(self, upgrade_sql) -> None:
+        assert "CREATE ROLE hub_api_keystore NOLOGIN" in upgrade_sql
+
+    def test_revokes_public_on_both_tables(self, upgrade_sql) -> None:
+        assert "REVOKE ALL ON keystore.tenant_encryption_keys FROM PUBLIC;" in upgrade_sql
+        assert "REVOKE ALL ON keystore.key_tombstones FROM PUBLIC;" in upgrade_sql
+
+    def test_grants_dedicated_role_only(self, upgrade_sql) -> None:
+        assert (
+            "GRANT INSERT, SELECT, UPDATE ON keystore.tenant_encryption_keys "
+            "TO hub_api_keystore;" in upgrade_sql
+        )
+        assert (
+            "GRANT INSERT, SELECT ON keystore.key_tombstones TO hub_api_keystore;"
+            in upgrade_sql
+        )
+
+    def test_data_plane_roles_get_no_grant_statement(self, upgrade_sql) -> None:
+        # privileges: [] rows render nothing (render_grant_sql skips empty
+        # privilege lists) -- assert no GRANT statement targets these roles
+        # on either keystore table at all, including plain hub_api itself.
+        for role in ("hub_api", "svc_ingest", "svc_process", "svc_action", "webui"):
+            assert f"TO {role};" not in upgrade_sql or "keystore." not in [
+                line
+                for line in upgrade_sql.splitlines()
+                if line.strip().startswith("GRANT") and f"TO {role};" in line
+            ]
+            for line in upgrade_sql.splitlines():
+                if line.strip().startswith("GRANT") and f"TO {role};" in line:
+                    assert "keystore." not in line
+
+    def test_grants_schema_usage_and_sequences_to_dedicated_role(self, upgrade_sql) -> None:
+        assert "GRANT USAGE ON SCHEMA keystore TO hub_api_keystore;" in upgrade_sql
+        assert (
+            "GRANT USAGE ON SEQUENCE keystore.tenant_encryption_keys_id_seq "
+            "TO hub_api_keystore;" in upgrade_sql
+        )
+        assert (
+            "GRANT USAGE ON SEQUENCE keystore.key_tombstones_id_seq TO hub_api_keystore;"
+            in upgrade_sql
+        )
+
+
 class TestDowngradeRemovesEverythingUpgradeAdds:
     def test_drops_key_tombstones_before_tenant_encryption_keys(self, downgrade_sql) -> None:
         # No FK between them, but tombstones are the durable shred record --
@@ -132,8 +180,13 @@ class TestDowngradeRemovesEverythingUpgradeAdds:
             "DROP TABLE IF EXISTS keystore.tenant_encryption_keys"
         )
 
-    def test_drops_schema_last(self, downgrade_sql) -> None:
-        assert downgrade_sql.rstrip().endswith("DROP SCHEMA IF EXISTS keystore")
+    def test_drops_schema_before_dropping_role(self, downgrade_sql) -> None:
+        assert downgrade_sql.index("DROP SCHEMA IF EXISTS keystore") < downgrade_sql.index(
+            "DROP ROLE hub_api_keystore"
+        )
+
+    def test_drops_dedicated_keystore_role_last(self, downgrade_sql) -> None:
+        assert "DROP ROLE hub_api_keystore;" in downgrade_sql
 
     def test_downgrade_is_idempotent(self, migration) -> None:
         with patch("alembic.op.execute") as mock_execute:

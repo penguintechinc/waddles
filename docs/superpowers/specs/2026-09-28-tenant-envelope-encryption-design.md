@@ -136,6 +136,90 @@ The RO replica never holds key material — this is already the connections doc'
 
 ---
 
+## 5a. Purpose-limited stream keys (`ingest-stream`)
+
+**Amendment, 2026-09-28 (post security-review, PR #442).** Section 5 above states the data plane has "no operational need" to decrypt stored fields today via the at-rest DEK. That remains true and unchanged: **at-rest DEKs (`tenant_encryption_keys` rows with `purpose='at-rest'`) NEVER leave hub-api, in plaintext or wrapped form, under any circumstance.** The original `POST /api/v1/internal/keys/tenant-dek` implementation reviewed in PR #442 violated this by re-wrapping and returning the at-rest DEK to any caller presenting a matching scope for any of `message_content`/`connection_credentials`/`identity` — those three purposes are **removed**. This section defines the one purpose the data plane is actually approved for (Justin, 2026-09-28): encrypting/decrypting identity fields inline in the Rust ingest stream (`svc_ingest` encrypts, `svc_process` decrypts — see PR #443/#440), which needs a key the data plane genuinely holds, not one hub-api decrypts on its behalf per-call.
+
+**A separate per-tenant STREAM DEK, `keystore.tenant_encryption_keys` rows with `purpose='ingest-stream'`**, is the only key this broker ever issues:
+
+- **Independent key material from the at-rest DEK** — own row, own `dek_version` sequence, own KEK-wrap, own rotation clock. Compromising the stream key never exposes `message_content`/`platform_integrations`/etc., and vice versa.
+- **Server-side purpose→service allowlist, never client/request-supplied:**
+
+  | Purpose | Allowed service identity | Capability |
+  |---|---|---|
+  | `ingest-stream` | `svc-ingest` | encrypt only |
+  | `ingest-stream` | `svc-process` | decrypt only |
+
+  Enforced in `services/tenant_keystore.py::is_service_allowed(purpose, service_id)` against a fixed in-code mapping (`_PURPOSE_SERVICE_CAPABILITIES`) — **not** derived from the request body, the JWT's `scope` claim's string value, or any other caller-controlled input. The JWT scope (`keys:tenant-dek:read:ingest-stream`) is checked *in addition to*, never instead of, this server-side mapping — a forged or over-broad scope on a compromised `svc-action` token still cannot obtain the ingest-stream key, because `svc-action` isn't in the mapping at all. `svc-ingest`'s grant is encrypt-capability only and `svc-process`'s is decrypt-capability only at the design level (both receive the same DEK bytes today, since AES-256-GCM has no asymmetric encrypt/decrypt split — the capability column is enforced procedurally: `svc-ingest` calling the endpoint with an intent to decrypt, or `svc-process` with intent to encrypt, is out of scope for this key's issued use and is an audit-log anomaly per the anomaly metric below, not a cryptographic impossibility).
+
+- **Rotation: time-based, 24 hours, plus a usage-count backstop far below the 2^30 nonce-collision bound (spec Sec2):**
+
+  `STREAM_KEY_USAGE_CAP = 2**24` (16,777,216 operations per `dek_version`). Math: even a single tenant sustaining an anomalously high 1,000 ingest events/sec (well above this platform's ~300-tenant/20,000-community sizing target for any one tenant) exhausts 2^24 in ~4.7 hours — comfortably inside the 24h rotation window, so the *time-based* trigger is expected to fire first under normal load and the usage cap exists purely as a backstop for a single anomalous tenant, not the primary control. 2^24 is 64x below the 2^30 bound Sec2 sets for the at-rest DEK's own nonce discipline, leaving wide margin. A background scheduler rotates every active `ingest-stream` key every 24h regardless of usage (`TenantKeystore.rotate(tenant_id, purpose="ingest-stream")`, same mint-new/retire-old mechanism as §4's at-rest rotation, just on a fixed clock instead of purely usage-triggered).
+- **Grace window for previous versions:** a retired `ingest-stream` version stays fetchable (via `version=` in the request body) and decryptable for **48 hours** (`STREAM_KEY_GRACE_WINDOW = 2x rotation interval`) after retirement — long enough to cover in-flight events straddling a rotation boundary plus any consumer-side lag reading its cached key. After the grace window, a retired version is eligible for a background sweep to `destroyed` (housekeeping; the tombstone/shred machinery in §4 is unchanged and unaffected — a routine rotation is not a crypto-shred and never writes a tombstone).
+
+- **Transport (see §5b) and cache invalidation (see §5c)** are described below since they apply to this key type specifically, not to the at-rest DEK (which never transits the network at all).
+
+## 5b. Transport: ephemeral-key sealing, not platform-KEK wrap
+
+**The PR #442 response body's `"wrapped_dek": kek_provider.wrap(tenant_id, dek).hex()` step is removed entirely.** Wrapping under the platform root KEK for transport was never actually usable by the caller — `svc-ingest`/`svc-process` have no access to `TENANT_KEK_HEX` (by design; it's hub-api's own secret) and thus no way to unwrap that response, and worse, logging or replaying that response would carry a KEK-wrapped copy of a key hub-api itself can unwrap, i.e. functionally still "the DEK" for confidentiality purposes as far as anyone who ever obtains hub-api's KEK is concerned. This is the concrete defect the security review flagged.
+
+**Replacement: the caller supplies an ephemeral X25519 public key with every request; hub-api seals the stream DEK to it.**
+
+```
+POST /api/v1/internal/keys/tenant-dek
+{
+  "tenant_id": 123,
+  "purpose": "ingest-stream",
+  "version": null,                      // omit for "current active"
+  "client_ephemeral_pubkey": "<32 bytes, base64>"
+}
+```
+
+Sealing construction — **X25519 + HKDF-SHA256 + AES-256-GCM**, functionally HPKE's base mode (`DHKEM(X25519, HKDF-SHA256)` + `AES-256-GCM` AEAD) without requiring the `hpke` PyPI package as a new dependency, since `cryptography>=44.0.1` (already pinned, `hub_api/requirements.in`) provides every primitive needed:
+
+1. hub-api generates a fresh X25519 ephemeral key pair **per request** (never reused across calls, even to the same caller/tenant).
+2. `shared_secret = X25519(hub_api_ephemeral_private, client_ephemeral_pubkey)` (caller performs the mirror operation with its own ephemeral private key to derive the same secret).
+3. `salt = hub_api_ephemeral_pubkey_bytes || client_ephemeral_pubkey_bytes` (both public keys, fixed 32+32 bytes, publicly visible — binds the derived key to this exact key-exchange instance, standard HPKE-style construction).
+4. `info = f"{service_id}|{tenant_id}|{purpose}|{dek_version}".encode()` — **bound to the resolved `service_id` from the verified JWT (§5d), the requested `tenant_id`, `purpose`, and the DEK's own `dek_version`**, mirroring the at-rest DEK's AAD discipline (spec Sec2) one level up: a sealed blob replayed against a different service/tenant/purpose/version fails HKDF-derived-key + AEAD-tag verification rather than silently decrypting.
+5. `transport_key = HKDF-SHA256(shared_secret, salt=salt, info=info, length=32)`.
+6. `nonce = secrets.token_bytes(12)` (CSPRNG, never reused — same nonce discipline as spec Sec2).
+7. `sealed = AES-256-GCM-Encrypt(transport_key, nonce, plaintext=stream_dek, aad=info)`.
+8. Response carries `hub_api_ephemeral_pubkey`, `nonce`, `sealed` (all base64), never the raw or platform-KEK-wrapped DEK bytes in any field, and never logs any of steps 2-8's intermediate or output values (only `tenant_id`/`purpose`/`dek_version`/`service_id` reach the audit log, per §4's existing discipline).
+9. The caller reverses steps 2-7 with its own ephemeral private key (which it never transmits) to recover `stream_dek`, then discards its own ephemeral key pair — one-shot, forward-secret per request. A network observer or log capturing the full request+response pair recovers nothing without one of the two ephemeral private keys, neither of which is ever transmitted or persisted.
+
+**Rust client contract (`svc_ingest`/`svc_process`, PR #443's `HubApiDekProvider`):** generate an X25519 ephemeral key pair per call (`x25519-dalek` or equivalent), send the public half, perform the mirrored HKDF+AES-256-GCM open using the response's `hub_api_ephemeral_pubkey`/`nonce`/`sealed` fields and the same `info` construction (the four fields are all present in the response so the client never has to separately track `dek_version` for this purpose). This is a breaking change to the wire contract `#443` was drafted against (which expected a KEK-wrapped hex blob) — `#443` must land the sealing-open side before this PR is usable end-to-end; that dependency is called out explicitly in this PR's description.
+
+**Max-cache TTL:** every response includes `"max_cache_ttl_s": 300` (5 minutes) — callers MUST NOT cache the unsealed DEK past this TTL regardless of the key's own 24h rotation/48h grace window; this bounds how long a cached-but-since-invalidated key (§5c) can remain in use if a consumer somehow misses the invalidation stream message.
+
+## 5c. Cache invalidation
+
+On every `ingest-stream` rotation (time-based or usage-cap-triggered) and on any tenant shred (§4, unchanged), hub-api publishes to a Valkey **STREAM** (not pub/sub — durable, replayable, matches this codebase's existing `waddles:usage` XADD convention in `services/usage_aggregator_service.py` rather than introducing a second messaging primitive):
+
+```
+XADD keys:tenant-dek:invalidate * tenant_id <id> purpose ingest-stream version <old_dek_version> reason rotation|shred
+```
+
+**Consumers (`svc_ingest`/`svc_process`) MUST drop their cached copy of `(tenant_id, purpose)` on receipt** — not just the specific version named, since a rotation means the *active* pointer moved and continuing to encrypt under a retired version needlessly shortens that version's remaining grace window. This is a documented contract obligation for `#443`'s consumer-side cache, not enforced by hub-api (hub-api cannot force a remote process to evict a local cache) — the 5-minute `max_cache_ttl_s` above is the enforceable backstop if a consumer misses or mishandles this stream message (e.g. consumer-group lag, process restart with a stale local snapshot).
+
+## 5d. Server-side service identity for purpose checks and audit
+
+`internal_keys.py`'s `_authenticate()` now returns `(claims, None)` on success (previously discarded the verified claims and fell back to `getattr(request, "service_identity", "unknown")` for both the purpose-allowlist check and the audit row — a request-object attribute nothing in this codebase ever sets, meaning both checks silently used the literal string `"unknown"`). The route now uses `claims["sub"]` (the machine-JWT subject, hub-api's own `ServiceJwtVerifier`-issued service identity) as `service_id` for **both** `is_service_allowed(purpose, service_id)` and the audit log — the one property this fixes is that the purpose-allowlist enforcement in §5a is now checked against the cryptographically-verified caller identity, not an unset placeholder that would have made the allowlist check vacuous (every caller was effectively `"unknown"`, which matches nothing in `_PURPOSE_SERVICE_CAPABILITIES`, so the allowlist would have rejected everyone — a fail-closed bug, but still a bug masking the real enforcement path until #438 lands and a real caller shows up).
+
+## 5e. Per-service tenant-fanout observability
+
+`services/tenant_keystore_metrics.py` tracks, per `service_id`, the distinct set of `tenant_id`s that service has fetched a key for (process-local, bounded, TTL-evicted) and emits:
+
+- `waddles_hub_keystore_distinct_tenants_total{service_id}` — a counter incremented only the first time a given `(service_id, tenant_id)` pair is observed in the current tracking window; its rate is a proxy for fan-out breadth, not raw call volume.
+- An anomaly threshold alert (`waddles_hub_keystore_tenant_fanout_anomaly_total{service_id}`, plus a `logger.system(..., result="DEGRADED")` line) when one `service_id`'s distinct-tenant count in the window exceeds `KEYSTORE_TENANT_FANOUT_THRESHOLD` (default 50, env-overridable) — `svc-ingest`/`svc-process` are expected to fan out across many tenants by design (that's the entire point of a shared data-plane service), so this is a coarse anomaly signal (a sudden step-change or an unexpectedly high absolute count for a deployment's actual tenant count), not a hard block.
+
+**Accepted multi-tenant trust tradeoff, stated explicitly:** `svc-ingest` and `svc-process` are shared, multi-tenant processes by architecture (spec's whole "Rust data plane" premise) — a single compromised instance can request the `ingest-stream` key for *any* tenant it chooses, one at a time, since the purpose/service allowlist (§5a) authorizes the service identity, not a specific tenant. This is the same trust boundary already accepted for `waddles_bundle_reader`'s RO-replica grant and the existing `connection_credentials` broker (spec §5 intro) — a multi-tenant data-plane process is inherently a multi-tenant blast radius if compromised, and no per-request tenant-scoping short of a separate service identity per tenant (not adopted, same O(tenants) operational cost rejected for per-user DEKs in §1) closes it further. The fanout counter above is the compensating detective control: it does not prevent a compromised instance from touching many tenants, but it makes systematic enumeration (as opposed to normal, expected multi-tenant operation) visible.
+
+## 5f. Usage accounting
+
+The stream DEK's usage counter (§5a's `STREAM_KEY_USAGE_CAP` backstop) is incremented **once per key-fetch call** (`services/tenant_keystore.py::get_dek`), exactly like the at-rest DEK's existing counter (§4) — it counts *key issuances*, not the caller's actual downstream encrypt/decrypt operation count, since hub-api has no visibility into how many events `svc-ingest` encrypts with a DEK once it has issued it. **Decision: rely primarily on the 24h time-based rotation (§5a) for `ingest-stream`, with the usage-count backstop as a secondary safety net, not the primary control** — the reverse of the at-rest DEK's original design (spec Sec2/Sec4), which has no time-based trigger and relies on usage count alone, because the at-rest DEK's usage count *does* correspond 1:1 to real AES-GCM operations (hub-api itself performs every at-rest encrypt/decrypt). Callers are not required to report actual encryption-op counts back to hub-api on renewal — that would require a trusted-client-reported metric hub-api cannot verify, which is a weaker control than a hub-api-owned wall-clock trigger it doesn't need to trust the caller for.
+
+---
+
 ## 6. Enterprise BYOK / external KMS
 
 Additive on the baseline (`critical-rules.md` Feature Flags & License Tiers) — a per-tenant `tenant_encryption_keys.kek_kind = 'customer_kms'` row points `kek_ref` at the customer's own AWS/GCP/Azure KMS key instead of the platform key. Unwrap calls go to the customer's KMS via a workload-identity-federated role (no static customer credentials stored).

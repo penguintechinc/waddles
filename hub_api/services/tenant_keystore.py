@@ -34,16 +34,62 @@ from __future__ import annotations
 import asyncio
 import secrets
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from penguin_security.crypto.envelope.kek import AwsKmsKek, LocalSecretKek
 
 #: NIST SP 800-38D random-96-bit-nonce collision bound -- see spec Sec2.
-#: Hitting this on a `dek_version` auto-triggers rotation (spec Sec4).
+#: Hitting this on the `at-rest` purpose's `dek_version` auto-triggers
+#: rotation (spec Sec4). The `ingest-stream` purpose uses its own, much
+#: lower cap -- see `STREAM_USAGE_CAP` below (spec Sec5a).
 USAGE_CAP = 2**30
 
 _DEK_LENGTH_BYTES = 32  # AES-256
+
+#: `keystore.tenant_encryption_keys.purpose` values (spec Sec5a amendment).
+#: `AT_REST` never leaves hub-api, in plaintext or wrapped form, under any
+#: circumstance (spec Sec5 intro, unchanged). `STREAM` is the one purpose
+#: this module's broker (`blueprints/v1/internal_keys.py`) is allowed to
+#: distribute at all, sealed per spec Sec5b -- never `AT_REST`.
+PURPOSE_AT_REST = "at-rest"
+PURPOSE_INGEST_STREAM = "ingest-stream"
+
+#: Server-side purpose -> allowed-service-identity mapping (spec Sec5a).
+#: Deliberately a fixed in-code mapping, never derived from the request
+#: body or the JWT's raw `scope` string -- a forged/over-broad scope on a
+#: compromised caller still can't obtain a purpose it isn't listed here
+#: for. Capability ("encrypt"/"decrypt") is documented intent, enforced
+#: procedurally (audit + anomaly metric), not cryptographically -- see
+#: spec Sec5a's note on why AES-256-GCM has no asymmetric encrypt/decrypt
+#: split to enforce it with.
+PURPOSE_SERVICE_CAPABILITIES: dict[str, dict[str, frozenset[str]]] = {
+    PURPOSE_INGEST_STREAM: {
+        "svc-ingest": frozenset({"encrypt"}),
+        "svc-process": frozenset({"decrypt"}),
+    },
+}
+
+#: spec Sec5a: usage-count backstop for `ingest-stream`, far below the
+#: at-rest DEK's 2^30 nonce-collision bound -- 2^24 = 16,777,216 ops.
+#: Math: even a single tenant sustaining an anomalous 1,000 events/sec
+#: exhausts this in ~4.7 hours, comfortably inside the 24h time-based
+#: rotation window below, so this is a backstop, not the primary trigger.
+STREAM_USAGE_CAP = 2**24
+
+#: spec Sec5a: primary rotation trigger for `ingest-stream` -- wall-clock,
+#: not usage-based (reverse of the at-rest DEK's design, see spec Sec5f).
+STREAM_ROTATION_INTERVAL_SECONDS = 24 * 60 * 60
+
+#: spec Sec5a: a retired `ingest-stream` version stays fetchable/
+#: decryptable for this long after retirement, covering in-flight events
+#: and consumer-side cache lag straddling a rotation boundary.
+STREAM_GRACE_WINDOW_SECONDS = 2 * STREAM_ROTATION_INTERVAL_SECONDS
+
+
+def is_service_allowed(purpose: str, service_id: str) -> bool:
+    """Server-side purpose->service check (spec Sec5a) -- never client-supplied."""
+    return service_id in PURPOSE_SERVICE_CAPABILITIES.get(purpose, {})
 
 
 class TenantKeyError(Exception):
@@ -69,6 +115,7 @@ class TenantDekRecord:
 
     id: int
     tenant_id: int
+    purpose: str
     dek_version: int
     wrapped_dek: bytes | None
     kek_ref: str
@@ -88,25 +135,39 @@ class KeystoreRepository(Protocol):
     implementation; tests use an in-memory fake of the same shape.
     """
 
-    async def get_active(self, tenant_id: int) -> TenantDekRecord | None:
-        """Return the current `active`-status key row for `tenant_id`, or `None`."""
+    async def get_active(
+        self, tenant_id: int, *, purpose: str = PURPOSE_AT_REST
+    ) -> TenantDekRecord | None:
+        """Return the current `active`-status key row for `(tenant_id, purpose)`, or `None`."""
         ...
 
-    async def get_version(self, tenant_id: int, dek_version: int) -> TenantDekRecord | None:
-        """Return the specific `dek_version` row for `tenant_id`, or `None`."""
+    async def get_version(
+        self, tenant_id: int, dek_version: int, *, purpose: str = PURPOSE_AT_REST
+    ) -> TenantDekRecord | None:
+        """Return the specific `(tenant_id, purpose, dek_version)` row, or `None`."""
         ...
 
     async def insert_active(
-        self, tenant_id: int, wrapped_dek: bytes, kek_ref: str, kek_kind: str
+        self,
+        tenant_id: int,
+        wrapped_dek: bytes,
+        kek_ref: str,
+        kek_kind: str,
+        *,
+        purpose: str = PURPOSE_AT_REST,
     ) -> TenantDekRecord:
-        """Insert a new `active` key row, auto-assigning the next `dek_version`."""
+        """Insert a new `active` key row, auto-assigning the next `dek_version` for `purpose`."""
         ...
 
-    async def retire(self, tenant_id: int, dek_version: int) -> None:
+    async def retire(
+        self, tenant_id: int, dek_version: int, *, purpose: str = PURPOSE_AT_REST
+    ) -> None:
         """Flip a key row from `active` to `retired` (kept, not destroyed)."""
         ...
 
-    async def increment_usage(self, tenant_id: int, dek_version: int) -> int:
+    async def increment_usage(
+        self, tenant_id: int, dek_version: int, *, purpose: str = PURPOSE_AT_REST
+    ) -> int:
         """Atomically bump the usage counter; return the new count."""
         ...
 
@@ -240,6 +301,13 @@ class CustomerKmsKekProvider:
         )
 
 
+#: One invalidation event published on rotation/shred (spec Sec5c) --
+#: `TenantKeystore`'s caller (app.py wiring) supplies the actual
+#: publish-to-Valkey callback; this module stays transport-agnostic and
+#: unit-testable without a live Valkey connection.
+InvalidationPublisher = Any  # Callable[[int, str, int, str], Awaitable[None]]
+
+
 @dataclass(slots=True)
 class TenantKeystore:
     """The tenant-DEK broker: create, fetch (and unwrap), rotate, shred.
@@ -251,67 +319,114 @@ class TenantKeystore:
 
     repository: KeystoreRepository
     kek_provider: KekProvider
+    #: Called `(tenant_id, purpose, old_dek_version, reason)` after every
+    #: rotation/shred -- publishes `keys:tenant-dek:invalidate` (spec
+    #: Sec5c). `None` (default) skips publishing -- used by every existing
+    #: at-rest-only test/caller that predates this contract.
+    invalidation_publisher: InvalidationPublisher | None = None
 
-    async def create_tenant_key(self, tenant_id: int) -> TenantDekRecord:
-        """Generate + wrap a new v1 DEK for `tenant_id`. Called at tenant creation."""
+    async def create_tenant_key(
+        self, tenant_id: int, *, purpose: str = PURPOSE_AT_REST
+    ) -> TenantDekRecord:
+        """Generate + wrap a new v1 DEK for `(tenant_id, purpose)`. Called at tenant creation."""
         plaintext_dek = secrets.token_bytes(_DEK_LENGTH_BYTES)
         wrapped = await self.kek_provider.wrap(tenant_id, plaintext_dek)
         return await self.repository.insert_active(
-            tenant_id, wrapped, self.kek_provider.ref(tenant_id), self.kek_provider.kek_kind
+            tenant_id,
+            wrapped,
+            self.kek_provider.ref(tenant_id),
+            self.kek_provider.kek_kind,
+            purpose=purpose,
         )
 
     async def get_dek(
-        self, tenant_id: int, *, version: int | None = None
+        self, tenant_id: int, *, purpose: str = PURPOSE_AT_REST, version: int | None = None
     ) -> tuple[bytes, TenantDekRecord]:
-        """Return `(unwrapped_dek, record)` for `tenant_id`'s active (or `version`) key.
+        """Return `(unwrapped_dek, record)` for `(tenant_id, purpose)`'s active (or `version`) key.
 
         Raises `TenantKeyShredded` if the tenant has been crypto-shredded,
         `TenantKeyNotFound` if no matching key row exists. Auto-rotates
-        (spec Sec2/Sec4) the moment this DEK version's usage counter
-        reaches `USAGE_CAP` -- the caller still gets the DEK it asked for
-        this call; the *next* caller gets the new version.
+        the moment this DEK version's usage counter reaches its purpose's
+        cap (`USAGE_CAP` for `at-rest`, spec Sec2/Sec4; `STREAM_USAGE_CAP`
+        for `ingest-stream`, spec Sec5a) **or**, for `ingest-stream` only,
+        once `STREAM_ROTATION_INTERVAL_SECONDS` has elapsed since
+        activation -- the caller still gets the DEK it asked for this
+        call; the *next* caller gets the new version.
         """
         if await self.repository.is_shredded(tenant_id):
             raise TenantKeyShredded(f"tenant {tenant_id} key has been crypto-shredded")
 
         record = (
-            await self.repository.get_version(tenant_id, version)
+            await self.repository.get_version(tenant_id, version, purpose=purpose)
             if version is not None
-            else await self.repository.get_active(tenant_id)
+            else await self.repository.get_active(tenant_id, purpose=purpose)
         )
         if record is None or record.wrapped_dek is None or record.status == "destroyed":
-            raise TenantKeyNotFound(f"no key for tenant {tenant_id} (version={version})")
+            raise TenantKeyNotFound(f"no {purpose} key for tenant {tenant_id} (version={version})")
 
         unwrapped = await self.kek_provider.unwrap(tenant_id, record.wrapped_dek)
 
         if record.status == "active":
-            new_count = await self.repository.increment_usage(tenant_id, record.dek_version)
-            if new_count >= USAGE_CAP:
-                await self.rotate(tenant_id)
+            new_count = await self.repository.increment_usage(
+                tenant_id, record.dek_version, purpose=purpose
+            )
+            usage_cap = STREAM_USAGE_CAP if purpose == PURPOSE_INGEST_STREAM else USAGE_CAP
+            expired_by_age = (
+                purpose == PURPOSE_INGEST_STREAM
+                and _age_seconds(record.activated_at) >= STREAM_ROTATION_INTERVAL_SECONDS
+            )
+            if new_count >= usage_cap or expired_by_age:
+                await self.rotate(
+                    tenant_id,
+                    purpose=purpose,
+                    reason="usage_cap" if new_count >= usage_cap else "scheduled_rotation",
+                )
 
         return unwrapped, record
 
-    async def rotate(self, tenant_id: int) -> TenantDekRecord:
+    async def rotate(
+        self, tenant_id: int, *, purpose: str = PURPOSE_AT_REST, reason: str = "rotation"
+    ) -> TenantDekRecord:
         """Mint a new active DEK version; retire (never delete) the prior active one.
 
-        Old ciphertext encrypted under the retired version stays
-        decryptable indefinitely (spec Sec4) -- `get_dek(tenant_id,
-        version=<old>)` still works after rotation.
+        Old ciphertext/stream traffic encrypted under the retired version
+        stays decryptable through its grace window (spec Sec4/Sec5a) --
+        `get_dek(tenant_id, purpose=purpose, version=<old>)` still works.
+        Publishes an invalidation event (spec Sec5c) if a publisher is wired.
         """
-        current = await self.repository.get_active(tenant_id)
+        current = await self.repository.get_active(tenant_id, purpose=purpose)
         if current is not None:
-            await self.repository.retire(tenant_id, current.dek_version)
-        return await self.create_tenant_key(tenant_id)
+            await self.repository.retire(tenant_id, current.dek_version, purpose=purpose)
+        new_record = await self.create_tenant_key(tenant_id, purpose=purpose)
+        if current is not None and self.invalidation_publisher is not None:
+            await self.invalidation_publisher(tenant_id, purpose, current.dek_version, reason)
+        return new_record
 
     async def shred(self, tenant_id: int, *, reason: str = "tenant_deleted") -> None:
-        """Crypto-shred: destroy all key rows for `tenant_id`, tombstone permanently.
+        """Crypto-shred: destroy every key row (all purposes) for `tenant_id`; tombstone it.
 
         Irreversible by design (spec Sec4) -- every ciphertext row for
         this tenant becomes permanently unrecoverable the instant this
-        returns, without touching the tenant's data rows at all.
+        returns, without touching the tenant's data rows at all. Publishes
+        an invalidation event (spec Sec5c) for the `ingest-stream` purpose
+        if a publisher is wired, so `svc_ingest`/`svc_process` drop their
+        cache immediately rather than waiting out `max_cache_ttl_s`.
         """
-        active = await self.repository.get_active(tenant_id)
+        active_at_rest = await self.repository.get_active(tenant_id, purpose=PURPOSE_AT_REST)
+        active_stream = await self.repository.get_active(tenant_id, purpose=PURPOSE_INGEST_STREAM)
         await self.repository.destroy_all(tenant_id)
         await self.repository.add_tombstone(
-            tenant_id, active.dek_version if active is not None else 0, reason
+            tenant_id, active_at_rest.dek_version if active_at_rest is not None else 0, reason
         )
+        if active_stream is not None and self.invalidation_publisher is not None:
+            await self.invalidation_publisher(
+                tenant_id, PURPOSE_INGEST_STREAM, active_stream.dek_version, reason
+            )
+
+
+def _age_seconds(activated_at: datetime) -> float:
+    """Wall-clock seconds since `activated_at` (expected tz-aware, UTC -- asyncpg TIMESTAMPTZ)."""
+    reference = (
+        activated_at if activated_at.tzinfo is not None else activated_at.replace(tzinfo=UTC)
+    )
+    return (datetime.now(UTC) - reference).total_seconds()

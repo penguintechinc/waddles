@@ -40,6 +40,7 @@ from config import HubAPIConfig
 from openapi.routes import register_openapi_docs
 from services.bundle_install_dal import build_install_dal
 from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
+from services.keystore_invalidation import build_invalidation_publisher
 from services.rate_limiting import install_rate_limiting
 from services.schema import (
     bind_ai_routing_tables,
@@ -248,26 +249,47 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         app.config["install_dal"] = install_dal
 
         # Tenant-DEK broker (blueprints/v1/internal_keys.py) -- feature is
-        # default-OFF (`waddles.core.tenant-envelope-encryption`) and its
-        # own migration (0027) may not have run yet in every environment,
-        # so a missing/invalid TENANT_KEK_HEX or unreachable `keystore`
-        # schema must never crash hub-api startup; the broker endpoint
+        # default-OFF (`waddles.core.tenant-envelope-encryption`). While
+        # OFF, a missing/invalid TENANT_KEK_HEX or unreachable `keystore`
+        # schema must never crash hub-api startup -- the broker endpoint
         # itself fails closed (503-equivalent via TenantKeyError) per-call
         # instead. See services/tenant_keystore.py module docstring for
         # the pending penguin-security[crypto] swap-in.
-        try:
-            keystore_pool = await asyncpg.create_pool(cfg.keystore_database_url)
-            app.config["tenant_keystore"] = TenantKeystore(
-                repository=AsyncpgKeystoreRepository(keystore_pool),
-                kek_provider=K8sSecretKekProvider(),
+        #
+        # **Fail-closed exception, security review HIGH finding (PR #442):**
+        # once the feature is turned ON, `KEYSTORE_DATABASE_URL` is
+        # mandatory -- config.py::from_env() deliberately never falls back
+        # to the main `database_url`, so an operator who flips the flag
+        # without also setting the dedicated DSN gets a hard startup
+        # failure here, not a silent reuse of the main DB connection
+        # (which would defeat the entire separate-key-store design).
+        if cfg.tenant_envelope_encryption_enabled and not cfg.keystore_database_url:
+            raise RuntimeError(
+                "WADDLES_TENANT_ENVELOPE_ENCRYPTION_ENABLED is true but "
+                "KEYSTORE_DATABASE_URL is unset -- refusing to start rather than "
+                "fall back to DATABASE_URL for the keystore connection "
+                "(tenant-envelope-encryption-design.md Sec4)"
             )
-        except Exception as exc:  # nosec B110 - see comment above
-            logger.system(
-                "tenant_keystore unavailable at startup",
-                action="startup",
-                result="DEGRADED",
-                extra={"error": str(exc)},
-            )
+        if cfg.keystore_database_url:
+            try:
+                keystore_pool = await asyncpg.create_pool(cfg.keystore_database_url)
+                app.config["tenant_keystore"] = TenantKeystore(
+                    repository=AsyncpgKeystoreRepository(keystore_pool),
+                    kek_provider=K8sSecretKekProvider(),
+                    # spec Sec5c: publish `keys:tenant-dek:invalidate` on
+                    # every ingest-stream rotation/shred so svc_ingest/
+                    # svc_process drop their cache immediately.
+                    invalidation_publisher=build_invalidation_publisher(),
+                )
+            except Exception as exc:  # nosec B110 - see comment above
+                if cfg.tenant_envelope_encryption_enabled:
+                    raise
+                logger.system(
+                    "tenant_keystore unavailable at startup",
+                    action="startup",
+                    result="DEGRADED",
+                    extra={"error": str(exc)},
+                )
 
         logger.system("hub-api started", action="startup", result="SUCCESS")
 
