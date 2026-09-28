@@ -49,12 +49,11 @@ pub const BUNDLE_EGRESS_FLAG: &str = "waddles.core.bundle-egress";
 /// DB-driven path enabled?", not "is the kill-switch flag raw-ON?". Never
 /// seen / license server unreachable ⇒ `LicenseFlag`'s own fail-closed
 /// `false` negates to `true` (DB-driven path enabled, the default); the
-/// existing `ACTION_APP_ID`/`ACTION_BUNDLE_*` env selection and the
-/// `crate::distribution` catalog poll remain the sole bundle sources only
-/// while this negated value is `false` (kill-switch raw-ON) or the DB
-/// loader's own `DB_READER_*`/`BUNDLE_SCOPE_TENANT_ID` prerequisites are
-/// unset (`crate::lib::try_start_db_bundle_loader`'s own startup gates,
-/// unaffected by this flag).
+/// legacy `ACTION_BUNDLE_*` env override (`crate::try_start_env_bundle_
+/// loader`) only ever starts when `crate::resolve_db_path_active` finds
+/// this negated value `false` (kill-switch raw-ON) or the DB loader's own
+/// `DB_READER_*`/`BUNDLE_SCOPE_TENANT_ID` prerequisites unset -- mutual
+/// exclusion, `crate::lib`'s top doc.
 pub const DISABLE_DB_BUNDLE_CONFIG_FLAG: &str = "waddles.core.disable-db-bundle-config";
 
 /// One flag's live enabled/disabled state. Object-safe (a manually-boxed

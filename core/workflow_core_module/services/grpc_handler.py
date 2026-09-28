@@ -15,7 +15,8 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 
 import grpc
-from jose import jwt, JWTError
+import jwt
+from jwt import PyJWTError as JWTError
 
 # Import generated protobuf messages
 import sys

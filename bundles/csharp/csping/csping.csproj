@@ -1,0 +1,86 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Minimal, real `!csping` -> `pong (c#)` process/action-stage bundle,
+    compiled to a WASI 0.2 component with `componentize-dotnet`
+    (BytecodeAlliance.Componentize.DotNet.Wasm.SDK) against the committed
+    `wit/waddle-bundle/stage.wit` world: the C#-toolchain feasibility
+    spike (spec `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md`
+    S18 R13 / D35). Mirrors `bundles/rust/ping` and `bundles/python/pyping`:
+    a `Library` output (no `Program.cs`/`wasi:cli/run` export; the `stage`
+    world exports only `process-stage`/`action-stage`), referencing the
+    single normative WIT file by relative path rather than copying it, per
+    that file's own header comment.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>WaddleBundleCsping</RootNamespace>
+    <AssemblyName>csping</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <!-- componentize-dotnet / NativeAOT-LLVM component build target. -->
+    <RuntimeIdentifier>wasi-wasm</RuntimeIdentifier>
+    <UseAppHost>false</UseAppHost>
+    <PublishTrimmed>true</PublishTrimmed>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SelfContained>true</SelfContained>
+
+    <!--
+      Required whenever the component's imports or exports carry strings
+      (README section "WIT strings and memory"): without this, NativeAOT's
+      trimmer drops `cabi_realloc` (the canonical-ABI allocator the guest
+      must export for the host/caller to place string/list/record bytes
+      into guest memory) because nothing in the managed entry-point graph
+      visibly references it. This world's `context`/`http`/`kv`/`db`/
+      `relay`/`log` imports and both stage exports all carry strings, so
+      omitting this produces the exact
+      "module does not export a function named `cabi_realloc`" build
+      failure the README documents.
+    -->
+    <IlcExportUnmanagedEntrypoints>true</IlcExportUnmanagedEntrypoints>
+
+    <!--
+      Generated bindings land here (relative to the project) instead of
+      the default buried `obj/<config>/net10.0/wit_bindgen` path, purely
+      so a maintainer, or the next language spike, can read what
+      `wit-bindgen c-sharp` actually produced for this world without a
+      build in hand. Never committed (see `.gitignore` in this
+      directory): same "generated, not source" status as Rust's
+      `wit_bindgen::generate!` macro expansion or Python's
+      `componentize-py`-generated shim, neither of which is committed
+      either.
+    -->
+    <WitGeneratedFilesRoot>generated/wit</WitGeneratedFilesRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Exact-version pins only (rules/critical-rules.md Dependency
+      Pinning): never the floating `0.8.0-preview*` the upstream
+      `dotnet new componentize.wasi.lib` template uses. `Microsoft.DotNet.
+      ILCompiler.LLVM`'s own version (pulled in transitively by the SDK
+      package below) and this explicit per-host-RID runtime pack must
+      match exactly, per componentize-dotnet's nuspec
+      (`BytecodeAlliance.Componentize.DotNet.Wasm.SDK` 0.8.0-preview00011
+      depends on `Microsoft.DotNet.ILCompiler.LLVM` = 10.0.0-rc.1.26306.1):
+      confirmed via `nuget.org`'s flat-container nuspec, not guessed.
+    -->
+    <PackageReference Include="BytecodeAlliance.Componentize.DotNet.Wasm.SDK" Version="0.8.0-preview00011" />
+    <PackageReference Include="runtime.linux-x64.microsoft.dotnet.ilcompiler.llvm" Version="10.0.0-rc.1.26306.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      The normative copy: `wit/waddle-bundle/stage.wit`'s own header
+      comment says "Every consumer ... references this exact file by
+      path ... and never inlines a copy." Same three-levels-up relative
+      path Rust's sibling bundle uses (`bundles/rust/ping/Cargo.toml`'s
+      `[package.metadata.component.target] path = "../../../wit/waddle-bundle"`).
+    -->
+    <Wit Include="../../../wit/waddle-bundle/stage.wit" World="stage" />
+  </ItemGroup>
+
+</Project>

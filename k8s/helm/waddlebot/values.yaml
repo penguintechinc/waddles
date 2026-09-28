@@ -649,7 +649,10 @@ pipeline:
 
   hubWebui:
     enabled: true
-    port: 8205
+    # Express server (admin/hub_module/webui-server/server.js), not nginx --
+    # PORT env below must match this, and the Dockerfile.webui default is
+    # also 8080. Do not change one without the other.
+    port: 8080
     replicas: 2
     service:
       type: ClusterIP
