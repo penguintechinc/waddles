@@ -801,11 +801,12 @@ pipeline:
       # of its svc-action-rust default. Matches HOST_API_PORT's own CliConfig default
       # (core/svc_process/src/config.rs).
       hostApiPort: 8301
-      # DB-driven active-bundle loader (core/svc_process/src/config.rs,
-      # core/bundle_active_set) -- hub-api is the sole writer, this stage reads ACTIVE,
-      # APPROVED bundle config from a READ-ONLY Postgres and hot-swaps in/out with no pod
-      # restart. Gated OFF by default behind waddles.core.db-bundle-config; while off or
-      # BUNDLE_SCOPE_TENANT_ID is unset (0, "not configured"), PROCESS_APP_ID/
+      # Multi-tenant, change-log-driven active-bundle loader (core/svc_process/
+      # src/config.rs, core/bundle_active_set, core/svc_process/src/changelog_consumer.rs)
+      # -- hub-api is the sole writer, this stage reads ACTIVE, APPROVED bundle config
+      # for EVERY tenant/community from a READ-ONLY Postgres and hot-swaps in/out with
+      # no pod restart. Enabled by default; opt out via waddles.core.disable-db-bundle-config
+      # and/or waddles.core.disable-multi-tenant-watermark, in which case PROCESS_APP_ID/
       # PROCESS_BUNDLE_* above remain the sole selection mechanism -- these defaults are
       # safe to ship even before the RO Postgres role exists.
       # dbReaderHost/Port/Name default to the SAME primary Postgres alpha already runs
@@ -820,24 +821,19 @@ pipeline:
       # the exact GRANT statements this role needs; provisioning the role itself is a
       # follow-up (not a Helm change) tracked outside this chart.
       dbReaderUser: "svc_process_ro"
-      # Bug fix: left unset ("") rather than defaulted to 0 -- the Rust side
-      # (core/svc_process/src/config.rs TenantScopeId) now distinguishes "not
-      # configured" (None) from the real, legitimate global tenant `0`
-      # (Some(0)), so this chart must not collapse those two states by
-      # defaulting to 0 either. templates/svc-process-rust.yaml only renders
-      # BUNDLE_SCOPE_TENANT_ID at all when this is non-empty; the loader
-      # stays disabled (same fail-safe posture as every other interim
-      # env-driven substitute in this block) until a values file
-      # (e.g. values-alpha.yaml) sets a real tenant scope, `0` included.
-      bundleScopeTenantId: ""
-      # 0 = tenant-wide (matches app_active_versions.community_id's own sentinel,
-      # migration 0022_app_versions_and_rbac). Unlike bundleScopeTenantId above, 0
-      # really is the intended default here, so this one keeps its literal default.
-      bundleScopeCommunityId: 0
+      # BUNDLE_SCOPE_TENANT_ID/BUNDLE_SCOPE_COMMUNITY_ID REMOVED (dataplane scale
+      # design, multi-tenant change-log consumer): the loader now discovers and
+      # serves every (tenant_id, community_id) scope in the database itself
+      # (bundle_active_set::read_active_set_all) -- there is no per-pod tenant
+      # scope left to configure.
       # Whole seconds; clamped to a 5s floor in code (CliConfig::
       # bundle_config_poll_interval) so a misconfigured 0/negative value here can never
-      # hot-loop the watermark check against the reader database.
+      # hot-loop the incremental change-log poll against the reader database.
       bundleConfigPollSeconds: 300
+      # Whole minutes; clamped to a 1m floor in code (CliConfig::
+      # full_reconcile_interval). Periodic full active-set reconcile -- bounds the
+      # blast radius of any change-log defect to one interval.
+      bundleConfigFullReconcileMinutes: 15
       resources:
         requests:
           cpu: "100m"
@@ -883,11 +879,10 @@ pipeline:
       dbReaderPort: ""
       dbReaderName: ""
       dbReaderUser: "svc_action_ro"
-      # Bug fix: left unset ("") rather than defaulted to 0 -- see svcProcess's
-      # identical field's own comment above for the full rationale.
-      bundleScopeTenantId: ""
-      bundleScopeCommunityId: 0
+      # BUNDLE_SCOPE_TENANT_ID/BUNDLE_SCOPE_COMMUNITY_ID REMOVED -- see
+      # svcProcess's identical field's own comment above for the full rationale.
       bundleConfigPollSeconds: 300
+      bundleConfigFullReconcileMinutes: 15
       resources:
         requests:
           cpu: "100m"

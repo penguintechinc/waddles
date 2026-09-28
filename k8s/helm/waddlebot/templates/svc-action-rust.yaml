@@ -138,17 +138,15 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: DB_READER_PASSWORD
-        {{- /* Bug fix: rendered only when explicitly set -- see
+        {{- /* BUNDLE_SCOPE_TENANT_ID/BUNDLE_SCOPE_COMMUNITY_ID REMOVED -- see
         templates/svc-process-rust.yaml's identical block for the full rationale
-        (core/svc_action/src/config.rs TenantScopeId mirrors svc_process's own). */}}
-        {{- if ne (.Values.pipeline.rustDataPlane.svcAction.bundleScopeTenantId | toString) "" }}
-        - name: BUNDLE_SCOPE_TENANT_ID
-          value: {{ .Values.pipeline.rustDataPlane.svcAction.bundleScopeTenantId | quote }}
-        {{- end }}
-        - name: BUNDLE_SCOPE_COMMUNITY_ID
-          value: {{ .Values.pipeline.rustDataPlane.svcAction.bundleScopeCommunityId | default 0 | quote }}
+        (dataplane scale design, multi-tenant change-log consumer). */}}
         - name: BUNDLE_CONFIG_POLL_SECONDS
+          # Incremental change-log poll interval, in whole seconds (floor: 5s).
           value: {{ .Values.pipeline.rustDataPlane.svcAction.bundleConfigPollSeconds | default 300 | quote }}
+        - name: BUNDLE_CONFIG_FULL_RECONCILE_MINUTES
+          # Periodic full active-set reconcile interval, in whole minutes (floor: 1m).
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.bundleConfigFullReconcileMinutes | default 15 | quote }}
         - name: ENVELOPE_BINDING_KEYS
           valueFrom:
             secretKeyRef:

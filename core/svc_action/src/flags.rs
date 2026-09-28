@@ -154,8 +154,8 @@ impl FeatureFlag for DisableDbBundleConfigFlag {
     }
 }
 
-/// Builds the [`FeatureFlag`] `crate::lib::try_start_db_bundle_loader` (and
-/// the startup path-selection dispatch) gates on: [`DisableDbBundleConfigFlag`]
+/// Builds the [`FeatureFlag`] `crate::lib::try_start_changelog_consumer`
+/// (and the startup path-selection dispatch) gates on: [`DisableDbBundleConfigFlag`]
 /// over a real client, or a fixed "DB path enabled" answer when no license
 /// client is available at all (mirrors `crate::lib::flag_or_closed`'s own
 /// `None` branch, just with the final, already-inverted boolean this
@@ -166,6 +166,76 @@ pub fn db_bundle_config_flag(
     match license {
         Some(client) => boxed(DisableDbBundleConfigFlag::new(Arc::clone(client))),
         None => boxed(StaticFlag(true)),
+    }
+}
+
+/// Opt-out kill-switch for the multi-tenant, change-log-driven active-set
+/// loader (`crate::changelog_consumer`) -- dataplane scale design rev 4,
+/// §8 step 2: "Multi-tenant watermark polling ...
+/// waddles.core.disable-multi-tenant-watermark". Same inversion convention
+/// as [`DISABLE_DB_BUNDLE_CONFIG_FLAG`]: unseen/OFF/license-server-
+/// unreachable means the multi-tenant path is ENABLED (the default, and
+/// the user's own hard requirement -- "every svc_process/svc_action pod
+/// serves ALL tenants"); ON opts back OUT of it, falling back to the
+/// existing `ACTION_APP_ID`/`ACTION_BUNDLE_*` env selection and the
+/// `crate::distribution` catalog poll -- there is no remaining
+/// single-tenant DB-driven path to fall back to (`BUNDLE_SCOPE_TENANT_ID`/
+/// `BUNDLE_SCOPE_COMMUNITY_ID` were removed in this same change).
+pub const DISABLE_MULTI_TENANT_WATERMARK_FLAG: &str = "waddles.core.disable-multi-tenant-watermark";
+
+/// Production [`FeatureFlag`] for [`DISABLE_MULTI_TENANT_WATERMARK_FLAG`] --
+/// same bypass-aware negation shape as [`DisableDbBundleConfigFlag`] (see
+/// that type's own doc for the full bypass-awareness rationale, identical
+/// here).
+pub struct DisableMultiTenantWatermarkFlag(Arc<penguin_licensing::LicenseClient>);
+
+impl DisableMultiTenantWatermarkFlag {
+    pub fn new(client: Arc<penguin_licensing::LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureFlag for DisableMultiTenantWatermarkFlag {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            if self.0.bypass_active() {
+                return true;
+            }
+            !self
+                .0
+                .flag_enabled(DISABLE_MULTI_TENANT_WATERMARK_FLAG)
+                .await
+        })
+    }
+}
+
+/// Builds the combined "is the multi-tenant changelog-consumer path
+/// enabled?" [`FeatureFlag`] -- `crate::flags::db_bundle_config_flag`'s
+/// answer AND [`DisableMultiTenantWatermarkFlag`]'s answer, both already
+/// negated (`true` = enabled). Mirrors `core/svc_process::license::AllGate`.
+pub fn multi_tenant_watermark_flag(
+    license: &Option<Arc<penguin_licensing::LicenseClient>>,
+) -> Arc<dyn FeatureFlag> {
+    match license {
+        Some(client) => boxed(DisableMultiTenantWatermarkFlag::new(Arc::clone(client))),
+        None => boxed(StaticFlag(true)),
+    }
+}
+
+/// Combines multiple [`FeatureFlag`]s with logical AND, short-circuiting on
+/// the first `false`.
+pub struct AllFlags(pub Vec<Arc<dyn FeatureFlag>>);
+
+impl FeatureFlag for AllFlags {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            for flag in &self.0 {
+                if !flag.enabled().await {
+                    return false;
+                }
+            }
+            true
+        })
     }
 }
 
@@ -249,6 +319,45 @@ mod tests {
     async fn db_bundle_config_flag_defaults_enabled_when_no_license_client_is_available() {
         let flag = db_bundle_config_flag(&None);
         assert!(flag.enabled().await);
+    }
+
+    #[test]
+    fn disable_multi_tenant_watermark_flag_matches_the_product_flag_key_convention() {
+        assert_eq!(
+            DISABLE_MULTI_TENANT_WATERMARK_FLAG,
+            "waddles.core.disable-multi-tenant-watermark"
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_tenant_watermark_flag_defaults_enabled_when_no_license_client_is_available() {
+        let flag = multi_tenant_watermark_flag(&None);
+        assert!(flag.enabled().await);
+    }
+
+    #[tokio::test]
+    async fn disable_multi_tenant_watermark_flag_defaults_enabled_when_never_seen() {
+        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-multi-tenant-default")
+            .expect("default LicenseConfig::new never fails");
+        let client = penguin_licensing::LicenseClient::new(cfg)
+            .expect("LicenseClient::new with a valid default config never fails");
+        let flag = DisableMultiTenantWatermarkFlag::new(client);
+        assert!(
+            flag.enabled().await,
+            "an unseen kill-switch flag must leave the multi-tenant path enabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn all_flags_is_enabled_only_when_every_wrapped_flag_is_enabled() {
+        let flags = AllFlags(vec![boxed(StaticFlag(true)), boxed(StaticFlag(true))]);
+        assert!(flags.enabled().await);
+    }
+
+    #[tokio::test]
+    async fn all_flags_is_disabled_when_any_wrapped_flag_is_disabled() {
+        let flags = AllFlags(vec![boxed(StaticFlag(true)), boxed(StaticFlag(false))]);
+        assert!(!flags.enabled().await);
     }
 
     /// Proves `LicenseFlag` genuinely calls through to a real
