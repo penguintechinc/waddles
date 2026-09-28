@@ -1,7 +1,8 @@
 .PHONY: dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
-        verify-csping-fixture
+        verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll \
+        build-superpenguin-roll-bundle
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -96,6 +97,26 @@ run-ai-local: ## Run ai_interaction_module container locally (standalone, 1 work
 # committed binary auditable instead of a trust-me blob.
 verify-csping-fixture:
 	@bash scripts/verify-csping-fixture.sh
+
+# waddle-sdk-cs: shared C# SDK for Waddles app bundles (sdk/waddle-sdk-cs) --
+# xUnit tests run in the same pinned containerized .NET SDK image as every
+# other C# build in this repo (see scripts/test-waddle-sdk-cs.sh).
+test-waddle-sdk-cs:
+	@bash scripts/test-waddle-sdk-cs.sh
+
+# superpenguin-roll: first C# bundle built on waddle-sdk-cs, ported from
+# PenguinTwitchBot's PastyGames/Roll.cs (MIT, used with permission -- see
+# bundles/csharp/superpenguin-roll/bundle.yaml `notice`).
+test-superpenguin-roll:
+	@bash scripts/test-superpenguin-roll.sh
+
+# Rebuilds bundles/csharp/superpenguin-roll to a real .wasm component and
+# reports its size/sha256 -- see scripts/verify-superpenguin-roll-fixture.sh
+# for why no committed fixture is byte-identity-checked here (unlike
+# verify-csping-fixture, this component is not committed to
+# core/bundle_executor/tests/fixtures/).
+build-superpenguin-roll-bundle:
+	@bash scripts/verify-superpenguin-roll-fixture.sh
 
 pre-commit:
 	@echo "=== Pre-commit checks ==="
