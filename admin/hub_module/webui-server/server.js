@@ -14,12 +14,26 @@ import { dirname, join } from 'path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const PORT = Number(process.env.PORT ?? 8080);
+const NODE_ENV = process.env.NODE_ENV ?? 'development';
+
+// In-cluster deployments (Helm) always set HUB_API_URL explicitly to the
+// hub-api Service DNS name -- localhost is never correct once this runs in
+// a pod. Fail fast in production rather than silently proxying to nothing.
+if (!process.env.HUB_API_URL && NODE_ENV === 'production') {
+  console.error(
+    '[hub-webui] FATAL: HUB_API_URL is required when NODE_ENV=production ' +
+      '-- refusing to start with the localhost:8060 dev default',
+  );
+  process.exit(1);
+}
 const HUB_API_URL = process.env.HUB_API_URL ?? 'http://localhost:8060';
 const DIST_DIR = join(__dirname, 'dist');
 
 const app = express();
 
-// Health check -- must be registered before the SPA catch-all below.
+// Health check -- LOCAL only (process-up check). Must never call out to
+// hub-api: liveness uses this same endpoint, and a slow/down upstream must
+// not cause kubelet to kill this pod. Registered before the SPA catch-all.
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
 });
