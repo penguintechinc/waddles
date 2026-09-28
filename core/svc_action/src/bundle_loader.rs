@@ -2,14 +2,14 @@
 //! this stage reads ACTIVE, APPROVED bundle config from a READ-ONLY
 //! Postgres and hot-swaps bundles in/out with no pod restart). Enabled by
 //! default; opt out via the `waddles.core.disable-db-bundle-config`
-//! kill-switch (`crate::flags::DISABLE_DB_BUNDLE_CONFIG_FLAG`, negated via
-//! `crate::flags::NegatedFlag` -- see that constant's doc) -- while the
-//! kill-switch is on or the DB path is unavailable, the existing
-//! `ACTION_APP_ID`/`ACTION_BUNDLE_*` env selection and the
-//! `crate::distribution` catalog poll remain the sole sources; this loader
-//! never deletes or overrides either path, only supplements them by
-//! driving `Load`/`Unload` onto whatever the executor connection already
-//! is.
+//! kill-switch (`crate::flags::DISABLE_DB_BUNDLE_CONFIG_FLAG`, see
+//! `crate::flags::db_bundle_config_flag`'s doc). **Mutually exclusive with
+//! the legacy `ACTION_BUNDLE_*` env override** (`crate::
+//! try_start_env_bundle_loader`) -- `crate::resolve_db_path_active` picks
+//! exactly one, once, at startup (`crate::lib`'s top doc); this module's
+//! own `run_tick` additionally re-checks the kill-switch every tick so a
+//! live flip stops DB-driven `Load`/`Unload` immediately, even though it
+//! can't fail the process back over to the legacy path without a restart.
 //!
 //! Direct port of `core/svc_process/src/bundle_loader.rs` (same query/diff
 //! logic from the shared `bundle_active_set` crate) with the wire calls
