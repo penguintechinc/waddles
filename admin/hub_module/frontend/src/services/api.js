@@ -1031,3 +1031,41 @@ export const superadminTenantApi = {
   update: (id, data) => api.put(`/api/v1/superadmin/tenants/${id}`, data),
   delete: (id) => api.delete(`/api/v1/superadmin/tenants/${id}`),
 };
+
+// ── Bundle Onboarding API (hub_api/blueprints/v1/bundle_versions.py +
+// bundle_approvals.py) ─────────────────────────────────────────────
+// `app_id` is a URL path segment, not a query value -- encoded so a
+// namespace like `waddles.integrations.vendor-42.mybundle` round-trips
+// safely even though it already only contains URL-safe characters.
+export const bundleApi = {
+  // multipart: `manifest` (YAML, required) + `component` (prebuilt WASM,
+  // vendors) OR `source` (tarball, platform:admin only). `source` is
+  // deliberately never sent by vendor-facing UI -- vendor uploads are
+  // 400-refused server-side (services/vendor_bundle_authz.py).
+  createVersion: (appId, formData) =>
+    api.post(`/api/v1/apps/${encodeURIComponent(appId)}/versions`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  listVersions: (appId) => api.get(`/api/v1/apps/${encodeURIComponent(appId)}/versions`),
+  getVersion: (appId, version) =>
+    api.get(`/api/v1/apps/${encodeURIComponent(appId)}/versions/${encodeURIComponent(version)}`),
+  getPermissions: (appId, version) =>
+    api.get(
+      `/api/v1/apps/${encodeURIComponent(appId)}/versions/${encodeURIComponent(version)}/permissions`,
+    ),
+  approveVersion: (appId, version, data) =>
+    api.post(
+      `/api/v1/apps/${encodeURIComponent(appId)}/versions/${encodeURIComponent(version)}/approve`,
+      data,
+    ),
+  denyVersion: (appId, version, data) =>
+    api.post(
+      `/api/v1/apps/${encodeURIComponent(appId)}/versions/${encodeURIComponent(version)}/deny`,
+      data,
+    ),
+};
+
+// ── Global-Admin Bundle Approval Queue (hub_api/blueprints/v1/bundle_admin.py) ──
+export const bundleAdminApi = {
+  listPendingVersions: (params) => api.get('/api/v1/admin/bundle-versions', { params }),
+};
