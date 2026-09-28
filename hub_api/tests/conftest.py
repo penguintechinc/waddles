@@ -1367,6 +1367,9 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("approved_by", Integer),
         Column("approved_at", DateTime),
         Column("superseded_by", BigInteger),
+        # migration 0026 -- "human" (default, global-admin approved) or
+        # "system:core-seeder" (seed_core_bundles.py, no human approval).
+        Column("approval_source", String(50), server_default="human"),
     )
     Table(
         "app_stream_grants",
@@ -1419,6 +1422,35 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("platform", String(50), nullable=False),
         Column("source_id", String(255), nullable=False),
         Column("created_at", DateTime),
+    )
+    # app_global_installs / bundle_tenant_availability (migration 0027) --
+    # GLOBAL and TENANT tiers of the App Bundle 3-tier split
+    # (services/bundle_approval_service.py's own module docstring).
+    Table(
+        "app_global_installs",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("app_id", String(255), nullable=False),
+        Column("version", String(50), nullable=False),
+        Column("version_id", BigInteger, nullable=False),
+        Column("permission_hash", String(71), nullable=False),
+        Column("summary_json", JSON, nullable=False),
+        Column("install_source", String(50), server_default="human"),
+        Column("installed_by", Integer),
+        Column("installed_at", DateTime),
+        Column("revoked_by", Integer),
+        Column("revoked_at", DateTime),
+        Column("superseded_by", BigInteger),
+    )
+    Table(
+        "bundle_tenant_availability",
+        metadata,
+        Column("tenant_id", Integer, nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("available", Boolean, server_default="1"),
+        Column("pinned_version_id", BigInteger),
+        Column("updated_by", Integer),
+        Column("updated_at", DateTime),
     )
     # `audit_log` is a pre-existing production table (services/schema.py's
     # `bind_admin_tables()`), reflected here as its sqlite-compatible
