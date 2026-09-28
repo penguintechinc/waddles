@@ -28,17 +28,24 @@ SYSTEM-actor path; an explicit `platform:admin` action for a stuck
 vendor upload) -- this migration only makes the resulting state
 representable and the resubmission path possible.
 
-Revision ID: 0027_app_version_uploads_abandoned
-Revises: 0026_app_install_approval_source
+Revision ID: 0034_upload_abandoned_status
+Revises: 0033_hub_users_identity_uuid
 Create Date: 2026-09-28
+
+NOTE (queued-migration renumbering, 2026-09-28): this PR branched before
+0027-0033 (seeder/lifecycle/changelog/attribution/app-schemas/signing/
+grants/users.uuid) merged, so `down_revision` below is a forward
+reference to a revision ID that does not exist on this branch yet --
+verify it still matches 0033's actual final revision ID at merge time
+and rebase this migration onto whatever lands immediately before it.
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "0027_app_version_uploads_abandoned"
-down_revision = "0026_app_install_approval_source"
+revision = "0034_upload_abandoned_status"
+down_revision = "0033_hub_users_identity_uuid"
 branch_labels = None
 depends_on = None
 
