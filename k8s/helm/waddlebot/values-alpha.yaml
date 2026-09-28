@@ -82,6 +82,12 @@ infrastructure:
     resources:
       requests: { cpu: "50m", memory: "128Mi" }
       limits: { cpu: "300m", memory: "512Mi" }
+    # fix/minio-kms-sse -- alpha is exempt from the beta/gamma/production fail guard
+    # (templates/infrastructure/minio.yaml) and may reference this well-known secret
+    # name; the Secret itself is never committed -- provision it once per cluster via
+    # `make generate-minio-kms-key` / scripts/generate-minio-kms-key.sh before deploy.
+    kms:
+      secretName: "minio-kms"
   ollama:
     enabled: false
   qdrant:
