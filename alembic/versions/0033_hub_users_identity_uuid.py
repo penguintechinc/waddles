@@ -35,9 +35,19 @@ tolerant no-ops until it lands:
   instead of `community_members.user_id` directly, once that crate is
   updated to consume it: joins `community_members` to `hub_users` via the
   existing `user_id::text = hub_users.id::text` convention and projects
-  only `(community_id, platform, platform_user_id, display_name,
-  hub_user_uuid)` -- no PII column (`email`, `username`, `password_hash`,
-  `avatar_url`, ...) is exposed.
+  only `(community_id, platform, platform_user_id, hub_user_uuid)` --
+  **`display_name` is deliberately NOT projected**: it is PII under this
+  repo's PII-tokenization rule, so `waddles_bundle_reader` must never be
+  able to read it. Identity resolution across this view is
+  `platform_user_id`-only -- Twitch IRC tags carry a stable numeric
+  `user-id`, Discord events carry a stable numeric snowflake, so a
+  handle/display-name match is never needed for the linked-identity path.
+  #429's `resolve_member_by_handle` (matching an unstructured `@mention`
+  against a handle) is a different, PII-handling code path entirely: the
+  raw handle it reads goes only to hub-api's ephemeral-pseudonym mint
+  endpoint (inside the PII boundary), never to this view or to
+  `waddles_bundle_reader`. No other PII column (`email`, `username`,
+  `password_hash`, `avatar_url`, ...) is exposed either.
 - `waddles_bundle_reader` (the Rust data-plane's existing RO role, see
   `0025_app_source_bindings.py`) is granted **column-scoped** `SELECT
   (uuid, id)` on `hub_users` directly (the join key plus the UUID itself,
@@ -49,8 +59,16 @@ tolerant no-ops until it lands:
 Downgrade is the exact inverse, in reverse order: revoke both grants,
 drop the view, drop the unique constraint, drop the column.
 
-Revision ID: 0027_hub_users_identity_uuid
-Revises: 0026_app_install_approval_source
+**Numbering note:** originally authored as `0027_hub_users_identity_uuid`
+against a `0026` head; renumbered to `0033` (`down_revision =
+0032_bundle_permission_grants`) once the real chain -- 0026 seeder ->
+0027 lifecycle -> 0028 changelog -> 0029 attribution -> 0030 app schemas
+-> 0031 signing -> 0032 grants (#407) -- was known. May need further
+renumbering at actual merge time if more migrations land on
+`release/v3.0.X` ahead of this one in the meantime.
+
+Revision ID: 0033_hub_users_identity_uuid
+Revises: 0032_bundle_permission_grants
 Create Date: 2026-09-28
 """
 
@@ -58,8 +76,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0027_hub_users_identity_uuid"
-down_revision = "0026_app_install_approval_source"
+revision = "0033_hub_users_identity_uuid"
+down_revision = "0032_bundle_permission_grants"
 branch_labels = None
 depends_on = None
 
@@ -95,14 +113,19 @@ def upgrade() -> None:
 
     # 5. The join the data plane actually needs: community_members (keyed
     #    by platform identity) -> hub_users.uuid (the real identity), with
-    #    zero PII columns projected.
+    #    zero PII columns projected. `display_name` is deliberately
+    #    excluded -- it is PII, and identity resolution across this view
+    #    is platform_user_id-only (Twitch IRC `user-id` tag / Discord
+    #    snowflake), never a handle/display-name match. A raw handle is
+    #    only ever passed to hub-api's ephemeral-pseudonym mint endpoint,
+    #    inside the PII boundary -- never to this view or to
+    #    waddles_bundle_reader.
     op.execute(
         f"CREATE OR REPLACE VIEW {_VIEW_NAME} AS\n"  # nosec B608 -- view name is a fixed module-level literal, never user input
         "SELECT\n"
         "    cm.community_id,\n"
         "    cm.platform,\n"
         "    cm.platform_user_id,\n"
-        "    cm.display_name,\n"
         "    hu.uuid AS hub_user_uuid\n"
         "FROM community_members cm\n"
         "LEFT JOIN hub_users hu ON hu.id::text = cm.user_id"
@@ -110,8 +133,9 @@ def upgrade() -> None:
     op.execute(
         f"COMMENT ON VIEW {_VIEW_NAME} IS "
         "'Data-plane read contract for PR #429/#427: community_members "
-        "platform identity joined to its linked hub_users.uuid (NULL if "
-        "unlinked). No PII column from either table is projected.'"
+        "platform identity (platform_user_id only, never a PII handle) "
+        "joined to its linked hub_users.uuid (NULL if unlinked). No PII "
+        "column from either table is projected.'"
     )
 
     # 6. Column-scoped grant on hub_users -- uuid plus the join key (id),
