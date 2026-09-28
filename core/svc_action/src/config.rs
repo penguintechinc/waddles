@@ -188,22 +188,19 @@ pub struct CliConfig {
     #[arg(long, env = "METERING_FLUSH_INTERVAL_S", default_value_t = 10)]
     pub metering_flush_interval_s: u64,
 
-    /// Interim, env-driven substitute for the `GET /api/v1/distribution/
-    /// bundles?stage=action` poll actually resolving a loadable digest
-    /// (spec §6.7) -- defense-in-depth fallback, mirrors `core/svc_process`'s
-    /// own `PROCESS_BUNDLE_DIGEST` (`config::CliConfig` there) field-for-
-    /// field. The distribution poll (`crate::distribution`) remains the
-    /// primary/eventual source: `crate::resolve_initial_bundle` only falls
-    /// back to this value when the catalog never resolves a digest for
-    /// `ACTION_APP_ID` within its retry window (hub-api empty/unreachable),
-    /// and `crate::try_start_env_bundle_loader` sends this bundle's `load`
-    /// frame directly -- independent of hub-api reachability -- so the
-    /// action stage can invoke without ever having polled a live hub-api.
-    /// Empty (default) disables the fallback entirely, leaving today's
-    /// catalog-only behavior unchanged. Expected shape: `sha256:<64 hex>`
-    /// -- the executor's own digest validator (`bundle_executor::invoke::
-    /// verify_digest`) rejects a bare hex string with `MalformedDigest`, so
-    /// the chart must set this with the prefix already included.
+    /// The legacy bundle-selection path's digest source (`crate::
+    /// try_start_env_bundle_loader`/`crate::resolve_initial_bundle`) --
+    /// active only when `crate::resolve_db_path_active` finds the DB-driven
+    /// path (below) inactive at startup (mutual exclusion, `crate::lib`'s
+    /// top doc). `try_start_env_bundle_loader` sends this bundle's `load`
+    /// frame directly over the host-API connection; `resolve_initial_bundle`
+    /// uses the same value for the dispatch loop's `deps.digest`. Empty
+    /// (default) disables this path entirely -- the dispatch loop then
+    /// starts with an empty digest until either this is set or the DB path
+    /// becomes active. Expected shape: `sha256:<64 hex>` -- the executor's
+    /// own digest validator (`bundle_executor::invoke::verify_digest`)
+    /// rejects a bare hex string with `MalformedDigest`, so the chart must
+    /// set this with the prefix already included.
     #[arg(long, env = "ACTION_BUNDLE_DIGEST", default_value = "")]
     pub action_bundle_digest: String,
     /// See [`Self::action_bundle_digest`]. The `load` frame's `version`
@@ -213,10 +210,8 @@ pub struct CliConfig {
     pub action_bundle_version: String,
     /// See [`Self::action_bundle_digest`]. The bucket key `load` asks the
     /// executor to fetch the compiled component from (spec §7.6 step 3's
-    /// naming convention -- `crate::distribution::bucket_keys` derives the
-    /// same shape from a real distribution row; this fallback requires the
-    /// operator to supply it directly since there is no row to derive it
-    /// from).
+    /// naming convention) -- this fallback requires the operator to supply
+    /// it directly since there is no distribution row to derive it from.
     #[arg(long, env = "ACTION_BUNDLE_COMPONENT_KEY", default_value = "")]
     pub action_bundle_component_key: String,
     /// See [`Self::action_bundle_digest`]. The bucket key for the bundle's
@@ -224,38 +219,6 @@ pub struct CliConfig {
     /// [`Self::action_bundle_component_key`].
     #[arg(long, env = "ACTION_BUNDLE_SIDECAR_KEY", default_value = "")]
     pub action_bundle_sidecar_key: String,
-
-    /// hub-api base URL, source of the `GET /api/v1/distribution/bundles
-    /// ?stage=action` poll (spec §6.7) `crate::distribution` drives --
-    /// same field name/default `core/svc_process`'s own M4 config carries
-    /// for the identical poll, kept consistent across the two stages.
-    #[arg(long, env = "HUB_API_URL", default_value = "http://hub-api:8204")]
-    pub hub_api_url: String,
-    /// Distribution-bundles poll interval, in seconds (spec §6.7: "Polling
-    /// behaviour is unchanged ... every `POLL_INTERVAL_S` (5.0 s)").
-    #[arg(long, env = "POLL_INTERVAL_S", default_value_t = 5.0)]
-    pub poll_interval_s: f64,
-    /// `iss` claim on the service JWT `crate::service_jwt` mints for the
-    /// distribution poll -- matches `libs/flask_core/flask_core/
-    /// auth.py::DEFAULT_JWT_ISSUER`'s own default exactly, so this pod's
-    /// tokens verify against the same platform-wide `verify_jwt_token`
-    /// hub-api (and every other flask_core-based service) already runs.
-    /// Not currently overridden anywhere in `k8s/helm/waddlebot` -- both
-    /// sides rely on this identical hardcoded default.
-    #[arg(long, env = "JWT_ISSUER", default_value = "waddlebot")]
-    pub jwt_issuer: String,
-    /// `aud` claim -- matches `DEFAULT_JWT_AUDIENCE`'s own default. See
-    /// `jwt_issuer` above.
-    #[arg(long, env = "JWT_AUDIENCE", default_value = "waddlebot-services")]
-    pub jwt_audience: String,
-    /// `tenant` claim on the minted service JWT -- same env var name and
-    /// `"global"` default `core/svc_process`/`core/svc_ingest`'s Python
-    /// stage-runner `Config.RUNNER_TENANT_SLUG` already uses for this exact
-    /// purpose (`libs/flask_core/flask_core/stage_runner.py`'s
-    /// `jwt_provider`, wired from `RUNNER_TENANT_SLUG` in each service's
-    /// `app.py`).
-    #[arg(long, env = "RUNNER_TENANT_SLUG", default_value = "global")]
-    pub runner_tenant_slug: String,
 
     /// Lifts the private-address half of the bundle `http` capability's
     /// SSRF guard (spec §8.2 step 6 / §8.5) for hosts already on that
@@ -288,10 +251,10 @@ pub struct CliConfig {
     // this stage reads ACTIVE, APPROVED bundle config from a READ-ONLY
     // Postgres and hot-swaps in/out with no pod restart) -- ENABLED by
     // default; opt out via the `waddles.core.disable-db-bundle-config`
-    // kill-switch (`crate::flags`). When the kill-switch is on or the DB
-    // path is unavailable, the existing `ACTION_APP_ID`/`ACTION_BUNDLE_*`
-    // env selection and the `crate::distribution` catalog poll remain the
-    // sole selection mechanisms. See `crate::bundle_loader`.
+    // kill-switch (`crate::flags`). Mutually exclusive with the legacy
+    // `ACTION_BUNDLE_*` env override -- `crate::resolve_db_path_active`
+    // picks exactly one, once, at startup (`crate::lib`'s top doc). See
+    // `crate::bundle_loader`.
     // Field shapes/defaults mirror `core/svc_process::config::CliConfig`'s
     // identical additions exactly -- same env var names across both
     // services, kept consistent per that crate's own doc rationale.
@@ -382,22 +345,6 @@ pub struct Config {
     /// without it rather than silently accepting every envelope (a missing
     /// keyring must never fail open).
     pub envelope_binding_keys: Option<Secret>,
-    /// `SECRET_KEY` (env-only, see [`Config::from_cli`]) -- the shared
-    /// HS256 signing key `crate::service_jwt` uses to mint the distribution
-    /// poll's service JWT. The exact same secret hub-api (and every other
-    /// flask_core-based service) verifies incoming bearer tokens against
-    /// (`libs/flask_core/flask_core/secrets.py::require_secret_key`,
-    /// default env var `SECRET_KEY`) -- already present on this pod today
-    /// via the Helm chart's blanket `envFrom: secretRef` (`templates/
-    /// secrets.yaml`'s `SECRET_KEY` key, shared with `hub-api.yaml`), no
-    /// chart change required. Required at startup, same fail-closed
-    /// treatment as `db_password` above -- there is no insecure-placeholder
-    /// fallback here (unlike the Python `require_secret_key()` helper this
-    /// mirrors, which tolerates an unset value outside production): this
-    /// binary has no equivalent "is this a dev/test process" signal to key
-    /// that leniency off of, so requiring the value unconditionally is the
-    /// safe default.
-    pub secret_key: Secret,
     /// `DISCORD_BOT_TOKEN` (env-only, optional): the bot token
     /// `crate::capabilities::StageCapabilities::with_discord` authenticates
     /// the Discord relay send with (`Authorization: Bot <token>`). This is
@@ -414,13 +361,13 @@ pub struct Config {
     pub discord_bot_token: Option<Secret>,
     /// `DB_READER_PASSWORD` for the DB-driven active-bundle loader's
     /// read-only Postgres role (`crate::bundle_loader`). Deliberately
-    /// `Option`, unlike `db_password`/`secret_key`: this loader is enabled
-    /// by default (opt out via `waddles.core.disable-db-bundle-config`), so
-    /// a fresh alpha deployment that hasn't provisioned the RO role yet must not fail
-    /// startup over it -- `crate::lib::try_start_db_bundle_loader` logs a
-    /// warning and stays disabled (falling back to the existing
-    /// `ACTION_APP_ID`/`ACTION_BUNDLE_*`/catalog-poll selection) when this
-    /// is unset, the same graceful-degradation contract as
+    /// `Option`, unlike `db_password`: this loader is enabled by default
+    /// (opt out via `waddles.core.disable-db-bundle-config`), so a fresh
+    /// alpha deployment that hasn't provisioned the RO role yet must not
+    /// fail startup over it -- `crate::resolve_db_path_active` treats this
+    /// unset the same as a genuinely-disabled DB path, falling back to the
+    /// legacy `ACTION_BUNDLE_*` env override (mutual exclusion, `crate::lib`'s
+    /// top doc), the same graceful-degradation contract as
     /// `envelope_binding_keys`/`discord_bot_token` above.
     pub db_reader_password: Option<Secret>,
 }
@@ -434,7 +381,6 @@ impl fmt::Debug for Config {
                 "envelope_binding_keys",
                 &self.envelope_binding_keys.as_ref().map(|_| "<redacted>"),
             )
-            .field("secret_key", &Secret::new(""))
             .field(
                 "discord_bot_token",
                 &self.discord_bot_token.as_ref().map(|_| "<redacted>"),
@@ -463,7 +409,6 @@ impl Config {
         cli.validate()?;
         let db_password = Secret::new(env_required("DB_PASSWORD")?);
         let envelope_binding_keys = std::env::var("ENVELOPE_BINDING_KEYS").ok().map(Secret::new);
-        let secret_key = Secret::new(env_required("SECRET_KEY")?);
         let discord_bot_token = std::env::var("DISCORD_BOT_TOKEN").ok().map(Secret::new);
         // Security review fix: Helm always renders the DB_READER_PASSWORD
         // secret key (`templates/secrets.yaml`), defaulting to "" until the
@@ -481,7 +426,6 @@ impl Config {
             cli,
             db_password,
             envelope_binding_keys,
-            secret_key,
             discord_bot_token,
             db_reader_password,
         })
@@ -506,7 +450,6 @@ mod tests {
         // these specific variables within the test process.
         unsafe {
             std::env::remove_var("DB_PASSWORD");
-            std::env::remove_var("SECRET_KEY");
             std::env::remove_var("DISCORD_BOT_TOKEN");
             std::env::remove_var("DB_READER_PASSWORD");
         }
@@ -611,13 +554,6 @@ mod tests {
     }
 
     #[test]
-    fn distribution_poll_defaults_match_spec_6_7() {
-        let cli = CliConfig::parse_from(["svc-action"]);
-        assert_eq!(cli.hub_api_url, "http://hub-api:8204");
-        assert_eq!(cli.poll_interval_s, 5.0);
-    }
-
-    #[test]
     fn action_bundle_env_override_defaults_to_disabled() {
         let cli = CliConfig::parse_from(["svc-action"]);
         assert_eq!(cli.action_bundle_digest, "");
@@ -671,24 +607,6 @@ mod tests {
         assert_eq!(err, ConfigError::MissingEnv("DB_PASSWORD"));
     }
 
-    /// `SECRET_KEY` is checked after `DB_PASSWORD` (see `Config::from_cli`)
-    /// -- with `DB_PASSWORD` set and `SECRET_KEY` absent, the missing-secret
-    /// error must name `SECRET_KEY` specifically, not silently succeed or
-    /// report the wrong variable.
-    #[test]
-    fn load_fails_without_secret_key() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_secret_env();
-        // SAFETY: serialized by ENV_LOCK above.
-        unsafe {
-            std::env::set_var("DB_PASSWORD", "test-db-pass");
-        }
-        let cli = CliConfig::parse_from(["svc-action"]);
-        let err = Config::from_cli(cli).unwrap_err();
-        assert_eq!(err, ConfigError::MissingEnv("SECRET_KEY"));
-        clear_secret_env();
-    }
-
     #[test]
     fn load_succeeds_with_required_secrets_set() {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -696,12 +614,10 @@ mod tests {
         // SAFETY: serialized by ENV_LOCK above.
         unsafe {
             std::env::set_var("DB_PASSWORD", "test-db-pass");
-            std::env::set_var("SECRET_KEY", "test-jwt-signing-secret");
         }
         let cli = CliConfig::parse_from(["svc-action"]);
         let cfg = Config::from_cli(cli).expect("secrets are set");
         assert_eq!(cfg.db_password.expose(), "test-db-pass");
-        assert_eq!(cfg.secret_key.expose(), "test-jwt-signing-secret");
         assert!(cfg.envelope_binding_keys.is_none());
         clear_secret_env();
     }
@@ -713,7 +629,6 @@ mod tests {
         // SAFETY: serialized by ENV_LOCK above.
         unsafe {
             std::env::set_var("DB_PASSWORD", "test-db-pass");
-            std::env::set_var("SECRET_KEY", "test-jwt-signing-secret");
             std::env::set_var("ENVELOPE_BINDING_KEYS", "k1:aabbcc");
         }
         let cli = CliConfig::parse_from(["svc-action"]);
@@ -732,7 +647,6 @@ mod tests {
         clear_secret_env();
         unsafe {
             std::env::set_var("DB_PASSWORD", "test-db-pass");
-            std::env::set_var("SECRET_KEY", "test-jwt-signing-secret");
         }
         let cli = CliConfig::parse_from(["svc-action"]);
         let cfg = Config::from_cli(cli).expect("secrets are set");
@@ -746,7 +660,6 @@ mod tests {
         clear_secret_env();
         unsafe {
             std::env::set_var("DB_PASSWORD", "test-db-pass");
-            std::env::set_var("SECRET_KEY", "test-jwt-signing-secret");
             std::env::set_var("DISCORD_BOT_TOKEN", "test-discord-bot-token");
         }
         let cli = CliConfig::parse_from(["svc-action"]);
@@ -771,7 +684,6 @@ mod tests {
         clear_secret_env();
         unsafe {
             std::env::set_var("DB_PASSWORD", "test-db-pass");
-            std::env::set_var("SECRET_KEY", "test-jwt-signing-secret");
             std::env::set_var("DB_READER_PASSWORD", "");
         }
         let cli = CliConfig::parse_from(["svc-action"]);
@@ -789,7 +701,6 @@ mod tests {
         clear_secret_env();
         unsafe {
             std::env::set_var("DB_PASSWORD", "test-db-pass");
-            std::env::set_var("SECRET_KEY", "test-jwt-signing-secret");
             std::env::set_var("DB_READER_PASSWORD", "real-ro-password");
         }
         let cli = CliConfig::parse_from(["svc-action"]);
@@ -861,44 +772,13 @@ mod tests {
         // SAFETY: serialized by ENV_LOCK above.
         unsafe {
             std::env::set_var("DB_PASSWORD", "super-secret-db-pass");
-            std::env::set_var("SECRET_KEY", "super-secret-jwt-signing-key");
             std::env::set_var("DISCORD_BOT_TOKEN", "super-secret-discord-bot-token");
         }
         let cli = CliConfig::parse_from(["svc-action"]);
         let cfg = Config::from_cli(cli).expect("secrets are set");
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("super-secret-db-pass"));
-        assert!(!rendered.contains("super-secret-jwt-signing-key"));
         assert!(!rendered.contains("super-secret-discord-bot-token"));
         clear_secret_env();
-    }
-
-    #[test]
-    fn jwt_issuer_audience_and_runner_tenant_slug_defaults_match_flask_core() {
-        let cli = CliConfig::parse_from(["svc-action"]);
-        // Matches `libs/flask_core/flask_core/auth.py`'s
-        // `DEFAULT_JWT_ISSUER`/`DEFAULT_JWT_AUDIENCE` and
-        // `core/svc_process/config.py`'s `RUNNER_TENANT_SLUG` default
-        // exactly -- hub-api verifies the minted service JWT against these
-        // same defaults.
-        assert_eq!(cli.jwt_issuer, "waddlebot");
-        assert_eq!(cli.jwt_audience, "waddlebot-services");
-        assert_eq!(cli.runner_tenant_slug, "global");
-    }
-
-    #[test]
-    fn jwt_issuer_audience_and_runner_tenant_slug_env_overrides_are_honored() {
-        let cli = CliConfig::parse_from([
-            "svc-action",
-            "--jwt-issuer",
-            "custom-issuer",
-            "--jwt-audience",
-            "custom-audience",
-            "--runner-tenant-slug",
-            "acme",
-        ]);
-        assert_eq!(cli.jwt_issuer, "custom-issuer");
-        assert_eq!(cli.jwt_audience, "custom-audience");
-        assert_eq!(cli.runner_tenant_slug, "acme");
     }
 }

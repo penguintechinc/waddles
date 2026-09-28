@@ -108,24 +108,27 @@ penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", re
 penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f642e0695046386ca674e47eb9e6f7d6283ac531", package = "penguin-licensing", version = "=0.1.0" }
 # `penguin-connector-twitch`: IRC chat receive (`src/ingest/twitch.rs`) and
 # the outbound relay sender (`src/outbound.rs`, `TwitchIrcSender`) -- rev
-# carries penguin-libs PR #102 (discord message-drop fix, see the comment
-# below) fast-forwarded past the prior pin-alignment fix, PR #98. No
-# functional change to twitch itself; kept in lockstep with
-# penguin-connector-discord's rev below rather than diverging the two
-# same-repo git pins. EventSub webhook verification remains a separate
-# `// TODO(M5)` seam.
-penguin-connector-twitch = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "4a7619720615ea0df6731f5ae278eb8b03021ca6", package = "penguin-connector-twitch", version = "=0.1.0" }
+# fast-forwarded to penguin-libs PR #103 (typed Discord gateway close
+# codes, see the comment below) in lockstep with penguin-connector-discord's
+# rev rather than diverging the two same-repo git pins; PR #103 touches
+# only the discord crate's `error.rs`/`gateway.rs`, so this is a pure no-op
+# for twitch itself (verified via the GitHub compare: 2 commits ahead,
+# 0 behind, only discord files changed). EventSub webhook verification
+# remains a separate `// TODO(M5)` seam.
+penguin-connector-twitch = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "b65e93c08d7955e750e55e3c9621a94901c22962", package = "penguin-connector-twitch", version = "=0.1.0" }
 # `penguin-connector-discord`: Gateway chat receive (`src/ingest/discord.rs`).
-# rev carries penguin-libs PR #102: `normalize_message_create` was
-# silently dropping every real, non-self message whenever Discord's
-# `MESSAGE_CREATE` payload didn't carry `author.username`/message `id`/
-# `content` as a parseable string (all three were hard-required via `?`,
-# same as `author.id`/`channel_id`) -- a live-confirmed incident where a
-# real human `!ping` (author id != the bot's own id, self-filter correctly
-# not triggering) never reached svc-process. Those three fields are now
-# read leniently (empty-string default); only `author`/`author.id`/
-# `channel_id` remain hard-required.
-penguin-connector-discord = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "4a7619720615ea0df6731f5ae278eb8b03021ca6", package = "penguin-connector-discord", version = "=0.1.0" }
+# rev carries penguin-libs PR #103: `DiscordError` gained a
+# `GatewayClosed { code, reason, class }` variant plus
+# `gateway::{CloseCodeClass, classify_close_code}` -- a WebSocket close
+# frame that carries an explicit Discord close code is now classified
+# (`Resumable`/`ReconnectFresh`/`Fatal`) instead of collapsing to the
+# generic `Ok(None)` "connection ended" signal every other clean close
+# produces. Before this rev a fatal close (e.g. `4004` revoked/invalid
+# bot token) was indistinguishable from an ordinary disconnect, so
+# `run_loop` retried it forever; `src/ingest/discord.rs` now branches on
+# `class` (see that module's doc comment). Still carries PR #102's
+# lenient `MESSAGE_CREATE` field parsing (unchanged by #103).
+penguin-connector-discord = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "b65e93c08d7955e750e55e3c9621a94901c22962", package = "penguin-connector-discord", version = "=0.1.0" }
 # Named directly (not just transitive via penguin-connector-discord) only
 # because `src/ingest/discord.rs`'s `GatewayConnector for
 # DiscordGatewayReceiver` impl names `tokio_tungstenite::MaybeTlsStream` in
