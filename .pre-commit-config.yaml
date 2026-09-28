@@ -38,6 +38,15 @@ repos:
       - id: check-case-conflict
       - id: check-added-large-files
         args: [--maxkb=1024]
+        # core/bundle_executor/tests/fixtures/*.wasm are REAL compiled WASI
+        # 0.2 components committed so executor integration tests load a
+        # genuine build artifact rather than a hand-rolled stand-in (see
+        # that directory's own README). csping.wasm (componentize-dotnet/
+        # NativeAOT-LLVM output, ~4.3MB) is the first one to exceed 1024KB
+        # -- hostile_fixture.wasm (Rust, ~96KB) happened to fit under the
+        # limit by chance, not by a narrower rule. Scoped to this one
+        # directory, not a blanket bypass.
+        exclude: '^core/bundle_executor/tests/fixtures/.*\.wasm$'
       - id: check-yaml
         args: [--allow-multiple-documents]
         # Helm templates use Go templating ({{ }}) — not valid YAML until
