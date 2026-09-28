@@ -24,25 +24,37 @@ stages:
       - platform: twitch
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!so", "!shoutout"]
+          command_prefix: ["!so", "!shoutout", "!aiso"]
       - platform: discord
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!so", "!shoutout"]
+          command_prefix: ["!so", "!shoutout", "!aiso"]
     produces: []
     config: {}
     spec:
       required_config: []
   action:
     entry: "waddle:bundle/action-stage#dispatch"
-    config: {}
+    # `waddleai_base_url` is `!aiso`-only (src/app.py's KNOWN GAP 5) -- hub-api's internal
+    # AI-completions proxy has no fixed, Helm-release-independent DNS name, so this lets an
+    # operator override the placeholder default to match their actual `HUB_API_URL`.
+    config:
+      waddleai_base_url: "http://hub-api:8204"
     spec:
       required_config: []
-# Twitch Helix lookups only -- see src/app.py's module docstring "KNOWN GAPS" section for why
-# the OAuth token exchange itself (id.twitch.tv) is NOT egress this bundle ever performs.
+# Twitch Helix lookups (users + streams -- the latter for `!aiso`'s public, non-PII prompt
+# context only, see src/app.py's module docstring "KNOWN GAPS" section) plus a PLACEHOLDER
+# entry for hub-api's internal WaddleAI completions proxy: `hub-api` is the bare in-cluster
+# Service name this repo's own compose/dev default uses, but a real Helm install's Service
+# name is release-prefixed (`{{ fullname }}-hub-api-v3`) -- an operator must keep this entry
+# in sync with `action.config.waddleai_base_url` above until templated egress hosts (or a
+# native `ai.generate` capability) exist. The Twitch OAuth token exchange itself
+# (id.twitch.tv) is still NOT egress this bundle ever performs -- same gap as before.
 egress:
   - host: api.twitch.tv
     methods: ["GET"]
+  - host: hub-api
+    methods: ["POST"]
 data:
   tables: []
 limits:
@@ -50,7 +62,11 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions: []
-config_schema: {}
+config_schema:
+  waddleai_base_url:
+    type: string
+    required: false
+    default: "http://hub-api:8204"
 compatible_with: []
 incompatible_with: []
 platform_compatibility:

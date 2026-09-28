@@ -27,16 +27,21 @@ stages:
       - platform: twitch
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!so", "!shoutout"]
+          command_prefix: ["!so", "!shoutout", "!aiso"]
       - platform: discord
         event_types: ["chat.message"]
         filters:
-          command_prefix: ["!so", "!shoutout"]
+          command_prefix: ["!so", "!shoutout", "!aiso"]
   action:
     entry: "waddle:bundle/action-stage#dispatch"
+# See src/app.py's module docstring KNOWN GAP 5 / bundle.yaml's own egress comment: `hub-api`
+# is a placeholder in-cluster Service name for `!aiso`'s WaddleAI completions proxy call,
+# release-name-dependent in a real Helm install -- keep in sync with `waddleai_base_url`.
 egress:
   - host: api.twitch.tv
     methods: ["GET"]
+  - host: hub-api
+    methods: ["POST"]
 data:
   tables: []
 limits:

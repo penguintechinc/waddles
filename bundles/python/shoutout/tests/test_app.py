@@ -17,11 +17,13 @@ import json
 import sys
 import types
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
-
 from app import (
+    _AI_FEATURE_FLAG,
+    _AI_REQUIRED_TIER,
+    _AISO_USAGE,
     _FEATURE_FLAG,
     _INVALID_LOGIN_REPLY,
     _PERMISSION_DENIED_REPLY,
@@ -30,13 +32,13 @@ from app import (
     dispatch,
     transform,
 )
+from waddle_sdk.db import AsyncDB
 from waddle_sdk.flask_core.bundle_runtime import (
     bundle_context,
     reset_bundle_dal_for_tests,
     set_bundle_dal,
 )
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
-from waddle_sdk.db import AsyncDB
 
 TENANT = "tenant-1"
 COMMUNITY = "42"
@@ -162,12 +164,34 @@ class _FakeRelay:
         self.calls.append((provider, message_json))
 
 
+class _FakeLevel:
+    """Stands in for the generated `wit_world.imports.log.Level` enum -- subscriptable by
+    member name only, matching `waddle_sdk.log._write`'s `log_mod.Level[level_name]` lookup."""
+
+    _MEMBERS: ClassVar[dict[str, int]] = {"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3}
+
+    def __getitem__(self, name: str) -> int:
+        return self._MEMBERS[name]
+
+
+class _FakeLog:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, str, str]] = []
+        self.Level = _FakeLevel()  # matches generated binding's own PascalCase attribute name
+
+    def write(self, level: int, message: str, fields_json: str) -> None:
+        self.calls.append((level, message, fields_json))
+
+
 @dataclass
 class _Harness:
     db: _FakeDbHarness
     kv: _FakeKv
     relay: _FakeRelay
+    log: _FakeLog
     flags_enabled: bool
+    ai_flag_enabled: bool = True
+    tier: str = _AI_REQUIRED_TIER
 
 
 @pytest.fixture
@@ -176,7 +200,8 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
     db = _FakeDbHarness()
     kv = _FakeKv()
     relay = _FakeRelay()
-    state = _Harness(db=db, kv=kv, relay=relay, flags_enabled=True)
+    log_fake = _FakeLog()
+    state = _Harness(db=db, kv=kv, relay=relay, log=log_fake, flags_enabled=True)
 
     # Lambdas indirect through the harness instance at CALL time (not bound-method references
     # captured now), so a test's `harness.db.execute = _boom`-style instance override -- set
@@ -188,11 +213,17 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
         get=lambda key: kv.get(key), set=lambda key, value, ttl: kv.set(key, value, ttl)
     )
     relay_mod = types.SimpleNamespace(push=lambda provider, message: relay.push(provider, message))
-    flags_mod = types.SimpleNamespace(enabled=lambda key, default: state.flags_enabled)
+    flags_mod = types.SimpleNamespace(
+        enabled=lambda key, default: (
+            state.ai_flag_enabled if key == _AI_FEATURE_FLAG else state.flags_enabled
+        ),
+        tier=lambda: state.tier,
+    )
+    clock_mod = types.SimpleNamespace(monotonic_nanos=lambda: 0)
 
     fake_wit_world = types.ModuleType("wit_world")
     fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
-        db=db_mod, kv=kv_mod, relay=relay_mod, flags=flags_mod
+        db=db_mod, kv=kv_mod, relay=relay_mod, flags=flags_mod, log=log_fake, clock=clock_mod
     )
     monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
 
@@ -448,8 +479,18 @@ class TestTransformCooldown:
         assert result.payload["text"] == _PERMISSION_DENIED_REPLY
 
 
-def _sample_envelope(*, cooldown_minutes: int = 60, channel_id: str | None = "12345", target: str | None = "clubpenguinfan") -> StageEnvelope:
-    payload: dict[str, Any] = {"channel_id": channel_id, "cooldown_minutes": cooldown_minutes}
+def _sample_envelope(
+    *,
+    cooldown_minutes: int = 60,
+    channel_id: str | None = "12345",
+    target: str | None = "clubpenguinfan",
+    command: str = "so",
+) -> StageEnvelope:
+    payload: dict[str, Any] = {
+        "channel_id": channel_id,
+        "cooldown_minutes": cooldown_minutes,
+        "command": command,
+    }
     if target is not None:
         payload["target"] = target
     return StageEnvelope(
@@ -562,6 +603,242 @@ class TestDispatch:
         _run(dispatch(envelope, {}, http_client=_NotFoundHttpClient()))
         _, message_json = harness.relay.calls[0]
         assert "clubpenguinfan" in json.loads(message_json)["text"]
+
+
+# --------------------------------------------------------------------------
+# `!aiso` -- AI-generated shoutout (module docstring gap 5).
+# --------------------------------------------------------------------------
+
+
+class TestTransformAiso:
+    def test_bare_aiso_returns_usage(self, harness: _Harness) -> None:
+        result = _run(transform(_event("!aiso")))
+        assert result is not None
+        assert result.payload["text"] == _AISO_USAGE
+
+    def test_eligible_aiso_forwards_with_aiso_command(self, harness: _Harness) -> None:
+        harness.db.roles_by_display_name[(COMMUNITY_ID, MOD_ACTOR)] = "moderator"
+        result = _run(transform(_event("!aiso clubpenguinfan")))
+        assert result is not None
+        assert result.payload["command"] == "aiso"
+        assert result.payload["target"] == "clubpenguinfan"
+
+    def test_downgrades_to_so_when_tier_not_enterprise(self, harness: _Harness) -> None:
+        harness.tier = "professional"
+        harness.db.roles_by_display_name[(COMMUNITY_ID, MOD_ACTOR)] = "moderator"
+        result = _run(transform(_event("!aiso clubpenguinfan")))
+        assert result is not None
+        assert result.payload["command"] == "so"
+
+    def test_downgrades_to_so_when_ai_flag_off(self, harness: _Harness) -> None:
+        harness.ai_flag_enabled = False
+        harness.db.roles_by_display_name[(COMMUNITY_ID, MOD_ACTOR)] = "moderator"
+        result = _run(transform(_event("!aiso clubpenguinfan")))
+        assert result is not None
+        assert result.payload["command"] == "so"
+
+    def test_downgrades_to_so_on_channel_cooldown(self, harness: _Harness) -> None:
+        harness.db.roles_by_display_name[(COMMUNITY_ID, MOD_ACTOR)] = "moderator"
+        harness.kv.store["shoutout:aicd:chan:12345"] = b"1"
+        result = _run(transform(_event("!aiso clubpenguinfan")))
+        assert result is not None
+        assert result.payload["command"] == "so"
+
+    def test_downgrades_to_so_on_target_cooldown(self, harness: _Harness) -> None:
+        harness.db.roles_by_display_name[(COMMUNITY_ID, MOD_ACTOR)] = "moderator"
+        harness.kv.store[f"shoutout:aicd:target:{COMMUNITY}:clubpenguinfan"] = b"1"
+        result = _run(transform(_event("!aiso clubpenguinfan")))
+        assert result is not None
+        assert result.payload["command"] == "so"
+
+    def test_kv_error_fails_closed_and_downgrades_to_so(self, harness: _Harness) -> None:
+        """Unlike `!so`'s fail-OPEN cooldown, an unmetered AI call is a real cost surface --
+        a `kv` outage must deny the AI path, never allow it through."""
+        harness.db.roles_by_display_name[(COMMUNITY_ID, MOD_ACTOR)] = "moderator"
+
+        def _boom(*_a: Any, **_k: Any) -> Any:
+            raise RuntimeError("kv outage")
+
+        harness.kv.get = _boom  # type: ignore[method-assign]
+        result = _run(transform(_event("!aiso clubpenguinfan")))
+        assert result is not None
+        assert result.payload["command"] == "so"
+
+    def test_still_applies_shared_permission_and_self_shoutout_checks(self, harness: _Harness) -> None:
+        result = _run(transform(_event(f"!aiso {MOD_ACTOR}", actor=MOD_ACTOR)))
+        assert result is not None
+        assert result.payload["text"] == _SELF_SHOUTOUT_REPLY
+
+    def test_aiso_invalid_login_rejected(self, harness: _Harness) -> None:
+        result = _run(transform(_event("!aiso ab")))
+        assert result is not None
+        assert result.payload["text"] == _INVALID_LOGIN_REPLY
+
+
+class _FakeAiHttpClient:
+    """Answers both Twitch Helix `GET`s and the WaddleAI completions `POST` `!aiso` needs."""
+
+    def __init__(
+        self,
+        *,
+        ai_text: str | None = "Big love for {user}, always a great watch!",
+        ai_status: int = 200,
+        stream_info: dict[str, Any] | None = None,
+        user_info: dict[str, Any] | None = None,
+        raise_on_post: bool = False,
+    ) -> None:
+        self.ai_calls: list[dict[str, Any]] = []
+        self.ai_text = ai_text
+        self.ai_status = ai_status
+        self.stream_info = stream_info
+        self.user_info = user_info
+        self.raise_on_post = raise_on_post
+
+    async def get(self, url: str, **_kwargs: Any) -> dict[str, Any]:
+        if "helix/streams" in url:
+            data = [self.stream_info] if self.stream_info else []
+            return {"status": 200, "body": json.dumps({"data": data}).encode()}
+        if "helix/users" in url:
+            data = [self.user_info] if self.user_info else []
+            return {"status": 200, "body": json.dumps({"data": data}).encode()}
+        raise AssertionError(f"unexpected GET {url}")
+
+    async def post(self, url: str, **kwargs: Any) -> dict[str, Any]:
+        self.ai_calls.append({"url": url, **kwargs})
+        if self.raise_on_post:
+            raise RuntimeError("simulated waddleai transport error")
+        if self.ai_text is None:
+            return {"status": self.ai_status, "body": b"{}"}
+        return {
+            "status": self.ai_status,
+            "body": json.dumps({"text": self.ai_text}).encode(),
+        }
+
+
+class TestDispatchAiso:
+    def test_success_substitutes_placeholder_with_display_name(self, harness: _Harness) -> None:
+        client = _FakeAiHttpClient(user_info={"display_name": "ClubPenguinFan"})
+        envelope = _sample_envelope(command="aiso")
+        result = _run(dispatch(envelope, {}, http_client=client))
+        assert result.detail == "relayed_ai"
+        _, message_json = harness.relay.calls[0]
+        text = json.loads(message_json)["text"]
+        assert "ClubPenguinFan" in text
+        assert "{user}" not in text
+
+    def test_prompt_never_contains_target_login_or_name(self, harness: _Harness) -> None:
+        """Hard PII boundary: the outbound WaddleAI prompt must never contain the target's
+        login/display name -- only the `{user}` placeholder and public stream metadata."""
+        client = _FakeAiHttpClient(
+            user_info={"display_name": "ClubPenguinFan"},
+            stream_info={"game_name": "Just Chatting", "title": "hello!"},
+        )
+        envelope = _sample_envelope(command="aiso", target="clubpenguinfan")
+        _run(dispatch(envelope, {}, http_client=client))
+        assert len(client.ai_calls) == 1
+        body = json.loads(client.ai_calls[0]["body"])
+        prompt = body["prompt"]
+        assert "clubpenguinfan" not in prompt.lower()
+        assert "ClubPenguinFan" not in prompt
+        assert "{user}" in prompt
+        assert "Just Chatting" in prompt
+
+    def test_ai_auth_uses_secret_ref_not_embedded_credential(self, harness: _Harness) -> None:
+        client = _FakeAiHttpClient()
+        envelope = _sample_envelope(command="aiso")
+        _run(dispatch(envelope, {}, http_client=client))
+        secret_refs = client.ai_calls[0]["secret_refs"]
+        assert secret_refs["Authorization"].name == "WADDLEAI_SERVICE_TOKEN"
+
+    def test_falls_back_on_missing_placeholder(self, harness: _Harness) -> None:
+        client = _FakeAiHttpClient(ai_text="Great streamer, no placeholder here!")
+        envelope = _sample_envelope(command="aiso", target="clubpenguinfan")
+        result = _run(dispatch(envelope, {}, http_client=client))
+        assert result.detail == "relayed"
+        _, message_json = harness.relay.calls[0]
+        assert "clubpenguinfan" in json.loads(message_json)["text"]
+
+    def test_falls_back_on_moderation_hit(self, harness: _Harness) -> None:
+        client = _FakeAiHttpClient(ai_text="Screw off {user}, this is shit!")
+        envelope = _sample_envelope(command="aiso", target="clubpenguinfan")
+        result = _run(dispatch(envelope, {}, http_client=client))
+        assert result.detail == "relayed"
+        _, message_json = harness.relay.calls[0]
+        assert "clubpenguinfan" in json.loads(message_json)["text"]
+
+    def test_falls_back_on_url_in_ai_text(self, harness: _Harness) -> None:
+        client = _FakeAiHttpClient(ai_text="Check out {user} at https://evil.example!")
+        envelope = _sample_envelope(command="aiso", target="clubpenguinfan")
+        result = _run(dispatch(envelope, {}, http_client=client))
+        assert result.detail == "relayed"
+
+    def test_falls_back_on_non_200(self, harness: _Harness) -> None:
+        client = _FakeAiHttpClient(ai_status=503)
+        envelope = _sample_envelope(command="aiso", target="clubpenguinfan")
+        result = _run(dispatch(envelope, {}, http_client=client))
+        assert result.detail == "relayed"
+        _, message_json = harness.relay.calls[0]
+        assert "clubpenguinfan" in json.loads(message_json)["text"]
+
+    def test_falls_back_on_transport_error(self, harness: _Harness) -> None:
+        client = _FakeAiHttpClient(raise_on_post=True)
+        envelope = _sample_envelope(command="aiso", target="clubpenguinfan")
+        result = _run(dispatch(envelope, {}, http_client=client))
+        assert result.detail == "relayed"
+
+    def test_falls_back_on_missing_text_field(self, harness: _Harness) -> None:
+        client = _FakeAiHttpClient(ai_text=None)
+        envelope = _sample_envelope(command="aiso", target="clubpenguinfan")
+        result = _run(dispatch(envelope, {}, http_client=client))
+        assert result.detail == "relayed"
+
+    def test_falls_back_when_no_http_client(self, harness: _Harness) -> None:
+        envelope = _sample_envelope(command="aiso", target="clubpenguinfan")
+        result = _run(dispatch(envelope, {}, http_client=None))
+        assert result.detail == "relayed"
+        _, message_json = harness.relay.calls[0]
+        assert "clubpenguinfan" in json.loads(message_json)["text"]
+
+    def test_output_capped_to_max_chars(self, harness: _Harness) -> None:
+        from app import _AI_OUTPUT_MAX_CHARS
+
+        client = _FakeAiHttpClient(ai_text="{user} " + ("x" * 1000))
+        envelope = _sample_envelope(command="aiso", target="clubpenguinfan")
+        _run(dispatch(envelope, {}, http_client=client))
+        _, message_json = harness.relay.calls[0]
+        assert len(json.loads(message_json)["text"]) <= _AI_OUTPUT_MAX_CHARS
+
+    def test_sets_both_cooldown_buckets_before_generation_even_on_failure(
+        self, harness: _Harness
+    ) -> None:
+        """Cooldown is set BEFORE the WaddleAI call (fail-closed metering) -- a failing
+        generation must still count against the window, never allow a retry-storm."""
+        client = _FakeAiHttpClient(raise_on_post=True)
+        envelope = _sample_envelope(command="aiso", channel_id="12345", target="clubpenguinfan")
+        _run(dispatch(envelope, {}, http_client=client))
+        assert harness.kv.store.get("shoutout:aicd:chan:12345") == b"1"
+        assert harness.kv.store.get(f"shoutout:aicd:target:{COMMUNITY}:clubpenguinfan") == b"1"
+
+    def test_uses_config_waddleai_base_url_override(self, harness: _Harness) -> None:
+        client = _FakeAiHttpClient()
+        envelope = _sample_envelope(command="aiso", target="clubpenguinfan")
+        _run(dispatch(envelope, {"waddleai_base_url": "https://ai.internal.example"}, http_client=client))
+        assert client.ai_calls[0]["url"].startswith("https://ai.internal.example/")
+
+    def test_emits_latency_and_fallback_metrics_via_log(self, harness: _Harness) -> None:
+        client = _FakeAiHttpClient(raise_on_post=True)
+        envelope = _sample_envelope(command="aiso", target="clubpenguinfan")
+        _run(dispatch(envelope, {}, http_client=client))
+        messages = [call[1] for call in harness.log.calls]
+        assert "shoutout_ai_latency" in messages
+        assert "shoutout_ai_fallback" in messages
+
+    def test_so_command_never_calls_waddleai(self, harness: _Harness) -> None:
+        """A plain `!so` (or a downgraded `!aiso`) must never touch the AI HTTP path."""
+        client = _FakeAiHttpClient()
+        envelope = _sample_envelope(command="so", target="clubpenguinfan")
+        _run(dispatch(envelope, {}, http_client=client))
+        assert client.ai_calls == []
 
 
 class TestEntryWiring:
