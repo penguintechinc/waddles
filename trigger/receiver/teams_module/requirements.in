@@ -1,0 +1,23 @@
+# WaddleBot Teams Module - Dependencies
+
+# Core Framework
+quart>=0.22.0
+hypercorn>=0.18.0
+
+# HTTP Client (async)
+httpx>=0.28.1
+
+# Microsoft Bot Framework and Teams SDK
+# NOTE: botbuilder-integration-aiohttp and botbuilder-adapters-teams removed —
+# both unused (no imports in source) and botbuilder-adapters-teams does not
+# exist as a published PyPI package; Teams support lives in botbuilder-core.
+botbuilder-core>=4.17.1
+botbuilder-schema>=4.17.1
+
+# Environment
+python-dotenv>=1.2.3
+
+# Development
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0
