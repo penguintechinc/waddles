@@ -135,6 +135,121 @@ async def test_extra_export_beyond_the_stage_world_is_rejected(
     assert result.ok is False
 
 
+_INIT_FUNCTION = {
+    "name": "init",
+    "kind": "freestanding",
+    "params": [
+        {"name": "app-name", "type": "string"},
+        {"name": "symbols", "type": 999},
+        {"name": "stub-wasi", "type": "bool"},
+    ],
+    "result": 1000,
+}
+
+
+def _componentize_py_runtime_doc(*, functions: dict[str, Any]) -> dict[str, Any]:
+    """A conformant doc plus componentize-py's synthetic `root:component` export.
+
+    Matches the exact shape captured from a real `bundles/python/pyping`
+    build (`wasm-tools component wit --json`, componentize-py 0.25.1) --
+    see `bundle_component_validator`'s module docstring.
+    """
+    interfaces = [*_CONFORMANT_INTERFACES, {"name": None, "package": 2, "functions": functions}]
+    packages = [*_CONFORMANT_PACKAGES, {"name": "root:component"}]
+    return _doc(
+        packages=packages,
+        interfaces=interfaces,
+        imports={"interface-0": _iface_ref(0)},
+        exports={
+            "interface-0": _iface_ref(4),
+            "interface-1": _iface_ref(1),
+            "interface-2": _iface_ref(2),
+        },
+    )
+
+
+async def test_componentize_py_runtime_reflection_export_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real, unavoidable componentize-py 0.25.1 build artifact passes.
+
+    Regression: fix/pyping-wit-conformance -- pyping's real build was
+    rejected with `disallowed_export:['root:component/None']` before this
+    fix.
+    """
+    doc = _componentize_py_runtime_doc(functions={"init": _INIT_FUNCTION})
+    monkeypatch.setattr(validator, "_run_wasm_tools_wit_json", lambda data: doc)
+    result = await validator.validate_component(b"fake")
+    assert result.ok is True, result.reason
+    assert set(result.exports) == {
+        "root:component/<anonymous>",
+        "waddle:bundle/process-stage",
+        "waddle:bundle/action-stage",
+    }
+
+
+async def test_reflection_export_lookalike_with_extra_function_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hostile component adding a second function to the disguised interface is still caught."""
+    doc = _componentize_py_runtime_doc(
+        functions={
+            "init": _INIT_FUNCTION,
+            "steal-secrets": {**_INIT_FUNCTION, "name": "steal-secrets"},
+        }
+    )
+    monkeypatch.setattr(validator, "_run_wasm_tools_wit_json", lambda data: doc)
+    result = await validator.validate_component(b"fake")
+    assert result.ok is False
+    assert "root:component/<anonymous>" in (result.reason or "")
+
+
+async def test_reflection_export_lookalike_with_renamed_function_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hostile component renaming the single function away from `init` is still caught."""
+    doc = _componentize_py_runtime_doc(
+        functions={"steal-secrets": {**_INIT_FUNCTION, "name": "steal-secrets"}}
+    )
+    monkeypatch.setattr(validator, "_run_wasm_tools_wit_json", lambda data: doc)
+    result = await validator.validate_component(b"fake")
+    assert result.ok is False
+    assert "root:component/<anonymous>" in (result.reason or "")
+
+
+async def test_reflection_export_lookalike_with_wrong_params_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hostile `init` with a different parameter shape is still caught."""
+    forged_init = {**_INIT_FUNCTION, "params": [{"name": "app-name", "type": "string"}]}
+    doc = _componentize_py_runtime_doc(functions={"init": forged_init})
+    monkeypatch.setattr(validator, "_run_wasm_tools_wit_json", lambda data: doc)
+    result = await validator.validate_component(b"fake")
+    assert result.ok is False
+    assert "root:component/<anonymous>" in (result.reason or "")
+
+
+async def test_componentize_py_runtime_export_is_rejected_on_the_import_side(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact same benign shape is never allowed as an IMPORT -- export-only exception."""
+    interfaces = [
+        *_CONFORMANT_INTERFACES,
+        {"name": None, "package": 2, "functions": {"init": _INIT_FUNCTION}},
+    ]
+    packages = [*_CONFORMANT_PACKAGES, {"name": "root:component"}]
+    doc = _doc(
+        packages=packages,
+        interfaces=interfaces,
+        imports={"interface-0": _iface_ref(0), "interface-1": _iface_ref(4)},
+        exports={"interface-0": _iface_ref(1), "interface-1": _iface_ref(2)},
+    )
+    monkeypatch.setattr(validator, "_run_wasm_tools_wit_json", lambda data: doc)
+    result = await validator.validate_component(b"fake")
+    assert result.ok is False
+    assert "root:component/<anonymous>" in (result.reason or "")
+
+
 async def test_non_interface_import_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     doc = _doc(
         packages=_CONFORMANT_PACKAGES,

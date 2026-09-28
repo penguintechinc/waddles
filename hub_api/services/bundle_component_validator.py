@@ -49,7 +49,22 @@ suggest) would reject every legitimate Python component; do not do that.
 
 Exports are checked strictly: the component MUST export exactly
 `waddle:bundle/process-stage` and `waddle:bundle/action-stage` (the
-`stage` world's own export set) -- neither more nor fewer.
+`stage` world's own export set) -- neither more nor fewer -- with one
+additional, narrowly-matched exception: `componentize-py` 0.25.1
+unconditionally links an anonymous, un-namespaced reflection export
+(package `root:component`, no interface name, a single `init` function)
+into EVERY component it builds -- its own embedded-CPython runtime's
+dynamic-dispatch bootstrap, entirely orthogonal to the target WIT world
+(confirmed against a real `bundles/python/pyping` build: `stage.wit`
+never declares it, yet it is present regardless of world/entry/WIT path).
+`core/bundle_executor/src/engine.rs`'s `wasmtime::component::bindgen!`-
+generated `Stage` binding looks up exactly `waddle:bundle/process-stage`/
+`action-stage` by name and never enumerates or calls anything else, so
+allowing this export grants no capability. `_is_componentize_py_runtime_reflection_export`
+matches it strictly (exact package, exact anonymous name, exact single
+function, exact parameter names/types) so a hostile component cannot
+smuggle an arbitrary export by reusing only the package/name half of the
+disguise.
 """
 
 from __future__ import annotations
@@ -73,6 +88,13 @@ ALLOWED_WASI_NAMESPACES = frozenset(
 #: The `stage` world's own export set (`wit/waddle-bundle/stage.wit`) -- a
 #: conformant component exports exactly these two, never more or fewer.
 REQUIRED_EXPORTS = frozenset({"process-stage", "action-stage"})
+
+#: `componentize-py`'s synthetic reflection export always reports this exact
+#: package name and no interface name (see module docstring).
+_COMPONENTIZE_PY_RUNTIME_EXPORT_PACKAGE = "root:component"
+#: `init(app-name: string, symbols: <record>, stub-wasi: bool) -> result<_, string>`
+#: -- the fixed parameter order/names this export's single function must have.
+_COMPONENTIZE_PY_RUNTIME_INIT_PARAM_NAMES = ("app-name", "symbols", "stub-wasi")
 
 _SUBPROCESS_TIMEOUT_S = 15
 
@@ -160,21 +182,53 @@ def _namespace(package_name: str) -> str:
     return package_name.split("@", 1)[0]
 
 
-def _resolve_interface(doc: dict[str, Any], interface_id: int) -> tuple[str, str]:
-    """`(namespace, interface_name)` for the interface at `doc["interfaces"][interface_id]`."""
+def _resolve_interface(doc: dict[str, Any], interface_id: int) -> tuple[str, dict[str, Any]]:
+    """`(namespace, interface_record)` for the interface at `doc["interfaces"][interface_id]`."""
     iface = doc["interfaces"][interface_id]
     pkg = doc["packages"][iface["package"]]
-    return _namespace(pkg["name"]), iface["name"]
+    return _namespace(pkg["name"]), iface
+
+
+def _is_componentize_py_runtime_reflection_export(namespace: str, iface: dict[str, Any]) -> bool:
+    """True iff `iface` is exactly componentize-py's synthetic `init` reflection export.
+
+    See module docstring. Every check here is load-bearing -- loosening any
+    one (e.g. matching on package/anonymous-name alone) would let a hostile
+    component reuse only half of this exact disguise to smuggle a different
+    function through as an export.
+    """
+    if namespace != _COMPONENTIZE_PY_RUNTIME_EXPORT_PACKAGE or iface.get("name") is not None:
+        return False
+    functions = iface.get("functions")
+    if not isinstance(functions, dict) or set(functions) != {"init"}:
+        return False
+    init_fn = functions["init"]
+    if not isinstance(init_fn, dict) or init_fn.get("kind") != "freestanding":
+        return False
+    params = init_fn.get("params")
+    if not isinstance(params, list) or len(params) != 3:
+        return False
+    if tuple(p.get("name") for p in params) != _COMPONENTIZE_PY_RUNTIME_INIT_PARAM_NAMES:
+        return False
+    # app-name/stub-wasi are primitive WIT type names; symbols is a local
+    # record, referenced by its integer type-id, never a primitive string.
+    return (
+        params[0].get("type") == "string"
+        and params[2].get("type") == "bool"
+        and isinstance(params[1].get("type"), int)
+    )
 
 
 def _classify_world_items(
-    doc: dict[str, Any], items: dict[str, Any]
+    doc: dict[str, Any], items: dict[str, Any], *, is_export: bool
 ) -> tuple[list[str], list[str]]:
     """Split a world's `imports`/`exports` map into `(qualified_names, violations)`.
 
     A violation is either a non-interface item (a bare top-level function
-    import/export -- not part of any legitimate `stage`-world component)
-    or an interface outside the allowlist.
+    import/export -- not part of any legitimate `stage`-world component),
+    or an interface outside the allowlist -- except componentize-py's
+    synthetic reflection export, permitted only on the export side and only
+    when it matches `_is_componentize_py_runtime_reflection_export` exactly.
     """
     names: list[str] = []
     violations: list[str] = []
@@ -183,10 +237,18 @@ def _classify_world_items(
             shape = list(item.keys()) if isinstance(item, dict) else repr(item)
             violations.append(f"non_interface_item:{shape}")
             continue
-        namespace, iface_name = _resolve_interface(doc, item["interface"]["id"])
-        qualified = f"{namespace}/{iface_name}"
+        namespace, iface = _resolve_interface(doc, item["interface"]["id"])
+        iface_name = iface.get("name")
+        qualified = f"{namespace}/{iface_name if iface_name is not None else '<anonymous>'}"
         names.append(qualified)
-        if namespace != WADDLE_BUNDLE_NAMESPACE and namespace not in ALLOWED_WASI_NAMESPACES:
+        allowed = namespace == WADDLE_BUNDLE_NAMESPACE or namespace in ALLOWED_WASI_NAMESPACES
+        if (
+            not allowed
+            and is_export
+            and _is_componentize_py_runtime_reflection_export(namespace, iface)
+        ):
+            allowed = True
+        if not allowed:
             violations.append(qualified)
     return names, violations
 
@@ -202,7 +264,9 @@ def _validate_document(doc: dict[str, Any]) -> ComponentValidationResult:
         return ComponentValidationResult(ok=False, reason="no_world_found")
     world = worlds[0]
 
-    import_names, import_violations = _classify_world_items(doc, world.get("imports", {}))
+    import_names, import_violations = _classify_world_items(
+        doc, world.get("imports", {}), is_export=False
+    )
     if import_violations:
         return ComponentValidationResult(
             ok=False,
@@ -210,7 +274,9 @@ def _validate_document(doc: dict[str, Any]) -> ComponentValidationResult:
             imports=tuple(import_names),
         )
 
-    export_names, export_violations = _classify_world_items(doc, world.get("exports", {}))
+    export_names, export_violations = _classify_world_items(
+        doc, world.get("exports", {}), is_export=True
+    )
     if export_violations:
         return ComponentValidationResult(
             ok=False,
