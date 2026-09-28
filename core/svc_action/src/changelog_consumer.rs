@@ -282,14 +282,18 @@ fn update_tenant_gauges(state: &ConsumerState, metrics: &ChangelogConsumerMetric
 /// affecting seq) - 1`, floored at the tracker's current `last_seq`; the
 /// failed scope (and anything after it) is retried from scratch next tick.
 ///
-/// **Retention-gap fail-safe (Gemini review on PR #397, hub-api's
-/// forthcoming `min_retained_seq`/48h retention):** no `min_retained_seq`
-/// column exists in this crate's schema yet (TODO follow-up once hub-api
-/// publishes it) -- until then, a returned `changes` set whose LOWEST `seq`
-/// is strictly greater than `last_seq + 1` is treated as an unexplained gap
-/// (most plausibly retention truncation) and short-circuits to a full
-/// multi-tenant reconcile instead of a partial apply, resetting the tracker
-/// to `safe_seq`.
+/// **Retention-gap fail-safe (hub-api migration `0026`/PR #397's
+/// `min_retained_seq`, 48h retention):** when this crate's schema has the
+/// `min_retained_seq` column (`state.retention_supported`, probed once at
+/// startup), the PRIMARY check below is authoritative -- it forces a full
+/// reconcile the moment this consumer has fallen behind the retention floor,
+/// before ever attempting a partial apply. On an older hub-api schema
+/// without the column, `min_retained_seq` reads as `0` and the primary
+/// check becomes a structural no-op; the FALLBACK heuristic further down --
+/// a returned `changes` set whose LOWEST `seq` is strictly greater than
+/// `last_seq + 1` -- remains the sole detector until upgraded. Either path
+/// short-circuits to a full multi-tenant reconcile instead of a partial
+/// apply, resetting the tracker to `safe_seq`.
 pub async fn run_incremental_tick(
     db: &DatabaseConnection,
     state: &mut ConsumerState,
@@ -317,7 +321,7 @@ pub async fn run_incremental_tick(
     // `core/svc_process/src/changelog_consumer.rs`'s identical check for the
     // full rationale.
     if state.tracker.last_seq() + 1 < watermark.min_retained_seq {
-        tracing::error!(
+        tracing::warn!(
             last_seq = state.tracker.last_seq(),
             min_retained_seq = watermark.min_retained_seq,
             safe_seq,
@@ -818,6 +822,47 @@ mod tests {
             Some(&digest)
         );
         assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+    }
+
+    /// Boundary proof for the PRIMARY retention check: `last_seq + 1 ==
+    /// min_retained_seq` is still WITHIN retention (the check is strictly
+    /// `<`, not `<=`), so this must take the ordinary incremental path --
+    /// `read_changes` is queried and applied, never short-circuited to a
+    /// full reconcile. Complements `run_incremental_tick_forces_a_full_
+    /// reconcile_when_behind_min_retained_seq` (one seq further behind),
+    /// pinning the exact edge of the enforced range.
+    #[tokio::test]
+    async fn run_incremental_tick_applies_incrementally_when_exactly_at_the_retention_floor() {
+        let digest = format!("sha256:{}", "c".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![watermark_row_with_retention(150, 101)]])
+            .append_query_results([vec![change_row(101, 1, 0)]])
+            .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.a", &digest)]])
+            .append_query_results([vec![approval_row(1, "waddles.a")]])
+            .into_connection();
+        let mut state = ConsumerState::new(100);
+        let sink = FakeSink::default();
+        let metrics = test_changelog_metrics();
+        run_incremental_tick(
+            &db,
+            &mut state,
+            Some(&sink as &dyn BundleSink),
+            &test_excluded_metric(),
+            &metrics,
+        )
+        .await;
+        assert_eq!(
+            state.last_seq(),
+            150,
+            "exactly-at-floor must still advance to safe_seq via the normal incremental path"
+        );
+        assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+        assert_eq!(
+            metrics.changelog_retention_exceeded_total.get(),
+            0,
+            "the primary check must not fire when last_seq + 1 == min_retained_seq"
+        );
     }
 
     #[tokio::test]

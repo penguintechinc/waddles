@@ -422,16 +422,23 @@ fn update_tenant_gauges(state: &ConsumerState, metrics: &ChangelogConsumerMetric
 /// (`bundle_active_set::read_changes`'s own contract), so the first change
 /// row naming a given scope is that scope's earliest-affecting seq.
 ///
-/// **Retention-gap fail-safe (Gemini review, hub-api's forthcoming
-/// `min_retained_seq`/48h change-log retention):** this crate's schema has
-/// no `min_retained_seq` column yet to check directly (TODO follow-up once
-/// hub-api publishes it) -- until then, a returned `changes` set whose
-/// LOWEST `seq` is strictly greater than `last_seq + 1` is treated as an
-/// unexplained gap (most plausibly retention truncation after this consumer
-/// fell far enough behind) and short-circuits straight to a full multi-
-/// tenant reconcile instead of applying a partial/misleading incremental
-/// diff, resetting the tracker to `safe_seq` (a full reconcile re-reads
-/// every scope fresh, so there is nothing left to apply incrementally).
+/// **Retention-gap fail-safe (hub-api migration `0026`/PR #397's
+/// `min_retained_seq`, 48h change-log retention):** when this crate's schema
+/// has the `min_retained_seq` column (`state.retention_supported`, probed
+/// once at startup via `probe_min_retained_seq_supported`), the PRIMARY
+/// check below compares `last_seq + 1` against `min_retained_seq` on every
+/// tick and is authoritative -- it forces a full reconcile the moment this
+/// consumer has fallen behind the retention floor, before ever attempting a
+/// partial apply. On an older hub-api schema without the column yet,
+/// `min_retained_seq` reads as `0` (see `read_safe_seq_watermark`'s own
+/// doc) and the primary check becomes a structural no-op; the FALLBACK
+/// heuristic further below -- a returned `changes` set whose LOWEST `seq`
+/// is strictly greater than `last_seq + 1` -- remains the sole detector
+/// until that hub-api is upgraded. Either path short-circuits straight to a
+/// full multi-tenant reconcile instead of applying a partial/misleading
+/// incremental diff, resetting the tracker to `safe_seq` (a full reconcile
+/// re-reads every scope fresh, so there is nothing left to apply
+/// incrementally).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_incremental_tick(
     db: &DatabaseConnection,
@@ -468,7 +475,7 @@ pub async fn run_incremental_tick(
     // this check a structural no-op there -- the "lowest returned change
     // row's seq" heuristic below remains the sole detector until upgraded.
     if state.tracker.last_seq() + 1 < watermark.min_retained_seq {
-        tracing::error!(
+        tracing::warn!(
             last_seq = state.tracker.last_seq(),
             min_retained_seq = watermark.min_retained_seq,
             safe_seq,
@@ -1162,6 +1169,58 @@ mod tests {
             Some(&digest)
         );
         assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+    }
+
+    /// Boundary proof for the PRIMARY retention check: `last_seq + 1 ==
+    /// min_retained_seq` is still WITHIN retention (the check is strictly
+    /// `<`, not `<=`), so this must take the ordinary incremental path --
+    /// `read_changes` is queried and applied, never short-circuited to a
+    /// full reconcile. Complements `run_incremental_tick_forces_a_full_
+    /// reconcile_when_behind_min_retained_seq` (one seq further behind),
+    /// pinning the exact edge of the enforced range.
+    #[tokio::test]
+    async fn run_incremental_tick_applies_incrementally_when_exactly_at_the_retention_floor() {
+        let digest = format!("sha256:{}", "c".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![watermark_row_with_retention(150, 101)]])
+            .append_query_results([vec![change_row(101, 1, 0)]])
+            .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.a", &digest)]])
+            .append_query_results([vec![approval_row(1, "waddles.a")]])
+            .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+            .append_query_results([
+                Vec::<bundle_active_set::entities::app_source_bindings::Model>::new(),
+            ])
+            .append_query_results([vec![bundle_active_set::entities::tenants::Model {
+                id: 1,
+                slug: "acme".to_string(),
+            }]])
+            .into_connection();
+        let mut state = ConsumerState::new(100);
+        let sink = FakeSink::default();
+        let spawner = RecordingSupervisor::default();
+        let metrics = test_changelog_metrics();
+        run_incremental_tick(
+            &db,
+            &mut state,
+            Some(&sink as &dyn BundleSink),
+            Some(&spawner),
+            &test_excluded_metric(),
+            &test_binding_metrics(),
+            &metrics,
+        )
+        .await;
+        assert_eq!(
+            state.last_seq(),
+            150,
+            "exactly-at-floor must still advance to safe_seq via the normal incremental path"
+        );
+        assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+        assert_eq!(
+            metrics.changelog_retention_exceeded_total.get(),
+            0,
+            "the primary check must not fire when last_seq + 1 == min_retained_seq"
+        );
     }
 
     /// End-to-end binding-reconciliation regression: a newly-bound source
