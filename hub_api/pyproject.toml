@@ -213,6 +213,10 @@ convention = "google"
 # every other v1 blueprint's DTOs already use; S101 is the same
 # tenant_middleware postcondition assert as workstream_usage.py above.
 "blueprints/v1/ingest_sources.py" = ["N815", "S101"]
+# Same camelCase-DTO-wire-contract rationale as bundle_versions.py/
+# bundle_approvals.py above -- no tenant_middleware assert here (this
+# endpoint is deliberately cross-tenant), so only N815 is needed.
+"blueprints/v1/bundle_admin.py" = ["N815"]
 
 [tool.mypy]
 python_version = "3.13"
