@@ -28,15 +28,15 @@
 //! that container's own image (matching where the other three languages'
 //! toolchains are headed) is the real production target.
 //!
-//! **Known upstream gap (also tracked, not fixable from this crate):**
-//! the pinned `penguin-bundle-host` crate (`Cargo.toml`'s exact `rev`)
-//! does not yet list `"csharp"` in its manifest-schema `KNOWN_LANGUAGES`
-//! (V17) -- so a real `bundle.yaml` declaring `language: csharp` cannot
-//! pass `crate::manifest::parse_and_validate` today, even though hub-api's
-//! own pure-YAML pre-check (`hub_api/services/bundle_manifest_v2.py`) now
-//! accepts it. This module's own tests construct a [`BundleManifest`]
-//! directly to exercise [`CSharpBuilder`] in isolation of that gap -- see
-//! the test module's doc comment.
+//! **Former upstream gap, now closed:** the pinned `penguin-bundle-host`
+//! crate previously did not list `"csharp"` in its manifest-schema
+//! `KNOWN_LANGUAGES` (V17), so a real `bundle.yaml` declaring
+//! `language: csharp` could not pass `crate::manifest::parse_and_validate`.
+//! `penguin-libs` PR #128 added `"csharp"` to `KNOWN_LANGUAGES` on
+//! `release/rust-bundle-host/v0.1.x`; this crate now pins that commit, and
+//! this module's own tests parse the real `bundles/csharp/csping/bundle.yaml`
+//! through `parse_and_validate` rather than constructing a
+//! [`BundleManifest`] by hand.
 
 use super::LanguageBuilder;
 use crate::errors::CompilerError;
@@ -262,45 +262,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    /// Constructs a validated-shape [`BundleManifest`] directly rather
-    /// than through [`crate::manifest::parse_and_validate`] -- see this
-    /// module's doc comment's "Known upstream gap": the pinned
-    /// `penguin-bundle-host` crate does not yet accept `language: csharp`,
-    /// so `bundles/csharp/csping/bundle.yaml` cannot pass real manifest
-    /// validation today. `Manifest`'s fields are all `pub` with no
-    /// `#[non_exhaustive]` (by design -- its own doc comment flags
-    /// constructing one directly as bypassing validation, which is
-    /// exactly and only what a test exercising one `LanguageBuilder` in
-    /// isolation needs), so this is the same trade every other
-    /// `LanguageBuilder`'s stub test makes by loading an already-known-
-    /// -valid-language fixture through `parse_and_validate` -- this test
-    /// cannot do that yet for `csharp` specifically.
-    fn csping_manifest() -> BundleManifest {
-        BundleManifest {
-            schema_version: 2,
-            app_id: "waddles.core.example.csping".to_string(),
-            name: "Ping Example Bundle (C#)".to_string(),
-            version: "1.0.0".to_string(),
-            feature: "waddles.core.example".to_string(),
-            module: "core".to_string(),
-            provider: "builtin".to_string(),
-            language: "csharp".to_string(),
-            artifact: "source".to_string(),
-            execution_model: "wasi-component".to_string(),
-            is_default: false,
-            stages: vec!["process".to_string(), "action".to_string()],
-            egress: vec![],
-            data_tables: vec![],
-            timeout_ms: 2000,
-            memory_mb: 64,
-            egress_rps: 10,
-            permissions: vec![],
-            routes_to: vec![],
-            compatible_with: vec![],
-            incompatible_with: vec![],
-        }
-    }
-
     /// End-to-end: builds the real `bundles/csharp/csping` spike bundle
     /// through `CSharpBuilder::build` -- the "new arm" `builder_for`
     /// (`build/mod.rs`) now returns for `"csharp"` -- via the same pinned,
@@ -310,17 +271,26 @@ mod tests {
     /// itself already runs that check before returning `Ok`, so a
     /// successful, non-empty result here is already proof it validated).
     ///
+    /// The manifest comes from `crate::manifest::parse_and_validate`
+    /// against the bundle's own real `bundle.yaml` -- not a hand-built
+    /// [`BundleManifest`] -- now that `penguin-bundle-host`
+    /// (`penguin-libs` PR #128) lists `"csharp"` in `KNOWN_LANGUAGES`.
+    ///
     /// Ignored: needs `docker` + network (NuGet restore, ~1-2 minutes) --
     /// not run in the default `cargo test` / CI unit-test pass. Runnable
     /// via `make test-csharp-bundle-compile`.
     #[test]
     #[ignore = "needs docker + network; run via `make test-csharp-bundle-compile`"]
     fn builds_csping_via_docker() {
-        let manifest = csping_manifest();
         let source_dir = Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../bundles/csharp/csping"
         ));
+        let manifest = crate::manifest::parse_and_validate(
+            &source_dir.join("bundle.yaml"),
+            &crate::manifest::ManifestOptions::default(),
+        )
+        .expect("real csping bundle.yaml should validate now that csharp is a known language");
         let out_dir = tempfile::tempdir().expect("tempdir");
         let wasm_path = CSharpBuilder
             .build(source_dir, &manifest, out_dir.path())
