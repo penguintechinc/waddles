@@ -90,7 +90,7 @@ MAX_JSONB_BYTES = 16384  # 16 KiB, §3.1
 POSTGRES_IDENTIFIER_MAX_LEN = 63  # NAMEDATALEN - 1, §3.4
 TABLE_NAME_HASH_SUFFIX_LEN = 8
 
-_COLUMN_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
+_COLUMN_NAME_RE = re.compile(r"\A[a-z][a-z0-9_]{0,62}\Z")
 
 # Platform-owned columns (§3.3) -- a bundle may never declare a column with
 # one of these names; bundle_data_ddl attaches them unconditionally.
@@ -171,10 +171,10 @@ _SIMPLE_TYPES = {
     "bool": ColumnType.BOOL,
     "timestamptz": ColumnType.TIMESTAMPTZ,
 }
-_NUMERIC_RE = re.compile(r"^numeric\((\d{1,3}),(\d{1,3})\)$")
-_TEXT_RE = re.compile(r"^text\((\d{1,6})\)$")
-_JSONB_BARE_RE = re.compile(r"^jsonb$")
-_JSONB_SIZED_RE = re.compile(r"^jsonb\((\d{1,6})\)$")
+_NUMERIC_RE = re.compile(r"\Anumeric\((\d{1,3}),(\d{1,3})\)\Z")
+_TEXT_RE = re.compile(r"\Atext\((\d{1,6})\)\Z")
+_JSONB_BARE_RE = re.compile(r"\Ajsonb\Z")
+_JSONB_SIZED_RE = re.compile(r"\Ajsonb\((\d{1,6})\)\Z")
 
 # Erasure actions valid on a `user_ref` column's declaration (§4).
 ERASURE_DELETE_ROW = "delete_row"
@@ -196,7 +196,7 @@ def _parse_column_type(raw: str) -> ParsedColumnType:
     if raw in _SIMPLE_TYPES:
         return ParsedColumnType(kind=_SIMPLE_TYPES[raw])
 
-    match = _NUMERIC_RE.match(raw)
+    match = _NUMERIC_RE.fullmatch(raw)
     if match:
         precision, scale = int(match.group(1)), int(match.group(2))
         if not (1 <= precision <= MAX_NUMERIC_PRECISION):
@@ -216,7 +216,7 @@ def _parse_column_type(raw: str) -> ParsedColumnType:
             kind=ColumnType.NUMERIC, numeric_precision=precision, numeric_scale=scale
         )
 
-    match = _TEXT_RE.match(raw)
+    match = _TEXT_RE.fullmatch(raw)
     if match:
         max_len = int(match.group(1))
         if not (1 <= max_len <= MAX_TEXT_LEN):
@@ -225,10 +225,10 @@ def _parse_column_type(raw: str) -> ParsedColumnType:
             )
         return ParsedColumnType(kind=ColumnType.TEXT, max_len=max_len)
 
-    if _JSONB_BARE_RE.match(raw):
+    if _JSONB_BARE_RE.fullmatch(raw):
         return ParsedColumnType(kind=ColumnType.JSONB, max_len=MAX_JSONB_BYTES)
 
-    match = _JSONB_SIZED_RE.match(raw)
+    match = _JSONB_SIZED_RE.fullmatch(raw)
     if match:
         max_len = int(match.group(1))
         if not (1 <= max_len <= MAX_JSONB_BYTES):
@@ -263,14 +263,17 @@ class LiteralDefault:
     raw: str  # original manifest text, retained for error messages/snapshots
 
 
-_NULL_RE = re.compile(r"^NULL$", re.IGNORECASE)
-_BOOL_RE = re.compile(r"^(true|false)$", re.IGNORECASE)
-_NUMBER_RE = re.compile(r"^-?\d+(\.\d+)?$")
+_NULL_RE = re.compile(r"\ANULL\Z", re.IGNORECASE)
+_BOOL_RE = re.compile(r"\A(true|false)\Z", re.IGNORECASE)
+_NUMBER_RE = re.compile(r"\A-?\d+(\.\d+)?\Z")
 # Single-quoted SQL string literal: doubled `''` is the only escape accepted
 # (standard SQL string-literal syntax); a literal backslash is rejected
 # outright -- there is no escape grammar here at all, only "is this exactly
-# one quoted string or not".
-_STRING_RE = re.compile(r"^'(?:[^'\\]|'')*'$")
+# one quoted string or not". Anchored with `\A`/`\Z`, not `^`/`$` -- `$`
+# matches immediately before a trailing `\n`, which would let a payload
+# like `"'hello'\n"` pass this check and then have `raw[1:-1]` silently
+# slice off the closing quote instead of the trailing newline.
+_STRING_RE = re.compile(r"\A'(?:[^'\\]|'')*'\Z")
 
 
 def parse_default_literal(raw: str) -> LiteralDefault:
@@ -283,14 +286,24 @@ def parse_default_literal(raw: str) -> LiteralDefault:
     §3.2 C2.1's requirement: bundle-declared defaults are scalar literals,
     never function calls (`now()`, `gen_random_uuid()`), full stop.
     """
-    if _NULL_RE.match(raw):
+    if _NULL_RE.fullmatch(raw):
         return LiteralDefault(kind=LiteralKind.NULL, value=None, raw=raw)
-    if _BOOL_RE.match(raw):
+    if _BOOL_RE.fullmatch(raw):
         return LiteralDefault(kind=LiteralKind.BOOL, value=raw.lower() == "true", raw=raw)
-    if _NUMBER_RE.match(raw):
+    if _NUMBER_RE.fullmatch(raw):
         value: Any = float(raw) if "." in raw else int(raw)
         return LiteralDefault(kind=LiteralKind.NUMBER, value=value, raw=raw)
-    if _STRING_RE.match(raw):
+    if _STRING_RE.fullmatch(raw):
+        # `_STRING_RE` is `\A...\Z`-anchored, so a fullmatch guarantees `raw`
+        # is exactly a leading quote, doubled-quote-escaped body, and a
+        # trailing quote with nothing else -- but slicing is only trusted
+        # once that shape is re-asserted explicitly here, not inferred from
+        # the match alone, so a future regex edit that loosens the anchors
+        # fails closed (raises) instead of silently mis-slicing.
+        if len(raw) < 2 or raw[0] != "'" or raw[-1] != "'":  # pragma: no cover - defense in depth
+            raise TableDeclarationError(
+                REASON_INVALID_DEFAULT_LITERAL, f"{raw!r} is not a well-formed quoted string"
+            )
         inner = raw[1:-1].replace("''", "'")
         return LiteralDefault(kind=LiteralKind.STRING, value=inner, raw=raw)
     raise TableDeclarationError(
@@ -416,9 +429,9 @@ class TableDeclaration:
 
 
 def _validate_column_name(name: Any) -> str:
-    if not isinstance(name, str) or not _COLUMN_NAME_RE.match(name):
+    if not isinstance(name, str) or not _COLUMN_NAME_RE.fullmatch(name):
         raise TableDeclarationError(
-            REASON_INVALID_COLUMN_NAME, f"{name!r} must match ^[a-z][a-z0-9_]{{0,62}}$"
+            REASON_INVALID_COLUMN_NAME, f"{name!r} must match [a-z][a-z0-9_]{{0,62}} exactly"
         )
     return name
 
@@ -542,6 +555,18 @@ def validate_table_declaration(raw: Mapping[str, Any], *, provider: str) -> Tabl
     branch on it -- validation is identical for core and community bundles
     (§2.1: "validation doesn't distinguish provenance").
 
+    Phase 1 integration note: ``provider`` MUST be resolved by the caller
+    from the platform's own app/provider registry (the same source
+    `bundle_data_ddl.derive_table_identity`'s call site uses), never read
+    off the bundle manifest or an inbound request payload -- a bundle or
+    caller supplying its own `provider` value is exactly the "manifest-
+    claimed schema placement" attack `derive_table_identity`'s docstring
+    already rejects (see `test_schema_is_never_taken_from_a_manifest_
+    looking_claim`). When onboarding wires this module in, add an
+    assertion/lookup at the call site that fetches `provider` from the
+    registry keyed by the already-authenticated app identity, not from
+    `raw`.
+
     Raises `TableDeclarationError` on the first violation found, in this
     order: column count cap, per-column name/type/PII-gate/default/
     user_ref-nullability checks (in declaration order), duplicate column
@@ -592,7 +617,7 @@ def validate_table_declaration(raw: Mapping[str, Any], *, provider: str) -> Tabl
 APP_CORE_SCHEMA = "app_core"
 APP_COMMUNITY_SCHEMA = "app_community"
 
-_SANITIZED_CHARSET_RE = re.compile(r"^[a-z0-9_]+$")
+_SANITIZED_CHARSET_RE = re.compile(r"\A[a-z0-9_]+\Z")
 
 
 @dataclass(slots=True, frozen=True)
@@ -634,7 +659,7 @@ def derive_table_identity(app_id: str, *, provider: str) -> TableIdentity:
     schema = APP_CORE_SCHEMA if provider == "builtin" else APP_COMMUNITY_SCHEMA
 
     sanitized = app_id.lower().replace(".", "_")
-    if not _SANITIZED_CHARSET_RE.match(sanitized):
+    if not _SANITIZED_CHARSET_RE.fullmatch(sanitized):
         raise TableDeclarationError(
             REASON_INVALID_TABLE_IDENTITY,
             f"app_id {app_id!r} contains characters outside [a-z0-9_.] after lower-casing",

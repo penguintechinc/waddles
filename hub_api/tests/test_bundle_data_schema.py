@@ -108,6 +108,82 @@ class TestParseDefaultLiteral:
         assert parsed.value == "x'; DROP TABLE app_core.foo; --"
 
 
+class TestTrailingNewlineRegexAnchorBypass:
+    r"""regression: `$` matches before a trailing `\n`, `^` matches after a leading one.
+
+    Every validation regex in this module must be `\A...\Z`-anchored (or use
+    `re.fullmatch`), never `^...$` -- otherwise a payload like `"'hello'\n"`
+    passes `_STRING_RE` and `raw[1:-1]` silently slices off the closing quote
+    instead of the trailing newline, and `"scorex\n"` passes
+    `_COLUMN_NAME_RE`/`_SANITIZED_CHARSET_RE`. Covers every literal shape,
+    column names, app ids, and index-column references.
+    """
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "NULL\n",
+            "\nNULL",
+            "NULL\r\n",
+            "true\n",
+            "\ntrue",
+            "true\r\n",
+            "42\n",
+            "\n42",
+            "42\r\n",
+            "'hello'\n",
+            "\n'hello'",
+            "'hello'\r\n",
+            "''\n",
+        ],
+    )
+    def test_default_literal_with_embedded_newline_rejected(self, raw: str) -> None:
+        with pytest.raises(TableDeclarationError) as exc:
+            parse_default_literal(raw)
+        assert exc.value.reason == REASON_INVALID_DEFAULT_LITERAL
+
+    @pytest.mark.parametrize(
+        "name",
+        ["score\n", "\nscore", "score\r\n", "score\r"],
+    )
+    def test_column_name_with_embedded_newline_rejected(self, name: str) -> None:
+        with pytest.raises(TableDeclarationError) as exc:
+            validate_table_declaration(
+                {"columns": [_minimal_column(name=name)]}, provider="builtin"
+            )
+        assert exc.value.reason == REASON_INVALID_COLUMN_NAME
+
+    @pytest.mark.parametrize(
+        "app_id",
+        [
+            "waddles.core.fishing.fishing_core\n",
+            "\nwaddles.core.fishing.fishing_core",
+            "waddles.core.fishing.fishing_core\r\n",
+        ],
+    )
+    def test_app_id_with_embedded_newline_rejected(self, app_id: str) -> None:
+        with pytest.raises(TableDeclarationError) as exc:
+            derive_table_identity(app_id, provider="builtin")
+        assert exc.value.reason == REASON_INVALID_TABLE_IDENTITY
+
+    @pytest.mark.parametrize(
+        "col_ref",
+        ["kind\n", "\nkind", "kind\r\n"],
+    )
+    def test_index_column_reference_with_embedded_newline_rejected(self, col_ref: str) -> None:
+        with pytest.raises(TableDeclarationError) as exc:
+            validate_table_declaration(
+                {
+                    "columns": [_minimal_column(name="kind", type_="text(8)")],
+                    "indexes": [{"columns": [col_ref]}],
+                },
+                provider="builtin",
+            )
+        # The newline-suffixed reference never equals the declared "kind"
+        # column, so it is rejected as unknown rather than silently matched.
+        assert exc.value.reason == REASON_INDEX_UNKNOWN_COLUMN
+
+
 class TestColumnNameSuggestsPii:
     @pytest.mark.parametrize(
         "name",
