@@ -208,6 +208,11 @@ convention = "google"
 # above.
 "blueprints/v1/bundle_versions.py" = ["N815", "S101"]
 "blueprints/v1/bundle_approvals.py" = ["N815", "S101"]
+# Tenant ingest_sources registry (spec Sec5.2, Sec10.3) -- camelCase DTO
+# fields (sourceId, communityId, nextCursor, ...) match the wire contract
+# every other v1 blueprint's DTOs already use; S101 is the same
+# tenant_middleware postcondition assert as workstream_usage.py above.
+"blueprints/v1/ingest_sources.py" = ["N815", "S101"]
 
 [tool.mypy]
 python_version = "3.13"
