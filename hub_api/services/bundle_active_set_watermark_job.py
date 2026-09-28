@@ -30,6 +30,12 @@ its result), so concurrent runs converge on the same answer and the
 final `UPDATE ... WHERE id = 1` is a plain idempotent overwrite -- no
 leader election needed for this increment. The only cost is redundant
 read/write load, bounded by `tick_seconds` and the number of replicas.
+`compute_once()` also verifies `pg_is_in_recovery() = false` at runtime,
+every tick, before doing anything else -- a config assumption
+("`DATABASE_URL` points at the primary") is not the same as a runtime
+guarantee, and a failover that repoints the connection string at a
+standby before this process restarts would otherwise silently
+reintroduce rev3's exact unsound computation.
 
 **Retention** (Sec7 "unchanged from rev 2", default 48h) is pruned by
 this same job on a slower cadence (`retention_tick_every` ticks) so a
@@ -117,6 +123,14 @@ _ADVISORY_LOCK_KEY: Final[int] = 0x7761646200000007
 #: Never downcast to `bigint` (that's the exact 32-bit-vs-64-bit
 #: unsoundness migration 0026 fixed).
 _HORIZON_SQL = "SELECT pg_snapshot_xmin(pg_current_snapshot()) AS horizon"
+#: Runtime primary-only guard (post-review fix). `DATABASE_URL` pointing
+#: at the primary is a deployment-config assumption, not something this
+#: job can verify at import time -- a config drift (e.g. a failover that
+#: repoints DNS/the connection string at the new standby before this
+#: process restarts) would otherwise let compute_once() run rev3's exact
+#: unsound replica-side computation. Checked first, every tick, inside
+#: the same transaction as everything else.
+_IS_IN_RECOVERY_SQL = "SELECT pg_is_in_recovery()"
 _TRY_LOCK_SQL = "SELECT pg_try_advisory_xact_lock(:key) AS acquired"
 _CURRENT_SAFE_SEQ_SQL = "SELECT safe_seq FROM bundle_active_set_watermark WHERE id = 1"
 #: Bounded PK-range scan (never a full-table scan): only rows past the
@@ -177,6 +191,13 @@ _computed_at_gauge = _meter.create_gauge(
 _tick_failures_counter = _meter.create_counter(
     "waddles.bundle_active_set.watermark_tick_failures_total",
     description="Failed safe_seq computation ticks (DB error, etc.) -- feeds the same stall alert",
+)
+_replica_skipped_counter = _meter.create_counter(
+    "waddles.bundle_active_set.watermark_replica_skipped_total",
+    description=(
+        "Ticks skipped because DATABASE_URL resolved to a standby "
+        "(pg_is_in_recovery() = true) -- config drift, not a normal replica-count cost"
+    ),
 )
 _pruned_rows_histogram = _meter.create_histogram(
     "waddles.bundle_active_set.changes_pruned",
@@ -261,10 +282,27 @@ class BundleActiveSetWatermarkJob:
         docstring for why each piece is necessary.
 
         Returns the published `safe_seq` (unchanged from the previous
-        tick when nothing new is safe yet, or when another replica holds
-        the lock this tick).
+        tick when nothing new is safe yet, when another replica holds
+        the lock this tick, or when `DATABASE_URL` has drifted onto a
+        standby -- see the primary-only guard below).
         """
         async with self._dal.engine.begin() as conn:
+            # Primary-only guard, checked before the advisory lock (post
+            # -review fix). `DATABASE_URL` pointing at the primary is a
+            # deployment-config assumption this process cannot verify at
+            # startup -- a failover that repoints the connection string at
+            # the new standby before this process restarts would otherwise
+            # silently reintroduce rev3's exact unsound replica-side
+            # computation. Never crash on this: skip the tick, warn, count.
+            in_recovery = (await conn.execute(text(_IS_IN_RECOVERY_SQL))).scalar_one()
+            if in_recovery:
+                _replica_skipped_counter.add(1)
+                logger.warning(
+                    "bundle_active_set_watermark_skipped_not_primary",
+                    reason="pg_is_in_recovery",
+                )
+                return int((await conn.execute(text(_CURRENT_SAFE_SEQ_SQL))).scalar_one())
+
             acquired = (
                 await conn.execute(text(_TRY_LOCK_SQL), {"key": _ADVISORY_LOCK_KEY})
             ).scalar_one()

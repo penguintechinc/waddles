@@ -17,7 +17,7 @@ import importlib.util
 import sys
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, TracebackType
 from typing import Any
 
 import psycopg2
@@ -335,3 +335,96 @@ class TestStartStopLifecycle:
 
         # A second stop() must be a safe no-op.
         await job.stop()
+
+
+class _FakeResult:
+    """Minimal stand-in for the one `.scalar_one()` call site actually uses."""
+
+    def __init__(self, value: Any) -> None:
+        self._value = value
+
+    def scalar_one(self) -> Any:
+        return self._value
+
+
+class _FakeRecoveryConn:
+    """Fake connection: `pg_is_in_recovery()` -> True, everything else must never run.
+
+    Standing up a real streaming standby just to exercise this one branch
+    is disproportionate to what's being tested -- `pg_is_in_recovery()`
+    itself is a single, stable Postgres builtin; the actual risk surface
+    is our own branching around it (skip before the advisory lock, never
+    write, never crash), which this fake exercises directly and completely
+    by asserting the lock/scan/write statements are never even attempted.
+    """
+
+    def __init__(self) -> None:
+        self.executed_sql: list[str] = []
+
+    async def execute(self, stmt: Any, params: dict[str, Any] | None = None) -> _FakeResult:
+        sql_text = str(stmt)
+        self.executed_sql.append(sql_text)
+        if "pg_is_in_recovery" in sql_text:
+            return _FakeResult(True)
+        if "safe_seq FROM bundle_active_set_watermark" in sql_text:
+            return _FakeResult(42)
+        raise AssertionError(
+            f"compute_once() must return before issuing this statement while in "
+            f"recovery: {sql_text}"
+        )
+
+
+class _FakeBeginCtx:
+    def __init__(self, conn: _FakeRecoveryConn) -> None:
+        self._conn = conn
+
+    async def __aenter__(self) -> _FakeRecoveryConn:
+        return self._conn
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
+        return False
+
+
+class _FakeEngine:
+    def __init__(self, conn: _FakeRecoveryConn) -> None:
+        self._conn = conn
+
+    def begin(self) -> _FakeBeginCtx:
+        return _FakeBeginCtx(self._conn)
+
+
+class _FakeStandbyDal:
+    """Stands in for `AsyncDB` -- only `.engine.begin()` is ever touched by `compute_once()`."""
+
+    def __init__(self) -> None:
+        self.conn = _FakeRecoveryConn()
+        self.engine = _FakeEngine(self.conn)
+
+
+class TestPrimaryOnlyGuard:
+    """`compute_once()` must never run its real logic against a standby."""
+
+    async def test_skips_the_tick_when_pg_is_in_recovery(self, capsys: Any) -> None:
+        # structlog's default (unconfigured) logger prints to stdout rather
+        # than routing through stdlib `logging` -- `capsys`, not `caplog`,
+        # is what actually observes it here.
+        fake_dal = _FakeStandbyDal()
+        job = BundleActiveSetWatermarkJob(fake_dal)  # type: ignore[arg-type]
+
+        result = await job.compute_once()
+
+        assert result == 42
+        assert any("pg_is_in_recovery" in str(stmt) for stmt in fake_dal.conn.executed_sql)
+        # The advisory lock, horizon computation, and any write were never
+        # attempted -- _FakeRecoveryConn.execute() would have raised.
+        assert not any("pg_try_advisory_xact_lock" in s for s in fake_dal.conn.executed_sql)
+        assert not any(
+            "UPDATE bundle_active_set_watermark SET safe_seq" in s
+            for s in fake_dal.conn.executed_sql
+        )
+        assert "bundle_active_set_watermark_skipped_not_primary" in capsys.readouterr().out

@@ -348,6 +348,15 @@ def upgrade() -> None:
         """
     )
 
+    # Row-level (FOR EACH ROW), not statement-level, on every one of these
+    # five tables: each is a hub-api-owned control-plane/config table
+    # (installs, approvals, source bindings, published digests, ingest
+    # source registration), written at human/admin-action or publish-time
+    # cadence, not per-event -- none is a hot data-plane write path where
+    # row-level overhead would matter. A statement-level trigger + transition
+    # table would save nothing meaningful at this write volume and would
+    # still need a per-row natural key for entity_id, so there is no real
+    # benefit to the added complexity.
     for table, key_columns in _WATCHED_TABLES:
         args = ", ".join(f"'{col}'" for col in key_columns)
         op.execute(f"DROP TRIGGER IF EXISTS trg_bundle_active_set_log ON {table}")
