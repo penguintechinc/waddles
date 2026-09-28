@@ -104,7 +104,7 @@ def _derive_capabilities(manifest: BundleManifestV2) -> frozenset[str]:
 async def _audit_routes_to_refusal(
     install_dal: AsyncDB,
     *,
-    actor_id: int,
+    actor_id: int | None,
     app_id: str,
     version: str,
     target_app_id: str,
@@ -173,7 +173,7 @@ async def _validate_routes_to(
     *,
     routes_to: tuple[str, ...],
     tenant_id: int,
-    approved_by: int,
+    approved_by: int | None,
     app_id: str,
     version: str,
 ) -> None:
@@ -294,11 +294,12 @@ async def _write_approval_and_activate(
     version: str,
     tenant_id: int,
     community_id: int | None,
-    approved_by: int,
+    approved_by: int | None,
     computed_hash: str,
     summary: dict[str, Any],
     version_id: int,
     manifest: BundleManifestV2,
+    approval_source: str = "human",
 ) -> tuple[int, dict[str, list[str]]]:
     """Write `app_install_approvals` + upsert `app_active_versions` + AUTO-BIND sources, in one tx.
 
@@ -319,6 +320,14 @@ async def _write_approval_and_activate(
     wraps internally) rather than hand-written SQL strings, so column
     types (e.g. `summary_json`'s JSON/JSONB) are bound correctly by the
     dialect instead of needing a manual cast.
+
+    `approved_by=None` + `approval_source="system:core-seeder"` is the
+    SYSTEM-actor representation `hub_api/cli/seed_core_bundles.py` uses
+    to activate a first-party `waddles.core.*` bundle with no human
+    global-admin approval -- `approved_by` is a NULLABLE FK (migration
+    0023), so this is a real NULL, never a fake `hub_users` row.
+    `approval_source` (migration 0026) defaults to `"human"`, matching
+    every existing caller's unchanged behavior.
 
     Returns `(new_id, bound)`: the new `app_install_approvals.id`, and
     `app_source_binding_service.sync_bindings()`'s own return value (the
@@ -356,6 +365,7 @@ async def _write_approval_and_activate(
                 summary_json=summary,
                 approved_by=approved_by,
                 approved_at=now,
+                approval_source=approval_source,
             )
         )
         new_id = insert_result.inserted_primary_key[0]
@@ -419,9 +429,10 @@ async def approve_version(
     version: str,
     tenant_id: int,
     community_id: int | None,
-    approved_by: int,
+    approved_by: int | None,
     expected_permission_hash: str | None = None,
     valkey_client: Any | None = None,
+    approval_source: str = "human",
 ) -> Any:
     """Record an `app_install_approvals` row, activate the version, and AUTO-BIND its sources.
 
@@ -441,6 +452,20 @@ async def approve_version(
     absent from `app_active_versions` (INACTIVE) from upload through
     every FSM state up to and including PUBLISHED, until this function
     runs successfully.
+
+    Core-bundle exception to that human gate (still Justin's ruling, this
+    milestone): `hub_api/cli/seed_core_bundles.py` also calls this
+    function, in-cluster at deploy time, with `approved_by=None` and
+    `approval_source="system:core-seeder"` -- but ONLY for first-party
+    `waddles.core.*` app_ids (hard-guarded in the seeder itself, before
+    this function is ever reached; see that module's own
+    `_guard_core_namespace`). Vendor bundles never take this path: no
+    vendor-scoped code calls `seed_core_bundles`, and the seeder itself
+    refuses any app_id outside the reserved `waddles.core.*` namespace
+    (`services/vendor_bundle_authz.CORE_NAMESPACE_PREFIX`). `approved_by`
+    stays a real SQL NULL for a SYSTEM approval, never a fake `hub_users`
+    row -- the column is nullable (migration 0023); `approval_source`
+    (migration 0026) is what a reader uses to tell the two apart.
 
     Refuses (404) a `community_id` that does not belong to the caller's
     tenant, before anything else -- an IDOR a client-supplied
@@ -525,6 +550,7 @@ async def approve_version(
         summary=summary,
         version_id=upload.app_version_id,
         manifest=manifest,
+        approval_source=approval_source,
     )
     logger.info(
         "bundle approval: version activated",
@@ -534,6 +560,7 @@ async def approve_version(
             "tenant_id": tenant_id,
             "community_id": community_id,
             "approved_by": approved_by,
+            "approval_source": approval_source,
         },
     )
 

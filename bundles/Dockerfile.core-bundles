@@ -1,0 +1,122 @@
+# core-bundle-seeder -- builds the first-party waddles.core.* example bundles to real WASI 0.2
+# components, then packages them + their hub-api manifests + bundles/core-bundles.yaml into the
+# hub-api runtime, with hub_api/cli/seed_core_bundles.py as the entrypoint.
+#
+# Multi-stage, rootless. Build (context = repo root; needs wit/, sdk/, bundles/, hub_api/):
+#   docker build -f bundles/Dockerfile.core-bundles -t localhost:32000/waddlebot/core-bundle-seeder:alpha-<epoch> .
+#
+# Toolchain versions match this repo's own proven CI recipe verbatim
+# (.github/workflows/rust-waddle-sdk-rs.yml's example-bundle-component job,
+# .github/workflows/python-waddle-sdk.yml) -- cargo-component 0.21.1, wasm-tools 1.259.0, Rust
+# 1.97.1, componentize-py==0.25.1.
+
+# ---------------------------------------------------------------------------
+# Stage 1: waddles.core.example.ping (Rust) -> WASI 0.2 component
+# ---------------------------------------------------------------------------
+FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS rust-bundle-builder
+
+# build-essential -- required to build `ring` (rustls's crypto provider), same as
+# core/bundle_executor/Dockerfile.rust's own builder stage.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        build-essential=12.9 ca-certificates=20250419~deb12u1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup toolchain install 1.97.1 --target wasm32-wasip2 --component rustfmt,clippy \
+    && rustup default 1.97.1
+
+# cargo-component/wasm-tools have no taiki-e/install-action binstall entry proven for this
+# toolchain (see the CI workflow's own comment) -- installed from source at the exact pinned
+# versions, --locked for full transitive-dependency pinning.
+RUN cargo install cargo-component --version 0.21.1 --locked \
+    && cargo install wasm-tools --version 1.259.0 --locked
+
+WORKDIR /repo
+COPY wit wit
+COPY sdk/waddle-sdk-rs sdk/waddle-sdk-rs
+COPY bundles/rust/ping bundles/rust/ping
+WORKDIR /repo/bundles/rust/ping
+RUN cargo component build --release --target wasm32-wasip2 --locked
+
+# ---------------------------------------------------------------------------
+# Stage 2: waddles.core.example.pyping (Python) -> WASI 0.2 component
+# ---------------------------------------------------------------------------
+FROM python:3.13-slim-bookworm@sha256:f13a6b7565175da40695e8109f64cbc4d2e65f4c9ef2e3b321c3a44fa3c06fe7 AS python-bundle-builder
+
+RUN pip install --no-cache-dir componentize-py==0.25.1
+
+WORKDIR /repo
+COPY wit wit
+COPY sdk/waddle-sdk/src sdk/waddle-sdk/src
+COPY bundles/python/pyping/src bundles/python/pyping/src
+# waddle_sdk._component_entry -- the shared SDK entry module every Python bundle points
+# componentize-py at (PR #382, fix/python-sdk-two-export-entry, merged into release/v3.0.X);
+# supersedes this bundle's own now-deleted _wit_app.py stand-in. bundles/python/pyping/src/
+# _entry_wiring.py (added by that same merge) supplies the static bundle_transform/
+# bundle_dispatch wiring _component_entry.py expects from the bundle's own source directory.
+RUN componentize-py \
+        -d wit/waddle-bundle -w stage \
+        componentize -p sdk/waddle-sdk/src -p bundles/python/pyping/src \
+        waddle_sdk._component_entry \
+        -o pyping.wasm
+
+# ---------------------------------------------------------------------------
+# Stage 3: hub-api's own Python dependency set (+ wasm-tools CLI) -- mirrors
+# hub_api/Dockerfile's builder stage verbatim, same pinned base per
+# devops-containers.md ("never a second pinned digest for the same tag").
+# ---------------------------------------------------------------------------
+FROM python:3.13-slim-bookworm@sha256:f13a6b7565175da40695e8109f64cbc4d2e65f4c9ef2e3b321c3a44fa3c06fe7 AS hub-deps-builder
+WORKDIR /app
+
+COPY hub_api/requirements.txt .
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
+
+COPY libs/flask_core /app/libs/flask_core
+RUN pip install --no-cache-dir /app/libs/flask_core
+
+# wasm-tools -- the seeder's own bundle_component_validator.validate_component() shells out to
+# this CLI (same WIT-conformance check hub-api's own onboarding endpoint uses); pinned +
+# checksum-verified identically to hub_api/Dockerfile's own install.
+ARG WASM_TOOLS_VERSION=1.259.0
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) wt_arch=x86_64; wt_sha256=3e9b374b4c7715b771b69bf0d65a337990ed4546ec5e97e01c0ff587dfc52160 ;; \
+      arm64) wt_arch=aarch64; wt_sha256=9e1644f3841f2b783dd8af82de054667388e46689806fba4909ed45f3182800f ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS_VERSION}/wasm-tools-${WASM_TOOLS_VERSION}-${wt_arch}-linux.tar.gz"; \
+    python3 -c "import urllib.request; urllib.request.urlretrieve('${url}', '/tmp/wasm-tools.tar.gz')"; \
+    echo "${wt_sha256}  /tmp/wasm-tools.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/wasm-tools.tar.gz -C /tmp; \
+    install -m 0755 "/tmp/wasm-tools-${WASM_TOOLS_VERSION}-${wt_arch}-linux/wasm-tools" /usr/local/bin/wasm-tools; \
+    rm -rf /tmp/wasm-tools.tar.gz "/tmp/wasm-tools-${WASM_TOOLS_VERSION}-${wt_arch}-linux"
+
+# ---------------------------------------------------------------------------
+# Final: hub-api runtime + the two built components + their manifests + the catalog.
+# ---------------------------------------------------------------------------
+FROM python:3.13-slim-bookworm@sha256:f13a6b7565175da40695e8109f64cbc4d2e65f4c9ef2e3b321c3a44fa3c06fe7
+WORKDIR /app
+
+COPY --from=hub-deps-builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
+COPY --from=hub-deps-builder /usr/local/bin /usr/local/bin
+
+COPY hub_api/config.py ./
+COPY hub_api/services ./services
+COPY hub_api/cli ./cli
+
+RUN mkdir -p /core-bundles
+COPY bundles/core-bundles.yaml /core-bundles/core-bundles.yaml
+COPY bundles/rust/ping/hub-manifest.yaml /core-bundles/ping.manifest.yaml
+COPY bundles/python/pyping/hub-manifest.yaml /core-bundles/pyping.manifest.yaml
+COPY --from=rust-bundle-builder /repo/bundles/rust/ping/target/wasm32-wasip2/release/waddle_bundle_ping_rust.wasm /core-bundles/ping.wasm
+COPY --from=python-bundle-builder /repo/pyping.wasm /core-bundles/pyping.wasm
+
+ENV CORE_BUNDLES_DIR=/core-bundles
+
+RUN groupadd -r appuser && useradd -r -g appuser -m appuser \
+    && chown -R appuser:appuser /app /core-bundles
+
+USER appuser
+
+ENTRYPOINT ["python3", "-m", "cli.seed_core_bundles"]
