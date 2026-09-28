@@ -239,6 +239,15 @@ class HubAPIConfig:
     connections_callback_base_url: str = "http://localhost:30879"
     connections_state_ttl_s: int = 600
 
+    # Dedicated connection for the `keystore` schema (migration 0027) --
+    # own role, own (short) backup-retention policy, deliberately never
+    # the same credential as `database_url`. See services/tenant_keystore.py
+    # module docstring. Empty-string default (rather than falling back to
+    # `database_url` here) keeps every pre-existing direct `HubAPIConfig(...)`
+    # test construction unaffected; `from_env()` below applies the real
+    # database_url fallback for actual runtime config.
+    keystore_database_url: str = ""
+
     @classmethod
     def from_env(cls) -> HubAPIConfig:
         """Build config from the process environment. Raises on an invalid DB_TYPE."""
@@ -270,6 +279,7 @@ class HubAPIConfig:
             grpc_port=int(os.getenv("GRPC_PORT", "50204")),
             database_url=database_url,
             database_read_replica_url=read_replica_url,
+            keystore_database_url=os.getenv("KEYSTORE_DATABASE_URL", database_url),
             db_pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
             db_max_retries=int(os.getenv("DB_MAX_RETRIES", "5")),
             db_retry_delay=int(os.getenv("DB_RETRY_DELAY", "5")),

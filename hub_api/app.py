@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+import asyncpg
 from flask_core import (
     create_health_blueprint,
     init_database,
@@ -48,6 +49,8 @@ from services.schema import (
     bind_token_billing_tables,
 )
 from services.session_cookie import bearer_token_from_cookie
+from services.tenant_keystore import K8sSecretKekProvider, TenantKeystore
+from services.tenant_keystore_repository import AsyncpgKeystoreRepository
 
 
 def _bind_reference_tables(dal: Any) -> None:
@@ -243,6 +246,29 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # rather than replacing it.
         install_dal = await build_install_dal(cfg.database_url, pool_size=cfg.db_pool_size)
         app.config["install_dal"] = install_dal
+
+        # Tenant-DEK broker (blueprints/v1/internal_keys.py) -- feature is
+        # default-OFF (`waddles.core.tenant-envelope-encryption`) and its
+        # own migration (0027) may not have run yet in every environment,
+        # so a missing/invalid TENANT_KEK_HEX or unreachable `keystore`
+        # schema must never crash hub-api startup; the broker endpoint
+        # itself fails closed (503-equivalent via TenantKeyError) per-call
+        # instead. See services/tenant_keystore.py module docstring for
+        # the pending penguin-security[crypto] swap-in.
+        try:
+            keystore_pool = await asyncpg.create_pool(cfg.keystore_database_url)
+            app.config["tenant_keystore"] = TenantKeystore(
+                repository=AsyncpgKeystoreRepository(keystore_pool),
+                kek_provider=K8sSecretKekProvider(),
+            )
+        except Exception as exc:  # nosec B110 - see comment above
+            logger.system(
+                "tenant_keystore unavailable at startup",
+                action="startup",
+                result="DEGRADED",
+                extra={"error": str(exc)},
+            )
+
         logger.system("hub-api started", action="startup", result="SUCCESS")
 
     @app.after_serving

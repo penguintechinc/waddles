@@ -243,3 +243,10 @@ follow_imports = "skip"
 [[tool.mypy.overrides]]
 module = ["boto3.*", "botocore.*", "webauthn.*"]
 ignore_missing_imports = true
+
+# asyncpg (services/tenant_keystore_repository.py -- the dedicated `keystore`
+# schema connection pool) ships no py.typed marker either -- same boundary
+# override as above.
+[[tool.mypy.overrides]]
+module = ["asyncpg.*"]
+ignore_missing_imports = true
