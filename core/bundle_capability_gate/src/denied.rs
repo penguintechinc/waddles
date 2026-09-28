@@ -56,6 +56,13 @@ pub enum Denied {
     /// Reserved for `ai.generate`'s host-side PII rejection (spec SS9) --
     /// capability-specific, not triggered by this crate.
     ContainsPii,
+    /// The permission's TYPE (family) is instance-denied platform-wide (spec:
+    /// instance policy, above the 3 consent tiers) -- checked even when an
+    /// active `GrantSnapshot` entry exists, so a stale/unrevoked grant can
+    /// never bypass an instance-wide deny (defense in depth against the
+    /// push-invalidation cascade not having landed yet). Triggered by this
+    /// crate.
+    InstanceDenied,
 }
 
 impl Denied {
@@ -70,6 +77,7 @@ impl Denied {
             Self::DeltaOutOfBounds => "delta_out_of_bounds",
             Self::UnsupportedPlatform => "unsupported_platform",
             Self::ContainsPii => "contains_pii",
+            Self::InstanceDenied => "instance_denied",
         }
     }
 }
@@ -102,5 +110,6 @@ mod tests {
             "unsupported_platform"
         );
         assert_eq!(Denied::ContainsPii.reason_str(), "contains_pii");
+        assert_eq!(Denied::InstanceDenied.reason_str(), "instance_denied");
     }
 }

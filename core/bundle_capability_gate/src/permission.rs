@@ -8,7 +8,113 @@
 //! string from a manifest at parse time.
 
 use std::fmt;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
+
+/// No `net.http.private-ip` grant may be coarser than this -- mirrors
+/// hub-api's own `_MAX_PRIVATE_PREFIX_V4/6` (`bundle_permission_catalog.py`).
+/// A /8 would hand a bundle the whole RFC1918 `10.0.0.0/8` block; /16 (v4) /
+/// /64 (v6) is the widest an operator should ever hand a single bundle.
+const MAX_PRIVATE_PREFIX_V4: u8 = 16;
+const MAX_PRIVATE_PREFIX_V6: u8 = 64;
+
+/// AWS IMDSv2's IPv6 metadata address -- outside `fe80::/10`, so it needs
+/// its own explicit check (mirrors `bundle_permission_catalog.py`).
+const METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
+
+fn ipv6_is_link_local(v6: &Ipv6Addr) -> bool {
+    (v6.segments()[0] & 0xffc0) == 0xfe80
+}
+
+fn ipv6_is_unique_local(v6: &Ipv6Addr) -> bool {
+    (v6.segments()[0] & 0xfe00) == 0xfc00
+}
+
+/// Loopback, link-local, or cloud-metadata -- always denied regardless of
+/// family or instance policy (spec: "Loopback, link-local and metadata...
+/// are ALWAYS denied, even with private-ip"). This crate does not (yet) know
+/// this cluster's own pod/service/node CIDRs -- that check lives at
+/// hub-api's manifest/grant-time validation (`bundle_permission_catalog.
+/// py::_cluster_deny_networks`), which runs before any grant this crate's
+/// `GrantSnapshot` would ever serve; a defense-in-depth cluster-CIDR check
+/// here is a follow-up once this crate gains a config-injection point for
+/// per-deployment CIDRs.
+fn is_always_denied_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_link_local() || *v4 == Ipv4Addr::new(169, 254, 169, 254)
+        }
+        IpAddr::V6(v6) => v6.is_loopback() || ipv6_is_link_local(v6) || *v6 == METADATA_V6,
+    }
+}
+
+fn is_globally_routable(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            !v4.is_private()
+                && !v4.is_loopback()
+                && !v4.is_link_local()
+                && !v4.is_broadcast()
+                && !v4.is_documentation()
+                && !v4.is_unspecified()
+        }
+        IpAddr::V6(v6) => {
+            !v6.is_loopback()
+                && !ipv6_is_link_local(v6)
+                && !ipv6_is_unique_local(v6)
+                && !v6.is_unspecified()
+        }
+    }
+}
+
+fn is_rfc1918_or_ula(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_private(),
+        IpAddr::V6(v6) => ipv6_is_unique_local(v6),
+    }
+}
+
+/// Parses `<ip>` or `<ip>/<prefix>` -- a bare IP is treated as `/32` (v4) or
+/// `/128` (v6), the full width, so the prefix-bound check below is trivially
+/// satisfied for a single address.
+fn parse_ip_and_prefix(value: &str) -> Option<(IpAddr, u8)> {
+    match value.split_once('/') {
+        Some((addr_str, prefix_str)) => {
+            let addr: IpAddr = addr_str.parse().ok()?;
+            let max_prefix = if addr.is_ipv4() { 32 } else { 128 };
+            let prefix: u8 = prefix_str.parse().ok()?;
+            if prefix > max_prefix {
+                return None;
+            }
+            Some((addr, prefix))
+        }
+        None => {
+            let addr: IpAddr = value.parse().ok()?;
+            let full = if addr.is_ipv4() { 32 } else { 128 };
+            Some((addr, full))
+        }
+    }
+}
+
+fn mask_ipv4(addr: Ipv4Addr, prefix: u8) -> Ipv4Addr {
+    let bits = u32::from(addr);
+    let mask: u32 = if prefix == 0 {
+        0
+    } else {
+        !0u32 << (32 - prefix)
+    };
+    Ipv4Addr::from(bits & mask)
+}
+
+fn mask_ipv6(addr: Ipv6Addr, prefix: u8) -> Ipv6Addr {
+    let bits = u128::from(addr);
+    let mask: u128 = if prefix == 0 {
+        0
+    } else {
+        !0u128 << (128 - prefix)
+    };
+    Ipv6Addr::from(bits & mask)
+}
 
 /// Android-style risk tier (spec SS1). `Normal` permissions are shown on
 /// every consent screen but never block approval on a per-id ack; `Dangerous`
@@ -85,7 +191,22 @@ pub enum PermissionFamily {
     StorageKv,
     StorageTables,
     StorageObjects,
-    NetHttp,
+    /// `net.http.fqdn:<host>` -- the preferred, `Normal`-risk outbound-HTTP
+    /// family (2026-09-28 decision). A bundle should reach for this family
+    /// first; `NetHttpPublicIp`/`NetHttpPrivateIp` exist for the exceptional
+    /// case where no stable hostname is available.
+    NetHttpFqdn,
+    /// `net.http.public-ip:<ip>` -- a bare, globally-routable IP with no
+    /// FQDN. `Dangerous` (2026-09-28 refinement: an IP-literal target is
+    /// opaque, rebinding/cache-poisoning-prone, and harder to audit than a
+    /// hostname, regardless of whether the address itself is publicly
+    /// routable).
+    NetHttpPublicIp,
+    /// `net.http.private-ip:<ip|cidr>` -- `Dangerous`, and additionally
+    /// deny-by-default at the instance-policy layer (opt-in only) since this
+    /// is the one family capable of naming the platform's own internal
+    /// network. See [`crate::instance_policy`].
+    NetHttpPrivateIp,
     ChatSend,
     Moderation,
     OverlayMedia,
@@ -119,7 +240,9 @@ impl PermissionFamily {
         Self::StorageKv,
         Self::StorageTables,
         Self::StorageObjects,
-        Self::NetHttp,
+        Self::NetHttpFqdn,
+        Self::NetHttpPublicIp,
+        Self::NetHttpPrivateIp,
         Self::ChatSend,
         Self::Moderation,
         Self::OverlayMedia,
@@ -144,7 +267,9 @@ impl PermissionFamily {
             Self::StorageKv => "storage.kv",
             Self::StorageTables => "storage.tables",
             Self::StorageObjects => "storage.objects",
-            Self::NetHttp => "net.http",
+            Self::NetHttpFqdn => "net.http.fqdn",
+            Self::NetHttpPublicIp => "net.http.public-ip",
+            Self::NetHttpPrivateIp => "net.http.private-ip",
             Self::ChatSend => "chat.send",
             Self::Moderation => "moderation",
             Self::OverlayMedia => "overlay.media",
@@ -169,7 +294,14 @@ impl PermissionFamily {
     /// but parsed identically to the colon-joined pair here for a single
     /// consistent grammar; see [`PermissionId::parse`]).
     pub fn is_parameterized(&self) -> bool {
-        matches!(self, Self::NetHttp | Self::ChatSend | Self::Moderation)
+        matches!(
+            self,
+            Self::NetHttpFqdn
+                | Self::NetHttpPublicIp
+                | Self::NetHttpPrivateIp
+                | Self::ChatSend
+                | Self::Moderation
+        )
     }
 
     /// spec SS5.2: `AppScoped` permissions have their resource derived
@@ -231,7 +363,17 @@ impl PermissionFamily {
                 default_quota: Quota::Descriptive("1k objects / 500 MB per (tenant, app)"),
                 notes: "Tiered bucket/prefix topology, spec SS6",
             },
-            Self::NetHttp => CatalogEntry {
+            Self::NetHttpFqdn => CatalogEntry {
+                family: *self,
+                risk: Risk::Normal,
+                capability_kind: CapabilityKind::Http,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 10,
+                    window: Duration::from_secs(1),
+                },
+                notes: "10 rps, 1 MB response -- the preferred net.http form",
+            },
+            Self::NetHttpPublicIp => CatalogEntry {
                 family: *self,
                 risk: Risk::Dangerous,
                 capability_kind: CapabilityKind::Http,
@@ -239,7 +381,18 @@ impl PermissionFamily {
                     max_calls: 10,
                     window: Duration::from_secs(1),
                 },
-                notes: "10 rps, 1 MB response, no private hosts",
+                notes: "10 rps, 1 MB response; bare IP, no FQDN -- prefer net.http.fqdn",
+            },
+            Self::NetHttpPrivateIp => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Http,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 10,
+                    window: Duration::from_secs(1),
+                },
+                notes: "10 rps, 1 MB response; deny-by-default at the instance-policy layer, \
+                        loopback/link-local/metadata/cluster CIDRs always denied",
             },
             Self::ChatSend => CatalogEntry {
                 family: *self,
@@ -384,7 +537,9 @@ pub enum PermissionId {
     StorageKv,
     StorageTables,
     StorageObjects,
-    NetHttp(String),
+    NetHttpFqdn(String),
+    NetHttpPublicIp(String),
+    NetHttpPrivateIp(String),
     ChatSend(String),
     Moderation(String),
     OverlayMedia,
@@ -418,8 +573,17 @@ pub enum ParsePermissionIdError {
     MissingParam { family: &'static str },
     #[error("unsupported_platform: {0:?} is not a compiled-in provider")]
     UnsupportedPlatform(String),
-    #[error("net.http host {0:?} is not a valid hostname")]
+    #[error(
+        "net.http.fqdn host {0:?} is not a valid, non-wildcard hostname (or is an IP literal)"
+    )]
     InvalidHost(String),
+    #[error("net.http.public-ip {0:?} is not a single, globally-routable IP address")]
+    InvalidPublicIp(String),
+    #[error(
+        "net.http.private-ip {0:?} is not a private IP/CIDR within the allowed prefix bound, \
+         or overlaps an always-denied range (loopback/link-local/metadata/cluster CIDR)"
+    )]
+    InvalidPrivateIp(String),
 }
 
 impl PermissionId {
@@ -428,7 +592,9 @@ impl PermissionId {
             Self::StorageKv => PermissionFamily::StorageKv,
             Self::StorageTables => PermissionFamily::StorageTables,
             Self::StorageObjects => PermissionFamily::StorageObjects,
-            Self::NetHttp(_) => PermissionFamily::NetHttp,
+            Self::NetHttpFqdn(_) => PermissionFamily::NetHttpFqdn,
+            Self::NetHttpPublicIp(_) => PermissionFamily::NetHttpPublicIp,
+            Self::NetHttpPrivateIp(_) => PermissionFamily::NetHttpPrivateIp,
             Self::ChatSend(_) => PermissionFamily::ChatSend,
             Self::Moderation(_) => PermissionFamily::Moderation,
             Self::OverlayMedia => PermissionFamily::OverlayMedia,
@@ -460,7 +626,9 @@ impl PermissionId {
     /// `GrantSnapshot`/`GrantCache` lookup key.
     pub fn canonical_id(&self) -> String {
         match self {
-            Self::NetHttp(host) => format!("net.http:{host}"),
+            Self::NetHttpFqdn(host) => format!("net.http.fqdn:{host}"),
+            Self::NetHttpPublicIp(ip) => format!("net.http.public-ip:{ip}"),
+            Self::NetHttpPrivateIp(value) => format!("net.http.private-ip:{value}"),
             Self::ChatSend(platform) => format!("chat.send:{platform}"),
             Self::Moderation(platform) => format!("moderation.{platform}"),
             other => other.family().id_prefix().to_string(),
@@ -477,8 +645,12 @@ impl PermissionId {
         }
     }
 
+    /// `net.http.fqdn` only -- rejects a wildcard (already excluded by the
+    /// charset below), an IP literal (must use `net.http.public-ip`/
+    /// `net.http.private-ip` instead), and anything else not shaped like a
+    /// DNS hostname.
     fn validate_host(host: &str) -> Result<(), ParsePermissionIdError> {
-        let valid = !host.is_empty()
+        let shape_valid = !host.is_empty()
             && host.len() <= 253
             && host
                 .chars()
@@ -487,23 +659,65 @@ impl PermissionId {
             && !host.starts_with('-')
             && !host.ends_with('.')
             && !host.ends_with('-');
-        if valid {
-            Ok(())
-        } else {
-            Err(ParsePermissionIdError::InvalidHost(host.to_string()))
+        if !shape_valid || host.parse::<IpAddr>().is_ok() {
+            return Err(ParsePermissionIdError::InvalidHost(host.to_string()));
         }
+        Ok(())
     }
 
-    /// Parses a catalog id string (`storage.kv`, `net.http:api.example.com`,
-    /// `chat.send:discord`, `moderation.twitch`) against the closed catalog
-    /// (spec SS2.3) -- an id matching no entry is `unknown_permission`, and a
-    /// parameterized family with an unrecognized platform is
-    /// `unsupported_platform`, exactly the two denial-reason strings spec
-    /// SS5.4 defines for these cases.
+    fn validate_public_ip(value: &str) -> Result<(), ParsePermissionIdError> {
+        let err = || ParsePermissionIdError::InvalidPublicIp(value.to_string());
+        if value.contains('/') {
+            return Err(err()); // never a CIDR
+        }
+        let addr: IpAddr = value.parse().map_err(|_| err())?;
+        if is_always_denied_ip(&addr) || !is_globally_routable(&addr) {
+            return Err(err());
+        }
+        Ok(())
+    }
+
+    fn validate_private_ip_or_cidr(value: &str) -> Result<(), ParsePermissionIdError> {
+        let err = || ParsePermissionIdError::InvalidPrivateIp(value.to_string());
+        let (addr, prefix) = parse_ip_and_prefix(value).ok_or_else(err)?;
+        let network = match addr {
+            IpAddr::V4(v4) => {
+                if prefix < MAX_PRIVATE_PREFIX_V4 {
+                    return Err(err());
+                }
+                IpAddr::V4(mask_ipv4(v4, prefix))
+            }
+            IpAddr::V6(v6) => {
+                if prefix < MAX_PRIVATE_PREFIX_V6 {
+                    return Err(err());
+                }
+                IpAddr::V6(mask_ipv6(v6, prefix))
+            }
+        };
+        if is_always_denied_ip(&network) || !is_rfc1918_or_ula(&network) {
+            return Err(err());
+        }
+        Ok(())
+    }
+
+    /// Parses a catalog id string (`storage.kv`, `net.http.fqdn:
+    /// api.example.com`, `chat.send:discord`, `moderation.twitch`) against
+    /// the closed catalog (spec SS2.3) -- an id matching no entry is
+    /// `unknown_permission`, and a parameterized family with an unrecognized
+    /// platform is `unsupported_platform`, exactly the two denial-reason
+    /// strings spec SS5.4 defines for these cases.
     pub fn parse(raw: &str) -> Result<Self, ParsePermissionIdError> {
-        if let Some(host) = raw.strip_prefix("net.http:") {
+        if let Some(host) = raw.strip_prefix("net.http.fqdn:") {
             Self::validate_host(host)?;
-            return Ok(Self::NetHttp(host.to_string()));
+            return Ok(Self::NetHttpFqdn(host.to_string()));
+        }
+        if let Some(ip) = raw.strip_prefix("net.http.public-ip:") {
+            Self::validate_public_ip(ip)?;
+            return Ok(Self::NetHttpPublicIp(ip.to_string()));
+        }
+        if let Some(value) = raw.strip_prefix("net.http.private-ip:") {
+            Self::validate_private_ip_or_cidr(value)?;
+            return Ok(Self::NetHttpPrivateIp(value.to_string()));
         }
         if let Some(platform) = raw.strip_prefix("chat.send:") {
             Self::validate_platform(platform)?;
@@ -513,13 +727,18 @@ impl PermissionId {
             Self::validate_platform(platform)?;
             return Ok(Self::Moderation(platform.to_string()));
         }
-        if raw == "net.http" || raw == "chat.send" {
+        if raw == "net.http.fqdn" || raw == "net.http.public-ip" || raw == "net.http.private-ip" {
             return Err(ParsePermissionIdError::MissingParam {
-                family: if raw == "net.http" {
-                    "net.http"
-                } else {
-                    "chat.send"
+                family: match raw {
+                    "net.http.fqdn" => "net.http.fqdn",
+                    "net.http.public-ip" => "net.http.public-ip",
+                    _ => "net.http.private-ip",
                 },
+            });
+        }
+        if raw == "chat.send" {
+            return Err(ParsePermissionIdError::MissingParam {
+                family: "chat.send",
             });
         }
 
@@ -576,16 +795,91 @@ mod tests {
     }
 
     #[test]
-    fn parse_accepts_a_compiled_in_net_http_host() {
-        let id = PermissionId::parse("net.http:api.weatherapi.example.com").unwrap();
-        assert_eq!(id.canonical_id(), "net.http:api.weatherapi.example.com");
-        assert_eq!(id.family(), PermissionFamily::NetHttp);
+    fn parse_accepts_a_compiled_in_net_http_fqdn_host() {
+        let id = PermissionId::parse("net.http.fqdn:api.weatherapi.example.com").unwrap();
+        assert_eq!(
+            id.canonical_id(),
+            "net.http.fqdn:api.weatherapi.example.com"
+        );
+        assert_eq!(id.family(), PermissionFamily::NetHttpFqdn);
+        assert_eq!(id.risk(), Risk::Normal);
     }
 
     #[test]
-    fn parse_rejects_an_invalid_net_http_host() {
-        let err = PermissionId::parse("net.http:not a host!").unwrap_err();
+    fn parse_rejects_an_invalid_net_http_fqdn_host() {
+        let err = PermissionId::parse("net.http.fqdn:not a host!").unwrap_err();
         assert!(matches!(err, ParsePermissionIdError::InvalidHost(_)));
+    }
+
+    #[test]
+    fn parse_rejects_a_wildcard_net_http_fqdn_host() {
+        let err = PermissionId::parse("net.http.fqdn:*.example.com").unwrap_err();
+        assert!(matches!(err, ParsePermissionIdError::InvalidHost(_)));
+    }
+
+    #[test]
+    fn parse_rejects_an_ip_literal_as_net_http_fqdn() {
+        let err = PermissionId::parse("net.http.fqdn:93.184.216.34").unwrap_err();
+        assert!(matches!(err, ParsePermissionIdError::InvalidHost(_)));
+    }
+
+    #[test]
+    fn parse_accepts_a_globally_routable_net_http_public_ip() {
+        let id = PermissionId::parse("net.http.public-ip:93.184.216.34").unwrap();
+        assert_eq!(id.canonical_id(), "net.http.public-ip:93.184.216.34");
+        assert_eq!(id.family(), PermissionFamily::NetHttpPublicIp);
+        assert_eq!(id.risk(), Risk::Dangerous);
+    }
+
+    #[test]
+    fn parse_rejects_a_cidr_as_net_http_public_ip() {
+        let err = PermissionId::parse("net.http.public-ip:93.184.216.0/24").unwrap_err();
+        assert!(matches!(err, ParsePermissionIdError::InvalidPublicIp(_)));
+    }
+
+    #[test]
+    fn parse_rejects_a_private_address_as_net_http_public_ip() {
+        let err = PermissionId::parse("net.http.public-ip:10.0.0.5").unwrap_err();
+        assert!(matches!(err, ParsePermissionIdError::InvalidPublicIp(_)));
+    }
+
+    #[test]
+    fn parse_rejects_loopback_and_metadata_as_net_http_public_ip() {
+        assert!(PermissionId::parse("net.http.public-ip:127.0.0.1").is_err());
+        assert!(PermissionId::parse("net.http.public-ip:169.254.169.254").is_err());
+    }
+
+    #[test]
+    fn parse_accepts_a_private_ip_within_the_prefix_bound() {
+        let id = PermissionId::parse("net.http.private-ip:10.20.0.0/16").unwrap();
+        assert_eq!(id.canonical_id(), "net.http.private-ip:10.20.0.0/16");
+        assert_eq!(id.family(), PermissionFamily::NetHttpPrivateIp);
+        assert_eq!(id.risk(), Risk::Dangerous);
+    }
+
+    #[test]
+    fn parse_rejects_a_private_ip_coarser_than_the_prefix_bound() {
+        let err = PermissionId::parse("net.http.private-ip:10.0.0.0/8").unwrap_err();
+        assert!(matches!(err, ParsePermissionIdError::InvalidPrivateIp(_)));
+    }
+
+    #[test]
+    fn parse_rejects_a_public_address_as_net_http_private_ip() {
+        let err = PermissionId::parse("net.http.private-ip:93.184.216.34").unwrap_err();
+        assert!(matches!(err, ParsePermissionIdError::InvalidPrivateIp(_)));
+    }
+
+    #[test]
+    fn parse_rejects_loopback_link_local_and_metadata_as_net_http_private_ip() {
+        assert!(PermissionId::parse("net.http.private-ip:127.0.0.1").is_err());
+        assert!(PermissionId::parse("net.http.private-ip:127.0.0.0/24").is_err());
+        assert!(PermissionId::parse("net.http.private-ip:169.254.169.254").is_err());
+    }
+
+    #[test]
+    fn parse_accepts_a_private_ipv6_ula_within_the_prefix_bound() {
+        assert!(PermissionId::parse("net.http.private-ip:fd12:3456:789a::/64").is_ok());
+        assert!(PermissionId::parse("net.http.private-ip:fd12:3456:789a::/48").is_err());
     }
 
     #[test]
@@ -623,10 +917,12 @@ mod tests {
 
     #[test]
     fn parse_rejects_a_bare_parameterized_family_with_no_param() {
-        let err = PermissionId::parse("net.http").unwrap_err();
+        let err = PermissionId::parse("net.http.fqdn").unwrap_err();
         assert_eq!(
             err,
-            ParsePermissionIdError::MissingParam { family: "net.http" }
+            ParsePermissionIdError::MissingParam {
+                family: "net.http.fqdn"
+            }
         );
     }
 
@@ -673,7 +969,7 @@ mod tests {
             AppScopedResource::Overlay
         );
         assert_eq!(
-            PermissionFamily::NetHttp.expected_app_scoped_resource(),
+            PermissionFamily::NetHttpFqdn.expected_app_scoped_resource(),
             AppScopedResource::None
         );
         assert_eq!(

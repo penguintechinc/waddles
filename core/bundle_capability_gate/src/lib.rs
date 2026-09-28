@@ -42,6 +42,7 @@ pub mod audit;
 pub mod denied;
 pub mod gate;
 pub mod grant;
+pub mod instance_policy;
 pub mod membership;
 pub mod permission;
 pub mod quota;
@@ -54,6 +55,7 @@ pub use grant::{
     GrantCache, GrantLoader, GrantSet, GrantSnapshot, GrantedPermission, InMemoryGrantLoader,
     InMemoryGrantSnapshot,
 };
+pub use instance_policy::{InMemoryInstancePolicySnapshot, InstanceAction, InstancePolicySnapshot};
 pub use membership::{InMemoryMembership, MembershipCheck};
 pub use permission::{
     CapabilityKind, ParsePermissionIdError, PermissionFamily, PermissionId, Quota, Risk,
