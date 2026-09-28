@@ -49,7 +49,52 @@ suggest) would reject every legitimate Python component; do not do that.
 
 Exports are checked strictly: the component MUST export exactly
 `waddle:bundle/process-stage` and `waddle:bundle/action-stage` (the
-`stage` world's own export set) -- neither more nor fewer.
+`stage` world's own export set) -- neither more nor fewer -- with one
+additional, narrowly-matched exception: `componentize-py` 0.25.1
+unconditionally links an anonymous, un-namespaced reflection export
+(package `root:component`, no interface name, a single `init` function)
+into EVERY component it builds -- its own embedded-CPython runtime's
+dynamic-dispatch bootstrap, entirely orthogonal to the target WIT world
+(confirmed against a real `bundles/python/pyping` build: `stage.wit`
+never declares it, yet it is present regardless of world/entry/WIT path).
+`core/bundle_executor/src/engine.rs`'s `wasmtime::component::bindgen!`-
+generated `Stage` binding looks up exactly `waddle:bundle/process-stage`/
+`action-stage` by name and never enumerates or calls anything else, so
+allowing this export grants no capability -- it is never invoked by the
+executor. It is also not a new instantiation hook: any WASI-p2 core-module
+start section runs at instantiation for every component already,
+independent of its exported interface surface -- this allowlist entry
+neither grants nor widens that behavior, it only lets `wasm-tools`'s own
+`wit --json` reflection of this one, already-inert, already-happening
+artifact pass through the export check unmolested.
+
+`_is_componentize_py_runtime_reflection_export` matches it exactly, not
+loosely:
+
+  - package `root:component`, interface name `None` (anonymous), exactly
+    one function named `init`, with exactly the parameter names
+    `app-name`/`symbols`/`stub-wasi` in that order;
+  - `app-name: string` and `stub-wasi: bool` are checked as literal WIT
+    primitives;
+  - `symbols` is checked against `_COMPONENTIZE_PY_SYMBOLS_SHAPE` --
+    the record's full field set, in order, resolved **recursively**
+    through every nested list/record/variant/enum it contains (captured
+    verbatim from a real build's `wasm-tools component wit --json`
+    output), not merely "is some record" or "is an int";
+  - `init`'s return type is checked against
+    `_COMPONENTIZE_PY_INIT_RESULT_SHAPE` (`result<_, string>`), not left
+    unchecked;
+  - every named type in both shapes must additionally be OWNED by this
+    same anonymous interface (`_check_type`'s `owner_interface_id`
+    check) -- a hostile component cannot satisfy the shape by pointing
+    `symbols`/the result type at a same-shaped type borrowed from
+    elsewhere in the component.
+
+This closes the gap a shallower check would leave open: matching only on
+package/name/param-names would let a hostile component reuse that half
+of the disguise while smuggling a *different* `symbols` record (e.g. one
+with an extra field carrying attacker-controlled data) or a different
+result type through the same `init` signature.
 """
 
 from __future__ import annotations
@@ -73,6 +118,173 @@ ALLOWED_WASI_NAMESPACES = frozenset(
 #: The `stage` world's own export set (`wit/waddle-bundle/stage.wit`) -- a
 #: conformant component exports exactly these two, never more or fewer.
 REQUIRED_EXPORTS = frozenset({"process-stage", "action-stage"})
+
+#: `componentize-py`'s synthetic reflection export always reports this exact
+#: package name and no interface name (see module docstring).
+_COMPONENTIZE_PY_RUNTIME_EXPORT_PACKAGE = "root:component"
+#: `init(app-name: string, symbols: <record>, stub-wasi: bool) -> result<_, string>`
+#: -- the fixed parameter order/names this export's single function must have.
+_COMPONENTIZE_PY_RUNTIME_INIT_PARAM_NAMES = ("app-name", "symbols", "stub-wasi")
+
+
+def _rec(name: str, fields: list[tuple[str, Any]]) -> dict[str, Any]:
+    """A named WIT `record` shape node -- see `_check_type`."""
+    return {"kind": "record", "name": name, "fields": fields}
+
+
+def _lst(of: Any) -> dict[str, Any]:
+    """An anonymous WIT `list<of>` shape node -- see `_check_type`."""
+    return {"kind": "list", "of": of}
+
+
+def _res(ok: Any, err: Any) -> dict[str, Any]:
+    """An anonymous WIT `result<ok, err>` shape node -- see `_check_type`."""
+    return {"kind": "result", "ok": ok, "err": err}
+
+
+def _var(name: str, cases: list[tuple[str, Any]]) -> dict[str, Any]:
+    """A named WIT `variant` shape node -- see `_check_type`."""
+    return {"kind": "variant", "name": name, "cases": cases}
+
+
+def _enum(name: str, cases: list[str]) -> dict[str, Any]:
+    """A named WIT `enum` shape node -- see `_check_type`."""
+    return {"kind": "enum", "name": name, "cases": cases}
+
+
+_FUNCTION = _rec("function", [("protocol", "string"), ("name", "string")])
+_CONSTRUCTOR = _rec("constructor", [("module", "string"), ("protocol", "string")])
+_STATIC = _rec("static", [("module", "string"), ("protocol", "string"), ("name", "string")])
+_FUNCTION_EXPORT_KIND = _var(
+    "function-export-kind",
+    [
+        ("freestanding", _FUNCTION),
+        ("constructor", _CONSTRUCTOR),
+        ("method", "string"),
+        ("static", _STATIC),
+    ],
+)
+_RETURN_STYLE = _var("return-style", [("none", None), ("normal", None), ("result", None)])
+_FUNCTION_EXPORT = _rec(
+    "function-export", [("kind", _FUNCTION_EXPORT_KIND), ("return-style", _RETURN_STYLE)]
+)
+_RESOURCE = _rec("resource", [("package", "string"), ("name", "string")])
+_RECORD_TYPE = _rec(
+    "record", [("package", "string"), ("name", "string"), ("fields", _lst("string"))]
+)
+_FLAGS_TYPE = _rec("flags", [("package", "string"), ("name", "string"), ("u32-count", "u32")])
+_TUPLE_TYPE = _rec("tuple", [("count", "u32")])
+_CASE_TYPE = _rec("case", [("name", "string"), ("has-payload", "bool")])
+_VARIANT_TYPE = _rec(
+    "variant", [("package", "string"), ("name", "string"), ("cases", _lst(_CASE_TYPE))]
+)
+_ENUM_TYPE = _rec("enum", [("package", "string"), ("name", "string"), ("count", "u32")])
+_OPTION_KIND_TYPE = _enum("option-kind", ["non-nesting", "nesting"])
+_RESULT_RECORD_TYPE = _rec("result-record", [("has-ok", "bool"), ("has-err", "bool")])
+
+#: The exact `symbols` record shape componentize-py 0.25.1's `init` export
+#: takes as its second parameter -- captured verbatim (field names, order,
+#: and every nested type, recursively) from a real `bundles/python/pyping`
+#: build's `wasm-tools component wit --json` output. Anything narrower or
+#: wider is rejected, never loosely matched on "is a record"/"is an int".
+_COMPONENTIZE_PY_SYMBOLS_SHAPE = _rec(
+    "symbols",
+    [
+        ("exports", _lst(_FUNCTION_EXPORT)),
+        ("resources", _lst(_RESOURCE)),
+        ("records", _lst(_RECORD_TYPE)),
+        ("flags", _lst(_FLAGS_TYPE)),
+        ("tuples", _lst(_TUPLE_TYPE)),
+        ("variants", _lst(_VARIANT_TYPE)),
+        ("enums", _lst(_ENUM_TYPE)),
+        ("options", _lst(_OPTION_KIND_TYPE)),
+        ("results", _lst(_RESULT_RECORD_TYPE)),
+    ],
+)
+
+#: `init`'s real return type: `result<_, string>` (no `ok` payload, `err` is
+#: a plain string) -- captured from the same real build as the shape above.
+_COMPONENTIZE_PY_INIT_RESULT_SHAPE = _res(None, "string")
+
+
+def _check_type(doc: dict[str, Any], type_ref: Any, expected: Any, owner_interface_id: int) -> bool:
+    """Recursively verify `type_ref` matches the structural shape `expected`.
+
+    `type_ref` is a WIT type reference as `wasm-tools component wit --json`
+    encodes it: either a bare primitive string (`"string"`, `"bool"`,
+    `"u32"`, ...), `None` (a variant case / return-style with no payload),
+    or an `int` index into `doc["types"]`. `expected` is one of this
+    module's `_rec`/`_lst`/`_res`/`_var`/`_enum` shape nodes, or a bare
+    primitive string, or `None`.
+
+    Every named type (`record`/`variant`/`enum`) must additionally be
+    owned by `owner_interface_id` -- the same anonymous interface being
+    validated -- so a hostile component cannot satisfy the shape by
+    pointing `symbols`/`init`'s result at a same-shaped type borrowed from
+    somewhere else in the component. Anonymous types (`list`/`result`)
+    must have no owner at all, matching the real capture.
+    """
+    if isinstance(expected, str):
+        return bool(type_ref == expected)
+    if expected is None or type_ref is None:
+        return expected is None and type_ref is None
+    if not isinstance(type_ref, int) or not (0 <= type_ref < len(doc.get("types", []))):
+        return False
+    node = doc["types"][type_ref]
+    if not isinstance(node, dict):
+        return False
+    kind_obj = node.get("kind")
+    if not isinstance(kind_obj, dict) or len(kind_obj) != 1:
+        return False
+    ((tag, value),) = kind_obj.items()
+    if tag != expected.get("kind"):
+        return False
+
+    if tag in ("record", "variant", "enum"):
+        if node.get("name") != expected["name"]:
+            return False
+        if node.get("owner") != {"interface": owner_interface_id}:
+            return False
+    elif node.get("owner") is not None:
+        # list/result: always anonymous in the real capture.
+        return False
+
+    if tag == "record":
+        exp_fields = expected["fields"]
+        fields = value.get("fields") if isinstance(value, dict) else None
+        if not isinstance(fields, list) or len(fields) != len(exp_fields):
+            return False
+        return all(
+            f.get("name") == exp_name
+            and _check_type(doc, f.get("type"), exp_type, owner_interface_id)
+            for f, (exp_name, exp_type) in zip(fields, exp_fields, strict=True)
+        )
+    if tag == "list":
+        return _check_type(doc, value, expected["of"], owner_interface_id)
+    if tag == "result":
+        if not isinstance(value, dict):
+            return False
+        return _check_type(
+            doc, value.get("ok"), expected["ok"], owner_interface_id
+        ) and _check_type(doc, value.get("err"), expected["err"], owner_interface_id)
+    if tag == "variant":
+        exp_cases = expected["cases"]
+        cases = value.get("cases") if isinstance(value, dict) else None
+        if not isinstance(cases, list) or len(cases) != len(exp_cases):
+            return False
+        return all(
+            c.get("name") == exp_name
+            and _check_type(doc, c.get("type"), exp_type, owner_interface_id)
+            for c, (exp_name, exp_type) in zip(cases, exp_cases, strict=True)
+        )
+    if tag == "enum":
+        exp_cases = expected["cases"]
+        cases = value.get("cases") if isinstance(value, dict) else None
+        if not isinstance(cases, list) or len(cases) != len(exp_cases):
+            return False
+        return all(c.get("name") == exp_name for c, exp_name in zip(cases, exp_cases, strict=True))
+    return False
+
 
 _SUBPROCESS_TIMEOUT_S = 15
 
@@ -160,21 +372,57 @@ def _namespace(package_name: str) -> str:
     return package_name.split("@", 1)[0]
 
 
-def _resolve_interface(doc: dict[str, Any], interface_id: int) -> tuple[str, str]:
-    """`(namespace, interface_name)` for the interface at `doc["interfaces"][interface_id]`."""
+def _resolve_interface(doc: dict[str, Any], interface_id: int) -> tuple[str, dict[str, Any]]:
+    """`(namespace, interface_record)` for the interface at `doc["interfaces"][interface_id]`."""
     iface = doc["interfaces"][interface_id]
     pkg = doc["packages"][iface["package"]]
-    return _namespace(pkg["name"]), iface["name"]
+    return _namespace(pkg["name"]), iface
+
+
+def _is_componentize_py_runtime_reflection_export(
+    doc: dict[str, Any], interface_id: int, namespace: str, iface: dict[str, Any]
+) -> bool:
+    """True iff `iface` is exactly componentize-py's synthetic `init` reflection export.
+
+    See module docstring. Every check here is load-bearing -- loosening any
+    one (e.g. matching on package/anonymous-name alone, or "symbols is some
+    record") would let a hostile component reuse only part of this exact
+    disguise to smuggle a different function, a different interface name,
+    or a differently-shaped `symbols`/result type through as an export.
+    """
+    if namespace != _COMPONENTIZE_PY_RUNTIME_EXPORT_PACKAGE or iface.get("name") is not None:
+        return False
+    functions = iface.get("functions")
+    if not isinstance(functions, dict) or set(functions) != {"init"}:
+        return False
+    init_fn = functions["init"]
+    if not isinstance(init_fn, dict) or init_fn.get("kind") != "freestanding":
+        return False
+    params = init_fn.get("params")
+    if not isinstance(params, list) or len(params) != 3:
+        return False
+    if tuple(p.get("name") for p in params) != _COMPONENTIZE_PY_RUNTIME_INIT_PARAM_NAMES:
+        return False
+    return (
+        params[0].get("type") == "string"
+        and params[2].get("type") == "bool"
+        and _check_type(doc, params[1].get("type"), _COMPONENTIZE_PY_SYMBOLS_SHAPE, interface_id)
+        and _check_type(
+            doc, init_fn.get("result"), _COMPONENTIZE_PY_INIT_RESULT_SHAPE, interface_id
+        )
+    )
 
 
 def _classify_world_items(
-    doc: dict[str, Any], items: dict[str, Any]
+    doc: dict[str, Any], items: dict[str, Any], *, is_export: bool
 ) -> tuple[list[str], list[str]]:
     """Split a world's `imports`/`exports` map into `(qualified_names, violations)`.
 
     A violation is either a non-interface item (a bare top-level function
-    import/export -- not part of any legitimate `stage`-world component)
-    or an interface outside the allowlist.
+    import/export -- not part of any legitimate `stage`-world component),
+    or an interface outside the allowlist -- except componentize-py's
+    synthetic reflection export, permitted only on the export side and only
+    when it matches `_is_componentize_py_runtime_reflection_export` exactly.
     """
     names: list[str] = []
     violations: list[str] = []
@@ -183,10 +431,19 @@ def _classify_world_items(
             shape = list(item.keys()) if isinstance(item, dict) else repr(item)
             violations.append(f"non_interface_item:{shape}")
             continue
-        namespace, iface_name = _resolve_interface(doc, item["interface"]["id"])
-        qualified = f"{namespace}/{iface_name}"
+        interface_id = item["interface"]["id"]
+        namespace, iface = _resolve_interface(doc, interface_id)
+        iface_name = iface.get("name")
+        qualified = f"{namespace}/{iface_name if iface_name is not None else '<anonymous>'}"
         names.append(qualified)
-        if namespace != WADDLE_BUNDLE_NAMESPACE and namespace not in ALLOWED_WASI_NAMESPACES:
+        allowed = namespace == WADDLE_BUNDLE_NAMESPACE or namespace in ALLOWED_WASI_NAMESPACES
+        if (
+            not allowed
+            and is_export
+            and _is_componentize_py_runtime_reflection_export(doc, interface_id, namespace, iface)
+        ):
+            allowed = True
+        if not allowed:
             violations.append(qualified)
     return names, violations
 
@@ -202,7 +459,9 @@ def _validate_document(doc: dict[str, Any]) -> ComponentValidationResult:
         return ComponentValidationResult(ok=False, reason="no_world_found")
     world = worlds[0]
 
-    import_names, import_violations = _classify_world_items(doc, world.get("imports", {}))
+    import_names, import_violations = _classify_world_items(
+        doc, world.get("imports", {}), is_export=False
+    )
     if import_violations:
         return ComponentValidationResult(
             ok=False,
@@ -210,7 +469,9 @@ def _validate_document(doc: dict[str, Any]) -> ComponentValidationResult:
             imports=tuple(import_names),
         )
 
-    export_names, export_violations = _classify_world_items(doc, world.get("exports", {}))
+    export_names, export_violations = _classify_world_items(
+        doc, world.get("exports", {}), is_export=True
+    )
     if export_violations:
         return ComponentValidationResult(
             ok=False,
