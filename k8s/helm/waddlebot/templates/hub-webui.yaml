@@ -1,8 +1,15 @@
-# v3.0.x Task 0.5 — SKELETON. Static SPA assets; different cache/scaling profile from
+# v3.0.x Task 0.5. Static SPA assets; different cache/scaling profile from
 # hub-api, which is why it is a separate container rather than served by the same one.
 # 1:1 fold of core/hub-webui.yaml — see PIPELINE_MAPPING.md. Coexists with that legacy
 # Deployment; cutover is a later task. No envFrom / db-migrate init container, matching the
 # legacy hub-webui Deployment's precedent (static assets need neither).
+#
+# fix/hub-webui-health-and-api-url -- runs admin/hub_module/webui-server/server.js
+# (Express, house convention: never nginx), which listens on $PORT (default 8080) and
+# proxies /api to $HUB_API_URL. containerPort/PORT/liveness+readiness port must all
+# agree with .Values.pipeline.hubWebui.port. HUB_API_URL is wired to the in-cluster
+# hub-api-v3 Service (never the server's localhost:8060 dev default) -- server.js
+# fails fast at startup if it's unset in NODE_ENV=production.
 {{- if .Values.pipeline.hubWebui.enabled }}
 ---
 apiVersion: apps/v1
@@ -42,7 +49,18 @@ spec:
         - name: http
           containerPort: {{ .Values.pipeline.hubWebui.port }}
           protocol: TCP
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: PORT
+          value: "{{ .Values.pipeline.hubWebui.port }}"
+        # In-cluster hub-api-v3 Service -- never the server's localhost dev
+        # default (see server.js). Same pattern as svc-ingest/svc-action/etc.
+        - name: HUB_API_URL
+          value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
         livenessProbe:
+          # LOCAL only -- /health never calls out to hub-api, so a slow/down
+          # upstream never kills this pod via liveness.
           httpGet:
             path: /health
             port: http
@@ -61,17 +79,9 @@ spec:
         resources:
           {{- toYaml .Values.pipeline.hubWebui.resources | nindent 10 }}
         volumeMounts:
-        - name: nginx-cache
-          mountPath: /var/cache/nginx
-        - name: nginx-run
-          mountPath: /var/run
         - name: tmp
           mountPath: /tmp
       volumes:
-      - name: nginx-cache
-        emptyDir: {}
-      - name: nginx-run
-        emptyDir: {}
       - name: tmp
         emptyDir: {}
 ---
