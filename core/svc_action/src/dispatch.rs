@@ -73,28 +73,6 @@ pub enum InvokeError {
     MalformedPayload(String),
 }
 
-/// Resolves the `app_versions.id` [`crate::capabilities::InvokeScope::
-/// app_version`] must carry for a live invocation of `digest`: the row in
-/// `active`'s ACTIVE+APPROVED set whose own `digest` matches the one this
-/// stage is about to invoke (spec SS4: grants are keyed `(tenant, community,
-/// app, app_version)`, never just `app_id`, so a pod running an older
-/// pinned digest than the tenant's current activation must resolve THAT
-/// digest's own version, not "whatever is active now"). Pure (no I/O) so
-/// the "correct row wins, no match fails closed" contract is unit-testable
-/// without a live reader connection -- `crate::lib::try_start_dispatch` is
-/// the sole caller, and treats `None` as unresolvable (never substitutes
-/// `0`, see that function's doc).
-pub fn resolve_action_app_version(
-    active: &bundle_active_set::ActiveSetRead,
-    digest: &str,
-) -> Option<i64> {
-    active
-        .rows
-        .iter()
-        .find(|row| row.digest == digest)
-        .map(|row| row.version_id)
-}
-
 /// Sends `load` for one bundle over `conn` and returns the executor's
 /// `loaded` reply (spec §6.6). A real, fully-wired wrapper around
 /// [`Connection::request`] -- see the module doc for what remains a seam
@@ -463,15 +441,16 @@ impl SpineOps for SpineClient {
 pub struct DispatchDeps<A: AuditSink, T: TenantResolver, S: SpineOps> {
     pub app_id: String,
     pub digest: String,
-    /// The `app_versions.id` the active-set row that loaded `digest`
-    /// resolved to (`crate::lib::try_start_dispatch`'s
-    /// `resolve_action_app_version`) -- threaded into every invoke's
-    /// [`crate::capabilities::InvokeScope::app_version`], never `0` except
-    /// in this stage's documented env-only unconfigured mode (no
-    /// `BUNDLE_SCOPE_TENANT_ID`/DB reader configured at all, matching
-    /// `core/svc_process::lib::try_start_process_loop`'s identical
-    /// "`(0, 0, 0)` sentinel while unconfigured" precedent).
-    pub app_version: i64,
+    /// The live, poll-refreshed `app_id -> (digest, app_versions.id)`
+    /// snapshot (`crate::lib::try_start_dispatch`'s shared handle,
+    /// populated every tick by `crate::bundle_loader::run_tick`) --
+    /// resolved PER INVOCATION in [`handle_delivered`] via
+    /// [`bundle_active_set::ActiveVersionSnapshot::resolve_for_digest`],
+    /// never captured once as a plain `i64`: a bundle hot-swap must be
+    /// reflected on the very next invocation (spec SS4/SS5.1), and an
+    /// invoke whose `digest` has since been superseded must fail closed,
+    /// never silently run under the newer digest's version.
+    pub app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
     pub config_json: String,
     pub key_ring: KeyRing,
     pub connections: Arc<ConnectionRegistry>,
@@ -521,6 +500,37 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
         };
         return deps.spine.dead_letter(d, &err).await;
     }
+
+    // Resolved PER INVOCATION against the live, poll-refreshed snapshot
+    // (`DispatchDeps::app_version_snapshot`'s doc) -- never a value
+    // captured once at startup, and checked BEFORE the executor-connection
+    // gate below (an in-memory, no-I/O check; no reason to require a live
+    // connection just to discover this invoke can't be authorized anyway).
+    // `None` means `deps.digest` is not (or no longer) in the current
+    // ACTIVE+APPROVED set for this app_id (a hot swap superseded it, or the
+    // pod's pinned digest was never active in the first place): fail closed
+    // by dead-lettering this entry rather than ever invoking under an
+    // unresolvable/stale version.
+    let Some(app_version) = deps
+        .app_version_snapshot
+        .resolve_for_digest(&deps.app_id, &deps.digest)
+    else {
+        tracing::warn!(
+            app_id = %deps.app_id,
+            digest = %deps.digest,
+            "app_version unresolvable for the invoked digest (not in the current \
+             active-set snapshot -- likely superseded by a hot swap), dead-lettering"
+        );
+        let err = penguin_spine::DlqError {
+            kind: penguin_spine::DlqErrorKind::HostCallDenied,
+            code: "APP_VERSION_UNRESOLVED".to_string(),
+            message: "invoked digest is not in the current active-set snapshot".to_string(),
+            detail: None,
+            artifact_digest: Some(deps.digest.clone()),
+            consumer_id: deps.consumer_id.clone(),
+        };
+        return deps.spine.dead_letter(d, &err).await;
+    };
 
     let Some(connection) = deps.connections.active() else {
         tracing::warn!(app_id = %deps.app_id, "no executor connection available, dead-lettering for redelivery");
@@ -573,7 +583,7 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
                 deps.retry_policy.call_timeout_ms,
                 tenant_id,
                 community_id,
-                deps.app_version,
+                app_version,
             )
             .await
             {
@@ -815,50 +825,6 @@ mod tests {
         assert!(matches!(outcome, AttemptOutcome::NonRetryable { .. }));
     }
 
-    fn active_row(digest: &str, version_id: i64) -> bundle_active_set::ActiveBundleRow {
-        bundle_active_set::ActiveBundleRow {
-            app_id: "waddles.bot.commands.default".to_string(),
-            version: version_id.to_string(),
-            version_id,
-            digest: digest.to_string(),
-            component_key: "bundles/c/component.wasm".to_string(),
-            sidecar_key: "bundles/c/sidecar.json".to_string(),
-        }
-    }
-
-    /// Regression (gh-433): the resolved `app_version` is the DIGEST-matched
-    /// row's `version_id`, never the tenant's current-activation row when
-    /// this pod's pinned digest has since drifted from it -- and never the
-    /// `0` interim placeholder this replaced.
-    #[test]
-    fn resolve_action_app_version_matches_the_invoked_digest_not_just_the_app_id() {
-        let active = bundle_active_set::ActiveSetRead {
-            rows: vec![active_row("sha256:old", 7), active_row("sha256:new", 9)],
-            excluded: vec![],
-            degraded: vec![],
-        };
-        assert_eq!(
-            resolve_action_app_version(&active, "sha256:old"),
-            Some(7),
-            "must resolve the OLD pinned digest's own version, not the newer row"
-        );
-        assert_eq!(resolve_action_app_version(&active, "sha256:new"), Some(9));
-    }
-
-    /// No active-set row matches the invoked digest at all -- unresolvable,
-    /// never `0` (regression: a production caller must fail closed here,
-    /// never build an `InvokeScope` with the `0` sentinel for a live
-    /// invocation).
-    #[test]
-    fn resolve_action_app_version_is_none_when_no_row_matches_the_digest() {
-        let active = bundle_active_set::ActiveSetRead {
-            rows: vec![active_row("sha256:other", 7)],
-            excluded: vec![],
-            degraded: vec![],
-        };
-        assert_eq!(resolve_action_app_version(&active, "sha256:missing"), None);
-    }
-
     #[derive(Default)]
     struct FakeAudit {
         records: std::sync::Mutex<Vec<DispatchRecord>>,
@@ -1078,10 +1044,19 @@ mod tests {
         spine: FakeSpineOps,
         connections: Arc<ConnectionRegistry>,
     ) -> DispatchDeps<FakeAudit, FixedTenantResolver, FakeSpineOps> {
+        let app_version_snapshot = bundle_active_set::ActiveVersionSnapshot::new();
+        app_version_snapshot.update(&[bundle_active_set::ActiveBundleRow {
+            app_id: "waddles.bot.commands.default".to_string(),
+            version: "1".to_string(),
+            version_id: 1,
+            digest: "sha256:00".to_string(),
+            component_key: String::new(),
+            sidecar_key: String::new(),
+        }]);
         DispatchDeps {
             app_id: "waddles.bot.commands.default".to_string(),
             digest: "sha256:00".to_string(),
-            app_version: 1,
+            app_version_snapshot,
             config_json: "{}".to_string(),
             key_ring: test_ring(),
             connections,
@@ -1249,6 +1224,65 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].status, "success");
         assert_eq!(deps.usage.lock().unwrap().pending_len(), 1);
+    }
+
+    /// Regression (gh-433 follow-up): `app_version` is resolved PER
+    /// INVOCATION from the live snapshot, never captured once. The first
+    /// delivery succeeds against the seeded version; a hot swap mid-run
+    /// (`bundle_loader::run_tick`'s own `ActiveVersionSnapshot::update`,
+    /// simulated here directly) that supersedes this pod's pinned digest
+    /// must make the very NEXT delivery fail closed (dead-lettered,
+    /// `HostCallDenied`) rather than keep invoking under a version the
+    /// active set no longer recognizes.
+    #[tokio::test]
+    async fn handle_delivered_fails_closed_after_the_active_set_hot_swaps_past_the_pinned_digest() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
+
+        let connections = connected_registry_with_fake_executor(
+            serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+        )
+        .await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+
+        // First delivery: the snapshot still resolves `deps.digest` ->
+        // version 1 (seeded by `test_deps`) -- succeeds and acks.
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+        assert_eq!(deps.spine.dead_lettered.lock().unwrap().len(), 0);
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 1);
+
+        // Mid-run hot swap: the poller's next tick reads a NEW digest/
+        // version for this same app_id -- `deps.digest` (this pod's pinned
+        // digest) is no longer in the active set at all.
+        deps.app_version_snapshot
+            .update(&[bundle_active_set::ActiveBundleRow {
+                app_id: "waddles.bot.commands.default".to_string(),
+                version: "2".to_string(),
+                version_id: 2,
+                digest: "sha256:new-after-swap".to_string(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+            }]);
+
+        // Second delivery, same pinned digest: must fail closed now.
+        let mac2 = mac_for(&ring, "acme");
+        let d2 = fixture_delivered("acme", "waddles.bot.commands.default", mac2, "k1");
+        handle_delivered(&d2, &stream_key, &deps).await.unwrap();
+
+        assert_eq!(
+            deps.spine.acked.lock().unwrap().len(),
+            1,
+            "the post-swap delivery must never be acked as a successful invocation"
+        );
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(
+            dead_lettered[0].1,
+            penguin_spine::DlqErrorKind::HostCallDenied
+        );
     }
 
     /// A [`crate::usage::UsageSink`] that records every delta it is asked

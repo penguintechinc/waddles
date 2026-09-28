@@ -173,7 +173,15 @@ where
     // just doesn't fail OVER to the legacy env override without a pod
     // restart). Mirrors `core/svc_process`'s identical
     // `resolve_db_path_active`/`db_path_selected` pair exactly.
-    if resolve_db_path_active(&config, &license).await {
+    // Shared, poll-refreshed `app_id -> (digest, app_versions.id)` snapshot
+    // (`bundle_active_set::ActiveVersionSnapshot`) -- populated by
+    // `try_start_db_bundle_loader`'s own poll tick below when the DB-driven
+    // path is active, so `try_start_dispatch`'s per-invocation resolution
+    // (never captured once at startup) always sees the CURRENT hot-swapped
+    // version, not a stale one.
+    let app_version_snapshot = bundle_active_set::ActiveVersionSnapshot::new();
+    let db_path_active = resolve_db_path_active(&config, &license).await;
+    if db_path_active {
         if !config.cli.action_bundle_digest.is_empty() {
             tracing::info!(
                 action_bundle_digest = %config.cli.action_bundle_digest,
@@ -186,6 +194,7 @@ where
             Arc::clone(&connections),
             license.clone(),
             bundle_loader_excluded_metric,
+            app_version_snapshot.clone(),
         );
     } else {
         tracing::info!(
@@ -195,7 +204,14 @@ where
         );
         try_start_env_bundle_loader(&config.cli, Arc::clone(&connections));
     }
-    try_start_dispatch(&config, connections, usage, license);
+    try_start_dispatch(
+        &config,
+        connections,
+        usage,
+        license,
+        app_version_snapshot,
+        db_path_active,
+    );
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
     let metrics_addr = SocketAddr::new(config.cli.bind_addr, config.cli.metrics_port);
@@ -746,6 +762,7 @@ fn try_start_db_bundle_loader(
     connections: Arc<host_api::ConnectionRegistry>,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
     excluded_metric: prometheus::IntCounterVec,
+    app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
@@ -803,6 +820,7 @@ fn try_start_db_bundle_loader(
             connections,
             excluded_metric,
             shutdown_rx,
+            app_version_snapshot,
         )
         .await;
     });
@@ -824,6 +842,8 @@ fn try_start_dispatch(
     connections: Arc<host_api::ConnectionRegistry>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
+    app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    db_path_active: bool,
 ) {
     if config.cli.action_app_id.is_empty() {
         tracing::info!("ACTION_APP_ID not set; dispatch loop not started (no bundle assigned)");
@@ -861,66 +881,28 @@ fn try_start_dispatch(
             }
         };
         let (digest, config_json) = resolve_initial_bundle(&config.cli.action_bundle_digest);
-        // Resolves the real `app_versions.id` the active-set row that
-        // loaded `digest` carries (`dispatch::resolve_action_app_version`,
-        // mirroring `core/svc_process::lib::resolve_app_version_id`'s
-        // identical pattern) when this pod is ALSO configured with a real
-        // `BUNDLE_SCOPE_TENANT_ID` and a DB reader account -- fail-closed
-        // (dispatch loop never starts) on any resolution failure, never a
-        // `0` placeholder substituted for a live invocation (spec SS4/
-        // SS5.1). `None` (both `BUNDLE_SCOPE_TENANT_ID`/`DB_READER_PASSWORD`
-        // unset) keeps this stage's documented env-only unconfigured mode
-        // unchanged: `app_version` stays `0`, the same sentinel
-        // `core/svc_process::lib::try_start_process_loop` uses while
-        // unconfigured.
-        let app_version = match (
-            config.cli.bundle_scope_tenant_id.get(),
-            config.db_reader_password.as_ref(),
-        ) {
-            (Some(tenant_id), Some(password)) => {
-                let community_id = config.cli.bundle_scope_community_id;
-                let reader_cfg = bundle_active_set::ReaderConfig {
-                    host: config.cli.db_reader_host.clone(),
-                    port: config.cli.db_reader_port,
-                    name: config.cli.db_reader_name.clone(),
-                    user: config.cli.db_reader_user.clone(),
-                };
-                let reader_db = match bundle_active_set::reader::connect(
-                    &reader_cfg,
-                    password.expose(),
-                )
-                .await
-                {
-                    Ok(db) => db,
-                    Err(err) => {
-                        tracing::error!(error = %err, "db-reader connection failed; dispatch loop not started (fail-closed: BUNDLE_SCOPE_TENANT_ID is configured, so a 0 app_version is never substituted)");
-                        return;
-                    }
-                };
-                let active = match bundle_active_set::read_active_set(
-                    &reader_db,
-                    tenant_id,
-                    community_id,
-                    Some(&app_id),
-                )
-                .await
-                {
-                    Ok(active) => active,
-                    Err(err) => {
-                        tracing::error!(error = %err, tenant_id, community_id, app_id = %app_id, "active-set query failed; dispatch loop not started (fail-closed)");
-                        return;
-                    }
-                };
-                match dispatch::resolve_action_app_version(&active, &digest) {
-                    Some(id) => id,
-                    None => {
-                        tracing::error!(tenant_id, community_id, app_id = %app_id, digest = %digest, "no active-set row matches the invoked digest; dispatch loop not started (fail-closed)");
-                        return;
-                    }
-                }
-            }
-            _ => 0,
-        };
+        // `app_version_snapshot` is resolved PER INVOCATION in
+        // `dispatch::handle_delivered`, never captured once here (a bundle
+        // hot-swap -- `crate::bundle_loader`'s poll tick -- must be
+        // reflected on the very next invocation, spec SS4/SS5.1). When the
+        // DB-driven path is inactive (unconfigured, or the kill-switch
+        // fell back to this legacy env override -- `db_path_active`, the
+        // SAME decision `crate::resolve_db_path_active` already made for
+        // bundle load/unload), no poller ever populates the snapshot for
+        // this `app_id`, so seed it ONCE with the `0` sentinel here --
+        // identical posture to `core/svc_process::lib::
+        // try_start_process_loop`'s own documented unconfigured-mode
+        // fallback.
+        if !db_path_active {
+            app_version_snapshot.update(&[bundle_active_set::ActiveBundleRow {
+                app_id: app_id.clone(),
+                version: String::new(),
+                version_id: 0,
+                digest: digest.clone(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+            }]);
+        }
         // TODO(M3+): tenant/community scope is hardcoded to the
         // tenant-wide `global` activation until multi-bundle scheduling
         // (module doc) resolves the real set of (tenant, community,
@@ -946,7 +928,7 @@ fn try_start_dispatch(
         let deps = dispatch::DispatchDeps {
             app_id: app_id.clone(),
             digest,
-            app_version,
+            app_version_snapshot,
             config_json,
             key_ring,
             connections,
@@ -1441,7 +1423,14 @@ mod tests {
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
         let usage = Arc::new(std::sync::Mutex::new(usage::UsageBatcher::new()));
-        try_start_dispatch(&config, connections, usage, None);
+        try_start_dispatch(
+            &config,
+            connections,
+            usage,
+            None,
+            bundle_active_set::ActiveVersionSnapshot::new(),
+            false,
+        );
     }
 
     /// `try_start_env_bundle_loader`'s own gate: `ACTION_BUNDLE_DIGEST`
@@ -1472,7 +1461,13 @@ mod tests {
             db_reader_password: None,
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
-        try_start_db_bundle_loader(&config, connections, None, test_excluded_metric());
+        try_start_db_bundle_loader(
+            &config,
+            connections,
+            None,
+            test_excluded_metric(),
+            bundle_active_set::ActiveVersionSnapshot::new(),
+        );
     }
 
     /// Same no-op contract, the other independent startup gate:
@@ -1490,7 +1485,13 @@ mod tests {
             db_reader_password: Some(Secret::new("real-ro-password")),
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
-        try_start_db_bundle_loader(&config, connections, None, test_excluded_metric());
+        try_start_db_bundle_loader(
+            &config,
+            connections,
+            None,
+            test_excluded_metric(),
+            bundle_active_set::ActiveVersionSnapshot::new(),
+        );
     }
 
     /// Bug fix regression (the actual bug): tenant `0` is a real,
@@ -1511,7 +1512,13 @@ mod tests {
             db_reader_password: Some(Secret::new("real-ro-password")),
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
-        try_start_db_bundle_loader(&config, connections, None, test_excluded_metric());
+        try_start_db_bundle_loader(
+            &config,
+            connections,
+            None,
+            test_excluded_metric(),
+            bundle_active_set::ActiveVersionSnapshot::new(),
+        );
     }
 
     /// A standalone, unregistered `IntCounterVec` for

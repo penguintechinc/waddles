@@ -480,10 +480,19 @@ pub struct ProcessDeps<S: SpineOps> {
     /// genuinely-resolved tenant-wide scope -- distinguished from the
     /// unconfigured case only by `tenant_id` also being `0` there.
     pub community_id: i32,
-    /// The resolved `app_versions.id` for [`ProcessDeps::version`] (see
-    /// `crate::lib::resolve_app_version_id`) -- `0` when `version` is empty
-    /// (no bundle configured yet) or scope resolution is unconfigured.
-    pub app_version: i64,
+    /// The live, poll-refreshed `app_id -> (digest, app_versions.id)`
+    /// snapshot -- resolved PER INVOCATION in [`handle_delivered`] (via
+    /// [`bundle_active_set::ActiveVersionSnapshot::resolve_for_digest`]
+    /// when [`ProcessDeps::digest`] is set, or
+    /// [`bundle_active_set::ActiveVersionSnapshot::resolve_for_app`] when it
+    /// is empty -- `crate::source_supervisor`'s per-binding consumers never
+    /// hold a fixed digest at all), never captured once at startup: a
+    /// bundle hot swap (`crate::bundle_loader`'s poll tick, which also
+    /// updates this same snapshot) must be reflected on the very next
+    /// invocation (spec SS4/SS5.1), and an invoke whose version can no
+    /// longer be resolved must fail closed rather than run under a stale
+    /// one.
+    pub app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -538,6 +547,39 @@ async fn handle_delivered<S: SpineOps>(
         };
         return deps.spine.dead_letter(d, &err).await;
     }
+
+    // Resolved PER INVOCATION against the live, poll-refreshed snapshot
+    // (`ProcessDeps::app_version_snapshot`'s doc), before the executor-
+    // connection gate below (an in-memory, no-I/O check). `digest` non-empty
+    // (the legacy single-consumer loop, `crate::lib::try_start_process_loop`)
+    // resolves by digest match; empty (a DB-driven source-binding consumer,
+    // `crate::source_supervisor`, which never holds a fixed digest --
+    // `crate::bundle_loader` owns load/unload independently) resolves by
+    // `app_id` alone. `None` means unresolvable (a hot swap superseded this
+    // digest, or the app_id is no longer active) -- fail closed by
+    // dead-lettering rather than ever invoking under a stale/guessed version.
+    let Some(app_version) = (if deps.digest.is_empty() {
+        deps.app_version_snapshot.resolve_for_app(&deps.app_id)
+    } else {
+        deps.app_version_snapshot
+            .resolve_for_digest(&deps.app_id, &deps.digest)
+    }) else {
+        tracing::warn!(
+            app_id = %deps.app_id,
+            digest = %deps.digest,
+            "app_version unresolvable (not in the current active-set snapshot -- likely \
+             superseded by a hot swap or deactivation), dead-lettering"
+        );
+        let err = DlqError {
+            kind: DlqErrorKind::HostCallDenied,
+            code: "APP_VERSION_UNRESOLVED".to_string(),
+            message: "app_id/digest is not in the current active-set snapshot".to_string(),
+            detail: None,
+            artifact_digest: Some(deps.digest.clone()),
+            consumer_id: deps.consumer_id.clone(),
+        };
+        return deps.spine.dead_letter(d, &err).await;
+    };
 
     let Some(connection) = deps.connections.active() else {
         tracing::warn!(app_id = %deps.app_id, "no executor connection available, dead-lettering for redelivery");
@@ -600,7 +642,7 @@ async fn handle_delivered<S: SpineOps>(
             deps.app_id.clone(),
             deps.tenant_id,
             deps.community_id,
-            deps.app_version,
+            app_version,
             Arc::clone(&deps.gate),
         );
         let caps = match &deps.kv_conn {
@@ -1062,6 +1104,19 @@ mod tests {
         connections: Arc<ConnectionRegistry>,
     ) -> (ProcessDeps<FakeSpineOps>, Arc<RecordingSpineMetrics>) {
         let metrics = Arc::new(RecordingSpineMetrics::default());
+        // Seeded so the default fixture's `resolve_for_app` (empty
+        // `digest`, the default below) resolves cleanly -- individual
+        // tests that override `digest` to a non-empty value re-seed the
+        // snapshot themselves (matching digest) right after doing so.
+        let app_version_snapshot = bundle_active_set::ActiveVersionSnapshot::new();
+        app_version_snapshot.update(&[bundle_active_set::ActiveBundleRow {
+            app_id: "waddles.bot.commands.default".to_string(),
+            version: "1".to_string(),
+            version_id: 1,
+            digest: String::new(),
+            component_key: String::new(),
+            sidecar_key: String::new(),
+        }]);
         let deps = ProcessDeps {
             app_id: "waddles.bot.commands.default".to_string(),
             // Empty by default -- see `ProcessDeps::digest`'s doc: an empty
@@ -1095,7 +1150,7 @@ mod tests {
             gate: test_gate(),
             tenant_id: 0,
             community_id: 0,
-            app_version: 0,
+            app_version_snapshot,
         };
         (deps, metrics)
     }
@@ -1349,6 +1404,15 @@ mod tests {
         deps.version = "3".to_string();
         deps.component_key = "bundles/waddles.bot.commands.default/3/deadbeef.wasm".to_string();
         deps.sidecar_key = "bundles/waddles.bot.commands.default/3/deadbeef.json".to_string();
+        deps.app_version_snapshot
+            .update(&[bundle_active_set::ActiveBundleRow {
+                app_id: deps.app_id.clone(),
+                version: deps.version.clone(),
+                version_id: 1,
+                digest: deps.digest.clone(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+            }]);
 
         handle_delivered(&d, &deps).await.unwrap();
 
@@ -1391,6 +1455,15 @@ mod tests {
         deps.digest = "sha256:00".to_string();
         deps.component_key = "k".to_string();
         deps.sidecar_key = "s".to_string();
+        deps.app_version_snapshot
+            .update(&[bundle_active_set::ActiveBundleRow {
+                app_id: deps.app_id.clone(),
+                version: deps.version.clone(),
+                version_id: 1,
+                digest: deps.digest.clone(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+            }]);
 
         handle_delivered(&d1, &deps).await.unwrap();
         handle_delivered(&d2, &deps).await.unwrap();
@@ -1481,6 +1554,15 @@ mod tests {
         deps.digest = "sha256:00".to_string();
         deps.component_key = "k".to_string();
         deps.sidecar_key = "s".to_string();
+        deps.app_version_snapshot
+            .update(&[bundle_active_set::ActiveBundleRow {
+                app_id: deps.app_id.clone(),
+                version: deps.version.clone(),
+                version_id: 1,
+                digest: deps.digest.clone(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+            }]);
 
         handle_delivered(&d, &deps).await.unwrap();
 
@@ -1503,6 +1585,47 @@ mod tests {
         assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
         assert!(deps.spine.appended.lock().unwrap().is_empty());
         assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+    }
+
+    /// Regression (gh-433 follow-up): `app_version` is resolved PER
+    /// DELIVERY from the live snapshot, never once per connect/startup.
+    /// The first delivery succeeds against the seeded version; a hot swap
+    /// mid-run (`bundle_loader::run_tick`'s own `ActiveVersionSnapshot::
+    /// update`, simulated here directly) that drops this app_id out of the
+    /// active set entirely must make the very NEXT delivery fail closed
+    /// (dead-lettered, `HostCallDenied`) rather than keep invoking under a
+    /// version the active set no longer recognizes.
+    #[tokio::test]
+    async fn handle_delivered_fails_closed_after_the_active_set_hot_swaps_away_the_app_id() {
+        let ring = test_ring();
+        let d1 = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let connections = connected_registry_with_fake_executor(serde_json::json!(null)).await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+
+        // First delivery: the snapshot still resolves `deps.app_id` (empty
+        // `digest`, so `resolve_for_app`) -- succeeds and acks.
+        handle_delivered(&d1, &deps).await.unwrap();
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 1);
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+
+        // Mid-run hot swap: the poller's next tick reads an active set that
+        // no longer includes this app_id at all (deactivated, or a
+        // different app now occupies the scope).
+        deps.app_version_snapshot.update(&[]);
+
+        let mut d2 = d1.clone();
+        d2.entry_id = "1234567890-1".to_string();
+        handle_delivered(&d2, &deps).await.unwrap();
+
+        assert_eq!(
+            deps.spine.acked.lock().unwrap().len(),
+            1,
+            "the post-swap delivery must never be acked as a successful invocation"
+        );
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, DlqErrorKind::HostCallDenied);
     }
 
     #[tokio::test]

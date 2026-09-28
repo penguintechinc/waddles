@@ -121,6 +121,7 @@ pub async fn run_tick(
     loaded: &mut HashMap<String, String>,
     sink: Option<&dyn BundleSink>,
     excluded_metric: &prometheus::IntCounterVec,
+    snapshot: &bundle_active_set::ActiveVersionSnapshot,
 ) {
     if !gate.enabled().await {
         tracing::debug!(
@@ -171,6 +172,13 @@ pub async fn run_tick(
             .with_label_values(&[app_id, reason.as_str()])
             .inc();
     }
+
+    // Wholesale-replace the shared `app_version` snapshot from this SAME
+    // read, before the load/unload decision below -- `crate::spine`/
+    // `crate::source_supervisor`'s per-invocation resolution (spec SS4/
+    // SS5.1) must see a superseded digest stop resolving the instant the
+    // active set moves, not just after this tick's load/unload completes.
+    snapshot.update(&active);
 
     let plan = diff::plan(loaded, &active);
     if plan.is_empty() {
@@ -230,6 +238,7 @@ pub async fn run(
     connections: Arc<crate::host_api::ConnectionRegistry>,
     excluded_metric: prometheus::IntCounterVec,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
+    snapshot: bundle_active_set::ActiveVersionSnapshot,
 ) {
     let mut tracker = WatermarkTracker::new();
     let mut loaded: HashMap<String, String> = HashMap::new();
@@ -252,6 +261,7 @@ pub async fn run(
                     &mut loaded,
                     sink.as_ref().map(|s| s as &dyn BundleSink),
                     &excluded_metric,
+                &snapshot,
                 )
                 .await;
             }
@@ -352,6 +362,7 @@ mod tests {
             &mut loaded,
             None,
             &test_metric(),
+            &test_snapshot(),
         )
         .await;
         assert!(loaded.is_empty());
@@ -397,6 +408,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &metric,
+            &test_snapshot(),
         )
         .await;
         run_tick(
@@ -408,6 +420,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &metric,
+            &test_snapshot(),
         )
         .await;
 
@@ -439,6 +452,7 @@ mod tests {
             &mut loaded,
             None,
             &test_metric(),
+            &test_snapshot(),
         )
         .await;
         assert!(
@@ -469,6 +483,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &test_metric(),
+            &test_snapshot(),
         )
         .await;
         assert_eq!(loaded.get("waddles.a"), Some(&digest));
@@ -499,6 +514,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &test_metric(),
+            &test_snapshot(),
         )
         .await;
         assert!(loaded.is_empty());
@@ -531,6 +547,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &test_metric(),
+            &test_snapshot(),
         )
         .await;
         assert!(
@@ -555,6 +572,7 @@ mod tests {
             &mut loaded,
             None,
             &test_metric(),
+            &test_snapshot(),
         )
         .await;
         assert!(loaded.is_empty());
@@ -565,6 +583,10 @@ mod tests {
     /// for `/metrics` exposition, not internal correctness), so tests don't
     /// need to thread `telemetry::register_bundle_loader_excluded_metrics`
     /// through just to satisfy `run_tick`'s signature.
+    fn test_snapshot() -> bundle_active_set::ActiveVersionSnapshot {
+        bundle_active_set::ActiveVersionSnapshot::new()
+    }
+
     fn test_metric() -> prometheus::IntCounterVec {
         prometheus::IntCounterVec::new(
             prometheus::Opts::new("test_bundle_active_set_excluded_total", "test"),
@@ -673,6 +695,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &metric,
+            &test_snapshot(),
         )
         .await;
         assert_eq!(loaded.get("waddles.a"), Some(&digest));
@@ -727,6 +750,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &metric,
+            &test_snapshot(),
         )
         .await;
         assert_eq!(
