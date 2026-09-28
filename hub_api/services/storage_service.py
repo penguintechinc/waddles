@@ -21,6 +21,7 @@ sync S3 I/O directly on the event loop.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -160,6 +161,36 @@ async def upload_bundle_component(app_id: str, version: str, sha256_hex: str, da
             Body=b"{}",
             ContentType="application/json",
             ServerSideEncryption="AES256",
+        )
+
+    await asyncio.to_thread(_put)
+    return key
+
+
+async def write_bundle_sidecar(
+    app_id: str, version: str, sha256_hex: str, document: dict[str, Any]
+) -> str:
+    """Overwrites the `.json` sidecar object at `bundle_sidecar_key()` with `document`.
+
+    `upload_bundle_component()` writes the pre-signing `{}` stub sidecar at
+    ADDRESSING time (spec Sec9.1); `services/bundle_signing_service.py`
+    calls this to replace it with the real Ed25519-signed document once
+    hub-api approves the version (spec SS5.6, Gemini review condition 9) --
+    same bucket/key convention, a later write to the same key. Canonical
+    (sorted-key, no-whitespace) JSON so the object's bytes are
+    deterministic across repeated writes of the same document, matching
+    `permission_summary_service.canonical_json()`'s own convention.
+    """
+    key = bundle_sidecar_key(app_id, version, sha256_hex)
+    body = json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    def _put() -> None:
+        _client().put_object(
+            Bucket=_bucket(),
+            Key=key,
+            Body=body,
+            ContentType="application/json",
+            ServerSideEncryption="AES256",  # security.md: default server-side encryption
         )
 
     await asyncio.to_thread(_put)

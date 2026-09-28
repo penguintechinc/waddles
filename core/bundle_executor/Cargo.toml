@@ -103,6 +103,16 @@ tracing = "=0.1.44"
 # itself: it returns durations, and the stage records them" -- the
 # stage is already the aggregation point for this component's telemetry.
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "json", "env-filter"] }
+# `ed25519-dalek`/`base64`: `crate::signing`'s platform artifact-signature
+# verification (spec SS5.6/Gemini condition 9) -- the executor checks the
+# fetched sidecar's Ed25519 signature against `BUNDLE_SIGNING_PUBLIC_KEYS`
+# before instantiating. Pure Rust (RustCrypto family, same lineage as the
+# already-pinned `sha2`/`hmac`), no networking dependency, so this addition
+# does not touch the dependency-set security assertion `tests/
+# dependency_policy.rs` enforces (verification only -- no signing key ever
+# lives in this binary, only public keys).
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
+base64 = "=0.22.1"
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }

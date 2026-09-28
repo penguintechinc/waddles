@@ -36,18 +36,23 @@ use crate::config::CliConfig;
 use crate::engine::{ticks_for_deadline, Stage};
 use crate::error::ExecutorError;
 use crate::host::{ExecState, HostBridge};
+use crate::signing::PlatformPublicKeys;
 use crate::wire::{Connection, RequestHandler};
 
 /// Supplies a bundle version's component bytes and signed sidecar bytes
-/// for a `component_key`/`sidecar_key` pair (spec SS7.6). The production
-/// implementation is `object_store` against `BUNDLE_BUCKET_*`; see the
-/// module doc for why that isn't wired in this pass.
+/// for a `component_key`/`sidecar_key` pair (spec SS7.6), returned as
+/// `(component_bytes, sidecar_bytes)`. The production implementation is
+/// `crate::bucket::BucketComponentSource`, a hand-rolled SigV4-signed
+/// HTTP/1.1 client (see that module's doc for why not `object_store`).
+/// `on_load` verifies the component against `digest` and the sidecar's
+/// embedded Ed25519 signature against `crate::signing::
+/// verify_artifact_signature` before ever compiling either.
 pub trait ComponentSource: Send + Sync + 'static {
     fn fetch(
         &self,
         component_key: &str,
         sidecar_key: &str,
-    ) -> impl std::future::Future<Output = Result<Vec<u8>, ExecutorError>> + Send;
+    ) -> impl std::future::Future<Output = Result<(Vec<u8>, Vec<u8>), ExecutorError>> + Send;
 }
 
 /// The seam production code plugs into once the bucket client lands
@@ -62,7 +67,7 @@ impl ComponentSource for UnimplementedBucketSource {
         &self,
         component_key: &str,
         _sidecar_key: &str,
-    ) -> Result<Vec<u8>, ExecutorError> {
+    ) -> Result<(Vec<u8>, Vec<u8>), ExecutorError> {
         Err(ExecutorError::Config(format!(
             "TODO(M2 follow-up): object_store bucket GET not yet wired (component_key={component_key:?}); spec SS7.6"
         )))
@@ -104,6 +109,14 @@ pub struct Executor<S: ComponentSource> {
     /// and no call would ever time out. Aborted on `Drop` so tests don't
     /// leak tasks.
     epoch_ticker: tokio::task::JoinHandle<()>,
+    /// Platform Ed25519 public key(s) `on_load` checks every fetched
+    /// sidecar's signature against (spec SS5.6). Derived leniently from
+    /// `cfg.bundle_signing_public_keys` -- unset/blank yields an empty set
+    /// (verification skipped, see that field's own doc for why this is
+    /// safe); a value that IS set but fails to parse propagates as a
+    /// `Config` error from this constructor, same as any other malformed
+    /// config field.
+    signing_keys: PlatformPublicKeys,
 }
 
 impl<S: ComponentSource> Executor<S> {
@@ -117,6 +130,7 @@ impl<S: ComponentSource> Executor<S> {
                 ticker_engine.increment_epoch();
             }
         });
+        let signing_keys = PlatformPublicKeys::from_cli(cfg)?;
         Ok(Self {
             engine,
             linker,
@@ -126,6 +140,7 @@ impl<S: ComponentSource> Executor<S> {
             max_memory_limit_mb: cfg.executor_max_memory_limit_mb,
             bundles: RwLock::new(HashMap::new()),
             epoch_ticker,
+            signing_keys,
         })
     }
 
@@ -190,7 +205,7 @@ fn error_body(code: ErrorCode, message: impl Into<String>) -> ErrorBody {
 impl<S: ComponentSource> RequestHandler for Executor<S> {
     async fn on_load(&self, body: LoadBody) -> Result<LoadedBody, ErrorBody> {
         let start = std::time::Instant::now();
-        let bytes = self
+        let (bytes, sidecar_bytes) = self
             .source
             .fetch(&body.component_key, &body.sidecar_key)
             .await
@@ -198,6 +213,24 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
 
         verify_digest(&bytes, &body.digest)
             .map_err(|e| error_body(ErrorCode::DigestMismatch, e.to_string()))?;
+
+        // Artifact integrity (spec SS5.6/Gemini review condition 9): refuse
+        // to instantiate a component whose signed sidecar doesn't verify
+        // against a configured platform public key, BEFORE the
+        // (expensive, and otherwise-trusting) `Component::new` compile
+        // step below. Skipped only when no platform key is configured at
+        // all (`self.signing_keys.is_empty()`) -- unreachable in
+        // production, see `crate::signing::PlatformPublicKeys`'s own doc.
+        if !self.signing_keys.is_empty() {
+            crate::signing::verify_artifact_signature(
+                &sidecar_bytes,
+                &self.signing_keys,
+                &body.app_id,
+                &body.version,
+                &body.digest,
+            )
+            .map_err(|e| error_body(ErrorCode::LoadFailed, e.to_string()))?;
+        }
 
         let component = Component::new(&self.engine, &bytes)
             .map_err(|e| error_body(ErrorCode::LoadFailed, e.to_string()))?;
@@ -551,15 +584,44 @@ mod tests {
 
     /// Hands back the committed test fixture's real compiled component
     /// bytes (spec-honest: `on_load`'s digest verification and
-    /// `Component::new` compile against genuine WASM, not a stand-in).
+    /// `Component::new` compile against genuine WASM, not a stand-in) and
+    /// an unsigned `{}` sidecar stub -- fine for every test in this module
+    /// that constructs its `Executor` via `test_config()` (no
+    /// `bundle_signing_public_keys`, so `on_load` skips verification
+    /// entirely); tests that DO exercise signature verification build
+    /// their own signed sidecar via `SignedFixtureSource` below instead.
     struct FixtureSource;
 
     const FIXTURE_WASM: &[u8] = include_bytes!("../tests/fixtures/hostile_fixture.wasm");
 
     impl ComponentSource for FixtureSource {
-        async fn fetch(&self, _c: &str, _s: &str) -> Result<Vec<u8>, ExecutorError> {
-            Ok(FIXTURE_WASM.to_vec())
+        async fn fetch(&self, _c: &str, _s: &str) -> Result<(Vec<u8>, Vec<u8>), ExecutorError> {
+            Ok((FIXTURE_WASM.to_vec(), b"{}".to_vec()))
         }
+    }
+
+    /// A [`ComponentSource`] that hands back the same fixture bytes plus a
+    /// caller-supplied sidecar -- lets signature-verification tests below
+    /// control exactly what `on_load` sees without a real bucket.
+    struct SignedFixtureSource {
+        sidecar: Vec<u8>,
+    }
+
+    impl ComponentSource for SignedFixtureSource {
+        async fn fetch(&self, _c: &str, _s: &str) -> Result<(Vec<u8>, Vec<u8>), ExecutorError> {
+            Ok((FIXTURE_WASM.to_vec(), self.sidecar.clone()))
+        }
+    }
+
+    /// A `CliConfig` with `bundle_signing_public_keys` set so
+    /// `Executor::new`'s derived `signing_keys` is non-empty and `on_load`
+    /// actually enforces signature verification (unlike every other test
+    /// in this module, which relies on `test_config()`'s unset default to
+    /// skip it).
+    fn test_config_with_signing_keys(raw_json: &str) -> CliConfig {
+        let mut cfg = test_config();
+        cfg.bundle_signing_public_keys = Some(raw_json.to_string());
+        cfg
     }
 
     fn fixture_digest() -> String {
@@ -933,5 +995,193 @@ mod tests {
             .on_shutdown(penguin_bundle_host::wire::ShutdownBody { grace_ms: 100 })
             .await;
         Ok(())
+    }
+
+    /// `on_load`'s artifact-signature integration (spec SS5.6/Gemini review
+    /// condition 9): builds a real signed sidecar for the fixture's own
+    /// digest via `crate::signing`, exercised through the FULL `on_load`
+    /// call rather than `crate::signing`'s own unit tests in isolation --
+    /// proving the wiring (fetch -> digest check -> signature check ->
+    /// compile), not just the crypto.
+    mod artifact_signature_on_load {
+        use ed25519_dalek::{Signer, SigningKey};
+        use serde_json::json;
+
+        use super::*;
+        use crate::signing::signing_payload;
+
+        const APP_ID: &str = "waddles.test.signed-app";
+        const VERSION: &str = "1";
+        const APPROVAL_ID: i64 = 7;
+
+        fn test_key() -> SigningKey {
+            SigningKey::from_bytes(&[11u8; 32])
+        }
+
+        fn public_keys_json(key_id: &str, key: &SigningKey) -> String {
+            use base64::engine::general_purpose::STANDARD as BASE64;
+            use base64::Engine as _;
+            json!({ key_id: BASE64.encode(key.verifying_key().to_bytes()) }).to_string()
+        }
+
+        fn signed_sidecar(key: &SigningKey, key_id: &str, digest: &str) -> Vec<u8> {
+            use base64::engine::general_purpose::STANDARD as BASE64;
+            use base64::Engine as _;
+            let payload = signing_payload(APP_ID, VERSION, digest, APPROVAL_ID);
+            let signature = key.sign(&payload);
+            serde_json::to_vec(&json!({
+                "app_id": APP_ID,
+                "version": VERSION,
+                "digest": digest,
+                "approval_id": APPROVAL_ID,
+                "key_id": key_id,
+                "algorithm": "ed25519",
+                "signature": BASE64.encode(signature.to_bytes()),
+            }))
+            .expect("serializable fixture")
+        }
+
+        fn signed_load_body(digest: String, sidecar: Vec<u8>) -> (LoadBody, SignedFixtureSource) {
+            let body = LoadBody {
+                app_id: APP_ID.to_string(),
+                version: VERSION.to_string(),
+                digest,
+                component_key: "k".to_string(),
+                sidecar_key: "s".to_string(),
+                capabilities: vec![],
+                limits: penguin_bundle_host::wire::LoadLimits {
+                    timeout_ms: 2000,
+                    memory_mb: 64,
+                },
+            };
+            (body, SignedFixtureSource { sidecar })
+        }
+
+        #[tokio::test]
+        async fn on_load_succeeds_with_a_validly_signed_sidecar() -> Result<(), ExecutorError> {
+            let key = test_key();
+            let cfg = test_config_with_signing_keys(&public_keys_json("k1", &key));
+            let digest = fixture_digest();
+            let sidecar = signed_sidecar(&key, "k1", &digest);
+            let (body, source) = signed_load_body(digest.clone(), sidecar);
+            let executor = Executor::new(&cfg, source)?;
+            let loaded = executor
+                .on_load(body)
+                .await
+                .expect("a validly signed sidecar must load");
+            assert_eq!(loaded.digest, digest);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn on_load_rejects_a_missing_sidecar_signature() -> Result<(), ExecutorError> {
+            let key = test_key();
+            let cfg = test_config_with_signing_keys(&public_keys_json("k1", &key));
+            let digest = fixture_digest();
+            // The pre-approval `{}` stub `storage_service.
+            // upload_bundle_component()` writes before hub-api ever signs
+            // anything.
+            let (body, source) = signed_load_body(digest, b"{}".to_vec());
+            let executor = Executor::new(&cfg, source)?;
+            let result = executor.on_load(body).await;
+            assert!(matches!(
+                result,
+                Err(ErrorBody {
+                    code: ErrorCode::LoadFailed,
+                    ..
+                })
+            ));
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn on_load_rejects_a_sidecar_signed_for_a_different_digest(
+        ) -> Result<(), ExecutorError> {
+            let key = test_key();
+            let cfg = test_config_with_signing_keys(&public_keys_json("k1", &key));
+            let digest = fixture_digest();
+            // Signed for a DIFFERENT digest than the one the load frame
+            // (and the real fixture bytes) actually carry -- the exact
+            // "prevent swapping" property the task requires.
+            let wrong_digest = format!("sha256:{}", "9".repeat(64));
+            let sidecar = signed_sidecar(&key, "k1", &wrong_digest);
+            let (body, source) = signed_load_body(digest, sidecar);
+            let executor = Executor::new(&cfg, source)?;
+            let result = executor.on_load(body).await;
+            assert!(matches!(
+                result,
+                Err(ErrorBody {
+                    code: ErrorCode::LoadFailed,
+                    ..
+                })
+            ));
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn on_load_rejects_an_unknown_signing_key_id() -> Result<(), ExecutorError> {
+            let key = test_key();
+            // `cfg` only knows about "k1"; the sidecar claims "k2".
+            let cfg = test_config_with_signing_keys(&public_keys_json("k1", &key));
+            let digest = fixture_digest();
+            let sidecar = signed_sidecar(&key, "k2", &digest);
+            let (body, source) = signed_load_body(digest, sidecar);
+            let executor = Executor::new(&cfg, source)?;
+            let result = executor.on_load(body).await;
+            assert!(matches!(
+                result,
+                Err(ErrorBody {
+                    code: ErrorCode::LoadFailed,
+                    ..
+                })
+            ));
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn on_load_accepts_rotation_a_second_configured_key_id_still_loads(
+        ) -> Result<(), ExecutorError> {
+            let old_key = test_key();
+            let new_key = SigningKey::from_bytes(&[13u8; 32]);
+            use base64::engine::general_purpose::STANDARD as BASE64;
+            use base64::Engine as _;
+            let both_keys = json!({
+                "platform-old": BASE64.encode(old_key.verifying_key().to_bytes()),
+                "platform-new": BASE64.encode(new_key.verifying_key().to_bytes()),
+            })
+            .to_string();
+            let cfg = test_config_with_signing_keys(&both_keys);
+            let digest = fixture_digest();
+            // Signed under the newly rotated-in key -- still loads because
+            // both keys remain configured during rotation.
+            let sidecar = signed_sidecar(&new_key, "platform-new", &digest);
+            let (body, source) = signed_load_body(digest.clone(), sidecar);
+            let executor = Executor::new(&cfg, source)?;
+            let loaded = executor
+                .on_load(body)
+                .await
+                .expect("a key rotated in must still load");
+            assert_eq!(loaded.digest, digest);
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn on_load_skips_verification_when_no_signing_keys_are_configured(
+        ) -> Result<(), ExecutorError> {
+            // Documents the deliberate, precedent-matching "unconfigured"
+            // behavior (`crate::signing::PlatformPublicKeys::from_cli`'s
+            // own doc) -- unreachable in production because `crate::lib::
+            // run` calls `from_cli_required` first and refuses to start
+            // otherwise.
+            let digest = fixture_digest();
+            let (body, source) = signed_load_body(digest.clone(), b"not even json".to_vec());
+            let executor = Executor::new(&test_config(), source)?;
+            let loaded = executor
+                .on_load(body)
+                .await
+                .expect("no configured signing keys means verification is skipped");
+            assert_eq!(loaded.digest, digest);
+            Ok(())
+        }
     }
 }
