@@ -47,6 +47,12 @@ pub struct EgressLimits {
     pub timeout: Duration,
     pub max_redirects: u8,
     pub max_response_bytes: usize,
+    /// Port allowlist (connector spec `net.http:<host>`, Gemini condition 2:
+    /// "a port allowlist (443 by default)"). Not yet CLI-tunable -- every
+    /// caller sets this to `vec![443]` today; a follow-up wires an
+    /// `--egress-allowed-ports` flag through `CliConfig` the same way the
+    /// other `egress_*` fields already are.
+    pub allowed_ports: Vec<u16>,
 }
 
 /// One `http.send` request as decoded from a bundle's host-call `args`
@@ -92,6 +98,17 @@ pub struct EgressGuard {
     /// enforced regardless).
     denylist: Arc<RwLock<HashSet<String>>>,
     buckets: Mutex<HashMap<String, TokenBucket>>,
+    /// Host-side DNS resolution seam (connector spec: "DNS resolution done
+    /// host-side ... then connecting ONLY to the validated IP, no
+    /// re-resolution"). Defaults to [`TokioResolver`] in [`EgressGuard::new`];
+    /// swappable in tests only ([`EgressGuard::with_resolver`]) to prove the
+    /// single-resolution/no-rebind property without a live resolver.
+    resolver: Arc<dyn Resolver>,
+    /// Secret-handle substitution seam (connector spec condition 8: "opaque
+    /// handles in the guest request, tokens never in guest memory").
+    /// Defaults to [`EnvCredentialBroker`]; swappable in tests only
+    /// ([`EgressGuard::with_credential_broker`]).
+    credential_broker: Arc<dyn CredentialBroker>,
     denied_total: prometheus::IntCounterVec,
     /// Spec §13.5's `waddles.core.bundle-egress` flag: OFF ⇒ every call
     /// denied `feature_disabled`, checked before anything else (scheme,
@@ -115,9 +132,28 @@ impl EgressGuard {
             catalog,
             denylist: Arc::new(RwLock::new(HashSet::new())),
             buckets: Mutex::new(HashMap::new()),
+            resolver: Arc::new(TokioResolver),
+            credential_broker: Arc::new(EnvCredentialBroker),
             denied_total,
             bundle_egress,
         }
+    }
+
+    /// Test-only override of the DNS resolution seam -- production always
+    /// uses [`TokioResolver`], constructed by [`EgressGuard::new`].
+    #[cfg(test)]
+    fn with_resolver(mut self, resolver: Arc<dyn Resolver>) -> Self {
+        self.resolver = resolver;
+        self
+    }
+
+    /// Test-only override of the credential-substitution seam -- production
+    /// always uses [`EnvCredentialBroker`], constructed by
+    /// [`EgressGuard::new`].
+    #[cfg(test)]
+    fn with_credential_broker(mut self, broker: Arc<dyn CredentialBroker>) -> Self {
+        self.credential_broker = broker;
+        self
     }
 
     /// Services one `http`/`send` host-call for `app_id` (spec §7.4's
@@ -208,12 +244,14 @@ impl EgressGuard {
                         ),
                     )
                 })?;
-            let value = std::env::var(env_var_name).map_err(|_| {
-                denied(
-                    "secret_unresolved",
-                    format!("granted env var {env_var_name:?} is not configured"),
-                )
-            })?;
+            // Connector spec condition 8: the guest only ever names a
+            // symbolic `secret_ref`; the opaque `SecretHandle` carrying the
+            // actual resolvable credential name is constructed here, host
+            // side, after the grant-map lookup succeeds, and substituted via
+            // `CredentialBroker` -- the real value never passes back through
+            // any guest-visible state.
+            let handle = SecretHandle::from_granted_env_var(env_var_name);
+            let value = self.credential_broker.resolve(&handle)?;
             headers.push((header_name.clone(), value));
         }
 
@@ -269,7 +307,15 @@ impl EgressGuard {
             }
 
             let port = url.port_or_known_default().unwrap_or(443);
-            let addrs = tokio::net::lookup_host((host.as_str(), port))
+            if !self.limits.allowed_ports.contains(&port) {
+                return Err(denied(
+                    "port_not_allowed",
+                    format!("port {port} is not on the egress port allowlist"),
+                ));
+            }
+            let addrs = self
+                .resolver
+                .lookup(host.clone(), port)
                 .await
                 .map_err(|e| {
                     denied(
@@ -362,21 +408,18 @@ impl EgressGuard {
     }
 }
 
-/// A single-label wildcard host match (spec §8.1): `*.example.com` matches
-/// `a.example.com`, not `a.b.example.com` and not `example.com` itself.
-/// Case-insensitive, matching DNS's own convention.
+/// Exact host match only (connector spec, Gemini condition 2: "one
+/// permission id per exact host ... never a subdomain/wildcard pattern" --
+/// same `net.http:<host>` shape hub-api's manifest validator already
+/// enforces via `_EGRESS_HOST_RE`). Deliberately **not** a wildcard match:
+/// an operator-declared `*.example.com` manifest entry is treated as a
+/// literal string and will never match any concrete host, falling through
+/// to `host_not_declared` -- wildcard rejection belongs at manifest
+/// validation time, but this function must never silently honor one that
+/// slips through regardless. Case-insensitive, matching DNS's own
+/// convention.
 fn host_matches(pattern: &str, host: &str) -> bool {
-    let pattern = pattern.to_ascii_lowercase();
-    let host = host.to_ascii_lowercase();
-    match pattern.strip_prefix("*.") {
-        Some(suffix) => match host.strip_suffix(suffix) {
-            Some(prefix) if prefix.ends_with('.') && prefix.len() > 1 => {
-                !prefix[..prefix.len() - 1].contains('.')
-            }
-            _ => false,
-        },
-        None => pattern == host,
-    }
+    pattern.eq_ignore_ascii_case(host)
 }
 
 /// AWS's IPv6 metadata address, `fd00:ec2::254` (spec §8.2 step 6).
@@ -501,6 +544,87 @@ pub(crate) fn is_forbidden_address(ip: IpAddr, allow_private: bool) -> Option<&'
             }
             None
         }
+    }
+}
+
+/// An opaque reference to a bundle's granted secret (connector spec
+/// condition 8: "opaque handles in the guest request, tokens never in guest
+/// memory"). The bundle's own request JSON only ever carries a *symbolic*
+/// `secret_ref` name (`HttpSendArgs::secret_refs`); this handle wraps the
+/// already-validated, host-resolved credential locator produced *after*
+/// that symbolic name is confirmed present in the bundle's own
+/// `granted_secret_refs` grant map -- it is constructed host-side only and
+/// never round-trips back into guest-controlled state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretHandle(String);
+
+impl SecretHandle {
+    /// Wraps an already-granted environment variable name. Private
+    /// constructor: a [`SecretHandle`] must only ever be built from a value
+    /// that has already passed the grant-map check in
+    /// [`EgressGuard::send_checked`], never directly from bundle input.
+    fn from_granted_env_var(env_var_name: &str) -> Self {
+        Self(env_var_name.to_string())
+    }
+}
+
+/// Resolves a [`SecretHandle`] to its live credential value. Split out as a
+/// trait -- mirrors this crate's `HttpTransport`/`AuditSink` per-dependency
+/// seam pattern (see module doc) -- so the credential source is swappable
+/// (process-env today; a vault/KMS-backed broker later) without
+/// [`EgressGuard::send_checked`] changing at all, and so a symbolic
+/// bundle-supplied name is never one step away from an arbitrary
+/// `std::env::var` call outside this seam.
+pub trait CredentialBroker: Send + Sync {
+    fn resolve(&self, handle: &SecretHandle) -> Result<String, HostResultError>;
+}
+
+/// The only [`CredentialBroker`] wired today: the granted secret's value is
+/// read from the process environment (spec §8.3's model -- an
+/// activation-config *name*, not a stored token, is what's granted).
+pub struct EnvCredentialBroker;
+
+impl CredentialBroker for EnvCredentialBroker {
+    fn resolve(&self, handle: &SecretHandle) -> Result<String, HostResultError> {
+        std::env::var(&handle.0).map_err(|_| {
+            denied(
+                "secret_unresolved",
+                format!("granted env var {:?} is not configured", handle.0),
+            )
+        })
+    }
+}
+
+/// Host-side DNS resolution (connector spec: "DNS resolution done
+/// host-side, rejecting private, loopback, link-local and metadata IPs ...
+/// then connecting ONLY to the validated IP (no re-resolution, to prevent
+/// DNS rebinding)"). Split out purely for testability -- see [`EgressGuard::
+/// with_resolver`] -- production always uses [`TokioResolver`].
+trait Resolver: Send + Sync {
+    fn lookup<'a>(
+        &'a self,
+        host: String,
+        port: u16,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send + 'a>>;
+}
+
+/// The real [`Resolver`]: `tokio::net::lookup_host`, collected once. This
+/// single collection point is the entire anti-rebinding property --
+/// [`EgressGuard::send_checked`] calls this exactly once per hop and pins
+/// the chosen address into [`TransportRequest::pinned_addr`], which
+/// [`HttpTransport`] impls must connect to verbatim, never re-resolving.
+struct TokioResolver;
+
+impl Resolver for TokioResolver {
+    fn lookup<'a>(
+        &'a self,
+        host: String,
+        port: u16,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send + 'a>> {
+        Box::pin(async move {
+            let addrs = tokio::net::lookup_host((host.as_str(), port)).await?;
+            Ok(addrs.collect())
+        })
     }
 }
 
@@ -704,6 +828,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             max_redirects: 3,
             max_response_bytes: 1_048_576,
+            allowed_ports: vec![443],
         }
     }
 
@@ -792,7 +917,7 @@ mod tests {
         )
     }
 
-    // -- Host-pattern matching (spec §8.1) --
+    // -- Host-pattern matching: exact only (connector spec, Gemini condition 2) --
 
     #[test]
     fn host_matches_exact_pattern() {
@@ -801,10 +926,161 @@ mod tests {
     }
 
     #[test]
-    fn host_matches_single_label_wildcard() {
-        assert!(host_matches("*.googleapis.com", "storage.googleapis.com"));
+    fn host_matches_is_case_insensitive() {
+        assert!(host_matches("API.Spotify.com", "api.spotify.com"));
+    }
+
+    /// A wildcard pattern is never honored, even if one slips past manifest
+    /// validation (hub-api's `_EGRESS_HOST_RE` is meant to reject it there
+    /// already -- this is the second, host-side line of defense): it's
+    /// compared as a literal string and never matches any concrete host.
+    #[test]
+    fn wildcard_pattern_is_never_honored_as_a_wildcard() {
+        assert!(!host_matches("*.googleapis.com", "storage.googleapis.com"));
         assert!(!host_matches("*.googleapis.com", "a.b.googleapis.com"));
         assert!(!host_matches("*.googleapis.com", "googleapis.com"));
+    }
+
+    /// End-to-end proof that a manifest wildcard entry denies every concrete
+    /// host as `host_not_declared`, same as an absent entry -- a wildcard
+    /// egress declaration grants access to nothing.
+    #[tokio::test]
+    async fn manifest_wildcard_entry_denies_every_concrete_host() {
+        let guard = guard_with(
+            "waddles.a.b.c",
+            vec![("*.googleapis.com".to_string(), vec!["GET".to_string()])],
+            FakeTransport::default(),
+        );
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://storage.googleapis.com/"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "host_not_declared");
+    }
+
+    /// Mandatory negative test: an IP-literal host, not on the manifest
+    /// allowlist, is denied on the same `host_not_declared` path as any
+    /// other undeclared host -- literal syntax buys no special treatment.
+    #[tokio::test]
+    async fn ip_literal_host_not_on_allowlist_is_denied() {
+        let guard = guard_with(
+            "waddles.a.b.c",
+            vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
+            FakeTransport::default(),
+        );
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://93.184.216.34/"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "host_not_declared");
+    }
+
+    // -- Port allowlist (connector spec, Gemini condition 2: "443 by default") --
+
+    #[tokio::test]
+    async fn non_default_port_is_denied_even_for_an_allowlisted_host() {
+        let guard = guard_with(
+            "waddles.a.b.c",
+            vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
+            FakeTransport::default(),
+        );
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://api.spotify.com:8443/"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "port_not_allowed");
+    }
+
+    #[tokio::test]
+    async fn allowlisted_port_is_permitted() {
+        let mut limits = default_limits();
+        limits.allowed_ports = vec![443, 8443];
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default().queue(Ok(ok_response()))),
+            limits,
+            catalog_with_row(
+                "waddles.a.b.c",
+                vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
+            ),
+            test_metrics(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
+        );
+        let result = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://api.spotify.com:8443/"}),
+            )
+            .await;
+        assert!(result.is_ok(), "expected success, got {result:?}");
+    }
+
+    // -- DNS rebinding (connector spec: "no re-resolution, to prevent DNS
+    // rebinding") --
+
+    /// A resolver stub that counts calls and always answers with the same
+    /// fixed, permitted address -- standing in for an attacker's DNS server
+    /// that would answer *differently* on a second lookup (rebinding to a
+    /// forbidden address) if the guard were ever foolish enough to ask
+    /// twice. Asserting exactly one call, and that the transport receives
+    /// precisely that resolved address, proves the guard never gives a
+    /// rebinding attacker the second lookup it needs.
+    struct CountingResolver {
+        calls: std::sync::atomic::AtomicUsize,
+        addr: SocketAddr,
+    }
+
+    impl Resolver for CountingResolver {
+        fn lookup<'a>(
+            &'a self,
+            _host: String,
+            _port: u16,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send + 'a>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let addr = self.addr;
+            Box::pin(async move { Ok(vec![addr]) })
+        }
+    }
+
+    #[tokio::test]
+    async fn dns_rebinding_simulation_resolves_exactly_once_and_pins_that_address() {
+        let checked_addr: SocketAddr = "93.184.216.34:443".parse().unwrap();
+        let resolver = Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            addr: checked_addr,
+        });
+        let transport = Arc::new(FakeTransport::default().queue(Ok(ok_response())));
+        let guard = EgressGuard::new(
+            Arc::clone(&transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog_with_row(
+                "waddles.a.b.c",
+                vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
+            ),
+            test_metrics(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
+        )
+        .with_resolver(Arc::clone(&resolver) as Arc<dyn Resolver>);
+
+        guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://api.spotify.com/"}),
+            )
+            .await
+            .expect("send succeeds");
+
+        assert_eq!(resolver.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let sent = transport.requests.lock().unwrap();
+        assert_eq!(sent[0].pinned_addr, checked_addr);
     }
 
     // -- SSRF address classification (spec §8.2 step 6 / §11.4) --
@@ -1194,6 +1470,122 @@ mod tests {
             .decode(body_b64)
             .unwrap();
         assert_eq!(decoded, b"{\"ok\":true}");
+    }
+
+    /// Mandatory oversize-response test at the [`EgressGuard`] pipeline
+    /// level (spec: "request and response size caps"): a truncated
+    /// [`TransportResponse`] from the transport (its own size-cap
+    /// enforcement, exercised directly against a real server further down)
+    /// is surfaced through the guard's response shape unchanged -- the guard
+    /// never re-buffers or hides truncation, so a caller can always tell a
+    /// response was capped rather than complete.
+    #[tokio::test]
+    async fn oversize_response_is_reported_truncated_through_the_full_guard_pipeline() {
+        let capped_body = vec![b'x'; 1_048_576];
+        let transport = FakeTransport::default().queue(Ok(TransportResponse {
+            status: 200,
+            headers: vec![],
+            body: capped_body.clone(),
+            truncated: true,
+        }));
+        let guard = guard_with(
+            "waddles.a.b.c",
+            vec![("discord.com".to_string(), vec!["GET".to_string()])],
+            transport,
+        );
+        let result = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://discord.com/big"}),
+            )
+            .await
+            .expect("oversize response is still a successful send, just marked truncated");
+        assert_eq!(result["truncated"], true);
+        let body_b64 = result["body_base64"].as_str().unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(body_b64)
+            .unwrap();
+        assert_eq!(decoded.len(), capped_body.len());
+    }
+
+    // -- Secret-handle substitution (connector spec condition 8) --
+
+    /// A [`CredentialBroker`] stub that records every [`SecretHandle`] it
+    /// was asked to resolve, standing in for a future vault/KMS-backed
+    /// broker -- proves the substitution goes through the trait seam, not a
+    /// direct `std::env::var` call baked into the send path.
+    struct FakeCredentialBroker {
+        value: String,
+        resolved_handles: Mutex<Vec<SecretHandle>>,
+    }
+
+    impl CredentialBroker for FakeCredentialBroker {
+        fn resolve(&self, handle: &SecretHandle) -> Result<String, HostResultError> {
+            self.resolved_handles.lock().unwrap().push(handle.clone());
+            Ok(self.value.clone())
+        }
+    }
+
+    /// Mandatory handle-substitution test (connector spec condition 8): the
+    /// guest-supplied request JSON (`HttpSendArgs`, standing in for the
+    /// bundle's own memory) carries only the symbolic `secret_ref` name --
+    /// never the real token -- and the real token is substituted by the
+    /// host, via [`CredentialBroker`], only into the outbound
+    /// [`TransportRequest`] the guest never observes.
+    #[tokio::test]
+    async fn secret_handle_substitution_never_exposes_the_token_to_the_guest_request() {
+        let broker = Arc::new(FakeCredentialBroker {
+            value: "sk-live-should-never-appear-in-guest-state".to_string(),
+            resolved_handles: Mutex::new(Vec::new()),
+        });
+        let transport = Arc::new(FakeTransport::default().queue(Ok(ok_response())));
+        let guard = EgressGuard::new(
+            Arc::clone(&transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog_with_row_and_secrets(
+                "waddles.a.b.c",
+                vec![("discord.com".to_string(), vec!["POST".to_string()])],
+                HashMap::from([(
+                    "DISCORD_TOKEN_REF".to_string(),
+                    "EGRESS_TEST_HANDLE_BROKER".to_string(),
+                )]),
+            ),
+            test_metrics(),
+            crate::flags::boxed(crate::flags::StaticFlag(true)),
+        )
+        .with_credential_broker(Arc::clone(&broker) as Arc<dyn CredentialBroker>);
+
+        // The guest's own request args -- the only thing a bundle ever
+        // constructs -- carries the symbolic name only.
+        let guest_args = serde_json::json!({
+            "method": "POST",
+            "url": "https://discord.com/api/webhooks/1",
+            "secret_refs": {"Authorization": "DISCORD_TOKEN_REF"}
+        });
+        let guest_args_serialized = guest_args.to_string();
+        assert!(!guest_args_serialized.contains("sk-live"));
+
+        guard
+            .send("waddles.a.b.c", &guest_args)
+            .await
+            .expect("send succeeds");
+
+        // The broker was asked to resolve the host-constructed handle, not
+        // a bundle-supplied string.
+        let resolved = broker.resolved_handles.lock().unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0],
+            SecretHandle::from_granted_env_var("EGRESS_TEST_HANDLE_BROKER")
+        );
+
+        // The real token reaches only the outbound transport request, never
+        // back into anything shaped like the guest's own request args.
+        let sent = transport.requests.lock().unwrap();
+        assert!(sent[0]
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == &broker.value));
     }
 
     /// Happy path for the two-hop resolution (security review fix): the

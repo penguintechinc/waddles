@@ -358,6 +358,8 @@ async fn build_stage_capabilities(
             timeout: std::time::Duration::from_millis(cli.egress_timeout_ms),
             max_redirects: cli.egress_max_redirects,
             max_response_bytes: cli.egress_max_response_bytes,
+            // Not yet CLI-tunable -- see `EgressLimits::allowed_ports` doc.
+            allowed_ports: vec![443],
         },
         catalog,
         egress_denied_total,

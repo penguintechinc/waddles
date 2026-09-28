@@ -761,6 +761,7 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_redirects: 3,
                 max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
             },
             Arc::new(crate::distribution::BundleCatalog::new()),
             prometheus::IntCounterVec::new(
@@ -965,6 +966,7 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_redirects: 3,
                 max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
             },
             Arc::new(crate::distribution::BundleCatalog::new()),
             prometheus::IntCounterVec::new(
@@ -1170,6 +1172,7 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_redirects: 3,
                 max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
             },
             Arc::new(crate::distribution::BundleCatalog::new()),
             prometheus::IntCounterVec::new(
@@ -1274,6 +1277,7 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_redirects: 3,
                 max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
             },
             Arc::new(crate::distribution::BundleCatalog::new()),
             prometheus::IntCounterVec::new(
