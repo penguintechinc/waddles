@@ -110,6 +110,7 @@ pub struct IngestMetrics {
     pub events_published_total: prometheus::IntCounterVec,
     pub publish_errors_total: prometheus::IntCounterVec,
     pub receiver_reconnects_total: prometheus::IntCounterVec,
+    pub receiver_connection_healthy: prometheus::IntGaugeVec,
 }
 
 /// Registers this service's ingest-path metrics against `registry`. Must be
@@ -142,19 +143,84 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
     let receiver_reconnects_total = prometheus::IntCounterVec::new(
         prometheus::Opts::new(
             "svc_ingest_receiver_reconnects_total",
-            "Total platform receiver reconnect attempts, labeled by platform",
+            "Total platform receiver reconnect attempts, labeled by platform and triggering reason \
+             (e.g. resumable_close/reconnect_fresh_close/session_invalidated/other)",
         ),
-        &["platform"],
+        &["platform", "reason"],
     )
     .expect("valid metric definition");
     registry
         .register(Box::new(receiver_reconnects_total.clone()))
         .expect("register svc_ingest_receiver_reconnects_total");
 
+    // Starts at 1 (healthy) for every platform the first time it's touched
+    // via `with_label_values` -- there is no fixed set of platform labels
+    // to pre-populate at registration time (unlike `up`), so this gauge
+    // only exists in the exposition once a receiver loop has run at least
+    // once. See `ReceiverHealthMetrics::receiver_marked_unhealthy`.
+    let receiver_connection_healthy = prometheus::IntGaugeVec::new(
+        prometheus::Opts::new(
+            "svc_ingest_receiver_connection_healthy",
+            "1 if the platform receiver's connection is healthy, 0 once a fatal \
+             (non-retryable) close has stopped that connection's reconnect loop -- \
+             the service process itself keeps running either way",
+        ),
+        &["platform"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(receiver_connection_healthy.clone()))
+        .expect("register svc_ingest_receiver_connection_healthy");
+
     IngestMetrics {
         events_published_total,
         publish_errors_total,
         receiver_reconnects_total,
+        receiver_connection_healthy,
+    }
+}
+
+/// Extends [`penguin_spine::SpineMetrics`] with the reconnect/health
+/// counters this crate's own platform receiver loops need
+/// (`ingest::discord`, and any future `ingest::twitch`-style caller) --
+/// kept as a separate trait rather than folding into the shared spine
+/// crate's `SpineMetrics` because these are svc-ingest's own receiver-
+/// observability surface, not part of `penguin-spine`'s public contract.
+/// Every method has a no-op default so a test double (e.g.
+/// `ingest::discord::tests::NoopTestMetrics`) needs no implementation at
+/// all unless a specific test wants to assert on the recorded values.
+pub trait ReceiverHealthMetrics {
+    /// Records one reconnect attempt for `platform`, labeled by the
+    /// triggering `reason` -- e.g. `"resumable_close"`,
+    /// `"reconnect_fresh_close"`, `"session_invalidated"`, `"other"`.
+    fn receiver_reconnect(&self, _platform: &str, _reason: &str) {}
+
+    /// Marks `platform`'s receiver connection as unhealthy: a fatal,
+    /// non-retryable close (e.g. Discord `4004` auth failed, `4010`-`4014`
+    /// sharding/intents) has stopped that connection's reconnect loop.
+    /// `code` is the raw close code, when the peer sent one -- never a
+    /// token, this is a small documented integer, not caller-provided
+    /// secret material. The service process keeps running; only this one
+    /// platform's ingest loop has stopped.
+    fn receiver_marked_unhealthy(&self, _platform: &str, _code: Option<u16>) {}
+}
+
+impl ReceiverHealthMetrics for IngestMetrics {
+    fn receiver_reconnect(&self, platform: &str, reason: &str) {
+        self.receiver_reconnects_total
+            .with_label_values(&[platform, reason])
+            .inc();
+    }
+
+    fn receiver_marked_unhealthy(&self, platform: &str, code: Option<u16>) {
+        self.receiver_connection_healthy
+            .with_label_values(&[platform])
+            .set(0);
+        tracing::error!(
+            platform,
+            code = ?code,
+            "receiver connection marked unhealthy (fatal, non-retryable close)"
+        );
     }
 }
 
