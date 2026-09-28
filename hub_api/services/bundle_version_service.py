@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any
 
@@ -76,17 +77,29 @@ STATUS_ADDRESSING = "ADDRESSING"
 STATUS_PUBLISHING = "PUBLISHING"
 STATUS_PUBLISHED = "PUBLISHED"
 STATUS_REJECTED = "REJECTED"
+#: A distinct terminal-failure state from STATUS_REJECTED -- REJECTED means "the
+#: content itself failed validation" (WIT conformance, manifest rules); ABANDONED
+#: means "this upload was auto-reclaimed because it stalled past its lease" (crashed
+#: mid-run, killed pod, ...). Written only by `abandon_stalled_upload()` below, never
+#: a raw status write. See migration 0027 for the CHECK-constraint/uniqueness change
+#: that makes this state representable in Postgres.
+STATUS_ABANDONED = "ABANDONED"
 
 #: The state machine's directed edges (spec Sec9.1's diagram). Every
-#: non-terminal state may also transition to STATUS_REJECTED -- listed
-#: explicitly per source state rather than as a blanket exception, so
-#: `advance_state()` can name the exact failure state in its error.
+#: non-terminal state may also transition to STATUS_REJECTED or
+#: STATUS_ABANDONED -- listed explicitly per source state rather than as a
+#: blanket exception, so `advance_state()` can name the exact failure state
+#: in its error.
 _TRANSITIONS: dict[str, frozenset[str]] = {
-    STATUS_UPLOADED: frozenset({STATUS_VALIDATING, STATUS_REJECTED}),
-    STATUS_VALIDATING: frozenset({STATUS_SCANNING, STATUS_INSPECTING, STATUS_REJECTED}),
-    STATUS_SCANNING: frozenset({STATUS_ADDRESSING, STATUS_REJECTED}),
-    STATUS_INSPECTING: frozenset({STATUS_COMPILING, STATUS_ADDRESSING, STATUS_REJECTED}),
-    STATUS_COMPILING: frozenset({STATUS_ADDRESSING, STATUS_REJECTED}),
+    STATUS_UPLOADED: frozenset({STATUS_VALIDATING, STATUS_REJECTED, STATUS_ABANDONED}),
+    STATUS_VALIDATING: frozenset(
+        {STATUS_SCANNING, STATUS_INSPECTING, STATUS_REJECTED, STATUS_ABANDONED}
+    ),
+    STATUS_SCANNING: frozenset({STATUS_ADDRESSING, STATUS_REJECTED, STATUS_ABANDONED}),
+    STATUS_INSPECTING: frozenset(
+        {STATUS_COMPILING, STATUS_ADDRESSING, STATUS_REJECTED, STATUS_ABANDONED}
+    ),
+    STATUS_COMPILING: frozenset({STATUS_ADDRESSING, STATUS_REJECTED, STATUS_ABANDONED}),
     # STATUS_PUBLISHED is a direct edge here (not only via STATUS_PUBLISHING)
     # for the pre-built-component path: `process_prebuilt_component()`
     # publishes immediately once staging succeeds -- there is no separate
@@ -94,11 +107,75 @@ _TRANSITIONS: dict[str, frozenset[str]] = {
     # (that gate is what STATUS_PUBLISHING exists for on the `source`
     # artifact path, still a not-yet-built follow-on, see this module's
     # own scope note above `process_prebuilt_component()`).
-    STATUS_ADDRESSING: frozenset({STATUS_PUBLISHING, STATUS_PUBLISHED, STATUS_REJECTED}),
-    STATUS_PUBLISHING: frozenset({STATUS_PUBLISHED, STATUS_REJECTED}),
+    STATUS_ADDRESSING: frozenset(
+        {STATUS_PUBLISHING, STATUS_PUBLISHED, STATUS_REJECTED, STATUS_ABANDONED}
+    ),
+    STATUS_PUBLISHING: frozenset({STATUS_PUBLISHED, STATUS_REJECTED, STATUS_ABANDONED}),
     STATUS_PUBLISHED: frozenset(),  # terminal -- superseded via a new version, never mutated
     STATUS_REJECTED: frozenset(),  # terminal
+    STATUS_ABANDONED: frozenset(),  # terminal
 }
+
+#: Every terminal state -- PUBLISHED (success) plus the two failure states.
+_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {STATUS_PUBLISHED, STATUS_REJECTED, STATUS_ABANDONED}
+)
+
+#: The two terminal-FAILURE states specifically -- these are the ones a fresh
+#: `create_version()` call is allowed to coexist with (migration 0027's partial
+#: unique index has the identical `NOT IN (...)` shape, kept in sync by hand since
+#: SQL and Python enums can't share a single source of truth here).
+_TERMINAL_FAILURE_STATUSES: frozenset[str] = frozenset({STATUS_REJECTED, STATUS_ABANDONED})
+
+#: Env var overriding the default lease timeout `is_lease_expired()` uses to decide
+#: whether a non-terminal `app_version_uploads` row has stalled (crashed mid-run,
+#: killed pod, ...) rather than simply being a slow-but-live run.
+_LEASE_SECONDS_ENV = "APP_VERSION_UPLOAD_LEASE_SECONDS"
+DEFAULT_LEASE_SECONDS = 600
+
+
+def is_terminal_status(status: str) -> bool:
+    """Whether `status` is one of the state machine's three terminal states."""
+    return status in _TERMINAL_STATUSES
+
+
+def _lease_seconds() -> int:
+    """The configured lease timeout, in seconds -- `_LEASE_SECONDS_ENV`, default 600 (10 min).
+
+    Read at call time (never cached at import) so a test or a deploy-time env change
+    takes effect without a process restart.
+    """
+    raw = os.getenv(_LEASE_SECONDS_ENV)
+    if not raw:
+        return DEFAULT_LEASE_SECONDS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_LEASE_SECONDS
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize a possibly-naive `datetime` (the sqlite test fixture's own shape) to UTC-aware."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def is_lease_expired(
+    upload: Any, *, lease_seconds: int | None = None, now: datetime | None = None
+) -> bool:
+    """Whether `upload` (an `app_version_uploads` row) has gone stale past its lease.
+
+    `updated_at` doubles as the lease heartbeat -- every `advance_state()` call
+    refreshes it, so a row genuinely still progressing keeps a fresh timestamp; a
+    crashed/killed run leaves it frozen at whatever it was when the process died.
+    Falls back to `created_at` for a row that somehow has no `updated_at`.
+    """
+    seconds = lease_seconds if lease_seconds is not None else _lease_seconds()
+    reference = now if now is not None else datetime.now(UTC)
+    last_activity = upload.updated_at or upload.created_at
+    return (reference - _as_utc(last_activity)).total_seconds() > seconds
+
 
 BUNDLE_MAX_SOURCE_BYTES = 16_777_216
 BUNDLE_MAX_COMPONENT_BYTES = 33_554_432
@@ -156,6 +233,54 @@ async def advance_state(
         updated_at=datetime.now(UTC),
     )
     return (await install_dal(install_dal.app_version_uploads.id == upload.id).select()).first()
+
+
+async def abandon_stalled_upload(
+    install_dal: AsyncDB,
+    *,
+    app_id: str,
+    version: str,
+    reason: str,
+    actor: str,
+    actor_id: int | None = None,
+) -> Any:
+    """Transition a non-terminal `app_version_uploads` row to ABANDONED, with an audit record.
+
+    Generic FSM-based reclaim primitive -- routes through `advance_state()`, never a
+    raw status write, so an illegal call (the row is already terminal) raises the same
+    409 `invalid_state_transition` any other bad transition would. Two callers use
+    this today, both gated well before this function ever runs:
+
+      * `hub_api/cli/seed_core_bundles.py` (SYSTEM actor, `waddles.core.*` only) --
+        reclaims a row whose lease (`is_lease_expired()`) has expired, so a crashed
+        mid-run seeder can self-heal on the next run instead of returning 409 forever.
+      * `blueprints/v1/bundle_admin.py` (`platform:admin`, any `app_id`) -- an explicit
+        global-admin action for a stuck vendor upload; vendors otherwise keep the
+        existing 409 `stalled_core_bundle_upload`-shaped behavior (no auto-reclaim).
+
+    The audit-log write is best-effort, matching every other audit write in this
+    codebase (`bundle_approval_service._audit_routes_to_refusal`'s own convention) --
+    a logging failure must never prevent the abandon itself from taking effect.
+    """
+    row = await advance_state(
+        install_dal,
+        app_id=app_id,
+        version=version,
+        target=STATUS_ABANDONED,
+        reject_reason=reason[:100],
+    )
+    try:
+        await install_dal.audit_log.async_insert(
+            user_id=actor_id,
+            action="app_version_upload_abandoned",
+            target_type="app_version_uploads",
+            target_id=f"{app_id}@{version}",
+            details={"reason": reason, "actor": actor},
+            created_at=datetime.now(UTC),
+        )
+    except Exception:  # noqa: BLE001, S110 -- audit logging failure must not block the abandon
+        pass
+    return row
 
 
 def _require(condition: bool, message: str, code: str) -> None:
@@ -227,8 +352,26 @@ async def create_version(
         (install_dal.app_version_uploads.app_id == app_id)
         & (install_dal.app_version_uploads.version == manifest.version)
     ).select()
-    if existing:
+    # A row in a terminal-FAILURE state (REJECTED/ABANDONED) never blocks a fresh
+    # upload of the same (app_id, version) -- migration 0027's partial unique index
+    # excludes those two statuses for exactly this reason. Any other existing row
+    # (in-flight, or already PUBLISHED) still blocks, unchanged.
+    blocking = next((row for row in existing if row.status not in _TERMINAL_FAILURE_STATUSES), None)
+    if blocking is not None:
         raise conflict(f"version {manifest.version} of {app_id} already exists")
+    if existing:
+        # Every remaining row here is already terminal-FAILURE (REJECTED/ABANDONED) --
+        # already audited via `abandon_stalled_upload()`/`deny_version()`'s own trail, so
+        # this is bookkeeping cleanup, NOT the stall-recovery transition itself (that
+        # already happened, through the FSM, before this function was ever called).
+        # Clearing it keeps (app_id, version) single-row, matching every other lookup in
+        # this module (`advance_state()`, `get_version()`, ...) that assumes exactly one
+        # row per key -- letting a second, terminal row linger would make those lookups'
+        # own `.first()` ambiguous against the fresh row this call is about to insert.
+        await install_dal(
+            (install_dal.app_version_uploads.app_id == app_id)
+            & (install_dal.app_version_uploads.version == manifest.version)
+        ).delete()
 
     now = datetime.now(UTC)
     upload_id = await install_dal.app_version_uploads.async_insert(

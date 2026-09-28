@@ -37,6 +37,18 @@ points at that same `version_id`, activation is skipped too (a true no-op, logge
 integrity conflict (app_versions has its own `UNIQUE(app_id, version)`) -- refused, not
 overwritten; bump the catalog's `version` field alongside the artifact.
 
+**Self-healing stall recovery.** A run that crashes/is killed mid-way leaves an
+`app_version_uploads` row stuck in a non-terminal state (e.g. `INSPECTING`) --
+`_reclaim_stalled_core_upload()` auto-abandons it (through the FSM's proper
+`abandon_stalled_upload()`/`advance_state()` transition, never a raw delete, with an
+audit_log row) once it is older than its lease (`APP_VERSION_UPLOAD_LEASE_SECONDS`,
+default 600s), then a fresh upload proceeds. A row still within its lease is left
+alone -- the existing 409 `stalled_core_bundle_upload` fires instead, covering the
+genuinely-concurrent-run case. This ONLY ever touches `waddles.core.*` rows (the HARD
+GUARD gates every caller); a vendor's stalled upload keeps the current 409 --
+`blueprints/v1/bundle_admin.py`'s `platform:admin` abandon endpoint is the explicit,
+human-gated equivalent for that case.
+
 **Platform connections** (`bundles/core-bundles.yaml`'s own `platform_connections:` section,
 extended by the `CORE_BUNDLES_PLATFORM_CONNECTIONS` env var -- a JSON array, populated by
 `k8s/helm/waddlebot/templates/core-bundle-seeder-job.yaml` from the SAME Helm values already
@@ -72,7 +84,13 @@ from services.bundle_approval_service import TENANT_WIDE_COMMUNITY_SENTINEL, app
 from services.bundle_install_dal import build_install_dal, raw_sql_write
 from services.bundle_manifest_v2 import BundleManifestV2, parse_bundle_manifest_v2
 from services.bundle_telemetry import get_meter
-from services.bundle_version_service import create_version, process_prebuilt_component
+from services.bundle_version_service import (
+    abandon_stalled_upload,
+    create_version,
+    is_lease_expired,
+    is_terminal_status,
+    process_prebuilt_component,
+)
 from services.errors import ApiError
 from services.ingest_source_service import ensure_ingest_source
 
@@ -351,6 +369,40 @@ async def _already_active(
     return row is not None and int(row.version_id) == int(version_id)
 
 
+async def _reclaim_stalled_core_upload(install_dal: AsyncDB, *, app_id: str, version: str) -> None:
+    """Auto-abandon a CORE bundle's own stale, non-terminal `app_version_uploads` row.
+
+    SYSTEM-actor, `waddles.core.*`-only reclaim path -- called from
+    `_resolve_or_publish_version()` right before `create_version()`, never for a
+    vendor/tenant-uploaded `app_id` (the HARD GUARD in `seed_one()` already refuses
+    those before this function's caller is ever reached). A row still within its
+    lease (`is_lease_expired()` false -- a genuinely concurrent run, not a crash) is
+    left untouched: `create_version()`'s own conflict check still raises the existing
+    409 `stalled_core_bundle_upload` for that case, unchanged. A terminal row
+    (PUBLISHED/REJECTED/ABANDONED) is never a stall candidate and is skipped too.
+    """
+    existing = await install_dal(
+        (install_dal.app_version_uploads.app_id == app_id)
+        & (install_dal.app_version_uploads.version == version)
+    ).select()
+    for row in existing:
+        if is_terminal_status(row.status):
+            continue
+        if not is_lease_expired(row):
+            continue
+        logger.warning(
+            "core-bundle-seeder: reclaiming a stalled upload past its lease",
+            extra={"app_id": app_id, "version": version, "stalled_status": row.status},
+        )
+        await abandon_stalled_upload(
+            install_dal,
+            app_id=app_id,
+            version=version,
+            reason=f"lease_expired:{row.status}",
+            actor=SYSTEM_ACTOR,
+        )
+
+
 async def _resolve_or_publish_version(
     install_dal: AsyncDB,
     *,
@@ -368,6 +420,11 @@ async def _resolve_or_publish_version(
     published with a DIFFERENT digest (`app_versions` is immutable per version string, spec
     Sec6.10) -- the catalog's `version` field must be bumped alongside the artifact, never
     silently republished under the same version string.
+
+    Before publishing, `_reclaim_stalled_core_upload()` auto-abandons any stale (past-lease),
+    non-terminal `app_version_uploads` row for this `(app_id, version)` -- a crashed/killed
+    prior run self-heals on the next run instead of returning 409 forever (see this module's
+    own docstring). A row still within its lease still blocks below, unchanged.
     """
     existing = await install_dal(
         (install_dal.app_versions.app_id == entry.app_id)
@@ -396,6 +453,8 @@ async def _resolve_or_publish_version(
             )
         return int(existing_row.id)
 
+    await _reclaim_stalled_core_upload(install_dal, app_id=entry.app_id, version=entry.version)
+
     try:
         await create_version(
             install_dal,
@@ -415,15 +474,16 @@ async def _resolve_or_publish_version(
     except ApiError as exc:
         if exc.code != "CONFLICT":
             raise
-        # A previous run created the app_version_uploads row but crashed before
-        # process_prebuilt_component() published it -- resuming from an arbitrary
-        # mid-FSM state is out of scope (see module docstring's idempotency note);
-        # fail loudly with a clear, actionable message rather than silently
-        # retrying a transition the state machine may now refuse.
+        # _reclaim_stalled_core_upload() already abandoned anything past its lease above --
+        # reaching this branch means an app_version_uploads row for this (app_id, version)
+        # is STILL non-terminal and STILL within its lease, i.e. a genuinely concurrent
+        # seeder run (another pod mid-publish right now), not a crash. Fail loudly rather
+        # than racing that run's own writes; a retry after the lease expires self-heals.
         raise ApiError(
-            f"{entry.app_id}@{entry.version} already has an app_version_uploads row that never "
-            "reached PUBLISHED -- a previous seeder run likely crashed mid-publish; inspect and "
-            "clear that row manually before re-running",
+            f"{entry.app_id}@{entry.version} already has an app_version_uploads row in "
+            "progress (within its lease) -- either a concurrent seeder run is publishing it "
+            "right now, or a previous run crashed and its lease has not yet expired; retry "
+            "later or lower APP_VERSION_UPLOAD_LEASE_SECONDS",
             exc.status_code,
             "stalled_core_bundle_upload",
         ) from exc
