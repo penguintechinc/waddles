@@ -42,6 +42,7 @@ pub mod error;
 pub mod hop;
 pub mod host_api;
 pub mod http;
+pub mod hub_identity_client;
 pub mod license;
 pub mod pii_tokenize;
 pub mod source_supervisor;
@@ -356,7 +357,7 @@ fn try_start_process_loop(
             },
             metrics,
             license: license_gate,
-            identity: Arc::new(crate::pii_tokenize::AlwaysEphemeralIdentityResolver),
+            identity: Arc::new(crate::pii_tokenize::AlwaysEphemeralIdentityResolver::default()),
             tokenize_metrics,
         };
 
@@ -499,6 +500,14 @@ fn try_start_db_bundle_loader(
     let community_id = config.cli.bundle_scope_community_id;
     let poll_interval = config.cli.bundle_config_poll_interval();
     let call_timeout_ms = config.cli.executor_call_timeout_ms;
+    // Owned, extracted before the `'static` spawn below (`config` is only
+    // valid for this function's own borrow) -- see
+    // `crate::hub_identity_client::HttpEphemeralIdentityMinter`'s doc.
+    let hub_api_url = config.cli.hub_api_url.clone();
+    let identity_service_api_key = config
+        .identity_service_api_key
+        .as_ref()
+        .map(|s| s.expose().to_string());
 
     // The source-binding supervisor's own optional dependencies -- built
     // eagerly (no network I/O) so a missing/invalid one only disables the
@@ -580,14 +589,26 @@ fn try_start_db_bundle_loader(
             };
 
         // Built from the same RO reader connection as everything else in
-        // this function, scoped to this instance's own `community_id` --
-        // see `crate::pii_tokenize`'s module doc for why this crate (not
-        // `core/svc_ingest`) owns the tokenization pass, and
-        // `SeaOrmIdentityResolver`'s own doc for the single-community
-        // scoping rationale.
-        let identity: Arc<dyn crate::pii_tokenize::IdentityResolver> = Arc::new(
-            crate::pii_tokenize::SeaOrmIdentityResolver::new(db.clone(), community_id),
+        // this function, scoped to this instance's own `(tenant_id,
+        // community_id)` -- see `crate::pii_tokenize`'s module doc for why
+        // this crate (not `core/svc_ingest`) owns the tokenization pass.
+        // The minter calls hub-api's dedicated-scope mint endpoint
+        // (`crate::hub_identity_client`) -- `identity_service_api_key`
+        // unset means every call gracefully falls back to a random token
+        // rather than failing startup.
+        let minter: Arc<dyn crate::hub_identity_client::EphemeralIdentityMinter> = Arc::new(
+            crate::hub_identity_client::HttpEphemeralIdentityMinter::new(
+                hub_api_url,
+                identity_service_api_key,
+            ),
         );
+        let identity: Arc<dyn crate::pii_tokenize::IdentityResolver> =
+            Arc::new(crate::pii_tokenize::SeaOrmIdentityResolver::new(
+                db.clone(),
+                tenant_id,
+                community_id,
+                minter,
+            ));
 
         match resolved.map(|r| finish_supervisor_deps(prereqs, r, identity, tokenize_metrics)) {
             Some(deps) => {
@@ -834,6 +855,7 @@ mod tests {
             service_api_key: crate::config::Secret::new("x"),
             envelope_binding_keys: Some(crate::config::Secret::new("k1:aabbcc")),
             db_reader_password: None,
+            identity_service_api_key: None,
         }
     }
 
@@ -875,33 +897,29 @@ mod tests {
     impl crate::pii_tokenize::IdentityResolver for TestIdentityResolver {
         fn resolve_by_id<'a>(
             &'a self,
-            platform: &'a str,
-            platform_user_id: &'a str,
+            _platform: &'a str,
+            _platform_user_id: &'a str,
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<Output = crate::pii_tokenize::ResolvedIdentity> + Send + 'a,
             >,
         > {
             Box::pin(async move {
-                crate::pii_tokenize::ResolvedIdentity::Ephemeral(
-                    crate::pii_tokenize::ephemeral_pseudonym(platform, platform_user_id),
-                )
+                crate::pii_tokenize::ResolvedIdentity::Ephemeral(uuid::Uuid::new_v4())
             })
         }
 
         fn resolve_by_handle<'a>(
             &'a self,
-            platform: &'a str,
-            handle: &'a str,
+            _platform: &'a str,
+            _handle: &'a str,
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<Output = crate::pii_tokenize::ResolvedIdentity> + Send + 'a,
             >,
         > {
             Box::pin(async move {
-                crate::pii_tokenize::ResolvedIdentity::Ephemeral(
-                    crate::pii_tokenize::ephemeral_pseudonym(platform, handle),
-                )
+                crate::pii_tokenize::ResolvedIdentity::Ephemeral(uuid::Uuid::new_v4())
             })
         }
     }
@@ -1301,6 +1319,7 @@ mod tests {
             service_api_key: crate::config::Secret::new("x"),
             envelope_binding_keys: None,
             db_reader_password: None,
+            identity_service_api_key: None,
         };
         let state = crate::http::AppState::new(config, prometheus::Registry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

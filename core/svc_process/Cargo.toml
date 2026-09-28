@@ -116,7 +116,7 @@ anyhow = "=1.0.104"
 # `UUIDv5(WADDLES_MENTION_NAMESPACE, "{platform}:{platform_user_id}")`
 # ephemeral pseudonym minting, `crate::pii_tokenize`) -- same pin as
 # `core/svc_ingest`'s own `uuid` dependency.
-uuid = { version = "=1.26.1", features = ["v4", "v5"] }
+uuid = { version = "=1.26.1", features = ["v4", "v5", "serde"] }
 # Unstructured mention grammar (`@handle` Twitch/IRC, `<@id>` Discord),
 # `crate::pii_tokenize` -- same pin as `core/bundle_compiler`'s own `regex`
 # dependency.

@@ -117,6 +117,7 @@ mod tests {
             service_api_key: Secret::new("x"),
             envelope_binding_keys: None,
             db_reader_password: None,
+            identity_service_api_key: None,
         };
         AppState::new(config, prometheus::Registry::new())
     }

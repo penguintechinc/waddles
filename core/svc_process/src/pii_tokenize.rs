@@ -3,10 +3,19 @@
 //! S10.1/S10.3, Phase 1 Task 1 -- HARD BLOCKER): replaces
 //! `penguin_spine::PlatformEvent::actor` and every recognized user mention
 //! in the event's own text fields with a `{user:<uuid>}` placeholder --
-//! either a real, tenant-linked `hub_users` UUID or a deterministic
-//! ephemeral pseudonym for an unknown/unlinked platform account -- so a
-//! bundle's `transform` invoke (`crate::spine::invoke_transform`) never
-//! receives a raw platform username/login.
+//! either a real, tenant-linked `hub_users` UUID or an ephemeral
+//! pseudonym for an unknown/unlinked platform account -- so a bundle's
+//! `transform` invoke (`crate::spine::invoke_transform`) never receives a
+//! raw platform username/login.
+//!
+//! **Ephemeral pseudonyms are minted INSIDE the PII boundary
+//! (`crate::hub_identity_client`), never locally.** Security review fix:
+//! an earlier version of this module derived the pseudonym itself,
+//! `UUIDv5(FIXED_PUBLIC_NAMESPACE, "platform:handle")` -- reversible by
+//! dictionary attack (anyone can recompute the same fixed, public
+//! derivation for a known handle). See `crate::hub_identity_client`'s
+//! module doc for the hub-api-minted, per-tenant-secret-keyed
+//! replacement and its random-token failure fallback.
 //!
 //! **Placement decision (this crate, not `core/svc_ingest`) -- see this
 //! change's PR description for the full justification.** Short version:
@@ -41,22 +50,13 @@ use regex::Regex;
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::hub_identity_client::EphemeralIdentityMinter;
 use crate::telemetry::TokenizeMetrics;
 
-/// Fixed (arbitrary-but-stable) namespace UUID for
-/// `UUIDv5(MENTION_NAMESPACE, "{platform}:{identity_key}")` ephemeral
-/// pseudonym minting (spec S10.3 step 3: "a deterministic ephemeral
-/// pseudonym ... consistent across repeated mentions but never a real
-/// `hub_users` row"). Any fixed 16 bytes work here -- a namespace UUID
-/// (RFC 4122 SS4.3) is not itself a real record, only its fixedness across
-/// process restarts matters, so the same unknown platform identity always
-/// mints the same pseudonym.
-const MENTION_NAMESPACE: Uuid = Uuid::from_bytes(*b"waddles-mention\0");
-
 /// One resolved identity: either a real, tenant-linked `hub_users` UUID,
-/// or a deterministic ephemeral pseudonym for an unknown/unlinked
-/// platform account. Both render identically on the wire
-/// (`{user:<uuid>}`) -- the distinction exists purely for telemetry
+/// or an ephemeral pseudonym for an unknown/unlinked platform account.
+/// Both render identically on the wire (`{user:<uuid>}`) -- the
+/// distinction exists purely for telemetry
 /// (`TokenizeMetrics::unresolved_users_total`) and tests, never for the
 /// bundle, which must not be able to tell the two apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,20 +75,6 @@ impl ResolvedIdentity {
     pub fn is_ephemeral(self) -> bool {
         matches!(self, Self::Ephemeral(_))
     }
-}
-
-/// Mints the deterministic ephemeral pseudonym for an unknown/unlinked
-/// `(platform, identity_key)` pair. `identity_key` is usually the
-/// platform's own numeric/opaque user id, but callers with no id at all
-/// (e.g. an actor whose tags carried no `user-id`) pass a distinguishable
-/// fallback key instead (`crate::pii_tokenize::tokenize_platform_event`'s
-/// `actor:<lowercased name>` convention) -- either way this function never
-/// sees, and never echoes, the raw display name/login itself.
-pub fn ephemeral_pseudonym(platform: &str, identity_key: &str) -> Uuid {
-    Uuid::new_v5(
-        &MENTION_NAMESPACE,
-        format!("{platform}:{identity_key}").as_bytes(),
-    )
 }
 
 /// Renders a resolved identity as the bundle-visible placeholder text
@@ -156,19 +142,67 @@ pub trait IdentityResolver: Send + Sync {
 }
 
 /// [`IdentityResolver`] backed by `bundle_active_set`'s RO reader
-/// connection, scoped to exactly one `community_id` -- this instance's own
-/// static `BUNDLE_SCOPE_COMMUNITY_ID` (never a per-call parameter: cross-
-/// community lookups would be a tenant-isolation bug, identical in spirit
-/// to `bundle_active_set::scope::resolve_scope`'s own fail-closed
-/// single-scope contract).
+/// connection, scoped to `(tenant_id, community_id)` -- this instance's own
+/// static `BUNDLE_SCOPE_TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID` (never a
+/// per-call parameter: cross-tenant/community lookups would be a
+/// tenant-isolation bug, identical in spirit to `bundle_active_set::
+/// scope::resolve_scope`'s own fail-closed single-scope contract).
+/// `community_id == 0` is the tenant-wide sentinel, resolved across every
+/// community in `tenant_id` -- see `bundle_active_set::identity`'s doc.
+///
+/// An unlinked/unknown identity is minted via `minter`
+/// (`crate::hub_identity_client`), never derived locally.
 pub struct SeaOrmIdentityResolver {
     conn: sea_orm::DatabaseConnection,
+    tenant_id: i32,
     community_id: i32,
+    minter: std::sync::Arc<dyn EphemeralIdentityMinter>,
 }
 
 impl SeaOrmIdentityResolver {
-    pub fn new(conn: sea_orm::DatabaseConnection, community_id: i32) -> Self {
-        Self { conn, community_id }
+    pub fn new(
+        conn: sea_orm::DatabaseConnection,
+        tenant_id: i32,
+        community_id: i32,
+        minter: std::sync::Arc<dyn EphemeralIdentityMinter>,
+    ) -> Self {
+        Self {
+            conn,
+            tenant_id,
+            community_id,
+            minter,
+        }
+    }
+
+    /// Shared "parse the linked UUID, or mint an ephemeral pseudonym"
+    /// tail -- a corrupt/non-UUID `community_members.user_id` (a
+    /// free-form `VARCHAR`, not a database `uuid` column) is treated the
+    /// same as unlinked, logged loudly rather than ever forwarded raw.
+    async fn parse_or_mint(
+        &self,
+        user_id: Option<String>,
+        platform: &str,
+        platform_user_id: &str,
+        handle: Option<&str>,
+    ) -> ResolvedIdentity {
+        if let Some(user_id) = user_id {
+            match Uuid::parse_str(&user_id) {
+                Ok(uuid) => return ResolvedIdentity::Linked(uuid),
+                Err(_) => {
+                    tracing::warn!(
+                        platform,
+                        platform_user_id,
+                        "community_members.user_id is not a valid UUID; minting an ephemeral \
+                         pseudonym instead"
+                    );
+                }
+            }
+        }
+        let pseudonym = self
+            .minter
+            .mint(self.tenant_id, platform, platform_user_id, handle)
+            .await;
+        ResolvedIdentity::Ephemeral(pseudonym)
     }
 }
 
@@ -181,25 +215,27 @@ impl IdentityResolver for SeaOrmIdentityResolver {
         Box::pin(async move {
             match bundle_active_set::resolve_linked_user_id(
                 &self.conn,
+                self.tenant_id,
                 self.community_id,
                 platform,
                 platform_user_id,
             )
             .await
             {
-                Ok(Some(user_id)) => parse_or_ephemeral(&user_id, platform, platform_user_id),
-                Ok(None) => {
-                    ResolvedIdentity::Ephemeral(ephemeral_pseudonym(platform, platform_user_id))
+                Ok(user_id) => {
+                    self.parse_or_mint(user_id, platform, platform_user_id, None)
+                        .await
                 }
                 Err(err) => {
                     tracing::error!(
                         platform,
                         platform_user_id,
                         error = %err,
-                        "identity resolution query failed; falling back to an ephemeral \
-                         pseudonym (fail-safe -- never raw PII, never blocks the event)"
+                        "identity resolution query failed; minting an ephemeral pseudonym \
+                         (fail-safe -- never raw PII, never blocks the event)"
                     );
-                    ResolvedIdentity::Ephemeral(ephemeral_pseudonym(platform, platform_user_id))
+                    self.parse_or_mint(None, platform, platform_user_id, None)
+                        .await
                 }
             }
         })
@@ -211,34 +247,41 @@ impl IdentityResolver for SeaOrmIdentityResolver {
         handle: &'a str,
     ) -> Pin<Box<dyn Future<Output = ResolvedIdentity> + Send + 'a>> {
         Box::pin(async move {
-            let fallback_key = format!("handle:{}", handle.to_ascii_lowercase());
             match bundle_active_set::identity::resolve_member_by_handle(
                 &self.conn,
+                self.tenant_id,
                 self.community_id,
                 platform,
                 handle,
             )
             .await
             {
-                Ok(Some(m)) => match m.user_id {
-                    Some(user_id) => parse_or_ephemeral(&user_id, platform, &m.platform_user_id),
-                    None => ResolvedIdentity::Ephemeral(ephemeral_pseudonym(
-                        platform,
-                        &m.platform_user_id,
-                    )),
-                },
+                Ok(Some(m)) => {
+                    self.parse_or_mint(m.user_id, platform, &m.platform_user_id, Some(handle))
+                        .await
+                }
                 Ok(None) => {
-                    ResolvedIdentity::Ephemeral(ephemeral_pseudonym(platform, &fallback_key))
+                    // No structured platform_user_id at all -- the mint
+                    // call still carries the handle (hub-api's own
+                    // pseudonym derivation may use it as a display hint;
+                    // this crate never derives anything from it locally),
+                    // keyed by a distinguishable fallback identity string
+                    // so it can never collide with a real numeric id.
+                    let fallback_key = format!("handle:{}", handle.to_ascii_lowercase());
+                    self.parse_or_mint(None, platform, &fallback_key, Some(handle))
+                        .await
                 }
                 Err(err) => {
                     tracing::error!(
                         platform,
                         handle,
                         error = %err,
-                        "handle-mention resolution query failed; falling back to an ephemeral \
-                         pseudonym (fail-safe -- never raw PII, never blocks the event)"
+                        "handle-mention resolution query failed; minting an ephemeral pseudonym \
+                         (fail-safe -- never raw PII, never blocks the event)"
                     );
-                    ResolvedIdentity::Ephemeral(ephemeral_pseudonym(platform, &fallback_key))
+                    let fallback_key = format!("handle:{}", handle.to_ascii_lowercase());
+                    self.parse_or_mint(None, platform, &fallback_key, Some(handle))
+                        .await
                 }
             }
         })
@@ -250,15 +293,28 @@ impl IdentityResolver for SeaOrmIdentityResolver {
 /// numeric `(tenant_id, community_id)` scope at all (it hardcodes the
 /// tenant-wide `"global"` activation, see that function's own doc) and
 /// has no RO reader connection to query, so it cannot look up
-/// `community_members` even in principle. Every identity therefore mints
-/// an ephemeral pseudonym unconditionally -- this still fully satisfies
-/// the hard invariant (a raw platform username/login is never forwarded
-/// to a guest), it just means this legacy path can never resolve a real
-/// linked `hub_users` UUID. `crate::source_supervisor`'s DB-driven path
-/// (backed by [`SeaOrmIdentityResolver`]) is what actually resolves linked
-/// accounts; this type exists only so the legacy fallback isn't left
-/// without a resolver at all.
-pub struct AlwaysEphemeralIdentityResolver;
+/// `community_members` -- nor a numeric `tenant_id` to call hub-api's
+/// tenant-scoped mint endpoint with. Every identity therefore gets a
+/// fresh random token (`crate::hub_identity_client::RandomTokenMinter`) --
+/// this still fully satisfies the hard invariant (a raw platform
+/// username/login is never forwarded to a guest), it just means this
+/// legacy path can never resolve a real linked `hub_users` UUID, nor keep
+/// a stable pseudonym for the same unknown user across repeated mentions.
+/// `crate::source_supervisor`'s DB-driven path (backed by
+/// [`SeaOrmIdentityResolver`]) is what actually resolves linked accounts;
+/// this type exists only so the legacy fallback isn't left without a
+/// resolver at all.
+pub struct AlwaysEphemeralIdentityResolver {
+    minter: crate::hub_identity_client::RandomTokenMinter,
+}
+
+impl Default for AlwaysEphemeralIdentityResolver {
+    fn default() -> Self {
+        Self {
+            minter: crate::hub_identity_client::RandomTokenMinter,
+        }
+    }
+}
 
 impl IdentityResolver for AlwaysEphemeralIdentityResolver {
     fn resolve_by_id<'a>(
@@ -267,7 +323,7 @@ impl IdentityResolver for AlwaysEphemeralIdentityResolver {
         platform_user_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = ResolvedIdentity> + Send + 'a>> {
         Box::pin(async move {
-            ResolvedIdentity::Ephemeral(ephemeral_pseudonym(platform, platform_user_id))
+            ResolvedIdentity::Ephemeral(self.minter.mint(0, platform, platform_user_id, None).await)
         })
     }
 
@@ -276,26 +332,9 @@ impl IdentityResolver for AlwaysEphemeralIdentityResolver {
         platform: &'a str,
         handle: &'a str,
     ) -> Pin<Box<dyn Future<Output = ResolvedIdentity> + Send + 'a>> {
-        Box::pin(async move { ResolvedIdentity::Ephemeral(ephemeral_pseudonym(platform, handle)) })
-    }
-}
-
-/// `community_members.user_id` is a free-form `VARCHAR`, not a database
-/// `uuid` column, so a corrupt/non-UUID value is possible in principle --
-/// treated the same as "unlinked" (ephemeral pseudonym), logged loudly
-/// rather than ever forwarding the raw string.
-fn parse_or_ephemeral(user_id: &str, platform: &str, identity_key: &str) -> ResolvedIdentity {
-    match Uuid::parse_str(user_id) {
-        Ok(uuid) => ResolvedIdentity::Linked(uuid),
-        Err(_) => {
-            tracing::warn!(
-                platform,
-                identity_key,
-                "community_members.user_id is not a valid UUID; falling back to an ephemeral \
-                 pseudonym"
-            );
-            ResolvedIdentity::Ephemeral(ephemeral_pseudonym(platform, identity_key))
-        }
+        Box::pin(async move {
+            ResolvedIdentity::Ephemeral(self.minter.mint(0, platform, handle, Some(handle)).await)
+        })
     }
 }
 
@@ -538,11 +577,26 @@ mod tests {
         crate::telemetry::register_tokenize_metrics(&prometheus::Registry::new())
     }
 
+    /// TEST-ONLY deterministic pseudonym helper -- production code never
+    /// calls this (see this module's own doc: minting happens inside the
+    /// PII boundary via `crate::hub_identity_client`, never locally). Only
+    /// [`FakeResolver`] below uses it, purely so this module's tokenization-
+    /// logic tests (mention substitution, brace escaping, actor-field
+    /// replacement) get a stable, assertable placeholder without needing a
+    /// real hub-api call.
+    fn ephemeral_pseudonym(platform: &str, identity_key: &str) -> Uuid {
+        const TEST_NAMESPACE: Uuid = Uuid::from_bytes(*b"test-only-ns\0\0\0\0");
+        Uuid::new_v5(
+            &TEST_NAMESPACE,
+            format!("{platform}:{identity_key}").as_bytes(),
+        )
+    }
+
     /// Deterministic in-memory [`IdentityResolver`] -- linked identities are
-    /// explicit, everything else falls through to the exact same
-    /// [`ephemeral_pseudonym`] production code path uses (never a
-    /// test-only shortcut), so these tests exercise the real fallback
-    /// behavior, not a mock of it.
+    /// explicit, everything else falls through to the test-only
+    /// [`ephemeral_pseudonym`] helper above so these tests get a stable,
+    /// assertable placeholder for "some ephemeral token", never a real
+    /// hub-api call.
     #[derive(Default)]
     struct FakeResolver {
         linked_by_id: HashMap<(String, String), Uuid>,

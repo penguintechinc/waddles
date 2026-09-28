@@ -1030,33 +1030,29 @@ mod tests {
     impl crate::pii_tokenize::IdentityResolver for FixedIdentityResolver {
         fn resolve_by_id<'a>(
             &'a self,
-            platform: &'a str,
-            platform_user_id: &'a str,
+            _platform: &'a str,
+            _platform_user_id: &'a str,
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<Output = crate::pii_tokenize::ResolvedIdentity> + Send + 'a,
             >,
         > {
             Box::pin(async move {
-                crate::pii_tokenize::ResolvedIdentity::Ephemeral(
-                    crate::pii_tokenize::ephemeral_pseudonym(platform, platform_user_id),
-                )
+                crate::pii_tokenize::ResolvedIdentity::Ephemeral(uuid::Uuid::new_v4())
             })
         }
 
         fn resolve_by_handle<'a>(
             &'a self,
-            platform: &'a str,
-            handle: &'a str,
+            _platform: &'a str,
+            _handle: &'a str,
         ) -> std::pin::Pin<
             Box<
                 dyn std::future::Future<Output = crate::pii_tokenize::ResolvedIdentity> + Send + 'a,
             >,
         > {
             Box::pin(async move {
-                crate::pii_tokenize::ResolvedIdentity::Ephemeral(
-                    crate::pii_tokenize::ephemeral_pseudonym(platform, handle),
-                )
+                crate::pii_tokenize::ResolvedIdentity::Ephemeral(uuid::Uuid::new_v4())
             })
         }
     }

@@ -50,10 +50,11 @@
 //! ```
 //!
 //! `community_members` (migration `000_create_base_schema.sql`) is read by
-//! `crate::identity::resolve_linked_user_id` -- the PII-tokenization hard
-//! invariant's identity-mapping lookup (spec S10.1/S10.3). Only its
-//! `user_id` column is ever read; no other column on this table (
-//! `display_name`, `avatar_url`, `bio`, ...) is queried, by design.
+//! `crate::identity::resolve_linked_user_id`/`resolve_member_by_handle` --
+//! the PII-tokenization hard invariant's identity-mapping lookup (spec
+//! S10.1/S10.3). Only `user_id` (structured resolution) and `display_name`
+//! (best-effort `@handle` mention matching) are ever read; no other
+//! column on this table (`avatar_url`, `bio`, ...) is queried, by design.
 //!
 //! `tenants`/`communities` (migration `058_tenants_and_claims.sql`) are the
 //! same tables hub-api's own auth chain reads (`hub_api/app.py::
