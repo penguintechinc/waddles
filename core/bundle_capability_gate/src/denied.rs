@@ -5,6 +5,17 @@
 //! are reserved so capability-specific, post-authorize validation (spec
 //! SS5.3, not this gate) reports through the same shared vocabulary for
 //! consistent audit logging and metrics.
+//!
+//! **Out of scope, intentionally:** the *global* per-bundle and
+//! per-publisher reputation caps and the distribution/entropy anomaly
+//! auto-suspend threshold (spec SS7.3, Gemini condition 4) are hub-api-side
+//! controls -- they aggregate across every community/tenant an app is
+//! activated in platform-wide, which is outside any single `authorize()`
+//! call's (tenant, community, app) scope. This crate's [`crate::quota`]
+//! ledger only enforces the per-call, per-user, and per-scope
+//! (community/tenant) caps that *are* checkable from a single call's
+//! `InvokeScope`. Spec SS12 Phase 10 tracks the hub-api-side aggregation job
+//! and its platform-wide suspend-and-notify action as separate work.
 
 use std::fmt;
 
