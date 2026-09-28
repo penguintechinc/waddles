@@ -27,8 +27,11 @@ impl types::Host for ExecState {}
 /// Routes a WIT import call through this instance's [`HostBridge`],
 /// producing a uniform [`ExecutorError`] when there is no bridge at all
 /// (a unit test exercising WASI/engine wiring without a live connection)
-/// or when the round trip itself fails.
-async fn call(
+/// or when the round trip itself fails. `pub(crate)` so
+/// `crate::host::connector_imports` (the `connector` world's reused
+/// `http`/`log`/`clock`/`%flags` imports, spec S1) shares this exact
+/// round-trip instead of a second copy.
+pub(crate) async fn call(
     state: &mut ExecState,
     capability: CapabilityKind,
     op: &'static str,
