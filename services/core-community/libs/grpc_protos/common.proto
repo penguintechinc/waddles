@@ -1,0 +1,20 @@
+syntax = "proto3";
+package waddlebot.common;
+
+message AuthToken {
+    string token = 1;
+}
+
+message Error {
+    int32 code = 1;
+    string message = 2;
+    map<string, string> details = 3;
+}
+
+message Empty {}
+
+message SuccessResponse {
+    bool success = 1;
+    string message = 2;
+    Error error = 3;
+}

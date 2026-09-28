@@ -1,0 +1,31 @@
+syntax = "proto3";
+package waddlebot.reputation;
+import "common.proto";
+
+service ReputationService {
+    rpc RecordEvent(RecordEventRequest) returns (waddlebot.common.SuccessResponse);
+    rpc GetScore(GetScoreRequest) returns (GetScoreResponse);
+}
+
+message RecordEventRequest {
+    string token = 1;
+    int32 community_id = 2;
+    int32 user_id = 3;
+    string platform = 4;
+    string platform_user_id = 5;
+    string event_type = 6;
+    map<string, string> metadata = 7;
+}
+
+message GetScoreRequest {
+    string token = 1;
+    int32 community_id = 2;
+    int32 user_id = 3;
+}
+
+message GetScoreResponse {
+    bool success = 1;
+    int32 score = 2;
+    string label = 3;
+    waddlebot.common.Error error = 4;
+}

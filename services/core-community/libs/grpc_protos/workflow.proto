@@ -1,0 +1,18 @@
+syntax = "proto3";
+package waddlebot.workflow;
+import "common.proto";
+
+service WorkflowService {
+    rpc TriggerWorkflow(TriggerWorkflowRequest) returns (waddlebot.common.SuccessResponse);
+}
+
+message TriggerWorkflowRequest {
+    string token = 1;
+    string workflow_id = 2;
+    string trigger_source = 3;
+    string trigger_data = 4;  // JSON string
+    string session_id = 5;
+    string entity_id = 6;
+    int32 user_id = 7;
+    string platform = 8;
+}

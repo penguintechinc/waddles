@@ -1,0 +1,29 @@
+syntax = "proto3";
+package waddlebot.hub_internal;
+import "common.proto";
+
+service HubInternalService {
+    rpc RecordActivity(RecordActivityRequest) returns (waddlebot.common.SuccessResponse);
+    rpc RecordMessage(RecordMessageRequest) returns (waddlebot.common.SuccessResponse);
+}
+
+message RecordActivityRequest {
+    string token = 1;
+    int32 community_id = 2;
+    string platform = 3;
+    string platform_user_id = 4;
+    string platform_username = 5;
+    string channel_id = 6;
+    string event_type = 7;
+    map<string, string> metadata = 8;
+}
+
+message RecordMessageRequest {
+    string token = 1;
+    int32 community_id = 2;
+    string platform = 3;
+    string platform_user_id = 4;
+    string platform_username = 5;
+    string channel_id = 6;
+    string message_content = 7;
+}

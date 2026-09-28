@@ -1,0 +1,27 @@
+syntax = "proto3";
+package waddlebot.browser_source;
+import "common.proto";
+
+service BrowserSourceService {
+    rpc SendCaption(SendCaptionRequest) returns (waddlebot.common.SuccessResponse);
+    rpc SendOverlayEvent(SendOverlayEventRequest) returns (waddlebot.common.SuccessResponse);
+}
+
+message SendCaptionRequest {
+    string token = 1;
+    int32 community_id = 2;
+    string platform = 3;
+    string username = 4;
+    string original_message = 5;
+    string translated_message = 6;
+    string detected_language = 7;
+    string target_language = 8;
+    float confidence = 9;
+}
+
+message SendOverlayEventRequest {
+    string token = 1;
+    int32 community_id = 2;
+    string event_type = 3;
+    string event_data = 4;  // JSON string
+}

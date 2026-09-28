@@ -1,0 +1,39 @@
+syntax = "proto3";
+package waddlebot.identity;
+import "common.proto";
+
+service IdentityService {
+    rpc LookupIdentity(LookupIdentityRequest) returns (LookupIdentityResponse);
+    rpc GetLinkedPlatforms(GetLinkedPlatformsRequest) returns (GetLinkedPlatformsResponse);
+}
+
+message LookupIdentityRequest {
+    string token = 1;
+    string platform = 2;
+    string platform_user_id = 3;
+}
+
+message LookupIdentityResponse {
+    bool success = 1;
+    int32 hub_user_id = 2;
+    string username = 3;
+    repeated PlatformIdentity linked_platforms = 4;
+    waddlebot.common.Error error = 5;
+}
+
+message PlatformIdentity {
+    string platform = 1;
+    string platform_user_id = 2;
+    string platform_username = 3;
+}
+
+message GetLinkedPlatformsRequest {
+    string token = 1;
+    int32 hub_user_id = 2;
+}
+
+message GetLinkedPlatformsResponse {
+    bool success = 1;
+    repeated PlatformIdentity platforms = 2;
+    waddlebot.common.Error error = 3;
+}
