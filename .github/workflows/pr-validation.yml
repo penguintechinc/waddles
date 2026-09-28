@@ -89,6 +89,11 @@ jobs:
     # no equivalent single "pre-PR tree" to diff, and this gate's whole job
     # is proving one PR's new migration(s) apply/rollback/reapply cleanly).
     if: github.event_name == 'pull_request'
+    # Narrower than the workflow-level default (contents: read + packages:
+    # read) -- this job only checks out the repo and talks to its own
+    # Postgres service container, no package-registry access needed.
+    permissions:
+      contents: read
     services:
       postgres:
         image: postgres:17-bookworm@sha256:639ab7ceb90e13123085b741fb31ef493fba25463002f6da665352e7b534b652
@@ -106,12 +111,16 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
+      # `base:` is deliberately omitted -- dorny/paths-filter ignores it on
+      # pull_request events (uses the PR's own base ref automatically) and
+      # passing it anyway produces a confusing "input parameter is ignored"
+      # annotation on every run.
       - name: Detect alembic changes
         uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4
         id: changes
         with:
-          base: ${{ github.event.pull_request.base.sha }}
           filters: |
             alembic:
               - 'alembic/**'
@@ -130,12 +139,27 @@ jobs:
       # `alembic>=1.13`) -- pinned here to an exact version so this gate is
       # reproducible. Folding a hash-pinned alembic into hub_api/requirements.txt
       # is a follow-up, tracked separately from this migration-chain gate.
+      #
+      # alembic/env.py imports `flask_core.models.db` (needed for
+      # `target_metadata`), which transitively needs flask-sqlalchemy +
+      # flask-security-too -- neither is in hub_api/requirements.txt (hub_api
+      # itself doesn't use flask_core). This is exactly the dependency set
+      # migrations/Dockerfile already installs for the same reason; versions
+      # pinned to match libs/flask_core/requirements.txt's own pins. First
+      # CI run of this job failed here with `ModuleNotFoundError: No module
+      # named 'flask_sqlalchemy'` -- a local run had passed only because the
+      # dev venv used for verification had it pre-installed from unrelated
+      # prior work, masking the gap.
       - name: Install migration dependencies
         if: steps.changes.outputs.alembic == 'true'
         run: |
           set -euo pipefail
           pip install --disable-pip-version-check --require-hashes -r hub_api/requirements.txt
-          pip install --disable-pip-version-check "alembic==1.20.0"
+          pip install --disable-pip-version-check \
+            "alembic==1.20.0" \
+            "flask-sqlalchemy==3.1.1" \
+            "flask-security-too==5.8.2" \
+            "PyYAML>=6.0.2,<7.0.0"
 
       # This repo's real-Postgres alembic history starts at migration 0020 --
       # everything before it is a 96-file legacy SQL baseline replay
@@ -175,13 +199,25 @@ jobs:
           );
           SQL
 
+      # `rev` is parsed out of PR-branch file content (a fork PR's own
+      # migration file text) -- never spliced back into `${{ }}` template
+      # expansion in a later step. Passed through GITHUB_OUTPUT only after
+      # it passes the same [0-9a-z_]+ shape every real revision ID in this
+      # repo has, so a crafted `revision = "..."` string with shell
+      # metacharacters can never reach a later `run:` block as literal
+      # script text.
       - name: Compute prior base revision
         if: steps.changes.outputs.alembic == 'true'
         id: base-rev
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          rev=$(python3 scripts/ci/alembic_prior_base_revision.py \
-            --base-sha "${{ github.event.pull_request.base.sha }}")
+          rev=$(python3 scripts/ci/alembic_prior_base_revision.py --base-sha "${PR_BASE_SHA}")
+          if ! printf '%s' "${rev}" | grep -qE '^[0-9a-z_]+$'; then
+            echo "::error::computed prior_base_revision '${rev}' doesn't match the expected [0-9a-z_]+ shape -- refusing to use it."
+            exit 1
+          fi
           echo "prior_base_revision=${rev}" >> "$GITHUB_OUTPUT"
 
       # Counts from `alembic history -r <base>:head` line count, not from
@@ -196,9 +232,18 @@ jobs:
         if: steps.changes.outputs.alembic == 'true'
         env:
           DATABASE_URL: postgresql://waddlebot:testpass123@localhost:5432/waddlebot
+          PRIOR_BASE_REVISION: ${{ steps.base-rev.outputs.prior_base_revision }}
         run: |
           set -euo pipefail
-          base_rev="${{ steps.base-rev.outputs.prior_base_revision }}"
+          base_rev="${PRIOR_BASE_REVISION}"
+          # Redundant with the producing step's own check -- cheap, and this
+          # step is the one that actually splices base_rev into an `alembic`
+          # argv, so it validates independently rather than trusting the
+          # upstream step forever.
+          if ! printf '%s' "${base_rev}" | grep -qE '^[0-9a-z_]+$'; then
+            echo "::error::prior_base_revision '${base_rev}' doesn't match the expected [0-9a-z_]+ shape -- refusing to use it."
+            exit 1
+          fi
 
           history_lines=$(python3 -m alembic history -r "${base_rev}:head" | grep -c .)
           # `history -r X:head` always includes the edge *into* X as its last
