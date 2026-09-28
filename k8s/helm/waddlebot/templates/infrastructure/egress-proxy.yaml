@@ -1,0 +1,133 @@
+# Bundle egress gateway — feature/bundle-egress-gateway.
+#
+# Design choice (see PR description for the full write-up): a dedicated,
+# rootless egress-proxy Deployment (Option A), not a bare Cilium egress
+# gateway / FQDN policy (Option B). The in-process guard
+# (core/bundle_host_http, feature/svc-process-http-capability) forwards
+# validated net.http requests here with a signed per-tenant/app allowlist
+# header (net.http.fqdn / .public-ip / .private-ip grants); the proxy
+# verifies that signature and re-checks the destination against it before
+# dialing upstream. Cilium FQDN/egress-gateway policies alone can't express
+# "this specific tenant/app may reach this specific destination" — they're
+# cluster-wide L3/L4/DNS policy, not per-request L7 identity — so they stay
+# as defense-in-depth (templates/network-policies-egress.yaml) rather than
+# the primary enforcement point.
+#
+# SKELETON: crates/egress-proxy (Rust — in-line of traffic, mandatory per
+# critical-rules.md Data Plane) has no Dockerfile/CI image yet. Pinned to
+# the repo's existing debian:bookworm-slim digest (pipeline.goRuntimeImage)
+# as a placeholder; replace once the crate has its own CI-built image.
+{{- if and (ne .Values.egressProxy.environment "alpha") (ne .Values.egressProxy.environment "local") (not .Values.egressProxy.enabled) }}
+{{- fail "egressProxy.enabled must be true in beta/gamma/production — bundle net.http and connector-platform traffic has no host-level enforcement without it (see feature/bundle-egress-gateway)." }}
+{{- end }}
+{{- if .Values.egressProxy.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-egress-proxy
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: egress-proxy
+spec:
+  replicas: {{ .Values.egressProxy.replicas }}
+  selector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: egress-proxy
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: egress-proxy
+    spec:
+      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: egress-proxy
+        image: "{{ .Values.egressProxy.image }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+        ports:
+        - name: proxy
+          containerPort: {{ .Values.egressProxy.port }}
+          protocol: TCP
+        - name: metrics
+          containerPort: {{ .Values.egressProxy.metricsPort }}
+          protocol: TCP
+        env:
+        - name: PROXY_LISTEN_PORT
+          value: {{ .Values.egressProxy.port | quote }}
+        - name: ALLOWED_PORTS
+          value: {{ .Values.egressProxy.allowedPorts | join "," | quote }}
+        - name: ALLOWLIST_SIGNING_KEY_PATH
+          value: "/etc/egress-proxy/signing/{{ .Values.egressProxy.allowlistSigning.secretKey }}"
+        - name: DENY_CIDRS
+          value: {{ .Values.egressPolicy.denyCidrs | join "," | quote }}
+        - name: DENY_CLUSTER_CIDRS
+          value: >-
+            {{ printf "%s,%s,%s"
+                 .Values.egressPolicy.clusterCidrs.podCidr
+                 .Values.egressPolicy.clusterCidrs.serviceCidr
+                 .Values.egressPolicy.clusterCidrs.nodeCidr | quote }}
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: metrics
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: metrics
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        resources:
+          {{- toYaml .Values.egressProxy.resources | nindent 10 }}
+        volumeMounts:
+        - name: signing-key
+          mountPath: /etc/egress-proxy/signing
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: signing-key
+        # Pre-created out-of-band (kubectl create secret / Vault / External
+        # Secrets Operator) — the proxy's signing public key is not app
+        # config and is never generated or defaulted by this chart.
+        secret:
+          secretName: {{ .Values.egressProxy.allowlistSigning.secretName }}
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-egress-proxy
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: egress-proxy
+spec:
+  type: ClusterIP
+  ports:
+  - port: {{ .Values.egressProxy.port }}
+    targetPort: proxy
+    protocol: TCP
+    name: proxy
+  - port: {{ .Values.egressProxy.metricsPort }}
+    targetPort: metrics
+    protocol: TCP
+    name: metrics
+  selector:
+    {{- include "waddlebot.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: egress-proxy
+{{- end }}

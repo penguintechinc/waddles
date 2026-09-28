@@ -489,6 +489,23 @@ monitoring:
 networkPolicy:
   enabled: false
 
+# Egress lockdown — on by default even locally so the CNP + proxy path is
+# exercised before beta; disable with --set egressProxy.enabled=false only
+# for a throwaway smoke test, never commit that override.
+egressProxy:
+  enabled: true
+  environment: "local"
+  replicas: 1
+  resources:
+    requests: { cpu: "50m", memory: "64Mi" }
+    limits: { cpu: "150m", memory: "128Mi" }
+egressPolicy:
+  enabled: true
+  clusterCidrs:
+    podCidr: "10.1.0.0/16"      # MicroK8s default — confirm against cluster before deploy
+    serviceCidr: "10.152.183.0/24"
+    nodeCidr: "10.0.0.0/8"
+
 # Pod Security Context - Relaxed for local
 podSecurityContext:
   runAsNonRoot: false

@@ -762,6 +762,22 @@ httproute:
 networkPolicy:
   enabled: true
 
+# Egress lockdown — MANDATORY from beta on (the fail guard in
+# infrastructure/egress-proxy.yaml blocks a render with this off).
+egressProxy:
+  enabled: true
+  environment: "beta"
+  replicas: 1
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits: { cpu: "250m", memory: "256Mi" }
+egressPolicy:
+  enabled: true
+  clusterCidrs:
+    podCidr: "10.244.0.0/16"      # dal2 — confirm against cluster CNI config before deploy
+    serviceCidr: "10.96.0.0/12"
+    nodeCidr: "10.0.0.0/8"
+
 presentation:
   image:
     repository: "waddlebot-svc-presentation"
