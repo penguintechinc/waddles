@@ -15,6 +15,26 @@
 - **Justin's decision on PII (supersedes this design's original §3.3 draft and, for connector bundles specifically, PR #419 §10's "bundles never see PII" framing):** *"For platform integration services they should have access [to] pii data from read only replicas."* Connector bundles are the privileged class (§3.2's Option A) **and** may read PII directly from a read-only Postgres replica for identity lookups — platform-handle/display-name ↔ `hub_users.uuid` — for both inbound tokenization and rendering outbound mentions. Ordinary `stage`/`stage-v1_1` app bundles are entirely unaffected: zero PII, unchanged.
 - `core/svc_ingest/src/ingest/{discord,twitch,twitch_eventsub}.rs`, `core/svc_ingest/src/normalize.rs`, `core/svc_ingest/src/outbound.rs`, `core/svc_action/src/capabilities.rs` — the current native implementation this design migrates. Confirmed by reading the code: Discord gateway is a single unsharded connection with **no true `OP_RESUME`** yet (every reconnect is a fresh `IDENTIFY`, disciplined only by `Backoff`/`STABILITY_WINDOW`); Twitch IRC is one connection per channel (not yet pooled to Twitch's 100-channel cap); `svc_action::capabilities.rs` has exactly two compiled-in relay providers (`twitch` via Valkey `LPUSH` queue, `discord` via direct REST send) — Slack/YouTube/Kick are unwired (`// TODO(M5)`/`PendingSeam`).
 - **Internal service calls are gRPC, not REST (Justin's constraint).** Every host→hub-api call this design introduces — credential broker resolve, DEK fetch, identity tokenization — goes through hub-api's internal gRPC service, `waddles.hub.internal.v1`, being built on `feature/hub-api-internal-grpc`. The proto already exists at `libs/grpc_protos/hub_internal.proto` (`HubInternalService`, today only `RecordActivity`/`RecordMessage`) and gains the RPCs this design needs (§2.4). This corrects connections-credentials' `POST /internal/v1/credentials/resolve-batch` and PR #443's `POST /api/v1/internal/keys/tenant-dek` to gRPC for every call this design's host transport layer makes — those two specs' REST sketches predate this constraint.
+- PR #431 (`feature/bundle-artifact-signing`, open) — implements PR #419 §5.6's Ed25519 artifact signing (hub-api signs the approved component digest; the executor verifies before instantiating, fail closed). §3.2.1 makes this the first of two independent gates keeping a vendor component out of the `connector` world.
+- PR #421 (`docs/bundle-telemetry-capability`, open) — the host log/metric scrubbing pipeline every bundle's `log`/telemetry calls already route through. §3.5 states this applies identically to connector-world guest calls.
+
+---
+
+## 0. Gemini review resolution (PASS-WITH-CONDITIONS)
+
+Gemini reviewed PR #444 and returned PASS-WITH-CONDITIONS. Every condition below is folded into this spec as a **normative requirement**, not a suggestion — none are optional follow-ups.
+
+| # | Condition | Resolved in |
+|---|---|---|
+| 1 | A per-component `Linker` registers only the functions granted by the signed and verified manifest (PR #431 artifact signing, wit-v1.1 §5 Linker isolation); a vendor component can **never** link the `connector` world or `identity.lookup`. | §3.2.1 (new) |
+| 2 | Connector `net.http` egress is a strict host allowlist per connector, declared per platform API host — default deny, no wildcards. | §3.1 (`net.http` row, expanded) |
+| 3 | A distributed Discord IDENTIFY budget: a Valkey-backed queue/token bucket per bot token enforcing `max_concurrency` and 5s pacing across **every** svc-ingest pod, plus RESUME-first. | §2.5 (new) |
+| 4 | Execution bounds: the existing epoch deadline (PR #406) **plus fuel** per `on-frame` invocation; heartbeats scheduled on a separate host task, never blocked by guest execution. | §3.5 (expanded) |
+| 5 | Trap isolation: a guest trap or timeout disables only that `source_id`/connection (circuit-break, backoff, alert) — the host process never crashes; instance-per-connection vs. pooled isolation choice stated. | §2.6 (new) |
+| 6 | Guest `log`/metric emission goes through the host scrubbing pipeline (`docs/bundle-telemetry-capability`, PR #421). | §3.5 (new row), §1 (import note) |
+| 7 | Webhook signatures are verified on the **raw bytes** at host ingress, before any parse or guest invocation, with explicit replay windows. | §2 (Webhook row, expanded) |
+| 8 | Credentials: the guest gets **opaque secret handles only**; the host substitutes the real tokens in the outbound layer, at send time — tokens never enter WASM memory. | §2.1 (rewritten) |
+| 9 | Shadow-mode sender bundles route to a **mock sink** (no real platform mutations); diffs compare against the legacy sender's output. | §5.2 (expanded) |
 
 ---
 
@@ -63,10 +83,12 @@ interface types {
     occurred-at: string,
   }
 
-  /// Returned by on-connect. `secret-refs` names header/field slots the
-  /// HOST fills with the real credential immediately before the socket
-  /// write -- the exact `http::request.secret-refs` pattern from
-  /// stage.wit:89, extended to raw transport frames.
+  /// Returned by on-connect. `secret-refs` pairs a byte-range/field slot
+  /// with an OPAQUE handle the guest cannot decode -- never the credential
+  /// itself. The host's outbound transport substitutes the real value at
+  /// send time, after the guest has returned (S2.1) -- the exact
+  /// `http::request.secret-refs` pattern from stage.wit:89, extended to
+  /// raw transport frames and hardened per Gemini condition 8.
   record handshake-payload {
     bytes: list<u8>,
     secret-refs: list<tuple<string, string>>,
@@ -150,10 +172,12 @@ interface sender {
                                  // via identity.lookup -- see S3.3
   }
 
-  /// The templated request the HOST will send. `secret-refs` (credential
-  /// injection) still resolves host-side, immediately before transmission
-  /// -- but placeholder/mention RENDERING now happens inside build-request
-  /// itself, via identity.lookup (S3.3, Justin's PII decision): the
+  /// The templated request the HOST will send. `secret-refs` carries an
+  /// OPAQUE handle per slot (S2.1) -- the host's outbound layer substitutes
+  /// the real credential at send time, after this call returns; the guest
+  /// never sees a resolved value. Placeholder/mention RENDERING, by
+  /// contrast, happens inside build-request itself, via identity.lookup
+  /// (S3.3, Justin's PII decision): the
   /// connector is the privileged, sink-adjacent component, so it may
   /// render `{user:<uuid>}` into a real handle/display name before
   /// returning this record. The host still owns the actual socket write
@@ -180,7 +204,10 @@ world connector {
                     // sender's fallback path (S3.4) and any receiver-side
                     // REST call (e.g. Twitch subscription bookkeeping
                     // stays host-side, not bundle-side -- see S2).
-  import log;
+  import log;      // reused from waddle:bundle@1.0.0 -- scrubbed by the
+                    // same host pipeline as every other bundle's log
+                    // calls (S3.5, Gemini condition 6), regardless of a
+                    // connector's elevated identity.lookup trust tier.
   import clock;
   import %flags;
 
@@ -201,15 +228,17 @@ One `Transport` trait per family; the connector bundle only ever sees `receiver`
 |---|---|---|---|
 | **WebSocket** | Discord Gateway | Connect/reconnect (`Backoff`/`STABILITY_WINDOW`, unchanged), **session storage** (`session_id`+`seq` in Valkey, keyed by `source_id`) for a **real `OP_RESUME`** on reconnect, shard supervision (watermark-poll hot add/remove per scale-design §3.1/3.3), the IDENTIFY rate budget (`max_concurrency`/5s, 120/60s/conn, 1000/24h global) | Today's `discord.rs` has **no `OP_RESUME`** — every reconnect is a fresh `IDENTIFY`. This design adds it because the host transport layer is being rebuilt anyway; not doing so would ship the same gap a second time. |
 | **IRC** | Twitch chat | Connect/reconnect, **channel pooling to Twitch's 100-channel/connection cap** (today: one connection per channel), JOIN/PART batching, 20 joins/10s pacing | Pooling is new — today's `twitch.rs` is 1:1 connection:channel, fine at current scale, not at the 10k-channel target (connections-credentials §3.2). |
-| **Webhook** | Twitch EventSub, Slack Events API, generic `/hooks/v1/{id}` | Signature verification **before** the bundle ever sees the body — HMAC-SHA256 (EventSub, Slack's signing secret) or ES256/Ed25519 (`/hooks/v1`, connections-credentials §4.2) — replay window, dedup, 2xx/202 response. A bundle's `on-frame` receives only a body that already passed verification; it never holds or checks a signature. | None — today's EventSub receiver already verifies host-side; this design keeps that property and extends it to Slack/`/hooks/v1`. |
+| **Webhook** | Twitch EventSub, Slack Events API, generic `/hooks/v1/{id}` | **Signature verification on the raw request bytes, at the HTTP handler, before any JSON parse and before any connector bundle is even resolved or invoked** (Gemini condition 7) — HMAC-SHA256 over the exact raw body (EventSub: `message_id+timestamp+body`; Slack: `v0:{timestamp}:{raw_body}` against its signing secret) or ES256/Ed25519 over the raw bytes (`/hooks/v1`, connections-credentials §4.2). Explicit replay windows, checked host-side before verification even completes: **EventSub 10 minutes** (`Twitch-Eventsub-Message-Timestamp`), **Slack 5 minutes** (`X-Slack-Request-Timestamp`), **`/hooks/v1` ±5 minutes** (connections-credentials §4.2) — all per-platform values already established by connections-credentials, restated here as the same bound this design's webhook `Transport` impls enforce. Dedup on the delivery id (Valkey `SET NX`), then 2xx/202. A connector's `on-frame` receives only a body that already passed signature+replay+dedup verification; it never holds, parses, or checks a signature itself — there is no signature-shaped field anywhere in the `connector` world's WIT (§1). | None — today's EventSub receiver already verifies host-side; this design keeps that property, makes the raw-bytes-before-parse ordering explicit, and extends it to Slack/`/hooks/v1`. |
 | **Polling** | YouTube (Live Chat) | Poll schedule, quota-aware backoff, dedup on the platform's own page/continuation token — each poll response is handed to `on-frame` as one `raw-frame`, unifying polling with push transports at the bundle boundary | New transport family for this codebase. |
 | **Pusher** | Kick | Pusher app-key handshake, channel subscribe/heartbeat framing — structurally a WebSocket variant (persistent socket, ping/pong), implemented as its own `Transport` impl reusing the WebSocket family's reconnect/backoff primitives | New transport family; reuses WS reconnect discipline rather than duplicating it. |
 
 **Leasing, reconnects, and backoff are host-side, full stop.** A connector bundle never sees a lease, a partition, or a reconnect attempt — `on-connect`/`on-disconnect`/`on-heartbeat-due` are called by host code that already decided a connection is live; `Backoff`/`STABILITY_WINDOW` (`core/svc_ingest/src/ingest/mod.rs`, unchanged) still govern the host's own retry loop.
 
-### 2.1 Credential injection
+### 2.1 Credential injection — opaque handles only, substituted at send time (Gemini condition 8)
 
-Bundles never see tokens. `on-connect`'s returned `handshake-payload.secret-refs` names which byte ranges (or, for webhook/HTTP shapes, which header) the host fills from the credential broker's resolved value immediately before the frame leaves the host — the same `secret-refs` pattern `http::request` already uses in `stage.wit`, extended to raw socket writes. The connector bundle constructs the *shape* of an IDENTIFY/AUTH frame; it never constructs, stores, or logs the credential *value*.
+**The guest gets an opaque secret handle, never a token — and never even a resolved value at `build-request`/`on-connect` return time.** `secret-refs: list<tuple<string, string>>` (both `handshake-payload` and `http-request-tpl`, §1) is a list of `(slot-name, handle)` pairs: `slot-name` says where the value goes (a byte range in the handshake payload, or an HTTP header name); `handle` is an **opaque string the connector bundle cannot decode, decrypt, or otherwise use for anything but passing back to the host unchanged** — it is not the credential, not a derivation of the credential, and not resolvable by the guest through any capability this world exposes. The bundle's `on-connect`/`build-request` return value is fully constructed — headers, body, byte layout — *with the handle still in place*; **the host's outbound transport layer performs the substitution as the literal last step before the bytes leave the process, at send time** — resolving the handle against the credential broker (§2.4) and writing the real value directly into the socket/HTTP write buffer. The resolved credential value **never enters WASM linear memory** at any point, in either direction: the guest never receives it to embed, and the host never round-trips a resolved value back into a guest call to confirm placement.
+
+This is a stricter reading than the original draft's "the host fills it in before the frame leaves the host" — the distinction Gemini's condition sharpens is *where in the host* the fill happens: not "somewhere in svc-ingest/svc-action before transmission" but specifically **in the outbound transport layer's send path**, after the guest has already returned control, so there is no call ordering in which a resolved secret could be observed from inside a `Store` even transiently (e.g. via a host function that both resolves and returns the value for the guest to place itself — that pattern is explicitly not used here).
 
 ### 2.2 `source_id` is the only identity a connector ever sees for routing
 
@@ -232,6 +261,26 @@ Every host call from `svc-ingest`/`svc-action` into hub-api for **credential/sec
 
 Per `backend.md`, every RPC still carries `api_version`/routes on proto package version; mTLS/SPIFFE or a short-lived machine JWT per `security.md` Service-to-Service Auth, unchanged from the rest of the platform's service-to-service posture.
 
+### 2.5 Distributed Discord IDENTIFY budget (Gemini condition 3)
+
+**The IDENTIFY budget is a per-bot-token, platform-wide limit — it must be enforced across every svc-ingest pod, not per-pod-local.** Discord's `max_concurrency` IDENTIFYs/5s bucket, the 120/60s-per-connection cap, and the 1000/24h global ceiling (dataplane-scale §3.1) are properties of the *bot token*, not of any one process — shard ownership (§2's WebSocket row) already moves between pods on reassignment, so a per-pod-local counter would double-count or under-count the instant a shard migrates.
+
+| Mechanism | Design |
+|---|---|
+| Budget store | Valkey, keyed `waddles:discord:identify-budget:{bot_token_id}:{window}` — a fixed 5s window counter (`max_concurrency` ceiling) and a rolling 60s/24h counter, both checked in one Lua script (`EVAL identify_budget_acquire`) so check-and-increment is atomic across every pod racing to IDENTIFY at once |
+| Acquire | Before sending an `IDENTIFY`, a pod calls the Lua script; a grant increments the counter and returns immediately, a miss returns the window's remaining wait time — the pod **queues** (bounded, jittered wait) rather than IDENTIFYing anyway or failing the connection |
+| **RESUME-first (mandatory ordering)** | On any reconnect where §2's session storage holds a valid `session_id`+`seq` for the shard, the pod **always attempts `OP_RESUME` before consulting the IDENTIFY budget at all** — Discord's own semantics exempt RESUME from the IDENTIFY rate limits, so a healthy resume path never touches this budget. The budget gate applies only when RESUME is unavailable (no stored session) or fails (Discord returns `Invalid Session`, opcode 9) and a fresh `IDENTIFY` becomes unavoidable. |
+| 24h/1000 global ceiling | Same Lua script's rolling-24h counter; approaching it (e.g. 80%) pages, per this platform's standard alert-before-breach posture (mirrors the Twitch cost-budget alert, connections-credentials §3.2) — breaching it resets the bot token session-wide per Discord's own enforcement, so this is treated as a hard stop, not a soft warning, once headroom is gone |
+| Pacing | `rate_limit_key = shard_id % max_concurrency` (dataplane-scale §3.1) still determines *which* 5s slot a shard's IDENTIFY belongs to; the Valkey script enforces *how many* pods may actually fire within that slot, fleet-wide |
+
+### 2.6 Trap isolation & fault containment (Gemini condition 5)
+
+**A guest trap or invoke-timeout never crashes the host process, and its blast radius is exactly one connection.**
+
+- **Containment.** `on-frame`/`on-connect`/`on-heartbeat-due`/`on-disconnect` calls execute inside a `catch_unwind`-equivalent boundary at the executor's wasmtime call site (the same boundary every other bundle invocation already uses); a trap (illegal instruction, unreachable, guest panic) or an epoch/fuel-deadline abort (§3.5) is caught there and converted into a `frame-error::backend` result **scoped to that one connection's `source_id`** — never propagated up as a host-thread panic.
+- **Response.** The host transport layer treats a trapped/timed-out call exactly like a transport-level failure: the connection is torn down, `Backoff`/`STABILITY_WINDOW` (§2, unchanged) governs the reconnect, a `WARN` is logged and `waddles_connector_trap_total{platform,source_id,kind}` is counted — this is the "circuit-break, backoff, alert" sequence, applied automatically, no manual intervention required for a single trapping connection.
+- **Instance-per-connection vs. pooled — pooled, with per-call Store isolation.** §2.3's fixed `Store` pool (sized to the executor's worker-thread count, shared compiled `Component`) is the chosen shape, **not** one persistent `Store` held per connection indefinitely — at 10k channels, one `Store` per connection would vastly over-provision idle memory relative to actual concurrent `on-frame` call volume. Isolation is achieved at a finer grain than "one connection, one `Store`": **a `Store` is checked out of the pool for the duration of exactly one call and never shared across two concurrent calls** — wasmtime's per-`Store` linear memory means a trap unwinding inside one checked-out `Store` cannot corrupt another `Store` in the same pool serving a different connection's call concurrently. **A `Store` involved in a trap or timeout is destroyed, never returned to the pool** — the pool replaces it with a freshly instantiated one, so no residual guest-corrupted state can leak into a later, unrelated call. This gives instance-per-connection's isolation guarantee without its memory cost.
+
 ---
 
 ## 3. Security
@@ -243,7 +292,7 @@ Per `backend.md`, every RPC still carries `api_version`/routes on proto package 
 | `connector.receive:<platform>` | **dangerous** | One id per platform (`connector.receive:discord`, `:twitch`, `:kick`, `:slack`, `:youtube`). Touches every tenant's traffic on the platform — the single most powerful grant in the catalog. |
 | `connector.send:<platform>` | **dangerous** | Same shape, outbound side. Subsumes `chat.send:<platform>`'s existing relay grant for platforms that migrate to a connector sender bundle (§5) — `chat.send:<platform>` is retired for a platform once its sender cuts over, not run in parallel. |
 | `connector.pii.read` | **dangerous** | Gates `identity.lookup` (§1, §3.3) — the one capability in the entire catalog that returns raw PII (handle, display name) to a guest. **Global-approved, first-party-core-only, no exceptions** — never offered to a vendor bundle, never restrictable/grantable at tenant or community tier (same carve-out as `connector.receive`/`connector.send`, below). |
-| `net.http` | dangerous (existing) | Unchanged — a connector's `http` import for any REST bookkeeping call (e.g. an EventSub subscription-management call the host makes, not the bundle) still goes through the existing egress allowlist. |
+| `net.http` | dangerous (existing) | **Gemini condition 2: a strict per-connector, per-host allowlist — default deny, no wildcards.** Reuses PR #419's `net.http:<host>` shape verbatim (one permission id per exact host, e.g. `net.http:discord.com`, `net.http:id.twitch.tv`) — a connector's manifest declares exactly the platform API hosts it calls (subscription management, token refresh bookkeeping), never a bare `net.http` grant covering arbitrary hosts, and never a subdomain/wildcard pattern (`*.twitch.tv` is rejected at manifest validation, same `_EGRESS_HOST_RE` host-literal check PR #419 already applies). |
 
 **No 3-tier consent flow for connector bundles.** PR #419's global→tenant→community consent ladder is for tenant-installed app bundles; a connector bundle is platform infrastructure, not something a tenant activates. Its permission grant is a **global-tier-only, platform-ops action** (enable this connector digest for a given platform/shard rollout) — `app_tenant_permission_restrictions`/`community_permission_grants` never apply to a `connector.*` permission id. This is a deliberate carve-out from §3 of PR #419, not an oversight: there is no tenant/community layer to ask, because the connector serves every tenant on that platform at once.
 
@@ -257,6 +306,17 @@ Justification:
 - **PII exposure (§3.3).** A connector bundle sees raw platform frames *and* has a standing, capability-gated ability to read PII from the RO replica (`identity.lookup`, §3.3) — Justin's decision. That is only acceptable because it is first-party, signed, core-namespaced code replacing already-trusted platform code; the argument does not extend to a third party.
 
 **Deferred, not rejected:** a future "verified connector vendor" tier is plausible post-v3.0 (narrower connector shapes that don't need raw-frame access, e.g. a webhook-only social connector using host-side pre-extraction instead of §3.3's model) — flagged as an open question (§7), not designed further here.
+
+### 3.2.1 Linker isolation & artifact signing — a vendor component can never link `connector` (Gemini condition 1)
+
+§3.2's "core-only" restriction is a policy statement; this is the mechanism that makes it structurally true, not just administratively true. **Two independent gates, both must pass, in order:**
+
+1. **Artifact signature verification (PR #431, implementing PR #419 §5.6) — before the Linker step runs at all.** hub-api signs the approved component digest (Ed25519, platform KMS key) only for a component whose manifest passed **global-tier, core-only approval** (§3.1's "no exceptions" carve-out for `connector.*` permissions) — a vendor-submitted component is never signed under a manifest declaring `wit-world: connector`, full stop, because the approval step that would produce that signature never accepts a non-`waddles.core.*` app_id against that world (§3.1, mirroring PR #419 §1.1's `CORE_NAMESPACE_PREFIX` enforcement for `storage.tables`' schema). The executor verifies this signature against the platform public key before instantiating **any** component, connector or `stage`; a missing/invalid signature fails closed here, before wasmtime's `Linker` is even constructed.
+2. **Per-component `Linker` construction (wit-v1.1 §5, applied to the `connector` world identically to how it already applies to `stage`/`stage-v1_1`) — registers only what's both declared and granted.** A fresh `Linker` is built per instantiation, registering host functions for exactly the world the signed manifest declares (`stage` | `stage-v1_1` | `connector`) **and** only the capabilities that world's manifest was granted (§3.1's permission catalog) — a `connector`-world component without `connector.pii.read` granted never gets `identity.lookup` linked at all; a `stage`/`stage-v1_1` component, core or vendor, never has the `connector` world's interfaces registered under any circumstance, because that Linker is built against a different world's import set entirely. An import a component requests that isn't in its reduced Linker fails at instantiation, before any guest code runs — identical failure shape to wit-v1.1 §5's existing merge gate.
+
+**Why both, not just one.** Signature verification alone would stop an *unsigned* vendor component but says nothing about a **compromised or buggy core-approval step** that somehow signed something it shouldn't have; Linker isolation alone would stop the *capability* leak but a signed-and-linked-as-`connector` vendor component would still start running before any capability call reveals the problem. Together: gate 1 ensures only core-approved digests are ever signed for the `connector` world; gate 2 ensures even a correctly-signed `connector` component only links what its specific granted permission set allows — the same defense-in-depth shape PR #419 §5.3 already uses for `stage`, extended one level up to gate *world eligibility*, not just *capability eligibility*.
+
+**Test requirement (merge gate, mirroring wit-v1.1 §7.5's Linker-isolation test):** (1) a component signed under a `stage`/`stage-v1_1` manifest, with its own component bytes modified post-signing to request a `connector`-world import, fails signature verification (gate 1) — the digest no longer matches. (2) A legitimately core-signed `connector` component whose manifest lacks `connector.pii.read` is instantiated and asserted to have no `identity.lookup` entry in its `Linker` at all (gate 2) — not merely a call that returns `denied`.
 
 ### 3.3 PII in raw frames — Justin's decision: connector bundles read PII from the RO replica
 
@@ -301,10 +361,12 @@ Both go through one gated host capability, `identity.lookup` (§1) — never ad 
 | Limit | Value | Mechanism |
 |---|---|---|
 | Frame size | Platform-specific ceiling (e.g. Discord gateway ~4KB typical, EventSub/webhook bodies capped per connections-credentials §4.2's 256KB) | Host rejects oversize frames before invoking `on-frame` — never a guest-side check |
-| `on-frame` invoke deadline | Reuses the existing per-invoke epoch deadline (PR #406, `new_bounded_store`) | Unchanged mechanism, connector world included |
+| `on-frame` invoke deadline | Reuses the existing per-invoke epoch deadline (PR #406, `new_bounded_store`) | Wall-clock bound, connector world included — unchanged mechanism |
+| **`on-frame` fuel** (Gemini condition 4) | `EXECUTOR_CONNECTOR_FUEL_LIMIT` (default: tuned per-platform against typical frame-parse cost, e.g. a low-thousands wasmtime fuel-unit budget) | **Instruction-count bound, independent of and in addition to the epoch deadline** — the epoch deadline interrupts at loop-back-edge/call boundaries on a wall-clock schedule; fuel bounds total guest instructions executed regardless of host scheduling jitter or clock granularity. Whichever limit trips first aborts the call into a trap, handled per §2.6 (that connection's circuit-break, not a host crash) |
 | Events per frame | `MAX_EVENTS_PER_FRAME` (default 64) | Host truncates `on-frame`'s returned list past the cap, logs `WARN`, counts a metric — bounds a pathological poll/batch response from fanning out unbounded downstream work |
 | `identity.lookup` rate | Per-connector-digest token bucket, §3.4 | Independent of the frame-invoke budget — a lookup burst never blocks frame processing, and vice versa |
-| Heartbeat isolation | `on-heartbeat-due` runs on the connection's own liveness timer, on a **separate executor slot** from the connection's `on-frame` dispatch queue | A slow/hanging `on-frame` invocation must never delay a HEARTBEAT/PING the transport needs to keep the socket alive — see §4's latency budget |
+| **Heartbeat isolation** (Gemini condition 4) | `on-heartbeat-due` runs on **its own dedicated host task/timer per connection** — a distinct scheduling entity from the executor worker pool that services the `on-frame` dispatch queue (§2.6), not merely a different queue priority within the same pool | A slow/hanging/trapped `on-frame` invocation must never delay a HEARTBEAT/PING the transport needs to keep the socket alive; the default heartbeat (platform-standard body, no guest call needed) can be sent by the host's timer task with zero guest involvement, and only a bundle-supplied non-default body (`on-heartbeat-due` returning `some`) adds a bounded, short-deadline guest call on that same dedicated task — see §4's latency budget |
+| **Guest `log`/telemetry emission** (Gemini condition 6) | Routed through the host's existing scrubbing pipeline (`docs/bundle-telemetry-capability`, PR #421) before reaching the OTel sink — identical to every other bundle's `log` import (stage.wit, unchanged) | Applies to a connector's `log` calls exactly as it does to any `stage` bundle's, **regardless of the connector's elevated PII-read trust tier** — a connector may hold PII internally via `identity.lookup` (§3.3), but its own log lines are still auto-sanitized against the platform's `SENSITIVE_KEYS`/PII patterns before emission, the same defense-in-depth posture as `critical-rules.md` Observability's "sanitization applies at every level." A connector must never rely on its own discipline to avoid logging a raw handle/display-name it just looked up — the scrubbing pipeline is the actual backstop |
 
 ### 3.6 Interaction with PR #429 and PR #443 — what remains needed
 
@@ -357,9 +419,13 @@ Both go through one gated host capability, `identity.lookup` (§1) — never ad 
 
 Every connector's WASM `on-frame` output is verified against the native/Python implementation it replaces **before** any live traffic depends on it:
 
+**Receivers:**
 - **Golden-vector fixture per platform** — a fixed corpus of real captured raw frames (same pattern as PR #443's cross-language golden vector), run through both the old normalizer and the new connector bundle; assert semantically-equivalent `normalized-event` output (byte-identical is not the bar, since `actor` is now tokenized one hop earlier — assert the *resolved identity* matches, not the raw string).
 - **Shadow mode, not a big-bang cutover.** The WASM connector runs alongside the existing native/Python receiver on live traffic, its output discarded, logged/counted at `WARN` on any divergence — the same shadow-then-enforce discipline as relay-authz (connections-credentials §6.2) and wit-v1.1's moderation rollout, 2–4 week soak window.
-- **Cutover is a kill-switch, not a rewrite.** `waddles.core.disable-<platform>-connector-bundle` (opt-out, ON by default once shadow parity holds) — flipping it reverts instantly to the native/Python path without a deploy. The flag and its native-path branch are deleted once every platform has soaked clean and the native code is decommissioned (§6, final phase) — never left as a permanent lever, per `critical-rules.md`'s no-kill-switch-in-steady-state rule for security-relevant paths; this one is availability/parity-relevant, not security-relevant, so a temporary opt-out during migration is appropriate, but it is removed at decommission, not kept indefinitely.
+
+**Senders — shadow mode routes to a mock sink, never the real platform (Gemini condition 9).** A receiver's shadow mode is safe to run against live traffic because it only reads; a sender's shadow mode is not — `build-request`'s output for a `moderation.ban`/`chat.send` action, if actually transmitted twice (once by the legacy sender, once by the shadow connector), would double-post a chat message or double-execute a ban. So a shadow-mode sender connector's `http-request-tpl` is routed to an **in-process mock sink** — a fake transport that records the request (method, URL, rendered body, which `secret-refs` handles it referenced) and returns a synthetic success **without ever opening a socket or calling the real platform API**. The mock-sink recording is then diffed against the legacy sender's (`handle_relay`/`handle_discord_relay`) actual request for the same input `action`, on the same soak/shadow-then-enforce cadence as receivers. **No real platform mutation ever originates from a shadow-mode sender, by construction — this is mandatory, not "log and continue like a receiver," precisely because sender actions have side effects a receiver's shadow mode does not.**
+
+- **Cutover is a kill-switch, not a rewrite.** `waddles.core.disable-<platform>-connector-bundle` (opt-out, ON by default once shadow parity holds) — flipping it reverts instantly to the native/Python path without a deploy. The flag and its native-path branch are deleted once every platform has soaked clean and the native code is decommissioned (§6, final phase) — never left as a permanent lever, per `critical-rules.md`'s no-kill-switch-in-steady-state rule for security-relevant paths; this one is availability/parity-relevant, not security-relevant, so a temporary opt-out during migration is appropriate, but it is removed at decommission, not kept indefinitely. A sender's cutover additionally requires its shadow-mode mock-sink diff to show clean parity — the kill-switch flip is what changes its `http-request-tpl` output's destination from the mock sink to the real outbound transport.
 
 ---
 
@@ -375,6 +441,11 @@ Every connector's WASM `on-frame` output is verified against the native/Python i
 | 1 | Always-pinned connector instance pool in the bundle executor (§2.3): `pinned: always` manifest flag, fixed `Store` pool sized to worker-thread count | Rust (`bundle_executor`) | Phase 0 |
 | 1 | `identity.lookup` host import: connects as `waddles_connector_pii_reader` against the RO replica, per-replica `{identity-key -> identity-record}` cache (TTL 5 min), rate limiter (`UsageBatcher`), audit-log writer (§3.3/§3.4) | Rust (svc_ingest) | Phase 0's role-migration task |
 | 1 | `identity-erased:{uuid}`/`identity-renamed:{uuid}` pub/sub invalidation: hub-api publishes on erasure/rename, the `identity.lookup` cache subscribes and evicts immediately (§3.4) | hub-api + Rust (svc_ingest) | previous task |
+| 1 | Per-component `Linker` for the `connector` world: registers `identity`/`http`/`log`/`clock`/`%flags` only per the signed manifest's granted permissions (§3.2.1) | Rust (`bundle_executor`) | Phase 0's permission-catalog task |
+| 1 | Executor: wire PR #431's signature verification ahead of the connector `Linker` step; reject any component whose manifest claims `wit-world: connector` but isn't core-signed (§3.2.1 gate 1) | Rust (`bundle_executor`) | PR #431 merged |
+| 1 | Linker-isolation test suite (§3.2.1's merge gate): a tampered/vendor-signed component claiming `connector` fails signature verification; a core-signed `connector` component without `connector.pii.read` has no `identity.lookup` linked | Rust tests | previous two tasks |
+| 1 | `on-frame` fuel metering (§3.5): `EXECUTOR_CONNECTOR_FUEL_LIMIT`, alongside the existing epoch deadline | Rust (`bundle_executor`) | Phase 0 |
+| 1 | Trap-isolation handling in the connector call site (§2.6): catch guest traps/epoch/fuel aborts, scope the failure to one `source_id`, destroy (never recycle) the involved `Store`, emit `waddles_connector_trap_total` | Rust (`bundle_executor`, svc_ingest) | previous task |
 | 2 | Echo connector bundle (`waddles.core.example.echo`-style): `on-connect`/`on-frame`/`on-disconnect` over a synthetic in-memory transport; end-to-end pipeline smoke test | Rust bundle | Phase 1 |
 | 2 | Shadow-mode harness: run a connector bundle alongside a native receiver on the same frames, diff `normalized-event` output, count divergences | Rust (svc_ingest test harness) | Phase 2 (Echo) |
 | 3 | Twitch EventSub connector bundle: `on-frame` ports `eventsub.py`'s normalization logic (signature verification stays host-side, §2, before the bundle sees anything) | Rust bundle | Phase 1 |
@@ -384,12 +455,14 @@ Every connector's WASM `on-frame` output is verified against the native/Python i
 | 4 | Twitch IRC connector bundle: `on-frame` ports `normalize_twitch_irc` | Rust bundle | Phase 1 |
 | 4 | Golden-vector parity test, Twitch IRC, shadow mode | Rust tests | previous two tasks |
 | 5 | Discord session storage (Valkey `session_id`+`seq` keyed by `source_id`) + real `OP_RESUME` on reconnect | Rust (svc_ingest) | Phase 1 |
+| 5 | Distributed IDENTIFY budget (§2.5): Valkey Lua `identify_budget_acquire` script, RESUME-first ordering, 24h-ceiling alert | Rust (svc_ingest) | previous task |
 | 5 | Discord shard supervisor (watermark-poll hot add/remove, scale-design §3.1/3.3) | Rust (svc_ingest) | previous task |
 | 5 | Discord Gateway connector bundle: `on-connect` builds IDENTIFY/RESUME, `on-frame` ports `normalize_discord` | Rust bundle | Phase 5's session-storage task |
 | 5 | Golden-vector parity test, Discord, shadow mode | Rust tests | previous task |
 | 6 | `sender` world wiring in `svc_action`: `build-request` dispatch replacing `handle_relay`'s Twitch path | Rust (svc_action) | Phase 1, Phase 4 |
 | 6 | `sender` world wiring in `svc_action`: `build-request` dispatch replacing `handle_discord_relay` | Rust (svc_action) | Phase 1, Phase 5 |
 | 6 | Output-detokenization inside `sender.build-request` via `identity.lookup` (placeholder render immediately before the request template is returned, §3.3) — no host-side rendering path needed | Rust bundle | previous two tasks |
+| 6 | Sender shadow-mode mock sink (§5.2, Gemini condition 9): in-process fake transport records `build-request` output with no real platform call; diff harness against the legacy sender's request for the same action | Rust (svc_action test harness) | previous task |
 | 6 | Slack sender connector bundle + `build-request` wiring | Rust bundle + svc_action | Phase 7 (Slack receiver) |
 | 7 | Slack webhook `Transport` impl (Events API signing-secret verification, host-side) | Rust (svc_ingest) | Phase 1 |
 | 7 | Slack connector bundle: `on-frame` normalizes Events API payloads | Rust bundle | previous task |
