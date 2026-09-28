@@ -646,6 +646,50 @@ pipeline:
       limits:
         cpu: "1000m"
         memory: "1Gi"
+    # feature/bundle-artifact-signing -- BUNDLE_SIGNING_PRIVATE_KEY/BUNDLE_SIGNING_KEY_ID
+    # (hub_api/services/bundle_signing_service.py) are wired via secretKeyRef against this
+    # externally-managed Secret, NEVER templated from values (the private key must never
+    # pass through `helm template`/`helm install --set`/a values file). Generate + apply
+    # with `make generate-bundle-signing-key` (scripts/generate-bundle-signing-key.sh)
+    # BEFORE deploying hub-api -- see the chart README's rollout-order section. `optional:
+    # true` on the env's secretKeyRef so hub-api still starts (approvals just fail closed
+    # per PlatformSigner.from_env()) before that script has been run once.
+    bundleSigning:
+      secretName: ""  # default: "{{ fullname }}-bundle-signing" -- computed in the template when empty
+    # One-off backfill CLI (hub_api/cli/sign_approved_bundles.py) as a Helm Job --
+    # templates/bundle-signing-backfill-job.yaml. Disabled by default: this is a deliberate
+    # rollout step (create secret -> deploy hub-api -> run this Job once -> deploy
+    # executor), not a hook that should fire on every `helm upgrade`. Flip to true for one
+    # `helm upgrade --set pipeline.hubApi.bundleSigningBackfill.enabled=true`, then back to
+    # false -- idempotent either way (module docstring), so a stray extra run is harmless.
+    bundleSigningBackfill:
+      enabled: false
+      backoffLimit: 2
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+    # MEDIUM security-review finding -- CronJob that re-uploads any missing signed bucket
+    # sidecar for a version that IS signed in Postgres (artifact_signature NOT NULL) but
+    # whose sidecar object is missing/stale (e.g. a prior upload_signed_sidecar() failure
+    # that was only ever recorded as a backfill-CLI row outcome, never retried). Runs
+    # hub_api/cli/reconcile_signed_sidecars.py on a schedule; metrics via the same
+    # bundle_telemetry meter the backfill CLI uses.
+    bundleSigningReconciler:
+      enabled: true
+      schedule: "*/30 * * * *"
+      backoffLimit: 3
+      concurrencyPolicy: Forbid
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
 
   hubWebui:
     enabled: true
@@ -766,6 +810,20 @@ pipeline:
   #     operator step (see global.hostApiTls's own comment) even in alpha.
   rustDataPlane:
     enabled: false
+
+    # feature/bundle-artifact-signing -- BUNDLE_SIGNING_PUBLIC_KEYS (core/bundle_executor/
+    # src/config.rs, core/bundle_executor/src/signing.rs::PlatformPublicKeys), shared by
+    # both bundleExecutor and bundleExecutorAction below (each executor verifies against
+    # the same platform key set regardless of which stage it dials). Map of
+    # `key_id -> base64(32-byte Ed25519 public key)` -- NOT secret (public keys), so this
+    # is safe to carry directly in values (unlike hubApi.bundleSigning's private-key
+    # secretKeyRef above). Rendered into the container env as a JSON object. Empty by
+    # default; `crate::signing::PlatformPublicKeys::from_cli_required` (the real
+    # production path, `crate::lib::run`) fails closed at startup if this is unset once
+    # `pipeline.rustDataPlane.enabled` is true -- set per-environment via
+    # values-{alpha,beta,gamma,production}.yaml once `make generate-bundle-signing-key`
+    # has printed the corresponding public key.
+    bundleSigningPublicKeys: {}
 
     svcIngest:
       enabled: true

@@ -122,6 +122,38 @@ async def test_select_excludes_a_superseded_approval(install_dal: Any) -> None:
     assert rows[0].approval_id == superseding_id
 
 
+async def test_select_dedupes_a_version_with_multiple_current_approvals(
+    install_dal: Any,
+) -> None:
+    """Regression: two CURRENT approvals for one version must yield exactly one row.
+
+    An earlier revision of `_SELECT_UNSIGNED_APPROVED_VERSIONS_SQL` grouped
+    by `a.id` in addition to `v.id`, which did NOT collapse duplicates --
+    this version would have produced 2 rows, and `sign_one()` would have
+    re-signed/re-uploaded the same version twice in one backfill run.
+    """
+    version_id = await _seed_version(install_dal)
+    first_approval_id = await _seed_current_approval(install_dal)
+    now = datetime.now(UTC)
+    second_approval_id = await install_dal.app_install_approvals.async_insert(
+        tenant_id=2,
+        community_id=None,
+        app_id=_APP_ID,
+        version=_VERSION,
+        permission_hash="sha256:" + "d" * 64,
+        summary_json={},
+        approved_by=1,
+        approved_at=now,
+        superseded_by=None,
+    )
+
+    rows = await _select_unsigned_approved_versions(install_dal)
+
+    assert len(rows) == 1
+    assert rows[0].version_id == version_id
+    assert rows[0].approval_id == min(first_approval_id, second_approval_id)
+
+
 async def test_sign_one_signs_and_uploads_the_sidecar(
     install_dal: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

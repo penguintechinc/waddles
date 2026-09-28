@@ -1,0 +1,25 @@
+## Waddlebot - Gamma Environment Overrides
+#
+# feature/bundle-artifact-signing -- gamma has no full values-gamma.yaml yet (DO gamma
+# context/cluster is TBD, see admin/.claude/rules/penguintech.md); this file exists ONLY to
+# carry the bundle-signing overrides the security review required per environment. Extend
+# in place once gamma's full topology (infrastructure sizing, image registry, etc.) lands,
+# mirroring values-beta.yaml's shape rather than duplicating it here.
+global:
+  deploymentTier: "gamma"
+
+pipeline:
+  hubApi:
+    # Run `make generate-bundle-signing-key KEY_ID=<label> KUBE_CONTEXT=<DO gamma context>
+    # NAMESPACE=waddlebot` once before the first bundle approval on this env -- see
+    # values.yaml's pipeline.hubApi.bundleSigning comment and the chart README's rollout
+    # order. Default secret name (waddlebot-bundle-signing) used -- no override needed
+    # unless running multiple releases in one namespace.
+    bundleSigning:
+      secretName: ""
+  rustDataPlane:
+    # OVERRIDE REQUIRED once the executor is enabled on gamma -- paste the `key_id:
+    # public_key` pair `generate-bundle-signing-key.sh` prints, e.g.:
+    #   bundleSigningPublicKeys:
+    #     2026-09-key1: "<base64 32-byte Ed25519 public key>"
+    bundleSigningPublicKeys: {}

@@ -75,6 +75,10 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.wasmCollector | quote }}
         - name: WADDLES_SANDBOX_GVISOR
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.sandboxGvisor | quote }}
+        # feature/bundle-artifact-signing -- shared platform key set, see values.yaml's
+        # pipeline.rustDataPlane.bundleSigningPublicKeys comment (not secret; public keys).
+        - name: BUNDLE_SIGNING_PUBLIC_KEYS
+          value: {{ .Values.pipeline.rustDataPlane.bundleSigningPublicKeys | toJson | quote }}
         - name: BUNDLE_BUCKET_ENDPOINT
           value: "http://{{ .Values.infrastructure.minio.service.name }}:{{ .Values.infrastructure.minio.service.apiPort }}"
         - name: BUNDLE_BUCKET_NAME

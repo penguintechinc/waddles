@@ -1027,7 +1027,8 @@ mod tests {
         fn signed_sidecar(key: &SigningKey, key_id: &str, digest: &str) -> Vec<u8> {
             use base64::engine::general_purpose::STANDARD as BASE64;
             use base64::Engine as _;
-            let payload = signing_payload(APP_ID, VERSION, digest, APPROVAL_ID);
+            let payload =
+                signing_payload(APP_ID, VERSION, digest, APPROVAL_ID).expect("valid test fixture");
             let signature = key.sign(&payload);
             serde_json::to_vec(&json!({
                 "app_id": APP_ID,

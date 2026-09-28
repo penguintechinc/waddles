@@ -28,6 +28,8 @@ import base64
 import binascii
 import logging
 import os
+import re
+import struct
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -48,22 +50,57 @@ _KEY_ID_ENV = "BUNDLE_SIGNING_KEY_ID"
 
 _ALGORITHM = "ed25519"
 
+#: Prefixes every signed payload -- MUST match `core/bundle_executor/src/
+#: signing.rs`'s `DOMAIN_SEPARATOR` byte-for-byte. The `-v1` suffix means a
+#: future format change is a new, distinguishable domain rather than a
+#: silent reinterpretation of old bytes.
+_DOMAIN_SEPARATOR = b"waddles-bundle-sig-v1"
+
+#: `app_id`/`version` charset (task instruction) -- matches the Rust side's
+#: `validate_id_charset`. Digest is deliberately NOT charset-checked here,
+#: same rationale as the Rust side's own doc comment on this point.
+_ID_CHARSET_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _validate_id_charset(field_name: str, value: str) -> None:
+    if not _ID_CHARSET_RE.match(value):
+        raise ApiError(
+            f"{field_name} {value!r} contains characters outside [A-Za-z0-9._-]",
+            500,
+            "artifact_signing_invalid_charset",
+        )
+
+
+def _length_prefixed(field: bytes) -> bytes:
+    return struct.pack(">I", len(field)) + field
+
 
 def build_signing_payload(*, app_id: str, version: str, digest: str, approval_id: int) -> bytes:
-    """The exact byte payload Ed25519-signs.
+    r"""The exact byte payload Ed25519-signs.
 
     MUST match `core/bundle_executor/src/signing.rs`'s `signing_payload()`
     byte-for-byte, or every signature fails to verify.
 
-    NUL-separated fields, not canonical JSON: matching two independent
-    languages' JSON canonicalization (integer formatting, key ordering,
-    escaping) byte-for-byte is a real, recurring cross-language footgun --
-    four opaque, NUL-delimited fields sidesteps it entirely. Including
-    `app_id`/`version`/`digest`/`approval_id` together (task instruction)
-    is what prevents swapping: a signature made for one `(app_id, version,
-    digest, approval_id)` tuple never verifies against a different one.
+    Length-prefixed, domain-separated encoding, not canonical JSON or
+    NUL-delimited concatenation (an earlier revision used the latter --
+    NUL-delimited fields cannot distinguish `("a\0b", "c")` from `("a",
+    "b\0c")`, a canonicalization ambiguity a length-prefixed encoding does
+    not have): `_DOMAIN_SEPARATOR + u32be(len(app_id)) + app_id +
+    u32be(len(version)) + version + u32be(len(digest)) + digest +
+    u64be(approval_id)`. Including `app_id`/`version`/`digest`/
+    `approval_id` together (task instruction) is what prevents swapping: a
+    signature made for one `(app_id, version, digest, approval_id)` tuple
+    never verifies against a different one.
     """
-    return f"{app_id}\0{version}\0{digest}\0{approval_id}".encode()
+    _validate_id_charset("app_id", app_id)
+    _validate_id_charset("version", version)
+    return (
+        _DOMAIN_SEPARATOR
+        + _length_prefixed(app_id.encode("utf-8"))
+        + _length_prefixed(version.encode("utf-8"))
+        + _length_prefixed(digest.encode("utf-8"))
+        + struct.pack(">Q", approval_id)
+    )
 
 
 @dataclass(slots=True, frozen=True)

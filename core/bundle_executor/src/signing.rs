@@ -23,21 +23,35 @@
 //!
 //! **Signed payload contract (must match
 //! `hub_api/services/bundle_signing_service.py::build_signing_payload`
-//! byte-for-byte, or every signature fails to verify):**
-//! `app_id + "\0" + version + "\0" + digest + "\0" + approval_id`, UTF-8
-//! encoded, signed directly with Ed25519 (no extra hashing layer -- Ed25519
-//! already hashes the message internally). NUL-separated rather than a
-//! canonical-JSON encoding deliberately: matching two independent
-//! languages' JSON canonicalization (integer formatting, key ordering,
-//! escaping) byte-for-byte is a real, recurring cross-language footgun;
-//! four opaque, NUL-delimited fields sidesteps it entirely. Including
+//! byte-for-byte, or every signature fails to verify):** a length-prefixed,
+//! domain-separated encoding, not canonical JSON or NUL-delimited
+//! concatenation (an earlier revision used the latter -- NUL-delimited
+//! fields cannot distinguish `("a\0b", "c")` from `("a", "b\0c")`, a
+//! canonicalization ambiguity a length-prefixed encoding does not have):
+//!
+//! ```text
+//! DOMAIN_SEPARATOR                      b"waddles-bundle-sig-v1" (22 bytes, literal)
+//! u32be(len(app_id))  || app_id          UTF-8 bytes
+//! u32be(len(version)) || version         UTF-8 bytes
+//! u32be(len(digest))  || digest          UTF-8 bytes
+//! u64be(approval_id)                     big-endian, unsigned
+//! ```
+//!
+//! Signed directly with Ed25519 (no extra hashing layer -- Ed25519 already
+//! hashes the message internally). The domain separator's own `-v1` suffix
+//! means a future format change is a new, distinguishable domain rather
+//! than a silent reinterpretation of old bytes. Including
 //! `app_id`/`version`/`digest`/`approval_id` together (task instruction)
 //! is what prevents swapping: an attacker who swaps the bucket object at
 //! `component_key` for a different, also-signed component cannot reuse
 //! that other component's signature here, because the digest embedded in
 //! its own signed payload will not match this component's actual bytes
 //! (checked independently by `crate::invoke::verify_digest`) or its own
-//! `app_id`/`version`/`approval_id`.
+//! `app_id`/`version`/`approval_id`. `app_id`/`version` are further
+//! restricted to `[A-Za-z0-9._-]` (see [`validate_id_charset`]) -- neither
+//! is attacker-controlled length-prefix-escapable, but a narrow charset
+//! also rules out control characters/whitespace ever reaching a log line
+//! or bucket key derived from these fields elsewhere in this crate.
 
 use std::collections::HashMap;
 
@@ -69,10 +83,56 @@ pub struct SignedSidecar {
     pub signature: String,
 }
 
-/// The exact byte payload that was signed -- see this module's doc for why
-/// NUL-separated fields rather than JSON.
-pub fn signing_payload(app_id: &str, version: &str, digest: &str, approval_id: i64) -> Vec<u8> {
-    format!("{app_id}\0{version}\0{digest}\0{approval_id}").into_bytes()
+/// Domain separator prefixing every signed payload -- see this module's doc.
+/// MUST match `bundle_signing_service._DOMAIN_SEPARATOR` byte-for-byte.
+pub const DOMAIN_SEPARATOR: &[u8] = b"waddles-bundle-sig-v1";
+
+/// `app_id`/`version` charset (task instruction): ASCII alphanumeric plus
+/// `. _ -`, matching the charset every other id-shaped field in this repo
+/// (key ids, tenant slugs) already restricts itself to. Digest is
+/// deliberately NOT charset-checked here -- its `sha256:<hex>` shape is
+/// already validated elsewhere (`crate::invoke::verify_digest`'s
+/// `MalformedDigest` path), and this function has no opinion on it beyond
+/// including its raw bytes in the signed payload.
+fn validate_id_charset(field_name: &'static str, value: &str) -> Result<(), ExecutorError> {
+    let ok = !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(ExecutorError::SignatureInvalid(format!(
+            "{field_name} {value:?} contains characters outside [A-Za-z0-9._-]"
+        )))
+    }
+}
+
+fn write_length_prefixed(buf: &mut Vec<u8>, field: &[u8]) {
+    buf.extend_from_slice(&(field.len() as u32).to_be_bytes());
+    buf.extend_from_slice(field);
+}
+
+/// The exact byte payload that was signed -- see this module's doc for the
+/// length-prefixed, domain-separated encoding this builds.
+pub fn signing_payload(
+    app_id: &str,
+    version: &str,
+    digest: &str,
+    approval_id: i64,
+) -> Result<Vec<u8>, ExecutorError> {
+    validate_id_charset("app_id", app_id)?;
+    validate_id_charset("version", version)?;
+
+    let mut buf = Vec::with_capacity(
+        DOMAIN_SEPARATOR.len() + 12 + app_id.len() + version.len() + digest.len() + 8,
+    );
+    buf.extend_from_slice(DOMAIN_SEPARATOR);
+    write_length_prefixed(&mut buf, app_id.as_bytes());
+    write_length_prefixed(&mut buf, version.as_bytes());
+    write_length_prefixed(&mut buf, digest.as_bytes());
+    buf.extend_from_slice(&(approval_id as u64).to_be_bytes());
+    Ok(buf)
 }
 
 /// Platform Ed25519 public keys, keyed by key id -- supports rotation
@@ -232,7 +292,7 @@ pub fn verify_artifact_signature(
         &sidecar.version,
         &sidecar.digest,
         sidecar.approval_id,
-    );
+    )?;
     verifying_key
         .verify_strict(&payload, &signature)
         .map_err(|e| ExecutorError::SignatureInvalid(format!("signature verification failed: {e}")))
@@ -266,7 +326,8 @@ mod tests {
         digest: &str,
         approval_id: i64,
     ) -> Vec<u8> {
-        let payload = signing_payload(app_id, version, digest, approval_id);
+        let payload =
+            signing_payload(app_id, version, digest, approval_id).expect("valid test fixture");
         let signature = signing_key.sign(&payload);
         serde_json::to_vec(&json!({
             "app_id": app_id,
@@ -375,7 +436,8 @@ mod tests {
         let keys = PlatformPublicKeys::from_json(&test_public_keys_json("k1", &signing_key))?;
         let tampered_digest =
             "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-        let payload = signing_payload(APP_ID, VERSION, DIGEST, APPROVAL_ID);
+        let payload =
+            signing_payload(APP_ID, VERSION, DIGEST, APPROVAL_ID).expect("valid test fixture");
         let signature = signing_key.sign(&payload);
         let forged = serde_json::to_vec(&json!({
             "app_id": APP_ID,
@@ -449,7 +511,8 @@ mod tests {
     fn verify_artifact_signature_rejects_an_unsupported_algorithm() -> Result<(), ExecutorError> {
         let signing_key = test_signing_key();
         let keys = PlatformPublicKeys::from_json(&test_public_keys_json("k1", &signing_key))?;
-        let payload = signing_payload(APP_ID, VERSION, DIGEST, APPROVAL_ID);
+        let payload =
+            signing_payload(APP_ID, VERSION, DIGEST, APPROVAL_ID).expect("valid test fixture");
         let signature = signing_key.sign(&payload);
         let sidecar = serde_json::to_vec(&json!({
             "app_id": APP_ID,
@@ -551,15 +614,56 @@ mod tests {
 
     #[test]
     fn signing_payload_is_stable_and_distinguishes_every_field() {
-        let a = signing_payload("app.a", "1", "sha256:x", 1);
-        let b = signing_payload("app.a", "1", "sha256:x", 2);
-        let c = signing_payload("app.a", "2", "sha256:x", 1);
-        let d = signing_payload("app.b", "1", "sha256:x", 1);
-        let e = signing_payload("app.a", "1", "sha256:y", 1);
+        let sp = |app_id, version, digest, approval_id| {
+            signing_payload(app_id, version, digest, approval_id).expect("valid test fixture")
+        };
+        let a = sp("app.a", "1", "sha256:x", 1);
+        let b = sp("app.a", "1", "sha256:x", 2);
+        let c = sp("app.a", "2", "sha256:x", 1);
+        let d = sp("app.b", "1", "sha256:x", 1);
+        let e = sp("app.a", "1", "sha256:y", 1);
         assert_ne!(a, b);
         assert_ne!(a, c);
         assert_ne!(a, d);
         assert_ne!(a, e);
-        assert_eq!(a, signing_payload("app.a", "1", "sha256:x", 1));
+        assert_eq!(a, sp("app.a", "1", "sha256:x", 1));
+    }
+
+    #[test]
+    fn signing_payload_rejects_an_app_id_outside_the_allowed_charset() {
+        let err = signing_payload("app id with spaces", "1", "sha256:x", 1);
+        assert!(matches!(err, Err(ExecutorError::SignatureInvalid(_))));
+    }
+
+    #[test]
+    fn signing_payload_rejects_a_version_outside_the_allowed_charset() {
+        let err = signing_payload("app.a", "1.0/../etc", "sha256:x", 1);
+        assert!(matches!(err, Err(ExecutorError::SignatureInvalid(_))));
+    }
+
+    /// Cross-language golden vector -- MUST match
+    /// `test_build_signing_payload_matches_the_cross_language_golden_vector`
+    /// in `hub_api/tests/test_bundle_signing_service.py` byte-for-byte. If
+    /// either side's encoding ever drifts from the other, this is the test
+    /// that catches it (every other test in both files only checks
+    /// self-consistency within its own language).
+    #[test]
+    fn signing_payload_matches_the_cross_language_golden_vector() {
+        let payload = signing_payload("waddles.core.example.ping", "1.2.3", "sha256:deadbeef", 42)
+            .expect("valid golden-vector fixture");
+        // Computed independently in Python against the exact same field values -- see
+        // hub_api/tests/test_bundle_signing_service.py's own copy of this constant.
+        let expected_hex = "776164646c65732d62756e646c652d7369672d763100000019776164646c65\
+732e636f72652e6578616d706c652e70696e6700000005312e322e330000000f7368613235363a6465616462\
+656566000000000000002a";
+        let expected = hex_decode(expected_hex);
+        assert_eq!(payload, expected);
+    }
+
+    fn hex_decode(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid golden-vector hex"))
+            .collect()
     }
 }

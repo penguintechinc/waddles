@@ -47,13 +47,13 @@ from services.bundle_telemetry import get_meter
 logger = logging.getLogger("waddles.hub_api.sign_approved_bundles")
 
 _SELECT_UNSIGNED_APPROVED_VERSIONS_SQL = """
-    SELECT v.id AS version_id, v.app_id AS app_id, v.version AS version, a.id AS approval_id
+    SELECT v.id AS version_id, v.app_id AS app_id, v.version AS version, MIN(a.id) AS approval_id
     FROM app_versions v
     JOIN app_install_approvals a
       ON a.app_id = v.app_id AND a.version = v.version AND a.superseded_by IS NULL
     WHERE v.artifact_digest IS NOT NULL
       AND v.artifact_signature IS NULL
-    GROUP BY v.id, v.app_id, v.version, a.id
+    GROUP BY v.id, v.app_id, v.version
     ORDER BY v.id ASC
 """
 
@@ -71,11 +71,15 @@ class BackfillResult:
 async def _select_unsigned_approved_versions(install_dal: Any) -> list[Any]:
     """Rows needing a signature -- see module docstring's selection rule.
 
-    One row per DISTINCT `app_versions.id` even if several current
-    approvals reference it (the `GROUP BY` collapses duplicates); `MIN`
-    would also work but `GROUP BY` alone with a deterministic `ORDER BY`
-    is sufficient since this CLI only needs *any one* current approval id,
-    not the specific minimum.
+    Exactly one row per DISTINCT `app_versions.id`, even when several
+    current approvals reference it -- `GROUP BY v.id, v.app_id, v.version`
+    with `MIN(a.id)` picks one deterministic approval id per version
+    (regression: an earlier revision grouped by `a.id` too, which did NOT
+    collapse duplicates -- a version with 2 current approvals produced 2
+    rows, and `sign_one()` re-signed/re-uploaded the same version twice in
+    one backfill run). This CLI only needs *any one* current approval id
+    embedded in the signature, not a specific one (see the module
+    docstring's "why the same artifact can be re-signed safely").
     """
     rows = await raw_sql_rows(install_dal, _SELECT_UNSIGNED_APPROVED_VERSIONS_SQL)
     return list(rows)

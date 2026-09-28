@@ -55,6 +55,40 @@ def test_build_signing_payload_distinguishes_every_field() -> None:
     )
 
 
+def test_build_signing_payload_matches_the_cross_language_golden_vector() -> None:
+    """Byte-for-byte cross-check against the Rust side's own golden vector.
+
+    MUST match `signing_payload_matches_the_cross_language_golden_vector` in
+    `core/bundle_executor/src/signing.rs` -- every other test in both files
+    only checks self-consistency within its own language; this is the one
+    that catches a drift between the two encodings.
+    """
+    payload = build_signing_payload(
+        app_id="waddles.core.example.ping",
+        version="1.2.3",
+        digest="sha256:deadbeef",
+        approval_id=42,
+    )
+    expected = bytes.fromhex(
+        "776164646c65732d62756e646c652d7369672d763100000019776164646c65"
+        "732e636f72652e6578616d706c652e70696e6700000005312e322e330000000f7368613235363a6465616462"
+        "656566000000000000002a"
+    )
+    assert payload == expected
+
+
+@pytest.mark.parametrize("app_id", ["app id with spaces", "app/id", "app\x00id", ""])
+def test_build_signing_payload_rejects_an_app_id_outside_the_allowed_charset(app_id: str) -> None:
+    with pytest.raises(ApiError):
+        build_signing_payload(app_id=app_id, version=_VERSION, digest=_DIGEST, approval_id=1)
+
+
+@pytest.mark.parametrize("version", ["1.0/../etc", "1 0", ""])
+def test_build_signing_payload_rejects_a_version_outside_the_allowed_charset(version: str) -> None:
+    with pytest.raises(ApiError):
+        build_signing_payload(app_id=_APP_ID, version=version, digest=_DIGEST, approval_id=1)
+
+
 def test_platform_signer_from_env_fails_closed_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("BUNDLE_SIGNING_PRIVATE_KEY", raising=False)
     monkeypatch.delenv("BUNDLE_SIGNING_KEY_ID", raising=False)

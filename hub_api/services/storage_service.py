@@ -197,6 +197,36 @@ async def write_bundle_sidecar(
     return key
 
 
+async def read_bundle_sidecar(app_id: str, version: str, sha256_hex: str) -> dict[str, Any] | None:
+    """GETs the `.json` sidecar at `bundle_sidecar_key()`. Returns `None` if the object is missing.
+
+    Used by `cli/reconcile_signed_sidecars.py` to distinguish "never
+    uploaded"/"deleted out-of-band" (bucket 404 -- `NoSuchKey`) from "still
+    the pre-signing `{}` stub" (object exists but has no `signature` field)
+    from "already correctly signed" -- both of the first two cases are
+    reconciled by re-running `write_bundle_sidecar()`, the last is a no-op.
+    Any other bucket error propagates (this is a read used to decide
+    whether to re-upload, not a best-effort cleanup like `delete_object()`).
+    """
+    key = bundle_sidecar_key(app_id, version, sha256_hex)
+
+    def _get() -> dict[str, Any] | None:
+        try:
+            resp = _client().get_object(Bucket=_bucket(), Key=key)
+        except _client().exceptions.NoSuchKey:
+            return None
+        except Exception as exc:  # noqa: BLE001 -- botocore raises a generic ClientError for
+            # some backends' 404s (MinIO) rather than the typed NoSuchKey subclass
+            if "NoSuchKey" in str(exc) or "404" in str(exc):
+                return None
+            raise
+        body = resp["Body"].read()
+        result: dict[str, Any] = json.loads(body)
+        return result
+
+    return await asyncio.to_thread(_get)
+
+
 async def delete_object(url: str) -> None:
     """Delete a previously-uploaded object given its public URL. Never raises on not-found."""
     base = _public_base_url().rstrip("/") + "/"
