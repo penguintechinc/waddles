@@ -214,6 +214,10 @@ convention = "google"
 # bundle_approvals.py above.
 "blueprints/v1/bundle_tenant_availability.py" = ["N815", "S101"]
 "blueprints/v1/bundle_activation.py" = ["N815", "S101"]
+# Same camelCase-DTO-wire-contract rationale as bundle_versions.py/
+# bundle_approvals.py above -- no tenant_middleware assert here (this
+# endpoint is deliberately cross-tenant), so only N815 is needed.
+"blueprints/v1/bundle_admin.py" = ["N815"]
 
 [tool.mypy]
 python_version = "3.13"
