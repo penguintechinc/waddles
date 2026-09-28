@@ -27,6 +27,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from flask_core.bundle_attribution import license_requires_review
 from penguin_dal import AsyncDB
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
@@ -86,6 +87,16 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         permissions=tuple(raw.get("permissions") or ()),
         routes_to=tuple(raw.get("routes_to") or ()),
         consumes=consumes,
+        author=raw.get("author"),
+        license=raw.get("license"),
+        license_requires_review=(
+            license_requires_review(raw["license"]) if raw.get("license") else False
+        ),
+        source_url=raw.get("source_url"),
+        alternative_to=tuple(raw.get("alternative_to") or ()),
+        homepage_url=raw.get("homepage_url"),
+        notice=raw.get("notice"),
+        category=raw.get("category"),
     )
 
 
