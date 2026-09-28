@@ -61,23 +61,11 @@ spec:
             - name: MODULE_NAME
               value: "bundle-signing-reconciler"
             # Read-path only (upload_signed_sidecar() re-uploads a signature already
-            # recorded in Postgres -- see that function's own docstring) -- but the private
-            # key env is still required since `sign_and_record_version` and
-            # `upload_signed_sidecar` share the same `services/bundle_signing_service.py`
-            # module import; the reconciler never calls the signing path itself, only
-            # re-uploads. `optional: true` matches templates/hub-api.yaml's own posture.
-            - name: BUNDLE_SIGNING_PRIVATE_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.pipeline.hubApi.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
-                  key: BUNDLE_SIGNING_PRIVATE_KEY
-                  optional: true
-            - name: BUNDLE_SIGNING_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.pipeline.hubApi.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
-                  key: BUNDLE_SIGNING_KEY_ID
-                  optional: true
+            # recorded in Postgres -- see that function's own docstring). Confirmed
+            # `upload_signed_sidecar()` never calls `PlatformSigner.from_env()` --
+            # only `sign_and_record_version()` does, and this CLI never imports or
+            # calls that function -- so the private signing key is NOT mounted here.
+            # This container never needs to hold key material at all.
             resources:
               {{- toYaml .Values.pipeline.hubApi.bundleSigningReconciler.resources | nindent 14 }}
             volumeMounts:

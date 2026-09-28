@@ -12,6 +12,9 @@
 # pipeline.rustDataPlane.enabled flag (default false) plus this module's own .enabled
 # sub-flag.
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.bundleExecutorAction.enabled }}
+{{- if not .Values.pipeline.rustDataPlane.bundleSigningPublicKeys }}
+{{- fail "pipeline.rustDataPlane.bundleSigningPublicKeys is empty: run make generate-bundle-signing-key and set values; see README rollout order" }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
