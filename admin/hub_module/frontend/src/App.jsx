@@ -135,6 +135,7 @@ import PlatformAnalytics from './pages/platform/PlatformAnalytics';
 import SuperAdminDashboard from './pages/superadmin/SuperAdminDashboard';
 import SuperAdminCommunities from './pages/superadmin/SuperAdminCommunities';
 import SuperAdminModuleRegistry from './pages/superadmin/SuperAdminModuleRegistry';
+import SuperAdminBundleApprovals from './pages/superadmin/SuperAdminBundleApprovals';
 import SuperAdminPlatformConfig from './pages/superadmin/SuperAdminPlatformConfig';
 import SuperAdminSoftwareDiscovery from './pages/superadmin/SuperAdminSoftwareDiscovery';
 import SuperAdminServiceDiscovery from './pages/superadmin/SuperAdminServiceDiscovery';
@@ -394,6 +395,7 @@ function App() {
         <Route path="/superadmin" element={<SuperAdminDashboard />} />
         <Route path="/superadmin/communities" element={<SuperAdminCommunities />} />
         <Route path="/superadmin/modules" element={<SuperAdminModuleRegistry />} />
+        <Route path="/superadmin/bundle-approvals" element={<SuperAdminBundleApprovals />} />
         <Route path="/superadmin/vendor-submissions" element={<AdminVendorReview />} />
         <Route path="/superadmin/vendor-submissions/:submissionId" element={<AdminVendorReview />} />
         <Route path="/superadmin/vendor-requests" element={<SuperAdminVendorRequests />} />

@@ -1,0 +1,8 @@
+# KICK Module Dependencies
+quart>=0.22.0
+hypercorn>=0.18.0
+aiohttp>=3.14.3,<4.0.0
+python-dotenv>=1.2.3
+pysher>=1.0.8
+psycopg2-binary>=2.9.13
+pydal>=20240906.1,<20250101
