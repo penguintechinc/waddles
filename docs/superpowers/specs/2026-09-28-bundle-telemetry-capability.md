@@ -15,6 +15,19 @@
 - Sizing target, shared with the above two specs: ~300 tenants, ~20,000 communities, ~10,000 channels.
 - `hub_api/blueprints/v1/marketplace_lifecycle.py` — the three real scope gates this spec's read endpoints reuse: `require_scope("platform:admin")`, `require_scope("tenant:admin")` + tenant match, `authorize_community(..., admin=True|False)`. `services/vendor_bundle_authz.py` — `vendor:onboard` scope + `waddles.integrations.vendor-{id}.*` namespace enforcement, reused for vendor status visibility (§6).
 
+**Gemini PR-review conditions (PASS-WITH-CONDITIONS on #421) — folded in as normative requirements:**
+
+| # | Condition | Resolved in | Requirement |
+|---|---|---|---|
+| 1 | Cardinality tracker must be memory-bounded, LFU eviction, hourly window reset | §4 | Bounded per-instrument tracker, LFU eviction on overflow (not deny-new-blind), hourly window reset |
+| 2 | SSRF: custom dialer connects only to the validated IP (no re-resolution); block RFC1918/loopback/link-local/metadata + IPv6 `fc00::/7`/`fe80::/10`/`::1` + IPv4-mapped IPv6 | §3.5 | Full blocklist + pinned-IP custom dialer, normative |
+| 3 | Log injection: strip 0x00-0x1F (except `\n`, encoded)/0x7F-0x9F/ESC/Unicode bidi overrides; render as untrusted text in UI | §2.4, §4 | Expanded sanitizer spec + hub-webui untrusted-text rendering rule |
+| 4 | `logs.fields` allowlist is the PRIMARY scrubbing boundary; regex scrubbing is defense-in-depth only; reject/redact high-entropy strings | §4 | Reordered scrubbing pipeline + entropy check |
+| 5 | Cross-tenant: per-tenant actor/pipeline isolation + tenant-id assertion at final serialization (mismatch drops batch + alerts) | §3.4 | New isolation + assertion rows |
+| 6 | `InvokeScope` passed explicitly or via `tokio::task_local!`, never thread-local; yield-across-threads tests | §2.3, §8 | Explicit-context requirement + test |
+| 7 | Fully non-blocking OTLP IO; exporters isolated on their own runtime/pool | §3.4, §3.7 | Dedicated runtime/pool requirement |
+| 8 | Data residency: Enterprise tenant opt-out disabling the internal telemetry mirror (+ hides hub-webui tab); TTL cap on the internal mirror | §6 | New opt-out + retention requirement |
+
 ---
 
 ## 1. WIT additions
@@ -109,9 +122,13 @@ The host does not stand up a second OTel pipeline. Both `svc_process` and `svc_a
 - Every `log.write` call is recorded as a `bundle.log` span event (SS2.2) on this span; `ERROR`-level calls additionally set the span status to `Error` (informational only — never affects control flow, matching the existing rule that "a bundle's own logging must never be able to affect its control flow").
 - Metric calls do not create additional spans; they carry the invoke's `trace_id`/`span_id` as OTel Exemplars where the metrics SDK in use supports them (best-effort, not a hard requirement).
 
+**Normative: `InvokeScope` (tenant, community, app_id, message_id) is passed explicitly through the async call chain — as an argument, or via `tokio::task_local!` scoped for the duration of one `invoke` future — never a thread-local static.** `svc_process`/`svc_action` run on Tokio's multi-threaded work-stealing runtime, where a single `.await` can resume the same logical task on a different OS thread; a `thread_local!`-keyed scope would silently read/write the wrong invocation's context after such a resume, which is exactly the cross-tenant leak vector this spec closes in §3.4. `tokio::task_local!` is bound to the task, not the thread, and survives a cross-thread resume correctly; a plain argument threaded through every capability-handler call achieves the same guarantee with no macro magic and is preferred where the call depth is shallow enough to avoid signature sprawl. Either is acceptable; a bare `thread_local!`/`std::sync::OnceLock`-as-ambient-global for per-invoke scope is not, for any of `metrics`, `log`, or the existing capabilities. Test requirement in §8.
+
 ### 2.4 Logs specifically
 
 Unchanged from today's bridge: `log::Host::write` sanitizes via `penguin_logging::sanitize::sanitize_object` (SENSITIVE_KEYS rule), strips control characters, truncates to `MAX_BUNDLE_LOG_MESSAGE_LEN` (4096), then emits via `tracing::{error,warn,info,debug}!`. New in this spec: `fields-json` keys not in the manifest's declared `logs.fields` allowlist (SS1.3) are dropped **before** sanitization even runs (SS4), and the effective emission level is clamped to the community/tenant's configured ceiling (SS4) before the `tracing` macro call is chosen.
+
+**Log injection / rendering (normative, Gemini condition 3):** the control-character strip is expanded from "control characters" to a precise set — `0x00`-`0x1F` (all C0 controls) except `\n`, which is retained but **encoded** (`\n` → literal two-character `\n` in the stored/emitted string, never a raw line-feed byte) so a bundle can never forge additional log lines or terminal escape sequences; `0x7F`-`0x9F` (DEL + C1 controls); ESC (`0x1B`, redundant with the C0 range but called out explicitly since it's the terminal/log-injection payload of concern); and the Unicode bidirectional-override code points `U+202A`-`U+202E` and `U+2066`-`U+2069` (RLO/LRO/PDF/RLE/LRE/LRI/RLI/FSI/PDI — the "Trojan Source" character class). This applies to both the `message` and every `fields-json` value, before truncation. **hub-webui renders bundle log content as escaped, untrusted text** (no raw HTML/markdown interpretation, no terminal-control interpretation) — the same trust boundary as any other user-supplied string reaching the UI; sanitization at the host is defense-in-depth, not a substitute for output-encoding at render time, and vice versa.
 
 ---
 
@@ -153,13 +170,16 @@ Auth headers are secrets: encrypted with the tenant's existing per-tenant DEK (t
 | Never affects request handling | Bundle telemetry emission (SS1) never awaits tenant-export completion — fire-and-forget into the per-tenant queue, same "a dead exporter never breaks the app" rule extended per-tenant |
 | Per-tenant export metrics | `waddles.telemetry.tenant_export.sent_total{tenant}`, `.dropped_total{tenant,reason}`, `.errors_total{tenant,code}`, `.queue_depth{tenant}` (gauge) — visible to that tenant's own admins (SS6), and also flow to the global destination (only 300 tenants, cheap) |
 | Cross-tenant leak test | Mandatory negative test (SS8): tenant A's destination receives zero records carrying tenant B's `tenant_id` |
+| Per-tenant actor/pipeline isolation *(Gemini condition 5)* | Each tenant's exporter is its own actor/task with its own queue, client, and backoff state (SS3.7's forwarder runs one pipeline instance per tenant, not a shared pipeline keyed by a runtime label) — no shared mutable state between tenants beyond the read-only `GrantSnapshot`/`TenantExporterSnapshot` config each reads independently |
+| Final-serialization tenant assertion *(Gemini condition 5)* | Immediately before a batch is handed to a tenant's exporter client, assert every record in the batch carries that exact `tenant_id` — a mismatch drops the **whole batch**, increments `waddles.telemetry.tenant_export.assertion_failed_total{tenant}`, and pages/alerts (never silently drops one record and ships the rest); this is the last-line check behind §2.3's task-local scoping and §3.7's per-tenant actor isolation, not a replacement for either |
+| Non-blocking IO *(Gemini condition 7)* | All OTLP export IO (batch send, backoff sleep, connection setup) is `async`/non-blocking (`tonic`/`hyper` async clients) — no blocking call anywhere in the emission or export hot path |
 
 ### 3.5 Security
 
 | Control | Detail |
 |---|---|
 | TLS mandatory | Reject plaintext `http://` or unencrypted gRPC targets regardless of protocol choice — TLS 1.2+ (prefer 1.3), same floor as `security.md` |
-| SSRF guard | Same pattern as the webhook/JWKS receiver design (connections-credentials-design): public addresses only — block RFC1918/loopback/link-local/`169.254.169.254` metadata IP; resolve once, pin the checked IP for the connection (defeats DNS rebinding); no following redirects |
+| SSRF guard *(normative, Gemini condition 2 — expanded)* | A **custom dialer** resolves the hostname once, validates the resulting IP against the blocklist below, and connects **only to that validated IP** — the connector never re-resolves the hostname mid-connection (defeats DNS rebinding by construction, not by a second check). Blocked: IPv4 RFC1918 (`10/8`, `172.16/12`, `192.168/16`), loopback (`127/8`, `::1`), link-local (`169.254/16`, `fe80::/10`), the `169.254.169.254` cloud metadata address specifically, IPv6 unique-local (`fc00::/7`), and IPv4-mapped IPv6 addresses (`::ffff:0:0/96`) — checked against the *decoded* IPv4 form, not the outer IPv6 literal, since that's the classic mapped-address bypass. No redirect following at the HTTP client layer (OTLP export doesn't need it and redirects are a re-resolution vector). Same pattern/precedent as the webhook/JWKS receiver design (connections-credentials-design), now stated as the literal blocklist rather than by reference |
 | Optional allowlist | Tenant admin may additionally restrict to a specific host/domain suffix |
 | Size/rate budget | Independent per-tenant byte/record budget (SS4), separate from the global export budget |
 | PII scrubbing | Identical sanitize path as SS3.1 — no separate, weaker path for the tenant destination |
@@ -181,6 +201,8 @@ At ~300 tenants × N service replicas (`svc_process`, `svc_action`, `svc_ingest`
 
 **Recommendation: Option B.** Isolates the SSRF/backoff/cardinality blast radius to one component instead of duplicating it across 4+ Rust services, and is the only option whose cost doesn't scale with pod count. Exact collector choice (OTel Collector contrib `routing` connector vs. a small purpose-built forwarder) is an implementation-phase decision, not a blocker here.
 
+**Runtime isolation *(normative, Gemini condition 7):*** whichever option ships, per-tenant exporters run on a dedicated Tokio runtime (or a bounded task pool separate from the runtime serving bundle invokes/host-calls) — a slow or backed-up tenant exporter competing for the same scheduler as invoke-handling tasks is exactly the "dead exporter breaks the app" failure mode this spec's global-telemetry rule already forbids, now stated for the per-tenant case explicitly. The global exporter (`penguin_logging`'s existing OTLP pipeline) already runs off the request-handling hot path; the per-tenant forwarder (Option B) gets the same treatment as its own process/pool, not folded into a service's primary runtime.
+
 ---
 
 ## 4. Protections and filtering (all host-side)
@@ -188,9 +210,9 @@ At ~300 tenants × N service replicas (`svc_process`, `svc_action`, `svc_ingest`
 | Protection | Mechanism |
 |---|---|
 | Declared-only instruments/labels | `metrics.*` calls checked against the manifest's `telemetry.metrics` block (SS1.3) before anything else; undeclared instrument → `not-declared` error + `waddles.telemetry.rejected_total{app_id, reason="undeclared_instrument"}` counter, never forwarded |
-| Label cardinality cap | ≤4 label keys/instrument (manifest cap, SS1.3), ≤100 distinct label-value combinations per `(tenant, app, instrument)` — deny-new-series-when-full (existing series keep updating; a brand-new combination is dropped + counted), not an unbounded LRU |
-| Value sanitization & length caps | Label values: strip control chars, cap 128 bytes, reject non-UTF8; log messages: existing `sanitize_bundle_log_message` pipeline (control-char strip, `SENSITIVE_KEYS` redaction, 4096-char cap) |
-| PII/secret scrubbing | Reuses `penguin_logging::sanitize::sanitize_object`'s `SENSITIVE_KEYS` rule for every `fields-json`/label map; additionally regex-scrubs email-shaped, phone-shaped, and token-shaped (`^[A-Za-z0-9_-]{20,}$` bearer-token heuristic) values wherever they appear, not just under a sensitive key name; UUID-shaped values pass through unredacted (they're already the platform's tokenized identity form) |
+| Label cardinality cap *(normative, Gemini condition 1 — expanded)* | ≤4 label keys/instrument (manifest cap, SS1.3). Per `(tenant, app, instrument)`, a **bounded-memory tracker** (fixed-capacity map, ≤100 entries) holds the active label-value combinations with a per-entry hit counter; a new combination arriving at capacity **evicts the least-frequently-used entry** (LFU, not blind deny-new) rather than permanently locking in whichever 100 combinations happened to appear first — a bundle with a slowly-shifting label distribution (e.g. daily `pond` rotation) doesn't get stuck reporting stale series forever. The tracker's window resets **hourly** (counts zeroed, eviction candidacy re-established), bounding both memory (fixed capacity, never unbounded growth) and the lifetime of any one LFU ranking. An evicted/rejected combination's data point is dropped + counted (`rejected_total{reason="cardinality_evicted"}`), never forwarded |
+| Value sanitization & length caps | Label values: strip control chars (same expanded set as §2.4: C0 minus encoded `\n`, C1, DEL, ESC, Unicode bidi overrides), cap 128 bytes, reject non-UTF8; log messages: existing `sanitize_bundle_log_message` pipeline, same expanded strip, `SENSITIVE_KEYS` redaction, 4096-char cap |
+| PII/secret scrubbing *(normative, Gemini condition 4 — reordered)* | **Primary boundary:** the manifest's `logs.fields` allowlist (SS1.3) — any `fields-json` key not declared is dropped before anything else runs, full stop; this is the actual security boundary, not a courtesy filter. **Defense in depth, applied to every declared field's value and to `message`:** (1) `penguin_logging::sanitize::sanitize_object`'s `SENSITIVE_KEYS` rule; (2) regex scrub for email-shaped, phone-shaped, and token-shaped (`^[A-Za-z0-9_-]{20,}$`) values wherever they appear, not just under a sensitive key name; (3) a **high-entropy string check** (Shannon entropy above a threshold tuned against the platform's own UUID/token corpus) on any remaining string value — a high-entropy hit is redacted (replaced with `<redacted:high-entropy>`) rather than silently passed, on the reasoning that an unrecognized secret shape is more likely than an unrecognized benign one at that entropy level; UUID-shaped values are explicitly exempted from the entropy check (they're already the platform's tokenized identity form and would otherwise false-positive on every message) |
 | Per-invocation budget | ≤50 log lines / invoke, ≤200 metric calls / invoke — exceeding either drops the remainder of that invoke's telemetry, counted, never fails the invoke itself |
 | Per-app rate limit & byte budget | Token-bucket per `(tenant, app_id)` — e.g. 500 log lines/min, 2000 metric points/min, 256 KiB/min — reuses the existing `UsageBatcher` primitive (`core/svc_action/src/usage.rs`) pattern already used for `relay`/`moderation`; excess → drop-oldest + `waddles.telemetry.dropped_total{app_id, reason="rate_limited"}` |
 | Log-level ceiling | Resolved through the existing 3-tier config (`bundle-context.config-json`) as reserved keys `_telemetry.log_level_ceiling` (default `info`) and `_telemetry.log_level_expires_at`; a community/tenant admin can raise the ceiling to `debug` only with an expiry (auto-reverts to `info`); the host clamps `effective_level = min(bundle_requested_level, ceiling)` — a bundle can never self-escalate |
@@ -234,6 +256,16 @@ Tenant/community/app ids are **never** taken from the request body for scoping p
 
 **Backend requirement:** the OTLP backend behind these reads must support this filtering natively (native multi-tenant query isolation), **or** hub-api needs its own scoped query path independent of the raw backend. If the chosen backend is external/customer-chosen and doesn't support server-side tenant/community filtering, hub-api must maintain a per-tenant (or per-community) log/metric index (or a narrower internal mirror keyed by `tenant_id`/`community_id`/`app_id`) that these endpoints query instead of trusting the backend's own access controls — this queryable store is independent of, and unaffected by, whether a tenant also configured their own external OTel destination (SS3): a tenant losing/misconfiguring their own destination never removes the platform's internal visibility.
 
+**Data residency (normative, Gemini condition 8):** the internal mirror above is a retention decision, not just a query-path one.
+
+| Requirement | Detail |
+|---|---|
+| TTL cap on the internal mirror | Every record in the internal telemetry mirror (bundle logs/metrics, regardless of tenant) expires and is purged after a fixed retention window (default 30 days, config-tunable) — the mirror is an operational/support store, never an indefinite archive; this bounds both storage cost and the data-residency exposure this condition is about |
+| Enterprise tenant opt-out | A tenant admin on an Enterprise-tier tenant may disable the internal mirror **for their tenant** entirely — once disabled, no new bundle telemetry for that tenant is written to the internal mirror (existing rows still age out under the TTL above; this is an opt-out of future collection, not a right-to-erasure mechanism, which is handled elsewhere per `critical-rules.md` PII Tokenization's statutory-rights carve-out) |
+| hub-webui reflects the opt-out | With the internal mirror disabled, that tenant's telemetry tab in hub-webui is hidden (not shown-but-empty — the distinction matters: an empty tab reads as "no telemetry occurred," a hidden tab correctly reads as "this tenant chose not to collect it here") |
+| Global export unaffected | The opt-out only removes the *internal mirror* copy; if the tenant separately runs their own per-tenant OTLP destination (SS3, also Enterprise), that fan-out is untouched — a tenant can have their own external destination while opting out of the platform's internal copy, and vice versa |
+| Gating | Same two-gate pattern as SS3.6: `get_tier() == "enterprise"` plus a PostHog flag, default OFF; domain-bypass only, never an env var/CLI toggle |
+
 ---
 
 ## 7. Cost and cardinality math (~300 tenants, ~20,000 communities, ~10,000 channels)
@@ -271,8 +303,13 @@ This is the number a naive "apply the per-instrument cap independently per tenan
 | Negative: rate limit | Bundle exceeds its per-invoke log-line budget (SS4) → excess lines dropped, `dropped_total{reason="rate_limited"}` increments, invoke itself still succeeds | FAIL if the invoke errors, or if excess lines reach the sink |
 | Negative: cross-tenant leak (SS3.4) | Tenant A configures a per-tenant destination; tenant B's bundle telemetry is generated; tenant A's destination sink receives zero records tagged `tenant=B` | FAIL on any leaked record |
 | Negative: tier lapse | Enterprise flag flipped OFF mid-run for a tenant with a configured destination → tenant fan-out stops within one poll cycle, global export continues uninterrupted, config row untouched | FAIL if tenant export continues, or if global export is disrupted |
+| Yield-across-threads (Gemini condition 6) | Drive two concurrent invokes for different tenants on a multi-threaded Tokio test runtime, forcing task migration across worker threads mid-invoke (e.g. via an intentional `.await` on a cross-thread-scheduled future) → each invoke's `metrics`/`log` calls are still attributed to its own `InvokeScope` after the migration | FAIL if either invoke's telemetry is attributed to the other tenant/app after a thread hop |
+| Cardinality eviction (Gemini condition 1) | Exceed an instrument's 100-combination cap with a shifting label distribution over a simulated multi-hour run → tracker memory stays bounded, LFU eviction occurs (not blind rejection of all new combinations), hourly reset observed | FAIL on unbounded memory growth or on the tracker never admitting a new combination after the first 100 |
+| SSRF: pinned-IP dialer (Gemini condition 2) | Point a tenant destination at a hostname that resolves to a public IP at validation time but a private/metadata IP at connect time (simulated DNS rebinding) → connection is refused, not silently redirected | FAIL if the connection succeeds against the rebound private/metadata address |
+| Log injection (Gemini condition 3) | Bundle logs a message containing a raw `\n`, a bidi-override code point, and an ESC sequence → stored/emitted record contains none of them unescaped; hub-webui rendering test confirms the log entry displays as inert text, not interpreted markup/control sequence | FAIL if any of the three reaches the sink un-neutralized, or renders as anything but text in the UI |
+| Data-residency opt-out (Gemini condition 8) | Enterprise tenant disables the internal mirror → no new records for that tenant appear in the mirror after the toggle, hub-webui hides the tab, and the tenant's own external destination (if configured) is unaffected | FAIL if new records still land, the tab still renders, or the external destination stops receiving data |
 
-All counts reported (examined/rejected/scrubbed/dropped), never a bare pass — per `critical-rules.md` Verification Integrity.
+All counts reported (examined/rejected/scrubbed/dropped/evicted), never a bare pass — per `critical-rules.md` Verification Integrity.
 
 ---
 
@@ -285,21 +322,28 @@ All counts reported (examined/rejected/scrubbed/dropped), never a bare pass — 
 | 0 | Add `telemetry.logs`/`telemetry.metrics` to the permission catalog module (SS5) | Rust (`bundle_capability_gate`) | permissions spec Phase 0 |
 | 1 | `#[tracing::instrument]` on `Connection::invoke` (SS2.3) in `svc_process`; span-event bridge for `log.write` | Rust (svc_process) | Phase 0 |
 | 1 | Same for `svc_action` | Rust (svc_action) | Phase 0 |
-| 1 | Manifest `logs.fields` allowlist enforcement + log-level-ceiling config keys (SS2.4, SS4) | Rust (both stages) | Phase 0 |
+| 1 | Manifest `logs.fields` allowlist enforcement (as the *primary* scrub boundary, Gemini condition 4) + expanded control-char/bidi-override strip (Gemini condition 3) + log-level-ceiling config keys (SS2.4, SS4) | Rust (both stages) | Phase 0 |
+| 1 | `InvokeScope` threaded via explicit argument or `tokio::task_local!`, never thread-local, through every capability-handler call path (Gemini condition 6) | Rust (both stages) | Phase 0 |
 | 2 | `metrics::Host` impl in `bundle_executor/src/host/imports.rs` bridging to `CapabilityKind::Metrics`; declared-instrument/label validation host-side (SS4) | Rust (bundle_executor) | Phase 0 |
-| 2 | `handle_metrics` in `svc_process`/`svc_action` `capabilities.rs`: counter/gauge/histogram emission via `penguin_logging`'s meter, per-instrument cardinality cap (SS4) | Rust (both stages) | previous task |
+| 2 | `handle_metrics` in `svc_process`/`svc_action` `capabilities.rs`: counter/gauge/histogram emission via `penguin_logging`'s meter | Rust (both stages) | previous task |
+| 2 | Bounded-memory, LFU-eviction, hourly-reset cardinality tracker per instrument (Gemini condition 1) | Rust (both stages) | previous task |
+| 2 | High-entropy string check as scrubbing layer 3, behind the `logs.fields` allowlist + regex layers (Gemini condition 4) | Rust (both stages) | Phase 1 |
 | 2 | Per-app/(tenant,app) rate limiter + byte budget reusing `UsageBatcher` (SS4) | Rust (both stages) | previous task |
 | 3 | Aggregate per-app platform-wide cardinality cap (SS7 backstop) | Rust (both stages) | Phase 2 |
 | 4 | `tenant_otel_destinations` migration + hub-api CRUD (`tenant:admin`) with header encryption via existing tenant DEK (SS3.3) | hub-api | tenant-envelope-encryption design |
 | 4 | Data-plane hot-swap of `TenantExporterSnapshot` into existing `BUNDLE_CONFIG_POLL_SECONDS` loop | Rust (both stages) | previous task |
-| 5 | Shared telemetry-forwarder (Option B, SS3.7): per-tenant routing rule, bounded queue/backoff, SSRF guard | Rust or Collector config | Phase 4 |
-| 5 | Per-tenant export metrics (`sent`/`dropped`/`errors`/`queue_depth`, SS3.4) | Rust (forwarder) | previous task |
+| 5 | Shared telemetry-forwarder (Option B, SS3.7) on its own dedicated runtime/pool (Gemini condition 7): per-tenant routing rule, per-tenant actor isolation, bounded queue/backoff | Rust or Collector config | Phase 4 |
+| 5 | Custom pinned-IP SSRF dialer with the full blocklist (Gemini condition 2) | Rust (forwarder) | previous task |
+| 5 | Final-serialization tenant-id assertion + alert-on-mismatch (Gemini condition 5) | Rust (forwarder) | previous task |
+| 5 | Per-tenant export metrics (`sent`/`dropped`/`errors`/`queue_depth`/`assertion_failed`, SS3.4) | Rust (forwarder) | previous task |
 | 5 | `get_tier()`/PostHog `waddles.tenant-otel-export` gate + graceful tier-lapse handling (SS3.6) | Rust (forwarder) + hub-api | previous task |
-| 6 | hub-webui: tenant OTel destination config screen + Enterprise-lapse banner | React | Phase 4 |
+| 6 | hub-webui: tenant OTel destination config screen + Enterprise-lapse banner; render bundle log content as escaped/untrusted text (Gemini condition 3) | React | Phase 4 |
+| 6 | Internal-mirror TTL purge job + Enterprise opt-out toggle + tab-hiding (Gemini condition 8) | hub-api + React | Phase 0 |
 | 7 | hub-api scoped read endpoints (SS6): global/tenant/community/vendor | hub-api | Phase 2 |
 | 7 | hub-webui: telemetry views per role (SS6) | React | previous task |
 | 8 | Smoke test: telemetry gate (SS8 row 1) | Rust/CI | Phase 2 |
 | 8 | Negative tests: undeclared label, PII scrub, rate limit, cross-tenant leak, tier lapse (SS8 rows 2-6) | Rust/CI | Phase 5, Phase 7 |
+| 8 | Gemini-condition tests: yield-across-threads, cardinality eviction, SSRF pinned-IP/rebinding, log injection/rendering, data-residency opt-out (SS8, remaining rows) | Rust/CI + Playwright | Phase 2, Phase 5, Phase 6 |
 
 Phases 0-3 (WIT + catalog + emission + host-side gate) have no dependency on Phase 4-6 (tenant fan-out) and can land and ship independently — per-tenant export is a pure Enterprise add-on to an already-complete global telemetry path.
 
@@ -308,5 +352,5 @@ Phases 0-3 (WIT + catalog + emission + host-side gate) have no dependency on Pha
 ## 10. Open questions (not blockers, flagged for follow-up)
 
 - **OTLP backend product choice** — this spec is backend-agnostic by design (`critical-rules.md`: destination always configurable); whether the platform's own default (e.g. Killkrill, if adopted) is used for the global destination, and whether it natively supports the tenant/community filtering SS6 requires, is a separate infra decision this spec doesn't block on.
-- **Exact quota numbers** (SS4/SS5 defaults: 100 series/instrument, 500 lines/min, 2,000 points/min, 2,000-series/app aggregate cap) are starting points, not load-tested — Phase 3/8 should tune them against real fixture load before the aggregate cap ships as a hard gate.
+- **Exact quota numbers** (SS4/SS5 defaults: 100 series/instrument, hourly LFU-reset window, 500 lines/min, 2,000 points/min, 2,000-series/app aggregate cap, high-entropy threshold, internal-mirror TTL default of 30 days) are starting points, not load-tested — Phase 3/8 should tune them against real fixture load before the aggregate cap ships as a hard gate.
 - **Shared forwarder implementation** (SS3.7 Option B) — OTel Collector contrib `routing`/`groupbyattrs` processors vs. a small purpose-built Rust forwarder is an implementation-phase call, not designed further here.
