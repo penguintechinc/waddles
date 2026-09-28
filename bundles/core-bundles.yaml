@@ -30,8 +30,13 @@
 platform_connections: []
 
 bundles:
+  # 1.0.0 is permanently retired -- fix/core-bundle-reproducible-ping. The alpha DB already
+  # has an app_versions row for this app_id@1.0.0 published from a non-reproducible build, and
+  # app_versions is immutable per (app_id, version); see bundles/rust/ping/hub-manifest.yaml's
+  # own comment for the full story. 1.0.1 is the first version built with
+  # bundles/Dockerfile.core-bundles's reproducibility pins.
   - app_id: waddles.core.example.ping
-    version: "1.0.0"
+    version: "1.0.1"
     language: rust
     manifest_path: ping.manifest.yaml
     artifact_path: ping.wasm

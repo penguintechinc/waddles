@@ -336,6 +336,11 @@ async def test_seed_one_same_version_different_digest_is_refused(
         await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
     assert excinfo.value.status_code == 409
     assert excinfo.value.code == "digest_conflict"
+    # The message is the operator's only signal when this fires from a Helm hook Job log --
+    # it must say what happened and exactly what to do, not just carry a machine code.
+    assert "ACTION REQUIRED" in excinfo.value.message
+    assert "bundles/core-bundles.yaml" in excinfo.value.message
+    assert "immutable" in excinfo.value.message
 
 
 # ---------------------------------------------------------------------------
@@ -563,6 +568,129 @@ async def test_run_examines_every_catalog_entry_and_reports_a_nonzero_exit_on_an
         & (install_dal.bundle_tenant_availability.available == True)  # noqa: E712
     ).select()
     assert len(available) == 1  # the one good bundle still seeded successfully
+
+
+def _patch_run_dependencies(install_dal: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same `_run()`-level plumbing `test_run_examines_every_catalog_entry_...` sets up."""
+
+    async def _fake_build_install_dal(database_url: str, pool_size: int) -> Any:
+        return install_dal
+
+    class _FakeConfig:
+        database_url = "sqlite://"
+
+    monkeypatch.setattr(seeder, "build_install_dal", _fake_build_install_dal)
+    monkeypatch.setattr(seeder.HubAPIConfig, "from_env", staticmethod(lambda: _FakeConfig()))
+    monkeypatch.setattr(install_dal, "close", AsyncMock())
+    from services import bundle_version_service as bvs_module
+
+    monkeypatch.setattr(bvs_module.valkey_admin_client, "build_client", lambda: AsyncMock())
+
+
+async def test_run_rerun_with_the_same_digest_is_a_clean_no_op_at_process_level(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact Helm-hook re-run scenario: same catalog, same artifact, run twice.
+
+    Regression scope: a re-run of an already-seeded core bundle (e.g. a Helm
+    post-upgrade hook firing again with no new artifact) must exit 0, never be treated as
+    a failure -- see module docstring's Idempotency section.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    _patch_run_dependencies(install_dal, monkeypatch)
+
+    _write_bundle(tmp_path)
+    catalog_path = tmp_path / "core-bundles.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(
+            {
+                "bundles": [
+                    {
+                        "app_id": "waddles.core.example.ping",
+                        "version": "1.0.0",
+                        "language": "rust",
+                        "manifest_path": "ping.manifest.yaml",
+                        "artifact_path": "ping.wasm",
+                        "activation_targets": [{"tenant_slug": TENANT_SLUG}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    first_exit = await seeder._run(tmp_path, catalog_path)
+    second_exit = await seeder._run(tmp_path, catalog_path)
+
+    assert first_exit == 0
+    assert second_exit == 0  # idempotent re-run: no-op, not a failure
+
+    versions = await install_dal(
+        install_dal.app_versions.app_id == "waddles.core.example.ping"
+    ).select()
+    assert len(versions) == 1  # never republished
+
+
+async def test_run_reports_a_clear_digest_conflict_and_nonzero_exit(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A different-digest re-seed at the same version fails loudly, exit 1, clear log line.
+
+    Guards against the exact operator-facing regression this fix closes: `str(ApiError(...))`
+    renders as a raw `(message, status_code, code)` args tuple (ApiError has no
+    `Exception.__init__()` call, see services/errors.py) unless `_run()` special-cases
+    `ApiError` and logs `.message`/`.code` directly -- assert the log record actually carries
+    the human-readable message and the `digest_conflict` code, not the tuple repr.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    _patch_run_dependencies(install_dal, monkeypatch)
+
+    entry = _write_bundle(tmp_path)
+    catalog_path = tmp_path / "core-bundles.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(
+            {
+                "bundles": [
+                    {
+                        "app_id": entry.app_id,
+                        "version": entry.version,
+                        "language": "rust",
+                        "manifest_path": "ping.manifest.yaml",
+                        "artifact_path": "ping.wasm",
+                        "activation_targets": [{"tenant_slug": TENANT_SLUG}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    first_exit = await seeder._run(tmp_path, catalog_path)
+    assert first_exit == 0
+
+    # Simulate the real alpha incident: a different digest shows up under the SAME
+    # catalog version string (e.g. a non-reproducible build drifting between runs).
+    (tmp_path / "ping.wasm").write_bytes(_COMPONENT_BYTES + b"-drifted")
+
+    with caplog.at_level("ERROR", logger="waddles.hub_api.core_bundle_seeder"):
+        second_exit = await seeder._run(tmp_path, catalog_path)
+
+    assert second_exit == 1  # fail-closed: never silently overwrites app_versions
+
+    conflict_records = [
+        r
+        for r in caplog.records
+        if r.getMessage() == "core-bundle-seeder: bundle failed" and r.app_id == entry.app_id
+    ]
+    assert conflict_records, "expected a logged failure for the conflicting bundle"
+    record = conflict_records[0]
+    assert record.error_code == "digest_conflict"
+    assert record.status_code == 409
+    assert "ACTION REQUIRED" in record.error
+    assert "DIFFERENT digest" in record.error
 
 
 # ---------------------------------------------------------------------------

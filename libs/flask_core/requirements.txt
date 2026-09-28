@@ -1407,6 +1407,10 @@ pathspec==1.1.1 \
     # via
     #   black
     #   mypy
+penguin-dal==0.4.1 \
+    --hash=sha256:0777d5c3af484ccdfa4bbc7f8ba1fef1b14d57af86d2ef88f67d73ec139920d4 \
+    --hash=sha256:ef72e513c47d74868e2f99fa69009d529eeea8172d4d4459b0b6b14b0c3a6188
+    # via -r requirements.in
 penguin-licensing==0.1.0 \
     --hash=sha256:58dba3c178f609e511e88db69963a26eeaf15de506f713ffa66772463829e686 \
     --hash=sha256:8cc33381eb9450081a15607439a9506f27867c97eabaa8820b006607de35950f
@@ -1843,6 +1847,7 @@ sqlalchemy==2.0.52 \
     #   -r requirements.in
     #   alembic
     #   flask-sqlalchemy
+    #   penguin-dal
 structlog==26.1.0 \
     --hash=sha256:e081a26d6c373e6d201eca24eede26d8ffab07f88f477822e679183428d3d91e \
     --hash=sha256:f63a716cbd1b1291cf7661de7794b455acfa4c43c5bcf1630e6ad5ddc1adb3b7
