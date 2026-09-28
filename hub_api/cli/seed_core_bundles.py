@@ -71,6 +71,7 @@ from services import vendor_bundle_authz
 from services.bundle_approval_service import activate_for_community, install_version_globally
 from services.bundle_install_dal import build_install_dal, raw_sql_write
 from services.bundle_manifest_v2 import BundleManifestV2, parse_bundle_manifest_v2
+from services.bundle_permission_service import seed_core_permission_requests
 from services.bundle_telemetry import get_meter
 from services.bundle_version_service import create_version, process_prebuilt_component
 from services.errors import ApiError
@@ -567,6 +568,13 @@ async def seed_one(
             version=entry.version,
             installed_by=None,
             install_source=SYSTEM_ACTOR,
+        )
+        # spec Sec3.6: pre-grant every permission this core bundle's manifest
+        # declares -- same SYSTEM-actor convention as the install above.
+        # `_guard_core_namespace()` (top of this function) already hard-
+        # guards `entry.app_id` to CORE_NAMESPACE_PREFIX before any DB write.
+        await seed_core_permission_requests(
+            install_dal, app_id=entry.app_id, version=entry.version, manifest=manifest
         )
 
     results: list[SeedResult] = []

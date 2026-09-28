@@ -1458,6 +1458,73 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("updated_by", Integer),
         Column("updated_at", DateTime),
     )
+    # app_permission_requests / app_tenant_permission_restrictions /
+    # community_permission_grants / app_permission_grant_versions /
+    # bundle_reputation_adjustments (migration 0032) -- sqlite-compatible
+    # mirror of the Bundle Permissions & Capability Gate grant-storage
+    # tables (services/bundle_permission_service.py).
+    Table(
+        "app_permission_requests",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("app_id", String(255), nullable=False),
+        Column("version", String(50), nullable=False),
+        Column("permission_id", String(255), nullable=False),
+        Column("risk", String(20), nullable=False),
+        Column("params_json", JSON, server_default="{}"),
+        Column("justification", Text, nullable=False),
+        Column("approved_by", Integer),
+        Column("approval_source", String(50), server_default="human"),
+        Column("approved_at", DateTime),
+    )
+    Table(
+        "app_tenant_permission_restrictions",
+        metadata,
+        Column("tenant_id", Integer, nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("permission_id", String(255), nullable=False),
+        Column("restricted_by", Integer),
+        Column("restricted_at", DateTime),
+    )
+    Table(
+        "community_permission_grants",
+        metadata,
+        Column("community_id", Integer, nullable=False),
+        Column("tenant_id", Integer, nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("permission_id", String(255), nullable=False),
+        Column("params_json", JSON, server_default="{}"),
+        Column("granted_by", Integer),
+        Column("granted_at", DateTime),
+        Column("revoked_by", Integer),
+        Column("revoked_at", DateTime),
+    )
+    Table(
+        "app_permission_grant_versions",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer, nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("version", String(50), nullable=False),
+        Column("grant_version", Integer, nullable=False),
+        Column("permission_snapshot_hash", String(71), nullable=False),
+        Column("effective_at", DateTime),
+    )
+    Table(
+        "bundle_reputation_adjustments",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("app_id", String(255), nullable=False),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer),
+        Column("target_user_uuid", String(36), nullable=False),
+        Column("scope", String(20), nullable=False),
+        Column("delta", Integer, nullable=False),
+        Column("reason_code", String(100), nullable=False),
+        Column("occurred_at", DateTime),
+        Column("reversal_of", BigInteger),
+    )
     # `audit_log` is a pre-existing production table (services/schema.py's
     # `bind_admin_tables()`), reflected here as its sqlite-compatible
     # mirror because this fixture has no full pydal schema bootstrap --
