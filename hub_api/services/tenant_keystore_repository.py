@@ -3,7 +3,7 @@
 Uses a dedicated `asyncpg` pool (see `config.py::keystore_database_url`,
 `app.py` startup) authenticated as hub-api's own key-store role, never
 the shared `dal`/`async_dal` connection used for application tables --
-that separation is the point of migration 0027 (own schema, own backup
+that separation is the point of migration 0035 (own schema, own backup
 policy, own grants).
 """
 

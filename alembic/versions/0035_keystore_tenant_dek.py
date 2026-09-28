@@ -15,13 +15,22 @@ needed). `key_tombstones` is the durable, append-only crypto-shred record
 serving traffic; that reconciliation is an operational runbook step, not
 something this migration can enforce.
 
-NOTE: this repo's `alembic/versions/` head at branch-cut time was
-`0026_app_install_approval_source` -- the `0034`/next-number instruction
-in this feature's task brief assumes other in-flight numbered migrations
-(e.g. the sibling `connections-credentials-design` work) that hadn't
-landed on this branch yet. Numbered `0027` here to stay contiguous with
-what actually exists on `release/v3.0.X`; **renumber this file if it
-collides with another migration merged first.**
+NOTE: this repo's `alembic/versions/` head as seen on this worktree's
+checkout of `release/v3.0.X` was `0026_app_install_approval_source`, but
+the chain is actually queued through `0034_upload_abandoned_status`
+(other in-flight numbered migrations, e.g. the sibling
+`connections-credentials-design` work, not yet visible on this branch).
+Numbered `0035` and chained off `0034_upload_abandoned_status` per that
+queue; **renumber and re-chain this file if the merged order at PR-merge
+time differs from what's assumed here** (i.e. if `0034_upload_abandoned_
+status` lands under a different number, or something else lands after it
+first).
+
+The id is abbreviated to `0035_keystore_tenant_dek` (not the more
+descriptive `..._tenant_encryption_keys`) to stay under
+`alembic_version.version_num`'s VARCHAR(32) column -- same constraint
+that already shortened 0011's `communities_license_cols` and 0020's
+`ingest_sources_rbac` in this same `versions/` directory.
 
 RBAC (rbac-matrix.yaml, out of scope for this migration file itself):
 hub-api's dedicated key-store role gets SELECT/INSERT/UPDATE on both
@@ -30,8 +39,8 @@ svc_ingest/svc_action/svc_process, webui, migration_runner) gets
 `privileges: []` -- identical posture to `connection_credentials`,
 extended to the schema boundary.
 
-Revision ID: 0027_keystore_tenant_encryption_keys
-Revises: 0026_app_install_approval_source
+Revision ID: 0035_keystore_tenant_dek
+Revises: 0034_upload_abandoned_status
 Create Date: 2026-09-28
 """
 
@@ -39,8 +48,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0027_keystore_tenant_encryption_keys"
-down_revision = "0026_app_install_approval_source"
+revision = "0035_keystore_tenant_dek"
+down_revision = "0034_upload_abandoned_status"
 branch_labels = None
 depends_on = None
 

@@ -45,6 +45,15 @@ httpx>=0.27.0,<0.28.0
 # floor was raised.
 cryptography>=44.0.1,<51.0.0
 
+# Tenant-DEK broker (services/tenant_keystore.py, docs/superpowers/specs/
+# 2026-09-28-tenant-envelope-encryption-design.md): `[crypto]` extra pulls
+# in the `cryptography` dep above for `penguin_security.crypto.envelope`'s
+# KEK providers (`LocalSecretKek`, `AwsKmsKek`) -- exact pin per
+# critical-rules.md Dependency Pinning; PenguinTech package, still pinned
+# exactly rather than left unpinned, since this branch targets a beta+
+# release (release/v3.0.X), not alpha-only.
+penguin-security[crypto]==0.1.1
+
 # M2b workstreams/usage-metering group (spec Sec5.11/Sec5.12, D30/D31):
 # penguin-dal (R52 coordinator ruling, "we aren't using pydal anymore for
 # new tables... instead we are running penguin-dal") is the runtime

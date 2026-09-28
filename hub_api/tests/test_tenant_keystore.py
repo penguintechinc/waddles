@@ -9,6 +9,7 @@ import pytest
 
 from services.tenant_keystore import (
     USAGE_CAP,
+    CustomerKmsKekProvider,
     K8sSecretKekProvider,
     TenantDekRecord,
     TenantKeyNotFound,
@@ -190,3 +191,62 @@ def test_no_key_material_in_record_repr() -> None:
     # site can ever accidentally print unwrapped key material from it.
     assert not hasattr(record, "dek")
     assert not hasattr(record, "plaintext_dek")
+
+
+class _FakeKmsClient:
+    """Minimal fake matching `AwsKmsKek`'s `_KmsClient` structural protocol.
+
+    Enforces `EncryptionContext` equality between `encrypt`/`decrypt`, same
+    as real AWS KMS, so `CustomerKmsKekProvider`'s cross-tenant-context
+    rejection is exercised without a live AWS account.
+    """
+
+    def __init__(self, key_arn: str = "arn:aws:kms:us-east-1:123456789012:key/fake") -> None:
+        self._key_arn = key_arn
+
+    def describe_key(self, *, KeyId: str) -> dict[str, object]:  # noqa: N803
+        return {"KeyMetadata": {"Arn": self._key_arn}}
+
+    def encrypt(
+        self,
+        *,
+        KeyId: str,  # noqa: N803
+        Plaintext: bytes,  # noqa: N803
+        EncryptionContext: dict[str, str],  # noqa: N803
+    ) -> dict[str, object]:
+        blob = Plaintext.hex().encode() + b"::" + repr(EncryptionContext).encode()
+        return {"CiphertextBlob": blob}
+
+    def decrypt(
+        self,
+        *,
+        CiphertextBlob: bytes,  # noqa: N803
+        KeyId: str,  # noqa: N803
+        EncryptionContext: dict[str, str],  # noqa: N803
+    ) -> dict[str, object]:
+        pt_hex, _sep, stored_ctx_repr = CiphertextBlob.partition(b"::")
+        if stored_ctx_repr != repr(EncryptionContext).encode():
+            raise ValueError("EncryptionContext mismatch -- simulated KMS InvalidCiphertext")
+        return {"KeyId": self._key_arn, "Plaintext": bytes.fromhex(pt_hex.decode())}
+
+
+async def test_customer_kms_kek_round_trip() -> None:
+    """`CustomerKmsKekProvider` wraps/unwraps via the (fake) `AwsKmsKek` client."""
+    provider = CustomerKmsKekProvider(key_id="alias/tenant-kek", kms_client=_FakeKmsClient())
+    dek = b"\x02" * 32
+    wrapped = await provider.wrap(1, dek)
+    assert wrapped != dek
+    assert await provider.unwrap(1, wrapped) == dek
+
+
+async def test_customer_kms_kek_cross_tenant_denied() -> None:
+    """A DEK wrapped for tenant 1 fails to unwrap under tenant 2's context."""
+    provider = CustomerKmsKekProvider(key_id="alias/tenant-kek", kms_client=_FakeKmsClient())
+    wrapped = await provider.wrap(1, b"\x03" * 32)
+    with pytest.raises(ValueError, match="EncryptionContext mismatch"):
+        await provider.unwrap(2, wrapped)
+
+
+def test_customer_kms_kek_ref_is_key_id() -> None:
+    provider = CustomerKmsKekProvider(key_id="arn:aws:kms:us-east-1:123456789012:key/fake")
+    assert provider.ref(tenant_id=1) == "arn:aws:kms:us-east-1:123456789012:key/fake"
