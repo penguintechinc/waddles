@@ -192,6 +192,7 @@ aes-gcm = "=0.10.3"
 hkdf = "=0.12.4"
 base64 = "=0.22.1"
 zeroize = { version = "=1.8.1", features = ["derive"] }
+x25519-dalek = { version = "=2.0.1", features = ["getrandom"] }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"

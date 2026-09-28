@@ -298,6 +298,35 @@ mod tests {
         }
     }
 
+    /// Decrypts a `publish_event`-encrypted payload field back to
+    /// plaintext for test assertions -- `stream`/`env.event_id` come from
+    /// the captured `EventAppender::append` call itself, so this stays
+    /// correct regardless of how `source_stream`/`event_id` are derived;
+    /// the DEK is [`FakeDekProvider`]'s fixed test key.
+    fn decrypt_test_payload_field(
+        stream: &str,
+        env: &penguin_spine::StageEnvelope,
+        field: &str,
+    ) -> String {
+        let raw = env
+            .event
+            .payload
+            .get(field)
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("payload.{field} missing"));
+        let envelope: crate::identity_crypto::JsonEnvelope = serde_json::from_str(raw).unwrap();
+        let dek = zeroize::Zeroizing::new([9u8; 32]);
+        crate::identity_crypto::decrypt_identity_value(
+            &envelope,
+            &dek,
+            "acme",
+            stream,
+            field,
+            &env.event_id,
+        )
+        .unwrap()
+    }
+
     fn test_identity_metrics() -> prometheus::IntCounterVec {
         prometheus::IntCounterVec::new(
             prometheus::Opts::new("test_twitch_identity_encryption_total", "test-only"),
@@ -464,13 +493,8 @@ mod tests {
             "waddles:t:acme:c:_tenant:src:twitch:tw-somechannel:events"
         );
         assert_eq!(
-            calls[0]
-                .1
-                .event
-                .payload
-                .get("text")
-                .and_then(|v| v.as_str()),
-            Some("hello")
+            decrypt_test_payload_field(&calls[0].0, &calls[0].1, "text"),
+            "hello"
         );
         assert_eq!(calls[0].1.workstream_id, calls[1].1.workstream_id);
     }
@@ -512,13 +536,8 @@ mod tests {
         let calls = appender.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "the self-echoed message must not publish");
         assert_eq!(
-            calls[0]
-                .1
-                .event
-                .payload
-                .get("text")
-                .and_then(|v| v.as_str()),
-            Some("real")
+            decrypt_test_payload_field(&calls[0].0, &calls[0].1, "text"),
+            "real"
         );
     }
 

@@ -10,7 +10,7 @@
 //! envelope.
 //!
 //! **Integration point (documented, not yet wired):** PR #429 was
-//! unmerged as of this writing. [`decrypt_actor_field`] is this module's
+//! unmerged as of this writing. [`decrypt_identity_fields`] is this module's
 //! pre-stage entry point -- call it immediately before `pii_tokenize`
 //! (or as `pii_tokenize`'s own first step) on every consumed
 //! `penguin_spine::PlatformEvent`, using the *same*
@@ -18,7 +18,7 @@
 //! `StageEnvelope`'s own `tenant`/`event_id` fields plus the granted
 //! ingest-source stream key svc-process is draining -- see
 //! `crate::source_supervisor`). Once #429 lands, its stage should call
-//! [`decrypt_actor_field`] as its first step rather than duplicating this
+//! [`decrypt_identity_fields`] as its first step rather than duplicating this
 //! logic.
 //!
 //! Wire format is identical to the encrypt side -- see that module's doc
@@ -34,7 +34,9 @@ use std::time::{Duration, Instant};
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use base64::Engine;
+use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use zeroize::Zeroizing;
 
 const FORMAT_VERSION: u8 = 1;
@@ -78,7 +80,7 @@ pub struct DekUnavailableError {
     pub reason: String,
 }
 
-/// Errors [`decrypt_identity_value`]/[`decrypt_actor_field`] can return.
+/// Errors [`decrypt_identity_value`]/[`decrypt_identity_fields`] can return.
 #[derive(Debug, thiserror::Error)]
 pub enum IdentityCryptoError {
     #[error(transparent)]
@@ -208,26 +210,78 @@ pub fn decrypt_identity_value(
     envelope_decrypt(&envelope, dek, &aad)
 }
 
+/// `payload` fields carrying the same identity as `actor`, duplicated in by
+/// the Twitch IRC/EventSub normalizers -- byte-identical to
+/// `core/svc_ingest/src/identity_crypto.rs::ACTOR_DUPLICATE_FIELDS` and to
+/// this crate's own `pii_tokenize.rs::ACTOR_DUPLICATE_FIELDS` (once #429
+/// lands). Keep all three lists in sync.
+pub const ACTOR_DUPLICATE_FIELDS: &[&str] =
+    &["author", "display_name", "user_login", "user_display_name"];
+
+/// Twitch EventSub's channel-owner login -- a genuinely different identity
+/// from `actor`. Matches `core/svc_ingest`'s identical constant.
+pub const BROADCASTER_LOGIN_FIELD: &str = "broadcaster_login";
+
+/// The message body -- user content that routinely carries `@handle`/
+/// `<@id>` mentions. Matches `core/svc_ingest`'s identical constant.
+pub const TEXT_FIELD: &str = "text";
+
+/// Every `payload` field this module decrypts when present as a JSON
+/// envelope string -- byte-identical list to
+/// `core/svc_ingest/src/identity_crypto.rs::PAYLOAD_IDENTITY_FIELDS`.
+pub const PAYLOAD_IDENTITY_FIELDS: &[&str] = &[
+    "author",
+    "display_name",
+    "user_login",
+    "user_display_name",
+    "broadcaster_login",
+    "text",
+];
+
 /// **Pre-stage entry point** (see this module's doc comment): decrypts a
-/// consumed `PlatformEvent`'s `actor` field in place, using `dek_provider`
-/// to resolve `tenant_id`'s DEK. A `None` actor is a no-op (nothing to
-/// decrypt). Fails closed on any error -- callers must never fall through
-/// to treating the still-encrypted string as a plaintext username.
-pub async fn decrypt_actor_field<D: DekProvider>(
+/// consumed `PlatformEvent`'s `actor` field plus every
+/// [`PAYLOAD_IDENTITY_FIELDS`] payload field present, in place, resolving
+/// `tenant_id`'s DEK exactly once (the encrypt side used the same DEK for
+/// every field of one event, only the AAD's field name differs). A field
+/// that's absent, or whose value isn't a string, is left untouched. Fails
+/// closed on any error -- callers must never fall through to treating a
+/// still-encrypted string as plaintext.
+pub async fn decrypt_identity_fields<D: DekProvider>(
     event: &mut penguin_spine::PlatformEvent,
     dek_provider: &D,
     tenant_id: &str,
     stream: &str,
     event_id: &str,
 ) -> Result<(), IdentityCryptoError> {
-    let Some(raw) = event.actor.take() else {
+    let has_payload_identity_field = PAYLOAD_IDENTITY_FIELDS.iter().any(|field| {
+        matches!(
+            event.payload.get(*field),
+            Some(serde_json::Value::String(_))
+        )
+    });
+    if event.actor.is_none() && !has_payload_identity_field {
         return Ok(());
-    };
-    let envelope: JsonEnvelope = serde_json::from_str(&raw)
-        .map_err(|e| IdentityCryptoError::NotAnEnvelope(e.to_string()))?;
+    }
+
     let (dek, _dek_version) = dek_provider.get_dek(tenant_id).await?;
-    let plaintext = decrypt_identity_value(&envelope, &dek, tenant_id, stream, "actor", event_id)?;
-    event.actor = Some(plaintext);
+    let decrypt_field = |raw: &str, field: &str| -> Result<String, IdentityCryptoError> {
+        let envelope: JsonEnvelope = serde_json::from_str(raw)
+            .map_err(|e| IdentityCryptoError::NotAnEnvelope(e.to_string()))?;
+        decrypt_identity_value(&envelope, &dek, tenant_id, stream, field, event_id)
+    };
+
+    if let Some(raw) = event.actor.take() {
+        event.actor = Some(decrypt_field(&raw, "actor")?);
+    }
+    for field in PAYLOAD_IDENTITY_FIELDS {
+        let Some(serde_json::Value::String(raw)) = event.payload.get(*field).cloned() else {
+            continue;
+        };
+        let plaintext = decrypt_field(&raw, field)?;
+        event
+            .payload
+            .insert((*field).to_string(), serde_json::Value::String(plaintext));
+    }
     Ok(())
 }
 
@@ -334,14 +388,25 @@ impl MachineJwtProvider for UnimplementedMachineJwtProvider {
     }
 }
 
+/// This is always what [`HubApiDekProvider`] requests -- see
+/// `core/svc_ingest`'s identical constant.
+pub const INGEST_STREAM_PURPOSE: &str = "ingest-stream";
+
 /// Calls hub-api's tenant-DEK broker endpoint
-/// (`POST /api/v1/internal/keys/tenant-dek`, `feature/tenant-dek-broker` --
-/// **server side not yet merged as of this writing**). See
-/// `core/svc_ingest`'s identical type for the full doc.
+/// (`POST /api/v1/internal/keys/tenant-dek`, `feature/tenant-dek-broker`/
+/// #442 -- **server side not yet merged, and #442 is itself being
+/// redesigned as of this writing; this client codes against the
+/// coordinator-described contract and will be reconciled with #442's PR
+/// description once it lands**). Byte-for-byte identical protocol to
+/// `core/svc_ingest`'s `HubApiDekProvider` (see that module's doc comment
+/// for the full HPKE-style seal/open rationale): a fresh X25519 keypair
+/// per call, `{service_id, tenant_id, purpose, version}` sent alongside the
+/// ephemeral public key, and the DEK sealed to it in the response.
 pub struct HubApiDekProvider<J: MachineJwtProvider> {
     http: reqwest::Client,
     hub_api_url: String,
     jwt_provider: J,
+    service_id: String,
 }
 
 impl<J: MachineJwtProvider + Clone> Clone for HubApiDekProvider<J> {
@@ -350,6 +415,7 @@ impl<J: MachineJwtProvider + Clone> Clone for HubApiDekProvider<J> {
             http: self.http.clone(),
             hub_api_url: self.hub_api_url.clone(),
             jwt_provider: self.jwt_provider.clone(),
+            service_id: self.service_id.clone(),
         }
     }
 }
@@ -357,20 +423,31 @@ impl<J: MachineJwtProvider + Clone> Clone for HubApiDekProvider<J> {
 #[derive(Serialize)]
 struct TenantDekRequest<'a> {
     tenant_id: &'a str,
+    purpose: &'a str,
+    version: u32,
+    client_pubkey: String,
 }
 
 #[derive(Deserialize)]
 struct TenantDekResponse {
-    dek: String,
+    enc: String,
+    ciphertext: String,
     dek_version: u32,
+    ttl_seconds: u64,
 }
 
 impl<J: MachineJwtProvider> HubApiDekProvider<J> {
-    pub fn new(http: reqwest::Client, hub_api_url: impl Into<String>, jwt_provider: J) -> Self {
+    pub fn new(
+        http: reqwest::Client,
+        hub_api_url: impl Into<String>,
+        jwt_provider: J,
+        service_id: impl Into<String>,
+    ) -> Self {
         Self {
             http,
             hub_api_url: hub_api_url.into(),
             jwt_provider,
+            service_id: service_id.into(),
         }
     }
 }
@@ -383,6 +460,10 @@ impl<J: MachineJwtProvider> DekProvider for HubApiDekProvider<J> {
             reason,
         };
         let jwt = self.jwt_provider.mint().map_err(&unavailable)?;
+
+        let client_secret = x25519_dalek::EphemeralSecret::random();
+        let client_public = x25519_dalek::PublicKey::from(&client_secret);
+
         let url = format!(
             "{}/api/v1/internal/keys/tenant-dek",
             self.hub_api_url.trim_end_matches('/')
@@ -391,7 +472,13 @@ impl<J: MachineJwtProvider> DekProvider for HubApiDekProvider<J> {
             .http
             .post(&url)
             .bearer_auth(jwt)
-            .json(&TenantDekRequest { tenant_id })
+            .json(&TenantDekRequest {
+                tenant_id,
+                purpose: INGEST_STREAM_PURPOSE,
+                version: 1,
+                client_pubkey: base64::engine::general_purpose::STANDARD
+                    .encode(client_public.as_bytes()),
+            })
             .timeout(Duration::from_secs(5))
             .send()
             .await
@@ -403,18 +490,158 @@ impl<J: MachineJwtProvider> DekProvider for HubApiDekProvider<J> {
             )));
         }
         let body: TenantDekResponse = resp.json().await.map_err(|e| unavailable(e.to_string()))?;
-        let raw = base64::engine::general_purpose::STANDARD
-            .decode(&body.dek)
-            .map_err(|e| unavailable(format!("malformed DEK: {e}")))?;
-        if raw.len() != DEK_LEN {
-            return Err(unavailable(format!(
-                "hub-api returned a {}-byte DEK, expected {DEK_LEN}",
-                raw.len()
-            )));
-        }
-        let mut dek_bytes = [0u8; DEK_LEN];
-        dek_bytes.copy_from_slice(&raw);
+
+        let context = format!(
+            "{}|{}|{}|{}",
+            self.service_id, tenant_id, INGEST_STREAM_PURPOSE, 1
+        );
+        let dek_bytes = hpke_seal_open(
+            client_secret,
+            &body.enc,
+            &body.ciphertext,
+            context.as_bytes(),
+        )
+        .map_err(&unavailable)?;
+
+        let ttl = Duration::from_secs(body.ttl_seconds).min(DEFAULT_DEK_CACHE_TTL);
+        let _ = ttl; // TODO(#442): thread a per-response TTL through once TtlCachedDekProvider accepts one.
         Ok((Zeroizing::new(dek_bytes), body.dek_version))
+    }
+}
+
+/// HPKE-lite seal-open -- byte-identical construction to
+/// `core/svc_ingest`'s identical function; see that module's doc comment
+/// for the full rationale and the RFC 9180-conformance caveat.
+fn hpke_seal_open(
+    client_secret: x25519_dalek::EphemeralSecret,
+    enc_b64: &str,
+    ciphertext_b64: &str,
+    context: &[u8],
+) -> Result<[u8; DEK_LEN], String> {
+    let enc_bytes = base64::engine::general_purpose::STANDARD
+        .decode(enc_b64)
+        .map_err(|e| format!("malformed enc: {e}"))?;
+    let enc_arr: [u8; 32] = enc_bytes
+        .try_into()
+        .map_err(|_| "enc must be exactly 32 bytes".to_string())?;
+    let server_public = x25519_dalek::PublicKey::from(enc_arr);
+    let shared_secret = client_secret.diffie_hellman(&server_public);
+
+    let hk = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
+    let mut key_and_nonce = [0u8; DEK_LEN + NONCE_LEN];
+    hk.expand(context, &mut key_and_nonce)
+        .map_err(|e| format!("HKDF expand failed: {e}"))?;
+    let (key_bytes, nonce_bytes) = key_and_nonce.split_at(DEK_LEN);
+
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(ciphertext_b64)
+        .map_err(|e| format!("malformed ciphertext: {e}"))?;
+    let cipher = Aes256Gcm::new_from_slice(key_bytes).expect("key_bytes is always 32 bytes");
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let plaintext = cipher
+        .decrypt(
+            nonce,
+            aes_gcm::aead::Payload {
+                msg: &ciphertext,
+                aad: context,
+            },
+        )
+        .map_err(|_| "HPKE-lite unseal failed (AEAD authentication error)".to_string())?;
+    if plaintext.len() != DEK_LEN {
+        return Err(format!(
+            "unsealed DEK is {} bytes, expected {DEK_LEN}",
+            plaintext.len()
+        ));
+    }
+    let mut out = [0u8; DEK_LEN];
+    out.copy_from_slice(&plaintext);
+    Ok(out)
+}
+
+/// The Valkey stream every DEK cache consumer MUST subscribe to -- see
+/// `core/svc_ingest`'s identical constant/doc comment.
+pub const DEK_INVALIDATION_STREAM: &str = "keys:tenant-dek:invalidate";
+
+/// See `core/svc_ingest`'s identical trait for the full doc.
+#[allow(async_fn_in_trait)]
+pub trait InvalidationSource: Send {
+    async fn read_after(
+        &mut self,
+        last_id: &str,
+    ) -> Result<(String, Vec<HashMap<String, String>>), String>;
+}
+
+impl InvalidationSource for redis::aio::MultiplexedConnection {
+    async fn read_after(
+        &mut self,
+        last_id: &str,
+    ) -> Result<(String, Vec<HashMap<String, String>>), String> {
+        let opts = redis::streams::StreamReadOptions::default().block(5000);
+        let reply: redis::streams::StreamReadReply = redis::AsyncCommands::xread_options(
+            self,
+            &[DEK_INVALIDATION_STREAM],
+            &[last_id],
+            &opts,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let mut newest_id = last_id.to_string();
+        let mut entries = Vec::new();
+        for key in reply.keys {
+            for stream_id in key.ids {
+                newest_id = stream_id.id.clone();
+                let mut fields = HashMap::new();
+                for (field, value) in stream_id.map {
+                    if let redis::Value::BulkString(bytes) = value {
+                        if let Ok(s) = String::from_utf8(bytes) {
+                            fields.insert(field, s);
+                        }
+                    }
+                }
+                entries.push(fields);
+            }
+        }
+        Ok((newest_id, entries))
+    }
+}
+
+/// See `core/svc_ingest`'s identical function for the full doc -- **not yet
+/// spawned from `src/lib.rs`**, same documented-follow-up status.
+pub async fn run_dek_invalidation_listener<D: DekProvider, S: InvalidationSource>(
+    mut source: S,
+    cache: TtlCachedDekProvider<D>,
+    expected_purpose: &str,
+    mut shutdown: tokio::sync::oneshot::Receiver<()>,
+) {
+    let mut last_id = "$".to_string();
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return,
+            result = source.read_after(&last_id) => match result {
+                Ok((new_last_id, fields_list)) => {
+                    last_id = new_last_id;
+                    for fields in fields_list {
+                        if fields.get("purpose").map(String::as_str) != Some(expected_purpose) {
+                            continue;
+                        }
+                        match fields.get("tenant") {
+                            Some(tenant) => cache.invalidate(tenant),
+                            None => tracing::warn!(
+                                "dek invalidation entry missing 'tenant' field, skipping"
+                            ),
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "dek invalidation stream read failed, retrying");
+                    tokio::select! {
+                        _ = &mut shutdown => return,
+                        () = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -424,6 +651,135 @@ mod tests {
 
     fn test_dek() -> Dek {
         Zeroizing::new([7u8; DEK_LEN])
+    }
+
+    /// Manually seals `dek_plain` the way a real #442 broker would -- see
+    /// `core/svc_ingest`'s identical test helper for the full rationale.
+    fn seal_for_test(
+        client_public: &x25519_dalek::PublicKey,
+        context: &[u8],
+        dek_plain: &[u8; DEK_LEN],
+    ) -> (String, String) {
+        let server_secret = x25519_dalek::EphemeralSecret::random();
+        let server_public = x25519_dalek::PublicKey::from(&server_secret);
+        let shared = server_secret.diffie_hellman(client_public);
+        let hk = Hkdf::<Sha256>::new(None, shared.as_bytes());
+        let mut key_and_nonce = [0u8; DEK_LEN + NONCE_LEN];
+        hk.expand(context, &mut key_and_nonce).unwrap();
+        let (key_bytes, nonce_bytes) = key_and_nonce.split_at(DEK_LEN);
+        let cipher = Aes256Gcm::new_from_slice(key_bytes).unwrap();
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let ct = cipher
+            .encrypt(
+                nonce,
+                aes_gcm::aead::Payload {
+                    msg: dek_plain.as_slice(),
+                    aad: context,
+                },
+            )
+            .unwrap();
+        (
+            base64::engine::general_purpose::STANDARD.encode(server_public.as_bytes()),
+            base64::engine::general_purpose::STANDARD.encode(ct),
+        )
+    }
+
+    #[test]
+    fn hpke_seal_open_round_trips_a_sealed_dek() {
+        let client_secret = x25519_dalek::EphemeralSecret::random();
+        let client_public = x25519_dalek::PublicKey::from(&client_secret);
+        let context = b"svc-process|acme|ingest-stream|1";
+        let dek_plain = [42u8; DEK_LEN];
+        let (enc_b64, ct_b64) = seal_for_test(&client_public, context, &dek_plain);
+        let opened = hpke_seal_open(client_secret, &enc_b64, &ct_b64, context).unwrap();
+        assert_eq!(opened, dek_plain);
+    }
+
+    #[test]
+    fn hpke_seal_open_fails_closed_on_context_mismatch() {
+        let client_secret = x25519_dalek::EphemeralSecret::random();
+        let client_public = x25519_dalek::PublicKey::from(&client_secret);
+        let (enc_b64, ct_b64) = seal_for_test(
+            &client_public,
+            b"svc-process|acme|ingest-stream|1",
+            &[1u8; DEK_LEN],
+        );
+        let err = hpke_seal_open(
+            client_secret,
+            &enc_b64,
+            &ct_b64,
+            b"svc-process|other-tenant|ingest-stream|1",
+        )
+        .unwrap_err();
+        assert!(err.contains("AEAD"));
+    }
+
+    fn invalidation_entry(fields: &[(&str, &str)]) -> HashMap<String, String> {
+        fields
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    struct FakeInvalidationSource {
+        batches: Vec<Vec<HashMap<String, String>>>,
+        next: usize,
+    }
+
+    impl InvalidationSource for FakeInvalidationSource {
+        async fn read_after(
+            &mut self,
+            last_id: &str,
+        ) -> Result<(String, Vec<HashMap<String, String>>), String> {
+            if self.next < self.batches.len() {
+                let batch = self.batches[self.next].clone();
+                self.next += 1;
+                Ok((format!("{}-1", self.next), batch))
+            } else {
+                tokio::task::yield_now().await;
+                Ok((last_id.to_string(), Vec::new()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalidation_listener_drops_cache_for_matching_purpose() {
+        struct CountingProvider(std::sync::atomic::AtomicU32);
+        impl DekProvider for CountingProvider {
+            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok((Zeroizing::new([1u8; DEK_LEN]), 1))
+            }
+        }
+        let cache = TtlCachedDekProvider::new(
+            CountingProvider(std::sync::atomic::AtomicU32::new(0)),
+            Duration::from_secs(60),
+        );
+        cache.get_dek("acme").await.unwrap();
+        cache.get_dek("acme").await.unwrap();
+        assert_eq!(cache.inner.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let source = FakeInvalidationSource {
+            batches: vec![vec![invalidation_entry(&[
+                ("tenant", "acme"),
+                ("purpose", INGEST_STREAM_PURPOSE),
+            ])]],
+            next: 0,
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let cache_clone = cache.clone();
+        let handle = tokio::spawn(run_dek_invalidation_listener(
+            source,
+            cache_clone,
+            INGEST_STREAM_PURPOSE,
+            rx,
+        ));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = tx.send(());
+        handle.await.unwrap();
+
+        cache.get_dek("acme").await.unwrap();
+        assert_eq!(cache.inner.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     /// Uses `core/svc_ingest`'s `envelope_encrypt`/`to_json_envelope`
@@ -496,7 +852,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decrypt_actor_field_is_a_noop_for_a_none_actor() {
+    async fn decrypt_identity_fields_is_a_noop_for_a_none_actor_and_no_payload_fields() {
         struct AlwaysFailProvider;
         impl DekProvider for AlwaysFailProvider {
             async fn get_dek(&self, tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
@@ -515,14 +871,14 @@ mod tests {
             occurred_at: "2026-09-14T12:00:00.000Z".to_string(),
             source: None,
         };
-        decrypt_actor_field(&mut event, &AlwaysFailProvider, "acme", "stream-a", "evt-1")
+        decrypt_identity_fields(&mut event, &AlwaysFailProvider, "acme", "stream-a", "evt-1")
             .await
             .unwrap();
         assert_eq!(event.actor, None);
     }
 
     #[tokio::test]
-    async fn decrypt_actor_field_decrypts_in_place() {
+    async fn decrypt_identity_fields_decrypts_actor_in_place() {
         struct FixedDekProvider;
         impl DekProvider for FixedDekProvider {
             async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
@@ -540,14 +896,14 @@ mod tests {
             occurred_at: "2026-09-14T12:00:00.000Z".to_string(),
             source: None,
         };
-        decrypt_actor_field(&mut event, &FixedDekProvider, "acme", "stream-a", "evt-1")
+        decrypt_identity_fields(&mut event, &FixedDekProvider, "acme", "stream-a", "evt-1")
             .await
             .unwrap();
         assert_eq!(event.actor.as_deref(), Some("someuser"));
     }
 
     #[tokio::test]
-    async fn decrypt_actor_field_fails_closed_on_dek_unavailable() {
+    async fn decrypt_identity_fields_fails_closed_on_dek_unavailable() {
         struct FailingProvider;
         impl DekProvider for FailingProvider {
             async fn get_dek(&self, tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
@@ -573,9 +929,10 @@ mod tests {
             occurred_at: "2026-09-14T12:00:00.000Z".to_string(),
             source: None,
         };
-        let err = decrypt_actor_field(&mut event, &FailingProvider, "acme", "stream-a", "evt-1")
-            .await
-            .unwrap_err();
+        let err =
+            decrypt_identity_fields(&mut event, &FailingProvider, "acme", "stream-a", "evt-1")
+                .await
+                .unwrap_err();
         assert!(matches!(err, IdentityCryptoError::DekUnavailable(_)));
     }
 
@@ -635,5 +992,248 @@ mod tests {
         )
         .expect("svc-process decrypt must accept a Python-produced envelope");
         assert_eq!(plaintext, vector.plaintext);
+    }
+
+    /// `decrypt_identity_fields` decrypts every present payload identity
+    /// field, not just `actor` -- one independent envelope per field, same
+    /// DEK, field name in the AAD.
+    #[tokio::test]
+    async fn decrypt_identity_fields_decrypts_every_payload_identity_field() {
+        struct FixedDekProvider;
+        impl DekProvider for FixedDekProvider {
+            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
+                Ok((test_dek(), 1))
+            }
+        }
+        let field_plaintexts: &[(&str, &str)] = &[
+            ("actor", "raider_login"),
+            ("author", "chatterbox99"),
+            ("display_name", "ChatterBox99"),
+            ("user_login", "raider_login"),
+            ("user_display_name", "RaiderDisplayName"),
+            ("broadcaster_login", "channelowner_login"),
+            ("text", "hey @moderator_jane check this out"),
+        ];
+        assert!(
+            !field_plaintexts.is_empty(),
+            "table test must examine at least one field"
+        );
+
+        let mut payload = serde_json::Map::new();
+        let mut actor_envelope = None;
+        for (field, plaintext) in field_plaintexts {
+            let aad = build_aad("acme", "stream-a", field, "evt-1", 1);
+            let raw = encrypt_via_fixture_format(plaintext, &test_dek(), &aad, [5u8; NONCE_LEN]);
+            let envelope = serde_json::to_string(&to_json(&raw)).unwrap();
+            if *field == "actor" {
+                actor_envelope = Some(envelope);
+            } else {
+                payload.insert((*field).to_string(), serde_json::Value::String(envelope));
+            }
+        }
+
+        let mut event = penguin_spine::PlatformEvent {
+            platform: "twitch".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: actor_envelope,
+            payload,
+            occurred_at: "2026-09-14T12:00:00.000Z".to_string(),
+            source: None,
+        };
+        decrypt_identity_fields(&mut event, &FixedDekProvider, "acme", "stream-a", "evt-1")
+            .await
+            .unwrap();
+
+        let mut examined = 0;
+        for (field, plaintext) in field_plaintexts {
+            let actual = if *field == "actor" {
+                event.actor.clone()
+            } else {
+                event
+                    .payload
+                    .get(*field)
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            };
+            assert_eq!(
+                actual.as_deref(),
+                Some(*plaintext),
+                "field {field:?} did not decrypt correctly"
+            );
+            examined += 1;
+        }
+        assert_eq!(examined, field_plaintexts.len());
+    }
+
+    /// Table test (coordinator follow-up): mirrors
+    /// `core/svc_ingest/src/publish.rs`'s identical table test from the
+    /// decrypt side -- for realistic Discord and Twitch normalizer-shaped
+    /// events (already encrypted, as `svc_ingest::publish::publish_event`
+    /// would produce them), `decrypt_identity_fields` recovers every
+    /// original plaintext, proving the pre-stage entry point handles both
+    /// platforms' full identity-field surface. Non-zero denominator
+    /// asserted directly.
+    #[tokio::test]
+    async fn decrypt_identity_fields_recovers_twitch_and_discord_fixtures() {
+        struct FixedDekProvider;
+        impl DekProvider for FixedDekProvider {
+            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
+                Ok((test_dek(), 1))
+            }
+        }
+
+        fn encrypt_field(
+            tenant: &str,
+            stream: &str,
+            field: &str,
+            event_id: &str,
+            plaintext: &str,
+        ) -> String {
+            let aad = build_aad(tenant, stream, field, event_id, 1);
+            let raw = encrypt_via_fixture_format(plaintext, &test_dek(), &aad, [8u8; NONCE_LEN]);
+            serde_json::to_string(&to_json(&raw)).unwrap()
+        }
+
+        struct Case {
+            name: &'static str,
+            event: penguin_spine::PlatformEvent,
+            expected: Vec<(&'static str, &'static str)>,
+        }
+
+        let stream = "waddles:t:acme:c:_tenant:src:twitch:tw-somechannel:events";
+        let mut twitch_payload = serde_json::Map::new();
+        twitch_payload.insert(
+            "text".to_string(),
+            serde_json::Value::String(encrypt_field(
+                "acme",
+                stream,
+                "text",
+                "evt-twitch",
+                "hey @moderator_jane",
+            )),
+        );
+        twitch_payload.insert(
+            "author".to_string(),
+            serde_json::Value::String(encrypt_field(
+                "acme",
+                stream,
+                "author",
+                "evt-twitch",
+                "chatterbox99",
+            )),
+        );
+        twitch_payload.insert(
+            "display_name".to_string(),
+            serde_json::Value::String(encrypt_field(
+                "acme",
+                stream,
+                "display_name",
+                "evt-twitch",
+                "ChatterBox99",
+            )),
+        );
+
+        let discord_stream = "waddles:t:acme:c:_tenant:src:discord:dg-111:events";
+        let mut discord_payload = serde_json::Map::new();
+        discord_payload.insert(
+            "text".to_string(),
+            serde_json::Value::String(encrypt_field(
+                "acme",
+                discord_stream,
+                "text",
+                "evt-discord",
+                "thanks <@999888777>",
+            )),
+        );
+
+        let cases = vec![
+            Case {
+                name: "twitch_irc",
+                event: penguin_spine::PlatformEvent {
+                    platform: "twitch".to_string(),
+                    event_type: "chat.message".to_string(),
+                    actor: Some(encrypt_field(
+                        "acme",
+                        stream,
+                        "actor",
+                        "evt-twitch",
+                        "chatterbox99",
+                    )),
+                    payload: twitch_payload,
+                    occurred_at: "2026-09-14T12:00:00.000Z".to_string(),
+                    source: None,
+                },
+                expected: vec![
+                    ("actor", "chatterbox99"),
+                    ("text", "hey @moderator_jane"),
+                    ("author", "chatterbox99"),
+                    ("display_name", "ChatterBox99"),
+                ],
+            },
+            Case {
+                name: "discord_gateway",
+                event: penguin_spine::PlatformEvent {
+                    platform: "discord".to_string(),
+                    event_type: "message".to_string(),
+                    actor: Some(encrypt_field(
+                        "acme",
+                        discord_stream,
+                        "actor",
+                        "evt-discord",
+                        "discorduser42",
+                    )),
+                    payload: discord_payload,
+                    occurred_at: "2026-09-14T12:00:00.000Z".to_string(),
+                    source: None,
+                },
+                expected: vec![("actor", "discorduser42"), ("text", "thanks <@999888777>")],
+            },
+        ];
+        assert!(
+            !cases.is_empty(),
+            "table test must examine at least one case"
+        );
+
+        let mut examined = 0;
+        for case in cases {
+            let mut event = case.event;
+            let (stream_for_case, event_id_for_case) = if case.name == "twitch_irc" {
+                (stream, "evt-twitch")
+            } else {
+                (discord_stream, "evt-discord")
+            };
+            decrypt_identity_fields(
+                &mut event,
+                &FixedDekProvider,
+                "acme",
+                stream_for_case,
+                event_id_for_case,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("case {:?}: decrypt failed: {e}", case.name));
+
+            for (field, expected) in &case.expected {
+                let actual = if *field == "actor" {
+                    event.actor.clone()
+                } else {
+                    event
+                        .payload
+                        .get(*field)
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                };
+                assert_eq!(
+                    actual.as_deref(),
+                    Some(*expected),
+                    "case {:?} field {field:?} did not decrypt correctly",
+                    case.name
+                );
+            }
+            examined += 1;
+        }
+        assert_eq!(
+            examined, 2,
+            "expected to examine exactly the 2 defined platform cases"
+        );
     }
 }

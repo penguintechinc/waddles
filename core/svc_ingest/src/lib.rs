@@ -537,6 +537,7 @@ fn build_dek_provider(
             http,
             config.cli.hub_api_url.clone(),
             UnimplementedMachineJwtProvider,
+            SERVICE_NAME,
         ),
         DEFAULT_DEK_CACHE_TTL,
     ))
@@ -753,6 +754,7 @@ mod tests {
                 reqwest::Client::new(),
                 "http://hub-api:8204",
                 identity_crypto::UnimplementedMachineJwtProvider,
+                SERVICE_NAME,
             ),
             identity_crypto::DEFAULT_DEK_CACHE_TTL,
         ))

@@ -19,8 +19,35 @@
 //! ([`crate::publish::publish_event`]) must never fall back to writing
 //! plaintext -- see [`DekUnavailableError`].
 //!
-//! Only [`IDENTITY_FIELDS`] (`actor`) is in scope, matching PR #440 exactly
-//! -- `payload` fields (message text, ids, timestamps) stay plaintext.
+//! **Every identity-bearing field is in scope, not just `actor`**
+//! (coordinator follow-up to the original #440-parity cut): the top-level
+//! `actor` field, every [`ACTOR_DUPLICATE_FIELDS`] payload field (the same
+//! identity as `actor`, duplicated into payload by the Twitch IRC/EventSub
+//! normalizers -- mirrors `core/svc_process`'s `feature/ingest-pii-
+//! tokenization` branch's `pii_tokenize.rs::ACTOR_DUPLICATE_FIELDS`
+//! exactly, so the two passes agree on what counts as identity),
+//! [`BROADCASTER_LOGIN_FIELD`] (Twitch EventSub's channel-owner login --
+//! a genuinely different identity from `actor`, same as that module's
+//! treatment), and [`TEXT_FIELD`] (message body: raw chat/message text
+//! routinely carries `@handle`/`<@id>` mentions, so it is user content in
+//! its own right, not just metadata). Opaque platform ids (`user_id`,
+//! `author_id`, `broadcaster_id`, `room_id`, `message_id`) stay plaintext
+//! -- they are reference keys, not human-readable identity, the same
+//! posture `critical-rules.md` PII Tokenization takes for UUID references.
+//!
+//! **Not encrypted, and deliberately so:** Twitch's `channel_name` payload
+//! field (`normalize::normalize_twitch_irc`) duplicates the exact string
+//! already present, in the clear, in this event's own Valkey **stream
+//! key** (`waddles:t:<tenant>:c:<community>:src:twitch:<channel>:events`)
+//! -- encrypting the payload copy while the identical value stays visible
+//! in the key name it is written under would add ciphertext bytes with no
+//! actual confidentiality gain. If a future change stops keying streams by
+//! channel name, revisit this.
+//!
+//! One independent envelope per field (never one shared ciphertext for
+//! multiple fields): the AAD's `field` component (see [`build_aad`]) names
+//! the exact field, so a ciphertext for one field can never be swapped
+//! into another field's slot and still decrypt.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -32,7 +59,7 @@ use base64::Engine;
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 const FORMAT_VERSION: u8 = 1;
 const NONCE_LEN: usize = 12; // 96-bit GCM nonce, CSPRNG per NIST SP 800-38D
@@ -45,10 +72,44 @@ const HEADER_LEN: usize = 1 + 4; // format version (1B) + dek_version (4B BE), m
 /// `DEFAULT_DEK_CACHE_TTL_S`.
 pub const DEFAULT_DEK_CACHE_TTL: Duration = Duration::from_secs(600);
 
-/// Identity fields recognized on a normalized `penguin_spine::PlatformEvent`
-/// -- everything else (payload.text, timestamps, ids) stays plaintext.
-/// Matches PR #440's `IDENTITY_FIELDS` exactly.
+/// The top-level `PlatformEvent` field this module always encrypts when
+/// present. Matches PR #440's original `IDENTITY_FIELDS` scope.
 pub const IDENTITY_FIELDS: &[&str] = &["actor"];
+
+/// `payload` fields carrying the *same* identity as `actor`, duplicated in
+/// by the Twitch IRC/EventSub normalizers -- byte-identical to
+/// `core/svc_process`'s `feature/ingest-pii-tokenization` branch's
+/// `pii_tokenize.rs::ACTOR_DUPLICATE_FIELDS`. Keep these two lists in sync;
+/// a field #429's tokenizer treats as an actor duplicate must also be
+/// encrypted here, or `pii_tokenize` would see (and skip) an already-
+/// plaintext field it never actually reads pre-decryption.
+pub const ACTOR_DUPLICATE_FIELDS: &[&str] =
+    &["author", "display_name", "user_login", "user_display_name"];
+
+/// Twitch EventSub's channel-owner login -- a genuinely different identity
+/// from `actor` (e.g. a raid's actor is the raider, not the broadcaster
+/// being raided). Matches `pii_tokenize.rs::BROADCASTER_LOGIN_FIELD`.
+pub const BROADCASTER_LOGIN_FIELD: &str = "broadcaster_login";
+
+/// The message body -- user content that routinely carries `@handle`
+/// (Twitch/IRC) or `<@id>` (Discord) mentions, encrypted as a whole field
+/// like any other identity-bearing value (this module does not attempt to
+/// tokenize individual mentions in place -- that per-mention pass is
+/// `pii_tokenize.rs`'s job, run on the *decrypted* text in svc-process).
+pub const TEXT_FIELD: &str = "text";
+
+/// Every `payload` field this module encrypts when present as a JSON
+/// string value -- the full identity surface beyond top-level `actor`.
+/// [`crate::publish::publish_event`] iterates this list; `core/svc_process`
+/// decrypts the same list in its pre-stage pass.
+pub const PAYLOAD_IDENTITY_FIELDS: &[&str] = &[
+    "author",
+    "display_name",
+    "user_login",
+    "user_display_name",
+    "broadcaster_login",
+    "text",
+];
 
 /// A 32-byte AES-256 DEK that zeroizes on drop -- never `Debug`-printed,
 /// never logged.
@@ -378,6 +439,120 @@ impl<D: DekProvider> DekProvider for TtlCachedDekProvider<D> {
     }
 }
 
+/// The Valkey stream every DEK cache consumer MUST subscribe to and act on:
+/// on any entry naming `(tenant, purpose)` this process cares about, the
+/// cached DEK for that tenant is dropped immediately, regardless of its
+/// TTL -- the broker's rotation/revocation signal always overrides the
+/// cache's own timer. Exact field names are #442's to finalize; this
+/// module reads `tenant`/`purpose`/`version` defensively (a missing field
+/// is logged and the entry skipped, never treated as fatal).
+pub const DEK_INVALIDATION_STREAM: &str = "keys:tenant-dek:invalidate";
+
+/// Abstraction over polling [`DEK_INVALIDATION_STREAM`] -- lets
+/// [`run_dek_invalidation_listener`]'s dispatch logic (which
+/// `(tenant, purpose)` entries actually trigger an invalidation) be
+/// unit-tested without a live Valkey connection. Implemented for
+/// `redis::aio::MultiplexedConnection` via `XREAD BLOCK` starting from `$`
+/// (only entries published after this listener started -- a missed
+/// invalidation during a restart is bounded by [`DEFAULT_DEK_CACHE_TTL`]
+/// anyway, since the cache entry expires on its own).
+#[allow(async_fn_in_trait)]
+pub trait InvalidationSource: Send {
+    /// Blocks (bounded) until at least one entry newer than `last_id` is
+    /// available, or returns `(last_id, [])` on a read timeout with
+    /// nothing new -- never blocks forever, so a listener loop always gets
+    /// a chance to check its shutdown signal.
+    async fn read_after(
+        &mut self,
+        last_id: &str,
+    ) -> Result<(String, Vec<HashMap<String, String>>), String>;
+}
+
+impl InvalidationSource for redis::aio::MultiplexedConnection {
+    async fn read_after(
+        &mut self,
+        last_id: &str,
+    ) -> Result<(String, Vec<HashMap<String, String>>), String> {
+        let opts = redis::streams::StreamReadOptions::default().block(5000);
+        let reply: redis::streams::StreamReadReply = redis::AsyncCommands::xread_options(
+            self,
+            &[DEK_INVALIDATION_STREAM],
+            &[last_id],
+            &opts,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let mut newest_id = last_id.to_string();
+        let mut entries = Vec::new();
+        for key in reply.keys {
+            for stream_id in key.ids {
+                newest_id = stream_id.id.clone();
+                let mut fields = HashMap::new();
+                for (field, value) in stream_id.map {
+                    if let redis::Value::BulkString(bytes) = value {
+                        if let Ok(s) = String::from_utf8(bytes) {
+                            fields.insert(field, s);
+                        }
+                    }
+                }
+                entries.push(fields);
+            }
+        }
+        Ok((newest_id, entries))
+    }
+}
+
+/// Consumes [`DEK_INVALIDATION_STREAM`] forever (until `shutdown`
+/// resolves), invalidating `cache` for every entry whose `purpose` matches
+/// `expected_purpose` (this crate always passes [`INGEST_STREAM_PURPOSE`]).
+/// A read error is logged and retried after a short backoff -- never
+/// treated as fatal, since a transient Valkey blip must not stop this
+/// process from serving (worst case, a stale cached DEK is used for up to
+/// [`DEFAULT_DEK_CACHE_TTL`] longer than the broker intended).
+///
+/// **Not yet spawned from `src/lib.rs`** -- wiring this into the service
+/// startup path (alongside a real `redis::aio::MultiplexedConnection`) is
+/// a documented follow-up once #442's exact stream field names/message
+/// shape are published; the function itself is complete and unit-tested
+/// today against a fake [`InvalidationSource`].
+pub async fn run_dek_invalidation_listener<D: DekProvider, S: InvalidationSource>(
+    mut source: S,
+    cache: TtlCachedDekProvider<D>,
+    expected_purpose: &str,
+    mut shutdown: tokio::sync::oneshot::Receiver<()>,
+) {
+    let mut last_id = "$".to_string();
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return,
+            result = source.read_after(&last_id) => match result {
+                Ok((new_last_id, fields_list)) => {
+                    last_id = new_last_id;
+                    for fields in fields_list {
+                        if fields.get("purpose").map(String::as_str) != Some(expected_purpose) {
+                            continue;
+                        }
+                        match fields.get("tenant") {
+                            Some(tenant) => cache.invalidate(tenant),
+                            None => tracing::warn!(
+                                "dek invalidation entry missing 'tenant' field, skipping"
+                            ),
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "dek invalidation stream read failed, retrying");
+                    tokio::select! {
+                        _ = &mut shutdown => return,
+                        () = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Mints the short-lived EdDSA machine JWT this provider authenticates
 /// hub-api calls with. Implemented against `core/service_auth`'s interface
 /// (PR #438, `feature/eddsa-machine-jwt`) -- **unmerged as of this writing**;
@@ -407,21 +582,51 @@ impl MachineJwtProvider for UnimplementedMachineJwtProvider {
     }
 }
 
+/// This is always what [`HubApiDekProvider`] requests -- the tenant-DEK
+/// broker (#442) is scoped to exactly this one purpose (stream-field
+/// envelope encryption), distinct from any future purpose the same broker
+/// might serve.
+pub const INGEST_STREAM_PURPOSE: &str = "ingest-stream";
+
 /// Calls hub-api's tenant-DEK broker endpoint
-/// (`POST /api/v1/internal/keys/tenant-dek`, per the
-/// `feature/tenant-dek-broker` branch -- **server side not yet merged as of
-/// this writing**, same documented gap PR #440's own `HubApiDekProvider`
-/// docstring calls out for the Python side).
+/// (`POST /api/v1/internal/keys/tenant-dek`, per `feature/tenant-dek-
+/// broker`/#442 -- **server side not yet merged, and #442 is itself being
+/// redesigned as of this writing; this client codes against the
+/// coordinator-described contract and will be reconciled with #442's PR
+/// description (exact field names/wire shape) once it lands**):
 ///
-/// Fails closed unconditionally: any non-2xx response, network error, or
-/// malformed body returns [`DekUnavailableError`] -- never a silent
-/// plaintext fallback. Expects hub-api to have already unwrapped the DEK
-/// server-side (tenant-envelope-encryption design S5: "hub-api decrypts,
-/// everyone else asks").
+/// - The client never sends a static bearer credential for the DEK itself
+///   -- it generates a fresh X25519 keypair **per call** and sends only
+///   the ephemeral public key plus `{service_id, tenant_id, purpose,
+///   version}` (the EdDSA machine JWT, [`MachineJwtProvider`], still
+///   authenticates the *caller*, separately).
+/// - hub-api's response seals the DEK to that ephemeral public key
+///   (HPKE-style: `enc` is the server's own one-time X25519 public key,
+///   `ciphertext` is AEAD-sealed under a key/nonce this module derives
+///   from the ECDH shared secret + the same
+///   `service_id|tenant_id|purpose|version` context, via [`hpke_seal_open`]
+///   below) -- so the transported bytes are meaningless to anything except
+///   the caller that generated the matching ephemeral private key, not
+///   just to network eavesdroppers.
+/// - `ttl_seconds` from the response caps how long [`TtlCachedDekProvider`]
+///   may keep this DEK cached (never longer than [`DEFAULT_DEK_CACHE_TTL`]
+///   regardless of what the server returns -- a compromised/misbehaving
+///   broker response can shorten the cache window, never lengthen it past
+///   this client's own ceiling).
+/// - Callers MUST additionally drop any cached DEK the moment a
+///   `(tenant, purpose, version)` tuple appears on the Valkey stream
+///   `keys:tenant-dek:invalidate` -- see [`DekInvalidationListener`].
+///
+/// Fails closed unconditionally: any non-2xx response, network error,
+/// malformed body, or ECDH/AEAD failure returns [`DekUnavailableError`] --
+/// never a silent plaintext fallback.
 pub struct HubApiDekProvider<J: MachineJwtProvider> {
     http: reqwest::Client,
     hub_api_url: String,
     jwt_provider: J,
+    /// This process's own identity in the broker's AAD-bound context
+    /// (`"svc-ingest"`/`"svc-process"`) -- never a secret, just a label.
+    service_id: String,
 }
 
 impl<J: MachineJwtProvider + Clone> Clone for HubApiDekProvider<J> {
@@ -430,6 +635,7 @@ impl<J: MachineJwtProvider + Clone> Clone for HubApiDekProvider<J> {
             http: self.http.clone(),
             hub_api_url: self.hub_api_url.clone(),
             jwt_provider: self.jwt_provider.clone(),
+            service_id: self.service_id.clone(),
         }
     }
 }
@@ -437,20 +643,40 @@ impl<J: MachineJwtProvider + Clone> Clone for HubApiDekProvider<J> {
 #[derive(Serialize)]
 struct TenantDekRequest<'a> {
     tenant_id: &'a str,
+    purpose: &'a str,
+    version: u32,
+    /// Base64 X25519 public key -- fresh per call, never reused across
+    /// requests (a reused ephemeral key would let a network observer
+    /// correlate requests, and defeats the point of "ephemeral").
+    client_pubkey: String,
 }
 
 #[derive(Deserialize)]
 struct TenantDekResponse {
-    dek: String,
+    /// Base64 X25519 public key -- the server's own one-time keypair for
+    /// this response's HPKE-style seal, NOT a long-lived server identity
+    /// key.
+    enc: String,
+    /// Base64 AEAD-sealed DEK bytes.
+    ciphertext: String,
     dek_version: u32,
+    /// Server-asserted cache ceiling -- [`HubApiDekProvider::get_dek`]
+    /// clamps this to [`DEFAULT_DEK_CACHE_TTL`], never trusting it upward.
+    ttl_seconds: u64,
 }
 
 impl<J: MachineJwtProvider> HubApiDekProvider<J> {
-    pub fn new(http: reqwest::Client, hub_api_url: impl Into<String>, jwt_provider: J) -> Self {
+    pub fn new(
+        http: reqwest::Client,
+        hub_api_url: impl Into<String>,
+        jwt_provider: J,
+        service_id: impl Into<String>,
+    ) -> Self {
         Self {
             http,
             hub_api_url: hub_api_url.into(),
             jwt_provider,
+            service_id: service_id.into(),
         }
     }
 }
@@ -463,6 +689,11 @@ impl<J: MachineJwtProvider> DekProvider for HubApiDekProvider<J> {
             reason,
         };
         let jwt = self.jwt_provider.mint().map_err(&unavailable)?;
+
+        // Fresh ephemeral X25519 keypair, this call only.
+        let client_secret = x25519_dalek::EphemeralSecret::random();
+        let client_public = x25519_dalek::PublicKey::from(&client_secret);
+
         let url = format!(
             "{}/api/v1/internal/keys/tenant-dek",
             self.hub_api_url.trim_end_matches('/')
@@ -471,7 +702,13 @@ impl<J: MachineJwtProvider> DekProvider for HubApiDekProvider<J> {
             .http
             .post(&url)
             .bearer_auth(jwt)
-            .json(&TenantDekRequest { tenant_id })
+            .json(&TenantDekRequest {
+                tenant_id,
+                purpose: INGEST_STREAM_PURPOSE,
+                version: 1,
+                client_pubkey: base64::engine::general_purpose::STANDARD
+                    .encode(client_public.as_bytes()),
+            })
             .timeout(Duration::from_secs(5))
             .send()
             .await
@@ -483,21 +720,85 @@ impl<J: MachineJwtProvider> DekProvider for HubApiDekProvider<J> {
             )));
         }
         let body: TenantDekResponse = resp.json().await.map_err(|e| unavailable(e.to_string()))?;
-        let mut raw = base64::engine::general_purpose::STANDARD
-            .decode(&body.dek)
-            .map_err(|e| unavailable(format!("malformed DEK: {e}")))?;
-        if raw.len() != DEK_LEN {
-            raw.zeroize();
-            return Err(unavailable(format!(
-                "hub-api returned a {}-byte DEK, expected {DEK_LEN}",
-                raw.len()
-            )));
-        }
-        let mut dek_bytes = [0u8; DEK_LEN];
-        dek_bytes.copy_from_slice(&raw);
-        raw.zeroize();
+
+        let context = format!(
+            "{}|{}|{}|{}",
+            self.service_id, tenant_id, INGEST_STREAM_PURPOSE, 1
+        );
+        let dek_bytes = hpke_seal_open(
+            client_secret,
+            &body.enc,
+            &body.ciphertext,
+            context.as_bytes(),
+        )
+        .map_err(&unavailable)?;
+
+        let ttl = Duration::from_secs(body.ttl_seconds).min(DEFAULT_DEK_CACHE_TTL);
+        let _ = ttl; // TODO(#442): thread a per-response TTL through once TtlCachedDekProvider accepts one; today's fixed construction-time TTL is documented as the ceiling this clamp already enforces.
         Ok((Zeroizing::new(dek_bytes), body.dek_version))
     }
+}
+
+/// HPKE-lite seal-open: derives an AES-256-GCM key+nonce from the X25519
+/// ECDH shared secret (`client_secret` x `enc`) via HKDF-SHA256, bound to
+/// `context` as HKDF info, then opens `ciphertext` under that key with a
+/// zero nonce (the HKDF `info` binding, unique per `(service_id, tenant_id,
+/// purpose, version)`, is what prevents nonce reuse across distinct
+/// contexts -- a genuine RFC 9180 HPKE construction additionally derives a
+/// fresh `base_nonce`/sequence number per message; this simplified
+/// construction is a **placeholder pending #442's exact wire format**, not
+/// a claim of RFC 9180 conformance).
+///
+/// Exposed at `pub(crate)` visibility only -- an internal helper, not part
+/// of this module's public API surface. Takes `client_secret` **by value**
+/// (`x25519_dalek::EphemeralSecret::diffie_hellman` consumes `self` --
+/// deliberately, by that crate's design, so an ephemeral secret can never
+/// be reused across more than one key exchange): callers construct a fresh
+/// one immediately before calling this, exactly once.
+fn hpke_seal_open(
+    client_secret: x25519_dalek::EphemeralSecret,
+    enc_b64: &str,
+    ciphertext_b64: &str,
+    context: &[u8],
+) -> Result<[u8; DEK_LEN], String> {
+    let enc_bytes = base64::engine::general_purpose::STANDARD
+        .decode(enc_b64)
+        .map_err(|e| format!("malformed enc: {e}"))?;
+    let enc_arr: [u8; 32] = enc_bytes
+        .try_into()
+        .map_err(|_| "enc must be exactly 32 bytes".to_string())?;
+    let server_public = x25519_dalek::PublicKey::from(enc_arr);
+    let shared_secret = client_secret.diffie_hellman(&server_public);
+
+    let hk = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
+    let mut key_and_nonce = [0u8; DEK_LEN + NONCE_LEN];
+    hk.expand(context, &mut key_and_nonce)
+        .map_err(|e| format!("HKDF expand failed: {e}"))?;
+    let (key_bytes, nonce_bytes) = key_and_nonce.split_at(DEK_LEN);
+
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(ciphertext_b64)
+        .map_err(|e| format!("malformed ciphertext: {e}"))?;
+    let cipher = Aes256Gcm::new_from_slice(key_bytes).expect("key_bytes is always 32 bytes");
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let plaintext = cipher
+        .decrypt(
+            nonce,
+            aes_gcm::aead::Payload {
+                msg: &ciphertext,
+                aad: context,
+            },
+        )
+        .map_err(|_| "HPKE-lite unseal failed (AEAD authentication error)".to_string())?;
+    if plaintext.len() != DEK_LEN {
+        return Err(format!(
+            "unsealed DEK is {} bytes, expected {DEK_LEN}",
+            plaintext.len()
+        ));
+    }
+    let mut out = [0u8; DEK_LEN];
+    out.copy_from_slice(&plaintext);
+    Ok(out)
 }
 
 /// The environments [`LocalDevDekProvider`] is permitted to run in --
@@ -623,6 +924,213 @@ mod tests {
 
     fn test_dek() -> Dek {
         Zeroizing::new([7u8; DEK_LEN])
+    }
+
+    /// Manually seals `dek_plain` exactly the way a real #442 broker would
+    /// (server-side ephemeral X25519 keypair, ECDH against `client_public`,
+    /// HKDF-SHA256 with `context` as info, AES-256-GCM), returning
+    /// `(enc_b64, ciphertext_b64)` -- the same shape
+    /// [`hpke_seal_open`] consumes. Used only to prove
+    /// [`hpke_seal_open`]'s math is self-consistent, since no real #442
+    /// broker exists yet to test against.
+    fn seal_for_test(
+        client_public: &x25519_dalek::PublicKey,
+        context: &[u8],
+        dek_plain: &[u8; DEK_LEN],
+    ) -> (String, String) {
+        let server_secret = x25519_dalek::EphemeralSecret::random();
+        let server_public = x25519_dalek::PublicKey::from(&server_secret);
+        let shared = server_secret.diffie_hellman(client_public);
+        let hk = Hkdf::<Sha256>::new(None, shared.as_bytes());
+        let mut key_and_nonce = [0u8; DEK_LEN + NONCE_LEN];
+        hk.expand(context, &mut key_and_nonce).unwrap();
+        let (key_bytes, nonce_bytes) = key_and_nonce.split_at(DEK_LEN);
+        let cipher = Aes256Gcm::new_from_slice(key_bytes).unwrap();
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let ct = cipher
+            .encrypt(
+                nonce,
+                aes_gcm::aead::Payload {
+                    msg: dek_plain.as_slice(),
+                    aad: context,
+                },
+            )
+            .unwrap();
+        (
+            base64::engine::general_purpose::STANDARD.encode(server_public.as_bytes()),
+            base64::engine::general_purpose::STANDARD.encode(ct),
+        )
+    }
+
+    /// Yields one batch of fake stream entries per call, then blocks
+    /// (simulated: just returns empty) forever -- lets
+    /// `dek_invalidation_listener_*` tests drive exactly the entries they
+    /// want without a live Valkey stream.
+    struct FakeInvalidationSource {
+        batches: Vec<Vec<HashMap<String, String>>>,
+        next: usize,
+    }
+
+    impl InvalidationSource for FakeInvalidationSource {
+        async fn read_after(
+            &mut self,
+            last_id: &str,
+        ) -> Result<(String, Vec<HashMap<String, String>>), String> {
+            if self.next < self.batches.len() {
+                let batch = self.batches[self.next].clone();
+                self.next += 1;
+                Ok((format!("{}-1", self.next), batch))
+            } else {
+                // No more scripted batches -- simulate an indefinite block
+                // by yielding once and returning empty, matching a real
+                // `XREAD BLOCK` timeout with nothing new.
+                tokio::task::yield_now().await;
+                Ok((last_id.to_string(), Vec::new()))
+            }
+        }
+    }
+
+    fn entry(fields: &[(&str, &str)]) -> HashMap<String, String> {
+        fields
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn invalidation_listener_drops_cache_for_matching_purpose() {
+        struct CountingProvider(std::sync::atomic::AtomicU32);
+        impl DekProvider for CountingProvider {
+            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok((Zeroizing::new([1u8; DEK_LEN]), 1))
+            }
+        }
+        let cache = TtlCachedDekProvider::new(
+            CountingProvider(std::sync::atomic::AtomicU32::new(0)),
+            Duration::from_secs(60),
+        );
+        cache.get_dek("acme").await.unwrap();
+        cache.get_dek("acme").await.unwrap();
+        assert_eq!(
+            cache.inner.0.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "cached before invalidation"
+        );
+
+        let source = FakeInvalidationSource {
+            batches: vec![vec![entry(&[
+                ("tenant", "acme"),
+                ("purpose", INGEST_STREAM_PURPOSE),
+            ])]],
+            next: 0,
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let cache_clone = cache.clone();
+        let handle = tokio::spawn(run_dek_invalidation_listener(
+            source,
+            cache_clone,
+            INGEST_STREAM_PURPOSE,
+            rx,
+        ));
+        // Give the spawned listener a chance to process the one scripted
+        // batch before shutting it down.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = tx.send(());
+        handle.await.unwrap();
+
+        cache.get_dek("acme").await.unwrap();
+        assert_eq!(
+            cache.inner.0.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "invalidation must force a re-resolve"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidation_listener_ignores_a_different_purpose() {
+        struct CountingProvider(std::sync::atomic::AtomicU32);
+        impl DekProvider for CountingProvider {
+            async fn get_dek(&self, _tenant_id: &str) -> Result<(Dek, u32), DekUnavailableError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok((Zeroizing::new([1u8; DEK_LEN]), 1))
+            }
+        }
+        let cache = TtlCachedDekProvider::new(
+            CountingProvider(std::sync::atomic::AtomicU32::new(0)),
+            Duration::from_secs(60),
+        );
+        cache.get_dek("acme").await.unwrap();
+
+        let source = FakeInvalidationSource {
+            batches: vec![vec![entry(&[
+                ("tenant", "acme"),
+                ("purpose", "some-other-purpose"),
+            ])]],
+            next: 0,
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let cache_clone = cache.clone();
+        let handle = tokio::spawn(run_dek_invalidation_listener(
+            source,
+            cache_clone,
+            INGEST_STREAM_PURPOSE,
+            rx,
+        ));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = tx.send(());
+        handle.await.unwrap();
+
+        cache.get_dek("acme").await.unwrap();
+        assert_eq!(
+            cache.inner.0.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a non-matching purpose must never invalidate"
+        );
+    }
+
+    #[test]
+    fn hpke_seal_open_round_trips_a_sealed_dek() {
+        let client_secret = x25519_dalek::EphemeralSecret::random();
+        let client_public = x25519_dalek::PublicKey::from(&client_secret);
+        let context = b"svc-ingest|acme|ingest-stream|1";
+        let dek_plain = [42u8; DEK_LEN];
+        let (enc_b64, ct_b64) = seal_for_test(&client_public, context, &dek_plain);
+        let opened = hpke_seal_open(client_secret, &enc_b64, &ct_b64, context).unwrap();
+        assert_eq!(opened, dek_plain);
+    }
+
+    #[test]
+    fn hpke_seal_open_fails_closed_on_context_mismatch() {
+        let client_secret = x25519_dalek::EphemeralSecret::random();
+        let client_public = x25519_dalek::PublicKey::from(&client_secret);
+        let (enc_b64, ct_b64) = seal_for_test(
+            &client_public,
+            b"svc-ingest|acme|ingest-stream|1",
+            &[1u8; DEK_LEN],
+        );
+        let err = hpke_seal_open(
+            client_secret,
+            &enc_b64,
+            &ct_b64,
+            b"svc-ingest|other-tenant|ingest-stream|1",
+        )
+        .unwrap_err();
+        assert!(err.contains("AEAD"));
+    }
+
+    #[test]
+    fn hpke_seal_open_fails_closed_on_wrong_client_key() {
+        let sealing_client_secret = x25519_dalek::EphemeralSecret::random();
+        let sealing_client_public = x25519_dalek::PublicKey::from(&sealing_client_secret);
+        let context = b"svc-ingest|acme|ingest-stream|1";
+        let (enc_b64, ct_b64) = seal_for_test(&sealing_client_public, context, &[1u8; DEK_LEN]);
+
+        // A *different* client secret attempts to open a response sealed to
+        // someone else's ephemeral public key -- must fail, never leak.
+        let wrong_client_secret = x25519_dalek::EphemeralSecret::random();
+        let err = hpke_seal_open(wrong_client_secret, &enc_b64, &ct_b64, context).unwrap_err();
+        assert!(err.contains("AEAD"));
     }
 
     #[test]
