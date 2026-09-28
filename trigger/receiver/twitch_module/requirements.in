@@ -1,0 +1,19 @@
+# WaddleBot Twitch Module - Dependencies
+
+# Core Framework
+quart>=0.22.0
+hypercorn>=0.18.0
+
+# HTTP Client (async)
+httpx>=0.28.1
+
+# Twitch IRC Bot (TwitchIO)
+twitchio>=2.10.0,<3.0.0
+
+# Environment
+python-dotenv>=1.2.3
+
+# Development
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0
