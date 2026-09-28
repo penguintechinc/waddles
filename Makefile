@@ -1,6 +1,7 @@
 .PHONY: dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
-        seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs
+        seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
+        verify-csping-fixture
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -87,6 +88,14 @@ run-ai-local: ## Run ai_interaction_module container locally (standalone, 1 work
 	  -e HYPERCORN_WORKERS=1 \
 	  -p 8005:8005 \
 	  waddlebot/ai-interaction:local
+
+# C#-toolchain spike (spec S18 R13): rebuilds bundles/csharp/csping from
+# source in its pinned, checksum-verified, rootless Dockerfile and asserts
+# byte-identical output against the committed
+# core/bundle_executor/tests/fixtures/csping.wasm + .sha256 -- makes that
+# committed binary auditable instead of a trust-me blob.
+verify-csping-fixture:
+	@bash scripts/verify-csping-fixture.sh
 
 pre-commit:
 	@echo "=== Pre-commit checks ==="
