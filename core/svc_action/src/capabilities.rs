@@ -41,6 +41,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use bundle_capability_gate::{
+    AppScopedResource, CapabilityGate, Denied, HostInvokeScopeBuilder, PermissionId, ResourceRef,
+    TenantTier,
+};
 use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
@@ -67,6 +71,75 @@ pub struct InvokeScope {
     /// bundle's own `message_json`, unchanged) and for any invoke with no
     /// channel-bearing origin event.
     pub origin_channel_id: Option<String>,
+    /// Numeric `tenants.id`/`communities.id` (spec
+    /// `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+    /// SS5.1/SS4 `GrantScopeKey`) -- resolved by `crate::dispatch::
+    /// handle_delivered` via `TenantResolver` before this scope is built
+    /// (never guest-suppliable). `community_id` is `0` for a tenant-wide
+    /// activation, matching `bundle_active_set`'s existing sentinel
+    /// convention.
+    pub tenant_id: i32,
+    pub community_id: i32,
+    /// The approved `(app_id, version)` row id this invoke's grants are
+    /// pinned to (spec SS4). **Interim placeholder** until the real
+    /// `app_versions.id` is threaded through `crate::dispatch`'s bundle-load
+    /// path (tracked as follow-on work, same "interim substitute" posture
+    /// this crate already documents for `ProcessDeps::version`): every
+    /// invocation today resolves to `0` here, which only ever matches a
+    /// grant row also written under version `0` -- never a real approved
+    /// version, so this fails closed (denies every non-platform permission)
+    /// rather than silently matching the wrong version's grants.
+    pub app_version: i64,
+}
+
+impl InvokeScope {
+    /// Builds the gate's host-only [`bundle_capability_gate::InvokeScope`]
+    /// from this already-trusted scope (spec SS5.1: `HostInvokeScopeBuilder`
+    /// is the sole constructor). `tenant_tier` is not yet resolved per
+    /// invocation (no capability wired in this stage today reads it) and
+    /// defaults to [`TenantTier::Free`] -- documented here rather than
+    /// silently guessed, so the follow-on task that wires `storage.objects`
+    /// (spec SS6) knows exactly what to replace.
+    fn gate_scope(&self) -> bundle_capability_gate::InvokeScope {
+        HostInvokeScopeBuilder::new()
+            .tenant_id(self.tenant_id)
+            .community_id(self.community_id)
+            .app_id(self.app_id.clone())
+            .app_version(self.app_version)
+            .tenant_tier(TenantTier::Free)
+            .build()
+            // `app_id` is always non-empty here: it is always
+            // `deps.app_id`, itself sourced from a live `app_catalog` row
+            // (never guest input, never constructed empty) -- see
+            // `crate::dispatch::DispatchDeps::app_id`'s doc.
+            .expect("InvokeScope::app_id is never empty for a live invocation")
+    }
+}
+
+/// Maps a gate [`Denied`] onto the `{code, message}` shape every `host-call`
+/// error reply carries (spec SS5.4's stable `reason` vocabulary).
+fn denied_from_gate(err: Denied) -> HostResultError {
+    denied(err.reason_str(), err.to_string())
+}
+
+/// Best-effort host extraction for `net.http:<host>` (spec SS1) from the
+/// `http.send` host-call's own `{"url": ...}` arg -- no `url` crate
+/// dependency in this crate, so this is a small manual scheme/port strip
+/// rather than a full URL parse. `crate::egress::EgressGuard::send` (called
+/// only once this permission is authorized) performs the real, security-
+/// relevant URL validation/SSRF guarding on this same `url` string; this
+/// function only needs a good-enough host to select which per-host
+/// permission grant to check.
+fn extract_http_host(args: &serde_json::Value) -> Option<String> {
+    let url = args.get("url").and_then(|v| v.as_str())?;
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host = host_port.split(':').next().unwrap_or(host_port);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
 }
 
 /// Answers one `host-call` for a given `capability`/`op`, scoped to the
@@ -270,6 +343,10 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Multiplex
     /// `not_implemented` rather than this process failing to start if a
     /// live Valkey connection for `kv` was never configured).
     kv: Option<KvHost<K>>,
+    /// The standard enforcement gate (spec SS5) every arm of
+    /// [`CapabilityHandler::handle`] calls first. Mandatory, never
+    /// bypassable (spec SS5.2 "no kill-switch") -- see [`Self::new`]'s doc.
+    gate: Arc<CapabilityGate>,
 }
 
 impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
@@ -281,14 +358,24 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     /// (`relay_unavailable`/`not_implemented` until [`Self::with_discord`]/
     /// [`Self::with_kv`] are chained on) so every existing caller of this
     /// constructor -- production and test alike -- is unaffected by this
-    /// landing.
-    pub fn new(relay_queue: Q, egress: Arc<EgressGuard>, usage: Arc<Mutex<UsageBatcher>>) -> Self {
+    /// landing. `gate` is mandatory: every arm calls `gate.authorize()`
+    /// first (spec SS5), typically backed by
+    /// `crate::grant_gate::AlwaysGrantedLoader` so `context`/`clock`/`log`
+    /// keep working even before the sibling grants migration lands, while
+    /// every other permission fails closed with no grant data.
+    pub fn new(
+        relay_queue: Q,
+        egress: Arc<EgressGuard>,
+        usage: Arc<Mutex<UsageBatcher>>,
+        gate: Arc<CapabilityGate>,
+    ) -> Self {
         Self {
             relay_queue,
             egress,
             usage,
             discord: None,
             kv: None,
+            gate,
         }
     }
 
@@ -342,6 +429,16 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 format!("relay provider {provider:?} is not in the compiled-in allowlist"),
             ));
         }
+        // Gate call FIRST (spec SS5), now that `provider` is known well
+        // enough to name the specific `chat.send:<platform>` permission id
+        // this call maps to.
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::ChatSend(provider.to_string()),
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
         // WIT `relay.push(provider: string, message-json: string)`
         // (`wit/waddle-bundle/stage.wit`) carries the message as an
         // opaque, provider-shaped JSON *string* -- `channel`/`text` are
@@ -535,7 +632,18 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         Ok(serde_json::json!({"sent": true, "provider": "discord"}))
     }
 
-    fn handle_clock(&self, op: &str) -> Result<serde_json::Value, HostResultError> {
+    fn handle_clock(
+        &self,
+        scope: &InvokeScope,
+        op: &str,
+    ) -> Result<serde_json::Value, HostResultError> {
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::PlatformClock,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
         match op {
             "now-millis" => {
                 let millis = std::time::SystemTime::now()
@@ -552,6 +660,13 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     }
 
     fn handle_context(&self, scope: &InvokeScope) -> Result<serde_json::Value, HostResultError> {
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::PlatformContext,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
         // Spec §7.4: "Tenant and community come from the key, never from
         // payload." Never includes a credential or secret.
         Ok(serde_json::json!({
@@ -566,6 +681,13 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         scope: &InvokeScope,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, HostResultError> {
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::PlatformLog,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
         let level = args.get("level").and_then(|v| v.as_str()).unwrap_or("info");
         let raw_message = args
             .get("message")
@@ -606,6 +728,18 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         scope: &InvokeScope,
         call: &HostCallBody,
     ) -> Result<serde_json::Value, HostResultError> {
+        // Gate call FIRST (spec SS5) -- `storage.kv`, `AppScoped`. This
+        // supersedes `bundle_host_kv::authorize::authorize_kv`'s interim
+        // always-grant stand-in as the real security boundary; that inner
+        // seam remains harmlessly redundant until it is retired in a
+        // follow-on cleanup.
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::StorageKv,
+                ResourceRef::AppScoped(AppScopedResource::KvState),
+            )
+            .map_err(denied_from_gate)?;
         let Some(kv) = &self.kv else {
             return Err(denied(
                 "not_implemented",
@@ -716,10 +850,22 @@ impl<Q: RelayQueue, K: KvBackend> CapabilityHandler for StageCapabilities<Q, K> 
         Box::pin(async move {
             match call.capability {
                 CapabilityKind::Relay => self.handle_relay(scope, &call.args).await,
-                CapabilityKind::Clock => self.handle_clock(&call.op),
+                CapabilityKind::Clock => self.handle_clock(scope, &call.op),
                 CapabilityKind::Context => self.handle_context(scope),
                 CapabilityKind::Log => self.handle_log(scope, &call.args),
-                CapabilityKind::Http => self.egress.send(&scope.app_id, &call.args).await,
+                CapabilityKind::Http => {
+                    let host = extract_http_host(&call.args).ok_or_else(|| {
+                        denied("invalid_args", "http.send requires a 'url' string")
+                    })?;
+                    self.gate
+                        .authorize(
+                            &scope.gate_scope(),
+                            PermissionId::NetHttp(host),
+                            ResourceRef::AppScoped(AppScopedResource::None),
+                        )
+                        .map_err(denied_from_gate)?;
+                    self.egress.send(&scope.app_id, &call.args).await
+                }
                 CapabilityKind::Kv => self.handle_kv(scope, &call).await,
                 // `db` needs the manifest's `data.tables` allowlist plus
                 // per-bundle-role Postgres RLS (`SET LOCAL waddles.tenant`/
@@ -728,17 +874,36 @@ impl<Q: RelayQueue, K: KvBackend> CapabilityHandler for StageCapabilities<Q, K> 
                 // `db.execute-batch`, a manifest `capabilities` allowlist)
                 // by a separate, in-progress design -- see
                 // `docs/superpowers/specs/2026-09-28-wit-stage-v1-1-design.md`
-                // §3/§4. Denying (never silently succeeding) is the correct
-                // behavior for an unimplemented capability until that design
-                // lands and is wired here.
-                CapabilityKind::Db => Err(denied(
-                    "not_implemented",
-                    "db capability is not wired in this build",
-                )),
-                CapabilityKind::Flags => Err(denied(
-                    "not_implemented",
-                    "flags capability is not wired in this build -- TODO(M3+)",
-                )),
+                // §3/§4. Gate call FIRST (spec SS5): a real grant now
+                // reports `not_implemented` (the wiring seam), but an
+                // ungranted call reports `not_granted` -- never silently
+                // succeeding either way.
+                CapabilityKind::Db => {
+                    self.gate
+                        .authorize(
+                            &scope.gate_scope(),
+                            PermissionId::StorageTables,
+                            ResourceRef::AppScoped(AppScopedResource::Table),
+                        )
+                        .map_err(denied_from_gate)?;
+                    Err(denied(
+                        "not_implemented",
+                        "db capability is not wired in this build",
+                    ))
+                }
+                CapabilityKind::Flags => {
+                    self.gate
+                        .authorize(
+                            &scope.gate_scope(),
+                            PermissionId::FlagsRead,
+                            ResourceRef::AppScoped(AppScopedResource::None),
+                        )
+                        .map_err(denied_from_gate)?;
+                    Err(denied(
+                        "not_implemented",
+                        "flags capability is not wired in this build -- TODO(M3+)",
+                    ))
+                }
             }
         })
     }
@@ -925,6 +1090,66 @@ mod tests {
         ))
     }
 
+    /// Grants every permission this file's existing (pre-gate) tests
+    /// already exercised, for both app ids this suite uses
+    /// (`kv_two_apps_in_the_same_tenant_are_isolated_through_the_handler`'s
+    /// `waddles.bot.other` included) under `scope()`'s `(7, 3, 1)` -- so
+    /// every happy-path test keeps proving its own capability logic, not
+    /// this landing's gate wiring (which the dedicated `gate_*` tests below
+    /// exercise directly, including the deny-without-grant cases).
+    fn permissive_gate() -> Arc<CapabilityGate> {
+        let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+        for app_id in ["waddles.bot.commands.default", "waddles.bot.other"] {
+            let mut grants = std::collections::HashMap::new();
+            for id in [
+                "platform.context",
+                "platform.clock",
+                "platform.log",
+                "storage.kv",
+                "chat.send:twitch",
+                "chat.send:discord",
+                "net.http:example.com",
+                "storage.tables",
+                "flags.read",
+            ] {
+                grants.insert(
+                    id.to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: id.to_string(),
+                        params: serde_json::json!({}),
+                    },
+                );
+            }
+            snapshot.set(
+                bundle_capability_gate::GrantScopeKey {
+                    tenant_id: 7,
+                    community_id: 3,
+                    app_id: app_id.to_string(),
+                    app_version: 1,
+                },
+                bundle_capability_gate::GrantSet {
+                    permission_snapshot_hash: "test".to_string(),
+                    grants,
+                },
+            );
+        }
+        Arc::new(CapabilityGate::new(
+            Arc::new(snapshot),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+        ))
+    }
+
+    /// A gate with an empty snapshot -- every permission fails closed
+    /// `not_granted`, for tests proving the gate is actually consulted.
+    fn deny_all_gate() -> Arc<CapabilityGate> {
+        Arc::new(CapabilityGate::new(
+            Arc::new(bundle_capability_gate::InMemoryGrantSnapshot::new()),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+        ))
+    }
+
     fn caps(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue> {
         caps_with_usage(queue, Arc::new(Mutex::new(UsageBatcher::new())))
     }
@@ -933,7 +1158,7 @@ mod tests {
         queue: FakeRelayQueue,
         usage: Arc<Mutex<UsageBatcher>>,
     ) -> StageCapabilities<FakeRelayQueue> {
-        StageCapabilities::new(queue, test_egress(), usage)
+        StageCapabilities::new(queue, test_egress(), usage, permissive_gate())
     }
 
     fn caps_with_kv(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue, FakeKvBackend> {
@@ -941,6 +1166,7 @@ mod tests {
             queue,
             test_egress(),
             Arc::new(Mutex::new(UsageBatcher::new())),
+            permissive_gate(),
         )
         .with_kv(FakeKvBackend::default())
     }
@@ -951,6 +1177,9 @@ mod tests {
             community: Some("main".to_string()),
             app_id: "waddles.bot.commands.default".to_string(),
             origin_channel_id: None,
+            tenant_id: 7,
+            community_id: 3,
+            app_version: 1,
         }
     }
 
@@ -1756,6 +1985,227 @@ mod tests {
                 .unwrap_err();
             assert_eq!(err.code, "not_implemented");
         }
+    }
+
+    /// A [`StageCapabilities`] wired to `deny_all_gate()` -- every arm below
+    /// exercises `gate.authorize()` actually being consulted first, not
+    /// bypassed.
+    fn caps_denied(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue, FakeKvBackend> {
+        StageCapabilities::new(
+            queue,
+            test_egress(),
+            Arc::new(Mutex::new(UsageBatcher::new())),
+            deny_all_gate(),
+        )
+        .with_kv(FakeKvBackend::default())
+    }
+
+    #[tokio::test]
+    async fn gate_denies_kv_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_relay_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "message_json": r#"{"channel":"c","text":"hi"}"#}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_http_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Http,
+                    "send",
+                    serde_json::json!({"method": "GET", "url": "https://example.com/"}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_db_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Db, "execute", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_flags_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Flags, "get", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    /// The "Always granted, zero-config" platform capabilities (spec SS1)
+    /// still route through `gate.authorize()` (module doc: "so every call is
+    /// still audited uniformly") -- with no grant data at all, they deny
+    /// exactly like any other permission; `crate::grant_gate::
+    /// AlwaysGrantedLoader` (not exercised by this gate double) is what
+    /// makes them unconditionally present in production.
+    #[tokio::test]
+    async fn gate_denies_context_clock_log_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        for capability in [
+            CapabilityKind::Context,
+            CapabilityKind::Clock,
+            CapabilityKind::Log,
+        ] {
+            let err = caps
+                .handle(
+                    &scope(),
+                    call(capability, "now-millis", serde_json::json!({})),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_granted");
+        }
+    }
+
+    /// An undeclared permission (granted set has entries, but not the one
+    /// this call needs) denies exactly like an empty grant set -- proving
+    /// `authorize()` checks the specific permission id, not just "some
+    /// grant exists for this app."
+    #[tokio::test]
+    async fn gate_denies_a_permission_the_app_was_never_granted() {
+        let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+        snapshot.set(
+            bundle_capability_gate::GrantScopeKey {
+                tenant_id: 7,
+                community_id: 3,
+                app_id: "waddles.bot.commands.default".to_string(),
+                app_version: 1,
+            },
+            bundle_capability_gate::GrantSet {
+                permission_snapshot_hash: "test".to_string(),
+                grants: std::collections::HashMap::from([(
+                    "flags.read".to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: "flags.read".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                )]),
+            },
+        );
+        let gate = Arc::new(CapabilityGate::new(
+            Arc::new(snapshot),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+        ));
+        let caps = StageCapabilities::new(
+            FakeRelayQueue::default(),
+            test_egress(),
+            Arc::new(Mutex::new(UsageBatcher::new())),
+            gate,
+        )
+        .with_kv(FakeKvBackend::default());
+
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    /// Revocation mid-stream (spec SS4/SS5.3, task instruction): a grant
+    /// present at the start of the connection, then invalidated (simulating
+    /// a `bundle:grants:invalidate` push notification landing between two
+    /// calls), denies the very next call -- proving `StageCapabilities`
+    /// reads through a live [`bundle_capability_gate::GrantCache`], not a
+    /// one-shot snapshot copied at construction time.
+    #[tokio::test]
+    async fn gate_revocation_mid_stream_denies_the_next_call() {
+        let key = bundle_capability_gate::GrantScopeKey {
+            tenant_id: 7,
+            community_id: 3,
+            app_id: "waddles.bot.commands.default".to_string(),
+            app_version: 1,
+        };
+        let loader = Arc::new(bundle_capability_gate::InMemoryGrantLoader::new());
+        loader.set(
+            key.clone(),
+            bundle_capability_gate::GrantSet {
+                permission_snapshot_hash: "v1".to_string(),
+                grants: std::collections::HashMap::from([(
+                    "storage.kv".to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: "storage.kv".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                )]),
+            },
+        );
+        let cache = Arc::new(bundle_capability_gate::GrantCache::new(loader));
+        cache.refresh(&key).await.unwrap();
+        let gate = Arc::new(CapabilityGate::new(
+            cache.clone(),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+        ));
+        let caps = StageCapabilities::new(
+            FakeRelayQueue::default(),
+            test_egress(),
+            Arc::new(Mutex::new(UsageBatcher::new())),
+            gate,
+        )
+        .with_kv(FakeKvBackend::default());
+
+        caps.handle(
+            &scope(),
+            call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+        )
+        .await
+        .expect("granted before revocation");
+
+        cache.invalidate(&key);
+
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
     }
 
     #[tokio::test]

@@ -57,6 +57,7 @@ pub mod distribution;
 pub mod egress;
 pub mod error;
 pub mod flags;
+pub mod grant_gate;
 pub mod hop;
 pub mod host_api;
 pub mod http;
@@ -371,8 +372,24 @@ async fn build_stage_capabilities(
     // itself that `relay`/usage don't already require (`crate::capabilities`'
     // `StageCapabilities::with_kv`'s doc).
     let kv_conn = relay_conn.clone();
+    // `core/bundle_capability_gate::CapabilityGate` (spec
+    // `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+    // SS5) -- `grant_gate::AlwaysGrantedLoader` over an empty
+    // `InMemoryGrantLoader` until the sibling grants migration
+    // (`feature/bundle-permission-grants`) lands and a `grant_gate::
+    // PgGrantLoader` against a real RO-replica connection replaces this:
+    // `context`/`clock`/`log` stay granted (spec SS3.5), every other
+    // permission fails closed with no grant data (never a default allow).
+    let grant_cache = Arc::new(bundle_capability_gate::GrantCache::new(Arc::new(
+        grant_gate::AlwaysGrantedLoader::new(bundle_capability_gate::InMemoryGrantLoader::new()),
+    )));
+    let gate = Arc::new(bundle_capability_gate::CapabilityGate::new(
+        grant_cache,
+        Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+        Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+    ));
     let caps = capabilities::StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
-        relay_conn, egress, usage,
+        relay_conn, egress, usage, gate,
     )
     .with_kv(kv_conn);
     // Discord relay send (spec: relay providers, `discord`) -- graceful

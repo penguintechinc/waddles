@@ -39,6 +39,7 @@ pub mod bundle_loader;
 pub mod capabilities;
 pub mod config;
 pub mod error;
+pub mod grant_gate;
 pub mod hop;
 pub mod host_api;
 pub mod http;
@@ -417,6 +418,21 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
             metrics,
             license: license_gate,
             kv_conn,
+            // `grant_gate::AlwaysGrantedLoader` over an empty
+            // `InMemoryGrantLoader` until the sibling grants migration
+            // (`feature/bundle-permission-grants`) lands and a
+            // `grant_gate::PgGrantLoader` against a real RO-replica
+            // connection replaces this: `context`/`clock`/`log` stay
+            // granted (spec SS3.5), every other permission fails closed.
+            gate: Arc::new(bundle_capability_gate::CapabilityGate::new(
+                Arc::new(bundle_capability_gate::GrantCache::new(Arc::new(
+                    grant_gate::AlwaysGrantedLoader::new(
+                        bundle_capability_gate::InMemoryGrantLoader::new(),
+                    ),
+                ))),
+                Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+                Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            )),
         };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -759,6 +775,17 @@ fn finish_supervisor_deps(
         tenant: resolved.tenant_slug,
         community: resolved.community_name,
         kv_conn,
+        // See `spine::ProcessDeps::gate`'s doc for the interim
+        // AlwaysGrantedLoader wiring.
+        gate: Arc::new(bundle_capability_gate::CapabilityGate::new(
+            Arc::new(bundle_capability_gate::GrantCache::new(Arc::new(
+                grant_gate::AlwaysGrantedLoader::new(
+                    bundle_capability_gate::InMemoryGrantLoader::new(),
+                ),
+            ))),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+        )),
     }
 }
 

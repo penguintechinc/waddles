@@ -461,6 +461,11 @@ pub struct ProcessDeps<S: SpineOps> {
     /// graceful-degradation posture `core/svc_action::capabilities::
     /// StageCapabilities::with_kv`'s doc describes.
     pub kv_conn: Option<redis::aio::MultiplexedConnection>,
+    /// The standard enforcement gate (spec
+    /// `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+    /// SS5) every per-invoke [`StageCapabilities`] this loop constructs is
+    /// wired with.
+    pub gate: Arc<bundle_capability_gate::CapabilityGate>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -575,6 +580,7 @@ async fn handle_delivered<S: SpineOps>(
             d.env.tenant.clone(),
             d.env.community.clone(),
             deps.app_id.clone(),
+            Arc::clone(&deps.gate),
         );
         let caps = match &deps.kv_conn {
             Some(conn) => caps.with_kv(conn.clone()),
@@ -824,6 +830,21 @@ mod tests {
         KeyRing::new(vec![("k1".to_string(), vec![9u8; 32])])
     }
 
+    /// A permissive gate for this module's fixtures -- these tests exercise
+    /// the dispatch/DLQ/retry logic, not `crate::capabilities`'s gate
+    /// wiring (that module's own tests cover deny-without-grant behavior).
+    fn test_gate() -> Arc<bundle_capability_gate::CapabilityGate> {
+        Arc::new(bundle_capability_gate::CapabilityGate::new(
+            Arc::new(bundle_capability_gate::GrantCache::new(Arc::new(
+                crate::grant_gate::AlwaysGrantedLoader::new(
+                    bundle_capability_gate::InMemoryGrantLoader::new(),
+                ),
+            ))),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+        ))
+    }
+
     #[test]
     fn wire_platform_event_encodes_payload_as_a_json_string() {
         let event = PlatformEvent {
@@ -1050,6 +1071,7 @@ mod tests {
             // exercised directly by `capabilities`'s own test suite
             // instead of here.
             kv_conn: None,
+            gate: test_gate(),
         };
         (deps, metrics)
     }

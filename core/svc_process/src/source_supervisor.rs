@@ -120,6 +120,9 @@ pub struct SupervisorDeps {
     /// binding consumer's own `ProcessDeps` in [`run_binding_consumer`]
     /// below, rather than reopened per consumer or per reconnect attempt.
     pub kv_conn: Option<redis::aio::MultiplexedConnection>,
+    /// See `spine::ProcessDeps::gate`'s doc -- cloned into every binding
+    /// consumer's own `ProcessDeps` in [`run_binding_consumer`] below.
+    pub gate: Arc<bundle_capability_gate::CapabilityGate>,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -246,6 +249,7 @@ async fn run_binding_consumer(
             metrics: deps.metrics.clone(),
             license: Arc::clone(&deps.license),
             kv_conn: deps.kv_conn.clone(),
+            gate: Arc::clone(&deps.gate),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();

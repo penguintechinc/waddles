@@ -192,6 +192,7 @@ fn envelope_to_wire_json(env: &StageEnvelope) -> Result<serde_json::Value, Invok
 /// [`envelope_to_wire_json`] -- see that function's doc for the wire-shape
 /// bug this replaced. Returns the raw `result.payload` JSON for
 /// [`interpret_dispatch_payload`] to classify.
+#[allow(clippy::too_many_arguments)]
 pub async fn invoke_dispatch(
     conn: &Connection,
     app_id: &str,
@@ -199,6 +200,8 @@ pub async fn invoke_dispatch(
     env: &StageEnvelope,
     config_json: &str,
     deadline_ms: u64,
+    tenant_id: i32,
+    community_id: i32,
 ) -> Result<serde_json::Value, InvokeError> {
     let trace = env.trace.as_ref().map(|t| TraceContext {
         traceparent: t.traceparent.clone(),
@@ -221,6 +224,10 @@ pub async fn invoke_dispatch(
         // discord) -- `None` when the platform/event has no channel
         // concept. Never re-derived from anything a bundle returns.
         origin_channel_id: env.event.source.as_ref().and_then(|s| s.channel_id.clone()),
+        tenant_id,
+        community_id,
+        // Interim placeholder -- see `InvokeScope::app_version`'s doc.
+        app_version: 0,
     };
     let reply = conn
         .invoke(
@@ -503,6 +510,20 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
     // catches the "no executor at all" case before ever entering this
     // loop, which is the one infra failure worth a distinct DLQ kind at
     // this stage's current scope.
+    // Resolved once per delivered envelope (memoized by `deps.tenants` after
+    // the first lookup for this `(tenant, community)` pair) and threaded
+    // into every capability `authorize()` call this invoke makes (spec
+    // `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+    // SS5.1) -- an unresolvable tenant/community falls back to the `(0, 0)`
+    // sentinel, which fails closed (never matches a real grant row) rather
+    // than skipping the gate.
+    let (tenant_id, community_id) = deps
+        .tenants
+        .resolve(&d.env.tenant, d.env.community.as_deref())
+        .await
+        .map(|(t, c)| (t, c.unwrap_or(0)))
+        .unwrap_or((0, 0));
+
     let (record, _attempts) = dispatch_with_retry(
         |_attempt| async {
             match invoke_dispatch(
@@ -512,6 +533,8 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
                 &d.env,
                 &deps.config_json,
                 deps.retry_policy.call_timeout_ms,
+                tenant_id,
+                community_id,
             )
             .await
             {
