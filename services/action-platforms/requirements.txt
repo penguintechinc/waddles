@@ -27,6 +27,19 @@ google-api-python-client>=2.0.0
 google-auth-httplib2>=0.2.0
 google-auth-oauthlib>=1.2.0
 grpcio>=1.78.0
+# grpcio-tools (protoc codegen) -- REQUIRED at Docker build time to generate
+# youtube_action_pb2*.py (see `python -m grpc_tools.protoc` in Dockerfile).
+# Pinned to exactly 1.81.1: every grpcio-tools >=1.83.0 requires
+# protobuf>=7.35.1 (its own generated gencode enforces this at import time
+# via google.protobuf.runtime_version.ValidateProtobufRuntimeVersion), but
+# libs/flask_core/requirements.in caps `protobuf<7.0` -- installed after
+# this file in the Dockerfile, so it always wins the resolution and leaves
+# a newer grpcio-tools's stubs unimportable
+# (VersionError: gencode 7.35.1 runtime 6.33.6). grpcio-tools==1.81.1 is
+# the last release requiring `protobuf<7.0.0,>=6.33.5`, matching
+# flask_core's cap -- same version pin already used by
+# core/workflow_core_module/requirements.in for the identical reason.
+grpcio-tools==1.81.1
 h11>=0.14.0
 h2>=4.1.0
 hpack>=4.0.0

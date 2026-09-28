@@ -4,7 +4,18 @@
 //! `POST /intake/events`, spec S10.1) mount here once the connector/intake
 //! work lands -- see the `TODO(M5)` seam in `src/lib.rs` and `router`
 //! below; nothing here fakes that surface in the meantime.
+//!
+//! The Twitch EventSub webhook receiver (`eventsub`, `POST /eventsub/
+//! twitch/webhook`) is the one exception already mounted here -- it is
+//! in-line of traffic per `critical-rules.md` Data Plane and was built in
+//! Rust from the start (design doc `docs/superpowers/specs/2026-09-28-
+//! connections-credentials-design.md` §8 increment 4), landing ahead of the
+//! generic connector/intake work above. A separate `Router` merged in
+//! below, not folded into the generic intake surface once that lands --
+//! different auth/trust model, different secrets, different rate limits
+//! (design doc §4.4).
 
+pub mod eventsub;
 pub mod health;
 
 use std::sync::Arc;
@@ -28,6 +39,13 @@ pub struct AppState {
     pub metrics: Arc<prometheus::Registry>,
     pub request_metrics: RequestMetrics,
     pub started_at: Instant,
+    /// Twitch EventSub webhook dependencies (`crate::http::eventsub`) --
+    /// `None` until `crate::lib::try_build_eventsub_state` succeeds (no
+    /// binding keyring/spine config/Valkey connection configured, or the
+    /// `waddles.core.rust-data-plane` flag is off); the route still mounts
+    /// unconditionally and responds `503` in that case, matching every
+    /// other fixed-platform receiver's graceful-degradation contract.
+    pub eventsub: Option<Arc<eventsub::EventSubState>>,
 }
 
 impl AppState {
@@ -44,6 +62,7 @@ impl AppState {
             metrics: Arc::new(metrics),
             request_metrics,
             started_at: Instant::now(),
+            eventsub: None,
         }
     }
 }
@@ -81,10 +100,15 @@ async fn record_http_metrics(State(state): State<AppState>, req: Request, next: 
 /// // S10. Nothing here fakes that surface: an unmounted route 404s,
 /// // which is the honest state of an unimplemented milestone.
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let base = Router::new()
         .route("/health", get(health::liveness))
         .route("/healthz", get(health::healthz))
-        .with_state(state.clone())
+        .with_state(state.clone());
+
+    // `eventsub::router` mounts `POST /eventsub/twitch/webhook` -- see
+    // `eventsub`'s module doc for why it's a separately-built, merged-in
+    // `Router` rather than folded into the routes above.
+    base.merge(eventsub::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             state,
             record_http_metrics,

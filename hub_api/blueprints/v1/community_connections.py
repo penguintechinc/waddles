@@ -1,5 +1,13 @@
 """v1 `community.connections` group -- per-community OAuth "Connections" page (gh-320, chunk C3).
 
+**Not the same resource as `blueprints/v1/ingest_sources.py`** (`/api/v1/
+ingest-sources`, spec Sec10.3) -- that blueprint is a per-TENANT registry
+of inbound event sources over the `ingest_sources` table (no credentials
+ever stored, read by the Rust data plane); this one is the per-COMMUNITY
+OAuth token store below (`platform_integrations` table, stores encrypted
+access/refresh tokens). Kept as separate resources on separate paths
+rather than unified -- see that module's own docstring for the full note.
+
 Three surfaces, mirroring `community_loyalty.py`'s split (see that
 module's own docstring for the pattern this follows):
 

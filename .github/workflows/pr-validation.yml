@@ -32,6 +32,7 @@ jobs:
           cache-dependency-path: |
             core/identity_core_module/requirements.txt
             core/workflow_core_module/requirements.txt
+            core/community_module/requirements.txt
             libs/flask_core/requirements.txt
             hub_api/requirements.txt
             core/svc_action/requirements.txt
@@ -81,6 +82,217 @@ jobs:
           PYTHON_BIN: python
           SKIP_UNIT_TEST_DEPS_INSTALL: "1"
         run: make test-unit
+
+  alembic-migration-chain:
+    name: Alembic migration chain (real Postgres)
+    runs-on: ubuntu-latest
+    # Scoped to pull_request only: the base-revision diff below needs a real
+    # PR base commit to compare against (merge_group/workflow_dispatch have
+    # no equivalent single "pre-PR tree" to diff, and this gate's whole job
+    # is proving one PR's new migration(s) apply/rollback/reapply cleanly).
+    if: github.event_name == 'pull_request'
+    # Narrower than the workflow-level default (contents: read + packages:
+    # read) -- this job only checks out the repo and talks to its own
+    # Postgres service container, no package-registry access needed.
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:17-bookworm@sha256:639ab7ceb90e13123085b741fb31ef493fba25463002f6da665352e7b534b652
+        env:
+          POSTGRES_USER: waddlebot
+          POSTGRES_PASSWORD: testpass123
+          POSTGRES_DB: waddlebot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U waddlebot -d waddlebot"
+          --health-interval=5s --health-timeout=5s --health-retries=10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # `base:` is deliberately omitted -- dorny/paths-filter ignores it on
+      # pull_request events (uses the PR's own base ref automatically) and
+      # passing it anyway produces a confusing "input parameter is ignored"
+      # annotation on every run.
+      - name: Detect alembic changes
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4
+        id: changes
+        with:
+          filters: |
+            alembic:
+              - 'alembic/**'
+
+      - name: Set up Python
+        if: steps.changes.outputs.alembic == 'true'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: hub_api/requirements.txt
+
+      # hub_api/requirements.txt is hash-pinned and carries sqlalchemy +
+      # psycopg2-binary; alembic itself has no hash-pinned entry anywhere in
+      # this repo yet (migrations/Dockerfile installs it unpinned via
+      # `alembic>=1.13`) -- pinned here to an exact version so this gate is
+      # reproducible. Folding a hash-pinned alembic into hub_api/requirements.txt
+      # is a follow-up, tracked separately from this migration-chain gate.
+      #
+      # alembic/env.py imports `flask_core.models.db` (needed for
+      # `target_metadata`), which transitively needs flask-sqlalchemy +
+      # flask-security-too -- neither is in hub_api/requirements.txt (hub_api
+      # itself doesn't use flask_core). This is exactly the dependency set
+      # migrations/Dockerfile already installs for the same reason; versions
+      # pinned to match libs/flask_core/requirements.txt's own pins. First
+      # CI run of this job failed here with `ModuleNotFoundError: No module
+      # named 'flask_sqlalchemy'` -- a local run had passed only because the
+      # dev venv used for verification had it pre-installed from unrelated
+      # prior work, masking the gap.
+      - name: Install migration dependencies
+        if: steps.changes.outputs.alembic == 'true'
+        run: |
+          set -euo pipefail
+          pip install --disable-pip-version-check --require-hashes -r hub_api/requirements.txt
+          pip install --disable-pip-version-check \
+            "alembic==1.20.0" \
+            "flask-sqlalchemy==3.1.1" \
+            "flask-security-too==5.8.2" \
+            "PyYAML>=6.0.2,<7.0.0"
+
+      # This repo's real-Postgres alembic history starts at migration 0020 --
+      # everything before it is a 96-file legacy SQL baseline replay
+      # (`0001_baseline_from_sql_migrations`) that depends on roles/seed data
+      # only present in the full docker-compose dev stack (see
+      # `alembic/tests/pg_docker.py`'s own module docstring for the verified
+      # failure mode outside that stack). Reproducing that stack in CI is out
+      # of this gate's scope, so -- matching `pg_docker.py`'s own,
+      # already-proven approach -- this bootstraps only the four tables
+      # migrations 0020+ actually reference by FK, then stamps 0019_kick_app
+      # (the revision immediately before the first migration this minimal
+      # schema supports) so `alembic upgrade head` runs every migration this
+      # PR could plausibly touch for real.
+      - name: Bootstrap minimal FK schema + stamp pre-0020 baseline
+        if: steps.changes.outputs.alembic == 'true'
+        env:
+          PGPASSWORD: testpass123
+        run: |
+          set -euo pipefail
+          psql -h localhost -U waddlebot -d waddlebot <<'SQL'
+          CREATE TABLE tenants (
+              id SERIAL PRIMARY KEY,
+              slug TEXT NOT NULL UNIQUE,
+              is_active BOOLEAN NOT NULL DEFAULT TRUE,
+              logo_url TEXT,
+              config JSONB
+          );
+          CREATE TABLE communities (
+              id SERIAL PRIMARY KEY,
+              name TEXT
+          );
+          CREATE TABLE hub_users (
+              id SERIAL PRIMARY KEY
+          );
+          CREATE TABLE app_catalog (
+              app_id VARCHAR(255) PRIMARY KEY
+          );
+          SQL
+
+      # `rev` is parsed out of PR-branch file content (a fork PR's own
+      # migration file text) -- never spliced back into `${{ }}` template
+      # expansion in a later step. Passed through GITHUB_OUTPUT only after
+      # it passes the same [0-9a-z_]+ shape every real revision ID in this
+      # repo has, so a crafted `revision = "..."` string with shell
+      # metacharacters can never reach a later `run:` block as literal
+      # script text.
+      - name: Compute prior base revision
+        if: steps.changes.outputs.alembic == 'true'
+        id: base-rev
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          rev=$(python3 scripts/ci/alembic_prior_base_revision.py --base-sha "${PR_BASE_SHA}")
+          if ! printf '%s' "${rev}" | grep -qE '^[0-9a-z_]+$'; then
+            echo "::error::computed prior_base_revision '${rev}' doesn't match the expected [0-9a-z_]+ shape -- refusing to use it."
+            exit 1
+          fi
+          echo "prior_base_revision=${rev}" >> "$GITHUB_OUTPUT"
+
+      # Counts from `alembic history -r <base>:head` line count, not from
+      # grepping the upgrade command's own log output: this repo's
+      # alembic.ini pins `logger_root level = WARN`, which silently
+      # swallows alembic's default INFO-level "Running upgrade X -> Y"
+      # messages -- confirmed empty stdout/stderr from a real successful
+      # upgrade during this job's own development. `alembic current`
+      # (the DB's actual stamped revision) is what proves each step really
+      # executed, independent of that logging gap.
+      - name: alembic upgrade head -> downgrade to prior base -> upgrade head
+        if: steps.changes.outputs.alembic == 'true'
+        env:
+          DATABASE_URL: postgresql://waddlebot:testpass123@localhost:5432/waddlebot
+          PRIOR_BASE_REVISION: ${{ steps.base-rev.outputs.prior_base_revision }}
+        run: |
+          set -euo pipefail
+          base_rev="${PRIOR_BASE_REVISION}"
+          # Redundant with the producing step's own check -- cheap, and this
+          # step is the one that actually splices base_rev into an `alembic`
+          # argv, so it validates independently rather than trusting the
+          # upstream step forever.
+          if ! printf '%s' "${base_rev}" | grep -qE '^[0-9a-z_]+$'; then
+            echo "::error::prior_base_revision '${base_rev}' doesn't match the expected [0-9a-z_]+ shape -- refusing to use it."
+            exit 1
+          fi
+
+          history_lines=$(python3 -m alembic history -r "${base_rev}:head" | grep -c .)
+          # `history -r X:head` always includes the edge *into* X as its last
+          # line (see e.g. `alembic history -r 0025_app_source_bindings:head`
+          # printing both `0025 -> 0026` and `0024 -> 0025`) -- subtract 1 to
+          # get the count of revisions that actually apply going from X to head.
+          revision_count=$((history_lines - 1))
+          echo "revisions to apply (base ${base_rev} -> head): ${revision_count}"
+          if [ "${revision_count}" -le 0 ]; then
+            echo "::error::0 revisions between base ${base_rev} and head -- nothing for this gate to verify."
+            exit 1
+          fi
+
+          python3 -m alembic stamp 0019_kick_app
+
+          echo "== upgrade head (1st pass) =="
+          python3 -m alembic upgrade head
+          current_1=$(python3 -m alembic current)
+          head_1=$(python3 -m alembic heads)
+          head_count=$(printf '%s\n' "${head_1}" | grep -c .)
+          if [ "${head_count}" -ne 1 ]; then
+            echo "::error::expected exactly 1 alembic head, found ${head_count}: ${head_1}"
+            exit 1
+          fi
+          if [ -z "${current_1}" ]; then
+            echo "::error::alembic upgrade head completed without error, but \`alembic current\` reports no stamped revision -- the DB never actually advanced."
+            exit 1
+          fi
+          echo "DB now at: ${current_1}"
+
+          echo "== downgrade to prior base revision ${base_rev} =="
+          python3 -m alembic downgrade "${base_rev}"
+          current_after_downgrade=$(python3 -m alembic current)
+          if ! printf '%s\n' "${current_after_downgrade}" | grep -q "${base_rev}"; then
+            echo "::error::downgrade to ${base_rev} completed without error, but \`alembic current\` reports '${current_after_downgrade}' -- the DB didn't actually roll back."
+            exit 1
+          fi
+
+          echo "== upgrade head (2nd pass) =="
+          python3 -m alembic upgrade head
+          current_2=$(python3 -m alembic current)
+          if [ -z "${current_2}" ]; then
+            echo "::error::second alembic upgrade head completed without error, but \`alembic current\` reports no stamped revision -- the DB never actually re-advanced."
+            exit 1
+          fi
+
+          echo "::notice::alembic migration chain verified -- ${revision_count} revision(s) applied from ${base_rev} to head, round-tripped via downgrade/upgrade. Final revision: ${current_2}"
 
   marketplace-refunds:
     name: Marketplace refund authorization tests

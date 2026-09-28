@@ -123,24 +123,28 @@ where
     );
 
     let ingest_metrics = Arc::new(telemetry::register_ingest_metrics(&prom_registry));
-    let state = http::AppState::new(config.clone(), prom_registry);
+    let mut state = http::AppState::new(config.clone(), prom_registry);
 
     // `waddles.core.rust-data-plane` (spec S13.5): OFF (default until
-    // validated) means serve /health + /metrics and start nothing below.
-    // `flag_enabled` never performs inline network I/O (see
+    // validated) means serve /health + /metrics and start nothing below --
+    // the Twitch EventSub webhook route (`http::eventsub`) still mounts
+    // (ingress never changes), but responds 503 while `state.eventsub` is
+    // `None`. `flag_enabled` never performs inline network I/O (see
     // `crate::license`'s module doc), so this check never blocks startup
     // regardless of license/flag-server reachability.
     let license_client = license::build_license_client();
     if license::rust_data_plane_enabled(license_client.as_ref()).await {
-        // Twitch IRC (primary e2e path), Discord Gateway (secondary), and
-        // the Twitch outbound relay drain each independently no-op with a
-        // logged reason when unconfigured -- see each function's own doc
-        // comment. Slack/YouTube/Kick receivers, the generic webhook/JWT
-        // intake, and D31 usage metering are `// TODO(M5)` -- not started
-        // here, see this module's doc comment.
+        // Twitch IRC (primary e2e path), Discord Gateway (secondary), the
+        // Twitch outbound relay drain, and the Twitch EventSub webhook
+        // receiver each independently no-op with a logged reason when
+        // unconfigured -- see each function's own doc comment. Slack/
+        // YouTube/Kick receivers, the generic webhook/JWT intake, and D31
+        // usage metering are `// TODO(M5)` -- not started here, see this
+        // module's doc comment.
         try_start_twitch_irc(&config, ingest_metrics.clone());
-        try_start_discord(&config, ingest_metrics);
+        try_start_discord(&config, ingest_metrics.clone());
         try_start_twitch_outbound(&config);
+        state.eventsub = try_build_eventsub_state(&config, ingest_metrics.clone()).await;
     } else {
         tracing::info!(
             flag = license::RUST_DATA_PLANE_FLAG,
@@ -367,6 +371,86 @@ fn try_start_twitch_outbound(config: &config::Config) {
     });
 }
 
+/// Attempts to build the Twitch EventSub webhook receiver's dependencies
+/// (`crate::http::eventsub::EventSubState`) and returns `None` (never an
+/// error) on any of three independent, logged reasons this doesn't start --
+/// the same graceful-degradation contract as [`try_start_twitch_irc`]/
+/// [`try_start_discord`] (binding keyring, spine config), plus a Valkey
+/// connection for the dedup guard/revocation sink specifically:
+/// - the D30 binding keyring/active-kid is absent or invalid
+///   ([`resolve_binding_keyring`])
+/// - `penguin_spine::SpineConfig::from_env()` fails
+/// - the Valkey connection this function separately opens for
+///   `ingest::twitch_eventsub::{RedisReplayGuard, RedisRevocationSink}`
+///   fails to connect (a fresh connection, not shared with the IRC/Discord
+///   receivers' own `SpineClient`s or the outbound relay drain's list
+///   connection)
+///
+/// Unlike [`try_start_twitch_irc`]/[`try_start_discord`], this never spawns
+/// a background task -- the webhook route (`http::eventsub::router`) is
+/// already mounted unconditionally; this function only decides whether
+/// `AppState::eventsub` is `Some` (process requests) or `None` (503 every
+/// request).
+async fn try_build_eventsub_state(
+    config: &config::Config,
+    metrics: Arc<telemetry::IngestMetrics>,
+) -> Option<Arc<http::eventsub::EventSubState>> {
+    let keyring = resolve_binding_keyring(config, "twitch eventsub")?;
+
+    let spine_cfg = match penguin_spine::SpineConfig::from_env() {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            tracing::warn!(error = %err, "spine config unavailable; twitch eventsub receiver not started");
+            return None;
+        }
+    };
+
+    let spine_metrics: Arc<dyn penguin_spine::SpineMetrics> = metrics.clone();
+    let appender = match penguin_spine::SpineClient::connect(spine_cfg.clone(), spine_metrics).await
+    {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::error!(error = %err, "spine connect failed; twitch eventsub receiver not started");
+            return None;
+        }
+    };
+
+    let redis_client = match outbound::build_redis_client(&spine_cfg) {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::warn!(error = %err, "valkey client build failed; twitch eventsub receiver not started");
+            return None;
+        }
+    };
+    let conn = match redis_client.get_multiplexed_async_connection().await {
+        Ok(conn) => conn,
+        Err(err) => {
+            tracing::warn!(error = %err, "valkey connect failed; twitch eventsub receiver not started");
+            return None;
+        }
+    };
+
+    let resolver =
+        ingest::twitch_eventsub::EnvSecretResolver::from_env(config.twitch_eventsub_secret.clone());
+    let dedup = ingest::twitch_eventsub::RedisReplayGuard::new(
+        conn.clone(),
+        ingest::twitch_eventsub::DEDUP_TTL,
+    );
+    let revocation = ingest::twitch_eventsub::RedisRevocationSink::new(conn);
+
+    tracing::info!("twitch eventsub webhook receiver configured");
+    Some(Arc::new(http::eventsub::EventSubState {
+        resolver,
+        dedup,
+        revocation,
+        appender,
+        metrics,
+        keyring,
+        active_kid: config.cli.binding_active_kid.clone(),
+        scope: config.ingest_scope(),
+    }))
+}
+
 /// Shared keyring-resolution step for [`try_start_twitch_irc`]/
 /// [`try_start_discord`]: `None` (unconfigured), a parse error, or an
 /// empty `ENVELOPE_BINDING_ACTIVE_KID` are all logged and treated as "this
@@ -555,6 +639,7 @@ mod tests {
             twitch_irc_oauth_token: None,
             discord_bot_token: None,
             envelope_binding_keys: None,
+            twitch_eventsub_secret: None,
         }
     }
 
