@@ -73,6 +73,28 @@ pub enum InvokeError {
     MalformedPayload(String),
 }
 
+/// Resolves the `app_versions.id` [`crate::capabilities::InvokeScope::
+/// app_version`] must carry for a live invocation of `digest`: the row in
+/// `active`'s ACTIVE+APPROVED set whose own `digest` matches the one this
+/// stage is about to invoke (spec SS4: grants are keyed `(tenant, community,
+/// app, app_version)`, never just `app_id`, so a pod running an older
+/// pinned digest than the tenant's current activation must resolve THAT
+/// digest's own version, not "whatever is active now"). Pure (no I/O) so
+/// the "correct row wins, no match fails closed" contract is unit-testable
+/// without a live reader connection -- `crate::lib::try_start_dispatch` is
+/// the sole caller, and treats `None` as unresolvable (never substitutes
+/// `0`, see that function's doc).
+pub fn resolve_action_app_version(
+    active: &bundle_active_set::ActiveSetRead,
+    digest: &str,
+) -> Option<i64> {
+    active
+        .rows
+        .iter()
+        .find(|row| row.digest == digest)
+        .map(|row| row.version_id)
+}
+
 /// Sends `load` for one bundle over `conn` and returns the executor's
 /// `loaded` reply (spec §6.6). A real, fully-wired wrapper around
 /// [`Connection::request`] -- see the module doc for what remains a seam
@@ -202,6 +224,7 @@ pub async fn invoke_dispatch(
     deadline_ms: u64,
     tenant_id: i32,
     community_id: i32,
+    app_version: i64,
 ) -> Result<serde_json::Value, InvokeError> {
     let trace = env.trace.as_ref().map(|t| TraceContext {
         traceparent: t.traceparent.clone(),
@@ -226,8 +249,14 @@ pub async fn invoke_dispatch(
         origin_channel_id: env.event.source.as_ref().and_then(|s| s.channel_id.clone()),
         tenant_id,
         community_id,
-        // Interim placeholder -- see `InvokeScope::app_version`'s doc.
-        app_version: 0,
+        // Resolved once at startup from the active-set row that loaded
+        // `digest` (`crate::lib::try_start_dispatch`'s `resolve_action_app_version`
+        // call, mirroring `core/svc_process::lib::resolve_app_version_id`) --
+        // never `0` for a live invocation (spec SS4/SS5.1: grants are keyed
+        // `(tenant, community, app, app_version)`; `0` only ever matches a
+        // grant row also written under version `0`, never a real approved
+        // version).
+        app_version,
     };
     let reply = conn
         .invoke(
@@ -434,6 +463,15 @@ impl SpineOps for SpineClient {
 pub struct DispatchDeps<A: AuditSink, T: TenantResolver, S: SpineOps> {
     pub app_id: String,
     pub digest: String,
+    /// The `app_versions.id` the active-set row that loaded `digest`
+    /// resolved to (`crate::lib::try_start_dispatch`'s
+    /// `resolve_action_app_version`) -- threaded into every invoke's
+    /// [`crate::capabilities::InvokeScope::app_version`], never `0` except
+    /// in this stage's documented env-only unconfigured mode (no
+    /// `BUNDLE_SCOPE_TENANT_ID`/DB reader configured at all, matching
+    /// `core/svc_process::lib::try_start_process_loop`'s identical
+    /// "`(0, 0, 0)` sentinel while unconfigured" precedent).
+    pub app_version: i64,
     pub config_json: String,
     pub key_ring: KeyRing,
     pub connections: Arc<ConnectionRegistry>,
@@ -535,6 +573,7 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
                 deps.retry_policy.call_timeout_ms,
                 tenant_id,
                 community_id,
+                deps.app_version,
             )
             .await
             {
@@ -776,6 +815,50 @@ mod tests {
         assert!(matches!(outcome, AttemptOutcome::NonRetryable { .. }));
     }
 
+    fn active_row(digest: &str, version_id: i64) -> bundle_active_set::ActiveBundleRow {
+        bundle_active_set::ActiveBundleRow {
+            app_id: "waddles.bot.commands.default".to_string(),
+            version: version_id.to_string(),
+            version_id,
+            digest: digest.to_string(),
+            component_key: "bundles/c/component.wasm".to_string(),
+            sidecar_key: "bundles/c/sidecar.json".to_string(),
+        }
+    }
+
+    /// Regression (gh-433): the resolved `app_version` is the DIGEST-matched
+    /// row's `version_id`, never the tenant's current-activation row when
+    /// this pod's pinned digest has since drifted from it -- and never the
+    /// `0` interim placeholder this replaced.
+    #[test]
+    fn resolve_action_app_version_matches_the_invoked_digest_not_just_the_app_id() {
+        let active = bundle_active_set::ActiveSetRead {
+            rows: vec![active_row("sha256:old", 7), active_row("sha256:new", 9)],
+            excluded: vec![],
+            degraded: vec![],
+        };
+        assert_eq!(
+            resolve_action_app_version(&active, "sha256:old"),
+            Some(7),
+            "must resolve the OLD pinned digest's own version, not the newer row"
+        );
+        assert_eq!(resolve_action_app_version(&active, "sha256:new"), Some(9));
+    }
+
+    /// No active-set row matches the invoked digest at all -- unresolvable,
+    /// never `0` (regression: a production caller must fail closed here,
+    /// never build an `InvokeScope` with the `0` sentinel for a live
+    /// invocation).
+    #[test]
+    fn resolve_action_app_version_is_none_when_no_row_matches_the_digest() {
+        let active = bundle_active_set::ActiveSetRead {
+            rows: vec![active_row("sha256:other", 7)],
+            excluded: vec![],
+            degraded: vec![],
+        };
+        assert_eq!(resolve_action_app_version(&active, "sha256:missing"), None);
+    }
+
     #[derive(Default)]
     struct FakeAudit {
         records: std::sync::Mutex<Vec<DispatchRecord>>,
@@ -998,6 +1081,7 @@ mod tests {
         DispatchDeps {
             app_id: "waddles.bot.commands.default".to_string(),
             digest: "sha256:00".to_string(),
+            app_version: 1,
             config_json: "{}".to_string(),
             key_ring: test_ring(),
             connections,

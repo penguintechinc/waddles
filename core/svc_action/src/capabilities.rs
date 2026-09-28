@@ -2000,6 +2000,52 @@ mod tests {
         .with_kv(FakeKvBackend::default())
     }
 
+    /// Regression (gh-433): the dispatch-time `InvokeScope.app_version` this
+    /// module's own `gate_scope()` builds must be the REAL resolved
+    /// `app_versions.id` (never the `0` interim placeholder
+    /// `crate::dispatch::invoke_dispatch` used to hardcode) for a seeded
+    /// grant to ever match -- `permissive_gate()`'s grants are seeded under
+    /// `app_version: 1` (`scope()`'s own value, the same value a real
+    /// dispatch loop now threads through via `crate::dispatch::
+    /// resolve_action_app_version`), so an invoke carrying that resolved
+    /// version is ALLOWED.
+    #[tokio::test]
+    async fn dispatch_invocation_with_the_resolved_app_version_is_allowed_by_a_seeded_grant() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        let result = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .expect("a grant seeded under the resolved app_version allows the call");
+        assert_eq!(result["value"], serde_json::Value::Null);
+    }
+
+    /// Regression (gh-433): an invoke whose `app_version` cannot be
+    /// resolved to the version a grant was actually issued for -- modeled
+    /// here as a scope carrying a version no grant was ever seeded under --
+    /// is DENIED, never silently authorized under the wrong version's
+    /// permissions (which is exactly what the old `app_version: 0`
+    /// placeholder would have risked had any grant ever been seeded under
+    /// `0`).
+    #[tokio::test]
+    async fn dispatch_invocation_with_an_unresolved_app_version_is_denied() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        let unresolved_scope = InvokeScope {
+            app_version: 999,
+            ..scope()
+        };
+        let err = caps
+            .handle(
+                &unresolved_scope,
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
     #[tokio::test]
     async fn gate_denies_kv_without_a_grant() {
         let caps = caps_denied(FakeRelayQueue::default());

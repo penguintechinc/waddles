@@ -861,6 +861,66 @@ fn try_start_dispatch(
             }
         };
         let (digest, config_json) = resolve_initial_bundle(&config.cli.action_bundle_digest);
+        // Resolves the real `app_versions.id` the active-set row that
+        // loaded `digest` carries (`dispatch::resolve_action_app_version`,
+        // mirroring `core/svc_process::lib::resolve_app_version_id`'s
+        // identical pattern) when this pod is ALSO configured with a real
+        // `BUNDLE_SCOPE_TENANT_ID` and a DB reader account -- fail-closed
+        // (dispatch loop never starts) on any resolution failure, never a
+        // `0` placeholder substituted for a live invocation (spec SS4/
+        // SS5.1). `None` (both `BUNDLE_SCOPE_TENANT_ID`/`DB_READER_PASSWORD`
+        // unset) keeps this stage's documented env-only unconfigured mode
+        // unchanged: `app_version` stays `0`, the same sentinel
+        // `core/svc_process::lib::try_start_process_loop` uses while
+        // unconfigured.
+        let app_version = match (
+            config.cli.bundle_scope_tenant_id.get(),
+            config.db_reader_password.as_ref(),
+        ) {
+            (Some(tenant_id), Some(password)) => {
+                let community_id = config.cli.bundle_scope_community_id;
+                let reader_cfg = bundle_active_set::ReaderConfig {
+                    host: config.cli.db_reader_host.clone(),
+                    port: config.cli.db_reader_port,
+                    name: config.cli.db_reader_name.clone(),
+                    user: config.cli.db_reader_user.clone(),
+                };
+                let reader_db = match bundle_active_set::reader::connect(
+                    &reader_cfg,
+                    password.expose(),
+                )
+                .await
+                {
+                    Ok(db) => db,
+                    Err(err) => {
+                        tracing::error!(error = %err, "db-reader connection failed; dispatch loop not started (fail-closed: BUNDLE_SCOPE_TENANT_ID is configured, so a 0 app_version is never substituted)");
+                        return;
+                    }
+                };
+                let active = match bundle_active_set::read_active_set(
+                    &reader_db,
+                    tenant_id,
+                    community_id,
+                    Some(&app_id),
+                )
+                .await
+                {
+                    Ok(active) => active,
+                    Err(err) => {
+                        tracing::error!(error = %err, tenant_id, community_id, app_id = %app_id, "active-set query failed; dispatch loop not started (fail-closed)");
+                        return;
+                    }
+                };
+                match dispatch::resolve_action_app_version(&active, &digest) {
+                    Some(id) => id,
+                    None => {
+                        tracing::error!(tenant_id, community_id, app_id = %app_id, digest = %digest, "no active-set row matches the invoked digest; dispatch loop not started (fail-closed)");
+                        return;
+                    }
+                }
+            }
+            _ => 0,
+        };
         // TODO(M3+): tenant/community scope is hardcoded to the
         // tenant-wide `global` activation until multi-bundle scheduling
         // (module doc) resolves the real set of (tenant, community,
@@ -886,6 +946,7 @@ fn try_start_dispatch(
         let deps = dispatch::DispatchDeps {
             app_id: app_id.clone(),
             digest,
+            app_version,
             config_json,
             key_ring,
             connections,

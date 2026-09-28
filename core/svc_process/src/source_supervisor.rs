@@ -132,6 +132,14 @@ pub struct SupervisorDeps {
     /// See `spine::ProcessDeps::gate`'s doc -- cloned into every binding
     /// consumer's own `ProcessDeps` in [`run_binding_consumer`] below.
     pub gate: Arc<bundle_capability_gate::CapabilityGate>,
+    /// The same RO-replica reader connection `crate::lib::
+    /// try_start_db_bundle_loader` already opened for `resolve_scope`/
+    /// `grant_gate::PgGrantLoader` -- [`run_binding_consumer`] reads this
+    /// (via `bundle_active_set::read_active_set`) once per connect attempt
+    /// to resolve THIS binding's own `app_id`'s current `app_versions.id`,
+    /// never hardcoding `0` (spec SS4/SS5.1: grants are keyed `(tenant,
+    /// community, app, app_version)`).
+    pub db: DatabaseConnection,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -193,6 +201,20 @@ impl ConsumerSupervisor for SpineConsumerSupervisor {
     }
 }
 
+/// Resolves the `app_versions.id` [`ProcessDeps::app_version`] must carry
+/// for a live invocation of `app_id`'s own binding: the ACTIVE+APPROVED
+/// row's `version_id` -- `app_active_versions`'s `(tenant_id, community_id,
+/// app_id)` composite key means `active.rows` holds at most one row here
+/// (`bundle_active_set::read_active_set` was called with `Some(app_id)`).
+/// Pure (no I/O) so the "the right row wins, no match fails closed"
+/// contract is unit-testable without a live reader connection --
+/// [`run_binding_consumer`] is the sole caller, and treats `None` as
+/// unresolvable (retries the connect loop rather than ever substituting
+/// `0`, see that function's doc).
+fn resolve_binding_app_version(active: &bundle_active_set::ActiveSetRead) -> Option<i64> {
+    active.rows.first().map(|row| row.version_id)
+}
+
 /// Sleeps for `dur`, or returns early (reporting `true`) if `shutdown`
 /// resolves first -- lets [`run_binding_consumer`]'s retry backoff still
 /// respond promptly to a supervisor-initiated stop instead of sleeping out
@@ -225,6 +247,47 @@ async fn run_binding_consumer(
 ) {
     loop {
         let grant = binding_grant(&deps.tenant, &deps.community, &platform, &source_id);
+
+        // Resolve THIS binding's own `app_versions.id` fresh every connect
+        // attempt (cheap: one scoped, single-`app_id` active-set read) --
+        // never a `0` placeholder (spec SS4/SS5.1). Unresolvable (query
+        // error, or no ACTIVE+APPROVED row for this app_id right now, e.g.
+        // a deactivation racing this reconnect) is treated exactly like the
+        // `SpineClient::connect` failure below: log, back off, retry --
+        // this consumer never proceeds to invoke under an unresolved scope.
+        let app_version = match bundle_active_set::read_active_set(
+            &deps.db,
+            deps.tenant_id,
+            deps.community_id,
+            Some(&app_id),
+        )
+        .await
+        {
+            Ok(active) => match resolve_binding_app_version(&active) {
+                Some(id) => id,
+                None => {
+                    tracing::warn!(
+                        app_id = %app_id, platform = %platform, source_id = %source_id,
+                        "source-binding consumer: no active-set row for this app_id, retrying"
+                    );
+                    if wait_or_shutdown(&mut shutdown, CONSUMER_RETRY_BACKOFF).await {
+                        return;
+                    }
+                    continue;
+                }
+            },
+            Err(err) => {
+                tracing::warn!(
+                    app_id = %app_id, platform = %platform, source_id = %source_id,
+                    error = %err,
+                    "source-binding consumer: active-set query failed, retrying"
+                );
+                if wait_or_shutdown(&mut shutdown, CONSUMER_RETRY_BACKOFF).await {
+                    return;
+                }
+                continue;
+            }
+        };
 
         let spine_client =
             match SpineClient::connect(deps.spine_cfg.clone(), deps.metrics.clone()).await {
@@ -261,14 +324,11 @@ async fn run_binding_consumer(
             gate: Arc::clone(&deps.gate),
             tenant_id: deps.tenant_id,
             community_id: deps.community_id,
-            // No numeric `app_versions.id` source exists on this DB-driven
-            // per-binding path yet -- `version` above is itself still a
-            // hardcoded `"1"` placeholder (this function's own doc), a
-            // pre-existing gap this change does not extend to fixing.
-            // Fails closed exactly like the general dispatch loop's own
-            // unconfigured case: `0` only ever matches a grant row ALSO
-            // written under version `0`.
-            app_version: 0,
+            // Resolved fresh above every connect attempt
+            // (`resolve_binding_app_version`) -- never `0` for a live
+            // invocation; an unresolved version retries the connect loop
+            // instead of ever reaching this struct literal.
+            app_version,
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();
@@ -555,6 +615,40 @@ mod tests {
             platform: platform.to_string(),
             source_id: source_id.to_string(),
         }
+    }
+
+    fn active_bundle_row(app_id: &str, version_id: i64) -> bundle_active_set::ActiveBundleRow {
+        bundle_active_set::ActiveBundleRow {
+            app_id: app_id.to_string(),
+            version: version_id.to_string(),
+            version_id,
+            digest: "sha256:aa".to_string(),
+            component_key: "bundles/aa/component.wasm".to_string(),
+            sidecar_key: "bundles/aa/sidecar.json".to_string(),
+        }
+    }
+
+    /// Regression (gh-433): resolves the ACTIVE+APPROVED row's real
+    /// `version_id`, never the `0` interim placeholder
+    /// `run_binding_consumer` used to hardcode.
+    #[test]
+    fn resolve_binding_app_version_returns_the_active_rows_version_id() {
+        let active = bundle_active_set::ActiveSetRead {
+            rows: vec![active_bundle_row("waddles.bot.commands.default", 42)],
+            excluded: vec![],
+            degraded: vec![],
+        };
+        assert_eq!(resolve_binding_app_version(&active), Some(42));
+    }
+
+    /// No ACTIVE+APPROVED row for this app_id right now (e.g. a
+    /// deactivation racing the reconnect) -- unresolvable, never `0`
+    /// (regression: the caller must retry rather than build a `ProcessDeps`
+    /// with the `0` sentinel for a live invocation).
+    #[test]
+    fn resolve_binding_app_version_is_none_when_the_active_set_is_empty() {
+        let active = bundle_active_set::ActiveSetRead::default();
+        assert_eq!(resolve_binding_app_version(&active), None);
     }
 
     /// The NOGROUP-detection regression test: a real `RedisError` carrying

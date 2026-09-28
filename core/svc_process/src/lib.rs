@@ -800,6 +800,7 @@ fn try_start_db_bundle_loader(
                 tenant_id,
                 community_id,
                 supervisor_gate,
+                db.clone(),
             )
         }) {
             Some(deps) => {
@@ -908,6 +909,7 @@ fn finish_supervisor_deps(
     tenant_id: i32,
     community_id: i32,
     gate: Arc<bundle_capability_gate::CapabilityGate>,
+    db: sea_orm::DatabaseConnection,
 ) -> source_supervisor::SupervisorDeps {
     source_supervisor::SupervisorDeps {
         spine_cfg: prereqs.spine_cfg,
@@ -923,6 +925,7 @@ fn finish_supervisor_deps(
         community_id,
         kv_conn,
         gate,
+        db,
     }
 }
 
@@ -1098,6 +1101,13 @@ mod tests {
     /// into `SupervisorDeps` verbatim -- this is what
     /// `source_supervisor::binding_grant` then renders into the actual
     /// Valkey stream key (see that module's own regression test).
+    /// A `DatabaseConnection` handle with no queued queries -- sufficient for
+    /// tests that only assert `finish_supervisor_deps`'s field plumbing,
+    /// never actually issue a query against it.
+    fn test_db_connection() -> sea_orm::DatabaseConnection {
+        sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection()
+    }
+
     #[test]
     fn finish_supervisor_deps_uses_the_resolved_tenant_slug_and_community() {
         let prereqs = test_supervisor_prereqs();
@@ -1105,7 +1115,15 @@ mod tests {
             tenant_slug: "acme".to_string(),
             community_name: Some("main".to_string()),
         };
-        let deps = finish_supervisor_deps(prereqs, resolved, None, 7, 3, test_gate());
+        let deps = finish_supervisor_deps(
+            prereqs,
+            resolved,
+            None,
+            7,
+            3,
+            test_gate(),
+            test_db_connection(),
+        );
         assert_eq!(deps.tenant, "acme");
         assert_eq!(deps.community.as_deref(), Some("main"));
         assert_eq!(deps.tenant_id, 7);
@@ -1123,7 +1141,9 @@ mod tests {
     fn supervisor_deps_are_never_built_when_scope_resolution_fails() {
         let prereqs = test_supervisor_prereqs();
         let resolved: Option<bundle_active_set::scope::ResolvedScope> = None;
-        let deps = resolved.map(|r| finish_supervisor_deps(prereqs, r, None, 7, 3, test_gate()));
+        let deps = resolved.map(|r| {
+            finish_supervisor_deps(prereqs, r, None, 7, 3, test_gate(), test_db_connection())
+        });
         assert!(
             deps.is_none(),
             "an unresolved scope must never produce SupervisorDeps -- the source-binding \

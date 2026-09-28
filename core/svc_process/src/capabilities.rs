@@ -679,6 +679,90 @@ mod tests {
         .with_kv(FakeKvBackend::default())
     }
 
+    /// A gate with a grant seeded under a specific, non-zero `app_version`
+    /// -- models `source_supervisor::resolve_binding_app_version`'s real
+    /// resolved value (never the `0` interim placeholder
+    /// `run_binding_consumer` used to hardcode).
+    fn gate_seeded_at_version(app_version: i64) -> Arc<CapabilityGate> {
+        let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+        snapshot.set(
+            bundle_capability_gate::GrantScopeKey {
+                tenant_id: 7,
+                community_id: 3,
+                app_id: "waddles.bot.commands.default".to_string(),
+                app_version,
+            },
+            bundle_capability_gate::GrantSet {
+                permission_snapshot_hash: "test".to_string(),
+                grants: std::collections::HashMap::from([(
+                    "storage.kv".to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: "storage.kv".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                )]),
+            },
+        );
+        Arc::new(CapabilityGate::new(
+            Arc::new(snapshot),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+        ))
+    }
+
+    /// Regression (gh-433): a source-binding invocation carrying the
+    /// resolved `app_version` (`source_supervisor::
+    /// resolve_binding_app_version`'s real value) is ALLOWED by a grant
+    /// seeded under that same version.
+    #[tokio::test]
+    async fn source_binding_invocation_with_the_resolved_app_version_is_allowed_by_a_seeded_grant()
+    {
+        let caps = StageCapabilities::new(
+            "acme".to_string(),
+            Some("main".to_string()),
+            "waddles.bot.commands.default".to_string(),
+            7,
+            3,
+            42,
+            gate_seeded_at_version(42),
+        )
+        .with_kv(FakeKvBackend::default());
+        caps.handle(call(
+            CapabilityKind::Kv,
+            "get",
+            serde_json::json!({"key": "k"}),
+        ))
+        .await
+        .expect("a grant seeded under the resolved app_version allows the call");
+    }
+
+    /// Regression (gh-433): an unresolvable/mismatched `app_version` --
+    /// modeled as a scope carrying a different version than any seeded
+    /// grant -- is DENIED, never silently authorized under the wrong
+    /// version's permissions.
+    #[tokio::test]
+    async fn source_binding_invocation_with_an_unresolved_app_version_is_denied() {
+        let caps = StageCapabilities::new(
+            "acme".to_string(),
+            Some("main".to_string()),
+            "waddles.bot.commands.default".to_string(),
+            7,
+            3,
+            999,
+            gate_seeded_at_version(42),
+        )
+        .with_kv(FakeKvBackend::default());
+        let err = caps
+            .handle(call(
+                CapabilityKind::Kv,
+                "get",
+                serde_json::json!({"key": "k"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
     /// A minimal in-memory [`KvBackend`] fake, mirroring
     /// `bundle_host_kv::backend::fake::FakeBackend`'s semantics (that one
     /// is crate-private to `bundle_host_kv`, so `handle_kv`'s own
