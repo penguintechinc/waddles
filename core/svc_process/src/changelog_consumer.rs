@@ -80,6 +80,40 @@ fn should_stop_consumers(currently_enabled: bool, were_enabled: bool) -> bool {
     !currently_enabled && were_enabled
 }
 
+/// Detects a NEW executor connection becoming active, by pointer identity,
+/// compared to the last one this consumer observed -- updates
+/// `last_connection_id` in place and reports whether a change occurred.
+/// Pure (no I/O), so directly unit-testable.
+///
+/// **Why this matters (item 4, gh security review on PR #406):** the
+/// executor wipes its ENTIRE bundle registry on every disconnect
+/// (`core/bundle_executor/src/invoke.rs`'s `on_disconnect`) -- "on
+/// reconnect, the consumer sends its full authoritative scope set, which
+/// REPLACES that peer's scopes" is only true if this consumer's OWN
+/// `state.loaded` bookkeeping is reset on a detected reconnect too;
+/// otherwise it would believe everything it previously loaded is still
+/// resident and never resend the `Load`s the freshly-reconnected (empty)
+/// executor actually needs, leaving a real (if self-healing on the next
+/// full reconcile) availability gap. `crate::host_api::ConnectionRegistry::
+/// set_active` constructs a brand-new `Connection` for every accepted TCP
+/// connection (see that type's own doc), so pointer identity is a reliable,
+/// zero-cost way to detect this without any wire-level signal.
+fn detect_new_connection<T>(
+    current: Option<&Arc<T>>,
+    last_connection_id: &mut Option<usize>,
+) -> bool {
+    let current_id = current.map(|c| Arc::as_ptr(c) as usize);
+    let changed = match (current_id, *last_connection_id) {
+        (Some(cur), Some(last)) => cur != last,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+    if let Some(id) = current_id {
+        *last_connection_id = Some(id);
+    }
+    changed
+}
+
 /// All state one running consumer instance carries across ticks --
 /// constructed once by [`initial_state`], mutated in place by every
 /// subsequent [`run_incremental_tick`]/[`run_full_reconcile`] call.
@@ -101,6 +135,13 @@ pub struct ConsumerState {
     /// no entry here has either never succeeded yet (nothing to evict) or
     /// was already evicted (fresh baseline on its next success).
     scope_last_success: HashMap<ScopeKey, Instant>,
+    /// Whether `bundle_active_set_watermark.min_retained_seq` exists in this
+    /// environment's schema (hub-api migration `0026`/PR #397) -- probed
+    /// ONCE by [`initial_state`] and cached here for the process's lifetime;
+    /// `false` on an older hub-api means the primary retention check in
+    /// [`run_incremental_tick`] never fires, and the heuristic gap-detection
+    /// fallback remains the sole detector.
+    retention_supported: bool,
 }
 
 impl ConsumerState {
@@ -118,7 +159,18 @@ impl ConsumerState {
             running_consumers: HashMap::new(),
             tracker: ChangeLogTracker::new(initial_seq),
             scope_last_success: HashMap::new(),
+            // Tests assume the column is present by default (matches every
+            // existing `watermark_row(...)` fixture); tests exercising the
+            // "older hub-api" fallback set this explicitly via
+            // `#[cfg(test)] fn with_retention_supported`.
+            retention_supported: true,
         }
+    }
+
+    #[cfg(test)]
+    fn with_retention_supported(mut self, supported: bool) -> Self {
+        self.retention_supported = supported;
+        self
     }
 
     #[cfg(test)]
@@ -152,7 +204,16 @@ impl ConsumerState {
 pub async fn initial_state(
     db: &DatabaseConnection,
 ) -> Result<ConsumerState, bundle_active_set::ActiveSetError> {
-    let safe_seq = bundle_active_set::read_safe_seq(db).await?;
+    // Probed ONCE (never per-tick) and cached for this consumer's lifetime
+    // (`ConsumerState::retention_supported`) -- an older hub-api schema
+    // (migration `0026`/PR #397 not yet applied) must never prevent this
+    // consumer from starting at all; it only means the primary retention
+    // check never fires, and the heuristic gap-detection fallback
+    // (`run_incremental_tick`'s own doc) remains the sole detector.
+    let retention_supported = bundle_active_set::probe_min_retained_seq_supported(db).await?;
+    let safe_seq = bundle_active_set::read_safe_seq_watermark(db, retention_supported)
+        .await?
+        .safe_seq;
     let by_scope = bundle_active_set::read_active_set_all(db).await?;
     let bindings_by_scope = bundle_active_set::read_source_bindings_all(db).await?;
     let scope_last_success = by_scope.keys().map(|s| (*s, Instant::now())).collect();
@@ -164,6 +225,7 @@ pub async fn initial_state(
         running_consumers: HashMap::new(),
         tracker: ChangeLogTracker::new(safe_seq),
         scope_last_success,
+        retention_supported,
     })
 }
 
@@ -381,13 +443,14 @@ pub async fn run_incremental_tick(
     metrics: &ChangelogConsumerMetrics,
 ) {
     let start = Instant::now();
-    let watermark = match bundle_active_set::read_safe_seq_watermark(db).await {
-        Ok(w) => w,
-        Err(err) => {
-            tracing::warn!(error = %err, "changelog consumer: safe_seq read failed");
-            return;
-        }
-    };
+    let watermark =
+        match bundle_active_set::read_safe_seq_watermark(db, state.retention_supported).await {
+            Ok(w) => w,
+            Err(err) => {
+                tracing::warn!(error = %err, "changelog consumer: safe_seq read failed");
+                return;
+            }
+        };
     let safe_seq = watermark.safe_seq;
     metrics.changelog_lag.set(state.tracker.lag(safe_seq));
     if safe_seq <= state.tracker.last_seq() {
@@ -687,14 +750,25 @@ pub async fn run(
     // gate, so the very first disabled tick is a genuine transition worth
     // acting on.
     let mut consumers_were_enabled = true;
+    // See `detect_new_connection`'s own doc (item 4, gh security review on
+    // PR #406). `None`: no connection observed yet.
+    let mut last_connection_id: Option<usize> = None;
 
     loop {
-        let sink = connections
-            .active()
-            .map(|connection| crate::bundle_loader::ExecutorSink {
-                connection,
-                call_timeout_ms,
-            });
+        let active_connection = connections.active();
+        if detect_new_connection(active_connection.as_ref(), &mut last_connection_id) {
+            tracing::info!(
+                "changelog consumer: detected a new executor connection; resetting loaded-state \
+                 so the full authoritative active set is resent (the executor wipes its own \
+                 registry on every disconnect)"
+            );
+            state.loaded.clear();
+            metrics.executor_reconnect_detected_total.inc();
+        }
+        let sink = active_connection.map(|connection| crate::bundle_loader::ExecutorSink {
+            connection,
+            call_timeout_ms,
+        });
         let sink_ref = sink.as_ref().map(|s| s as &dyn BundleSink);
 
         tokio::select! {
@@ -780,6 +854,12 @@ mod tests {
             version: "1".to_string(),
             superseded_by: None,
         }
+    }
+
+    /// Mocked row for `probe_min_retained_seq_supported`'s `information_
+    /// schema.columns` query when the `min_retained_seq` column exists.
+    fn retention_probe_row_supported() -> std::collections::BTreeMap<String, sea_orm::Value> {
+        std::collections::BTreeMap::from([("?column?".to_string(), sea_orm::Value::Int(Some(1)))])
     }
 
     fn watermark_row(
@@ -900,6 +980,7 @@ mod tests {
     ) -> Result<(), bundle_active_set::ActiveSetError> {
         let digest = format!("sha256:{}", "a".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![retention_probe_row_supported()]])
             .append_query_results([vec![watermark_row(500)]])
             .append_query_results([vec![
                 active_row("waddles.a", 1, 0, 10),
@@ -921,7 +1002,101 @@ mod tests {
         let state = initial_state(&db).await?;
         assert_eq!(state.last_seq(), 500);
         assert_eq!(state.by_scope.len(), 2);
+        assert!(
+            state.retention_supported,
+            "the probe query returned a row -- the column is present"
+        );
         Ok(())
+    }
+
+    /// Item 5 (Gemini re-review of PR #406): an older hub-api whose schema
+    /// predates migration `0026`/PR #397 (no `min_retained_seq` column at
+    /// all) must NOT prevent this consumer from starting -- `initial_state`
+    /// probes first, finds it absent, and falls back to a `safe_seq`-only
+    /// read to seed the tracker.
+    #[tokio::test]
+    async fn initial_state_starts_successfully_when_min_retained_seq_column_is_absent(
+    ) -> Result<(), bundle_active_set::ActiveSetError> {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // The probe query: an EMPTY result means the column is absent.
+            .append_query_results([
+                Vec::<std::collections::BTreeMap<String, sea_orm::Value>>::new(),
+            ])
+            // The safe_seq-only fallback read (never references the missing
+            // column).
+            .append_query_results([vec![std::collections::BTreeMap::from([(
+                "safe_seq".to_string(),
+                sea_orm::Value::BigInt(Some(500)),
+            )])]])
+            .append_query_results([
+                Vec::<bundle_active_set::entities::app_active_versions::Model>::new(),
+            ])
+            .append_query_results([
+                Vec::<bundle_active_set::entities::app_active_versions::Model>::new(),
+            ])
+            .into_connection();
+
+        let state = initial_state(&db).await?;
+        assert!(
+            !state.retention_supported,
+            "an empty probe result must be read as \"column absent\""
+        );
+        assert_eq!(
+            state.last_seq(),
+            500,
+            "the safe_seq-only fallback must still seed the tracker correctly"
+        );
+        Ok(())
+    }
+
+    /// The counterpart at tick level: with `retention_supported: false`, the
+    /// primary retention check must never fire (it always sees
+    /// `min_retained_seq: 0`) -- a genuine gap is still caught by the
+    /// existing heuristic fallback instead, proving the two checks are
+    /// independent and the older-schema case degrades gracefully rather
+    /// than losing gap detection entirely.
+    #[tokio::test]
+    async fn run_incremental_tick_relies_on_the_heuristic_fallback_when_retention_unsupported() {
+        let digest = format!("sha256:{}", "9".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // safe_seq-only read (retention_supported: false).
+            .append_query_results([vec![std::collections::BTreeMap::from([(
+                "safe_seq".to_string(),
+                sea_orm::Value::BigInt(Some(150)),
+            )])]])
+            // The lowest returned seq (120) is past last_seq+1 (101) --
+            // caught by the heuristic fallback, never the (unavailable)
+            // primary retention check.
+            .append_query_results([vec![change_row(120, 1, 0)]])
+            .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.a", &digest)]])
+            .append_query_results([vec![approval_row(1, "waddles.a")]])
+            .into_connection();
+        let mut state = ConsumerState::new(100).with_retention_supported(false);
+        let sink = FakeSink::default();
+        let metrics = test_changelog_metrics();
+        run_incremental_tick(
+            &db,
+            &mut state,
+            Some(&sink as &dyn BundleSink),
+            None,
+            &test_excluded_metric(),
+            &test_binding_metrics(),
+            &metrics,
+        )
+        .await;
+
+        assert_eq!(state.last_seq(), 150);
+        assert_eq!(
+            metrics.changelog_gap_detected_total.get(),
+            1,
+            "the heuristic fallback must still catch the gap"
+        );
+        assert_eq!(
+            metrics.changelog_retention_exceeded_total.get(),
+            0,
+            "the primary check must never fire when retention is unsupported"
+        );
     }
 
     #[tokio::test]
@@ -1220,6 +1395,43 @@ mod tests {
         );
         assert!(!should_stop_consumers(true, true));
         assert!(!should_stop_consumers(true, false));
+    }
+
+    /// Item 4 (gh security review on PR #406): a genuinely new connection
+    /// (a different `Arc` allocation -- exactly what `ConnectionRegistry::
+    /// set_active` produces for every accepted TCP connection) must be
+    /// detected; the SAME connection observed again, or no connection at
+    /// all, must not be.
+    #[test]
+    fn detect_new_connection_fires_only_on_a_genuine_identity_change() {
+        let mut last = None;
+        let a = Arc::new(());
+        let b = Arc::new(());
+
+        assert!(
+            detect_new_connection(Some(&a), &mut last),
+            "the very first observed connection is always a change"
+        );
+        assert!(
+            !detect_new_connection(Some(&a), &mut last),
+            "the same connection observed again must not re-trigger"
+        );
+        assert!(
+            detect_new_connection(Some(&b), &mut last),
+            "a different Arc allocation must be detected as a new connection"
+        );
+        assert!(
+            !detect_new_connection(Some(&b), &mut last),
+            "b observed again must not re-trigger"
+        );
+        assert!(
+            !detect_new_connection(Option::<&Arc<()>>::None, &mut last),
+            "no connection currently active is never itself a \"new connection\" event"
+        );
+        assert!(
+            detect_new_connection(Some(&a), &mut last),
+            "a reappearing after a None gap is still a change from b (the last real connection)"
+        );
     }
 
     /// Partial-advance regression (Gemini review, HIGH): scope (1,0) at seq

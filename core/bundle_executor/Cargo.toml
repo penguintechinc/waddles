@@ -103,6 +103,16 @@ tracing = "=0.1.44"
 # itself: it returns durations, and the stage records them" -- the
 # stage is already the aggregation point for this component's telemetry.
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "json", "env-filter"] }
+# Parses the stage's server certificate's SAN/Subject (gh security review
+# CRITICAL finding on PR #406, item 1: pin the host-API TLS peer to an
+# explicit allowlisted identity -- SPIFFE URI SAN or CN -- not just "chains
+# to the configured CA", per spec SS6.6's "otherwise pinned by
+# configuration"). Pure Rust ASN.1/X.509 parsing, no networking/HTTP
+# dependency of its own -- verified against `tests/dependency_policy.rs`'s
+# banned-crate list (redis/sea-orm/sqlx/deadpool-redis/reqwest): none of
+# its own dependency tree (nom/der-parser/asn1-rs/oid-registry/ring/
+# data-encoding) pulls any of them in.
+x509-parser = "=0.18.1"
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }

@@ -175,6 +175,11 @@ pub struct ChangelogConsumerMetrics {
     /// silent. Distinct from `changelog_gap_detected_total` (the heuristic
     /// fallback).
     pub changelog_retention_exceeded_total: prometheus::IntCounter,
+    /// A NEW executor connection detected (by pointer identity) -- gh
+    /// security review item 4 on PR #406: the executor wipes its bundle
+    /// registry on every disconnect, so this consumer resets its own
+    /// `loaded` bookkeeping in lockstep.
+    pub executor_reconnect_detected_total: prometheus::IntCounter,
 }
 
 /// Registers [`ChangelogConsumerMetrics`] against `registry`. Must be
@@ -264,6 +269,15 @@ pub fn register_changelog_consumer_metrics(
         .register(Box::new(changelog_retention_exceeded_total.clone()))
         .expect("register svc_action_changelog_retention_exceeded_total");
 
+    let executor_reconnect_detected_total = prometheus::IntCounter::new(
+        "svc_action_executor_reconnect_detected_total",
+        "New executor connections detected (by pointer identity), resetting loaded-state",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(executor_reconnect_detected_total.clone()))
+        .expect("register svc_action_executor_reconnect_detected_total");
+
     ChangelogConsumerMetrics {
         applied_scopes_total,
         scope_failures_total,
@@ -272,6 +286,7 @@ pub fn register_changelog_consumer_metrics(
         tenant_active_apps,
         scope_stale_evicted_total,
         changelog_gap_detected_total,
+        executor_reconnect_detected_total,
         changelog_retention_exceeded_total,
     }
 }
@@ -347,6 +362,7 @@ mod tests {
         metrics.scope_stale_evicted_total.inc();
         metrics.changelog_gap_detected_total.inc();
         metrics.changelog_retention_exceeded_total.inc();
+        metrics.executor_reconnect_detected_total.inc();
 
         let rendered = render_metrics(&registry).expect("registry with metrics must encode");
         assert!(rendered.contains("svc_action_changelog_applied_scopes_total 1"));
@@ -357,6 +373,7 @@ mod tests {
         assert!(rendered.contains("svc_action_changelog_scope_stale_evicted_total 1"));
         assert!(rendered.contains("svc_action_changelog_gap_detected_total 1"));
         assert!(rendered.contains("svc_action_changelog_retention_exceeded_total 1"));
+        assert!(rendered.contains("svc_action_executor_reconnect_detected_total 1"));
     }
 
     #[test]

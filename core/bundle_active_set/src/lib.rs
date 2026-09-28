@@ -70,8 +70,8 @@ pub mod scope;
 
 pub use bindings::{read_source_bindings, SourceBinding};
 pub use changelog::{
-    affected_scopes, read_changes, read_safe_seq, read_safe_seq_watermark, ChangeLogTracker,
-    ChangeRow, SafeSeqWatermark,
+    affected_scopes, probe_min_retained_seq_supported, read_changes, read_safe_seq,
+    read_safe_seq_watermark, ChangeLogTracker, ChangeRow, SafeSeqWatermark,
 };
 pub use diff::{plan, plan_scoped, DiffPlan, ScopedDiffPlan};
 pub use multi_tenant::{

@@ -209,6 +209,7 @@ dependencies = [
  "tracing-subscriber",
  "wasmtime",
  "wasmtime-wasi",
+ "x509-parser",
 ]
 
 [[package]]

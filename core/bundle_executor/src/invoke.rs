@@ -157,6 +157,16 @@ pub struct Executor<S: ComponentSource> {
     /// `limits.memory_mb` override may exceed (spec SS7.3).
     max_memory_limit_mb: u32,
     bundles: RwLock<HashMap<String, LoadedBundle>>,
+    /// Single-flight compile-in-progress tracker (gh security review item
+    /// 2): concurrent `load`s for the SAME cold digest share one `OnceCell`,
+    /// so N scopes activating an identical never-before-seen digest at once
+    /// trigger exactly one bucket fetch + one `Component::new` JIT compile
+    /// (spec SS7.2's ~3-4s cold-compile cost), not N redundant ones. Entries
+    /// are removed once their compile resolves (success or failure) --
+    /// never left to accumulate across the process's lifetime; a digest
+    /// already resident in `bundles` never touches this map at all (the
+    /// fast path in `on_load`).
+    compiling: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Component>>>>,
     /// Count of `unload` calls naming a scope that was NOT in the digest's
     /// referencing set (a duplicate/retried/orphaned unload, see
     /// [`LoadedBundle::scopes`]'s doc) -- never an error, but never silent
@@ -194,6 +204,7 @@ impl<S: ComponentSource> Executor<S> {
             default_memory_limit_mb: cfg.executor_memory_limit_mb,
             max_memory_limit_mb: cfg.executor_max_memory_limit_mb,
             bundles: RwLock::new(HashMap::new()),
+            compiling: tokio::sync::Mutex::new(HashMap::new()),
             orphaned_unload_total: AtomicU64::new(0),
             epoch_ticker,
         })
@@ -272,6 +283,37 @@ fn error_body(code: ErrorCode, message: impl Into<String>) -> ErrorBody {
     }
 }
 
+/// **The ONLY constructor for a `Store<ExecState>` this crate's production
+/// code may use** (gh security review CRITICAL finding on PR #406, item 3:
+/// "no other `Store::new` may exist outside tests"). Every `Store` this
+/// executor ever runs a guest export against MUST be CPU- and memory-bounded
+/// -- unconditionally wiring both bounds in the one place a `Store` is born
+/// makes "forgot to arm the epoch deadline/memory limiter on this call path"
+/// a structurally impossible mistake, rather than a convention every new
+/// call site has to remember to repeat:
+///
+/// - **CPU bound**: `Store::set_epoch_deadline`/`Store::epoch_deadline_trap`
+///   (spec SS7.2/SS7.3) -- `deadline_ms` converted to engine epoch ticks via
+///   `ticks_for_deadline`; the guest traps with `EXECUTOR_DEADLINE`
+///   (`trap_to_error_body`) once `self.epoch_ticker` advances the engine
+///   epoch past this deadline, regardless of what the guest is doing (proven
+///   against a real unbounded guest loop by `on_invoke_traps_an_infinite_
+///   guest_loop_within_its_deadline` below).
+/// - **Memory bound**: `Store::limiter` wired to `ExecState`'s own
+///   `StoreLimits` (`exec_state.with_memory_limit_mb` must already be called
+///   by the caller before this function -- sandbox layer 8, spec SS7.3).
+///
+/// `grep -n "Store::new" core/bundle_executor/src/invoke.rs` (this crate's
+/// only production module that ever runs a guest) must show exactly one hit:
+/// the one inside this function's own body.
+fn new_bounded_store(engine: &Engine, exec_state: ExecState, deadline_ms: u64) -> Store<ExecState> {
+    let mut store = Store::new(engine, exec_state);
+    store.set_epoch_deadline(ticks_for_deadline(deadline_ms));
+    store.epoch_deadline_trap();
+    store.limiter(|state| &mut state.limits);
+    store
+}
+
 impl<S: ComponentSource> RequestHandler for Executor<S> {
     async fn on_load(&self, body: LoadBody) -> Result<LoadedBody, ErrorBody> {
         let start = std::time::Instant::now();
@@ -342,23 +384,56 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
             }
         }
 
-        let bytes = self
-            .source
-            .fetch(&body.component_key, &body.sidecar_key)
-            .await
-            .map_err(|e| error_body(ErrorCode::LoadFailed, e.to_string()))?;
-
-        verify_digest(&bytes, &body.digest)
-            .map_err(|e| error_body(ErrorCode::DigestMismatch, e.to_string()))?;
-
-        // `Component::new` (JIT-compiles the whole module, ~3-4s for a large
-        // component per spec SS7.2) and the bucket fetch above both run
-        // OUTSIDE any registry lock -- only the map insert immediately below
-        // (and the fast-path/re-check reads) ever hold `self.bundles`, so a
-        // slow compile never blocks other connections' `invoke`/`load`/
-        // `unload` calls against unrelated (or even the same) digests.
-        let component = Component::new(&self.engine, &bytes)
-            .map_err(|e| error_body(ErrorCode::LoadFailed, e.to_string()))?;
+        // Single-flight fetch+verify+compile (gh security review item 2):
+        // get-or-create this digest's `OnceCell` under a short, map-only
+        // critical section, then await ITS `get_or_try_init` outside any
+        // lock -- a concurrent `load` for the identical digest (from a
+        // different scope, or a different connection entirely) awaits the
+        // SAME cell and gets the SAME compiled `Component` clone back,
+        // rather than redundantly re-fetching/re-compiling. `Component::new`
+        // (~3-4s for a large component, spec SS7.2) and the bucket fetch
+        // both run OUTSIDE `self.bundles`'s lock either way -- only the map
+        // insert further below (and the fast-path/re-check reads) ever hold
+        // it, so a slow compile never blocks other connections' `invoke`/
+        // `load`/`unload` calls against unrelated digests.
+        let cell = {
+            let mut compiling = self.compiling.lock().await;
+            Arc::clone(
+                compiling
+                    .entry(digest.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+            )
+        };
+        let compiled: Result<&Component, ExecutorError> = cell
+            .get_or_try_init(|| async {
+                let bytes = self
+                    .source
+                    .fetch(&body.component_key, &body.sidecar_key)
+                    .await?;
+                verify_digest(&bytes, &body.digest)?;
+                Component::new(&self.engine, &bytes).map_err(ExecutorError::from)
+            })
+            .await;
+        let component = match compiled {
+            Ok(c) => c.clone(),
+            Err(err) => {
+                // Never leave a failed attempt's slot behind -- a future
+                // `load` for this same digest (a legitimate retry, e.g.
+                // after a transient bucket outage) must start fresh, never
+                // be told "already failed" indefinitely.
+                self.compiling.lock().await.remove(&digest);
+                let code = match err {
+                    ExecutorError::DigestMismatch { .. } => ErrorCode::DigestMismatch,
+                    _ => ErrorCode::LoadFailed,
+                };
+                return Err(error_body(code, err.to_string()));
+            }
+        };
+        // The compile succeeded -- this digest will now live in `bundles`
+        // (below), so its `OnceCell` slot in `compiling` is no longer
+        // needed; removing it keeps this map bounded to genuinely in-flight
+        // compiles, never accumulating one entry per digest ever seen.
+        self.compiling.lock().await.remove(&digest);
 
         // spec SS7.3: a `load` may request its own `limits.memory_mb`; `0`
         // means "no preference" and falls back to `EXECUTOR_MEMORY_LIMIT_MB`.
@@ -502,18 +577,7 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
         let bridge = HostBridge::new(connection);
         let exec_state = ExecState::new(Some(bridge), body.app_id.clone(), invoke_id)
             .with_memory_limit_mb(memory_limit_mb);
-        let mut store = Store::new(&self.engine, exec_state);
-        store.set_epoch_deadline(ticks_for_deadline(deadline_ms));
-        store.epoch_deadline_trap();
-        // Sandbox layer 8 (spec SS7.3): caps this instance's linear memory
-        // to the bundle's resolved `memory_limit_mb` (`on_load`,
-        // `EXECUTOR_MEMORY_LIMIT_MB`/`limits.memory_mb`) via
-        // `ExecState::with_memory_limit_mb`'s `StoreLimits`, so a
-        // `memory.grow` past the cap traps (`trap_on_grow_failure`) rather
-        // than growing unbounded or the epoch deadline alone (CPU only)
-        // being the sole containment layer -- gh security review MED
-        // finding, previously a TODO.
-        store.limiter(|state| &mut state.limits);
+        let mut store = new_bounded_store(&self.engine, exec_state, deadline_ms);
 
         let start = std::time::Instant::now();
         let stage = Stage::instantiate_async(&mut store, &component, &self.linker)
@@ -568,12 +632,38 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
     async fn on_shutdown(&self, body: ShutdownBody) {
         warn!(grace_ms = body.grace_ms, "stage requested shutdown");
     }
+
+    /// Wipes the ENTIRE bundle registry and any in-flight compiles (gh
+    /// security review item 4 on PR #406) -- see the trait method's own doc
+    /// for why a full wipe, rather than per-scope bookkeeping, is both
+    /// sufficient and correct for this executor's single-active-connection
+    /// architecture. `self.orphaned_unload_total` is deliberately NOT reset
+    /// -- it's a lifetime counter, not per-connection state.
+    async fn on_disconnect(&self) {
+        let evicted = {
+            let mut bundles = self.bundles.write().await;
+            let evicted = bundles.len();
+            bundles.clear();
+            evicted
+        };
+        self.compiling.lock().await.clear();
+        if evicted > 0 {
+            info!(
+                evicted_digests = evicted,
+                "host-api connection closed; wiped the bundle registry \
+                 (the reconnecting stage resends its full authoritative active set)"
+            );
+        }
+    }
 }
 
 /// Delegating impl so an `Arc<Executor<S>>` -- the shape shared across
-/// every reconnect attempt in `crate::run`'s dial loop, since the bundle
-/// registry must survive a single connection dropping -- satisfies
-/// `RequestHandler` directly without a wrapper newtype.
+/// every reconnect attempt in `crate::run`'s dial loop, since rebuilding
+/// the wasmtime `Engine`/`Linker` on every reconnect would be wasteful --
+/// satisfies `RequestHandler` directly without a wrapper newtype. The
+/// bundle REGISTRY itself does NOT survive a reconnect (`on_disconnect`
+/// above wipes it) -- only the underlying engine/linker construction is
+/// preserved.
 impl<S: ComponentSource> RequestHandler for Arc<Executor<S>> {
     async fn on_load(&self, body: LoadBody) -> Result<LoadedBody, ErrorBody> {
         (**self).on_load(body).await
@@ -594,6 +684,10 @@ impl<S: ComponentSource> RequestHandler for Arc<Executor<S>> {
 
     async fn on_shutdown(&self, body: ShutdownBody) {
         (**self).on_shutdown(body).await
+    }
+
+    async fn on_disconnect(&self) {
+        (**self).on_disconnect().await
     }
 }
 
@@ -766,6 +860,24 @@ mod tests {
 
     impl ComponentSource for FixtureSource {
         async fn fetch(&self, _c: &str, _s: &str) -> Result<Vec<u8>, ExecutorError> {
+            Ok(FIXTURE_WASM.to_vec())
+        }
+    }
+
+    /// Counts every `fetch` call and sleeps briefly before returning, so a
+    /// test can force several concurrent `on_load`s to genuinely overlap
+    /// (without the sleep, a fast in-memory fetch could resolve before a
+    /// second `on_load` even reaches the single-flight check, making the
+    /// test flaky rather than a real concurrency proof).
+    #[derive(Default)]
+    struct CountingFixtureSource {
+        fetch_count: std::sync::Arc<AtomicU64>,
+    }
+
+    impl ComponentSource for CountingFixtureSource {
+        async fn fetch(&self, _c: &str, _s: &str) -> Result<Vec<u8>, ExecutorError> {
+            self.fetch_count.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             Ok(FIXTURE_WASM.to_vec())
         }
     }
@@ -1070,6 +1182,52 @@ mod tests {
                 connection,
             )
             .await
+    }
+
+    /// **Single-flight compile regression (gh security review item 2):**
+    /// several concurrent `load`s for the exact same COLD digest (from
+    /// different scopes) must trigger exactly ONE `ComponentSource::fetch`
+    /// (and by extension one `Component::new` JIT compile) -- never one per
+    /// concurrent caller. Uses a real, genuinely-overlapping concurrent
+    /// `tokio::join!` (not sequential `.await`s) against a fetch source that
+    /// sleeps, so this actually proves concurrency rather than an artifact
+    /// of running one at a time.
+    #[tokio::test]
+    async fn concurrent_loads_of_a_cold_digest_share_one_compile() -> Result<(), ExecutorError> {
+        let fetch_count = std::sync::Arc::new(AtomicU64::new(0));
+        let executor = Executor::new(
+            &test_config(),
+            CountingFixtureSource {
+                fetch_count: fetch_count.clone(),
+            },
+        )?;
+
+        let (a, b, c) = tokio::join!(
+            executor.on_load(fixture_load_body_scoped("waddles.test.app", 1, 0)),
+            executor.on_load(fixture_load_body_scoped("waddles.test.app", 2, 0)),
+            executor.on_load(fixture_load_body_scoped("waddles.test.app", 3, 0)),
+        );
+        a.expect("scope 1's load succeeds");
+        b.expect("scope 2's load succeeds");
+        c.expect("scope 3's load succeeds");
+
+        assert_eq!(
+            fetch_count.load(Ordering::SeqCst),
+            1,
+            "three concurrent loads of the same cold digest must fetch/compile exactly once"
+        );
+        let bundles = executor.bundles.read().await;
+        assert_eq!(bundles.len(), 1, "one registry entry for the shared digest");
+        assert_eq!(
+            bundles
+                .get(&fixture_digest())
+                .expect("resident")
+                .scopes
+                .len(),
+            3,
+            "all three scopes must be registered against the one compiled entry"
+        );
+        Ok(())
     }
 
     /// The SAME digest loaded by two DIFFERENT scopes must compile once
@@ -1631,6 +1789,77 @@ mod tests {
         executor
             .on_shutdown(penguin_bundle_host::wire::ShutdownBody { grace_ms: 100 })
             .await;
+        Ok(())
+    }
+
+    /// **Item 4 regression (gh security review on PR #406):** a disconnect
+    /// must wipe the ENTIRE bundle registry -- every scope from every
+    /// digest, not just some -- so a subsequent reconnect starts from a
+    /// clean slate rather than serving a stale, orphaned scope set.
+    #[tokio::test]
+    async fn on_disconnect_wipes_the_entire_bundle_registry() -> Result<(), ExecutorError> {
+        crate::init_test_tracing();
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .await
+            .expect("scope A load succeeds");
+        executor
+            .on_load(fixture_load_body_scoped("waddles.test.app", 2, 0))
+            .await
+            .expect("scope B load succeeds");
+        assert_eq!(executor.bundles.read().await.len(), 1);
+
+        executor.on_disconnect().await;
+
+        assert!(
+            executor.bundles.read().await.is_empty(),
+            "every scope from every digest must be gone after a disconnect"
+        );
+
+        // The digest must also be re-fetchable/re-compilable from scratch --
+        // proves `compiling`'s in-flight tracker was cleared too, not left
+        // pointing at a stale resolved cell from before the wipe.
+        let reloaded = executor
+            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .await;
+        assert!(
+            reloaded.is_ok(),
+            "a fresh load after disconnect must succeed: {reloaded:?}"
+        );
+        assert_eq!(executor.bundles.read().await.len(), 1);
+        Ok(())
+    }
+
+    /// **Item 1's "a peer can only unload scopes it loaded itself", proven
+    /// at the connection level:** once a connection disconnects (wiping its
+    /// scopes), NO subsequent `unload` naming those same scopes can find
+    /// anything to act on -- it's a fail-closed `UNKNOWN_BUNDLE`, never a
+    /// silent success that could be confused with actually owning them.
+    #[tokio::test]
+    async fn unload_after_disconnect_fails_closed_as_unknown() -> Result<(), ExecutorError> {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("load succeeds");
+        executor.on_disconnect().await;
+
+        let result = executor
+            .on_unload(fixture_unload_body(
+                "waddles.test.app",
+                1,
+                0,
+                &fixture_digest(),
+            ))
+            .await;
+        assert!(matches!(
+            result,
+            Err(ErrorBody {
+                code: ErrorCode::UnknownBundle,
+                ..
+            })
+        ));
         Ok(())
     }
 }
