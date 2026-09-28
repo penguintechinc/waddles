@@ -169,7 +169,7 @@ async def create_version(
     *,
     tenant_id: int,
     app_id: str,
-    requested_by: int,
+    requested_by: int | None,
     manifest_bytes: bytes,
     source_bytes: bytes | None,
     component_bytes: bytes | None,
@@ -184,6 +184,11 @@ async def create_version(
     `"app_id_mismatch"`), 403 `prebuilt_not_allowed`, 409 (version
     already exists), or 413 (oversize part). See this module's own
     docstring for why no compiler Job is launched here.
+
+    `requested_by=None` is the SYSTEM-actor case (`hub_api/cli/
+    seed_core_bundles.py`, in-cluster at deploy time, no human
+    requester) -- the column is a nullable FK (migration 0023), so this
+    is a real NULL, never a fake `hub_users` row.
     """
     if len(manifest_bytes) > BUNDLE_MAX_MANIFEST_BYTES:
         raise ApiError("manifest exceeds 1 MiB", 413, "PAYLOAD_TOO_LARGE")
@@ -260,6 +265,40 @@ async def list_versions(install_dal: AsyncDB, *, app_id: str) -> list[Any]:
         orderby=~install_dal.app_version_uploads.created_at,
     )
     return list(rows)
+
+
+#: `?status=pending` (the global-admin approval queue's only caller-facing
+#: value today, webui SuperAdminBundleApprovals.jsx) aliases to
+#: `STATUS_PUBLISHED` -- "staged, not yet approved for any tenant" (see
+#: this module's own docstring: PUBLISHED means staged, approval is the
+#: separate `bundle_approval_service.approve_version()` step). Any other
+#: literal `app_version_uploads.status` value (e.g. `REJECTED`) is passed
+#: through unchanged so the same endpoint can also list denied versions.
+_STATUS_ALIASES: dict[str, str] = {"pending": STATUS_PUBLISHED}
+
+
+async def list_versions_by_status(
+    install_dal: AsyncDB, *, status: str, page: int, limit: int
+) -> tuple[list[Any], int]:
+    """Cross-app `app_version_uploads` rows for the global-admin approval queue.
+
+    Returns `(rows, total)` -- `rows` is the requested page (newest
+    first), `total` is the full matching count for pagination metadata.
+    Unlike `list_versions()` this is deliberately NOT scoped to one
+    `app_id`: the approval queue spans every vendor/first-party namespace.
+    """
+    page = max(1, page)
+    limit = min(100, max(1, limit))
+    offset = (page - 1) * limit
+    resolved_status = _STATUS_ALIASES.get(status.lower(), status.upper())
+
+    query = install_dal(install_dal.app_version_uploads.status == resolved_status)
+    total = await query.count()
+    rows = await query.select(
+        orderby=~install_dal.app_version_uploads.created_at,
+        limitby=(offset, offset + limit),
+    )
+    return list(rows), total
 
 
 async def _set_staging_component_key(

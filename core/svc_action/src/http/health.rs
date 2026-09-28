@@ -91,7 +91,6 @@ mod tests {
             cli,
             db_password: Secret::new("x"),
             envelope_binding_keys: None,
-            secret_key: Secret::new("x"),
             discord_bot_token: None,
             db_reader_password: None,
         };

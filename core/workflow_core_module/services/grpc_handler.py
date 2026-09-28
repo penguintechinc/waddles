@@ -15,7 +15,7 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 
 import grpc
-from jose import jwt, JWTError
+import jwt
 
 # Import generated protobuf messages
 import sys
@@ -102,7 +102,10 @@ class WorkflowServiceServicer:
                 }
             )
 
-            # Step 1: Verify JWT token
+            # Step 1: Verify JWT token. `algorithms=["HS256"]` is an explicit
+            # allowlist -- PyJWT rejects any other `alg` (including `none`)
+            # even if the token itself declares it, preventing algorithm-
+            # confusion/none-alg forgery.
             try:
                 payload = jwt.decode(
                     token,
@@ -126,7 +129,20 @@ class WorkflowServiceServicer:
                         "Invalid token: missing user_id"
                     )
 
-            except JWTError as e:
+            except jwt.ExpiredSignatureError:
+                self.logger.warning(
+                    "gRPC: JWT verification failed: token expired",
+                    extra={
+                        "action": "grpc_trigger_workflow",
+                        "workflow_id": workflow_id,
+                        "result": "AUTH_FAILED"
+                    }
+                )
+                await context.abort(
+                    grpc.StatusCode.UNAUTHENTICATED,
+                    "JWT verification failed: token expired"
+                )
+            except jwt.InvalidTokenError as e:
                 self.logger.warning(
                     f"gRPC: JWT verification failed: {str(e)}",
                     extra={
@@ -195,22 +211,34 @@ class WorkflowServiceServicer:
                     f"Invalid trigger_data JSON: {str(e)}"
                 )
 
-            # Step 5: Build execution context
-            execution_context = {
-                "trigger_source": trigger_source,
-                "session_id": session_id,
-                "entity_id": entity_id,
-                "platform": platform,
-                "initiated_by": user_id,
-                "initiated_at": datetime.utcnow().isoformat(),
-                "grpc_initiated": True
-            }
+            # Step 5: Enrich trigger data with request-level fields.
+            #
+            # WorkflowEngine.execute_workflow only builds its own
+            # ExecutionContext when `context=None` -- if a `context` is
+            # passed in, it does `context.execution_id = execution_id`
+            # unconditionally (services/workflow_engine.py), which requires
+            # attribute assignment. This previously passed a plain dict
+            # (`execution_context`), which raises `AttributeError: 'dict'
+            # object has no attribute 'execution_id'` on every single gRPC-
+            # triggered execution -- caught by the generic `except
+            # Exception` below and surfaced as an opaque INTERNAL abort.
+            # Folding these fields into `trigger_data` instead lets
+            # execute_workflow's `context is None` branch build a real
+            # `ExecutionContext` from them, the only path that actually
+            # works.
+            trigger_data.setdefault("session_id", session_id)
+            trigger_data.setdefault("entity_id", entity_id)
+            trigger_data.setdefault("user_id", user_id)
+            trigger_data.setdefault("platform", platform)
+            trigger_data["trigger_source"] = trigger_source
+            trigger_data["initiated_by"] = user_id
+            trigger_data["initiated_at"] = datetime.utcnow().isoformat()
+            trigger_data["grpc_initiated"] = True
 
             # Step 6: Execute workflow
             execution_result = await self.workflow_engine.execute_workflow(
                 workflow_id=workflow_id,
                 trigger_data=trigger_data,
-                context=execution_context
             )
 
             execution_id = execution_result.execution_id
@@ -234,6 +262,17 @@ class WorkflowServiceServicer:
                 error=""
             )
 
+        except grpc.aio.AbortError:
+            # `context.abort()` (Steps 1-4 above) raises this to unwind the
+            # coroutine once the deliberate status/message has already been
+            # set on the RPC -- `grpc.aio.AbortError` is a plain `Exception`
+            # subclass (not `grpc.RpcError`), so without this clause every
+            # early abort fell through to the generic `except Exception`
+            # below and triggered a *second* `context.abort()` call with the
+            # wrong status (INTERNAL) and a message wrapping the original
+            # abort's own message -- masking the real UNAUTHENTICATED/
+            # PERMISSION_DENIED/INVALID_ARGUMENT result.
+            raise
         except grpc.RpcError:
             # Re-raise gRPC errors
             raise

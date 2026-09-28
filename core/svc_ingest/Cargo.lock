@@ -1310,7 +1310,7 @@ dependencies = [
 [[package]]
 name = "penguin-connector-discord"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=4a7619720615ea0df6731f5ae278eb8b03021ca6#4a7619720615ea0df6731f5ae278eb8b03021ca6"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=b65e93c08d7955e750e55e3c9621a94901c22962#b65e93c08d7955e750e55e3c9621a94901c22962"
 dependencies = [
  "futures-util",
  "reqwest 0.13.4",
@@ -1325,7 +1325,7 @@ dependencies = [
 [[package]]
 name = "penguin-connector-twitch"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=4a7619720615ea0df6731f5ae278eb8b03021ca6#4a7619720615ea0df6731f5ae278eb8b03021ca6"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=b65e93c08d7955e750e55e3c9621a94901c22962#b65e93c08d7955e750e55e3c9621a94901c22962"
 dependencies = [
  "hex",
  "hmac",
@@ -2173,6 +2173,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "hmac",
  "http-body-util",
  "libc",
  "penguin-connector-discord",
@@ -2186,6 +2187,8 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
+ "subtle",
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",

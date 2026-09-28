@@ -110,6 +110,19 @@ pub struct IngestMetrics {
     pub events_published_total: prometheus::IntCounterVec,
     pub publish_errors_total: prometheus::IntCounterVec,
     pub receiver_reconnects_total: prometheus::IntCounterVec,
+    /// Twitch EventSub webhook verification outcomes, labeled by result
+    /// (`ok`/`bad_signature`/`replay_rejected`/`secret_not_found`/
+    /// `missing_header`/`bad_content_type`/`oversized_body`) --
+    /// `crate::ingest::twitch_eventsub::handle_webhook`.
+    pub eventsub_verifications_total: prometheus::IntCounterVec,
+    /// Twitch EventSub message-ids rejected as duplicates by the dedup
+    /// guard.
+    pub eventsub_dedup_hits_total: prometheus::IntCounter,
+    /// Twitch EventSub webhook handler latency, labeled by outcome -- the
+    /// fast-path histogram `rules/critical-rules.md` Observability requires
+    /// (load/latency histograms first, not just a counter).
+    pub eventsub_request_duration_seconds: prometheus::HistogramVec,
+    pub receiver_connection_healthy: prometheus::IntGaugeVec,
 }
 
 /// Registers this service's ingest-path metrics against `registry`. Must be
@@ -142,19 +155,146 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
     let receiver_reconnects_total = prometheus::IntCounterVec::new(
         prometheus::Opts::new(
             "svc_ingest_receiver_reconnects_total",
-            "Total platform receiver reconnect attempts, labeled by platform",
+            "Total platform receiver reconnect attempts, labeled by platform and triggering reason \
+             (e.g. resumable_close/reconnect_fresh_close/session_invalidated/other)",
         ),
-        &["platform"],
+        &["platform", "reason"],
     )
     .expect("valid metric definition");
     registry
         .register(Box::new(receiver_reconnects_total.clone()))
         .expect("register svc_ingest_receiver_reconnects_total");
 
+    let eventsub_verifications_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_ingest_eventsub_verifications_total",
+            "Total Twitch EventSub webhook verification attempts, labeled by outcome",
+        ),
+        &["outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(eventsub_verifications_total.clone()))
+        .expect("register svc_ingest_eventsub_verifications_total");
+
+    let eventsub_dedup_hits_total = prometheus::IntCounter::new(
+        "svc_ingest_eventsub_dedup_hits_total",
+        "Total Twitch EventSub deliveries rejected as duplicate message-ids",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(eventsub_dedup_hits_total.clone()))
+        .expect("register svc_ingest_eventsub_dedup_hits_total");
+
+    let eventsub_request_duration_seconds = prometheus::HistogramVec::new(
+        prometheus::HistogramOpts::new(
+            "svc_ingest_eventsub_request_duration_seconds",
+            "Twitch EventSub webhook handler latency in seconds, labeled by outcome",
+        ),
+        &["outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(eventsub_request_duration_seconds.clone()))
+        .expect("register svc_ingest_eventsub_request_duration_seconds");
+
+    // Starts at 1 (healthy) for every platform the first time it's touched
+    // via `with_label_values` -- there is no fixed set of platform labels
+    // to pre-populate at registration time (unlike `up`), so this gauge
+    // only exists in the exposition once a receiver loop has run at least
+    // once. See `ReceiverHealthMetrics::receiver_marked_unhealthy`.
+    let receiver_connection_healthy = prometheus::IntGaugeVec::new(
+        prometheus::Opts::new(
+            "svc_ingest_receiver_connection_healthy",
+            "1 if the platform receiver's connection is healthy, 0 once a fatal \
+             (non-retryable) close has stopped that connection's reconnect loop -- \
+             the service process itself keeps running either way",
+        ),
+        &["platform"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(receiver_connection_healthy.clone()))
+        .expect("register svc_ingest_receiver_connection_healthy");
+
     IngestMetrics {
         events_published_total,
         publish_errors_total,
         receiver_reconnects_total,
+        eventsub_verifications_total,
+        eventsub_dedup_hits_total,
+        eventsub_request_duration_seconds,
+        receiver_connection_healthy,
+    }
+}
+
+impl IngestMetrics {
+    /// Records one Twitch EventSub webhook verification outcome --
+    /// `crate::ingest::twitch_eventsub::handle_webhook`.
+    pub fn record_eventsub_verification(&self, outcome: &str) {
+        self.eventsub_verifications_total
+            .with_label_values(&[outcome])
+            .inc();
+    }
+
+    /// Records one Twitch EventSub duplicate-message-id rejection.
+    pub fn record_eventsub_dedup_hit(&self) {
+        self.eventsub_dedup_hits_total.inc();
+    }
+
+    /// Observes one Twitch EventSub webhook handler's end-to-end latency,
+    /// labeled by `outcome` (mirrors [`Self::record_eventsub_verification`]'s
+    /// label set, plus the terminal response outcomes: `ack`/
+    /// `duplicate_ignored`/`acknowledged`/`ignored`/`unknown_type`/
+    /// `challenge`/an error variant name).
+    pub fn observe_eventsub_duration(&self, outcome: &str, seconds: f64) {
+        self.eventsub_request_duration_seconds
+            .with_label_values(&[outcome])
+            .observe(seconds);
+    }
+}
+
+/// Extends [`penguin_spine::SpineMetrics`] with the reconnect/health
+/// counters this crate's own platform receiver loops need
+/// (`ingest::discord`, and any future `ingest::twitch`-style caller) --
+/// kept as a separate trait rather than folding into the shared spine
+/// crate's `SpineMetrics` because these are svc-ingest's own receiver-
+/// observability surface, not part of `penguin-spine`'s public contract.
+/// Every method has a no-op default so a test double (e.g.
+/// `ingest::discord::tests::NoopTestMetrics`) needs no implementation at
+/// all unless a specific test wants to assert on the recorded values.
+pub trait ReceiverHealthMetrics {
+    /// Records one reconnect attempt for `platform`, labeled by the
+    /// triggering `reason` -- e.g. `"resumable_close"`,
+    /// `"reconnect_fresh_close"`, `"session_invalidated"`, `"other"`.
+    fn receiver_reconnect(&self, _platform: &str, _reason: &str) {}
+
+    /// Marks `platform`'s receiver connection as unhealthy: a fatal,
+    /// non-retryable close (e.g. Discord `4004` auth failed, `4010`-`4014`
+    /// sharding/intents) has stopped that connection's reconnect loop.
+    /// `code` is the raw close code, when the peer sent one -- never a
+    /// token, this is a small documented integer, not caller-provided
+    /// secret material. The service process keeps running; only this one
+    /// platform's ingest loop has stopped.
+    fn receiver_marked_unhealthy(&self, _platform: &str, _code: Option<u16>) {}
+}
+
+impl ReceiverHealthMetrics for IngestMetrics {
+    fn receiver_reconnect(&self, platform: &str, reason: &str) {
+        self.receiver_reconnects_total
+            .with_label_values(&[platform, reason])
+            .inc();
+    }
+
+    fn receiver_marked_unhealthy(&self, platform: &str, code: Option<u16>) {
+        self.receiver_connection_healthy
+            .with_label_values(&[platform])
+            .set(0);
+        tracing::error!(
+            platform,
+            code = ?code,
+            "receiver connection marked unhealthy (fatal, non-retryable close)"
+        );
     }
 }
 
@@ -230,6 +370,29 @@ mod tests {
                 .get(),
             2
         );
+    }
+
+    #[test]
+    fn eventsub_metrics_record_and_render() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_ingest_metrics(&registry);
+        metrics.record_eventsub_verification("ok");
+        metrics.record_eventsub_verification("bad_signature");
+        metrics.record_eventsub_dedup_hit();
+        metrics.observe_eventsub_duration("ack", 0.002);
+
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_ingest_eventsub_verifications_total"));
+        assert!(rendered.contains("svc_ingest_eventsub_dedup_hits_total"));
+        assert!(rendered.contains("svc_ingest_eventsub_request_duration_seconds"));
+        assert_eq!(
+            metrics
+                .eventsub_verifications_total
+                .with_label_values(&["ok"])
+                .get(),
+            1
+        );
+        assert_eq!(metrics.eventsub_dedup_hits_total.get(), 1);
     }
 
     #[test]

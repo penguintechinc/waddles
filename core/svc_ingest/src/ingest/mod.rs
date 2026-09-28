@@ -17,6 +17,7 @@
 
 pub mod discord;
 pub mod twitch;
+pub mod twitch_eventsub;
 
 use std::time::Duration;
 
