@@ -7,7 +7,9 @@ WORKDIR /app
 
 # Copy requirements
 COPY services/core-data/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Pin pip itself: base image ships 26.0.1 (PYSEC-2026-2875/2876/196/3721, fixed <=26.1.2/26.2)
+RUN pip install --no-cache-dir --upgrade "pip==26.2.1" && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy all 4 module source directories
 COPY core/analytics_core_module /app/core/analytics_core_module
@@ -35,6 +37,12 @@ WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 COPY --from=builder /app /app
+
+# This runtime stage's own base image ships an older bundled pip
+# (pip-26.0.1.dist-info) that the COPY above doesn't remove (COPY merges,
+# it doesn't delete stale destination files) -- drop it so only the
+# builder's patched pip metadata (26.2.1) remains.
+RUN find /usr/local/lib/python3.13/site-packages -maxdepth 1 -name 'pip-*.dist-info' ! -name 'pip-26.2.1.dist-info' -exec rm -rf {} +
 
 # Create non-root user for security
 RUN useradd -m -u 1000 app && chown -R app:app /app
