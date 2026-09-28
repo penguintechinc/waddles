@@ -69,7 +69,10 @@ pub mod reader;
 pub mod scope;
 
 pub use bindings::{read_source_bindings, SourceBinding};
-pub use changelog::{affected_scopes, read_changes, read_safe_seq, ChangeLogTracker, ChangeRow};
+pub use changelog::{
+    affected_scopes, read_changes, read_safe_seq, read_safe_seq_watermark, ChangeLogTracker,
+    ChangeRow, SafeSeqWatermark,
+};
 pub use diff::{plan, plan_scoped, DiffPlan, ScopedDiffPlan};
 pub use multi_tenant::{
     read_active_set_all, read_source_bindings_all, scoped_active_rows, tenant_active_app_counts,

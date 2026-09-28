@@ -290,7 +290,7 @@ async fn apply_active_set(
     };
 
     for (scope, row) in &plan.to_load {
-        match sink.load(row).await {
+        match sink.load(scope.0, scope.1, row).await {
             Ok(()) => {
                 tracing::info!(
                     tenant_id = scope.0, community_id = scope.1,
@@ -309,7 +309,7 @@ async fn apply_active_set(
         }
     }
     for (scope, digest) in &plan.to_unload {
-        match sink.unload(&scope.2, digest).await {
+        match sink.unload(scope.0, scope.1, &scope.2, digest).await {
             Ok(()) => {
                 tracing::info!(
                     tenant_id = scope.0, community_id = scope.1,
@@ -381,15 +381,50 @@ pub async fn run_incremental_tick(
     metrics: &ChangelogConsumerMetrics,
 ) {
     let start = Instant::now();
-    let safe_seq = match bundle_active_set::read_safe_seq(db).await {
-        Ok(s) => s,
+    let watermark = match bundle_active_set::read_safe_seq_watermark(db).await {
+        Ok(w) => w,
         Err(err) => {
             tracing::warn!(error = %err, "changelog consumer: safe_seq read failed");
             return;
         }
     };
+    let safe_seq = watermark.safe_seq;
     metrics.changelog_lag.set(state.tracker.lag(safe_seq));
     if safe_seq <= state.tracker.last_seq() {
+        return;
+    }
+
+    // PRIMARY retention check (hub-api migration `0026`/PR #397's
+    // `min_retained_seq`, authoritative once present): `last_seq + 1` is a
+    // row this consumer would need to see next, but retention has already
+    // pruned everything below `min_retained_seq` -- that row is gone for
+    // good. Never attempt a partial apply against a horizon retention has
+    // already invalidated; force a full multi-tenant reconcile instead.
+    // `min_retained_seq` reads as `0` on an older hub-api schema without
+    // this column yet (`read_safe_seq_watermark`'s own doc), which makes
+    // this check a structural no-op there -- the "lowest returned change
+    // row's seq" heuristic below remains the sole detector until upgraded.
+    if state.tracker.last_seq() + 1 < watermark.min_retained_seq {
+        tracing::error!(
+            last_seq = state.tracker.last_seq(),
+            min_retained_seq = watermark.min_retained_seq,
+            safe_seq,
+            "changelog consumer: last_seq has fallen behind change-log retention \
+             (min_retained_seq); forcing a full reconcile instead of a partial apply"
+        );
+        metrics.changelog_retention_exceeded_total.inc();
+        run_full_reconcile(
+            db,
+            state,
+            sink,
+            spawner,
+            excluded_metric,
+            binding_metrics,
+            metrics,
+        )
+        .await;
+        state.tracker.advance(safe_seq);
+        metrics.changelog_lag.set(state.tracker.lag(safe_seq));
         return;
     }
 
@@ -402,6 +437,10 @@ pub async fn run_incremental_tick(
             }
         };
 
+    // FALLBACK gap heuristic (older hub-api schema without `min_retained_
+    // seq` yet, or a genuine unexplained gap the primary check above didn't
+    // catch): a returned change set whose lowest `seq` exceeds `last_seq +
+    // 1` means at least one row in that range is unaccounted for.
     if let Some(first) = changes.first() {
         if first.seq > state.tracker.last_seq() + 1 {
             tracing::error!(
@@ -746,9 +785,17 @@ mod tests {
     fn watermark_row(
         safe_seq: i64,
     ) -> bundle_active_set::entities::bundle_active_set_watermark::Model {
+        watermark_row_with_retention(safe_seq, 0)
+    }
+
+    fn watermark_row_with_retention(
+        safe_seq: i64,
+        min_retained_seq: i64,
+    ) -> bundle_active_set::entities::bundle_active_set_watermark::Model {
         bundle_active_set::entities::bundle_active_set_watermark::Model {
             id: 1,
             safe_seq,
+            min_retained_seq,
             computed_at: chrono::Utc::now(),
         }
     }
@@ -782,6 +829,8 @@ mod tests {
     impl BundleSink for FakeSink {
         fn load<'a>(
             &'a self,
+            _tenant_id: i32,
+            _community_id: i32,
             row: &'a bundle_active_set::ActiveBundleRow,
         ) -> std::pin::Pin<
             Box<
@@ -798,6 +847,8 @@ mod tests {
         }
         fn unload<'a>(
             &'a self,
+            _tenant_id: i32,
+            _community_id: i32,
             app_id: &'a str,
             digest: &'a str,
         ) -> std::pin::Pin<
@@ -1268,6 +1319,61 @@ mod tests {
             sink.calls(),
             vec!["unload:waddles.a:sha256:00".to_string()],
             "eviction must drive an unload through apply_active_set's diff"
+        );
+    }
+
+    /// Primary retention regression (hub-api migration `0026`/PR #397's
+    /// `min_retained_seq`): `last_seq + 1` (101) is already below
+    /// `min_retained_seq` (150) -- retention has pruned that row for good --
+    /// so this must force a full reconcile WITHOUT ever reading `changes` at
+    /// all (no query queued for it; the mock would error if one were
+    /// attempted, proving the primary check short-circuits before the
+    /// heuristic fallback gets a chance to run).
+    #[tokio::test]
+    async fn run_incremental_tick_forces_a_full_reconcile_when_behind_min_retained_seq() {
+        let digest = format!("sha256:{}", "8".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![watermark_row_with_retention(200, 150)]])
+            // The forced full reconcile's own reads (no `read_changes` query
+            // queued -- the primary retention check must short-circuit
+            // before ever reading the change log):
+            .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.a", &digest)]])
+            .append_query_results([vec![approval_row(1, "waddles.a")]])
+            .into_connection();
+        let mut state = ConsumerState::new(100);
+        let sink = FakeSink::default();
+        let metrics = test_changelog_metrics();
+        run_incremental_tick(
+            &db,
+            &mut state,
+            Some(&sink as &dyn BundleSink),
+            None,
+            &test_excluded_metric(),
+            &test_binding_metrics(),
+            &metrics,
+        )
+        .await;
+
+        assert_eq!(
+            state.last_seq(),
+            200,
+            "falling behind retention resets the tracker straight to safe_seq"
+        );
+        assert_eq!(
+            metrics.changelog_retention_exceeded_total.get(),
+            1,
+            "the primary-confirmed retention breach must be counted, never silent"
+        );
+        assert_eq!(
+            metrics.changelog_gap_detected_total.get(),
+            0,
+            "the primary check firing must not also count as the heuristic fallback"
+        );
+        assert_eq!(
+            sink.calls(),
+            vec![format!("load:waddles.a:{digest}")],
+            "the full reconcile's own active set must still apply"
         );
     }
 

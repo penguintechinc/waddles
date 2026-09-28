@@ -322,8 +322,19 @@ pub async fn run_poll_loop(
                     tracing::debug!(app_id = %action_app_id, digest, "new digest observed, no executor connection yet");
                     continue;
                 };
+                // `(0, 0)`: this interim, env/catalog-driven single-app-per-
+                // pod distribution poll predates the numeric `(tenant_id,
+                // community_id)` scoping `bundle_active_set` introduced
+                // (`crate::changelog_consumer` is the multi-tenant
+                // replacement) -- it has no real tenant row to resolve.
+                // `(0, 0)` is a reserved sentinel (`bundle_active_set`
+                // tenant ids start at 1 in every real schema row) naming
+                // "no real DB scope", never confusable with a genuine
+                // tenant.
                 match crate::dispatch::ensure_loaded(
                     &connection,
+                    0,
+                    0,
                     &row.app_id,
                     &row.version,
                     &digest,

@@ -16,6 +16,15 @@
 //! primary-side publisher job hasn't run yet in this environment) as
 //! `safe_seq = 0` -- never consuming beyond a horizon that hasn't been
 //! published is the fail-safe default, not an error.
+//!
+//! `min_retained_seq` (hub-api migration `0026_bundle_active_set_changelog`,
+//! waddles PR #397): the lowest `seq` still present in
+//! `bundle_active_set_changes` after the last retention prune (default
+//! 48h) -- lets a consumer whose `last_seq` has fallen behind retention
+//! detect it directly (`crate::changelog::read_safe_seq_watermark`) rather
+//! than relying solely on the "lowest returned change row's seq" heuristic
+//! (`core/svc_process`'s/`core/svc_action`'s own `changelog_consumer`
+//! modules' fallback for an older hub-api schema without this column yet).
 
 use sea_orm::entity::prelude::*;
 
@@ -25,6 +34,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: i32,
     pub safe_seq: i64,
+    pub min_retained_seq: i64,
     pub computed_at: DateTimeUtc,
 }
 

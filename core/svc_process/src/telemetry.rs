@@ -210,6 +210,13 @@ pub struct ChangelogConsumerMetrics {
     /// `last_seq + 1`, most plausibly retention truncation) -- forces a full
     /// reconcile instead of a partial apply, never silent.
     pub changelog_gap_detected_total: prometheus::IntCounter,
+    /// `last_seq + 1 < min_retained_seq` detected via the primary's
+    /// authoritative `bundle_active_set_watermark.min_retained_seq` column
+    /// (hub-api migration `0026`/PR #397) -- forces a full reconcile, never
+    /// silent. Distinct from `changelog_gap_detected_total` (the heuristic
+    /// fallback) so on-call can tell "confirmed by the primary" apart from
+    /// "inferred from a returned row's seq".
+    pub changelog_retention_exceeded_total: prometheus::IntCounter,
 }
 
 /// Registers [`ChangelogConsumerMetrics`] against `registry`. Must be
@@ -290,6 +297,15 @@ pub fn register_changelog_consumer_metrics(
         .register(Box::new(changelog_gap_detected_total.clone()))
         .expect("register svc_process_changelog_gap_detected_total");
 
+    let changelog_retention_exceeded_total = prometheus::IntCounter::new(
+        "svc_process_changelog_retention_exceeded_total",
+        "last_seq fell behind min_retained_seq (primary-confirmed), forcing a full reconcile",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(changelog_retention_exceeded_total.clone()))
+        .expect("register svc_process_changelog_retention_exceeded_total");
+
     ChangelogConsumerMetrics {
         applied_scopes_total,
         scope_failures_total,
@@ -298,6 +314,7 @@ pub fn register_changelog_consumer_metrics(
         tenant_active_apps,
         scope_stale_evicted_total,
         changelog_gap_detected_total,
+        changelog_retention_exceeded_total,
     }
 }
 
@@ -351,6 +368,7 @@ mod tests {
         metrics.tenant_active_apps.with_label_values(&["7"]).set(3);
         metrics.scope_stale_evicted_total.inc();
         metrics.changelog_gap_detected_total.inc();
+        metrics.changelog_retention_exceeded_total.inc();
 
         let rendered = render_metrics(&registry).expect("registry with metrics must encode");
         assert!(rendered.contains("svc_process_changelog_applied_scopes_total 1"));
@@ -360,6 +378,7 @@ mod tests {
         assert!(rendered.contains(r#"tenant_id="7""#));
         assert!(rendered.contains("svc_process_changelog_scope_stale_evicted_total 1"));
         assert!(rendered.contains("svc_process_changelog_gap_detected_total 1"));
+        assert!(rendered.contains("svc_process_changelog_retention_exceeded_total 1"));
     }
 
     #[test]

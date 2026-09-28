@@ -449,6 +449,8 @@ mod tests {
             &Frame::new(
                 100,
                 Message::Load(LoadBody {
+                    tenant_id: 1,
+                    community_id: 0,
                     app_id: "waddles.test.app".to_string(),
                     version: "1".to_string(),
                     digest: "sha256:00".to_string(),
@@ -713,6 +715,8 @@ mod tests {
             &Frame::new(
                 300,
                 Message::Unload(UnloadBody {
+                    tenant_id: 1,
+                    community_id: 0,
                     app_id: "waddles.test.app".to_string(),
                     digest: "sha256:00".to_string(),
                 }),

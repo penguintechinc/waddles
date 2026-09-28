@@ -17,7 +17,10 @@ MiB) with no WIT import involved at all -- the negative test for the
 per-instance memory cap (`crate::invoke`'s `Store::limiter`/`StoreLimits`
 wiring, spec SS7.3 sandbox layer 8): loaded with a small
 `limits.memory_mb`, this must trap with `MEMORY_LIMIT` well before
-reaching 64 MiB.
+reaching 64 MiB. `busy-loop` is the CPU-bound counterpart: an unbounded
+guest loop with no WIT import and no natural termination, proving the
+epoch-deadline mechanism (`Store::set_epoch_deadline`/`epoch_deadline_trap`)
+actually bounds guest CPU time -- without it this call would hang forever.
 
 ## Regenerating
 

@@ -182,7 +182,7 @@ async fn apply_active_set(
     };
 
     for (scope, row) in &plan.to_load {
-        match sink.load(row).await {
+        match sink.load(scope.0, scope.1, row).await {
             Ok(()) => {
                 tracing::info!(
                     tenant_id = scope.0, community_id = scope.1,
@@ -201,7 +201,7 @@ async fn apply_active_set(
         }
     }
     for (scope, digest) in &plan.to_unload {
-        match sink.unload(&scope.2, digest).await {
+        match sink.unload(scope.0, scope.1, &scope.2, digest).await {
             Ok(()) => {
                 tracing::info!(
                     tenant_id = scope.0, community_id = scope.1,
@@ -259,15 +259,35 @@ pub async fn run_incremental_tick(
     metrics: &ChangelogConsumerMetrics,
 ) {
     let start = Instant::now();
-    let safe_seq = match bundle_active_set::read_safe_seq(db).await {
-        Ok(s) => s,
+    let watermark = match bundle_active_set::read_safe_seq_watermark(db).await {
+        Ok(w) => w,
         Err(err) => {
             tracing::warn!(error = %err, "changelog consumer: safe_seq read failed");
             return;
         }
     };
+    let safe_seq = watermark.safe_seq;
     metrics.changelog_lag.set(state.tracker.lag(safe_seq));
     if safe_seq <= state.tracker.last_seq() {
+        return;
+    }
+
+    // PRIMARY retention check (hub-api migration `0026`/PR #397's
+    // `min_retained_seq`, authoritative once present) -- see
+    // `core/svc_process/src/changelog_consumer.rs`'s identical check for the
+    // full rationale.
+    if state.tracker.last_seq() + 1 < watermark.min_retained_seq {
+        tracing::error!(
+            last_seq = state.tracker.last_seq(),
+            min_retained_seq = watermark.min_retained_seq,
+            safe_seq,
+            "changelog consumer: last_seq has fallen behind change-log retention \
+             (min_retained_seq); forcing a full reconcile instead of a partial apply"
+        );
+        metrics.changelog_retention_exceeded_total.inc();
+        run_full_reconcile(db, state, sink, excluded_metric, metrics).await;
+        state.tracker.advance(safe_seq);
+        metrics.changelog_lag.set(state.tracker.lag(safe_seq));
         return;
     }
 
@@ -280,6 +300,8 @@ pub async fn run_incremental_tick(
             }
         };
 
+    // FALLBACK gap heuristic (older hub-api schema, or an unexplained gap
+    // the primary check above didn't catch).
     if let Some(first) = changes.first() {
         if first.seq > state.tracker.last_seq() + 1 {
             tracing::error!(
@@ -513,9 +535,17 @@ mod tests {
     fn watermark_row(
         safe_seq: i64,
     ) -> bundle_active_set::entities::bundle_active_set_watermark::Model {
+        watermark_row_with_retention(safe_seq, 0)
+    }
+
+    fn watermark_row_with_retention(
+        safe_seq: i64,
+        min_retained_seq: i64,
+    ) -> bundle_active_set::entities::bundle_active_set_watermark::Model {
         bundle_active_set::entities::bundle_active_set_watermark::Model {
             id: 1,
             safe_seq,
+            min_retained_seq,
             computed_at: chrono::Utc::now(),
         }
     }
@@ -549,6 +579,8 @@ mod tests {
     impl BundleSink for FakeSink {
         fn load<'a>(
             &'a self,
+            _tenant_id: i32,
+            _community_id: i32,
             row: &'a bundle_active_set::ActiveBundleRow,
         ) -> std::pin::Pin<
             Box<
@@ -567,6 +599,8 @@ mod tests {
         }
         fn unload<'a>(
             &'a self,
+            _tenant_id: i32,
+            _community_id: i32,
             app_id: &'a str,
             digest: &'a str,
         ) -> std::pin::Pin<
@@ -793,6 +827,35 @@ mod tests {
 
         assert_eq!(state.by_scope_len(), 0);
         assert_eq!(sink.calls(), vec!["unload:waddles.a:sha256:00".to_string()]);
+    }
+
+    /// Primary retention regression (hub-api migration `0026`/PR #397):
+    /// see `core/svc_process/src/changelog_consumer.rs`'s identical test.
+    #[tokio::test]
+    async fn run_incremental_tick_forces_a_full_reconcile_when_behind_min_retained_seq() {
+        let digest = format!("sha256:{}", "8".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![watermark_row_with_retention(200, 150)]])
+            .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.a", &digest)]])
+            .append_query_results([vec![approval_row(1, "waddles.a")]])
+            .into_connection();
+        let mut state = ConsumerState::new(100);
+        let sink = FakeSink::default();
+        let metrics = test_changelog_metrics();
+        run_incremental_tick(
+            &db,
+            &mut state,
+            Some(&sink as &dyn BundleSink),
+            &test_excluded_metric(),
+            &metrics,
+        )
+        .await;
+
+        assert_eq!(state.last_seq(), 200);
+        assert_eq!(metrics.changelog_retention_exceeded_total.get(), 1);
+        assert_eq!(metrics.changelog_gap_detected_total.get(), 0);
+        assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
     }
 
     /// Retention-gap regression (Gemini review on PR #397): see
