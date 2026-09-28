@@ -349,8 +349,17 @@ reputation:
 
 ingress:
   enabled: false
+# spire.enabled defaults to false at the chart level (values.yaml) pending
+# https://github.com/penguintechinc/waddles/issues/437 (SPIRE server/agent
+# crash-loop -- the waddlebot-spire-auto-enroll post-upgrade hook Job fails
+# every rollout while this is true, which pins the whole release in FAILED
+# state). Flip back to true once #437 is resolved and the hook has been
+# verified green in a scratch namespace first. If a release is ALREADY stuck
+# FAILED because of this, see the chart README "Recovering a FAILED release"
+# section (helm rollback to the last good revision, or helm upgrade once
+# this flag -- and therefore the hook -- is false).
 spire:
-  enabled: true
+  enabled: false
   environment: "alpha"
   server:
     resources:
