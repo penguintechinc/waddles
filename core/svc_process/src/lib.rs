@@ -21,9 +21,9 @@
 //! - The content-moderation gate itself (`crate::builtins::
 //!   run_moderation_gate`) -- needs a Rust Ollama classifier client and
 //!   PostHog flag client, neither of which exists in this crate yet
-//! - The `db`/`kv`/`http`/`flags` host capabilities
-//!   (`crate::capabilities::StageCapabilities`) -- `context`/`clock`/`log`
-//!   are fully wired
+//! - The `db`/`http`/`flags` host capabilities
+//!   (`crate::capabilities::StageCapabilities`) -- `context`/`clock`/`log`/
+//!   `kv` are fully wired
 //! - The `GET /api/v1/distribution/bundles?stage=process` activation poll
 //!   (spec §6.7) that would resolve `PROCESS_APP_ID`'s real granted-stream
 //!   list, bundle digest, and approved `routes_to` set -- see
@@ -204,6 +204,71 @@ fn try_start_host_api(cli: &config::CliConfig) -> Arc<host_api::ConnectionRegist
     registry
 }
 
+/// Opens the direct Valkey connection the `kv` host capability is backed
+/// by (`spine::ProcessDeps::kv_conn`'s doc), built from the same
+/// `VALKEY_URL`/username/password/TLS/CA-file settings
+/// `penguin_spine::SpineClient` connects with -- byte-for-byte the same
+/// connection-building logic as `core/svc_action::usage::connect`
+/// (duplicated rather than shared: it is a dozen lines of `redis`-crate
+/// client construction, not the `kv` capability's own logic, which
+/// already lives in exactly one place, `bundle_host_kv`). Never fatal on
+/// failure -- returns `None` (logged) so the caller can start every other
+/// capability regardless (`crate::capabilities::StageCapabilities::with_kv`'s
+/// doc).
+async fn connect_kv(cfg: &penguin_spine::SpineConfig) -> Option<redis::aio::MultiplexedConnection> {
+    use redis::IntoConnectionInfo;
+
+    let info: redis::ConnectionInfo = match cfg.valkey_url.as_str().into_connection_info() {
+        Ok(info) => info,
+        Err(err) => {
+            tracing::warn!(error = %err, "kv capability: invalid VALKEY_URL; kv disabled (not_implemented on every kv host-call)");
+            return None;
+        }
+    };
+    let mut settings = info.redis_settings().clone();
+    if let Some(username) = &cfg.valkey_username {
+        settings = settings.set_username(username);
+    }
+    if let Some(password) = &cfg.valkey_password {
+        settings = settings.set_password(password);
+    }
+    let info = info.set_redis_settings(settings);
+
+    let client = if cfg.security_transport_tls {
+        host_api::ensure_crypto_provider_installed();
+        let root_cert = std::fs::read(&cfg.valkey_ca_file).ok();
+        match redis::Client::build_with_tls(
+            info,
+            redis::TlsCertificates {
+                client_tls: None,
+                root_cert,
+            },
+        ) {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::warn!(error = %err, "kv capability: TLS Valkey client build failed; kv disabled");
+                return None;
+            }
+        }
+    } else {
+        match redis::Client::open(info) {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::warn!(error = %err, "kv capability: Valkey client build failed; kv disabled");
+                return None;
+            }
+        }
+    };
+
+    match client.get_multiplexed_async_connection().await {
+        Ok(conn) => Some(conn),
+        Err(err) => {
+            tracing::warn!(error = %err, "kv capability: Valkey connection failed; kv disabled (not_implemented on every kv host-call)");
+            None
+        }
+    }
+}
+
 /// Attempts to start the **legacy, single-consumer** process-stage drain
 /// loop (`crate::spine::run`) as its own background task, mirroring
 /// `core/svc_action::try_start_dispatch`'s shape: three independent reasons
@@ -322,6 +387,12 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
         };
 
         let metrics: Arc<dyn penguin_spine::SpineMetrics> = Arc::new(penguin_spine::NoopMetrics);
+        // `kv` host capability: opened once here, cloned into every
+        // per-invoke `StageCapabilities` (`spine::ProcessDeps::kv_conn`'s
+        // doc) rather than reopened per invoke. `None` on failure is not
+        // fatal to the process loop -- every `kv` host-call then sees
+        // `not_implemented` instead (`connect_kv`'s doc).
+        let kv_conn = connect_kv(&spine_cfg).await;
         let deps = spine::ProcessDeps {
             app_id: app_id.clone(),
             digest: cli.process_bundle_digest.clone(),
@@ -345,6 +416,7 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
             },
             metrics,
             license: license_gate,
+            kv_conn,
         };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -530,6 +602,12 @@ fn try_start_db_bundle_loader(
             bundle_loader_task.await;
             return;
         };
+        // `kv` host capability for every source-binding consumer this
+        // supervisor spawns -- opened once here (network I/O deliberately
+        // kept out of `build_source_supervisor_prereqs`, see that
+        // function's doc) and cloned into each consumer's `ProcessDeps`
+        // (`source_supervisor::run_binding_consumer`).
+        let kv_conn = connect_kv(&prereqs.spine_cfg).await;
 
         // Tenant-isolation fix: resolve the real tenant slug/community name
         // for THIS process's own numeric scope through the same RO reader
@@ -565,7 +643,7 @@ fn try_start_db_bundle_loader(
                 }
             };
 
-        match resolved.map(|r| finish_supervisor_deps(prereqs, r)) {
+        match resolved.map(|r| finish_supervisor_deps(prereqs, r, kv_conn)) {
             Some(deps) => {
                 let (supervisor_shutdown_tx, supervisor_shutdown_rx) =
                     tokio::sync::oneshot::channel();
@@ -668,6 +746,7 @@ fn build_source_supervisor_prereqs(
 fn finish_supervisor_deps(
     prereqs: SupervisorPrereqs,
     resolved: bundle_active_set::scope::ResolvedScope,
+    kv_conn: Option<redis::aio::MultiplexedConnection>,
 ) -> source_supervisor::SupervisorDeps {
     source_supervisor::SupervisorDeps {
         spine_cfg: prereqs.spine_cfg,
@@ -679,6 +758,7 @@ fn finish_supervisor_deps(
         license: prereqs.license,
         tenant: resolved.tenant_slug,
         community: resolved.community_name,
+        kv_conn,
     }
 }
 
@@ -850,7 +930,7 @@ mod tests {
             tenant_slug: "acme".to_string(),
             community_name: Some("main".to_string()),
         };
-        let deps = finish_supervisor_deps(prereqs, resolved);
+        let deps = finish_supervisor_deps(prereqs, resolved, None);
         assert_eq!(deps.tenant, "acme");
         assert_eq!(deps.community.as_deref(), Some("main"));
     }
@@ -866,7 +946,7 @@ mod tests {
     fn supervisor_deps_are_never_built_when_scope_resolution_fails() {
         let prereqs = test_supervisor_prereqs();
         let resolved: Option<bundle_active_set::scope::ResolvedScope> = None;
-        let deps = resolved.map(|r| finish_supervisor_deps(prereqs, r));
+        let deps = resolved.map(|r| finish_supervisor_deps(prereqs, r, None));
         assert!(
             deps.is_none(),
             "an unresolved scope must never produce SupervisorDeps -- the source-binding \

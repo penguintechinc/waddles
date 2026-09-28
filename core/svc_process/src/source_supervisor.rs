@@ -115,6 +115,11 @@ pub struct SupervisorDeps {
     /// when resolution fails, rather than falling back to a guessed value.
     pub tenant: String,
     pub community: Option<String>,
+    /// See `spine::ProcessDeps::kv_conn`'s doc -- opened once by
+    /// `crate::lib::try_start_db_bundle_loader` and cloned into every
+    /// binding consumer's own `ProcessDeps` in [`run_binding_consumer`]
+    /// below, rather than reopened per consumer or per reconnect attempt.
+    pub kv_conn: Option<redis::aio::MultiplexedConnection>,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -240,6 +245,7 @@ async fn run_binding_consumer(
             spine: spine_client,
             metrics: deps.metrics.clone(),
             license: Arc::clone(&deps.license),
+            kv_conn: deps.kv_conn.clone(),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();

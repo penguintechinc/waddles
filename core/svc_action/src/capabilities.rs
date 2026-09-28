@@ -22,10 +22,16 @@
 //! `relay` (Twitch outbound via Valkey `LPUSH`, drained by svc-ingest's own
 //! persistent IRC connection; Discord outbound via a direct, stateless bot
 //! REST send -- see [`StageCapabilities::handle_discord_relay`]'s doc for
-//! why Discord takes a different path than Twitch), `clock`, `context` and
-//! `log` are fully wired. `http` is wired to `crate::egress::EgressGuard`
-//! (spec §8's full SSRF guard). `db`/`kv`/`flags` remain documented
-//! `TODO(M3+)` seams -- see [`StageCapabilities::handle`]'s match arms.
+//! why Discord takes a different path than Twitch), `clock`, `context`,
+//! `log`, and `kv` are fully wired. `http` is wired to
+//! `crate::egress::EgressGuard` (spec §8's full SSRF guard). `kv` is wired
+//! to `bundle_host_kv::KvHost` (the crate shared with `core/svc_process` --
+//! see that crate's own module doc for the key-derivation/isolation/quota
+//! design) over the same direct Valkey connection this stage already opens
+//! for `relay`/usage metering (see [`Self::with_kv`]'s doc for why that
+//! connection is reused rather than a second one opened). `db` remains a
+//! documented seam -- see [`StageCapabilities::handle`]'s match arm for
+//! what a real wiring needs and where that design is tracked.
 //!
 //! A bundle never holds a platform credential (spec §4.3): every
 //! capability here resolves any credential itself, from this process's own
@@ -35,6 +41,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
 use crate::egress::EgressGuard;
@@ -236,9 +243,14 @@ struct DiscordRelay {
 /// over [`RelayQueue`] so `handle_relay` is fully unit-testable against a
 /// fake queue without a live Valkey server -- production callers
 /// instantiate `StageCapabilities<redis::aio::MultiplexedConnection>`.
-/// Holds no per-connection tenant/community/app_id (see the module doc --
-/// that scope now arrives per call via [`InvokeScope`]).
-pub struct StageCapabilities<Q: RelayQueue> {
+/// Also generic over [`KvBackend`] (defaulted to the same production
+/// connection type) for the identical reason: `handle_kv`'s argument-
+/// parsing/error-mapping is unit-testable against a fake implementing the
+/// public `bundle_host_kv::KvBackend` trait, with no live Valkey server --
+/// see this module's `tests::FakeKvBackend`. Holds no per-connection
+/// tenant/community/app_id (see the module doc -- that scope now arrives
+/// per call via [`InvokeScope`]).
+pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::MultiplexedConnection> {
     relay_queue: Q,
     egress: Arc<EgressGuard>,
     /// Shared with the dispatch loop's own `DispatchDeps::usage` so a
@@ -253,24 +265,45 @@ pub struct StageCapabilities<Q: RelayQueue> {
     /// See [`DiscordRelay`]'s doc; `None` until [`Self::with_discord`] is
     /// called.
     discord: Option<DiscordRelay>,
+    /// See [`Self::with_kv`]'s doc; `None` until it is called (mirrors
+    /// [`Self::discord`]'s graceful-degradation shape: a bundle sees
+    /// `not_implemented` rather than this process failing to start if a
+    /// live Valkey connection for `kv` was never configured).
+    kv: Option<KvHost<K>>,
 }
 
-impl<Q: RelayQueue> StageCapabilities<Q> {
+impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     /// Builds the capability set this connection's read loop answers every
     /// `host-call` against, for as long as the connection lives. No
     /// tenant/community/app_id here -- every capability method below takes
     /// its [`InvokeScope`] as a parameter instead (module doc). The Discord
-    /// relay provider starts unconfigured (`relay_unavailable` until
-    /// [`Self::with_discord`] is chained on) so every existing caller of
-    /// this constructor -- production and test alike -- is unaffected by
-    /// this landing.
+    /// relay provider and the `kv` backend both start unconfigured
+    /// (`relay_unavailable`/`not_implemented` until [`Self::with_discord`]/
+    /// [`Self::with_kv`] are chained on) so every existing caller of this
+    /// constructor -- production and test alike -- is unaffected by this
+    /// landing.
     pub fn new(relay_queue: Q, egress: Arc<EgressGuard>, usage: Arc<Mutex<UsageBatcher>>) -> Self {
         Self {
             relay_queue,
             egress,
             usage,
             discord: None,
+            kv: None,
         }
+    }
+
+    /// Enables the `kv` capability over `backend` (production:
+    /// `redis::aio::MultiplexedConnection` -- the exact same direct Valkey
+    /// connection `lib.rs`'s `build_stage_capabilities` already opens for
+    /// `relay`/usage metering, cloned rather than opening a second
+    /// connection, since `MultiplexedConnection::clone` is a cheap handle
+    /// clone over one shared TCP connection, not a new socket). Builder-
+    /// style so a deployment where the Valkey connection failed to open can
+    /// still construct every other capability and simply skip this call,
+    /// the same pattern [`Self::with_discord`] already established.
+    pub fn with_kv(mut self, backend: K) -> Self {
+        self.kv = Some(KvHost::new(backend));
+        self
     }
 
     /// Enables the Discord relay provider, given the transport to send
@@ -557,9 +590,124 @@ impl<Q: RelayQueue> StageCapabilities<Q> {
         }
         Ok(serde_json::json!({}))
     }
+
+    /// `kv.get`/`kv.set`/`kv.delete`/`kv.increment` (`wit/waddle-bundle/
+    /// stage.wit` `interface kv`). Every argument shape here matches
+    /// exactly what `core/bundle_executor::host::imports`'s `kv::Host`
+    /// impl sends (`{"key"}`, `{"key","value","ttl_seconds"}`,
+    /// `{"key","delta","ttl_seconds"}`) and expects back
+    /// (`{"value": ...}`) -- see that module's doc for the wire contract
+    /// this must not drift from. Tenant/community/app_id come from `scope`
+    /// (never `call.app_id`, which is executor-set metadata, not a trust
+    /// boundary this capability re-derives its own scope from -- module
+    /// doc: "every capability here resolves its own scope from `self`").
+    async fn handle_kv(
+        &self,
+        scope: &InvokeScope,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        let Some(kv) = &self.kv else {
+            return Err(denied(
+                "not_implemented",
+                "kv capability is not configured on this stage (no Valkey connection)",
+            ));
+        };
+        let kv_scope = KvScope::new(
+            scope.tenant.clone(),
+            scope.community.clone(),
+            scope.app_id.clone(),
+        );
+
+        match call.op.as_str() {
+            "get" => {
+                let args: KvKeyArgs = parse_kv_args(&call.args)?;
+                let value = kv
+                    .get(&kv_scope, call.call_id, &args.key)
+                    .await
+                    .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({ "value": value }))
+            }
+            "set" => {
+                let args: KvSetArgs = parse_kv_args(&call.args)?;
+                kv.set(
+                    &kv_scope,
+                    call.call_id,
+                    &args.key,
+                    &args.value,
+                    args.ttl_seconds,
+                )
+                .await
+                .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({}))
+            }
+            "delete" => {
+                let args: KvKeyArgs = parse_kv_args(&call.args)?;
+                kv.delete(&kv_scope, call.call_id, &args.key)
+                    .await
+                    .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({}))
+            }
+            "increment" => {
+                let args: KvIncrementArgs = parse_kv_args(&call.args)?;
+                let value = kv
+                    .increment(
+                        &kv_scope,
+                        call.call_id,
+                        &args.key,
+                        args.delta,
+                        args.ttl_seconds,
+                    )
+                    .await
+                    .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({ "value": value }))
+            }
+            other => Err(denied(
+                "unknown_op",
+                format!("kv op {other:?} not supported"),
+            )),
+        }
+    }
 }
 
-impl<Q: RelayQueue> CapabilityHandler for StageCapabilities<Q> {
+/// `{"key": String}` -- `kv.get`/`kv.delete`'s args.
+#[derive(serde::Deserialize)]
+struct KvKeyArgs {
+    key: String,
+}
+
+/// `{"key": String, "value": Vec<u8>, "ttl_seconds": u32}` -- `kv.set`'s args.
+#[derive(serde::Deserialize)]
+struct KvSetArgs {
+    key: String,
+    value: Vec<u8>,
+    ttl_seconds: u32,
+}
+
+/// `{"key": String, "delta": i64, "ttl_seconds": u32}` -- `kv.increment`'s args.
+#[derive(serde::Deserialize)]
+struct KvIncrementArgs {
+    key: String,
+    delta: i64,
+    ttl_seconds: u32,
+}
+
+fn parse_kv_args<T: serde::de::DeserializeOwned>(
+    args: &serde_json::Value,
+) -> Result<T, HostResultError> {
+    serde_json::from_value(args.clone())
+        .map_err(|e| denied("invalid_args", format!("malformed kv host-call args: {e}")))
+}
+
+/// Maps [`KvError`] onto the `{code, message}` shape every `host-call`
+/// error reply carries -- [`KvError::wire_code`]/[`KvError::wire_message`]
+/// already collapse to exactly the two `kv.error` variants a bundle SDK
+/// knows how to render (`too_large`/everything else), so this is a direct
+/// pass-through, not a second mapping layer.
+fn kv_err_to_host(err: KvError) -> HostResultError {
+    denied(err.wire_code(), err.wire_message())
+}
+
+impl<Q: RelayQueue, K: KvBackend> CapabilityHandler for StageCapabilities<Q, K> {
     fn handle<'a>(
         &'a self,
         scope: &'a InvokeScope,
@@ -572,20 +720,20 @@ impl<Q: RelayQueue> CapabilityHandler for StageCapabilities<Q> {
                 CapabilityKind::Context => self.handle_context(scope),
                 CapabilityKind::Log => self.handle_log(scope, &call.args),
                 CapabilityKind::Http => self.egress.send(&scope.app_id, &call.args).await,
-                // TODO(M3+): `db`/`kv`/`flags` (spec §7.4's SQL-parser-gated
-                // statement execution, the per-bundle KV hash, and the
-                // `penguin-licensing` two-gate flag check) are not wired in
-                // this landing. Denying (never silently succeeding) is the
-                // correct behavior for an unimplemented capability: a
-                // bundle calling it sees `access-denied`, not a fabricated
-                // success.
+                CapabilityKind::Kv => self.handle_kv(scope, &call).await,
+                // `db` needs the manifest's `data.tables` allowlist plus
+                // per-bundle-role Postgres RLS (`SET LOCAL waddles.tenant`/
+                // `waddles.community`, spec §7.4/§11.10), and is being
+                // extended further (single-statement -> transactional
+                // `db.execute-batch`, a manifest `capabilities` allowlist)
+                // by a separate, in-progress design -- see
+                // `docs/superpowers/specs/2026-09-28-wit-stage-v1-1-design.md`
+                // §3/§4. Denying (never silently succeeding) is the correct
+                // behavior for an unimplemented capability until that design
+                // lands and is wired here.
                 CapabilityKind::Db => Err(denied(
                     "not_implemented",
-                    "db capability is not wired in this build -- TODO(M3+)",
-                )),
-                CapabilityKind::Kv => Err(denied(
-                    "not_implemented",
-                    "kv capability is not wired in this build -- TODO(M3+)",
+                    "db capability is not wired in this build",
                 )),
                 CapabilityKind::Flags => Err(denied(
                     "not_implemented",
@@ -652,6 +800,110 @@ mod tests {
         }
     }
 
+    /// A minimal in-memory [`KvBackend`] fake, mirroring
+    /// `bundle_host_kv::backend::fake::FakeBackend`'s semantics (that one
+    /// is crate-private to `bundle_host_kv`, so `handle_kv`'s own
+    /// argument-parsing/error-mapping is exercised here against a fresh,
+    /// independent implementation of the public `KvBackend` trait -- no
+    /// live Valkey server needed for this module's own tests).
+    #[derive(Default)]
+    struct FakeKvBackend {
+        data: Mutex<std::collections::HashMap<String, Vec<u8>>>,
+        counts: Mutex<std::collections::HashMap<String, u64>>,
+    }
+
+    impl KvBackend for FakeKvBackend {
+        fn get<'a>(
+            &'a self,
+            data_key: &'a str,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+            let value = self.data.lock().unwrap().get(data_key).cloned();
+            Box::pin(async move { Ok(value) })
+        }
+
+        fn set_with_quota<'a>(
+            &'a self,
+            data_key: &'a str,
+            count_key: &'a str,
+            value: &'a [u8],
+            _ttl_seconds: u32,
+            max_keys: u64,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<bundle_host_kv::QuotaOutcome<()>, String>>
+        {
+            let mut data = self.data.lock().unwrap();
+            let existed = data.contains_key(data_key);
+            if !existed {
+                let mut counts = self.counts.lock().unwrap();
+                let count = *counts.get(count_key).unwrap_or(&0);
+                if count >= max_keys {
+                    return Box::pin(
+                        async move { Ok(bundle_host_kv::QuotaOutcome::QuotaExceeded) },
+                    );
+                }
+                counts.insert(count_key.to_string(), count + 1);
+            }
+            data.insert(data_key.to_string(), value.to_vec());
+            Box::pin(async move { Ok(bundle_host_kv::QuotaOutcome::Admitted(())) })
+        }
+
+        fn delete<'a>(
+            &'a self,
+            data_key: &'a str,
+            count_key: &'a str,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<bool, String>> {
+            let existed = self.data.lock().unwrap().remove(data_key).is_some();
+            if existed {
+                let mut counts = self.counts.lock().unwrap();
+                let count = *counts.get(count_key).unwrap_or(&0);
+                counts.insert(count_key.to_string(), count.saturating_sub(1));
+            }
+            Box::pin(async move { Ok(existed) })
+        }
+
+        fn increment_with_quota<'a>(
+            &'a self,
+            data_key: &'a str,
+            count_key: &'a str,
+            delta: i64,
+            _ttl_seconds: u32,
+            max_keys: u64,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<bundle_host_kv::QuotaOutcome<i64>, String>>
+        {
+            let mut data = self.data.lock().unwrap();
+            let existed = data.contains_key(data_key);
+            if !existed {
+                let mut counts = self.counts.lock().unwrap();
+                let count = *counts.get(count_key).unwrap_or(&0);
+                if count >= max_keys {
+                    return Box::pin(
+                        async move { Ok(bundle_host_kv::QuotaOutcome::QuotaExceeded) },
+                    );
+                }
+                counts.insert(count_key.to_string(), count + 1);
+            }
+            let current = data
+                .get(data_key)
+                .and_then(|v| std::str::from_utf8(v).ok())
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0);
+            let new_value = current + delta;
+            data.insert(data_key.to_string(), new_value.to_string().into_bytes());
+            Box::pin(async move { Ok(bundle_host_kv::QuotaOutcome::Admitted(new_value)) })
+        }
+
+        fn increment_rate<'a>(
+            &'a self,
+            _rate_key: &'a str,
+            _window_seconds: u64,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<u64, String>> {
+            // Unbounded in this fake -- `handle_kv`'s own rate limit is
+            // `bundle_host_kv::KvHost`'s responsibility, already covered by
+            // that crate's own tests; this module only needs to prove its
+            // argument parsing/error mapping, not re-prove the limiter.
+            Box::pin(async move { Ok(1) })
+        }
+    }
+
     fn test_egress() -> Arc<EgressGuard> {
         Arc::new(EgressGuard::new(
             Arc::new(crate::egress::ReqwestTransport),
@@ -682,6 +934,15 @@ mod tests {
         usage: Arc<Mutex<UsageBatcher>>,
     ) -> StageCapabilities<FakeRelayQueue> {
         StageCapabilities::new(queue, test_egress(), usage)
+    }
+
+    fn caps_with_kv(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue, FakeKvBackend> {
+        StageCapabilities::new(
+            queue,
+            test_egress(),
+            Arc::new(Mutex::new(UsageBatcher::new())),
+        )
+        .with_kv(FakeKvBackend::default())
     }
 
     fn scope() -> InvokeScope {
@@ -754,6 +1015,210 @@ mod tests {
             args,
             call_id: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn kv_is_not_implemented_when_no_backend_was_configured() {
+        let caps = caps(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_implemented");
+    }
+
+    #[tokio::test]
+    async fn kv_set_then_get_round_trips_through_the_handler() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Kv,
+                "set",
+                serde_json::json!({"key": "counter", "value": [1, 2, 3], "ttl_seconds": 0}),
+            ),
+        )
+        .await
+        .expect("set succeeds");
+
+        let result = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Kv,
+                    "get",
+                    serde_json::json!({"key": "counter"}),
+                ),
+            )
+            .await
+            .expect("get succeeds");
+        assert_eq!(result["value"], serde_json::json!([1, 2, 3]));
+    }
+
+    #[tokio::test]
+    async fn kv_get_of_an_absent_key_returns_a_null_value_not_an_error() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        let result = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Kv,
+                    "get",
+                    serde_json::json!({"key": "absent"}),
+                ),
+            )
+            .await
+            .expect("get succeeds");
+        assert_eq!(result["value"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn kv_delete_then_get_returns_null() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Kv,
+                "set",
+                serde_json::json!({"key": "k", "value": [9], "ttl_seconds": 0}),
+            ),
+        )
+        .await
+        .unwrap();
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Kv,
+                "delete",
+                serde_json::json!({"key": "k"}),
+            ),
+        )
+        .await
+        .expect("delete succeeds");
+        let result = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .expect("get succeeds");
+        assert_eq!(result["value"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn kv_increment_accumulates_across_calls() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        let first = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Kv,
+                    "increment",
+                    serde_json::json!({"key": "hits", "delta": 5, "ttl_seconds": 0}),
+                ),
+            )
+            .await
+            .expect("increment succeeds");
+        assert_eq!(first["value"], serde_json::json!(5));
+
+        let second = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Kv,
+                    "increment",
+                    serde_json::json!({"key": "hits", "delta": 3, "ttl_seconds": 0}),
+                ),
+            )
+            .await
+            .expect("increment succeeds");
+        assert_eq!(second["value"], serde_json::json!(8));
+    }
+
+    #[tokio::test]
+    async fn kv_set_with_malformed_args_is_rejected_as_invalid_args() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "set", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn kv_unknown_op_is_rejected() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "bogus", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "unknown_op");
+    }
+
+    #[tokio::test]
+    async fn kv_rejects_a_guest_key_that_attempts_a_namespace_escape() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Kv,
+                    "set",
+                    serde_json::json!({"key": "other:app:data:secret", "value": [1], "ttl_seconds": 0}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        // `KvError::wire_code` collapses every non-`too_large` reason to
+        // `"backend"` at the host-call boundary (module doc) -- the
+        // finer-grained `invalid_key` reason is what `bundle_host_kv`'s own
+        // tests assert against `KvError::code()` directly.
+        assert_eq!(err.code, "backend");
+    }
+
+    #[tokio::test]
+    async fn kv_two_apps_in_the_same_tenant_are_isolated_through_the_handler() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Kv,
+                "set",
+                serde_json::json!({"key": "secret", "value": [42], "ttl_seconds": 0}),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let other_app = InvokeScope {
+            app_id: "waddles.bot.other".to_string(),
+            ..scope()
+        };
+        let result = caps
+            .handle(
+                &other_app,
+                call(
+                    CapabilityKind::Kv,
+                    "get",
+                    serde_json::json!({"key": "secret"}),
+                ),
+            )
+            .await
+            .expect("get succeeds");
+        assert_eq!(
+            result["value"],
+            serde_json::Value::Null,
+            "a different app_id must never see this app's value"
+        );
     }
 
     #[test]
@@ -1275,13 +1740,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn db_kv_flags_capabilities_are_documented_seams() {
+    async fn db_and_flags_capabilities_are_documented_seams() {
+        // `kv` is no longer an unconditional seam -- see
+        // `kv_is_not_implemented_when_no_backend_was_configured` for its
+        // own (backend-unconfigured) not_implemented case, and the
+        // `kv_*` tests above for the fully-wired behavior.
         let caps = caps(FakeRelayQueue::default());
-        for capability in [
-            CapabilityKind::Db,
-            CapabilityKind::Kv,
-            CapabilityKind::Flags,
-        ] {
+        for capability in [CapabilityKind::Db, CapabilityKind::Flags] {
             let err = caps
                 .handle(
                     &scope(),
