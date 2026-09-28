@@ -1,6 +1,6 @@
 # Bundle Manifest Attribution & Marketplace Metadata
 
-Added in migration `0026_bundle_attribution_metadata`. `bundle.yaml` (schema
+Added in migration `0029_bundle_attribution_metadata`. `bundle.yaml` (schema
 `v2`) may declare an optional attribution block so a third-party port can be
 credited, its license terms tracked, and the marketplace listing can call
 out apps positioned as alternatives to a feature a tenant doesn't want to

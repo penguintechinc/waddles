@@ -39,8 +39,8 @@ precedent as every other manifest-shape rule in this repo (`bundle_
 manifest_v2.py`'s own pure-YAML rules, none of which are CHECK
 constraints).
 
-Revision ID: 0026_bundle_attribution_metadata
-Revises: 0025_app_source_bindings
+Revision ID: 0029_bundle_attribution_metadata
+Revises: 0028_bundle_active_set_changelog
 Create Date: 2026-09-27
 """
 
@@ -48,8 +48,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0026_bundle_attribution_metadata"
-down_revision = "0025_app_source_bindings"
+revision = "0029_bundle_attribution_metadata"
+down_revision = "0028_bundle_active_set_changelog"
 branch_labels = None
 depends_on = None
 
