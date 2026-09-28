@@ -18,7 +18,7 @@ use std::time::Duration;
 // privately `use`s it, no `pub use` inside that submodule) -- import from
 // the root.
 use penguin_connector_discord::gateway::{
-    ChatMessage, DiscordGatewayReceiver, GatewayConfig, GatewaySession,
+    ChatMessage, CloseCodeClass, DiscordGatewayReceiver, GatewayConfig, GatewaySession,
 };
 use penguin_connector_discord::DiscordError;
 use penguin_spine::{KeyRing, Scope, SpineMetrics};
@@ -27,6 +27,7 @@ use tokio::sync::oneshot;
 
 use crate::ingest::{Backoff, STABILITY_WINDOW};
 use crate::publish::{deterministic_workstream_id, publish_event, EventAppender};
+use crate::telemetry::ReceiverHealthMetrics;
 
 /// Abstraction over a live, identified Gateway session's
 /// `next_chat_message()` -- lets [`run_loop`] be driven by a scripted fake
@@ -101,6 +102,21 @@ pub fn source_id(guild_id: Option<&str>) -> String {
 ///   `OP_RESUME` (see [`penguin_connector_discord::gateway::DiscordError::ResumeRequested`]'s
 ///   own doc comment) -- there is no different *action* to take yet, only
 ///   a different thing to tell the operator.
+/// - A [`DiscordError::GatewayClosed`] (a WebSocket close frame that carried
+///   an explicit Discord close code) branches on its
+///   [`CloseCodeClass`]: `Resumable` and `ReconnectFresh` both reconnect via
+///   `backoff.delay()` like every other retryable path above (this crate
+///   has no `OP_RESUME` yet, so "resume" today still means a fresh
+///   `connector.connect()` -- the distinction is preserved for logging/
+///   metrics and for when `OP_RESUME` lands); `backoff.delay()`'s existing
+///   exponential-with-jitter escalation is what keeps a churning
+///   `ReconnectFresh` loop well under Discord's ~1000 `IDENTIFY`/24h budget
+///   instead of hot-looping. `Fatal` (e.g. `4004` auth failed, `4010`-`4014`
+///   sharding/intents) returns immediately: this connection's reconnect
+///   loop stops, [`crate::telemetry::ReceiverHealthMetrics::receiver_marked_unhealthy`]
+///   flips its health gauge to 0, and an ERROR is logged with the close
+///   code (never the bot token) -- the service process itself keeps
+///   running; only this one platform's ingest loop has stopped.
 #[allow(clippy::too_many_arguments)] // every parameter is independently varied across tests; a params struct would just move the same count elsewhere -- matches twitch.rs's own precedent
 async fn run_loop<C, A, M>(
     connector: C,
@@ -114,7 +130,7 @@ async fn run_loop<C, A, M>(
 ) where
     C: GatewayConnector,
     A: EventAppender,
-    M: SpineMetrics,
+    M: SpineMetrics + ReceiverHealthMetrics,
 {
     'outer: loop {
         let mut channel = tokio::select! {
@@ -194,12 +210,72 @@ async fn run_loop<C, A, M>(
                         match &err {
                             DiscordError::ResumeRequested => {
                                 tracing::warn!(platform = "discord", "gateway requested reconnect (resumable session), reconnecting");
+                                metrics.receiver_reconnect("discord", "session_resume_requested");
                             }
                             DiscordError::SessionInvalidated => {
                                 tracing::warn!(platform = "discord", "gateway invalidated the session, re-identifying");
+                                metrics.receiver_reconnect("discord", "session_invalidated");
+                            }
+                            DiscordError::GatewayClosed {
+                                code,
+                                reason,
+                                class: CloseCodeClass::Fatal,
+                            } => {
+                                // Fatal: e.g. 4004 (auth failed), 4010-4014
+                                // (invalid/required sharding, invalid API
+                                // version, invalid/disallowed intents).
+                                // Stop reconnecting *this connection*
+                                // outright instead of falling through to
+                                // the generic `!is_retryable()` check below
+                                // -- returns here so this is the only ERROR
+                                // logged for this failure. The code is a
+                                // small documented integer, never the bot
+                                // token. The service process keeps running;
+                                // only this platform's ingest loop stops.
+                                tracing::error!(
+                                    platform = "discord",
+                                    code = ?code,
+                                    reason = %reason,
+                                    "gateway closed fatally (auth/sharding/intents); stopping discord ingest for this connection, service continues running"
+                                );
+                                metrics.receiver_marked_unhealthy("discord", *code);
+                                return;
+                            }
+                            DiscordError::GatewayClosed {
+                                code,
+                                reason,
+                                class: CloseCodeClass::Resumable,
+                            } => {
+                                tracing::warn!(
+                                    platform = "discord",
+                                    code = ?code,
+                                    reason = %reason,
+                                    "gateway closed (resumable session); reconnecting with existing backoff"
+                                );
+                                metrics.receiver_reconnect("discord", "resumable_close");
+                            }
+                            DiscordError::GatewayClosed {
+                                code,
+                                reason,
+                                class: CloseCodeClass::ReconnectFresh,
+                            } => {
+                                // No true OP_RESUME yet (see this function's
+                                // doc comment), so this is a fresh IDENTIFY
+                                // either way -- `backoff.delay()` below is
+                                // what keeps repeated churn here well under
+                                // Discord's ~1000 IDENTIFY/24h budget
+                                // instead of hot-looping.
+                                tracing::warn!(
+                                    platform = "discord",
+                                    code = ?code,
+                                    reason = %reason,
+                                    "gateway closed (reconnect required); re-identifying with backoff"
+                                );
+                                metrics.receiver_reconnect("discord", "reconnect_fresh_close");
                             }
                             _ => {
                                 tracing::warn!(platform = "discord", error = %err, "recv error, reconnecting");
+                                metrics.receiver_reconnect("discord", "other");
                             }
                         }
                         if !err.is_retryable() {
@@ -223,7 +299,7 @@ async fn run_loop<C, A, M>(
 /// `SpineClient`-backed publisher, then runs [`run_loop`] until `shutdown`
 /// resolves. This is the function `crate::lib::try_start_discord` spawns as
 /// its own background task.
-pub async fn run<A: EventAppender, M: SpineMetrics>(
+pub async fn run<A: EventAppender, M: SpineMetrics + ReceiverHealthMetrics>(
     gateway_cfg: GatewayConfig,
     appender: &A,
     metrics: &M,
@@ -273,6 +349,32 @@ mod tests {
     #[derive(Default)]
     struct NoopTestMetrics;
     impl SpineMetrics for NoopTestMetrics {}
+    impl ReceiverHealthMetrics for NoopTestMetrics {}
+
+    /// Records every `receiver_reconnect`/`receiver_marked_unhealthy` call
+    /// verbatim so tests can assert on the exact reason/health-state
+    /// sequence a run produced, not just that publishing happened.
+    #[derive(Default)]
+    struct RecordingHealthMetrics {
+        reconnects: Mutex<Vec<(String, String)>>,
+        unhealthy: Mutex<Vec<(String, Option<u16>)>>,
+    }
+    impl SpineMetrics for RecordingHealthMetrics {}
+    impl ReceiverHealthMetrics for RecordingHealthMetrics {
+        fn receiver_reconnect(&self, platform: &str, reason: &str) {
+            self.reconnects
+                .lock()
+                .unwrap()
+                .push((platform.to_string(), reason.to_string()));
+        }
+
+        fn receiver_marked_unhealthy(&self, platform: &str, code: Option<u16>) {
+            self.unhealthy
+                .lock()
+                .unwrap()
+                .push((platform.to_string(), code));
+        }
+    }
 
     struct FakeChannel {
         messages: Vec<ChatMessage>,
@@ -788,6 +890,199 @@ mod tests {
             deltas[2] <= Duration::from_secs(1),
             "post-reset delay {:?} must be bounded by the base 1s ceiling, not the pre-reset ~4s ceiling",
             deltas[2]
+        );
+    }
+
+    /// A channel whose `next_chat_message` always returns the same
+    /// `GatewayClosed` error -- lets each close-code-class test drive
+    /// `run_loop` against a fixed classification without a live socket.
+    struct AlwaysClosedChannel {
+        code: u16,
+        class: CloseCodeClass,
+    }
+
+    impl GatewayChannel for AlwaysClosedChannel {
+        async fn next_chat_message(&mut self) -> Result<Option<ChatMessage>, DiscordError> {
+            Err(DiscordError::GatewayClosed {
+                code: Some(self.code),
+                reason: "test close".to_string(),
+                class: self.class,
+            })
+        }
+    }
+
+    /// A connector that always succeeds, yielding `AlwaysClosedChannel`,
+    /// and counts how many times `connect()` was called -- the direct
+    /// "never hot-loop" proof for the Fatal test below (exactly one
+    /// connect, no retry at all).
+    struct AlwaysReconnectsToClosedChannel {
+        code: u16,
+        class: CloseCodeClass,
+        connect_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl GatewayConnector for AlwaysReconnectsToClosedChannel {
+        type Channel = AlwaysClosedChannel;
+        async fn connect(&self) -> Result<Self::Channel, DiscordError> {
+            self.connect_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(AlwaysClosedChannel {
+                code: self.code,
+                class: self.class,
+            })
+        }
+    }
+
+    /// `CloseCodeClass::Resumable` (e.g. Discord `4000`): retryable --
+    /// `run_loop` keeps reconnecting with the existing backoff instead of
+    /// stopping, and each attempt is recorded as a `"resumable_close"`
+    /// reconnect metric.
+    #[tokio::test]
+    async fn resumable_close_keeps_reconnecting_and_records_the_reason() {
+        let connect_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let connector = AlwaysReconnectsToClosedChannel {
+            code: 4000,
+            class: CloseCodeClass::Resumable,
+            connect_count: connect_count.clone(),
+        };
+        let metrics = RecordingHealthMetrics::default();
+        let (_tx, rx) = oneshot::channel();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            run_loop(
+                connector,
+                &RecordingAppender::default(),
+                &metrics,
+                &test_keyring(),
+                "k1",
+                &Scope::new("acme", None),
+                Backoff::new(Duration::from_millis(10)),
+                rx,
+            ),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a resumable close is retryable -- run_loop must still be looping, not returned, when the timeout fires"
+        );
+        assert!(
+            connect_count.load(std::sync::atomic::Ordering::SeqCst) > 1,
+            "must have reconnected more than once within the timeout window"
+        );
+        let reconnects = metrics.reconnects.lock().unwrap();
+        assert!(reconnects
+            .iter()
+            .all(|(platform, reason)| platform == "discord" && reason == "resumable_close"));
+        assert!(!reconnects.is_empty());
+        assert!(
+            metrics.unhealthy.lock().unwrap().is_empty(),
+            "a resumable close must never mark the connection unhealthy"
+        );
+    }
+
+    /// `CloseCodeClass::ReconnectFresh` (e.g. Discord `4007`/`4009`, or any
+    /// undocumented code): retryable -- fresh `IDENTIFY` via backoff, same
+    /// as `Resumable` today (no `OP_RESUME` yet), but recorded under its
+    /// own distinct reason so an operator can tell the two apart.
+    #[tokio::test]
+    async fn reconnect_fresh_close_keeps_reconnecting_and_records_the_reason() {
+        let connect_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let connector = AlwaysReconnectsToClosedChannel {
+            code: 4009,
+            class: CloseCodeClass::ReconnectFresh,
+            connect_count: connect_count.clone(),
+        };
+        let metrics = RecordingHealthMetrics::default();
+        let (_tx, rx) = oneshot::channel();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            run_loop(
+                connector,
+                &RecordingAppender::default(),
+                &metrics,
+                &test_keyring(),
+                "k1",
+                &Scope::new("acme", None),
+                Backoff::new(Duration::from_millis(10)),
+                rx,
+            ),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a reconnect-fresh close is retryable -- run_loop must still be looping when the timeout fires"
+        );
+        assert!(
+            connect_count.load(std::sync::atomic::Ordering::SeqCst) > 1,
+            "must have reconnected more than once within the timeout window"
+        );
+        let reconnects = metrics.reconnects.lock().unwrap();
+        assert!(reconnects
+            .iter()
+            .all(|(platform, reason)| platform == "discord" && reason == "reconnect_fresh_close"));
+        assert!(!reconnects.is_empty());
+        assert!(
+            metrics.unhealthy.lock().unwrap().is_empty(),
+            "a reconnect-fresh close must never mark the connection unhealthy"
+        );
+    }
+
+    /// `CloseCodeClass::Fatal` (e.g. Discord `4004` auth failed, `4010`-
+    /// `4014` sharding/intents): non-retryable -- `run_loop` must stop
+    /// reconnecting *this connection* immediately (never hot-loop),
+    /// record the close code via `receiver_marked_unhealthy`, and return,
+    /// while the service process itself keeps running (proven at the
+    /// `try_start_discord` call-site level by this being a plain function
+    /// return, not a panic/process exit).
+    #[tokio::test]
+    async fn fatal_close_stops_immediately_marks_unhealthy_and_never_hot_loops() {
+        let connect_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let connector = AlwaysReconnectsToClosedChannel {
+            code: 4004,
+            class: CloseCodeClass::Fatal,
+            connect_count: connect_count.clone(),
+        };
+        let metrics = RecordingHealthMetrics::default();
+        let appender = RecordingAppender::default();
+        let (_tx, rx) = oneshot::channel();
+
+        // A short real-time timeout proves `run_loop` returns *on its own*
+        // -- if Fatal were mishandled as retryable this would still be
+        // looping and the timeout would elapse instead.
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_loop(
+                connector,
+                &appender,
+                &metrics,
+                &test_keyring(),
+                "k1",
+                &Scope::new("acme", None),
+                Backoff::new(Duration::from_secs(30)),
+                rx,
+            ),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "a fatal close must make run_loop return promptly, not keep reconnecting"
+        );
+        assert_eq!(
+            connect_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly one connect attempt -- a fatal close must never trigger a reconnect (no hot loop)"
+        );
+        assert!(appender.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            metrics.unhealthy.lock().unwrap().as_slice(),
+            [("discord".to_string(), Some(4004))],
+            "the close code must be recorded, never a token or other secret"
+        );
+        assert!(
+            metrics.reconnects.lock().unwrap().is_empty(),
+            "a fatal close must never be recorded as a reconnect attempt"
         );
     }
 }

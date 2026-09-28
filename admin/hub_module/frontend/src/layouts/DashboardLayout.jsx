@@ -128,6 +128,7 @@ function DashboardLayout() {
           { name: 'Dashboard', href: '/superadmin', icon: ChartBarIcon },
           { name: 'Communities', href: '/superadmin/communities', icon: HomeIcon },
           { name: 'Module Registry', href: '/superadmin/modules', icon: BuildingStorefrontIcon },
+          { name: 'Bundle Approvals', href: '/superadmin/bundle-approvals', icon: InboxStackIcon },
           { name: 'User Management', href: '/superadmin/users', icon: UserIcon },
           { name: 'Vendor Requests', href: '/superadmin/vendor-requests', icon: ShoppingCartIcon },
           { name: 'Analytics', href: '/superadmin/analytics', icon: ChartBarIcon },
