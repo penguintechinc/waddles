@@ -1,19 +1,25 @@
-//! `POST /eventsub/twitch/webhook` -- the axum adapter over
-//! `crate::ingest::twitch_eventsub::handle_webhook`. Thin by design: header/
-//! body extraction and response rendering only, so every branch of the
-//! actual verification/dedup/dispatch logic is unit-tested in
+//! `POST /eventsub/twitch/webhook[/{callback_key}]` -- the axum adapter over
+//! `crate::ingest::twitch_eventsub::handle_webhook`. Thin by design: path/
+//! header/body extraction and response rendering only, so every branch of
+//! the actual verification/dedup/dispatch logic is unit-tested in
 //! `crate::ingest::twitch_eventsub` without axum or a live socket at all.
 //!
-//! Mounted at the same path the legacy `core/svc_ingest/eventsub.py`
-//! (`app.py`) used, so ingress/Cilium policy/WAF rules never need to
-//! change -- see `docs/superpowers/specs/2026-09-28-connections-
-//! credentials-design.md` §4.1/§4.4.
+//! Two routes, one handler: the bare legacy path (matches the original
+//! `core/svc_ingest/eventsub.py` mount, so ingress/Cilium policy/WAF rules
+//! for it never need to change) resolves its secret under
+//! `twitch_eventsub::LEGACY_CALLBACK_KEY`; the new `/{callback_key}` path
+//! carries an opaque per-subscription identifier a
+//! [`crate::ingest::twitch_eventsub::SubscriptionSecretResolver`] looks the
+//! secret up by -- see that module's own doc comment for why secret
+//! resolution reads the URL path, never a body field. See
+//! `docs/superpowers/specs/2026-09-28-connections-credentials-design.md`
+//! §4.1/§4.4.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -25,7 +31,7 @@ use crate::error::ApiError;
 use crate::http::AppState;
 use crate::ingest::twitch_eventsub::{
     self, EnvSecretResolver, EventSubError, EventSubResponse, RawHeaders, RedisReplayGuard,
-    RedisRevocationSink,
+    RedisRevocationSink, LEGACY_CALLBACK_KEY,
 };
 use crate::telemetry::IngestMetrics;
 
@@ -55,7 +61,11 @@ pub struct EventSubState {
 /// re-check.
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/eventsub/twitch/webhook", post(twitch_webhook))
+        .route("/eventsub/twitch/webhook", post(twitch_webhook_legacy))
+        .route(
+            "/eventsub/twitch/webhook/{callback_key}",
+            post(twitch_webhook),
+        )
         .route_layer(DefaultBodyLimit::max(
             twitch_eventsub::MAX_EVENTSUB_BODY_BYTES,
         ))
@@ -139,14 +149,43 @@ fn outcome_label(result: &Result<EventSubResponse, EventSubError>) -> &'static s
     }
 }
 
-/// `POST /eventsub/twitch/webhook`. Returns `503` (not the
-/// `ApiError`/`EventSubError` surface) when this instance has no configured
-/// eventsub secret/keyring/spine connection -- see
+/// `POST /eventsub/twitch/webhook` (legacy, no `callback_key` segment) --
+/// resolves its secret under [`LEGACY_CALLBACK_KEY`] for alpha backward
+/// compatibility with subscriptions already registered against this bare
+/// URL.
+async fn twitch_webhook_legacy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    process(state, LEGACY_CALLBACK_KEY, headers, body).await
+}
+
+/// `POST /eventsub/twitch/webhook/{callback_key}`. `callback_key` is an
+/// opaque path segment (never trusted for anything beyond secret lookup --
+/// it carries no tenant/scope information itself, matching `security.md`'s
+/// "never trust an id from the request path for routing/authz" for the
+/// *body*, though this one legitimately IS the routing key by design, see
+/// `crate::ingest::twitch_eventsub`'s module doc).
+async fn twitch_webhook(
+    State(state): State<AppState>,
+    Path(callback_key): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    process(state, &callback_key, headers, body).await
+}
+
+/// Shared body for both routes: builds the raw header/content-type view and
+/// delegates to `crate::ingest::twitch_eventsub::handle_webhook`. Returns
+/// `503` (not the `ApiError`/`EventSubError` surface) when this instance has
+/// no configured eventsub secret/keyring/spine connection -- see
 /// `crate::lib::try_build_eventsub_state`'s own graceful-degradation
 /// contract, same shape as every other fixed-platform receiver in this
 /// crate.
-async fn twitch_webhook(
-    State(state): State<AppState>,
+async fn process(
+    state: AppState,
+    callback_key: &str,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
@@ -187,6 +226,7 @@ async fn twitch_webhook(
         &es.keyring,
         &es.active_kid,
         &es.scope,
+        callback_key,
         content_type,
         &raw_headers,
         &body,
@@ -226,6 +266,23 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/eventsub/twitch/webhook")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn unconfigured_eventsub_returns_503_on_the_callback_key_route_too() {
+        let app = router(test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/eventsub/twitch/webhook/some-callback-key")
                     .header("content-type", "application/json")
                     .body(Body::from("{}"))
                     .unwrap(),

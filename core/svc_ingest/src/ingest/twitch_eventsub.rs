@@ -22,6 +22,20 @@
 //! beyond signature verify + dedup + normalize + one `XADD` -- p99 stays
 //! well under Twitch's delivery deadline. `webhook_callback_verification`
 //! and `revocation` never touch the spine at all.
+//!
+//! **Secret resolution never parses the body.** The webhook path carries an
+//! opaque `callback_key` segment (`POST /eventsub/twitch/webhook/
+//! {callback_key}`, `crate::http::eventsub::router`; the legacy bare
+//! `POST /eventsub/twitch/webhook` path maps to [`LEGACY_CALLBACK_KEY`] for
+//! alpha backward compatibility) that [`SubscriptionSecretResolver`]
+//! resolves against -- never a field read out of the JSON body. This is
+//! load-bearing for [`handle_webhook`]'s ordering (see that function's own
+//! doc): an unauthenticated body must never reach `serde_json::from_slice`,
+//! and resolving the secret from a body field would have required parsing
+//! first, defeating that guarantee (the vulnerability this module's own
+//! history records: JSON was originally parsed before HMAC verification to
+//! read `subscription.id` for secret lookup -- fixed by moving secret
+//! resolution to the URL path instead).
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -29,6 +43,7 @@ use std::time::Duration;
 use hmac::{Hmac, Mac};
 use penguin_spine::{KeyRing, Scope};
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 
 use crate::config::Secret;
 use crate::publish::{deterministic_workstream_id, publish_event, EventAppender};
@@ -79,28 +94,29 @@ const DEDUP_KEY_PREFIX: &str = "waddles:eventsub:dedup:twitch:";
 /// inline (design doc §3.2/§8 increment 4).
 pub const REVOCATION_QUEUE_KEY: &str = "waddles:control:twitch:eventsub-revocations";
 
-/// The subset of an inbound EventSub delivery's `subscription` object needed
-/// to resolve which secret verifies it.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SubscriptionContext<'a> {
-    pub subscription_id: &'a str,
-    pub conduit_id: Option<&'a str>,
-    pub broadcaster_user_id: Option<&'a str>,
-}
+/// The `callback_key` the legacy bare `POST /eventsub/twitch/webhook` path
+/// (no path segment) resolves its secret under -- alpha backward
+/// compatibility with the pre-existing Twitch subscription callback URL.
+/// New subscriptions should register under `POST /eventsub/twitch/webhook/
+/// {callback_key}` with a real opaque key instead.
+pub const LEGACY_CALLBACK_KEY: &str = "legacy-default";
 
 /// Errors a [`SubscriptionSecretResolver`] can return.
 #[derive(Debug, thiserror::Error)]
 pub enum SecretResolverError {
-    /// No secret is registered for this subscription/broadcaster.
-    #[error("no eventsub secret configured for this subscription")]
+    /// No secret is registered for this callback key.
+    #[error("no eventsub secret configured for this callback key")]
     NotFound,
 }
 
-/// Resolves the HMAC secret that verifies one Twitch EventSub subscription's
-/// deliveries. Looked up by subscription id (and, once the credential
-/// broker lands, conduit/broadcaster) -- never a single global secret in the
-/// production impl, so one compromised/rotated secret never affects every
-/// tenant's subscriptions at once.
+/// Resolves the HMAC secret that verifies deliveries to one Twitch EventSub
+/// webhook callback URL. Looked up by `callback_key` -- an opaque identifier
+/// carried in the URL path (`POST /eventsub/twitch/webhook/{callback_key}`,
+/// `crate::http::eventsub::router`), **never a field read out of the request
+/// body**: resolving the secret must not require parsing the (as yet
+/// unauthenticated) JSON payload -- see this module's own doc comment.
+/// Never a single global secret in the production impl, so one compromised/
+/// rotated secret never affects every tenant's subscriptions at once.
 ///
 /// `#[allow(async_fn_in_trait)]`: this trait must be `pub` (it appears in
 /// [`handle_webhook`]'s public signature), so the crate-level "you can
@@ -110,17 +126,21 @@ pub enum SecretResolverError {
 /// justification as `crate::publish::EventAppender`'s own doc comment).
 #[allow(async_fn_in_trait)]
 pub trait SubscriptionSecretResolver: Send + Sync {
-    /// Resolves the secret for `ctx`, or `Err(SecretResolverError::NotFound)`
-    /// if nothing is registered.
+    /// Resolves the secret for `callback_key`, or
+    /// `Err(SecretResolverError::NotFound)` if nothing is registered.
+    /// `headers` is passed through for a future broker impl's own audit
+    /// logging/keying needs (e.g. correlating by message-id) -- never
+    /// consulted for the secret value itself in [`EnvSecretResolver`].
     async fn resolve_secret(
         &self,
-        ctx: &SubscriptionContext<'_>,
+        callback_key: &str,
+        headers: &RawHeaders<'_>,
     ) -> Result<String, SecretResolverError>;
 }
 
 /// **Alpha/test-only** [`SubscriptionSecretResolver`]: a single fallback
 /// secret from `TWITCH_EVENTSUB_SECRET` (mirrors the legacy Python module's
-/// single-tenant env var), plus an optional in-memory per-subscription
+/// single-tenant env var), plus an optional in-memory per-callback-key
 /// override map for tests. The credential-broker-backed implementation
 /// (per-connection secret resolved from `connection_credentials` via
 /// hub-api, design doc §2) lands behind this same trait in a later
@@ -129,31 +149,32 @@ pub trait SubscriptionSecretResolver: Send + Sync {
 #[derive(Clone, Default)]
 pub struct EnvSecretResolver {
     default_secret: Option<Secret>,
-    per_subscription: HashMap<String, Secret>,
+    per_callback_key: HashMap<String, Secret>,
 }
 
 impl EnvSecretResolver {
     /// Builds a resolver whose fallback secret is `TWITCH_EVENTSUB_SECRET`,
-    /// with no per-subscription overrides.
+    /// with no per-callback-key overrides.
     #[must_use]
     pub fn from_env(default_secret: Option<Secret>) -> Self {
         Self {
             default_secret,
-            per_subscription: HashMap::new(),
+            per_callback_key: HashMap::new(),
         }
     }
 
-    /// Registers a per-subscription secret override, taking precedence over
+    /// Registers a per-callback-key secret override, taking precedence over
     /// the fallback -- test-only helper (also usable for a small, static
-    /// alpha deployment with a handful of manually-configured subscriptions).
+    /// alpha deployment with a handful of manually-configured webhook
+    /// callback URLs).
     #[must_use]
-    pub fn with_subscription_secret(
+    pub fn with_callback_key_secret(
         mut self,
-        subscription_id: impl Into<String>,
+        callback_key: impl Into<String>,
         secret: impl Into<String>,
     ) -> Self {
-        self.per_subscription
-            .insert(subscription_id.into(), Secret::new(secret.into()));
+        self.per_callback_key
+            .insert(callback_key.into(), Secret::new(secret.into()));
         self
     }
 }
@@ -161,9 +182,10 @@ impl EnvSecretResolver {
 impl SubscriptionSecretResolver for EnvSecretResolver {
     async fn resolve_secret(
         &self,
-        ctx: &SubscriptionContext<'_>,
+        callback_key: &str,
+        _headers: &RawHeaders<'_>,
     ) -> Result<String, SecretResolverError> {
-        if let Some(secret) = self.per_subscription.get(ctx.subscription_id) {
+        if let Some(secret) = self.per_callback_key.get(callback_key) {
             return Ok(secret.expose().to_string());
         }
         self.default_secret
@@ -357,36 +379,44 @@ pub fn is_allowed_content_type(content_type: Option<&str>) -> bool {
     )
 }
 
-/// Constant-time comparison of two equal-length-checked strings -- a length
-/// mismatch short-circuits (the same behaviour `hmac::Mac::verify_slice`/
-/// Python's `hmac.compare_digest` both have; a valid signature always has a
-/// fixed, public length, so this leaks nothing an attacker doesn't already
-/// know).
-fn constant_time_str_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
+/// Decodes a lowercase-or-uppercase hex string into bytes. Pure format
+/// validation of attacker-supplied input (the `Twitch-Eventsub-Message-
+/// Signature` header's hex portion) -- not itself the security-sensitive
+/// comparison (that's [`verify_signature`]'s `subtle::ConstantTimeEq` step),
+/// so an early return on a malformed character leaks nothing beyond what
+/// the attacker already knows about their own header.
+fn decode_hex(s: &str) -> Result<Vec<u8>, ()> {
+    if !s.len().is_multiple_of(2) {
+        return Err(());
     }
-    let mut diff: u8 = 0;
-    for (x, y) in a.bytes().zip(b.bytes()) {
-        diff |= x ^ y;
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    let mut i = 0;
+    while i < bytes.len() {
+        let hi = hex_nibble(bytes[i])?;
+        let lo = hex_nibble(bytes[i + 1])?;
+        out.push((hi << 4) | lo);
+        i += 2;
     }
-    diff == 0
+    Ok(out)
 }
 
-fn encode_hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(&mut s, "{b:02x}");
+fn hex_nibble(b: u8) -> Result<u8, ()> {
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(b - b'a' + 10),
+        b'A'..=b'F' => Ok(b - b'A' + 10),
+        _ => Err(()),
     }
-    s
 }
 
 /// Verifies the `Twitch-Eventsub-Message-Signature` header: `"sha256=" +
-/// hex(HMAC-SHA256(secret, message_id + timestamp + body))`, constant-time
-/// compared. Byte-identical algorithm to the legacy `eventsub.py::
-/// verify_signature`/`trigger/receiver/twitch_module/services/
-/// eventsub_handler.py::_verify_signature`.
+/// hex(HMAC-SHA256(secret, message_id + timestamp + body))`. Byte-identical
+/// algorithm to the legacy `eventsub.py::verify_signature`/`trigger/
+/// receiver/twitch_module/services/eventsub_handler.py::_verify_signature`,
+/// but compared as raw decoded bytes via the audited `subtle::
+/// ConstantTimeEq` -- never a hand-rolled comparison loop -- rather than a
+/// hex-string comparison.
 #[must_use]
 pub fn verify_signature(
     secret: &str,
@@ -407,9 +437,20 @@ pub fn verify_signature(
     mac.update(message_id.as_bytes());
     mac.update(timestamp.as_bytes());
     mac.update(body);
-    let digest = mac.finalize().into_bytes();
-    let expected = format!("sha256={}", encode_hex_lower(&digest));
-    constant_time_str_eq(&expected, signature)
+    let expected_digest = mac.finalize().into_bytes();
+
+    let Some(hex_part) = signature.strip_prefix("sha256=") else {
+        return false;
+    };
+    let Ok(provided_digest) = decode_hex(hex_part) else {
+        return false;
+    };
+
+    // `ConstantTimeEq::ct_eq` on `&[u8]` handles a length mismatch itself
+    // (returns a false `Choice` rather than panicking or branching on
+    // length before comparing content) -- no separate length pre-check of
+    // our own that could short-circuit ahead of the constant-time compare.
+    expected_digest.as_slice().ct_eq(&provided_digest).into()
 }
 
 /// True when `timestamp` (RFC 3339, Twitch's own format) is within
@@ -440,14 +481,24 @@ fn eventsub_source_id(broadcaster_user_id: &str) -> String {
 /// Verifies, dedups, and routes one EventSub webhook POST. Pure
 /// orchestration over injected dependencies -- no axum types, no live
 /// Valkey/Twitch required in tests. `crate::http::eventsub::twitch_webhook`
-/// is the thin axum adapter that extracts headers/body and calls this.
+/// is the thin axum adapter that extracts the path's `callback_key`/
+/// headers/body and calls this.
 ///
-/// Order of operations (cheapest/least-trusting checks first, per
-/// `security.md`'s hardening baseline): content-type -> parse JSON (to read
-/// `subscription.id` for secret resolution) -> required headers present ->
-/// secret resolvable -> signature valid -> timestamp within replay window ->
-/// dedup -> message-type dispatch. Every step from "secret resolvable"
-/// through "timestamp within replay window" fails identically
+/// **Order of operations is deliberate and security-load-bearing**
+/// (cheapest/least-trusting checks first, per `security.md`'s hardening
+/// baseline, and -- critically -- every check up through the replay-window
+/// check runs on the raw header/body bytes alone, *before* `serde_json`
+/// ever touches the body):
+///
+/// content-type -> body size -> required headers present -> secret
+/// resolvable (by [`SubscriptionSecretResolver`]'s own contract, from
+/// `callback_key` alone, never a body field) -> HMAC signature valid over
+/// the raw body -> timestamp within replay window -> dedup -> **only now**
+/// `serde_json::from_slice` -> message-type dispatch. An attacker without
+/// the secret can therefore never reach the JSON parser at all -- closing
+/// both a JSON-parser-as-oracle side channel and a cheap unauthenticated-
+/// parsing DoS surface. Every step from "secret resolvable" through
+/// "timestamp within replay window" fails identically
 /// ([`EventSubError::VerificationFailed`]) -- see that variant's doc.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_webhook<R, D, V, A>(
@@ -459,6 +510,7 @@ pub async fn handle_webhook<R, D, V, A>(
     keyring: &KeyRing,
     active_kid: &str,
     scope: &Scope,
+    callback_key: &str,
     content_type: Option<&str>,
     headers: &RawHeaders<'_>,
     body: &[u8],
@@ -482,9 +534,6 @@ where
         return Err(EventSubError::UnsupportedContentType);
     }
 
-    let body_json: serde_json::Value =
-        serde_json::from_slice(body).map_err(|_| EventSubError::MalformedBody)?;
-
     let (Some(message_id), Some(timestamp), Some(signature), Some(message_type)) = (
         headers.message_id,
         headers.timestamp,
@@ -494,6 +543,58 @@ where
         metrics.record_eventsub_verification("missing_header");
         return Err(EventSubError::VerificationFailed);
     };
+
+    // Secret resolution reads only `callback_key` (URL path) + headers --
+    // never the body, which is not yet authenticated (and not yet parsed).
+    let Ok(secret) = resolver.resolve_secret(callback_key, headers).await else {
+        metrics.record_eventsub_verification("secret_not_found");
+        tracing::warn!(callback_key, "eventsub.secret_not_found");
+        return Err(EventSubError::VerificationFailed);
+    };
+
+    if !verify_signature(&secret, message_id, timestamp, body, signature) {
+        metrics.record_eventsub_verification("bad_signature");
+        tracing::warn!(callback_key, "eventsub.invalid_signature");
+        return Err(EventSubError::VerificationFailed);
+    }
+
+    if !timestamp_within_replay_window(timestamp, chrono::Utc::now()) {
+        metrics.record_eventsub_verification("replay_rejected");
+        tracing::warn!(callback_key, timestamp, "eventsub.replay_window_exceeded");
+        return Err(EventSubError::VerificationFailed);
+    }
+
+    metrics.record_eventsub_verification("ok");
+
+    match dedup.check_and_mark(message_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            metrics.record_eventsub_dedup_hit();
+            tracing::debug!(message_id, "eventsub.duplicate_message");
+            return Ok(EventSubResponse::DuplicateIgnored);
+        }
+        Err(err) => {
+            // Fails OPEN, never closed: a dedup-store outage degrades to
+            // "no dedup guarantee this request", never "reject the
+            // delivery". This is safe because a duplicate that slips
+            // through is still bounded -- Twitch's own `message_id` is
+            // stable across redeliveries, so any downstream consumer that
+            // wants exactly-once semantics can key its own idempotency
+            // check off that same id (this receiver's job ends at "publish
+            // at-least-once, never lose a delivery to a Valkey blip"; a
+            // rare duplicate is a downstream idempotency concern, not a
+            // security problem -- contrast with the DENY-forever-safe
+            // asymmetry in the design doc's relay-authz cache, §6.1).
+            tracing::warn!(error = %err, callback_key, message_id, "eventsub.dedup_check_failed; proceeding without dedup guarantee (fails open -- duplicates are bounded by downstream idempotency keyed on message_id)");
+        }
+    }
+
+    // JSON parsing happens only after the delivery is content-type-checked,
+    // size-capped, authenticated (HMAC), and replay/dedup-checked -- see
+    // this function's own doc comment for why that ordering is the actual
+    // point, not an implementation detail.
+    let body_json: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| EventSubError::MalformedBody)?;
 
     let subscription = body_json.get("subscription").cloned().unwrap_or_default();
     let subscription_id = subscription
@@ -511,59 +612,6 @@ where
         .and_then(|c| c.get("broadcaster_user_id"))
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let conduit_id = subscription
-        .get("transport")
-        .and_then(|t| t.get("conduit_id"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let ctx = SubscriptionContext {
-        subscription_id: &subscription_id,
-        conduit_id: conduit_id.as_deref(),
-        broadcaster_user_id: broadcaster_user_id.as_deref(),
-    };
-
-    let Ok(secret) = resolver.resolve_secret(&ctx).await else {
-        metrics.record_eventsub_verification("secret_not_found");
-        tracing::warn!(subscription_id, "eventsub.secret_not_found");
-        return Err(EventSubError::VerificationFailed);
-    };
-
-    if !verify_signature(&secret, message_id, timestamp, body, signature) {
-        metrics.record_eventsub_verification("bad_signature");
-        tracing::warn!(subscription_id, "eventsub.invalid_signature");
-        return Err(EventSubError::VerificationFailed);
-    }
-
-    if !timestamp_within_replay_window(timestamp, chrono::Utc::now()) {
-        metrics.record_eventsub_verification("replay_rejected");
-        tracing::warn!(
-            subscription_id,
-            timestamp,
-            "eventsub.replay_window_exceeded"
-        );
-        return Err(EventSubError::VerificationFailed);
-    }
-
-    metrics.record_eventsub_verification("ok");
-
-    match dedup.check_and_mark(message_id).await {
-        Ok(true) => {}
-        Ok(false) => {
-            metrics.record_eventsub_dedup_hit();
-            tracing::debug!(message_id, "eventsub.duplicate_message");
-            return Ok(EventSubResponse::DuplicateIgnored);
-        }
-        Err(err) => {
-            // A dedup-store outage degrades to "no dedup guarantee this
-            // request", never "reject the delivery" -- Twitch would just
-            // redeliver a rejected notification later anyway, and a missed
-            // dedup risks at-most a duplicate downstream event, not a
-            // security problem (contrast with the DENY-forever-safe
-            // asymmetry in the design doc's relay-authz cache, §6.1).
-            tracing::warn!(error = %err, subscription_id, "eventsub.dedup_check_failed; proceeding without dedup guarantee");
-        }
-    }
 
     match message_type {
         "webhook_callback_verification" => {
@@ -653,6 +701,8 @@ mod tests {
         crate::telemetry::register_ingest_metrics(&prometheus::Registry::new())
     }
 
+    const CALLBACK_KEY: &str = "cb-key-1";
+
     #[derive(Default)]
     struct RecordingAppender {
         calls: Mutex<Vec<(String, penguin_spine::StageEnvelope)>>,
@@ -679,7 +729,8 @@ mod tests {
     impl SubscriptionSecretResolver for FakeResolver {
         async fn resolve_secret(
             &self,
-            _ctx: &SubscriptionContext<'_>,
+            _callback_key: &str,
+            _headers: &RawHeaders<'_>,
         ) -> Result<String, SecretResolverError> {
             self.secret.clone().ok_or(SecretResolverError::NotFound)
         }
@@ -711,6 +762,20 @@ mod tests {
     }
 
     const SECRET: &str = "s3cr3t-eventsub-key";
+
+    /// Test-only hex encoder for building a *correct* signature in `sign()`
+    /// -- production `verify_signature` no longer encodes hex at all (it
+    /// decodes the attacker-supplied hex and compares raw bytes via
+    /// `subtle::ConstantTimeEq`), so this exists solely to construct
+    /// expected-valid fixtures.
+    fn encode_hex_lower(bytes: &[u8]) -> String {
+        use std::fmt::Write;
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            let _ = write!(&mut s, "{b:02x}");
+        }
+        s
+    }
 
     fn sign(secret: &str, message_id: &str, timestamp: &str, body: &[u8]) -> String {
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
@@ -755,6 +820,37 @@ mod tests {
         }
     }
 
+    /// Helper bundling every fixed dependency so each test only has to name
+    /// the resolver/dedup it cares about varying.
+    #[allow(clippy::too_many_arguments)]
+    async fn call(
+        resolver: &FakeResolver,
+        dedup: &FakeDedup,
+        revocation: &FakeRevocationSink,
+        appender: &RecordingAppender,
+        metrics: &IngestMetrics,
+        callback_key: &str,
+        content_type: Option<&str>,
+        h: &RawHeaders<'_>,
+        body: &[u8],
+    ) -> Result<EventSubResponse, EventSubError> {
+        handle_webhook(
+            resolver,
+            dedup,
+            revocation,
+            appender,
+            metrics,
+            &test_keyring(),
+            "k1",
+            &test_scope(),
+            callback_key,
+            content_type,
+            h,
+            body,
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn valid_signature_publishes_a_notification() {
         let body = notification_body("sub-1", "channel.raid", "broadcaster-1");
@@ -770,15 +866,13 @@ mod tests {
         let appender = RecordingAppender::default();
         let metrics = test_metrics();
 
-        let outcome = handle_webhook(
+        let outcome = call(
             &resolver,
             &dedup,
             &revocation,
             &appender,
             &metrics,
-            &test_keyring(),
-            "k1",
-            &test_scope(),
+            CALLBACK_KEY,
             Some("application/json"),
             &h,
             &body,
@@ -809,15 +903,13 @@ mod tests {
         let appender = RecordingAppender::default();
         let metrics = test_metrics();
 
-        let err = handle_webhook(
+        let err = call(
             &resolver,
             &dedup,
             &revocation,
             &appender,
             &metrics,
-            &test_keyring(),
-            "k1",
-            &test_scope(),
+            CALLBACK_KEY,
             Some("application/json"),
             &h,
             &body,
@@ -826,6 +918,48 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, EventSubError::VerificationFailed));
+        assert!(appender.calls.lock().unwrap().is_empty());
+    }
+
+    /// CRITICAL regression test: proves the JSON parser is never reached
+    /// when the signature is wrong -- the body here is deliberately *not*
+    /// valid JSON at all. If `handle_webhook` still parsed before verifying
+    /// (the original ordering), this would fail with `MalformedBody`
+    /// instead of `VerificationFailed`, since a malformed-but-unparsed body
+    /// never gets the chance to report itself as malformed.
+    #[tokio::test]
+    async fn bad_signature_with_non_json_body_never_reaches_the_parser() {
+        let body: &[u8] = b"this is not json at all {{{";
+        let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let h = headers("msg-1", &ts, "sha256=deadbeef", "notification");
+
+        let resolver = FakeResolver {
+            secret: Some(SECRET.to_string()),
+        };
+        let dedup = FakeDedup::default();
+        let revocation = FakeRevocationSink::default();
+        let appender = RecordingAppender::default();
+        let metrics = test_metrics();
+
+        let err = call(
+            &resolver,
+            &dedup,
+            &revocation,
+            &appender,
+            &metrics,
+            CALLBACK_KEY,
+            Some("application/json"),
+            &h,
+            body,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, EventSubError::VerificationFailed),
+            "a bad signature must fail as VerificationFailed even over a non-JSON body \
+             -- MalformedBody would prove the parser ran before verification"
+        );
         assert!(appender.calls.lock().unwrap().is_empty());
     }
 
@@ -845,15 +979,13 @@ mod tests {
         let appender = RecordingAppender::default();
         let metrics = test_metrics();
 
-        let err = handle_webhook(
+        let err = call(
             &resolver,
             &dedup,
             &revocation,
             &appender,
             &metrics,
-            &test_keyring(),
-            "k1",
-            &test_scope(),
+            CALLBACK_KEY,
             Some("application/json"),
             &h,
             &body,
@@ -880,15 +1012,13 @@ mod tests {
         let appender = RecordingAppender::default();
         let metrics = test_metrics();
 
-        let first = handle_webhook(
+        let first = call(
             &resolver,
             &dedup,
             &revocation,
             &appender,
             &metrics,
-            &test_keyring(),
-            "k1",
-            &test_scope(),
+            CALLBACK_KEY,
             Some("application/json"),
             &h,
             &body,
@@ -897,15 +1027,13 @@ mod tests {
         .unwrap();
         assert_eq!(first, EventSubResponse::Ack);
 
-        let second = handle_webhook(
+        let second = call(
             &resolver,
             &dedup,
             &revocation,
             &appender,
             &metrics,
-            &test_keyring(),
-            "k1",
-            &test_scope(),
+            CALLBACK_KEY,
             Some("application/json"),
             &h,
             &body,
@@ -941,15 +1069,13 @@ mod tests {
         let appender = RecordingAppender::default();
         let metrics = test_metrics();
 
-        let outcome = handle_webhook(
+        let outcome = call(
             &resolver,
             &dedup,
             &revocation,
             &appender,
             &metrics,
-            &test_keyring(),
-            "k1",
-            &test_scope(),
+            CALLBACK_KEY,
             Some("application/json"),
             &h,
             &body,
@@ -988,15 +1114,13 @@ mod tests {
         let appender = RecordingAppender::default();
         let metrics = test_metrics();
 
-        let outcome = handle_webhook(
+        let outcome = call(
             &resolver,
             &dedup,
             &revocation,
             &appender,
             &metrics,
-            &test_keyring(),
-            "k1",
-            &test_scope(),
+            CALLBACK_KEY,
             Some("application/json"),
             &h,
             &body,
@@ -1033,15 +1157,13 @@ mod tests {
         let appender = RecordingAppender::default();
         let metrics = test_metrics();
 
-        let err = handle_webhook(
+        let err = call(
             &resolver,
             &dedup,
             &revocation,
             &appender,
             &metrics,
-            &test_keyring(),
-            "k1",
-            &test_scope(),
+            CALLBACK_KEY,
             Some("application/json"),
             &h,
             &oversized,
@@ -1067,15 +1189,13 @@ mod tests {
         let appender = RecordingAppender::default();
         let metrics = test_metrics();
 
-        let err = handle_webhook(
+        let err = call(
             &resolver,
             &dedup,
             &revocation,
             &appender,
             &metrics,
-            &test_keyring(),
-            "k1",
-            &test_scope(),
+            CALLBACK_KEY,
             Some("text/plain"),
             &h,
             &body,
@@ -1102,15 +1222,13 @@ mod tests {
         let appender = RecordingAppender::default();
         let metrics = test_metrics();
 
-        let outcome = handle_webhook(
+        let outcome = call(
             &resolver,
             &dedup,
             &revocation,
             &appender,
             &metrics,
-            &test_keyring(),
-            "k1",
-            &test_scope(),
+            CALLBACK_KEY,
             Some("application/json; charset=utf-8"),
             &h,
             &body,
@@ -1121,7 +1239,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_subscription_secret_fails_closed_uniformly_with_bad_signature() {
+    async fn unknown_callback_key_secret_fails_closed_uniformly_with_bad_signature() {
         let body = notification_body("sub-unknown", "channel.raid", "broadcaster-1");
         let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let sig = sign(SECRET, "msg-1", &ts, &body);
@@ -1133,15 +1251,13 @@ mod tests {
         let appender = RecordingAppender::default();
         let metrics = test_metrics();
 
-        let err = handle_webhook(
+        let err = call(
             &resolver,
             &dedup,
             &revocation,
             &appender,
             &metrics,
-            &test_keyring(),
-            "k1",
-            &test_scope(),
+            "unknown-callback-key",
             Some("application/json"),
             &h,
             &body,
@@ -1150,7 +1266,7 @@ mod tests {
         .unwrap_err();
 
         // Same variant/message as a bad signature -- no oracle distinguishing
-        // "unknown subscription" from "wrong signature".
+        // "unknown callback key" from "wrong signature".
         assert!(matches!(err, EventSubError::VerificationFailed));
     }
 
@@ -1172,15 +1288,13 @@ mod tests {
         let appender = RecordingAppender::default();
         let metrics = test_metrics();
 
-        let err = handle_webhook(
+        let err = call(
             &resolver,
             &dedup,
             &revocation,
             &appender,
             &metrics,
-            &test_keyring(),
-            "k1",
-            &test_scope(),
+            CALLBACK_KEY,
             Some("application/json"),
             &h,
             &body,
@@ -1192,9 +1306,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_json_body_is_rejected() {
+    async fn malformed_json_body_is_rejected_after_a_valid_signature() {
+        let body = b"not json";
         let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let h = headers("msg-1", &ts, "sha256=whatever", "notification");
+        let sig = sign(SECRET, "msg-1", &ts, body);
+        let h = headers("msg-1", &ts, &sig, "notification");
 
         let resolver = FakeResolver {
             secret: Some(SECRET.to_string()),
@@ -1204,18 +1320,16 @@ mod tests {
         let appender = RecordingAppender::default();
         let metrics = test_metrics();
 
-        let err = handle_webhook(
+        let err = call(
             &resolver,
             &dedup,
             &revocation,
             &appender,
             &metrics,
-            &test_keyring(),
-            "k1",
-            &test_scope(),
+            CALLBACK_KEY,
             Some("application/json"),
             &h,
-            b"not json",
+            body,
         )
         .await
         .unwrap_err();
@@ -1238,15 +1352,13 @@ mod tests {
         let appender = RecordingAppender::default();
         let metrics = test_metrics();
 
-        let outcome = handle_webhook(
+        let outcome = call(
             &resolver,
             &dedup,
             &revocation,
             &appender,
             &metrics,
-            &test_keyring(),
-            "k1",
-            &test_scope(),
+            CALLBACK_KEY,
             Some("application/json"),
             &h,
             &body,
@@ -1273,15 +1385,13 @@ mod tests {
         let appender = RecordingAppender::default();
         let metrics = test_metrics();
 
-        let outcome = handle_webhook(
+        let outcome = call(
             &resolver,
             &dedup,
             &revocation,
             &appender,
             &metrics,
-            &test_keyring(),
-            "k1",
-            &test_scope(),
+            CALLBACK_KEY,
             Some("application/json"),
             &h,
             &body,
@@ -1310,15 +1420,13 @@ mod tests {
         let appender = RecordingAppender::default();
         let metrics = test_metrics();
 
-        let outcome = handle_webhook(
+        let outcome = call(
             &resolver,
             &dedup,
             &revocation,
             &appender,
             &metrics,
-            &test_keyring(),
-            "k1",
-            &test_scope(),
+            CALLBACK_KEY,
             Some("application/json"),
             &h,
             &body,
@@ -1354,6 +1462,40 @@ mod tests {
             body,
             &sig
         ));
+    }
+
+    #[test]
+    fn verify_signature_rejects_missing_prefix_and_odd_length_hex() {
+        let secret = "topsecret";
+        let message_id = "abc-123";
+        let timestamp = "2026-09-28T00:00:00.000Z";
+        let body = b"{}";
+        assert!(!verify_signature(
+            secret, message_id, timestamp, body, "deadbeef"
+        ));
+        assert!(!verify_signature(
+            secret,
+            message_id,
+            timestamp,
+            body,
+            "sha256=abc"
+        ));
+        assert!(!verify_signature(
+            secret,
+            message_id,
+            timestamp,
+            body,
+            "sha256=zz"
+        ));
+        assert!(!verify_signature(secret, message_id, timestamp, body, ""));
+    }
+
+    #[test]
+    fn decode_hex_round_trips_and_rejects_malformed_input() {
+        assert_eq!(decode_hex("00ff").unwrap(), vec![0x00, 0xff]);
+        assert_eq!(decode_hex("").unwrap(), Vec::<u8>::new());
+        assert!(decode_hex("abc").is_err(), "odd length must be rejected");
+        assert!(decode_hex("zz").is_err(), "non-hex chars must be rejected");
     }
 
     #[test]
@@ -1393,47 +1535,46 @@ mod tests {
         assert!(!is_allowed_content_type(None));
     }
 
-    #[test]
-    fn env_secret_resolver_prefers_per_subscription_override_then_falls_back() {
+    #[tokio::test]
+    async fn env_secret_resolver_prefers_per_callback_key_override_then_falls_back() {
         let resolver = EnvSecretResolver::from_env(Some(Secret::new("fallback-secret")))
-            .with_subscription_secret("sub-special", "special-secret");
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        let ctx_special = SubscriptionContext {
-            subscription_id: "sub-special",
-            conduit_id: None,
-            broadcaster_user_id: None,
-        };
-        let ctx_other = SubscriptionContext {
-            subscription_id: "sub-other",
-            conduit_id: None,
-            broadcaster_user_id: None,
-        };
+            .with_callback_key_secret("cb-special", "special-secret");
+        let no_headers = RawHeaders::default();
         assert_eq!(
-            rt.block_on(resolver.resolve_secret(&ctx_special)).unwrap(),
+            resolver
+                .resolve_secret("cb-special", &no_headers)
+                .await
+                .unwrap(),
             "special-secret"
         );
         assert_eq!(
-            rt.block_on(resolver.resolve_secret(&ctx_other)).unwrap(),
+            resolver
+                .resolve_secret("cb-other", &no_headers)
+                .await
+                .unwrap(),
             "fallback-secret"
         );
     }
 
-    #[test]
-    fn env_secret_resolver_with_no_secret_configured_fails_closed() {
+    #[tokio::test]
+    async fn env_secret_resolver_with_no_secret_configured_fails_closed() {
         let resolver = EnvSecretResolver::from_env(None);
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        let ctx = SubscriptionContext {
-            subscription_id: "sub-1",
-            conduit_id: None,
-            broadcaster_user_id: None,
-        };
+        let no_headers = RawHeaders::default();
         assert!(matches!(
-            rt.block_on(resolver.resolve_secret(&ctx)).unwrap_err(),
+            resolver
+                .resolve_secret("cb-1", &no_headers)
+                .await
+                .unwrap_err(),
             SecretResolverError::NotFound
         ));
+    }
+
+    #[test]
+    fn legacy_callback_key_constant_is_stable() {
+        // Regression guard: this is a wire-visible mapping (the bare
+        // `POST /eventsub/twitch/webhook` path resolves under this exact
+        // key) -- changing it silently would break every alpha subscription
+        // still pointed at the legacy URL.
+        assert_eq!(LEGACY_CALLBACK_KEY, "legacy-default");
     }
 }
