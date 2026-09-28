@@ -56,6 +56,25 @@ signed mod/sub/stream-lifecycle webhook -- a SEPARATE delivery mechanism
 from `receivers/kick_pusher.py`'s Pusher chat socket, always mounted
 (unlike the conditionally-built Twitch handler), gracefully 503ing its
 own self when `Config.KICK_WEBHOOK_SECRET` is unset.
+
+DEPRECATED (chore/retire-python-dataplane, 2026-09-28): PenguinTech is
+retiring Python from all live-traffic (data-plane) services in favor of
+`core/svc_ingest`'s Rust build (`src/`, `Cargo.toml`) -- see
+`critical-rules.md` Data Plane (In-Line of Traffic). This Python service
+remains the ONLY functioning ingest today: the Rust build covers Discord
+gateway + Twitch IRC/EventSub only (`src/ingest/discord.rs`,
+`src/ingest/twitch.rs`, `src/ingest/twitch_eventsub.rs`) and has no
+Kick/Slack/YouTube/Echo receivers, no multi-tenant `socket_lease.py`
+equivalent, and only a single-tenant Twitch outbound drain
+(`src/outbound.rs`'s own doc comment flags the per-tenant gap). Do not
+remove this module or its Helm Deployment
+(`k8s/helm/waddlebot/templates/svc-ingest.yaml`) until the Rust build
+reaches full parity -- tracked as Rust follow-up work, not scheduled here.
+
+Note: PR #440 (Python ingest identity encryption) is now moot for the
+retirement path it targets -- it hardens code this deprecation notice
+marks for eventual removal, not a live-traffic surface PenguinTech
+intends to keep growing.
 """
 
 from __future__ import annotations
