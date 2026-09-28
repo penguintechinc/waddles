@@ -3,7 +3,7 @@
 Increment 1, control-plane side, of
 `docs/superpowers/specs/2026-09-28-dataplane-scale-design.md`. The
 change-log table (`bundle_active_set_changes`) and its per-table
-triggers are migration `0026_bundle_active_set_changelog`; this module
+triggers are migration `0028_bundle_active_set_changelog`; this module
 is the periodic job that turns that append-only log into the single
 exact-visibility watermark every replica polls.
 
@@ -51,7 +51,7 @@ fix).** `xmin` wraps at 2^32 and reads back as `FrozenTransactionId` (2)
 once a tuple is frozen by `VACUUM FREEZE` -- comparing it against
 `pg_snapshot_xmin()`'s 64-bit, epoch-extended `xid8` via a `bigint` cast
 is unsound at any table age beyond a wraparound/freeze boundary. Every
-comparison here is native `xid8 < xid8` against migration 0026's
+comparison here is native `xid8 < xid8` against migration 0028's
 `bundle_active_set_changes.writer_xid` column instead.
 
 **One replica computes per tick; the rest skip (post-review fix).**
@@ -72,7 +72,7 @@ correctness/perf fix).** An unconditional `MAX(seq) WHERE writer_xid <
 horizon` re-scans the whole table every tick *and* can publish a `seq`
 that shadows a still-in-flight, lower-`seq` row from a transaction whose
 xid was assigned at an earlier statement than its watched-table write --
-see migration `0026`'s own docstring for the exact scenario and why
+see migration `0028`'s own docstring for the exact scenario and why
 `seq` order and xid order aren't guaranteed to coincide. Fixed by
 scanning only `seq > current safe_seq` (`LIMIT`-capped, a plain PK
 -range index scan) and using a window function to find the longest
@@ -121,7 +121,7 @@ _ADVISORY_LOCK_KEY: Final[int] = 0x7761646200000007
 #: rejects a `str` on the way back in, so no `::text` round-trip here) --
 #: `_SAFE_SEQ_SQL` re-casts it explicitly via `CAST(:horizon AS xid8)`.
 #: Never downcast to `bigint` (that's the exact 32-bit-vs-64-bit
-#: unsoundness migration 0026 fixed).
+#: unsoundness migration 0028 fixed).
 _HORIZON_SQL = "SELECT pg_snapshot_xmin(pg_current_snapshot()) AS horizon"
 #: Runtime primary-only guard (post-review fix). `DATABASE_URL` pointing
 #: at the primary is a deployment-config assumption, not something this
@@ -137,7 +137,7 @@ _CURRENT_SAFE_SEQ_SQL = "SELECT safe_seq FROM bundle_active_set_watermark WHERE 
 #: currently-published safe_seq, capped at :batch_size. The window
 #: function computes, per row in seq order, whether every row from the
 #: start of this batch through this one is already xid-safe
-#: (`prefix_safe`) -- the contiguous-prefix fix migration 0026's
+#: (`prefix_safe`) -- the contiguous-prefix fix migration 0028's
 #: docstring and this module's own docstring describe. MAX(seq) over only
 #: `prefix_safe` rows can never jump past a not-yet-safe row, unlike an
 #: unconditional MAX() over the whole qualifying set.

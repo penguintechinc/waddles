@@ -24,8 +24,8 @@ this migration's scope. Instead: create only the four tables migrations
 `app_catalog`, with just the columns those migrations' own `CREATE
 TABLE`/comments name), `alembic stamp 0019_kick_app` (the revision
 immediately before the first migration this schema supports), then run
-`alembic upgrade head` for real -- migrations 0020 through 0026 execute
-exactly as they would in a full environment, including 0026's own
+`alembic upgrade head` for real -- migrations 0020 through 0028 execute
+exactly as they would in a full environment, including 0028's own
 triggers/tables/grants.
 """
 

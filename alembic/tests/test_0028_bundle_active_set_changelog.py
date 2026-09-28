@@ -1,4 +1,4 @@
-"""Real-Postgres regression tests for 0026_bundle_active_set_changelog.
+"""Real-Postgres regression tests for 0028_bundle_active_set_changelog.
 
 Unlike every sibling `test_00NN_*.py` in this directory (which mock
 `alembic.op.execute` and assert emitted SQL text -- see

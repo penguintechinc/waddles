@@ -132,8 +132,8 @@ names already carries). The setting is provisioned now so it is
 already in place the moment that wiring lands, exactly as this
 migration's sibling grants already do for table privileges.
 
-Revision ID: 0026_bundle_active_set_changelog
-Revises: 0025_app_source_bindings
+Revision ID: 0028_bundle_active_set_changelog
+Revises: 0027_app_bundle_three_tier
 Create Date: 2026-09-27
 """
 
@@ -141,8 +141,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0026_bundle_active_set_changelog"
-down_revision = "0025_app_source_bindings"
+revision = "0028_bundle_active_set_changelog"
+down_revision = "0027_app_bundle_three_tier"
 branch_labels = None
 depends_on = None
 
