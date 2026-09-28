@@ -162,11 +162,25 @@ class _FakeRelay:
         self.calls.append((provider, message_json))
 
 
+class _FakeLog:
+    """Answers `wit_world.imports.log` -- `waddle_sdk.log` needs a `Level` enum + `write()`."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str]] = []  # (level_name, message, fields_json)
+        # `waddle_sdk.log._write` does `log_mod.Level[level_name]` -- a plain dict supports
+        # that subscript directly, standing in for the real generated `enum.Enum`.
+        self.Level = {"ERROR": "ERROR", "WARN": "WARN", "INFO": "INFO", "DEBUG": "DEBUG"}
+
+    def write(self, level: str, message: str, fields_json: str) -> None:
+        self.calls.append((level, message, fields_json))
+
+
 @dataclass
 class _Harness:
     db: _FakeDbHarness
     kv: _FakeKv
     relay: _FakeRelay
+    log: _FakeLog
     flags_enabled: bool
 
 
@@ -176,7 +190,8 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
     db = _FakeDbHarness()
     kv = _FakeKv()
     relay = _FakeRelay()
-    state = _Harness(db=db, kv=kv, relay=relay, flags_enabled=True)
+    fake_log = _FakeLog()
+    state = _Harness(db=db, kv=kv, relay=relay, log=fake_log, flags_enabled=True)
 
     # Lambdas indirect through the harness instance at CALL time (not bound-method references
     # captured now), so a test's `harness.db.execute = _boom`-style instance override -- set
@@ -189,10 +204,14 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
     )
     relay_mod = types.SimpleNamespace(push=lambda provider, message: relay.push(provider, message))
     flags_mod = types.SimpleNamespace(enabled=lambda key, default: state.flags_enabled)
+    # `waddle_sdk.log._write` does `wit_world.imports.log.Level[level_name]` then
+    # `wit_world.imports.log.write(level, message, fields_json)` -- `fake_log` itself provides
+    # both `Level` (via `__getitem__`, see `_FakeLog`) and `write`.
+    log_mod = fake_log
 
     fake_wit_world = types.ModuleType("wit_world")
     fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
-        db=db_mod, kv=kv_mod, relay=relay_mod, flags=flags_mod
+        db=db_mod, kv=kv_mod, relay=relay_mod, flags=flags_mod, log=log_mod
     )
     monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
 
@@ -426,9 +445,10 @@ class TestTransformCooldown:
         assert result is not None
         assert result.payload["target"] == "target_user"
 
-    def test_kv_denied_degrades_to_not_on_cooldown(self, harness: _Harness) -> None:
-        """`kv` is currently hardcoded `denied` host-side (capabilities.rs) -- must degrade,
-        never block the shoutout. See `app._is_on_cooldown`'s own docstring for the gap."""
+    def test_kv_denied_fails_closed_no_shoutout_sent(self, harness: _Harness) -> None:
+        """The cooldown is an anti-spam control -- a `kv` error/denial (capabilities.rs is
+        currently hardcoded `denied` host-side) must REFUSE the shoutout, never send it
+        without a working cooldown check. See `app._check_cooldown`'s own docstring."""
         harness.db.roles_by_display_name[(COMMUNITY_ID, MOD_ACTOR)] = "moderator"
 
         def _denied(*_a: Any, **_k: Any) -> Any:
@@ -436,8 +456,23 @@ class TestTransformCooldown:
 
         harness.kv.get = _denied  # type: ignore[method-assign]
         result = _run(transform(_event("!so target_user", actor=MOD_ACTOR)))
-        assert result is not None
-        assert result.payload["target"] == "target_user"
+        assert result is None  # no event forwarded to dispatch -- no shoutout sent
+
+    def test_kv_denied_logs_warn_with_metric_field(self, harness: _Harness) -> None:
+        harness.db.roles_by_display_name[(COMMUNITY_ID, MOD_ACTOR)] = "moderator"
+
+        def _denied(*_a: Any, **_k: Any) -> Any:
+            raise RuntimeError("kv capability denied")
+
+        harness.kv.get = _denied  # type: ignore[method-assign]
+        _run(transform(_event("!so target_user", actor=MOD_ACTOR)))
+
+        assert len(harness.log.calls) == 1
+        level, message, fields_json = harness.log.calls[0]
+        assert level == "WARN"
+        fields = json.loads(fields_json)
+        assert fields["metric"] == "shoutout.cooldown_kv_unavailable"
+        assert fields["target"] == "target_user"
 
     def test_permission_denied_checked_before_cooldown(self, harness: _Harness) -> None:
         """A cooldown key must never mask a permission denial (order matters)."""
@@ -489,8 +524,12 @@ class TestDispatch:
         _run(dispatch(envelope, {}, http_client=None))
         assert harness.kv.set_calls == []
 
-    def test_kv_denied_degrades_without_failing_the_shoutout(self, harness: _Harness) -> None:
-        """`kv.set()` denial (capability gap, see `app._set_cooldown`) must not fail dispatch."""
+    def test_kv_set_denied_degrades_without_failing_the_already_sent_shoutout(
+        self, harness: _Harness
+    ) -> None:
+        """`kv.set()` denial (capability gap, see `app._set_cooldown`) can't un-send a shoutout
+        already relayed -- stays best-effort (WARN-logged), unlike the pre-send `kv.get()`
+        check in `transform()` (`_check_cooldown`), which fails closed instead."""
 
         def _denied(*_a: Any, **_k: Any) -> Any:
             raise RuntimeError("kv capability denied")
@@ -500,6 +539,11 @@ class TestDispatch:
         result = _run(dispatch(envelope, {}, http_client=None))
         assert result.transport == "twitch"
         assert harness.relay.calls  # the shoutout itself still went out
+
+        assert len(harness.log.calls) == 1
+        level, _message, fields_json = harness.log.calls[0]
+        assert level == "WARN"
+        assert json.loads(fields_json)["metric"] == "shoutout.cooldown_kv_unavailable"
 
     def test_missing_channel_id_raises(self, harness: _Harness) -> None:
         envelope = _sample_envelope(channel_id=None)

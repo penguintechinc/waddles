@@ -38,7 +38,12 @@ Behavior ported faithfully from the two legacy sources above:
   DB-timestamp comparison: a successful dispatch sets `kv` key
   `shoutout:cd:{community}:{target}` with TTL `cooldown_minutes * 60`;
   a `!so` for the same target while that key is still set is refused with
-  a cooldown reply, no DB/HTTP round trip spent.
+  a cooldown reply. **The cooldown check FAILS CLOSED**: unlike every other
+  degrade point in this module, a `kv` error/denial while checking the
+  cooldown refuses the shoutout outright (logged at WARN with a `metric`
+  field, no chat reply) rather than treating the outage as "not on
+  cooldown" -- see `_check_cooldown()`'s own docstring for the full
+  rationale and the current `kv`-capability gap this interacts with.
 - Feature-gated via `waddle_sdk.flask_core.feature_flags.feature_enabled`,
   flag key `waddles.shoutout-bundle`, **default OFF** (this bundle's own
   manifest requirement -- contrast `social_shoutout_process.py`'s
@@ -83,6 +88,16 @@ what works, flag what doesn't):
    built-in Twitch templates (live/minimal) -- custom templates are a
    follow-up once this bundle proves out the `db`+`http` combination in
    production.
+5. **`kv` (and `db`) are currently hardcoded `denied` host-side**
+   (`core/{svc_process,svc_action}/src/capabilities.rs`), pending a
+   separate in-flight PR (`feature/bundle-kv-capability`). This bundle is
+   feature-flagged OFF by default so the gap is inert today; once the
+   flag is turned on ahead of that capability PR landing, `_check_cooldown()`
+   fails CLOSED on the resulting `kv` denial -- every `!so`/`!shoutout` is
+   silently refused (logged at WARN with a `metric` field) rather than
+   sent without a working anti-spam cooldown. See `_check_cooldown()`'s
+   own docstring for why this is the one host-import failure in this
+   module that blocks the action instead of degrading past it.
 """
 
 from __future__ import annotations
@@ -91,7 +106,7 @@ import json
 import re
 from typing import Any
 
-from waddle_sdk import kv, relay
+from waddle_sdk import kv, log, relay
 from waddle_sdk.db import AsyncDB
 from waddle_sdk.flask_core.bundle_runtime import get_bundle_context, get_bundle_dal
 from waddle_sdk.flask_core.feature_flags import feature_enabled
@@ -255,31 +270,76 @@ def _cooldown_key(community: str | None, target: str) -> str:
     return f"{_COOLDOWN_KEY_PREFIX}:{community or '-'}:{target}"
 
 
-async def _is_on_cooldown(community: str | None, target: str) -> bool:
-    """Read the `kv` cooldown key for `target`; degrades to "not on cooldown" on ANY error.
+#: `_check_cooldown()`'s three outcomes -- `UNAVAILABLE` is distinct from `ALLOWED` precisely
+#: so a `kv` error/denial can never be silently treated as "not on cooldown" (see that
+#: function's own docstring: the cooldown is an anti-spam control and must fail CLOSED).
+_COOLDOWN_ALLOWED = "allowed"
+_COOLDOWN_ACTIVE = "active"
+_COOLDOWN_UNAVAILABLE = "unavailable"
+
+#: Structured-log field identifying a WARN line as this metric for any log-based alerting/
+#: counting pipeline scraping `waddle_sdk.log` output -- there is no dedicated WIT metrics
+#: import in `wit/waddle-bundle/stage.wit` (only `context/http/kv/db/relay/%flags/log/clock`),
+#: so a tagged WARN log is this sandbox's only available substitute for an emitted counter.
+_KV_UNAVAILABLE_METRIC = "shoutout.cooldown_kv_unavailable"
+
+
+async def _check_cooldown(community: str | None, target: str) -> str:
+    """Read the `kv` cooldown key for `target` -- FAILS CLOSED on any `kv` error/denial.
+
+    Returns one of `_COOLDOWN_ALLOWED`/`_COOLDOWN_ACTIVE`/`_COOLDOWN_UNAVAILABLE`. The cooldown
+    is an anti-spam control, not a best-effort enrichment like the DB permission lookup or the
+    Twitch Helix fetch elsewhere in this module -- a `kv` outage must never be silently read as
+    "not on cooldown" (that would let a `kv` denial disable anti-spam entirely), so this is the
+    one host-import failure in this bundle that blocks the action instead of degrading past it.
+    Logs at WARN (with a `metric` field, see `_KV_UNAVAILABLE_METRIC`) on the failure path so
+    the outage is observable; `transform()` sends no reply for this outcome (a plain
+    "shoutouts unavailable" notice would itself need `kv`-backed per-channel rate-limiting to
+    avoid becoming its own spam vector while `kv` is down, so this bundle deliberately says
+    nothing rather than adding a second control that depends on the very capability that just
+    failed).
 
     **Known, temporary gap**: the host `kv` capability is currently hardcoded to `denied` in
     `svc_process`/`svc_action` (`core/{svc_process,svc_action}/src/capabilities.rs`) pending a
-    separate in-flight PR (`feature/bundle-kv-capability`) that wires it up for real. Every
-    `kv` call in this bundle is therefore wrapped to degrade rather than raise, exactly like
-    this module's DB/HTTP degrade points -- a denied `kv` call must never block a shoutout,
-    only skip the cooldown gate, so this bundle is already safe to activate (behind its own
-    `waddles.shoutout-bundle` flag, default OFF) before that capability PR lands.
+    separate in-flight PR (`feature/bundle-kv-capability`) that wires it up for real -- until
+    that lands, every `!so`/`!shoutout` in a community with this bundle's flag ON will hit
+    `_COOLDOWN_UNAVAILABLE` and be silently refused. Flag defaults OFF, so this is inert today.
     """
     try:
-        return await kv.get(_cooldown_key(community, target)) is not None
-    except Exception:  # noqa: BLE001 -- kv denial/outage must never block a shoutout
-        return False
+        on_cooldown = await kv.get(_cooldown_key(community, target)) is not None
+    except Exception as exc:  # noqa: BLE001 -- classified below, never re-raised past this point
+        log.warn(
+            "shoutout cooldown check unavailable -- refusing to send (fail closed)",
+            metric=_KV_UNAVAILABLE_METRIC,
+            community=community,
+            target=target,
+            error=str(exc),
+        )
+        return _COOLDOWN_UNAVAILABLE
+    return _COOLDOWN_ACTIVE if on_cooldown else _COOLDOWN_ALLOWED
 
 
 async def _set_cooldown(community: str | None, target: str, ttl_seconds: int) -> None:
-    """Best-effort `kv` cooldown set -- see :func:`_is_on_cooldown`'s docstring for the same gap."""
+    """Best-effort `kv` cooldown set, run only AFTER a shoutout has already been relayed.
+
+    A `kv.set()` failure here cannot un-send the chat message already pushed by `dispatch()`,
+    so unlike `_check_cooldown()` (which fails closed BEFORE anything is sent) this stays
+    best-effort -- logged at WARN with the same `metric` tag for the same observability
+    pipeline, but never raised. See `_check_cooldown()`'s docstring for the full `kv`-outage
+    gap and why the fail-closed contract already covers the anti-spam guarantee going forward.
+    """
     if ttl_seconds <= 0:
         return
     try:
         await kv.set(_cooldown_key(community, target), b"1", ttl_seconds)
-    except Exception:  # noqa: BLE001 -- kv denial/outage must never fail a successful shoutout
-        return
+    except Exception as exc:  # noqa: BLE001 -- observability only, must never fail a sent shoutout
+        log.warn(
+            "shoutout cooldown set failed after a successful relay",
+            metric=_KV_UNAVAILABLE_METRIC,
+            community=community,
+            target=target,
+            error=str(exc),
+        )
 
 
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
@@ -329,8 +389,15 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     if not _permission_satisfied(permission, role):
         return _text_reply(event, _PERMISSION_DENIED_REPLY)
 
-    if await _is_on_cooldown(ctx.community, target):
+    cooldown_state = await _check_cooldown(ctx.community, target)
+    if cooldown_state == _COOLDOWN_ACTIVE:
         return _text_reply(event, f"{target} was already shouted out recently, try again later")
+    if cooldown_state == _COOLDOWN_UNAVAILABLE:
+        # Fail closed: the anti-spam control couldn't be verified, so no shoutout is sent --
+        # see _check_cooldown()'s docstring for why this stays silent (no chat reply) rather
+        # than sending a "temporarily unavailable" notice that would need its own kv-backed
+        # rate limiting to avoid becoming a spam vector itself.
+        return None
 
     return PlatformEvent(
         platform=event.platform,
