@@ -30,11 +30,17 @@ from flask_core import (
     setup_aaa_logging,
 )
 from flask_core.mcp_routes import create_mcp_blueprint
+from flask_core.service_jwt import (
+    ServiceJwtError,
+    load_identities_from_env,
+    load_issuer_from_env,
+)
 from pydal import Field
 from quart import Quart, request
 from quart_schema import Info, QuartSchema
 
 from blueprints import register_blueprints
+from blueprints.service_jwt_bp import service_jwt_bp
 from config import HubAPIConfig
 from openapi.routes import register_openapi_docs
 from services.bundle_install_dal import build_install_dal
@@ -207,6 +213,7 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
 
     app.register_blueprint(create_health_blueprint(cfg.module_name, cfg.module_version))
     app.register_blueprint(create_mcp_blueprint())
+    app.register_blueprint(service_jwt_bp)
     register_blueprints(app)
     register_openapi_docs(app)
 
@@ -216,6 +223,26 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     async def startup() -> None:
         """Initialize the DAL, connect the rate limiter, bind reference tables."""
         logger.system("Starting hub-api", action="startup", extra={"port": cfg.module_port})
+        # Per-service EdDSA machine JWT issuance (flask_core.service_jwt,
+        # feature/eddsa-machine-jwt) -- built from the `service-jwt-
+        # signing-key` Secret (SERVICE_JWT_ACTIVE_KID/SERVICE_JWT_PRIVATE_
+        # KEY_<kid>, mounted env-only into this container, see chart's
+        # hub-api.yaml) plus the `serviceJwt.identities` allow-list
+        # (SERVICE_JWT_IDENTITIES, JSON, see values.yaml). Missing/invalid
+        # config logs a warning and leaves issuance disabled (service_jwt_bp
+        # fails closed with 503) rather than crashing hub-api's whole app
+        # factory -- most non-prod/local deployments never call
+        # /internal/service-token at all.
+        try:
+            identities = load_identities_from_env()
+            issuer = load_issuer_from_env(identities)
+        except (ServiceJwtError, KeyError) as exc:
+            logger.warning(f"service_jwt not configured, issuance disabled: {exc}")
+            app.config["SERVICE_JWT_ISSUER"] = None
+            app.config["SERVICE_JWT_VERIFIER"] = None
+        else:
+            app.config["SERVICE_JWT_ISSUER"] = issuer
+            app.config["SERVICE_JWT_VERIFIER"] = issuer.as_verifier()
         # Connects to Redis/Valkey; falls back to an in-memory limiter
         # (per-process, non-distributed) if unreachable -- see
         # flask_core.rate_limiter.RateLimiter.connect()'s own fail-open

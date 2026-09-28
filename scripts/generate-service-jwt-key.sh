@@ -2,7 +2,12 @@
 # Generates the Ed25519 signing keypair for hub-api's per-service machine
 # JWTs (flask_core.service_jwt / core/service_auth) and creates the k8s
 # Secret directly from it -- the private key is never printed to stdout,
-# never passed as a CLI arg, and never written to a file on disk. Mirrors
+# never passed as a CLI arg (argv is world-readable via /proc/<pid>/cmdline
+# and `ps` on a shared host), and never held in a shell variable that could
+# be exported to argv or the environment of a child process. It touches
+# disk for exactly as long as `kubectl create secret --from-file` needs to
+# read it, in a `chmod 700` per-invocation temp directory, and is always
+# shredded on exit (success, failure, or signal) via the `trap`. Mirrors
 # the safe-generation pattern used for bundle artifact signing
 # (scripts/generate-bundle-signing-key.sh, PR #431).
 #
@@ -22,22 +27,42 @@ if ! command -v kubectl >/dev/null 2>&1; then
   exit 1
 fi
 
-# Generate straight to a PEM-in-memory pipeline; nothing touches disk.
-# `openssl genpkey` writes PKCS8 PEM to stdout, piped directly into
-# `kubectl create secret --from-file=-` equivalent via process substitution
-# -- the private key exists only in these two processes' memory and pipes.
-priv_key="$(openssl genpkey -algorithm ed25519)"
-pub_key="$(openssl pkey -pubout <<<"$priv_key")"
+# umask 077 belt-and-suspenders on top of `mktemp -d`'s own 0700 dir --
+# any file created under it inherits non-readable-by-others permissions
+# even if a step below forgets to chmod explicitly.
+umask 077
 
+tmpdir="$(mktemp -d)"
+key_file="${tmpdir}/private.pem"
+
+cleanup() {
+  # `shred -u` overwrites before unlinking -- a plain `rm` leaves recoverable
+  # plaintext on disk until the block is reused. `|| true` on both: if
+  # openssl never got to write the file (early failure), shred has nothing
+  # to shred, and that must not mask this trap's own cleanup of tmpdir.
+  if [[ -f "${key_file}" ]]; then
+    shred -u "${key_file}" || true
+  fi
+  rm -rf "${tmpdir}"
+}
+trap cleanup EXIT INT TERM
+
+# Writes PKCS8 PEM straight to the temp file -- the private key material
+# never passes through a shell variable (which `ps`/`/proc` can expose via
+# argv, or a stray `echo`/`set -x` could leak) at any point in this script.
+openssl genpkey -algorithm ed25519 -out "${key_file}"
+pub_key="$(openssl pkey -in "${key_file}" -pubout)"
+
+# `--from-file=<VAR_NAME>=<path>` reads the file's contents directly;
+# kubectl never receives the key material as a CLI argument, so it never
+# appears in this process's argv either.
 kubectl create secret generic "${SECRET_NAME}" \
   --namespace "${NAMESPACE}" \
   --from-literal="SERVICE_JWT_ACTIVE_KID=${KID}" \
-  --from-literal="SERVICE_JWT_PRIVATE_KEY_${KID}=${priv_key}" \
+  --from-file="SERVICE_JWT_PRIVATE_KEY_${KID}=${key_file}" \
   --dry-run=client -o yaml \
   | kubectl apply -f -
 
-unset priv_key
-
 echo "Secret ${SECRET_NAME} (kid=${KID}) applied in namespace ${NAMESPACE}."
 echo "Public key (safe to commit to values.yaml under serviceJwt.publicKeys.${KID}):"
-echo "$pub_key"
+echo "${pub_key}"

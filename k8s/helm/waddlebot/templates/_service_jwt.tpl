@@ -18,6 +18,20 @@ Not auto-injected into every Deployment template -- migrating the
 existing ~47 services is tracked separately (see the v3.1.x GitHub issue
 filed alongside this PR); these two helpers exist so that migration is
 "include two snippets", not "write the volume spec 47 times".
+
+"waddlebot.serviceJwtIdentitiesJson" -- renders `serviceJwt.identities`
+(a map keyed by short service name -> {spiffeId, serviceAccount,
+allowedScopes}) into the JSON array `SERVICE_JWT_IDENTITIES` hub-api's
+`flask_core.service_jwt.load_identities_from_env` parses at startup:
+`[{"service_id", "k8s_namespace", "k8s_service_account",
+"allowed_scopes"}, ...]`. `spiffeId` is run through `tpl` because its
+value in values.yaml is itself a template string (`{{ .Values.global.
+environment | default "alpha" }}`) that must be rendered against the
+current release context, not treated as a literal. Include only in
+hub-api's own Deployment env (the only consumer):
+
+  - name: SERVICE_JWT_IDENTITIES
+    value: {{ include "waddlebot.serviceJwtIdentitiesJson" . | quote }}
 */}}
 
 {{- define "waddlebot.serviceJwtBootstrapVolume" -}}
@@ -34,4 +48,14 @@ filed alongside this PR); these two helpers exist so that migration is
 - name: service-jwt-bootstrap-token
   mountPath: /var/run/secrets/waddlebot/service-jwt
   readOnly: true
+{{- end -}}
+
+{{- define "waddlebot.serviceJwtIdentitiesJson" -}}
+{{- $root := . -}}
+{{- $identities := list -}}
+{{- range $key, $identity := .Values.serviceJwt.identities }}
+{{- $spiffeId := tpl $identity.spiffeId $root -}}
+{{- $identities = append $identities (dict "service_id" $spiffeId "k8s_namespace" $root.Values.namespace "k8s_service_account" $identity.serviceAccount "allowed_scopes" $identity.allowedScopes) -}}
+{{- end }}
+{{- $identities | toJson -}}
 {{- end -}}

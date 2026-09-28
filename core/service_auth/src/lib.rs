@@ -66,6 +66,10 @@ pub struct ServiceClaims {
     pub sub: String,
     pub scope: String,
     pub iat: u64,
+    /// Not-before -- required (security review MEDIUM finding), mirrors
+    /// `libs/flask_core/flask_core/service_jwt.py::ServiceJwtIssuer.issue`
+    /// setting `nbf = iat` at mint time.
+    pub nbf: u64,
     pub exp: u64,
     pub jti: String,
 }
@@ -106,7 +110,12 @@ pub async fn verify(
     validation.set_audience(&[expected_audience]);
     validation.set_issuer(trusted_issuers);
     validation.leeway = CLOCK_SKEW_SECONDS;
-    validation.set_required_spec_claims(&["exp", "iat", "iss", "aud", "sub"]);
+    // `nbf` is mandatory (security review MEDIUM finding) -- `validate_nbf`
+    // defaults to `false` in jsonwebtoken 10.x, so it must be opted into
+    // explicitly; `leeway` above bounds it against issuer/verifier clock
+    // skew the same way it already bounds `exp`.
+    validation.validate_nbf = true;
+    validation.set_required_spec_claims(&["exp", "iat", "nbf", "iss", "aud", "sub"]);
 
     let data = jsonwebtoken::decode::<ServiceClaims>(token, &key, &validation)
         .map_err(|e| ServiceAuthError::InvalidToken(e.to_string()))?;
@@ -304,6 +313,7 @@ mod tests {
             sub: "spiffe://penguintech.io/alpha/svc-process".into(),
             scope: "identity:ephemeral:mint".into(),
             iat: now,
+            nbf: now,
             exp: now + 900,
             jti: "test-jti".into(),
         }
@@ -371,6 +381,39 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ServiceAuthError::InvalidToken(_)));
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_token_not_yet_valid() {
+        let (enc, dec) = ed25519_keypair();
+        let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
+        let now = now_secs();
+        let mut claims = base_claims(now);
+        // Well beyond CLOCK_SKEW_SECONDS -- a token whose `nbf` is still in
+        // the future (clock-skew-adjusted) must be rejected, not silently
+        // accepted because `exp` alone still passes.
+        claims.nbf = now + CLOCK_SKEW_SECONDS + 300;
+        let token = make_token(&enc, "k1", &claims);
+        let err = verify(&token, &bundle, "waddlebot-internal", &["hub-api"], "identity:ephemeral:mint")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::InvalidToken(_)));
+    }
+
+    #[tokio::test]
+    async fn verify_accepts_token_within_nbf_clock_skew() {
+        let (enc, dec) = ed25519_keypair();
+        let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
+        let now = now_secs();
+        let mut claims = base_claims(now);
+        // Just within the bounded skew -- must still verify (a strict
+        // `nbf == now` check would spuriously reject legitimate tokens on
+        // any real clock drift between issuer and verifier).
+        claims.nbf = now + CLOCK_SKEW_SECONDS - 5;
+        let token = make_token(&enc, "k1", &claims);
+        verify(&token, &bundle, "waddlebot-internal", &["hub-api"], "identity:ephemeral:mint")
+            .await
+            .expect("token within clock skew leeway verifies");
     }
 
     #[tokio::test]

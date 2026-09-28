@@ -2095,7 +2095,12 @@ serviceJwt:
   audience: waddlebot-internal
   # Audience the bootstrap ServiceAccount token projection (below) must
   # request -- hub-api's TokenReview call rejects any other audience.
-  bootstrapAudience: waddlebot-internal-bootstrap
+  # "hub-api" (not a generic "waddlebot-internal-bootstrap" string, security
+  # review HIGH finding) -- binding the projected token's audience to the
+  # specific resource server it authenticates to is what makes a stolen
+  # bootstrap token useless against any other in-cluster TokenReview
+  # consumer, standard "aud" scoping practice for workload-identity tokens.
+  bootstrapAudience: hub-api
   # Per-service allow-list mapping a k8s ServiceAccount identity to a
   # SPIFFE-shaped service id + permitted scopes. hub-api is the only
   # consumer; it never trusts a caller-supplied service id.

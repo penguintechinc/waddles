@@ -49,7 +49,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
-from flask import current_app, g, jsonify, request
+from quart import current_app, g, jsonify, request
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +147,16 @@ class ServiceJwtVerifier:
                 algorithms=["EdDSA"],
                 audience=self.audience,
                 leeway=CLOCK_SKEW_SECONDS,
-                options={"require": ["exp", "iat", "iss", "aud", "sub", "scope", "jti"], "verify_iss": False},
+                # `nbf` is mandatory (security review MEDIUM finding) --
+                # PyJWT validates `nbf <= now` automatically once present,
+                # honoring the same `leeway` clock-skew bound applied to
+                # `exp`/`iat` above; `require` additionally rejects any
+                # token minted without one (an older issuer or a forged
+                # token that omits it), rather than silently accepting it.
+                options={
+                    "require": ["exp", "iat", "nbf", "iss", "aud", "sub", "scope", "jti"],
+                    "verify_iss": False,
+                },
             )
         except jwt.InvalidTokenError as exc:
             raise InvalidServiceToken(str(exc)) from exc
@@ -230,17 +239,21 @@ class ServiceJwtIssuer:
             "sub": service_id,
             "scope": scope,
             "iat": now,
+            # `nbf` = issuance time (security review MEDIUM finding) -- this
+            # token is valid for use immediately, never "not yet"; bounded
+            # clock skew when verifying is what actually accommodates
+            # verifier/issuer clock drift (`ServiceJwtVerifier.verify`'s
+            # `leeway=CLOCK_SKEW_SECONDS`), not a deliberately backdated
+            # `nbf` here.
+            "nbf": now,
             "exp": now + ttl_seconds,
             "jti": str(uuid.uuid4()),
         }
-        private_bytes = key.private_key.private_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PrivateFormat.Raw,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-        # PyJWT's EdDSA signer accepts a cryptography private-key object
-        # directly; avoid ever holding the raw bytes longer than needed.
-        del private_bytes
+        # PyJWT's EdDSA signer accepts a `cryptography` private-key object
+        # directly -- extracting raw bytes here was dead code that only
+        # ever created (and immediately discarded) an extra copy of the
+        # private key material in memory, widening its exposure window for
+        # no benefit.
         return jwt.encode(payload, key.private_key, algorithm="EdDSA", headers={"kid": key.kid})
 
     def get_public_key(self, kid: str) -> Ed25519PublicKey | None:
@@ -325,6 +338,45 @@ def load_issuer_from_env(identities: list[ServiceIdentity]) -> ServiceJwtIssuer:
     )
 
 
+def load_identities_from_env(*, env: str = "alpha") -> list[ServiceIdentity]:
+    """Build the allow-listed `ServiceIdentity` list from `SERVICE_JWT_IDENTITIES`.
+
+    Helm (`values.yaml` `serviceJwt.identities`) renders this as a JSON
+    array -- `[{"service_id": "svc-process", "k8s_namespace": "waddlebot",
+    "k8s_service_account": "svc-process", "allowed_scopes":
+    ["identity:ephemeral:mint"]}, ...]` -- so the chart's per-service
+    allow-list is the single source of truth hub-api reads at startup,
+    rather than a second, driftable copy hardcoded in Python. `service_id`
+    may be given either as a bare service name (wrapped into this
+    deployment's SPIFFE ID via `env`) or a full `spiffe://...` string.
+    Missing/empty/malformed input yields an empty list (no identities
+    allow-listed) rather than raising -- an unconfigured deployment should
+    fail closed on every bootstrap attempt, not crash at startup.
+    """
+    import json
+
+    raw = os.getenv("SERVICE_JWT_IDENTITIES", "")
+    if not raw:
+        return []
+    try:
+        entries = json.loads(raw)
+    except ValueError as exc:
+        raise ServiceJwtError(f"SERVICE_JWT_IDENTITIES is not valid JSON: {exc}") from exc
+    identities: list[ServiceIdentity] = []
+    for entry in entries:
+        raw_service_id = entry["service_id"]
+        service_id = raw_service_id if raw_service_id.startswith("spiffe://") else spiffe_id(env, raw_service_id)
+        identities.append(
+            ServiceIdentity(
+                service_id=service_id,
+                k8s_namespace=entry["k8s_namespace"],
+                k8s_service_account=entry["k8s_service_account"],
+                allowed_scopes=frozenset(entry.get("allowed_scopes", [])),
+            )
+        )
+    return identities
+
+
 def verify_service_account_token(*, sa_token: str, audience: str, k8s_api_server: str, ca_cert_path: str) -> tuple[str, str]:
     """Validate a projected ServiceAccount token via the k8s TokenReview API.
 
@@ -376,7 +428,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 
 def require_service_scope(scope: str) -> Callable[[F], F]:
-    """Flask route decorator requiring a valid machine JWT with `scope`.
+    """Quart route decorator requiring a valid machine JWT with `scope`.
 
     Reads `Authorization: Bearer <token>`, verifies it against
     `current_app.config["SERVICE_JWT_VERIFIER"]` (a `ServiceJwtVerifier` --
@@ -390,7 +442,7 @@ def require_service_scope(scope: str) -> Callable[[F], F]:
 
     def decorator(fn: F) -> F:
         @wraps(fn)
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
             verifier: ServiceJwtVerifier = current_app.config["SERVICE_JWT_VERIFIER"]
             auth_header = request.headers.get("Authorization", "")
             if not auth_header.startswith("Bearer "):
@@ -405,7 +457,7 @@ def require_service_scope(scope: str) -> Callable[[F], F]:
                 logger.warning("service_jwt.invalid", extra={"reason": str(exc)})
                 return jsonify({"error": "unauthorized"}), 401
             g.service_claims = claims
-            return fn(*args, **kwargs)
+            return await fn(*args, **kwargs)
 
         return wrapper  # type: ignore[return-value]
 
