@@ -550,14 +550,30 @@ async fn handle_delivered<S: SpineOps>(
 
     // Resolved PER INVOCATION against the live, poll-refreshed snapshot
     // (`ProcessDeps::app_version_snapshot`'s doc), before the executor-
-    // connection gate below (an in-memory, no-I/O check). `digest` non-empty
-    // (the legacy single-consumer loop, `crate::lib::try_start_process_loop`)
-    // resolves by digest match; empty (a DB-driven source-binding consumer,
+    // connection gate below (an in-memory, no-I/O check).
+    //
+    // `digest` empty (a DB-driven source-binding consumer,
     // `crate::source_supervisor`, which never holds a fixed digest --
     // `crate::bundle_loader` owns load/unload independently) resolves by
-    // `app_id` alone. `None` means unresolvable (a hot swap superseded this
-    // digest, or the app_id is no longer active) -- fail closed by
-    // dead-lettering rather than ever invoking under a stale/guessed version.
+    // `app_id` alone: this has no separate "pinned digest" to go stale, so
+    // a bundle upgrade is picked up transparently on the very next delivery
+    // -- no redirect bookkeeping needed (unlike `crate::dispatch::
+    // handle_delivered`'s digest-pinned redirect path), and grants are
+    // always checked against whatever is CURRENTLY active.
+    //
+    // `digest` non-empty (the legacy single-consumer loop, `crate::lib::
+    // try_start_process_loop`, mutually exclusive with the DB-driven path
+    // per `db_path_selected`) resolves by digest match and does NOT
+    // redirect on a stale digest: unlike `ActiveBundleRow`, this snapshot
+    // carries no `component_key`/`sidecar_key`, so there is no safe way to
+    // re-`ensure_loaded` a superseded digest here -- fail closed instead,
+    // the same documented "this legacy env-configured fallback's own
+    // concern, not hot-swap-aware" posture this loop already carries
+    // elsewhere (`crate::lib::try_start_process_loop`'s own doc).
+    //
+    // Either way, `None` means unresolvable (the app_id is no longer active
+    // at all) -- fail closed by dead-lettering rather than ever invoking
+    // under a stale/guessed version.
     let Some(app_version) = (if deps.digest.is_empty() {
         deps.app_version_snapshot.resolve_for_app(&deps.app_id)
     } else {
@@ -1267,6 +1283,84 @@ mod tests {
         registry
     }
 
+    /// Same as [`connected_registry_with_fake_executor`], but answers
+    /// `invoke_count` invokes with the same `response` -- for tests
+    /// (e.g. the redirect-after-upgrade regression) that drive
+    /// `handle_delivered` more than once against the same live connection.
+    async fn connected_registry_with_fake_executor_multi(
+        response: serde_json::Value,
+        invoke_count: usize,
+    ) -> Arc<ConnectionRegistry> {
+        use crate::capabilities::DenyAllCapabilities;
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, Frame, HelloBody, HelloOkBody, ResultBody, SandboxInfo,
+        };
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            let hello_ok = read_frame(&mut executor_io).await.unwrap();
+            assert!(matches!(hello_ok.message, Message::HelloOk(_)));
+
+            for _ in 0..invoke_count {
+                let invoke = read_frame(&mut executor_io).await.unwrap();
+                write_frame(
+                    &mut executor_io,
+                    &Frame::new(
+                        invoke.id,
+                        Message::Result(ResultBody {
+                            payload: response.clone(),
+                            duration_ms: 1,
+                            fuel_used: 0,
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+            }
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-process".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let registry = Arc::new(ConnectionRegistry::new());
+        registry.set_active(connection);
+        registry
+    }
+
     /// Drives a fake executor over an in-memory duplex that expects `load`
     /// **before** any `invoke`: completes the `hello`/`hello-ok` handshake,
     /// answers exactly one `load` with `loaded` (recording the `LoadBody`
@@ -1587,16 +1681,64 @@ mod tests {
         assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
     }
 
+    /// Regression (gh-433 follow-up 2): source-binding-style resolution
+    /// (empty `digest`, `resolve_for_app`) has no separate "pinned digest"
+    /// to go stale -- a bundle upgrade (the poller's next tick reads a NEW
+    /// digest/version for this SAME app_id, still active in scope) is
+    /// transparently picked up on the very next delivery, never dead-
+    /// lettered: an upgrade must not drop in-flight deliveries.
+    #[tokio::test]
+    async fn handle_delivered_continues_processing_after_an_upgrade_for_app_scoped_resolution() {
+        let ring = test_ring();
+        let d1 = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let connections =
+            connected_registry_with_fake_executor_multi(serde_json::json!(null), 2).await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+
+        // First delivery: the snapshot resolves `deps.app_id` under its
+        // seeded version -- succeeds and acks.
+        handle_delivered(&d1, &deps).await.unwrap();
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 1);
+
+        // Upgrade: the poller's next tick reads a NEW digest/version for
+        // this SAME app_id, still active in scope.
+        deps.app_version_snapshot
+            .update(&[bundle_active_set::ActiveBundleRow {
+                app_id: "waddles.bot.commands.default".to_string(),
+                version: "2".to_string(),
+                version_id: 2,
+                digest: "sha256:new-after-upgrade".to_string(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+            }]);
+
+        let mut d2 = d1.clone();
+        d2.entry_id = "1234567890-1".to_string();
+        handle_delivered(&d2, &deps).await.unwrap();
+
+        assert!(
+            deps.spine.dead_lettered.lock().unwrap().is_empty(),
+            "an upgrade must never dead-letter an app-scoped delivery"
+        );
+        assert_eq!(
+            deps.spine.acked.lock().unwrap().len(),
+            2,
+            "both the pre- and post-upgrade deliveries must be acked"
+        );
+    }
+
     /// Regression (gh-433 follow-up): `app_version` is resolved PER
     /// DELIVERY from the live snapshot, never once per connect/startup.
-    /// The first delivery succeeds against the seeded version; a hot swap
-    /// mid-run (`bundle_loader::run_tick`'s own `ActiveVersionSnapshot::
-    /// update`, simulated here directly) that drops this app_id out of the
-    /// active set entirely must make the very NEXT delivery fail closed
-    /// (dead-lettered, `HostCallDenied`) rather than keep invoking under a
-    /// version the active set no longer recognizes.
+    /// The first delivery succeeds against the seeded version; a
+    /// deactivation mid-run (`bundle_loader::run_tick`'s own
+    /// `ActiveVersionSnapshot::update`, simulated here directly) that drops
+    /// this app_id out of the active set entirely -- unlike an upgrade
+    /// (tested above), which redirects -- must make the very NEXT delivery
+    /// fail closed (dead-lettered, `HostCallDenied`) rather than keep
+    /// invoking under a version the active set no longer recognizes.
     #[tokio::test]
-    async fn handle_delivered_fails_closed_after_the_active_set_hot_swaps_away_the_app_id() {
+    async fn handle_delivered_dead_letters_after_the_app_is_deactivated() {
         let ring = test_ring();
         let d1 = fixture_delivered("acme", Some("main"), &ring, "k1");
         let connections = connected_registry_with_fake_executor(serde_json::json!(null)).await;
@@ -1609,9 +1751,8 @@ mod tests {
         assert_eq!(deps.spine.acked.lock().unwrap().len(), 1);
         assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
 
-        // Mid-run hot swap: the poller's next tick reads an active set that
-        // no longer includes this app_id at all (deactivated, or a
-        // different app now occupies the scope).
+        // Deactivation: the poller's next tick reads an active set that no
+        // longer includes this app_id at all (deactivated or revoked).
         deps.app_version_snapshot.update(&[]);
 
         let mut d2 = d1.clone();
@@ -1621,7 +1762,7 @@ mod tests {
         assert_eq!(
             deps.spine.acked.lock().unwrap().len(),
             1,
-            "the post-swap delivery must never be acked as a successful invocation"
+            "the post-deactivation delivery must never be acked as a successful invocation"
         );
         let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
         assert_eq!(dead_lettered.len(), 1);

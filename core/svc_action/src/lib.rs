@@ -153,6 +153,10 @@ where
     // excluded-row counter.
     let bundle_loader_excluded_metric =
         telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
+    // Same registration timing constraint as the excluded-row counter above
+    // (`register_redirect_metrics` only borrows `prom_registry`, must run
+    // before it's moved into `AppState::new`).
+    let redirected_metric = telemetry::register_redirect_metrics(&prom_registry);
 
     let state = http::AppState::new(config.clone(), prom_registry);
 
@@ -211,6 +215,7 @@ where
         license,
         app_version_snapshot,
         db_path_active,
+        redirected_metric,
     );
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
@@ -844,6 +849,7 @@ fn try_start_dispatch(
     license: Option<Arc<penguin_licensing::LicenseClient>>,
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
     db_path_active: bool,
+    redirected_metric: prometheus::IntCounterVec,
 ) {
     if config.cli.action_app_id.is_empty() {
         tracing::info!("ACTION_APP_ID not set; dispatch loop not started (no bundle assigned)");
@@ -929,6 +935,7 @@ fn try_start_dispatch(
             app_id: app_id.clone(),
             digest,
             app_version_snapshot,
+            redirected_metric,
             config_json,
             key_ring,
             connections,
@@ -1430,6 +1437,11 @@ mod tests {
             None,
             bundle_active_set::ActiveVersionSnapshot::new(),
             false,
+            prometheus::IntCounterVec::new(
+                prometheus::Opts::new("test_redirected_after_upgrade_total", "test"),
+                &["app_id"],
+            )
+            .expect("valid metric definition"),
         );
     }
 

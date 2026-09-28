@@ -75,6 +75,23 @@ impl ActiveVersionSnapshot {
             .get(app_id)
             .map(|(_, version_id)| *version_id)
     }
+
+    /// Resolves `app_id`'s CURRENT `(digest, app_versions.id)` pair,
+    /// regardless of what digest the caller was previously invoking under
+    /// -- the redirect-after-upgrade path: when [`Self::resolve_for_digest`]
+    /// fails because a hot swap moved the app onto a new digest, but the
+    /// app itself is still active in this scope, a caller uses this to
+    /// invoke under the CURRENT digest/version instead of dead-lettering
+    /// (spec: bundle upgrades must not drop in-flight deliveries). `None`
+    /// means the app is no longer active in this scope at all
+    /// (deactivated/revoked) -- the only case a caller should fail closed.
+    pub fn current_digest_and_version(&self, app_id: &str) -> Option<(String, i64)> {
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(app_id)
+            .cloned()
+    }
 }
 
 #[cfg(test)]
@@ -128,6 +145,23 @@ mod tests {
         );
         assert_eq!(snap.resolve_for_digest("waddles.a", "sha256:new"), Some(9));
         assert_eq!(snap.resolve_for_app("waddles.a"), Some(9));
+    }
+
+    #[test]
+    fn current_digest_and_version_returns_the_current_pair_after_a_hot_swap() {
+        let snap = ActiveVersionSnapshot::new();
+        snap.update(&[row("waddles.a", "sha256:old", 7)]);
+        snap.update(&[row("waddles.a", "sha256:new", 9)]);
+        assert_eq!(
+            snap.current_digest_and_version("waddles.a"),
+            Some(("sha256:new".to_string(), 9))
+        );
+    }
+
+    #[test]
+    fn current_digest_and_version_is_none_when_the_app_is_no_longer_active() {
+        let snap = ActiveVersionSnapshot::new();
+        assert_eq!(snap.current_digest_and_version("waddles.missing"), None);
     }
 
     #[test]
