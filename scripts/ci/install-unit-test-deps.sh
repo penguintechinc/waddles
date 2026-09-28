@@ -31,10 +31,11 @@ PIP=("$PYTHON_BIN" -m pip install --disable-pip-version-check)
 echo "[install-unit-test-deps] core/identity_core_module + editable libs/flask_core"
 "${PIP[@]}" -r core/identity_core_module/requirements.txt -e libs/flask_core
 
-# core/workflow_core_module's requirements.txt is loose-pinned (like
-# identity_core_module's above), not hash-pinned like the core/svc_*
-# containers in the loop below -- installed the same unhashed way. It also
-# needs grpc_tools.protoc at test-collection time (tests/conftest.py
+# core/workflow_core_module's requirements.txt is hash-pinned
+# (--generate-hashes, like libs/waddle_transports below) -- installed
+# without --require-hashes since there's no accompanying unhashed/editable
+# spec in this call to conflict with pip's auto-enabled hash-checking mode.
+# It also needs grpc_tools.protoc at test-collection time (tests/conftest.py
 # generates workflow_pb2*.py from proto/workflow.proto on the fly, mirroring
 # the Dockerfile's build-time codegen step) -- grpcio-tools is already
 # declared in this requirements.txt for exactly that reason.
