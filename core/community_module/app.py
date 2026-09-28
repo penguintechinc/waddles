@@ -9,7 +9,8 @@ from quart import Quart, Blueprint
 
 from flask_core import (  # noqa: E402
     setup_aaa_logging, init_database, async_endpoint, success_response,
-    create_health_blueprint, install_rate_limiting, install_security_headers
+    create_health_blueprint, install_rate_limiting, install_security_headers,
+    bind_community_read_tables, install_community_scoped_auth
 )
 from config import Config  # noqa: E402
 
@@ -30,6 +31,27 @@ install_rate_limiting(app, namespace=Config.MODULE_NAME)
 api_bp = Blueprint('api', __name__, url_prefix='/api/v1')
 logger = setup_aaa_logging(Config.MODULE_NAME, Config.MODULE_VERSION)
 
+# SECURITY (C6, A01 -- BOLA/unauthenticated access): this blueprint had
+# ZERO tenant/community-membership enforcement on any route -- harmless
+# today since `/status` is its only route, but the next CRUD route added
+# (e.g. one taking a `community_id` path parameter) would ship with no
+# auth by omission. Registered once for the whole blueprint (not
+# per-route), matching `core/security_core_module/app.py`'s convention, so
+# a route added later can't skip this check by omission -- see
+# flask_core.community_access module docstring. Scoped to `api_bp` (not
+# `app`) so the separate `health_bp` (`/health`, `/healthz`, `/metrics` --
+# K8s probes) is never touched by this hook; `/api/v1/status` (this
+# module's only current business route, always public) is carved out via
+# `exempt_paths`. `dal_key='raw_dal'` keeps `app.config['dal']` pointing at
+# the `AsyncDAL` wrapper other code in this module already expects, while
+# this hook gets the raw pydal `DAL` it needs for
+# `tenants`/`communities`/`community_members` queries.
+install_community_scoped_auth(
+    api_bp,
+    dal_key='raw_dal',
+    exempt_paths=frozenset({'/api/v1/status'}),
+)
+
 dal = None
 
 
@@ -39,6 +61,12 @@ async def startup():
     logger.system("Starting community_module", action="startup")
     dal = init_database(Config.DATABASE_URL)
     app.config['dal'] = dal
+    app.config['async_dal'] = dal
+    # Read-only tenants/communities/community_members subset
+    # `install_community_scoped_auth` needs -- owned by hub-api's own
+    # migrations, never created here (migrate=False in prod).
+    app.config['raw_dal'] = dal.dal
+    bind_community_read_tables(app.config['raw_dal'], migrate=Config.DB_MIGRATE)
     logger.system("community_module started", result="SUCCESS")
 
 
