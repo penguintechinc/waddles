@@ -363,7 +363,18 @@ async fn build_stage_capabilities(
         egress_denied_total,
         flag_or_closed(&license, flags::BUNDLE_EGRESS_FLAG),
     ));
-    let caps = capabilities::StageCapabilities::new(relay_conn, egress, usage);
+    // `kv` reuses this same direct Valkey connection (cloned -- a cheap
+    // handle clone over one shared TCP connection, not a second socket)
+    // rather than opening a dedicated one: `relay_conn` already IS the
+    // "second, direct redis connection" `usage.rs`'s module doc describes,
+    // and `kv`'s isolation/quota model needs nothing about the connection
+    // itself that `relay`/usage don't already require (`crate::capabilities`'
+    // `StageCapabilities::with_kv`'s doc).
+    let kv_conn = relay_conn.clone();
+    let caps = capabilities::StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
+        relay_conn, egress, usage,
+    )
+    .with_kv(kv_conn);
     // Discord relay send (spec: relay providers, `discord`) -- graceful
     // degradation, not a startup requirement: a deployment that never sets
     // `DISCORD_BOT_TOKEN` simply never enables this provider, and a bundle

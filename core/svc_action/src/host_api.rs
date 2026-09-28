@@ -770,7 +770,10 @@ mod tests {
             .unwrap(),
             crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
+        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
+            _,
+            redis::aio::MultiplexedConnection,
+        >::new(
             NoopQueue,
             egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
@@ -987,7 +990,10 @@ mod tests {
                 self.0.lpush(key, value)
             }
         }
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
+        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
+            _,
+            redis::aio::MultiplexedConnection,
+        >::new(
             SharedQueue(Arc::clone(&relay_queue)),
             egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
@@ -1179,7 +1185,10 @@ mod tests {
             .unwrap(),
             crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
+        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
+            _,
+            redis::aio::MultiplexedConnection,
+        >::new(
             NoopQueue,
             egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
@@ -1283,7 +1292,10 @@ mod tests {
             .unwrap(),
             crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
+        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
+            _,
+            redis::aio::MultiplexedConnection,
+        >::new(
             NoopQueue,
             egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
