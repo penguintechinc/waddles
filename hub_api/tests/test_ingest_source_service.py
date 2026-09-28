@@ -14,6 +14,7 @@ from services.errors import ApiError
 from services.ingest_source_service import (
     create_source,
     delete_source,
+    ensure_ingest_source,
     list_sources,
     resolve_secret,
 )
@@ -145,3 +146,89 @@ async def test_delete_source_disables_the_workstream_without_deleting_it(install
     ).first()
     assert workstream is not None
     assert workstream.disabled_at is not None
+
+
+# ---------------------------------------------------------------------------
+# ensure_ingest_source() -- platform-connection registration (core-bundle-seeder)
+# ---------------------------------------------------------------------------
+
+
+async def test_ensure_ingest_source_creates_a_row_with_no_secret(install_dal: Any) -> None:
+    row = await ensure_ingest_source(
+        install_dal,
+        tenant_id=1,
+        community_id=None,
+        platform="discord",
+        source_id="dg-474965105759748096",
+        label="svc-ingest Discord guild",
+    )
+    assert row.platform == "discord"
+    assert row.source_id == "dg-474965105759748096"
+    assert row.enabled
+    assert row.secret_ciphertext is None
+    assert row.secret_iv is None
+
+
+async def test_ensure_ingest_source_creates_no_workstream_row(install_dal: Any) -> None:
+    """Unlike create_source(), no 1:1 workstreams row -- that table is generic-webhook scoped."""
+    row = await ensure_ingest_source(
+        install_dal,
+        tenant_id=1,
+        community_id=None,
+        platform="discord",
+        source_id="dg-474965105759748096",
+        label="svc-ingest Discord guild",
+    )
+    workstream = (
+        await install_dal(install_dal.workstreams.ingest_source_id == row.id).select()
+    ).first()
+    assert workstream is None
+
+
+async def test_ensure_ingest_source_rerun_is_a_no_op_not_a_duplicate(install_dal: Any) -> None:
+    first = await ensure_ingest_source(
+        install_dal,
+        tenant_id=1,
+        community_id=None,
+        platform="discord",
+        source_id="dg-474965105759748096",
+        label="svc-ingest Discord guild",
+    )
+    second = await ensure_ingest_source(
+        install_dal,
+        tenant_id=1,
+        community_id=None,
+        platform="discord",
+        source_id="dg-474965105759748096",
+        label="svc-ingest Discord guild",
+    )
+    assert second.id == first.id
+    rows = await install_dal(
+        (install_dal.ingest_sources.tenant_id == 1)
+        & (install_dal.ingest_sources.platform == "discord")
+        & (install_dal.ingest_sources.source_id == "dg-474965105759748096")
+    ).select()
+    assert len(rows) == 1
+
+
+async def test_ensure_ingest_source_reenables_a_previously_disabled_row(install_dal: Any) -> None:
+    row = await ensure_ingest_source(
+        install_dal,
+        tenant_id=1,
+        community_id=None,
+        platform="discord",
+        source_id="dg-474965105759748096",
+        label="svc-ingest Discord guild",
+    )
+    await install_dal(install_dal.ingest_sources.id == row.id).update(enabled=False)
+
+    reenabled = await ensure_ingest_source(
+        install_dal,
+        tenant_id=1,
+        community_id=None,
+        platform="discord",
+        source_id="dg-474965105759748096",
+        label="svc-ingest Discord guild",
+    )
+    assert reenabled.id == row.id
+    assert reenabled.enabled

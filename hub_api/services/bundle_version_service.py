@@ -170,7 +170,7 @@ async def create_version(
     *,
     tenant_id: int,
     app_id: str,
-    requested_by: int,
+    requested_by: int | None,
     manifest_bytes: bytes,
     source_bytes: bytes | None,
     component_bytes: bytes | None,
@@ -185,6 +185,11 @@ async def create_version(
     `"app_id_mismatch"`), 403 `prebuilt_not_allowed`, 409 (version
     already exists), or 413 (oversize part). See this module's own
     docstring for why no compiler Job is launched here.
+
+    `requested_by=None` is the SYSTEM-actor case (`hub_api/cli/
+    seed_core_bundles.py`, in-cluster at deploy time, no human
+    requester) -- the column is a nullable FK (migration 0023), so this
+    is a real NULL, never a fake `hub_users` row.
     """
     if len(manifest_bytes) > BUNDLE_MAX_MANIFEST_BYTES:
         raise ApiError("manifest exceeds 1 MiB", 413, "PAYLOAD_TOO_LARGE")
