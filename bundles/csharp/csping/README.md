@@ -22,7 +22,7 @@ bindings, same relationship `bundles/rust/ping` has to hand-rolled
 | `BytecodeAlliance.Componentize.DotNet.Wasm.SDK` | `0.8.0-preview00011` |
 | `BytecodeAlliance.Componentize.DotNet.WitBindgen` (`wit-bindgen` C# backend) | `0.8.0-preview00011`, wraps `wit-bindgen` `0.58.0` |
 | `Microsoft.DotNet.ILCompiler.LLVM` (NativeAOT-LLVM) | `10.0.0-rc.1.26306.1` |
-| WASI SDK (auto-fetched by NativeAOT-LLVM) | `wasi-sdk-29` |
+| WASI SDK | `wasi-sdk-29.0` (pinned + sha256-verified in `Dockerfile`; see "Hermeticity" below) |
 | `wasm-tools` (validation only, not part of the build) | `1.259.0` (repo-pinned, see `wit/waddle-bundle/stage_wit_test.sh`) |
 
 Sources: `componentize-dotnet`'s own README and `dotnet new
@@ -37,13 +37,22 @@ directory adds.
 
 ## Build
 
-Containerized (`Dockerfile` in this directory, context = repo root):
+Containerized, rootless end to end (`Dockerfile` in this directory,
+context = repo root). Pass `--user "$(id -u):$(id -g)"` so the container
+writes the output into your bind-mounted directory as *you*, not the
+image's baked-in `builder` uid (10001) — whichever one doesn't match your
+host directory's ownership fails the final `cp` with a permission error:
 
 ```bash
 docker build -f bundles/csharp/csping/Dockerfile -t waddles/bundle-csping-build:spike .
 mkdir -p /tmp/csping-out
-docker run --rm -v /tmp/csping-out:/out waddles/bundle-csping-build:spike
+docker run --rm --user "$(id -u):$(id -g)" -v /tmp/csping-out:/out waddles/bundle-csping-build:spike
 ```
+
+Or use `make verify-csping-fixture` from the repo root, which does exactly
+this and additionally diffs the result against the committed
+`core/bundle_executor/tests/fixtures/csping.wasm.sha256` (see
+"Reproducibility & auditability" below).
 
 Or directly, from this directory (needs .NET 10+ SDK on `PATH`):
 
@@ -102,34 +111,63 @@ of magnitude, likely 5-10x a comparable minimal Rust component. The
 NativeAOT-LLVM-compiled BCL subset (even trimmed, self-contained,
 `InvariantGlobalization`) dominates.
 
-## The one serious gap: cold-load (compile) time
+## Cold-load (compile) time
 
 `core/bundle_executor/tests/csharp_bundle_integration.rs`'s `load` step —
-`wasmtime::component::Component::new` compiling `csping.wasm` from
-bytes, no precompiled `.cwasm` cache (not wired for ANY language yet,
-`core/bundle_executor/src/invoke.rs`'s own module doc) — measured
-**~104 seconds** in this spike's dev container. `core/bundle_executor/src/
-invoke.rs` documents a **~3-4 second** cold-compile cost for a "large"
-Rust component as the reference point (spec SS7.2). C#'s ~4.3 MiB
-component compiled roughly **25-30x slower** than that reference, despite
-being only a few times larger by byte count — the generated code's shape
-(embedded GC, exception tables, a much larger function count from the
-trimmed-but-still-substantial BCL) is far more expensive for Cranelift to
-compile than an equivalent-sized Rust module, not just proportionally
-larger.
+`wasmtime::component::Component::new` compiling `csping.wasm` from bytes,
+no precompiled `.cwasm` cache (not wired for ANY language yet,
+`core/bundle_executor/src/invoke.rs`'s own module doc) — was first
+measured at **~104 seconds** under `cargo test`'s default (debug) host
+profile. That number is misleading and is **not** a production estimate:
+`cargo test` leaves the executor's OWN code (including the `wasmtime`/
+Cranelift crates that do the compiling) unoptimized, so it measures how
+slowly an unoptimized Cranelift runs, not how slowly Cranelift compiles
+this component. `core/bundle_executor`'s actual deployed binary is always
+built `--release` (`Dockerfile.rust`'s `cargo build --release --locked`),
+so the release-profile number below is the one that matters.
 
-Once instantiated, execution itself is fast: the first `transform` invoke
-(instantiation + actual call) took ~50ms; `dispatch` was comparable. The
-cost is entirely front-loaded into the one-time compile.
+`core/bundle_executor/tests/component_compile_benchmark.rs` isolates just
+the `Component::new` call (no wire-protocol/tokio overhead) and reports
+both this bundle's fixture and an existing Rust fixture side by side,
+built `--release`:
 
-**Consequence:** C# is not viable at Tier 1 without the precompiled
-`.cwasm` artifact caching spec SS7.2/SS7.6 already calls for (currently a
-TODO for every language, not C#-specific) — 104s per cold load is
-unacceptable on a hot `load` path, whereas Rust's 3-4s, while also not
-free, is tolerable in more scenarios. This is a load-bearing, not
-cosmetic, finding: any C#-toolchain rollout must land compile caching
-first, or restrict C# bundles to pre-warmed/long-lived executor instances
-that load once and stay resident.
+```bash
+cargo test --release --test component_compile_benchmark -- --ignored --nocapture
+```
+
+| Fixture | Size | `Component::new`, debug profile (`cargo test`) | `Component::new`, release profile (`cargo test --release`) |
+|---|---|---|---|
+| `csping.wasm` (this bundle, C#/NativeAOT-LLVM) | 4,361,157 bytes | ~104,000ms | **4,939ms** |
+| `hostile_fixture.wasm` (Rust, `cargo-component`) | 96,489 bytes | not separately measured | **271ms** |
+
+Release-profile compile is **~21x faster** than the debug-profile number
+this spike originally reported — the debug number overstated the real
+cost by more than an order of magnitude, and the correction matters:
+**~4.9 seconds is close to the spec's own ~3-4 second reference point for
+a "large" Rust component** (spec SS7.2), not the 25-30x-worse outlier
+the debug measurement implied. C# is still the slowest of the two
+fixtures measured here (~18x `hostile_fixture.wasm`'s 271ms), consistent
+with being ~45x larger by byte count — sub-linear, not proportional,
+suggesting a meaningful fixed per-component compile overhead rather than
+a per-byte one.
+
+Once instantiated, execution itself is fast regardless of profile: the
+first `transform` invoke (instantiation + actual call) took ~50ms;
+`dispatch` was comparable. The cost is entirely front-loaded into the
+one-time compile.
+
+**Revised consequence:** at ~4.9s release-profile, C# is in the same
+order of magnitude as Rust's own worst-case reference, not disqualified
+outright — this spike's original "not viable at Tier 1" verdict was an
+artifact of measuring under the wrong build profile and should be
+retracted. It is still the slowest of the two fixtures measured and a
+few seconds is still non-trivial on a hot `load` path, so the precompiled
+`.cwasm` artifact caching spec SS7.2/SS7.6 already calls for (a TODO for
+every language, not C#-specific) remains worth landing before any
+language is trusted at scale — but C#'s compile cost alone is no longer
+the blocking finding it first appeared to be. A larger, more realistic
+bundle (this spike's `csping` is deliberately minimal) should be
+re-measured before drawing a final conclusion either way.
 
 ## Other gaps and caveats
 
@@ -145,13 +183,18 @@ that load once and stay resident.
   preview feed, not the hardened nuget.org supply chain, is in the build
   path. No PRC/sanctioned-entity dependency found in the toolchain
   (Bytecode Alliance + Microsoft + dotnet Foundation only).
-- **First build downloads and caches WASI SDK** (~120MB from
-  `github.com/WebAssembly/wasi-sdk` GitHub Releases) the first time
-  NativeAOT-LLVM runs on a given machine/image layer — not pinned by this
-  bundle directly; its version follows the pinned
-  `Microsoft.DotNet.ILCompiler.LLVM` release. Document, don't silently
-  accept: a from-scratch container build is not fully hermetic without
-  vendoring that tarball.
+- **WASI SDK is pinned + sha256-verified in `Dockerfile`** (`WASI_SDK_VERSION`/
+  `WASI_SDK_SHA256` build args), not left to NativeAOT-LLVM's own live,
+  unverified first-use download (~120MB from
+  `github.com/WebAssembly/wasi-sdk` GitHub Releases). Confirmed empirically
+  that pre-seeding the exact cache directory the toolchain expects
+  (`$HOME/.wasi-sdk/wasi-sdk-<version>`) makes it skip its own download
+  entirely: a `docker build --network none`-equivalent run (pre-populated
+  cache volume, no network) still built successfully. Its version tracks
+  the pinned `Microsoft.DotNet.ILCompiler.LLVM` release — bumping that
+  package requires rebuilding once with network access, reading the new
+  WASI SDK version/URL out of the log, and re-pinning both Dockerfile
+  `ARG`s against the newly observed release asset's sha256.
 - **`--with-wit-results` was not used.** By default, `wit-bindgen`'s C#
   backend lowers a WIT `result<T, E>` export return type to "return `T`
   directly, throw `WitException<E>`/`WitException<T>` for `Err`" rather
@@ -201,17 +244,29 @@ language "csharp"`). A real `CSharpBuilder` needs:
 4. Generate (or vendor) a `<Wit Include=".../stage.wit" World="stage" />`
    item pointing at the manifest's declared world — mechanically
    equivalent to what `bundle.yaml`'s `stages` map already declares.
-5. Enforce the `dotnet-experimental` NuGet feed is present and no other
-   package source is reachable during the build (supply-chain
-   containment, mirrors why the untrusted `build` stage runs with zero
-   credentials/network per `core/bundle_compiler/README.md`) — this is in
-   tension with NativeAOT-LLVM's live WASI SDK download on first use,
-   which needs network access; resolving that (vendor the WASI SDK tarball
-   into the build image instead of fetching at build time) is a
-   prerequisite, not an afterthought.
+5. Enforce the `dotnet-experimental` NuGet feed is present, pin/verify the
+   WASI SDK download by version + sha256 exactly like this bundle's own
+   `Dockerfile` (see "Hermeticity" above) rather than trusting
+   NativeAOT-LLVM's live, unverified first-use fetch, and otherwise keep
+   the untrusted `build` stage's zero-credentials/network posture
+   (`core/bundle_compiler/README.md`) — NuGet restore itself is the one
+   remaining network dependency, same category as `cargo`/`pip`
+   restoring from their own registries for the other `LanguageBuilder`s.
 6. Run the same `wasm-tools component wit`/`ALLOWED_WASI_NAMESPACES`
    check this spike ran by hand, as part of `run_build`'s post-build
    verification.
+
+## Reproducibility & auditability
+
+`make verify-csping-fixture` (`scripts/verify-csping-fixture.sh`)
+rebuilds this bundle from source, in the pinned rootless `Dockerfile`,
+and asserts the result is byte-identical to the committed
+`core/bundle_executor/tests/fixtures/csping.wasm` — checked against a
+recorded `csping.wasm.sha256` in that same directory, not just a visual
+diff. Run it after any change to this directory's `.cs`/`.csproj`/
+`Dockerfile`/`nuget.config`, and re-run
+`sha256sum core/bundle_executor/tests/fixtures/csping.wasm > core/bundle_executor/tests/fixtures/csping.wasm.sha256`
+plus re-copy the fixture if the change is intentional.
 
 ## Porting an existing C# bot codebase (e.g. a Twitch bot) into this model
 
