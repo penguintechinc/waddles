@@ -6,7 +6,7 @@ Demonstrates usage of WorkflowValidationService with various scenarios.
 This file shows how to validate workflows and use the validation results.
 
 To run tests:
-    python3 -m pytest services/validation_service_tests.py -v
+    python3 -m pytest tests/test_validation_service.py -v
 """
 
 import logging

@@ -17,11 +17,12 @@ License Tiers:
 - Premium: Unlimited workflows
 """
 
-import logging
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
 from enum import Enum
 import asyncio
+
+from flask_core import setup_aaa_logging
 
 try:
     import aiohttp
@@ -36,7 +37,13 @@ except ImportError:
     REDIS_AVAILABLE = False
     redis = None
 
-logger = logging.getLogger(__name__)
+# Module-level fallback logger for callers that construct LicenseService
+# without an explicit logger_instance -- every self.logger.audit()/.system()
+# call below requires the AAALogger interface, not a bare stdlib Logger
+# (logging.getLogger(__name__) has no .audit()/.system() and raised
+# AttributeError the first time either was hit, previously undetected
+# because this module had 0% test coverage).
+logger = setup_aaa_logging("workflow_core.license_service", "1.0.0")
 
 
 class LicenseTier(str, Enum):
@@ -90,7 +97,7 @@ class LicenseService:
         license_server_url: str,
         redis_url: Optional[str] = None,
         release_mode: bool = False,
-        logger_instance: Optional[logging.Logger] = None
+        logger_instance: Optional[Any] = None
     ):
         """
         Initialize license service.
@@ -213,10 +220,11 @@ class LicenseService:
             # In dev mode without license key, assume premium
             if not self.release_mode:
                 self.logger.audit(
-                    f"License check skipped in dev mode for community {community_id}",
                     action="license_check",
+                    user="system",
                     community=str(community_id),
-                    result="SUCCESS"
+                    result="SUCCESS",
+                    message=f"License check skipped in dev mode for community {community_id}",
                 )
                 return {
                     "status": LicenseStatus.ACTIVE.value,
@@ -242,10 +250,11 @@ class LicenseService:
             await self._cache_license(community_id, license_info)
 
             self.logger.audit(
-                f"License validated for community {community_id}",
                 action="license_check",
+                user="system",
                 community=str(community_id),
-                result="SUCCESS"
+                result="SUCCESS",
+                message=f"License validated for community {community_id}",
             )
 
             return license_info
@@ -294,11 +303,11 @@ class LicenseService:
             # Check if license is active
             if license_info["status"] != LicenseStatus.ACTIVE.value:
                 self.logger.audit(
-                    f"Workflow creation denied: invalid license status",
                     action="workflow_creation_denied",
-                    community=str(community_id),
                     user=entity_id,
-                    result="FAILURE"
+                    community=str(community_id),
+                    result="FAILURE",
+                    message="Workflow creation denied: invalid license status",
                 )
                 raise LicenseValidationException(
                     "License is not active",
@@ -310,11 +319,11 @@ class LicenseService:
             if tier == LicenseTier.FREE.value:
                 # Free tier: 0 workflows allowed
                 self.logger.audit(
-                    f"Workflow creation denied: free tier limit reached",
                     action="workflow_creation_denied",
-                    community=str(community_id),
                     user=entity_id,
-                    result="FAILURE"
+                    community=str(community_id),
+                    result="FAILURE",
+                    message="Workflow creation denied: free tier limit reached",
                 )
                 raise LicenseValidationException(
                     "Free tier does not support workflows. Upgrade to Premium.",
@@ -323,11 +332,11 @@ class LicenseService:
 
             # Premium tier: unlimited workflows
             self.logger.audit(
-                f"Workflow creation validated",
                 action="workflow_creation_validated",
-                community=str(community_id),
                 user=entity_id,
-                result="SUCCESS"
+                community=str(community_id),
+                result="SUCCESS",
+                message="Workflow creation validated",
             )
             return True
 
@@ -379,11 +388,11 @@ class LicenseService:
             # Check if license is active
             if license_info["status"] != LicenseStatus.ACTIVE.value:
                 self.logger.audit(
-                    f"Workflow execution denied: invalid license status",
                     action="workflow_execution_denied",
-                    community=str(community_id),
                     user=workflow_id,
-                    result="FAILURE"
+                    community=str(community_id),
+                    result="FAILURE",
+                    message="Workflow execution denied: invalid license status",
                 )
                 raise LicenseValidationException(
                     "License is not active",
@@ -394,11 +403,11 @@ class LicenseService:
             features = license_info.get("features", {})
             if not features.get("workflows", False):
                 self.logger.audit(
-                    f"Workflow execution denied: workflows not in license",
                     action="workflow_execution_denied",
-                    community=str(community_id),
                     user=workflow_id,
-                    result="FAILURE"
+                    community=str(community_id),
+                    result="FAILURE",
+                    message="Workflow execution denied: workflows not in license",
                 )
                 raise LicenseValidationException(
                     "Workflows feature not enabled in license",
@@ -406,11 +415,11 @@ class LicenseService:
                 )
 
             self.logger.audit(
-                f"Workflow execution validated",
                 action="workflow_execution_validated",
-                community=str(community_id),
                 user=workflow_id,
-                result="SUCCESS"
+                community=str(community_id),
+                result="SUCCESS",
+                message="Workflow execution validated",
             )
             return True
 
