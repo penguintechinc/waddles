@@ -1,0 +1,41 @@
+[project]
+name = "waddle-bundle-quotes"
+version = "1.0.0"
+description = "First-party waddles.core.quotes App Bundle -- `!quote add|get|random|delete` chat commands, compiled to a WASI 0.2 component with componentize-py against wit/waddle-bundle/stage.wit. Migrated from action/interactive/quote_interaction_module (legacy module retained; retirement is a separate step)."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3", "pytest-cov==6.0.0", "mypy==1.13.0", "ruff==0.8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+enable_incomplete_feature = ["NewGenericSyntax"]
+mypy_path = ["src", "../../../sdk/waddle-sdk/src"]
+
+# `wit_world`, `componentize_py_types`, `_entry_wiring`, `_bundle_preimports`
+# are generated per-build, only inside a real compiled component -- never
+# pip-installable, so no stub can exist for static analysis to find. Same
+# override as sdk/waddle-sdk/pyproject.toml.
+[[tool.mypy.overrides]]
+module = ["wit_world", "componentize_py_types", "_bundle_preimports"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "D", "UP", "B", "ASYNC", "S"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Test names are self-documenting (pytest convention); S101 is standard
+# pytest usage; D1xx docstrings are not required on every test function.
+"tests/*" = ["D100", "D101", "D102", "D103", "D104", "S101"]

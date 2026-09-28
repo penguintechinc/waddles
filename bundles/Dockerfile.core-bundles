@@ -61,6 +61,25 @@ RUN componentize-py \
         -o pyping.wasm
 
 # ---------------------------------------------------------------------------
+# Stage 2b: waddles.core.quotes.default (Python) -> WASI 0.2 component
+#
+# Built FROM python-bundle-builder (stage 2) to reuse its already-installed,
+# pinned componentize-py==0.25.1 rather than a second pip install of the same
+# version -- same toolchain, new bundle source only.
+# ---------------------------------------------------------------------------
+FROM python-bundle-builder AS python-quotes-bundle-builder
+
+COPY bundles/python/quotes/src bundles/python/quotes/src
+# Same waddle_sdk._component_entry / _entry_wiring.py wiring as the pyping stage above
+# (see that stage's own comment) -- bundles/python/quotes/src/_entry_wiring.py supplies the
+# static bundle_transform/bundle_dispatch wiring for THIS bundle's own transform()/dispatch().
+RUN componentize-py \
+        -d wit/waddle-bundle -w stage \
+        componentize -p sdk/waddle-sdk/src -p bundles/python/quotes/src \
+        waddle_sdk._component_entry \
+        -o quotes.wasm
+
+# ---------------------------------------------------------------------------
 # Stage 3: hub-api's own Python dependency set (+ wasm-tools CLI) -- mirrors
 # hub_api/Dockerfile's builder stage verbatim, same pinned base per
 # devops-containers.md ("never a second pinned digest for the same tag").
@@ -109,8 +128,10 @@ RUN mkdir -p /core-bundles
 COPY bundles/core-bundles.yaml /core-bundles/core-bundles.yaml
 COPY bundles/rust/ping/hub-manifest.yaml /core-bundles/ping.manifest.yaml
 COPY bundles/python/pyping/hub-manifest.yaml /core-bundles/pyping.manifest.yaml
+COPY bundles/python/quotes/hub-manifest.yaml /core-bundles/quotes.manifest.yaml
 COPY --from=rust-bundle-builder /repo/bundles/rust/ping/target/wasm32-wasip2/release/waddle_bundle_ping_rust.wasm /core-bundles/ping.wasm
 COPY --from=python-bundle-builder /repo/pyping.wasm /core-bundles/pyping.wasm
+COPY --from=python-quotes-bundle-builder /repo/quotes.wasm /core-bundles/quotes.wasm
 
 ENV CORE_BUNDLES_DIR=/core-bundles
 

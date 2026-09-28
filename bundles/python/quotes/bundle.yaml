@@ -1,0 +1,54 @@
+schema_version: 2
+app_id: waddles.core.quotes.default
+name: Community Quotes (Python)
+version: 1.0.0
+feature: waddles.core.quotes
+module: core
+provider: builtin
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+author: PenguinTech/waddles
+license: Apache-2.0
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!quote"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!quote"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+data:
+  # Storage is `kv`, not `db` -- see bundles/python/quotes/src/app.py's own
+  # module docstring for why (db is still only being designed; kv has
+  # implementation in flight on feature/bundle-kv-capability). `kv` needs no
+  # `data.tables` declaration (WIT `stage.wit`: kv capability is "always
+  # granted", unlike db's "granted only when data.tables is non-empty").
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions: []
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null
