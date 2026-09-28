@@ -10,7 +10,9 @@ WORKDIR /app
 COPY services/action-platforms/requirements.txt .
 
 # Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Pin pip itself: base image ships 26.0.1 (PYSEC-2026-2875/2876/196/3721, fixed <=26.1.2/26.2)
+RUN pip install --no-cache-dir --upgrade "pip==26.2.1" && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy and install flask_core from shared libs
 COPY libs/flask_core /app/libs/flask_core
@@ -29,6 +31,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy installed Python packages from builder
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
+
+# This runtime stage's own base image ships an older bundled pip
+# (pip-26.0.1.dist-info) that the COPY above doesn't remove (COPY merges,
+# it doesn't delete stale destination files) -- drop it so only the
+# builder's patched pip metadata (26.2.1) remains.
+RUN find /usr/local/lib/python3.13/site-packages -maxdepth 1 -name 'pip-*.dist-info' ! -name 'pip-26.2.1.dist-info' -exec rm -rf {} +
 
 # Copy application code
 COPY services/action-platforms/app.py .

@@ -37,7 +37,10 @@ APScheduler==3.10.4
 redis==5.0.1
 
 # Authentication & Security
-python-jose[cryptography]>=3.5.0
+# python-jose replaced with pyjwt: jose pulls in `ecdsa` unconditionally
+# (PYSEC-2026-1325 / CVE-2024-23342, Minerva timing attack, no upstream fix)
+# even when only HS256 (symmetric) is used, as in grpc_handler.py.
+pyjwt>=2.12.1
 cryptography>=46.0.6
 
 # Environment
