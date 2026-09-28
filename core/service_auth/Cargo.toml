@@ -1,0 +1,29 @@
+[package]
+name = "service_auth"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Client + verifier for hub-api-issued per-service EdDSA machine JWTs (feature/eddsa-machine-jwt). Bootstraps with the pod's projected Kubernetes ServiceAccount token, caches and refreshes the resulting machine JWT, and verifies inbound machine JWTs against a JWKS-shaped trust bundle. SPIFFE/Skauswatch-ready: TrustBundle is a trait so a future JWT-SVID bundle source drops in without touching callers -- see docs comment in src/lib.rs."
+
+[lib]
+name = "service_auth"
+path = "src/lib.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- rules/critical-rules.md
+# Dependency Pinning. Versions mirror core/svc_process/Cargo.toml where the
+# same crate is already pinned there, to avoid a second pin of the same
+# dependency once these crates share a workspace.
+[dependencies]
+tokio = { version = "=1.53.1", features = ["sync", "time", "rt", "fs"] }
+reqwest = { version = "=0.12.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["rust_crypto"] }
+thiserror = "=2.0.21"
+tracing = "=0.1.44"
+async-trait = "=0.1.89"
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["full", "test-util"] }
