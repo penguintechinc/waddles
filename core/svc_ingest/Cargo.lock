@@ -1695,6 +1695,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "ryu",
+ "sha1_smol",
  "socket2",
  "tokio",
  "tokio-rustls",

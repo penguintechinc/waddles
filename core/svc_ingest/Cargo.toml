@@ -152,6 +152,7 @@ redis = { version = "=1.7.0", default-features = false, features = [
     "tokio-comp",
     "tls-rustls",
     "tokio-rustls-comp",
+    "script",
 ] }
 # `redis`'s `tls-rustls` feature enables `dep:rustls` but requests no
 # process-level `CryptoProvider` -- without one installed, the first TLS

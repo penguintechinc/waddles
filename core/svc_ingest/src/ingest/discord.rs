@@ -37,6 +37,17 @@ use crate::telemetry::ReceiverHealthMetrics;
 pub trait GatewayChannel: Send {
     /// Reads the next chat message, `Ok(None)` on a clean close.
     async fn next_chat_message(&mut self) -> Result<Option<ChatMessage>, DiscordError>;
+
+    /// A snapshot of this session's `session_id`/`seq`/`resume_gateway_url`
+    /// for [`crate::ingest::discord_identify_budget::SessionStore`] to
+    /// persist, enabling a future `RESUME` instead of a fresh `IDENTIFY`.
+    /// Default `None`: the pinned `penguin-connector-discord` crate does
+    /// not expose `READY`'s session fields yet (see
+    /// `crate::ingest::discord_identify_budget`'s top doc comment) --
+    /// overridden by test fakes that model a resume-capable transport.
+    fn session_snapshot(&self) -> Option<crate::ingest::discord_identify_budget::StoredSession> {
+        None
+    }
 }
 
 impl<S> GatewayChannel for GatewaySession<S>
@@ -58,6 +69,23 @@ pub trait GatewayConnector: Send + Sync {
     type Channel: GatewayChannel;
     /// Establishes one new connection (connect + `HELLO`/`IDENTIFY`).
     async fn connect(&self) -> Result<Self::Channel, DiscordError>;
+
+    /// Attempts to resume a prior session via `OP_RESUME` instead of a
+    /// fresh `HELLO`/`IDENTIFY` handshake -- see
+    /// `crate::ingest::discord_identify_budget::BudgetedResumingConnector`,
+    /// which always tries this before ever consulting the distributed
+    /// IDENTIFY budget (spec §2.5, RESUME is exempt from Discord's
+    /// IDENTIFY rate limit entirely). Default impl always reports the
+    /// session non-resumable ([`DiscordError::SessionInvalidated`]): the
+    /// pinned `penguin-connector-discord` crate does not implement the
+    /// `OP_RESUME` wire frame yet (see that module's top doc comment) --
+    /// overridden by test fakes that model a resume-capable transport.
+    async fn resume(
+        &self,
+        _session: &crate::ingest::discord_identify_budget::StoredSession,
+    ) -> Result<Self::Channel, DiscordError> {
+        Err(DiscordError::SessionInvalidated)
+    }
 }
 
 impl GatewayConnector for DiscordGatewayReceiver {
