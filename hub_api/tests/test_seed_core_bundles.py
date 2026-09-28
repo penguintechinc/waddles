@@ -54,7 +54,19 @@ _MANIFEST: dict[str, Any] = {
 _COMPONENT_BYTES = b"fake-wasm-ping-component-bytes"
 
 
-def _write_bundle(tmp_path: Path, *, manifest: dict[str, Any] = _MANIFEST) -> CatalogEntry:
+async def _seed_community(install_dal: Any, *, tenant_id: int = 1, name: str = "acme") -> int:
+    """A `communities` row -- COMMUNITY-tier activation targets need a real community_id."""
+    return int(await install_dal.communities.async_insert(tenant_id=tenant_id, name=name))
+
+
+def _write_bundle(
+    tmp_path: Path, *, manifest: dict[str, Any] = _MANIFEST, community_id: int | None = None
+) -> CatalogEntry:
+    """`community_id`, when given, makes the default target a full COMMUNITY-tier activation.
+
+    `None` (the default) is TENANT-tier availability only under the
+    3-tier split -- see `ActivationTarget`'s own docstring.
+    """
     (tmp_path / "ping.manifest.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
     (tmp_path / "ping.wasm").write_bytes(_COMPONENT_BYTES)
     return CatalogEntry(
@@ -63,7 +75,7 @@ def _write_bundle(tmp_path: Path, *, manifest: dict[str, Any] = _MANIFEST) -> Ca
         language="rust",
         manifest_path="ping.manifest.yaml",
         artifact_path="ping.wasm",
-        activation_targets=(ActivationTarget(tenant_slug=TENANT_SLUG),),
+        activation_targets=(ActivationTarget(tenant_slug=TENANT_SLUG, community_id=community_id),),
     )
 
 
@@ -145,11 +157,28 @@ async def test_seed_one_publishes_and_activates_under_system_actor(
     install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _patch_validator_and_storage(monkeypatch)
-    entry = _write_bundle(tmp_path)
+    community_id = await _seed_community(install_dal)
+    entry = _write_bundle(tmp_path, community_id=community_id)
 
     results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
 
-    assert [r.outcome for r in results] == ["activated"]
+    assert [r.outcome for r in results] == ["made_available", "activated"]
+
+    installed_row = (
+        await install_dal(install_dal.app_global_installs.app_id == entry.app_id).select()
+    ).first()
+    assert installed_row is not None
+    assert installed_row.installed_by is None  # SYSTEM actor, never a fake hub_users row
+    assert installed_row.install_source == "system:core-seeder"
+
+    availability_row = (
+        await install_dal(
+            (install_dal.bundle_tenant_availability.tenant_id == 1)
+            & (install_dal.bundle_tenant_availability.app_id == entry.app_id)
+        ).select()
+    ).first()
+    assert availability_row is not None
+    assert availability_row.available is True
 
     catalog_row = (
         await install_dal(install_dal.app_catalog.app_id == entry.app_id).select()
@@ -182,12 +211,39 @@ async def test_seed_one_publishes_and_activates_under_system_actor(
     active_row = (
         await install_dal(
             (install_dal.app_active_versions.app_id == entry.app_id)
-            & (install_dal.app_active_versions.community_id == 0)
+            & (install_dal.app_active_versions.community_id == community_id)
         ).select()
     ).first()
     assert active_row is not None
     assert active_row.version_id == version_row.id
     assert active_row.activated_by is None
+
+
+async def test_seed_one_with_no_community_id_only_makes_available_never_activates(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`community_id=None` (the real `bundles/core-bundles.yaml`'s own default) is TENANT-tier only.
+
+    3-tier split: no COMMUNITY-tier activation happens for a target that
+    declares no community -- see `ActivationTarget`'s own docstring.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    entry = _write_bundle(tmp_path)  # community_id=None (default)
+
+    results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert [r.outcome for r in results] == ["made_available"]
+
+    availability_row = (
+        await install_dal(
+            (install_dal.bundle_tenant_availability.tenant_id == 1)
+            & (install_dal.bundle_tenant_availability.app_id == entry.app_id)
+        ).select()
+    ).first()
+    assert availability_row is not None
+    assert availability_row.available is True
+
+    active = await install_dal(install_dal.app_active_versions.app_id == entry.app_id).select()
+    assert not active
 
 
 # ---------------------------------------------------------------------------
@@ -200,10 +256,11 @@ async def test_seed_one_reruns_are_a_no_op(
 ) -> None:
     """Same app_id+version+digest, already active -> no new approval row, `outcome == "no_op"`."""
     _patch_validator_and_storage(monkeypatch)
-    entry = _write_bundle(tmp_path)
+    community_id = await _seed_community(install_dal)
+    entry = _write_bundle(tmp_path, community_id=community_id)
 
     first = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
-    assert [r.outcome for r in first] == ["activated"]
+    assert [r.outcome for r in first] == ["made_available", "activated"]
 
     second = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
     assert [r.outcome for r in second] == ["no_op"]
@@ -220,7 +277,8 @@ async def test_seed_one_new_digest_publishes_a_new_version(
 ) -> None:
     """A bumped catalog version + new artifact activates a NEW version_id, not a no-op."""
     _patch_validator_and_storage(monkeypatch)
-    entry = _write_bundle(tmp_path)
+    community_id = await _seed_community(install_dal)
+    entry = _write_bundle(tmp_path, community_id=community_id)
     await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
 
     new_manifest = {**_MANIFEST, "version": "1.0.1"}
@@ -252,7 +310,7 @@ async def test_seed_one_new_digest_publishes_a_new_version(
     active_row = (
         await install_dal(
             (install_dal.app_active_versions.app_id == entry.app_id)
-            & (install_dal.app_active_versions.community_id == 0)
+            & (install_dal.app_active_versions.community_id == community_id)
         ).select()
     ).first()
     new_version_row = (
@@ -297,6 +355,10 @@ async def test_seed_one_activates_every_configured_target_independently(
     other_tenant_id = await install_dal.tenants.async_insert(
         slug="other-tenant", display_name="Other Tenant", is_active=True
     )
+    community_id = await _seed_community(install_dal, tenant_id=1, name="acme")
+    other_community_id = await _seed_community(
+        install_dal, tenant_id=int(other_tenant_id), name="other-community"
+    )
     entry = _write_bundle(tmp_path)
     entry = CatalogEntry(
         app_id=entry.app_id,
@@ -305,13 +367,18 @@ async def test_seed_one_activates_every_configured_target_independently(
         manifest_path=entry.manifest_path,
         artifact_path=entry.artifact_path,
         activation_targets=(
-            ActivationTarget(tenant_slug=TENANT_SLUG),
-            ActivationTarget(tenant_slug="other-tenant"),
+            ActivationTarget(tenant_slug=TENANT_SLUG, community_id=community_id),
+            ActivationTarget(tenant_slug="other-tenant", community_id=other_community_id),
         ),
     )
 
     results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
-    assert [r.outcome for r in results] == ["activated", "activated"]
+    assert [r.outcome for r in results] == [
+        "made_available",
+        "activated",
+        "made_available",
+        "activated",
+    ]
 
     active_rows = await install_dal(install_dal.app_active_versions.app_id == entry.app_id).select()
     assert {r.tenant_id for r in active_rows} == {1, int(other_tenant_id)}
@@ -494,10 +561,13 @@ async def test_run_examines_every_catalog_entry_and_reports_a_nonzero_exit_on_an
     exit_code = await seeder._run(tmp_path, catalog_path)
 
     assert exit_code == 1  # non-zero: 2 of 3 bundles failed
-    active = await install_dal(
-        install_dal.app_active_versions.app_id == "waddles.core.example.ping"
+    # This catalog's own activation_targets carry no community_id -- TENANT-tier
+    # availability only (see `ActivationTarget`'s own docstring), not COMMUNITY activation.
+    available = await install_dal(
+        (install_dal.bundle_tenant_availability.app_id == "waddles.core.example.ping")
+        & (install_dal.bundle_tenant_availability.available == True)  # noqa: E712
     ).select()
-    assert len(active) == 1  # the one good bundle still seeded successfully
+    assert len(available) == 1  # the one good bundle still seeded successfully
 
 
 def _patch_run_dependencies(install_dal: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -804,6 +874,12 @@ async def test_run_registers_platform_connections_before_activating_a_bundle_tha
     monkeypatch.setattr(seeder.HubAPIConfig, "from_env", staticmethod(lambda: _FakeConfig()))
     monkeypatch.setattr(install_dal, "close", AsyncMock())
 
+    # Auto-bind (app_source_binding_service.sync_bindings()) only runs at COMMUNITY-tier
+    # activation under the 3-tier split -- both the platform connection AND the bundle's
+    # own activation target need the SAME real community_id (sync_bindings() matches
+    # ingest_sources.community_id exactly, no tenant-wide fallback for a real community_id).
+    community_id = await _seed_community(install_dal)
+
     _write_pyping_bundle(tmp_path)
     catalog_path = tmp_path / "core-bundles.yaml"
     catalog_path.write_text(
@@ -815,6 +891,7 @@ async def test_run_registers_platform_connections_before_activating_a_bundle_tha
                         "platform": "discord",
                         "source_id": "dg-474965105759748096",
                         "label": "svc-ingest Discord guild",
+                        "community_id": community_id,
                     }
                 ],
                 "bundles": [
@@ -824,7 +901,9 @@ async def test_run_registers_platform_connections_before_activating_a_bundle_tha
                         "language": "python",
                         "manifest_path": "pyping.manifest.yaml",
                         "artifact_path": "pyping.wasm",
-                        "activation_targets": [{"tenant_slug": TENANT_SLUG}],
+                        "activation_targets": [
+                            {"tenant_slug": TENANT_SLUG, "community_id": community_id}
+                        ],
                     }
                 ],
             }

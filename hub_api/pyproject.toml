@@ -208,6 +208,12 @@ convention = "google"
 # above.
 "blueprints/v1/bundle_versions.py" = ["N815", "S101"]
 "blueprints/v1/bundle_approvals.py" = ["N815", "S101"]
+# App Bundle 3-tier split (TENANT + COMMUNITY tiers, services/bundle_
+# approval_service.py's own module docstring) -- same camelCase DTO wire
+# contract + tenant_middleware postcondition assert rationale as
+# bundle_approvals.py above.
+"blueprints/v1/bundle_tenant_availability.py" = ["N815", "S101"]
+"blueprints/v1/bundle_activation.py" = ["N815", "S101"]
 # Tenant ingest_sources registry (spec Sec5.2, Sec10.3) -- camelCase DTO
 # fields (sourceId, communityId, nextCursor, ...) match the wire contract
 # every other v1 blueprint's DTOs already use; S101 is the same
