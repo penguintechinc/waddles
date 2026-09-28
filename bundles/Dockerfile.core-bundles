@@ -36,6 +36,40 @@ COPY wit wit
 COPY sdk/waddle-sdk-rs sdk/waddle-sdk-rs
 COPY bundles/rust/ping bundles/rust/ping
 WORKDIR /repo/bundles/rust/ping
+
+# Reproducible-build pins -- proven byte-identical sha256 across two independent
+# `--no-cache` builds (scripts/verify-ping-bundle-reproducible.sh / `make
+# verify-ping-bundle-reproducible`, also run in CI on any change under this path). Every
+# knob below closes one specific nondeterminism source; `--locked` (already on the
+# `cargo install`/`cargo component build` invocations above/below) plus the pinned
+# `rust:1.97-slim-bookworm` digest and pinned cargo-component/wasm-tools versions handle
+# toolchain/dependency-resolution determinism -- these env vars handle CODEGEN
+# determinism, which `--locked` alone does not touch:
+#   - SOURCE_DATE_EPOCH: fixes any timestamp rustc/LLVM would otherwise embed (e.g. in
+#     debug info) to a constant instead of `date +%s` at build time.
+#   - CARGO_INCREMENTAL=0: the incremental compilation cache is itself a
+#     nondeterminism source (its on-disk layout is an optimization, not a spec) and
+#     must never influence a from-scratch release build.
+#   - RUSTFLAGS --remap-path-prefix (x2): erases this stage's absolute build path
+#     (`/repo`, otherwise baked into `panic!()`/`debug_assert!()` location strings
+#     even in a release cdylib) AND the crates.io registry source checkout path
+#     (`$CARGO_HOME/registry/src/<index-hash>/...` -- the `<index-hash>` segment is
+#     derived from the registry URL so it's already stable across hosts, but the
+#     leading `$CARGO_HOME` prefix is not guaranteed to match between build
+#     environments) so neither leaks into the component binary.
+#   - -C codegen-units=1: parallel codegen units are LLVM's own documented source of
+#     nondeterministic instruction/section ordering; forcing a single unit removes it.
+#   - -C strip=symbols: drops the debug/symbol tables `wasm-tools` would otherwise
+#     carry through verbatim (which can themselves embed compiler-version/path
+#     metadata beyond what remap-path-prefix reaches).
+#   - TZ/LC_ALL: defensive -- nothing in this build should read wall-clock time or
+#     locale-dependent formatting, but pinning both means a future dependency
+#     addition can't silently regress this without CI's reproducibility check catching it.
+ENV SOURCE_DATE_EPOCH=1704067200 \
+    CARGO_INCREMENTAL=0 \
+    RUSTFLAGS="--remap-path-prefix=/repo=/build --remap-path-prefix=${CARGO_HOME}/registry/src=/cargo/registry/src -C codegen-units=1 -C strip=symbols" \
+    TZ=UTC \
+    LC_ALL=C.UTF-8
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
 # ---------------------------------------------------------------------------

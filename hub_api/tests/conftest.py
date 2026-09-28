@@ -68,6 +68,7 @@ from sqlalchemy import (
     String,
     Table,
     Text,
+    UniqueConstraint,
 )
 
 from services.schema import (
@@ -1261,6 +1262,17 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("enabled", Boolean, server_default="1"),
         Column("created_at", DateTime),
         Column("updated_at", DateTime),
+        # Mirrors migration 0020's real `UNIQUE (tenant_id, platform,
+        # source_id)` -- this sqlite fixture previously omitted it (every
+        # other column-set-only table mirror in this function does too), but
+        # services/ingest_source_registry_service.py's `create_ingest_source`
+        # specifically depends on this constraint firing (caught as
+        # `IntegrityError`, surfaced as a documented 409) for its own
+        # "same source, second community of one tenant" gap -- untestable
+        # without it. Every existing seeder in this file already uses
+        # distinct `source_id` values per tenant/platform, so adding it here
+        # doesn't perturb any other test.
+        UniqueConstraint("tenant_id", "platform", "source_id"),
     )
     Table(
         "workstreams",
