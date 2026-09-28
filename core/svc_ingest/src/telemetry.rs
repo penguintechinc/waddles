@@ -123,6 +123,10 @@ pub struct IngestMetrics {
     /// (load/latency histograms first, not just a counter).
     pub eventsub_request_duration_seconds: prometheus::HistogramVec,
     pub receiver_connection_healthy: prometheus::IntGaugeVec,
+    /// Identity-field (`actor`) envelope-encryption outcomes, labeled by
+    /// tenant/status (`success`/`dek_unavailable`) -- `crate::identity_crypto`,
+    /// `crate::publish::publish_event`.
+    pub identity_encryption_total: prometheus::IntCounterVec,
 }
 
 /// Registers this service's ingest-path metrics against `registry`. Must be
@@ -217,6 +221,19 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         .register(Box::new(receiver_connection_healthy.clone()))
         .expect("register svc_ingest_receiver_connection_healthy");
 
+    let identity_encryption_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_ingest_identity_encryption_total",
+            "Identity-field (actor) envelope-encryption outcomes on the ingest->process \
+             stream, labeled by tenant/status (success/dek_unavailable)",
+        ),
+        &["tenant", "status"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(identity_encryption_total.clone()))
+        .expect("register svc_ingest_identity_encryption_total");
+
     IngestMetrics {
         events_published_total,
         publish_errors_total,
@@ -225,6 +242,7 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         eventsub_dedup_hits_total,
         eventsub_request_duration_seconds,
         receiver_connection_healthy,
+        identity_encryption_total,
     }
 }
 

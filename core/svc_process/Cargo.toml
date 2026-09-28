@@ -142,6 +142,10 @@ governor = "=0.8.1"
 # declares the identical dependency so the query/diff logic is written
 # and tested exactly once. See `core/bundle_active_set/Cargo.toml`.
 bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
+aes-gcm = "=0.10.3"
+hkdf = "=0.12.4"
+base64 = "=0.22.1"
+zeroize = { version = "=1.8.1", features = ["derive"] }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"

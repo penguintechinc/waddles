@@ -118,19 +118,22 @@ pub fn source_id(guild_id: Option<&str>) -> String {
 ///   code (never the bot token) -- the service process itself keeps
 ///   running; only this one platform's ingest loop has stopped.
 #[allow(clippy::too_many_arguments)] // every parameter is independently varied across tests; a params struct would just move the same count elsewhere -- matches twitch.rs's own precedent
-async fn run_loop<C, A, M>(
+async fn run_loop<C, A, M, Dk>(
     connector: C,
     appender: &A,
     metrics: &M,
     keyring: &KeyRing,
     active_kid: &str,
     scope: &Scope,
+    dek_provider: &Dk,
+    identity_metrics: &prometheus::IntCounterVec,
     mut backoff: Backoff,
     mut shutdown: oneshot::Receiver<()>,
 ) where
     C: GatewayConnector,
     A: EventAppender,
     M: SpineMetrics + ReceiverHealthMetrics,
+    Dk: crate::identity_crypto::DekProvider,
 {
     'outer: loop {
         let mut channel = tokio::select! {
@@ -191,6 +194,8 @@ async fn run_loop<C, A, M>(
                             &workstream_id,
                             None,
                             event,
+                            dek_provider,
+                            identity_metrics,
                         )
                         .await
                         {
@@ -299,19 +304,35 @@ async fn run_loop<C, A, M>(
 /// `SpineClient`-backed publisher, then runs [`run_loop`] until `shutdown`
 /// resolves. This is the function `crate::lib::try_start_discord` spawns as
 /// its own background task.
-pub async fn run<A: EventAppender, M: SpineMetrics + ReceiverHealthMetrics>(
+#[allow(clippy::too_many_arguments)] // mirrors run_loop's own justification
+pub async fn run<
+    A: EventAppender,
+    M: SpineMetrics + ReceiverHealthMetrics,
+    Dk: crate::identity_crypto::DekProvider,
+>(
     gateway_cfg: GatewayConfig,
     appender: &A,
     metrics: &M,
     keyring: &KeyRing,
     active_kid: &str,
     scope: &Scope,
+    dek_provider: &Dk,
+    identity_metrics: &prometheus::IntCounterVec,
     shutdown: oneshot::Receiver<()>,
 ) {
     let receiver = DiscordGatewayReceiver::new(gateway_cfg);
     let backoff = Backoff::new(Duration::from_secs(30));
     run_loop(
-        receiver, appender, metrics, keyring, active_kid, scope, backoff, shutdown,
+        receiver,
+        appender,
+        metrics,
+        keyring,
+        active_kid,
+        scope,
+        dek_provider,
+        identity_metrics,
+        backoff,
+        shutdown,
     )
     .await;
 }
@@ -322,6 +343,25 @@ mod tests {
     use penguin_spine::SpineError;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+
+    struct FakeDekProvider;
+    impl crate::identity_crypto::DekProvider for FakeDekProvider {
+        async fn get_dek(
+            &self,
+            _tenant_id: &str,
+        ) -> Result<(crate::identity_crypto::Dek, u32), crate::identity_crypto::DekUnavailableError>
+        {
+            Ok((zeroize::Zeroizing::new([9u8; 32]), 1))
+        }
+    }
+
+    fn test_identity_metrics() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_discord_identity_encryption_total", "test-only"),
+            &["tenant", "status"],
+        )
+        .unwrap()
+    }
 
     fn test_keyring() -> KeyRing {
         KeyRing::new(vec![("k1".to_string(), vec![9u8; 32])])
@@ -480,6 +520,8 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
             ),
@@ -523,6 +565,8 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
             ),
@@ -551,6 +595,8 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
             ),
@@ -633,6 +679,8 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 backoff,
                 rx,
             ),
@@ -736,6 +784,8 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
             ),
@@ -778,6 +828,8 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
             ),
@@ -848,6 +900,8 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 backoff,
                 rx,
             ),
@@ -957,6 +1011,8 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 Backoff::new(Duration::from_millis(10)),
                 rx,
             ),
@@ -1005,6 +1061,8 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 Backoff::new(Duration::from_millis(10)),
                 rx,
             ),
@@ -1060,6 +1118,8 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
             ),

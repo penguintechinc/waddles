@@ -501,7 +501,7 @@ fn eventsub_source_id(broadcaster_user_id: &str) -> String {
 /// "timestamp within replay window" fails identically
 /// ([`EventSubError::VerificationFailed`]) -- see that variant's doc.
 #[allow(clippy::too_many_arguments)]
-pub async fn handle_webhook<R, D, V, A>(
+pub async fn handle_webhook<R, D, V, A, Dk>(
     resolver: &R,
     dedup: &D,
     revocation: &V,
@@ -510,6 +510,7 @@ pub async fn handle_webhook<R, D, V, A>(
     keyring: &KeyRing,
     active_kid: &str,
     scope: &Scope,
+    dek_provider: &Dk,
     callback_key: &str,
     content_type: Option<&str>,
     headers: &RawHeaders<'_>,
@@ -520,6 +521,7 @@ where
     D: ReplayGuard,
     V: RevocationSink,
     A: EventAppender,
+    Dk: crate::identity_crypto::DekProvider,
 {
     if !is_allowed_content_type(content_type) {
         metrics.record_eventsub_verification("bad_content_type");
@@ -669,6 +671,8 @@ where
                 &workstream_id,
                 Some(&subscription_id),
                 platform_event,
+                dek_provider,
+                &metrics.identity_encryption_total,
             )
             .await
             {
@@ -834,6 +838,19 @@ mod tests {
         h: &RawHeaders<'_>,
         body: &[u8],
     ) -> Result<EventSubResponse, EventSubError> {
+        struct FakeDekProvider;
+        impl crate::identity_crypto::DekProvider for FakeDekProvider {
+            async fn get_dek(
+                &self,
+                _tenant_id: &str,
+            ) -> Result<
+                (crate::identity_crypto::Dek, u32),
+                crate::identity_crypto::DekUnavailableError,
+            > {
+                Ok((zeroize::Zeroizing::new([9u8; 32]), 1))
+            }
+        }
+
         handle_webhook(
             resolver,
             dedup,
@@ -843,6 +860,7 @@ mod tests {
             &test_keyring(),
             "k1",
             &test_scope(),
+            &FakeDekProvider,
             callback_key,
             content_type,
             h,
