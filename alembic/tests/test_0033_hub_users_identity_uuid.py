@@ -1,4 +1,4 @@
-"""Tests for 0027_hub_users_identity_uuid.
+"""Tests for 0033_hub_users_identity_uuid.
 
 Two layers, same split `test_0012_schema_drift_columns.py` establishes:
 
@@ -6,7 +6,10 @@ Two layers, same split `test_0012_schema_drift_columns.py` establishes:
    `TestDowngradeIsUpgradesInverse` -- mock `alembic.op.execute`, assert
    the exact SQL shape (revision chain, backfill-before-NOT-NULL
    ordering, column-scoped grant, view contract) with zero DB dependency,
-   always runs in CI.
+   always runs in CI. `TestMigrationMetadata` pins the exact
+   `revision`/`down_revision` strings (explicit-revision round-trip) so a
+   future renumbering (see this migration's own "Numbering note") is a
+   deliberate, test-visible edit rather than a silent drift.
 2. `TestRealPostgresRoundTrip` -- this migration's `op.execute()` calls
    are hand-written DDL (not SQLAlchemy Core), so unlike most of this
    repo's migrations (see `test_0012...`'s own docstring on why a real-DB
@@ -32,7 +35,7 @@ from unittest.mock import patch
 import pytest
 
 _MIGRATION_PATH = (
-    Path(__file__).resolve().parent.parent / "versions" / "0027_hub_users_identity_uuid.py"
+    Path(__file__).resolve().parent.parent / "versions" / "0033_hub_users_identity_uuid.py"
 )
 
 _DB_URL_ENV = "WADDLES_TEST_DATABASE_URL"
@@ -40,7 +43,7 @@ _DB_URL_ENV = "WADDLES_TEST_DATABASE_URL"
 
 def _load_migration() -> Any:
     spec = importlib.util.spec_from_file_location(
-        "migration_0027_hub_users_identity_uuid", _MIGRATION_PATH
+        "migration_0033_hub_users_identity_uuid", _MIGRATION_PATH
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -60,9 +63,9 @@ def _executed_sql(migration: Any, direction: str) -> str:
 
 
 class TestMigrationMetadata:
-    def test_chains_directly_off_0026(self, migration: Any) -> None:
-        assert migration.revision == "0027_hub_users_identity_uuid"
-        assert migration.down_revision == "0026_app_install_approval_source"
+    def test_chains_directly_off_0032_bundle_permission_grants(self, migration: Any) -> None:
+        assert migration.revision == "0033_hub_users_identity_uuid"
+        assert migration.down_revision == "0032_bundle_permission_grants"
 
     def test_revision_id_fits_alembic_version_num_varchar32(self, migration: Any) -> None:
         assert len(migration.revision) <= 32
@@ -101,11 +104,13 @@ class TestUpgradeEmitsExpectedSql:
         )
         assert view_match is not None
         projected = view_match.group(1)
-        for pii_column in ("email", "password_hash", "username", "avatar_url"):
+        for pii_column in ("email", "password_hash", "username", "avatar_url", "display_name"):
             assert pii_column not in projected, (
-                f"community_member_identities view must never project hub_users.{pii_column}"
+                f"community_member_identities view must never project {pii_column} "
+                "(display_name is PII -- identity resolution is platform_user_id-only)"
             )
         assert "hu.uuid AS hub_user_uuid" in projected
+        assert "cm.platform_user_id" in projected
 
     def test_bundle_reader_grant_is_column_scoped_not_table_wide(self, migration: Any) -> None:
         sql = _executed_sql(migration, "upgrade")
@@ -157,7 +162,7 @@ class TestRealPostgresRoundTrip:
         dsn = os.environ[_DB_URL_ENV]
         conn = psycopg2.connect(dsn)
         conn.autocommit = True
-        schema = f"test_0027_{uuid.uuid4().hex[:8]}"
+        schema = f"test_0033_{uuid.uuid4().hex[:8]}"
         with conn.cursor() as cur:
             cur.execute(f"CREATE SCHEMA {schema}")
             cur.execute(f"SET search_path TO {schema}")
@@ -307,6 +312,11 @@ class TestRealPostgresRoundTrip:
                 "INSERT INTO communities DEFAULT VALUES RETURNING id",
             )
             (community_id,) = cur.fetchone()
+            # display_name intentionally omitted from this insert's relevant
+            # columns for identity resolution -- the view/reader-role
+            # contract below is platform_user_id-only, per the PII rule
+            # (Twitch IRC `user-id` tag / Discord snowflake are the real
+            # stable identifiers; a handle is never used to resolve identity).
             cur.execute(
                 "INSERT INTO community_members "
                 "(community_id, user_id, platform, platform_user_id, display_name) "
@@ -314,13 +324,26 @@ class TestRealPostgresRoundTrip:
                 (community_id, str(hub_user_id)),
             )
 
+            # The view itself must never expose display_name at all -- not
+            # just "reader can't select it", the column must not exist on
+            # the view's own projection.
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = 'community_member_identities'",
+                (schema,),
+            )
+            view_columns = {row[0] for row in cur.fetchall()}
+            assert "display_name" not in view_columns
+            assert view_columns == {"community_id", "platform", "platform_user_id", "hub_user_uuid"}
+
             # Reader role: uuid column readable.
             cur.execute("SET ROLE waddles_bundle_reader")
             cur.execute(f"SELECT uuid FROM {schema}.hub_users WHERE id = %s", (hub_user_id,))
             (read_uuid,) = cur.fetchone()
             assert str(read_uuid) == str(hub_user_uuid)
 
-            # Reader role: view readable, exposes the resolved uuid.
+            # Reader role: view readable, exposes the resolved uuid, keyed
+            # by platform_user_id only.
             cur.execute(
                 f"SELECT hub_user_uuid FROM {schema}.community_member_identities "
                 "WHERE platform_user_id = '999'"
