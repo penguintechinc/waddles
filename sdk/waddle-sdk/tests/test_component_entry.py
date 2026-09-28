@@ -1,4 +1,4 @@
-"""Tests for `waddle_sdk._component_entry.WitWorld` -- the componentize-py app class.
+"""Tests for `waddle_sdk._component_entry.ProcessStage`/`ActionStage` app classes.
 
 `_component_entry` reads its optional `_entry_wiring`/`_bundle_preimports`
 sibling modules once, at import time (the same shape the real build recipe
@@ -66,6 +66,35 @@ def _reload_component_entry():
     return importlib.reload(component_entry)
 
 
+def test_module_exposes_separate_process_stage_and_action_stage_app_classes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: componentize-py 0.25.1 requires one class per exported interface.
+
+    `world stage` exports two separate interfaces (`process-stage` +
+    `action-stage`); componentize-py's real generated
+    `wit_world/exports/__init__.py` (confirmed by running `componentize-py
+    bindings`) declares two `Protocol` classes named `ProcessStage` and
+    `ActionStage`, and `componentize-py componentize` resolves each by
+    `getattr(app_module, "<InterfaceName>")`. A single combined class (this
+    module's old `WitWorld`) fails componentization with `AttributeError:
+    ... has no attribute 'ProcessStage'` -- this asserts the fix stays in
+    place: both names exist, are distinct classes, and neither is the old
+    combined name.
+    """
+    _install_fake_component_modules(monkeypatch, entry_wiring=None)
+    component_entry = _reload_component_entry()
+
+    assert hasattr(component_entry, "ProcessStage")
+    assert hasattr(component_entry, "ActionStage")
+    assert component_entry.ProcessStage is not component_entry.ActionStage
+    assert not hasattr(component_entry, "WitWorld")
+    assert hasattr(component_entry.ProcessStage, "transform")
+    assert not hasattr(component_entry.ProcessStage, "dispatch")
+    assert hasattr(component_entry.ActionStage, "dispatch")
+    assert not hasattr(component_entry.ActionStage, "transform")
+
+
 def test_transform_raises_unsupported_stage_when_bundle_has_no_transform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -81,7 +110,7 @@ def test_transform_raises_unsupported_stage_when_bundle_has_no_transform(
         occurred_at="ts",
     )
     with pytest.raises(_FakeErr) as exc_info:
-        component_entry.WitWorld().transform(event)
+        component_entry.ProcessStage().transform(event)
     assert isinstance(exc_info.value.value, wit_shapes.UnsupportedStage)
     assert exc_info.value.value.stage == "process"
 
@@ -116,7 +145,7 @@ def test_transform_calls_bundle_transform_and_converts_result(
         payload_json=json.dumps({"text": "!ping"}),
         occurred_at="ts",
     )
-    result = component_entry.WitWorld().transform(event)
+    result = component_entry.ProcessStage().transform(event)
 
     assert len(calls) == 1
     assert calls[0].payload == {"text": "!ping"}
@@ -144,7 +173,7 @@ def test_transform_returns_none_when_bundle_drops_the_event(
         payload_json="{}",
         occurred_at="ts",
     )
-    assert component_entry.WitWorld().transform(event) is None
+    assert component_entry.ProcessStage().transform(event) is None
 
 
 def test_dispatch_raises_unsupported_stage_when_bundle_has_no_dispatch(
@@ -171,7 +200,7 @@ def test_dispatch_raises_unsupported_stage_when_bundle_has_no_dispatch(
         trace_context=None,
     )
     with pytest.raises(_FakeErr) as exc_info:
-        component_entry.WitWorld().dispatch(envelope, "{}")
+        component_entry.ActionStage().dispatch(envelope, "{}")
     assert isinstance(exc_info.value.value, wit_shapes.TransportError)
     assert exc_info.value.value.retryable is False
     assert exc_info.value.value.code == "UNSUPPORTED_STAGE"
@@ -208,7 +237,7 @@ def test_dispatch_maps_retryable_exception_to_transport_error(
         trace_context=None,
     )
     with pytest.raises(_FakeErr) as exc_info:
-        component_entry.WitWorld().dispatch(envelope, "{}")
+        component_entry.ActionStage().dispatch(envelope, "{}")
     assert exc_info.value.value.retryable is True
     assert exc_info.value.value.code == "RetryableTransportError"
 
@@ -251,7 +280,7 @@ def test_dispatch_maps_retryable_exception_subclass_to_transport_error(
         trace_context=None,
     )
     with pytest.raises(_FakeErr) as exc_info:
-        component_entry.WitWorld().dispatch(envelope, "{}")
+        component_entry.ActionStage().dispatch(envelope, "{}")
     assert exc_info.value.value.retryable is True
     assert exc_info.value.value.code == "_RateLimitedError"
 
@@ -289,7 +318,7 @@ def test_dispatch_success_builds_transport_result(monkeypatch: pytest.MonkeyPatc
         target_app_id=None,
         trace_context=None,
     )
-    result = component_entry.WitWorld().dispatch(envelope, json.dumps({"channel_id": "c1"}))
+    result = component_entry.ActionStage().dispatch(envelope, json.dumps({"channel_id": "c1"}))
     assert result.ok is True
     assert result.status == 200
     assert result.detail == "sent"
@@ -334,7 +363,7 @@ def test_dispatch_returning_error_http_status_maps_to_ok_false(
         target_app_id=None,
         trace_context=None,
     )
-    result = component_entry.WitWorld().dispatch(envelope, "{}")
+    result = component_entry.ActionStage().dispatch(envelope, "{}")
     assert result.ok is False
     assert result.status == 500
 
@@ -372,6 +401,6 @@ def test_dispatch_result_with_no_http_status_still_maps_to_ok_true(
         target_app_id=None,
         trace_context=None,
     )
-    result = component_entry.WitWorld().dispatch(envelope, "{}")
+    result = component_entry.ActionStage().dispatch(envelope, "{}")
     assert result.ok is True
     assert result.status is None

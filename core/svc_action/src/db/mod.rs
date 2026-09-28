@@ -92,7 +92,6 @@ mod tests {
             cli,
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
-            secret_key: Secret::new("test-jwt-signing-secret"),
             discord_bot_token: None,
             db_reader_password: None,
         }
@@ -136,7 +135,6 @@ mod tests {
             cli,
             db_password: Secret::new("unused"),
             envelope_binding_keys: None,
-            secret_key: Secret::new("unused"),
             discord_bot_token: None,
             db_reader_password: None,
         };
