@@ -22,6 +22,12 @@ uuid = "=1.26.1"
 thiserror = "=2.0.20"
 tracing = "=0.1.44"
 async-trait = "=0.1.92"
+# Grapheme-cluster-safe truncation for the per-name and per-sink length
+# caps (`src/limits.rs`) -- a plain `str` char/byte cut can split a
+# combining-character or emoji ZWJ sequence in half; this is the standard,
+# pure-Rust (MIT/Apache-2.0, no C dependency) crate for grapheme
+# segmentation, not pinned anywhere else in this repo yet.
+unicode-segmentation = "=1.12.0"
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "time", "test-util"] }

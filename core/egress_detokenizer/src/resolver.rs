@@ -36,14 +36,40 @@ pub enum ResolveError {
 /// contract is: return a name for every UUID you can currently resolve,
 /// and omit (never error-out) the ones you can't -- an erased or
 /// never-seen UUID is absence from the returned map, not a per-key error.
+///
+/// # Security invariant (MUST, security review item 4)
+///
+/// **A resolver MUST resolve a UUID only if it belongs to the `tenant`
+/// argument it was called with -- never any other tenant, even if the
+/// UUID is a real, resolvable identity elsewhere.** A bundle running under
+/// tenant A can craft `{user:<uuid>}` using a UUID it has no legitimate
+/// way to know belongs to tenant B (guessed, leaked via an unrelated
+/// channel, or simply reused from a prior session); if the resolver's own
+/// backing query ever answers that lookup by identity alone (e.g. `SELECT
+/// display_name FROM hub_users WHERE id = $1`, omitting a `tenant_id`
+/// filter), tenant B's real display name leaks into tenant A's rendered
+/// output. Every resolver implementation's own query/lookup MUST include
+/// an explicit tenant filter -- this crate cannot enforce that at the type
+/// level (a `&str` cannot itself prove a query used it correctly), so this
+/// doc comment is the load-bearing contract.
+///
+/// [`crate::cache::NameCache`] enforces its half of this independently, at
+/// the cache-key level: entries are partitioned per tenant (never a
+/// single global `uuid -> name` map), so even a resolver call correctly
+/// scoped to tenant A can never be served back out of tenant B's cache
+/// bucket, or vice versa, regardless of resolver behavior. See
+/// [`crate::render::tests::cross_tenant_uuid_never_resolves_to_another_tenants_user`]
+/// for the end-to-end regression test through [`crate::render::
+/// Detokenizer::render`].
 #[async_trait]
 pub trait NameResolver: Send + Sync {
-    /// Resolves as many of `users` as possible within `tenant`, in a
-    /// single batched call (spec S10.4: "one batched lookup, not one
-    /// query per mention"). Returns `Err` only for a whole-batch backend
-    /// failure (e.g. the store is unreachable) -- a specific user simply
-    /// being erased or unknown is NOT an error, it is that UUID's absence
-    /// from the returned map.
+    /// Resolves as many of `users` as possible, but ONLY those that
+    /// genuinely belong to `tenant` (this trait's security invariant,
+    /// above), in a single batched call (spec S10.4: "one batched lookup,
+    /// not one query per mention"). Returns `Err` only for a whole-batch
+    /// backend failure (e.g. the store is unreachable) -- a specific user
+    /// simply being erased, unknown, or belonging to a different tenant is
+    /// NOT an error, it is that UUID's absence from the returned map.
     async fn resolve_batch(
         &self,
         tenant: &str,

@@ -4,6 +4,15 @@
 //! waiting out the TTL"). A plain `RwLock<HashMap<..>>` -- this crate's
 //! read:write ratio (many renders, occasional rename/erasure) doesn't
 //! justify a sharded/lock-free map dependency.
+//!
+//! **Tenant isolation (security review item 4):** entries are keyed
+//! `tenant -> uuid -> name`, never a single flat `uuid -> name` map --
+//! [`NameCache::resolve`] only ever reads/writes within the `tenant`
+//! sub-map it was called with, so a cache HIT can never cross tenants
+//! regardless of resolver behavior. This is independent of, and in
+//! addition to, [`NameResolver`]'s own tenant-scoping contract (that
+//! trait's doc) -- the cache is the second of the two enforcement points
+//! the security review asked for.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
