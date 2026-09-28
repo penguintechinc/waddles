@@ -65,7 +65,7 @@ struct RelayMessage {
 /// duplicated here rather than imported since that function is
 /// `pub(crate)` inside `penguin-spine` and this module needs a plain-list
 /// connection, not a `SpineClient`.
-fn build_redis_client(
+pub(crate) fn build_redis_client(
     cfg: &penguin_spine::SpineConfig,
 ) -> Result<redis::Client, redis::RedisError> {
     let base: redis::ConnectionInfo =

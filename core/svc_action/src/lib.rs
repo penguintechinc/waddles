@@ -19,29 +19,36 @@
 //! through `crate::host_api::Connection::invoke`), never fixed at
 //! connection-construction time, since one connection multiplexes many
 //! `(tenant, community, app_id)` activations (see `crate::capabilities`'s
-//! module doc for the full rationale). [`try_start_distribution_poll`]
-//! resolves which bundle/digest to `load` from the `GET /api/v1/
-//! distribution/bundles?stage=action` poll, gated by `ACTION_APP_ID` --
-//! single-bundle-scoped in this landing, matching every other seam at that
-//! same scope (`core/svc_process`'s own M4 skeleton's `PROCESS_APP_ID`).
-//! What remains a documented seam: `db`/`kv`/`flags` host capabilities
-//! (`crate::capabilities`), and full multi-bundle/hot-swap distribution
-//! reconciliation (`crate::distribution`'s module doc).
+//! module doc for the full rationale). What remains a documented seam:
+//! `db`/`kv`/`flags` host capabilities (`crate::capabilities`), and full
+//! multi-bundle/hot-swap distribution reconciliation
+//! (`crate::distribution`'s module doc).
 //!
-//! **Interim fix: `ACTION_BUNDLE_*` env override (defense-in-depth,
-//! mirrors `core/svc_process`'s `PROCESS_BUNDLE_*` fix).** Before this,
-//! [`resolve_initial_bundle`] depended entirely on the distribution poll
-//! (`crate::distribution::run_poll_loop`) ever populating the catalog with
-//! a digest -- an empty/unreachable hub-api left the dispatch loop's
-//! `deps.digest` permanently empty, and nothing ever sent `load` for it, so
-//! every invoke failed `UNKNOWN_BUNDLE` (no pong from the relay leg).
-//! [`try_start_env_bundle_loader`] now sends `load` for a statically
-//! configured bundle directly over the host-API connection --
-//! independent of hub-api reachability -- and [`resolve_initial_bundle`]
-//! falls back to that same digest for `deps.digest`/`invoke` when the
-//! catalog never resolves one. The distribution poll remains the primary,
-//! eventual source; the env override is strictly the interim fallback
-//! (`config::CliConfig::action_bundle_digest`'s doc).
+//! **Bundle-selection sources (dataplane scale design rev 4, multi-tenant,
+//! 2026-09-28).** Two sources run side by side, neither exclusive of the
+//! other:
+//!
+//! - **Multi-tenant, change-log-driven active-bundle loader**
+//!   (`crate::changelog_consumer`, `core/bundle_active_set`,
+//!   [`try_start_changelog_consumer`]) -- hub-api is the sole writer, this
+//!   stage reads ACTIVE, APPROVED bundle config from a READ-ONLY Postgres
+//!   and hot-swaps in/out with no pod restart, discovering every
+//!   `(tenant_id, community_id)` scope in the database itself (no
+//!   operator-configured tenant scope -- see `config::CliConfig`'s doc:
+//!   `BUNDLE_SCOPE_TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID` are retired).
+//!   Active whenever `DB_READER_PASSWORD` is configured and the
+//!   `waddles.core.disable-db-bundle-config`/`waddles.core.
+//!   disable-multi-tenant-watermark` kill-switches are not raw-ON.
+//! - **Legacy `ACTION_BUNDLE_*` env override** (`try_start_env_bundle_loader`,
+//!   `config::CliConfig::action_bundle_digest`'s doc) -- sends `load` for a
+//!   statically configured bundle directly over the host-API connection,
+//!   independent of any external service. Runs unconditionally alongside
+//!   the DB-driven loader above; the two are gated independently.
+//!
+//! The now-retired `GET /api/v1/distribution/bundles?stage=action` poll
+//! (spec §6.7) that used to be a third source has been removed -- superseded
+//! by the DB-driven loader; see `crate::distribution`'s module doc for what
+//! that leaves as a documented seam.
 
 pub mod bundle_loader;
 pub mod capabilities;
@@ -59,7 +66,6 @@ pub mod host_api;
 pub mod http;
 pub mod retry;
 pub mod senders;
-pub mod service_jwt;
 pub mod telemetry;
 pub mod usage;
 pub mod wiring;
@@ -158,12 +164,11 @@ where
         &config.cli,
         config.discord_bot_token.clone(),
         Arc::clone(&usage),
-        Arc::clone(&catalog),
+        catalog,
         egress_denied_total,
         license.clone(),
     );
     try_start_env_bundle_loader(&config.cli, Arc::clone(&connections));
-    try_start_distribution_poll(&config, Arc::clone(&connections), Arc::clone(&catalog));
     try_start_changelog_consumer(
         &config,
         Arc::clone(&connections),
@@ -171,7 +176,7 @@ where
         bundle_loader_excluded_metric,
         changelog_consumer_metrics,
     );
-    try_start_dispatch(&config, connections, catalog, usage, license);
+    try_start_dispatch(&config, connections, usage, license);
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
     let metrics_addr = SocketAddr::new(config.cli.bind_addr, config.cli.metrics_port);
@@ -404,125 +409,43 @@ fn try_start_host_api(
     registry
 }
 
-/// Starts the `GET /api/v1/distribution/bundles?stage=action` poll
-/// (`crate::distribution::run_poll_loop`) as its own background task.
-/// Mirrors [`try_start_dispatch`]'s own `ACTION_APP_ID`-gating: no bundle
-/// assigned yet means nothing to poll for.
-fn try_start_distribution_poll(
-    config: &config::Config,
-    connections: Arc<host_api::ConnectionRegistry>,
-    catalog: Arc<distribution::BundleCatalog>,
-) {
-    if config.cli.action_app_id.is_empty() {
-        tracing::info!("ACTION_APP_ID not set; distribution poll not started");
-        return;
-    }
-    let cli = config.cli.clone();
-    // Credentials the poll presents to hub-api's `distribution:read`-scoped
-    // endpoint (spec §6.7) -- see `crate::service_jwt`'s module doc for why
-    // this reuses the existing platform-wide machine-JWT scheme rather than
-    // inventing a new one. `config.secret_key` is the shared HS256
-    // `SECRET_KEY` every flask_core-based service (hub-api included)
-    // verifies bearer tokens against.
-    let jwt_config = service_jwt::ServiceJwtConfig {
-        secret: config.secret_key.clone(),
-        issuer: cli.jwt_issuer.clone(),
-        audience: cli.jwt_audience.clone(),
-        tenant: cli.runner_tenant_slug.clone(),
-    };
-    tokio::spawn(async move {
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            shutdown_signal().await;
-            let _ = shutdown_tx.send(());
-        });
-        let load_limits = penguin_bundle_host::wire::LoadLimits {
-            timeout_ms: cli.executor_call_timeout_ms,
-            memory_mb: 64,
-        };
-        distribution::run_poll_loop(
-            distribution::PollLoopConfig {
-                client: reqwest::Client::new(),
-                hub_api_url: cli.hub_api_url.clone(),
-                stage: "action",
-                poll_interval: std::time::Duration::from_secs_f64(cli.poll_interval_s.max(0.1)),
-                catalog,
-                connections,
-                action_app_id: cli.action_app_id.clone(),
-                load_limits,
-                jwt_config,
-            },
-            shutdown_rx,
-        )
-        .await;
-    });
-}
-
-/// Waits up to a few `poll_interval`s for [`try_start_distribution_poll`]
-/// to have resolved `app_id`'s digest/config into `catalog`, so the
-/// dispatch loop's first `invoke` has a real digest to run rather than the
-/// empty-string placeholder (which the executor would refuse with
-/// `UNKNOWN_BUNDLE`). Falls back to `env_bundle_digest` (`ACTION_BUNDLE_
-/// DIGEST`, `config::CliConfig::action_bundle_digest`'s doc) when the
-/// catalog never resolves one -- the same digest [`try_start_env_bundle_
-/// loader`] sends `load` for independently of hub-api reachability, so a
-/// non-empty fallback here always has a matching `load` in flight rather
-/// than immediately refusing `UNKNOWN_BUNDLE` itself. Falls back further to
-/// `(String::new(), "{}")` -- today's pre-fix behavior -- only when
-/// `env_bundle_digest` is also empty (no interim override configured):
-/// never blocks `try_start_dispatch` indefinitely, and never panics.
-/// **This is a one-shot resolution, not hot-swap** -- a digest change
-/// observed later by the poll loop updates `catalog` and (once an executor
-/// is connected) sends `load` for it, but this dispatch loop's own
-/// `deps.digest` stays fixed at whatever this function returned (documented
-/// seam, `crate::dispatch`'s own module doc).
-async fn resolve_initial_bundle(
-    catalog: &distribution::BundleCatalog,
-    app_id: &str,
-    poll_interval: std::time::Duration,
-    env_bundle_digest: &str,
-) -> (String, String) {
-    const MAX_ATTEMPTS: u32 = 3;
-    for attempt in 0..MAX_ATTEMPTS {
-        if let Some(row) = catalog.get(app_id) {
-            if let Some(digest) = row.artifact_digest {
-                return (digest, row.config_json);
-            }
-        }
-        if attempt + 1 < MAX_ATTEMPTS {
-            tokio::time::sleep(poll_interval).await;
-        }
-    }
+/// Resolves the digest/config JSON the dispatch loop's `deps.digest` starts
+/// with. Now that the distribution poll (this crate's former primary
+/// source, retired 2026-09-27) is gone, the `ACTION_BUNDLE_*` env override
+/// (`config::CliConfig::action_bundle_digest`) is the only source -- an
+/// empty value means no bundle is configured yet, and the dispatch loop
+/// starts with an empty digest (never blocks, never panics; the executor
+/// would refuse an `invoke` against it with `UNKNOWN_BUNDLE` until a real
+/// digest is configured). **This is a one-shot resolution, not hot-swap**:
+/// this dispatch loop's own `deps.digest` stays fixed at whatever this
+/// function returned for the life of the pod (documented seam,
+/// `crate::dispatch`'s own module doc).
+fn resolve_initial_bundle(env_bundle_digest: &str) -> (String, String) {
     if !env_bundle_digest.is_empty() {
         tracing::info!(
-            app_id,
             digest = env_bundle_digest,
-            "no distribution row resolved yet; falling back to ACTION_BUNDLE_DIGEST env override"
+            "dispatch loop starting with the ACTION_BUNDLE_DIGEST env override"
         );
         return (env_bundle_digest.to_string(), "{}".to_string());
     }
-    tracing::warn!(
-        app_id,
-        "no distribution row resolved yet and no ACTION_BUNDLE_DIGEST override set; dispatch \
-         loop starting with an empty digest"
-    );
+    tracing::warn!("ACTION_BUNDLE_DIGEST not set; dispatch loop starting with an empty digest");
     (String::new(), "{}".to_string())
 }
 
 /// Sends `load` for a statically-configured bundle (`ACTION_BUNDLE_*` env
 /// vars, `config::CliConfig::action_bundle_digest`'s doc) directly over the
-/// host-API connection, independent of `crate::distribution`'s hub-api poll
-/// -- the defense-in-depth fix this module's doc describes. A no-op (never
-/// spawns a task) when `ACTION_BUNDLE_DIGEST` is unset, leaving today's
-/// catalog-only behavior unchanged.
+/// host-API connection -- the legacy bundle-selection path, runs
+/// unconditionally alongside [`try_start_changelog_consumer`] (this
+/// module's top doc). A no-op (never spawns a task) when
+/// `ACTION_BUNDLE_DIGEST` is unset.
 fn try_start_env_bundle_loader(
     cli: &config::CliConfig,
     connections: Arc<host_api::ConnectionRegistry>,
 ) {
     if cli.action_bundle_digest.is_empty() {
         tracing::info!(
-            "ACTION_BUNDLE_DIGEST not set; env bundle-override loader not started (catalog poll \
-             remains the sole load source)"
+            "ACTION_BUNDLE_DIGEST not set; env bundle-override loader not started (no bundle \
+             configured for this pod)"
         );
         return;
     }
@@ -631,16 +554,16 @@ async fn env_bundle_loader_loop(
 /// §7/§8 step 2). One reason this never starts, logged and not an error --
 /// `DB_READER_PASSWORD` unset (the RO account hasn't been provisioned yet
 /// in this environment). Either way, the existing `ACTION_APP_ID`/
-/// `ACTION_BUNDLE_*` env selection and the `crate::distribution` catalog
-/// poll remain the sole sources; this loader only supplements them once
-/// actually configured, and is additionally gated per-tick on BOTH
-/// `waddles.core.disable-db-bundle-config` and `waddles.core.
-/// disable-multi-tenant-watermark` (each already the negated "is this path
-/// enabled" answer, enabled by default, combined via `flags::AllFlags`)
-/// inside `changelog_consumer::run` regardless of whether this function's
-/// own startup gate passes. Reuses the already-built, already-refreshing
-/// `license` client (`run_with_shutdown`'s own `build_license_client`
-/// call) rather than constructing a second one.
+/// `ACTION_BUNDLE_*` env selection remains the sole other source (the
+/// former `crate::distribution` catalog poll was retired 2026-09-27); this
+/// loader only supplements it once actually configured, and is
+/// additionally gated per-tick on BOTH `waddles.core.disable-db-bundle-config`
+/// and `waddles.core.disable-multi-tenant-watermark` (each already the
+/// negated "is this path enabled" answer, enabled by default, combined via
+/// `flags::AllFlags`) inside `changelog_consumer::run` regardless of
+/// whether this function's own startup gate passes. Reuses the
+/// already-built, already-refreshing `license` client (`run_with_shutdown`'s
+/// own `build_license_client` call) rather than constructing a second one.
 ///
 /// **`BUNDLE_SCOPE_TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID` REMOVED**
 /// (dataplane scale design, user requirement: "every svc_process/
@@ -655,7 +578,7 @@ fn try_start_changelog_consumer(
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
-            "DB_READER_PASSWORD not set; multi-tenant changelog consumer not started (env/catalog selection remains authoritative)"
+            "DB_READER_PASSWORD not set; multi-tenant changelog consumer not started (env selection remains authoritative)"
         );
         return;
     };
@@ -714,22 +637,21 @@ fn try_start_changelog_consumer(
 /// own background task, mirroring `core/svc_process`'s
 /// `try_start_spine_drain` exactly: two independent reasons this never
 /// starts, both logged and neither an error -- `ACTION_APP_ID` unset (no
-/// bundle assigned yet, multi-bundle scheduling is blocked on the
-/// distribution poll), or `penguin_spine::SpineConfig::from_env()`/
+/// bundle assigned yet), or `penguin_spine::SpineConfig::from_env()`/
 /// `ENVELOPE_BINDING_KEYS` parsing failing (missing/invalid required
 /// config -- hop verification must never silently fail open, so a missing
-/// keyring disables the loop rather than starting it unverified).
+/// keyring disables the loop rather than starting it unverified). Runs
+/// unconditionally alongside whichever bundle-selection path
+/// `run_with_shutdown` chose (this module's top doc) -- this is the
+/// consumer loop, not a bundle-selection path itself.
 fn try_start_dispatch(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
-    catalog: Arc<distribution::BundleCatalog>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
 ) {
     if config.cli.action_app_id.is_empty() {
-        tracing::info!(
-            "ACTION_APP_ID not set; dispatch loop not started (blocked on distribution poll)"
-        );
+        tracing::info!("ACTION_APP_ID not set; dispatch loop not started (no bundle assigned)");
         return;
     }
 
@@ -754,7 +676,6 @@ fn try_start_dispatch(
     };
 
     let app_id = config.cli.action_app_id.clone();
-    let poll_interval = std::time::Duration::from_secs_f64(config.cli.poll_interval_s.max(0.1));
     let config = config.clone();
     tokio::spawn(async move {
         let db = match db::connect(&config).await {
@@ -764,15 +685,9 @@ fn try_start_dispatch(
                 return;
             }
         };
-        let (digest, config_json) = resolve_initial_bundle(
-            &catalog,
-            &app_id,
-            poll_interval,
-            &config.cli.action_bundle_digest,
-        )
-        .await;
+        let (digest, config_json) = resolve_initial_bundle(&config.cli.action_bundle_digest);
         // TODO(M3+): tenant/community scope is hardcoded to the
-        // tenant-wide `global` activation until the distribution poll
+        // tenant-wide `global` activation until multi-bundle scheduling
         // (module doc) resolves the real set of (tenant, community,
         // app_id) activations this pod should drain -- a single-tenant
         // deployment (today's only shipped topology) is unaffected.
@@ -997,7 +912,6 @@ mod tests {
             cli,
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
-            secret_key: Secret::new("test-jwt-signing-secret"),
             discord_bot_token: None,
             db_reader_password: None,
         }
@@ -1094,123 +1008,18 @@ mod tests {
         assert!(!near_miss.domain_bypassed());
     }
 
-    #[tokio::test]
-    async fn resolve_initial_bundle_returns_immediately_once_the_catalog_has_a_digest() {
-        let catalog = distribution::BundleCatalog::new();
-        catalog.update(vec![distribution::BundleRow {
-            app_id: "waddles.a.b.c".to_string(),
-            version: "1.0.0".to_string(),
-            artifact_digest: Some("sha256:aa".to_string()),
-            component_key: "k".to_string(),
-            sidecar_key: "s".to_string(),
-            egress: vec![],
-            egress_rps: None,
-            config_json: "{\"x\":1}".to_string(),
-            granted_secret_refs: std::collections::HashMap::new(),
-        }]);
-        let (digest, config_json) = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            resolve_initial_bundle(
-                &catalog,
-                "waddles.a.b.c",
-                std::time::Duration::from_secs(60),
-                "",
-            ),
-        )
-        .await
-        .expect("resolves without waiting out the poll interval");
-        assert_eq!(digest, "sha256:aa");
-        assert_eq!(config_json, "{\"x\":1}");
-    }
-
-    #[tokio::test]
-    async fn resolve_initial_bundle_falls_back_to_empty_when_nothing_ever_resolves() {
-        let catalog = distribution::BundleCatalog::new();
-        let (digest, config_json) = resolve_initial_bundle(
-            &catalog,
-            "waddles.never.resolves",
-            std::time::Duration::from_millis(5),
-            "",
-        )
-        .await;
-        assert_eq!(digest, "");
-        assert_eq!(config_json, "{}");
-    }
-
-    /// The interim fix this PR adds: when the catalog never resolves a
-    /// digest (hub-api empty/unreachable) but `ACTION_BUNDLE_DIGEST` is
-    /// set, the dispatch loop's `deps.digest` must be the env-configured
-    /// one -- not the pre-fix empty placeholder the executor would refuse
-    /// with `UNKNOWN_BUNDLE` -- so `invoke_dispatch` targets the same
-    /// digest [`try_start_env_bundle_loader`] is sending `load` for.
-    #[tokio::test]
-    async fn resolve_initial_bundle_falls_back_to_the_env_override_digest_when_catalog_is_empty() {
-        let catalog = distribution::BundleCatalog::new();
-        let (digest, config_json) = resolve_initial_bundle(
-            &catalog,
-            "waddles.never.resolves",
-            std::time::Duration::from_millis(5),
-            "sha256:aa",
-        )
-        .await;
+    #[test]
+    fn resolve_initial_bundle_returns_the_env_override_digest_when_set() {
+        let (digest, config_json) = resolve_initial_bundle("sha256:aa");
         assert_eq!(digest, "sha256:aa");
         assert_eq!(config_json, "{}");
     }
 
-    /// A live catalog digest always wins over the env override -- the
-    /// catalog poll is the primary/eventual source, the env var is strictly
-    /// the fallback (`config::CliConfig::action_bundle_digest`'s doc).
-    #[tokio::test]
-    async fn resolve_initial_bundle_prefers_a_resolved_catalog_digest_over_the_env_override() {
-        let catalog = distribution::BundleCatalog::new();
-        catalog.update(vec![distribution::BundleRow {
-            app_id: "waddles.a.b.c".to_string(),
-            version: "1.0.0".to_string(),
-            artifact_digest: Some("sha256:catalog".to_string()),
-            component_key: "k".to_string(),
-            sidecar_key: "s".to_string(),
-            egress: vec![],
-            egress_rps: None,
-            config_json: "{\"x\":1}".to_string(),
-            granted_secret_refs: std::collections::HashMap::new(),
-        }]);
-        let (digest, config_json) = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            resolve_initial_bundle(
-                &catalog,
-                "waddles.a.b.c",
-                std::time::Duration::from_secs(60),
-                "sha256:env-override",
-            ),
-        )
-        .await
-        .expect("resolves without waiting out the poll interval");
-        assert_eq!(digest, "sha256:catalog");
-        assert_eq!(config_json, "{\"x\":1}");
-    }
-
-    #[tokio::test]
-    async fn resolve_initial_bundle_ignores_a_row_with_no_artifact_yet() {
-        let catalog = distribution::BundleCatalog::new();
-        catalog.update(vec![distribution::BundleRow {
-            app_id: "waddles.a.b.c".to_string(),
-            version: String::new(),
-            artifact_digest: None,
-            component_key: String::new(),
-            sidecar_key: String::new(),
-            egress: vec![],
-            egress_rps: None,
-            config_json: "{}".to_string(),
-            granted_secret_refs: std::collections::HashMap::new(),
-        }]);
-        let (digest, _config_json) = resolve_initial_bundle(
-            &catalog,
-            "waddles.a.b.c",
-            std::time::Duration::from_millis(5),
-            "",
-        )
-        .await;
+    #[test]
+    fn resolve_initial_bundle_returns_empty_when_env_override_unset() {
+        let (digest, config_json) = resolve_initial_bundle("");
         assert_eq!(digest, "");
+        assert_eq!(config_json, "{}");
     }
 
     #[tokio::test]
@@ -1339,40 +1148,17 @@ mod tests {
             cli,
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
-            secret_key: Secret::new("test-jwt-signing-secret"),
             discord_bot_token: None,
             db_reader_password: None,
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
-        let catalog = Arc::new(distribution::BundleCatalog::new());
         let usage = Arc::new(std::sync::Mutex::new(usage::UsageBatcher::new()));
-        try_start_dispatch(&config, connections, catalog, usage, None);
-    }
-
-    /// `try_start_distribution_poll`'s own gate: `ACTION_APP_ID` unset never
-    /// starts the poll task. A fire-and-forget call proving no panic and no
-    /// spawned task -- the "set" path is already exercised end to end by
-    /// `crate::distribution`'s own `run_poll_loop` tests.
-    #[test]
-    fn try_start_distribution_poll_disabled_without_action_app_id() {
-        let cli = CliConfig::parse_from(["svc-action"]);
-        let config = Config {
-            cli,
-            db_password: Secret::new("test-password"),
-            envelope_binding_keys: None,
-            secret_key: Secret::new("test-jwt-signing-secret"),
-            discord_bot_token: None,
-            db_reader_password: None,
-        };
-        let connections = Arc::new(host_api::ConnectionRegistry::new());
-        let catalog = Arc::new(distribution::BundleCatalog::new());
-        try_start_distribution_poll(&config, connections, catalog);
+        try_start_dispatch(&config, connections, usage, None);
     }
 
     /// `try_start_env_bundle_loader`'s own gate: `ACTION_BUNDLE_DIGEST`
     /// unset never starts the loader task -- a fire-and-forget call proving
-    /// no panic and no spawned task, mirroring `try_start_distribution_poll_
-    /// disabled_without_action_app_id` above.
+    /// no panic and no spawned task.
     #[test]
     fn try_start_env_bundle_loader_disabled_without_digest() {
         let cli = CliConfig::parse_from(["svc-action"]);
@@ -1394,7 +1180,6 @@ mod tests {
             cli,
             db_password: Secret::new("test-password"),
             envelope_binding_keys: None,
-            secret_key: Secret::new("test-jwt-signing-secret"),
             discord_bot_token: None,
             db_reader_password: None,
         };

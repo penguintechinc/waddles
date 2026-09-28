@@ -8,6 +8,14 @@ quart-flask-patch>=0.3.0  # Flask compatibility for Quart
 
 # Database
 pydal>=20240906.1,<20250101
+# penguin-dal is a direct runtime import of flask_core/bundle_runtime.py
+# (Row/Rows/AsyncDB) -- was missing from this file even though the code
+# imports it unconditionally, which broke `import flask_core` (and every
+# module that transitively imports it, e.g. workflow_core_module's
+# config.py -> flask_core.secrets) the moment penguin-dal wasn't already
+# present in the environment for some other reason. Pinned to match
+# hub_api/core/svc_action/core/svc_process's penguin-dal==0.4.0.
+penguin-dal>=0.3.0
 psycopg2-binary>=2.9.9  # PostgreSQL adapter
 sqlalchemy>=2.0  # SQLAlchemy ORM (Alembic migrations + model definitions)
 flask-sqlalchemy>=3.1.0  # Flask-SQLAlchemy integration

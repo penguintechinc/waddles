@@ -1,0 +1,59 @@
+# WaddleBot Workflow Core Module - Dependencies
+
+# Core Framework
+quart>=0.22.0
+hypercorn>=0.18.0
+
+# gRPC runtime. Pinned to match libs/flask_core/requirements.in's grpcio pin
+# -- this module installs flask_core first (see Dockerfile), and
+# flask_core's grpc_tls.py requires grpcio>=1.83.0,<1.84.0.
+grpcio>=1.83.0,<1.84.0
+
+# grpcio-tools (protoc codegen) -- REQUIRED at Docker build time (see
+# `python -m grpc_tools.protoc` in Dockerfile). Pinned to 1.81.1: the newest
+# non-yanked grpcio-tools release requiring protobuf<7.0 (>=6.33.5), whose
+# own `grpcio>=1.81.1` constraint is satisfied by the grpcio pin above, and
+# whose generated gencode imports cleanly against flask_core's
+# protobuf==6.33.6 runtime. A bare `>=1.84.0` here (as briefly introduced by
+# the repo-wide dependency bump) resolves protobuf>=7.35.1, silently
+# overriding flask_core's protobuf<7.0 pin (needed for
+# opentelemetry-proto==1.39.1 compat) on every rebuild.
+grpcio-tools==1.81.1
+
+# HTTP Client (async)
+aiohttp>=3.14.3,<4.0.0
+
+# Database
+pydal>=20240906.1,<20250101
+# penguin-dal is a direct runtime import of flask_core/bundle_runtime.py
+# (Row/Rows/AsyncDB) -- flask_core imports it unconditionally, so this
+# module's `from flask_core... import ...` chain (config.py ->
+# flask_core.secrets -> flask_core/__init__.py -> bundle_runtime.py) fails
+# with ModuleNotFoundError unless it's declared here too. Pinned to match
+# hub_api/core/svc_action/core/svc_process's penguin-dal==0.4.1.
+penguin-dal==0.4.1
+
+# Workflow Execution
+RestrictedPython>=8.5
+croniter>=6.2.4
+APScheduler>=3.11.3
+
+# Caching & Session
+redis>=8.1.0
+
+# Authentication & Security
+# NOTE: python-jose replaced with PyJWT — python-jose pulls an unconditional
+# `ecdsa` dependency with an unfixed timing side-channel (PYSEC-2026-1325,
+# upstream won't-fix); PyJWT is already the standard JWT lib elsewhere in
+# this codebase (core/reputation_module, libs/module_sdk) and is a drop-in
+# for the HS256 decode usage in services/grpc_handler.py.
+pyjwt>=2.15.0
+cryptography>=50.0.1
+
+# Environment
+python-dotenv>=1.2.3
+
+# Development & Testing
+pytest>=9.0.3
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0

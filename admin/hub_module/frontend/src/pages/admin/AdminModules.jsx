@@ -304,6 +304,17 @@ function AdminModules() {
           >
             Browse Marketplace
           </button>
+          <button
+            onClick={() => setActiveTab('bundle-apps')}
+            data-testid="admin-modules-bundle-apps-tab"
+            className={`pb-3 px-1 text-sm font-medium border-b-2 transition-colors ${
+              activeTab === 'bundle-apps'
+                ? 'border-gold-400 text-gold-400'
+                : 'border-transparent text-navy-400 hover:text-sky-300'
+            }`}
+          >
+            Bundle Apps
+          </button>
         </nav>
       </div>
 
@@ -545,6 +556,29 @@ function AdminModules() {
             </>
           )}
         </>
+      )}
+
+      {/* Bundle Apps Tab -- tier 3 follow-up placeholder (three-tier app
+          lifecycle, Justin's 2026-09-27 ruling): a community admin should
+          be able to activate/deactivate, for THIS community, any bundle
+          version a tenant admin has made available (tier 2,
+          TenantModules.jsx), once a global admin has installed it into
+          the platform catalog (tier 1, SuperAdminBundleApprovals.jsx).
+          No community-level activate/deactivate endpoint exists in
+          hub-api yet -- this tab is deliberately a placeholder rather
+          than a call against an invented endpoint. */}
+      {activeTab === 'bundle-apps' && (
+        <div
+          className="bg-navy-800 border border-navy-700 border-dashed rounded-xl p-12 text-center"
+          data-testid="community-bundle-apps-followup"
+        >
+          <PuzzlePieceIcon className="w-12 h-12 text-navy-500 mx-auto mb-4" />
+          <h3 className="text-lg font-semibold text-gold-400 mb-2">Bundle Apps (Coming Soon)</h3>
+          <p className="text-navy-400">
+            Activating or deactivating bundle-catalog apps made available to your tenant will
+            appear here once the community-level activation backend endpoint ships.
+          </p>
+        </div>
       )}
 
       {/* Core Module Warning Modal */}

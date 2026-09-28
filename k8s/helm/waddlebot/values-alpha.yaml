@@ -133,6 +133,14 @@ pipeline:
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "384Mi" }
+  # core-bundle-seeder-job.yaml -- explicit true here (matches values.yaml's own default)
+  # since this is the environment this milestone's own e2e proof (waddles.core.example.ping/
+  # pyping + the Discord guild connection below) targets first.
+  coreBundleSeeder:
+    enabled: true
+    resources:
+      requests: { cpu: "50m", memory: "64Mi" }
+      limits: { cpu: "200m", memory: "128Mi" }
   hubWebui:
     enabled: true
     replicas: 1

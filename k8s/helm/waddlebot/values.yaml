@@ -545,6 +545,23 @@ pipeline:
       limits:
         cpu: "500m"
         memory: "512Mi"
+  # Activates first-party waddles.core.* App Bundles under the platform's SYSTEM identity at
+  # deploy time (hub_api/cli/seed_core_bundles.py) -- no human global-admin approval, unlike a
+  # third-party vendor bundle. `tenantSlugs` is a comma-separated CORE_BUNDLES_TENANT_SLUGS
+  # override (empty = every catalog entry's own declared activation_targets, "global" tenant-
+  # wide by default -- see bundles/core-bundles.yaml).
+  coreBundleSeeder:
+    enabled: true
+    backoffLimit: 2
+    defaultTenantSlug: "global"
+    tenantSlugs: ""
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
   goRuntimeImage: "debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a"
 
   svcIngest:
@@ -632,7 +649,10 @@ pipeline:
 
   hubWebui:
     enabled: true
-    port: 8205
+    # Express server (admin/hub_module/webui-server/server.js), not nginx --
+    # PORT env below must match this, and the Dockerfile.webui default is
+    # also 8080. Do not change one without the other.
+    port: 8080
     replicas: 2
     service:
       type: ClusterIP
