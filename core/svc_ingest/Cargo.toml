@@ -166,6 +166,21 @@ rustls = { version = "=0.23.45", default-features = false, features = [
     "std",
     "ring",
 ] }
+# Twitch EventSub webhook signature verification (`src/ingest/
+# twitch_eventsub.rs`): HMAC-SHA256 over `message_id + timestamp + body`,
+# byte-identical to the legacy Python module's own algorithm (see that
+# module's doc comment). Both already resolve to these exact versions
+# transitively (via `penguin-spine`'s own binding-mac HMAC use, confirmed in
+# `Cargo.lock`) -- pinned directly here rather than left implicit so
+# `cargo deny`'s `[bans] wildcards = "deny"` never has to guess a version
+# for a crate this module calls directly.
+hmac = "=0.12.1"
+sha2 = "=0.10.9"
+# Audited constant-time equality for the decoded HMAC digest comparison in
+# `verify_signature` -- never a hand-rolled comparison loop for a
+# security-sensitive check. Already resolves to this exact version
+# transitively (via `hmac`/`digest`, confirmed in `Cargo.lock`).
+subtle = "=2.6.1"
 
 [dev-dependencies]
 http-body-util = "=0.1.3"

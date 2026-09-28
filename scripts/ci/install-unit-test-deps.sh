@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Installs every Python dependency `make test-unit` / tests/k8s/alpha/05-unit-tests.sh
 # needs to collect and run the full unit suite (legacy tests/unit +
-# identity_core_module, workflow_core_module, hub_api, libs/* (flask_core +
-# SCCEMBS module libraries), and every core/svc_* stage-runner container).
+# identity_core_module, workflow_core_module, community_module, hub_api,
+# libs/* (flask_core + SCCEMBS module libraries), and every core/svc_*
+# stage-runner container).
 #
 # Each subproject ships its own requirements.txt with its own pins -- most
 # are hash-pinned (--require-hashes) and some legitimately disagree on
@@ -28,6 +29,22 @@ command -v "$PYTHON_BIN" >/dev/null 2>&1 || {
 
 PIP=("$PYTHON_BIN" -m pip install --disable-pip-version-check)
 
+# penguin-dal is a real runtime import of libs/flask_core/flask_core/
+# bundle_runtime.py (`from penguin_dal import Row, Rows`, unconditional --
+# not TYPE_CHECKING-guarded) as of the R52 App Bundle DB access work, but
+# flask_core's own requirements.in/setup.py never declared it. Any module
+# whose `app.py`/`config.py` does `from flask_core import (...)` --
+# identity_core_module and community_module both, at minimum -- transitively
+# hits `flask_core/__init__.py`'s `from .bundle_runtime import (...)` and
+# fails to even collect with `ModuleNotFoundError: No module named
+# 'penguin_dal'` unless this is installed first. Pinned to the same
+# `penguin-dal==0.4.0` every other consumer in this repo already uses
+# (hub_api/requirements.in, core/svc_action/requirements.in,
+# core/svc_process/requirements.in) so nothing here introduces a second,
+# divergent pin.
+echo "[install-unit-test-deps] penguin-dal (libs/flask_core's undeclared runtime import)"
+"${PIP[@]}" "penguin-dal==0.4.0"
+
 echo "[install-unit-test-deps] core/identity_core_module + editable libs/flask_core"
 "${PIP[@]}" -r core/identity_core_module/requirements.txt -e libs/flask_core
 
@@ -41,6 +58,9 @@ echo "[install-unit-test-deps] core/identity_core_module + editable libs/flask_c
 # declared in this requirements.txt for exactly that reason.
 echo "[install-unit-test-deps] core/workflow_core_module"
 "${PIP[@]}" -r core/workflow_core_module/requirements.txt
+
+echo "[install-unit-test-deps] core/community_module"
+"${PIP[@]}" -r core/community_module/requirements.txt
 
 # libs/waddle_transports is the first libs/* module carrying its own
 # runtime dependencies beyond flask_core (websockets/aiosmtplib/httpx[http2]
