@@ -71,10 +71,10 @@ remove this module or its Helm Deployment
 (`k8s/helm/waddlebot/templates/svc-ingest.yaml`) until the Rust build
 reaches full parity -- tracked as Rust follow-up work, not scheduled here.
 
-Note: PR #440 (Python ingest identity encryption) is now moot for the
-retirement path it targets -- it hardens code this deprecation notice
-marks for eventual removal, not a live-traffic surface PenguinTech
-intends to keep growing.
+Note: PR #440 (Python ingest identity encryption) is NOT moot -- this
+Python service stays live (no Rust receiver parity yet, see above), so
+#440's hardening still applies to real production traffic until Python
+ingest is actually retired.
 """
 
 from __future__ import annotations
