@@ -1,0 +1,46 @@
+[package]
+name = "bundle-capability-gate"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "The standard host-side enforcement gate every bundle host import calls first (docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md SS5): PermissionId catalog, host-only InvokeScope construction, AppScoped/ReputationScoped resource derivation, and authorize(). A path dependency within this repo, not a penguin-libs crate -- this crate depends only on the grant-table shape another agent's migration owns (SS4), not on any published cross-repo schema. NOT YET wired into svc_process/svc_action's CapabilityHandler::handle -- that integration is a later task (spec SS12 Phase 4's third item)."
+
+[lib]
+name = "bundle_capability_gate"
+path = "src/lib.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- rules/critical-rules.md
+# Dependency Pinning. Cargo.lock is committed here and in every crate that
+# later depends on this one (svc_process, svc_action).
+[dependencies]
+thiserror = "=2.0.20"
+tracing = "=0.1.44"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+# `target_user` (ReputationScoped) and canonical Waddles user ids (spec
+# SS10.1) are always UUIDs, never a platform handle. Same feature set
+# `core/svc_ingest` already pins this crate at (v4 for fresh ids in tests,
+# v5 for the ephemeral-mention-pseudonym shape referenced by the spec,
+# though pseudonym minting itself is svc_ingest's job, not this crate's).
+uuid = { version = "=1.26.1", features = ["v4", "v5", "serde"] }
+# `sanitized_app_id`'s truncate-past-NAMEDATALEN hash suffix (src/resource.rs)
+# needs a hash stable across Rust versions/builds -- `std::hash::DefaultHasher`
+# explicitly is NOT (stdlib docs disclaim cross-version stability), and this
+# value must eventually match PR #415's own compiler byte-for-byte. Same
+# exact version pin `core/bundle_active_set` already uses for its watermark
+# fingerprint.
+sha2 = "=0.10.9"
+# Metrics facade only (spec SS5.4: `waddles_bundle_capability_denied_total`
+# counter) -- no exporter wired here; the binary that eventually embeds this
+# crate (svc_process/svc_action) installs whatever recorder it already uses.
+# A facade crate, not a backend, so it carries no transitive exporter deps.
+metrics = "=0.24.6"
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }
+# Compile-fail test proving `InvokeScope` has no public constructor usable
+# from outside this crate (spec SS5.1, Gemini condition 1) -- see
+# tests/compile_fail.rs.
+trybuild = "=1.0.121"
