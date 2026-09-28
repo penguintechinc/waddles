@@ -41,6 +41,31 @@ COPY action/pushing/googlechat_action_module ./googlechat_action_module
 COPY action/pushing/twitch_action_module ./twitch_action_module
 COPY action/pushing/youtube_action_module ./youtube_action_module
 
+# Generate gRPC protobuf stubs for the YouTube module. Output MUST land in
+# ./youtube_action_module/proto (not the image root) -- youtube_action_module/
+# services/grpc_handler.py runs with youtube_action_module/ prepended to
+# sys.path (see app.py's _setup_module_imports) and does a bare
+# `from proto import youtube_action_pb2, youtube_action_pb2_grpc`; that
+# resolves to youtube_action_module/proto/, the package with the __init__.py
+# marker, and nowhere else. The standalone youtube_action_module/Dockerfile
+# already generates into ./proto for its own single-service image -- this
+# mirrors that exact invocation for the consolidated action-platforms image,
+# which previously never ran protoc at all, so services/__init__.py's
+# `from .grpc_handler import ...` raised ImportError on every real deploy
+# (services/action-platforms/app.py imports
+# youtube_action_module.services.oauth_manager, which pulls in the package's
+# __init__.py, which pulls in grpc_handler.py unconditionally). Slack/Teams/
+# Twitch's own grpc_handler.py modules already guard this same import with
+# try/except ImportError (or never uncomment it), so they don't crash here --
+# only YouTube's is unconditional.
+RUN python3 -m grpc_tools.protoc \
+    -I./youtube_action_module/proto \
+    --python_out=./youtube_action_module/proto \
+    --grpc_python_out=./youtube_action_module/proto \
+    ./youtube_action_module/proto/youtube_action.proto && \
+    sed -i 's/^import youtube_action_pb2/from . import youtube_action_pb2/' \
+        ./youtube_action_module/proto/youtube_action_pb2_grpc.py
+
 # Create non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser

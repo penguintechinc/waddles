@@ -66,6 +66,10 @@ run_suite() {
 run_suite "legacy tests/unit + identity_core_module" \
     "$PYTHON_BIN" -m pytest tests/unit core/identity_core_module/services/test_grpc_handler.py
 
+# --- community_module (own tests/ dir, own conftest.py) ---
+run_suite "core/community_module" \
+    env -C "$REPO_ROOT/core/community_module" "$PYTHON_BIN" -m pytest
+
 # --- hub_api (v3 control-plane REST API) ---
 run_suite "hub_api" \
     env -C "$REPO_ROOT/hub_api" "$PYTHON_BIN" -m pytest
