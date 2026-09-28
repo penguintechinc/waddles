@@ -47,9 +47,18 @@ def upgrade() -> None:
     )
     op.execute(
         """
-        ALTER TABLE app_install_approvals
-          ADD CONSTRAINT IF NOT EXISTS ck_app_install_approvals_approval_source
-          CHECK (approval_source IN ('human', 'system:core-seeder'))
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'ck_app_install_approvals_approval_source'
+                  AND connamespace = 'public'::regnamespace
+            ) THEN
+                ALTER TABLE app_install_approvals
+                  ADD CONSTRAINT ck_app_install_approvals_approval_source
+                  CHECK (approval_source IN ('human', 'system:core-seeder'));
+            END IF;
+        END $$
         """
     )
     op.execute(
@@ -61,7 +70,18 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(
-        "ALTER TABLE app_install_approvals "
-        "DROP CONSTRAINT IF EXISTS ck_app_install_approvals_approval_source"
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'ck_app_install_approvals_approval_source'
+                  AND connamespace = 'public'::regnamespace
+            ) THEN
+                ALTER TABLE app_install_approvals
+                  DROP CONSTRAINT ck_app_install_approvals_approval_source;
+            END IF;
+        END $$
+        """
     )
     op.execute("ALTER TABLE app_install_approvals DROP COLUMN IF EXISTS approval_source")
