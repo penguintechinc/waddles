@@ -115,6 +115,12 @@ pub struct SupervisorDeps {
     /// when resolution fails, rather than falling back to a guessed value.
     pub tenant: String,
     pub community: Option<String>,
+    /// PII-tokenization identity resolver + metrics, threaded verbatim
+    /// into every [`crate::spine::ProcessDeps`] this supervisor's
+    /// per-binding consumers build -- see `crate::pii_tokenize`'s module
+    /// doc for why this crate is the tokenization pass's home.
+    pub identity: Arc<dyn crate::pii_tokenize::IdentityResolver>,
+    pub tokenize_metrics: Arc<crate::telemetry::TokenizeMetrics>,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -240,6 +246,8 @@ async fn run_binding_consumer(
             spine: spine_client,
             metrics: deps.metrics.clone(),
             license: Arc::clone(&deps.license),
+            identity: Arc::clone(&deps.identity),
+            tokenize_metrics: Arc::clone(&deps.tokenize_metrics),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();

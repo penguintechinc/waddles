@@ -450,6 +450,14 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `reader.read()` at all (drains nothing; `/health`/`/metrics` are
     /// unaffected, since they run on entirely separate tasks).
     pub license: Arc<dyn FeatureGate>,
+    /// PII-tokenization identity resolver (spec S10.1/S10.3, Phase 1 Task
+    /// 1 -- see `crate::pii_tokenize`'s module doc for the full placement
+    /// justification). [`handle_delivered`] calls this on every delivered
+    /// entry's own `event`, strictly before [`invoke_transform`] --
+    /// `d.env.event` itself is never mutated (it's `&Delivered`), a
+    /// tokenized clone is what actually reaches the guest.
+    pub identity: Arc<dyn crate::pii_tokenize::IdentityResolver>,
+    pub tokenize_metrics: Arc<crate::telemetry::TokenizeMetrics>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -567,11 +575,26 @@ async fn handle_delivered<S: SpineOps>(
         tracestate: t.tracestate.clone(),
     });
 
+    // PII-tokenization pre-dispatch pass (spec S10.1/S10.3, Phase 1 Task 1
+    // -- HARD BLOCKER, see `crate::pii_tokenize`'s module doc): the last
+    // thing that happens to `event` before it is ever handed to
+    // `invoke_transform`/the guest. Operates on an owned clone -- `d.env`
+    // is `&StageEnvelope`, never mutated in place -- so a hop-verified
+    // envelope's own bytes are untouched; only this local copy is
+    // tokenized.
+    let mut event = d.env.event.clone();
+    crate::pii_tokenize::tokenize_platform_event(
+        &mut event,
+        deps.identity.as_ref(),
+        &deps.tokenize_metrics,
+    )
+    .await;
+
     let outcome = invoke_transform(
         &connection,
         &deps.app_id,
         &deps.digest,
-        &d.env.event,
+        &event,
         deps.call_timeout_ms,
         trace,
         capabilities,
@@ -995,6 +1018,49 @@ mod tests {
     /// `RecordingSpineMetrics` handle so a test can assert on it directly
     /// -- `ProcessDeps::metrics` is `Arc<dyn SpineMetrics>`, which can't
     /// be downcast back without this.
+    /// Test-only [`crate::pii_tokenize::IdentityResolver`]: every identity
+    /// resolves to a deterministic ephemeral pseudonym (never errors,
+    /// never needs a real database) -- `crate::pii_tokenize`'s own test
+    /// module is what actually exercises linked-vs-ephemeral resolution
+    /// behavior; this module's tests only need the tokenization pass to
+    /// run without panicking so `handle_delivered`'s hop-verify/invoke/DLQ
+    /// control flow stays the thing under test.
+    struct FixedIdentityResolver;
+
+    impl crate::pii_tokenize::IdentityResolver for FixedIdentityResolver {
+        fn resolve_by_id<'a>(
+            &'a self,
+            platform: &'a str,
+            platform_user_id: &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = crate::pii_tokenize::ResolvedIdentity> + Send + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                crate::pii_tokenize::ResolvedIdentity::Ephemeral(
+                    crate::pii_tokenize::ephemeral_pseudonym(platform, platform_user_id),
+                )
+            })
+        }
+
+        fn resolve_by_handle<'a>(
+            &'a self,
+            platform: &'a str,
+            handle: &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = crate::pii_tokenize::ResolvedIdentity> + Send + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                crate::pii_tokenize::ResolvedIdentity::Ephemeral(
+                    crate::pii_tokenize::ephemeral_pseudonym(platform, handle),
+                )
+            })
+        }
+    }
+
     fn test_deps_with_metrics(
         spine: FakeSpineOps,
         connections: Arc<ConnectionRegistry>,
@@ -1025,6 +1091,10 @@ mod tests {
             // unaffected -- the gate's own OFF/ON behavior is exercised
             // directly by the `license_gate_*` tests below.
             license: Arc::new(crate::license::test_support::FixedGate(true)),
+            identity: Arc::new(FixedIdentityResolver),
+            tokenize_metrics: Arc::new(crate::telemetry::register_tokenize_metrics(
+                &prometheus::Registry::new(),
+            )),
         };
         (deps, metrics)
     }

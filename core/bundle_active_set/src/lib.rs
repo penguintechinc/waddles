@@ -28,8 +28,8 @@
 //! follow-up so this Rust-focused change doesn't also own a schema/RBAC
 //! migration)
 //!
-//! This crate's queries (`crate::query`/`crate::bindings`/`crate::scope`)
-//! touch exactly six tables, all `SELECT`-only:
+//! This crate's queries (`crate::query`/`crate::bindings`/`crate::scope`/
+//! `crate::identity`) touch exactly seven tables, all `SELECT`-only:
 //!
 //! ```sql
 //! CREATE ROLE svc_process_ro LOGIN PASSWORD '<secret>';
@@ -41,12 +41,19 @@
 //! GRANT SELECT ON app_source_bindings   TO svc_process_ro, svc_action_ro;
 //! GRANT SELECT ON tenants               TO svc_process_ro, svc_action_ro;
 //! GRANT SELECT ON communities           TO svc_process_ro, svc_action_ro;
+//! GRANT SELECT ON community_members     TO svc_process_ro, svc_action_ro;
 //! -- No INSERT/UPDATE/DELETE grant on any table, ever -- enforced at the
 //! -- database in addition to `crate::reader::connect`'s own defense-in-
 //! -- depth `options[default_transaction_read_only]=on` startup parameter
 //! -- (applied to every physical connection in the pool, not a one-shot
 //! -- post-connect `SET`).
 //! ```
+//!
+//! `community_members` (migration `000_create_base_schema.sql`) is read by
+//! `crate::identity::resolve_linked_user_id` -- the PII-tokenization hard
+//! invariant's identity-mapping lookup (spec S10.1/S10.3). Only its
+//! `user_id` column is ever read; no other column on this table (
+//! `display_name`, `avatar_url`, `bio`, ...) is queried, by design.
 //!
 //! `tenants`/`communities` (migration `058_tenants_and_claims.sql`) are the
 //! same tables hub-api's own auth chain reads (`hub_api/app.py::
@@ -61,12 +68,14 @@
 pub mod bindings;
 pub mod diff;
 pub mod entities;
+pub mod identity;
 pub mod query;
 pub mod reader;
 pub mod scope;
 
 pub use bindings::{read_source_bindings, SourceBinding};
 pub use diff::{plan, DiffPlan};
+pub use identity::resolve_linked_user_id;
 pub use query::{
     derive_component_keys, read_active_set, read_watermark, ActiveBundleRow, ActiveSetError,
     ActiveSetRead, DegradedReason, ExclusionReason, Watermark, WatermarkTracker,

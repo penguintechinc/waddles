@@ -178,6 +178,49 @@ pub fn register_source_binding_supervisor_metrics(
     }
 }
 
+/// Prometheus handles for `crate::pii_tokenize` (spec S10.1/S10.3, Phase 1
+/// Task 1): a latency histogram over the whole inbound actor/mention
+/// tokenization pass (histograms for load/latency come first, per
+/// `rules/critical-rules.md` Observability -- a lone counter is not
+/// instrumentation), and a counter for every identity that resolved to an
+/// ephemeral pseudonym rather than a linked `hub_users` UUID (an
+/// unexpectedly high rate is an ops signal: either a community's members
+/// mostly haven't linked accounts, or resolution itself is degraded).
+#[derive(Clone)]
+pub struct TokenizeMetrics {
+    pub duration_seconds: prometheus::Histogram,
+    pub unresolved_users_total: prometheus::IntCounter,
+}
+
+/// Registers [`TokenizeMetrics`] against `registry`. Must be called
+/// exactly once per `registry` -- see
+/// [`register_bundle_loader_excluded_metrics`]'s identical constraint.
+pub fn register_tokenize_metrics(registry: &prometheus::Registry) -> TokenizeMetrics {
+    let duration_seconds = prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+        "svc_process_pii_tokenize_duration_seconds",
+        "Latency of the inbound actor/mention PII-tokenization pass, per platform-event",
+    ))
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(duration_seconds.clone()))
+        .expect("register svc_process_pii_tokenize_duration_seconds");
+
+    let unresolved_users_total = prometheus::IntCounter::new(
+        "svc_process_pii_unresolved_users_total",
+        "Actor/mention identities resolved to an ephemeral pseudonym (unknown or unlinked \
+         platform account) rather than a linked hub_users UUID",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(unresolved_users_total.clone()))
+        .expect("register svc_process_pii_unresolved_users_total");
+
+    TokenizeMetrics {
+        duration_seconds,
+        unresolved_users_total,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +285,16 @@ mod tests {
         assert!(rendered.contains("svc_process_source_binding_consumers_active 1"));
         assert!(rendered.contains("svc_process_source_binding_consumer_transitions_total"));
         assert!(rendered.contains(r#"action="spawn""#));
+    }
+
+    #[test]
+    fn register_tokenize_metrics_produces_a_histogram_and_a_counter() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_tokenize_metrics(&registry);
+        metrics.duration_seconds.observe(0.002);
+        metrics.unresolved_users_total.inc_by(3);
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_process_pii_tokenize_duration_seconds"));
+        assert!(rendered.contains("svc_process_pii_unresolved_users_total 3"));
     }
 }
