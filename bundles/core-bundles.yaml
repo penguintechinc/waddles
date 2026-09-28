@@ -46,3 +46,16 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  # Feature-gated OFF by default (waddles.shoutout-bundle, checked in the bundle's own
+  # transform()) -- safe to auto-activate here same as the two example bundles above: no
+  # command runs and no db/kv host import is ever reached until an operator flips the flag on.
+  # See bundles/python/shoutout/src/app.py's module docstring for the kv-capability dependency
+  # (host kv is currently hardcoded `denied` pending feature/bundle-kv-capability).
+  - app_id: waddles.core.shoutout.default
+    version: "1.0.0"
+    language: python
+    manifest_path: shoutout.manifest.yaml
+    artifact_path: shoutout.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null

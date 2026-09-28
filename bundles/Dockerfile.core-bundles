@@ -61,6 +61,28 @@ RUN componentize-py \
         -o pyping.wasm
 
 # ---------------------------------------------------------------------------
+# Stage 2b: waddles.core.shoutout.default (Python) -> WASI 0.2 component
+#
+# Real `!so`/`!shoutout` Twitch shoutout bundle -- migrates
+# action/interactive/shoutout_interaction_module + hub_api/services/bot_shoutout.py onto the
+# App Bundle spine (see bundles/python/shoutout/src/app.py's own module docstring for the
+# full behavior port + documented gaps). Same recipe as Stage 2 above, own source tree.
+# ---------------------------------------------------------------------------
+FROM python:3.13-slim-bookworm@sha256:f13a6b7565175da40695e8109f64cbc4d2e65f4c9ef2e3b321c3a44fa3c06fe7 AS python-shoutout-bundle-builder
+
+RUN pip install --no-cache-dir componentize-py==0.25.1
+
+WORKDIR /repo
+COPY wit wit
+COPY sdk/waddle-sdk/src sdk/waddle-sdk/src
+COPY bundles/python/shoutout/src bundles/python/shoutout/src
+RUN componentize-py \
+        -d wit/waddle-bundle -w stage \
+        componentize -p sdk/waddle-sdk/src -p bundles/python/shoutout/src \
+        waddle_sdk._component_entry \
+        -o shoutout.wasm
+
+# ---------------------------------------------------------------------------
 # Stage 3: hub-api's own Python dependency set (+ wasm-tools CLI) -- mirrors
 # hub_api/Dockerfile's builder stage verbatim, same pinned base per
 # devops-containers.md ("never a second pinned digest for the same tag").
@@ -109,8 +131,10 @@ RUN mkdir -p /core-bundles
 COPY bundles/core-bundles.yaml /core-bundles/core-bundles.yaml
 COPY bundles/rust/ping/hub-manifest.yaml /core-bundles/ping.manifest.yaml
 COPY bundles/python/pyping/hub-manifest.yaml /core-bundles/pyping.manifest.yaml
+COPY bundles/python/shoutout/hub-manifest.yaml /core-bundles/shoutout.manifest.yaml
 COPY --from=rust-bundle-builder /repo/bundles/rust/ping/target/wasm32-wasip2/release/waddle_bundle_ping_rust.wasm /core-bundles/ping.wasm
 COPY --from=python-bundle-builder /repo/pyping.wasm /core-bundles/pyping.wasm
+COPY --from=python-shoutout-bundle-builder /repo/shoutout.wasm /core-bundles/shoutout.wasm
 
 ENV CORE_BUNDLES_DIR=/core-bundles
 

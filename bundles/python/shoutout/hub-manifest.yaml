@@ -1,0 +1,47 @@
+# hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
+# waddles.core.shoutout.default -- see bundles/python/pyping/hub-manifest.yaml's own header for
+# why this is a separate file from this bundle's own `bundle.yaml` (a different consumer's
+# schema: hub-api's M2a install-hooks pipeline understands only `artifact: source|prebuilt`
+# per services/bundle_manifest_v2.py, not this bundle's own `artifact: component` /
+# `execution_model: wasi-component`). This file is what
+# hub_api/cli/seed_core_bundles.py feeds to bundle_version_service.create_version() /
+# process_prebuilt_component() -- the artifact is already compiled to a WASI 0.2 component by
+# bundles/Dockerfile.core-bundles, so `artifact: prebuilt`.
+schema_version: 2
+app_id: waddles.core.shoutout.default
+name: Shoutout Bundle (Python)
+version: 1.0.0
+feature: waddles.core.shoutout
+module: core
+provider: builtin
+language: python
+artifact: prebuilt
+execution_model: native
+is_default: false
+author: PenguinTech/waddles
+license: Apache-2.0
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!so", "!shoutout"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!so", "!shoutout"]
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+egress:
+  - host: api.twitch.tv
+    methods: ["GET"]
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions: []
+routes_to: []

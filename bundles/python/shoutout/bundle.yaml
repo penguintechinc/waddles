@@ -1,0 +1,59 @@
+schema_version: 2
+app_id: waddles.core.shoutout.default
+name: Shoutout Bundle (Python)
+version: 1.0.0
+feature: waddles.core.shoutout
+module: core
+provider: builtin
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+author: PenguinTech/waddles
+license: Apache-2.0
+# Feature-flag key this bundle's own `transform()` checks via
+# `waddle_sdk.flask_core.feature_flags.feature_enabled()` -- default OFF, per this bundle's
+# own task requirement (contrast `waddles.core.example.*`'s always-on example bundles).
+# Informational only: hub-api's `bundle_manifest_v2.py` does not read this key today, the
+# actual gate lives in `src/app.py`'s `_FEATURE_FLAG` constant.
+feature_flag: waddles.shoutout-bundle
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!so", "!shoutout"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!so", "!shoutout"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+# Twitch Helix lookups only -- see src/app.py's module docstring "KNOWN GAPS" section for why
+# the OAuth token exchange itself (id.twitch.tv) is NOT egress this bundle ever performs.
+egress:
+  - host: api.twitch.tv
+    methods: ["GET"]
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions: []
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null
