@@ -1367,6 +1367,9 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("approved_by", Integer),
         Column("approved_at", DateTime),
         Column("superseded_by", BigInteger),
+        # migration 0026 -- "human" (default, global-admin approved) or
+        # "system:core-seeder" (seed_core_bundles.py, no human approval).
+        Column("approval_source", String(50), server_default="human"),
     )
     Table(
         "app_stream_grants",

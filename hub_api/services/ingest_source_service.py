@@ -103,6 +103,70 @@ async def create_source(
     return row, plaintext_secret
 
 
+async def ensure_ingest_source(
+    install_dal: AsyncDB,
+    *,
+    tenant_id: int,
+    community_id: int | None,
+    platform: str,
+    source_id: str,
+    label: str,
+    mapping: dict[str, Any] | None = None,
+) -> Any:
+    """Idempotently register a platform-managed ingest source, storing NO webhook secret.
+
+    Core-bundle-seeder milestone: a "platform connection" (e.g. svc-ingest's Discord guild,
+    `core/svc_ingest`'s own bot token already authenticates it independently, via a Helm
+    secret) needs an `ingest_sources` row to exist before `app_source_binding_service.
+    sync_bindings()`'s auto-bind can match a bundle's `consumes` rule against it -- but unlike
+    `create_source()` above (the human-facing generic-webhook-intake flow, which always
+    mints+encrypts an HMAC secret an external caller must sign requests with),
+    a platform connection's own client authenticates through a completely different
+    mechanism this table plays no part in. `secret_ciphertext`/`secret_iv` stay NULL here,
+    always -- a secret-REFERENCE design for this class of connection (pointing at the same
+    credential svc-ingest itself already holds, never a copy) is a documented follow-on, not
+    yet built; this function must never be the second place a real credential is copied to.
+
+    Same `(tenant_id, platform, source_id)` uniqueness key as `create_source()` (migration
+    0020's own `UNIQUE (tenant_id, platform, source_id)`) -- re-running with identical
+    arguments is always a safe no-op; a previously-disabled row is re-enabled (never
+    duplicated), matching this function's own idempotency contract. Unlike `create_source()`,
+    this never creates the paired `workstreams` row -- that table is scoped to generic-webhook
+    usage metering (spec Sec5.11), orthogonal to whether a bundle can bind and consume this
+    source's stream, which needs only this table (see `app_source_binding_service.py`'s own
+    module docstring).
+    """
+    existing = await install_dal(
+        (install_dal.ingest_sources.tenant_id == tenant_id)
+        & (install_dal.ingest_sources.platform == platform)
+        & (install_dal.ingest_sources.source_id == source_id)
+    ).select()
+    row = existing.first()
+    now = datetime.now(UTC)
+    if row is not None:
+        if not row.enabled:
+            await install_dal(install_dal.ingest_sources.id == row.id).update(
+                enabled=True, updated_at=now
+            )
+            row = (await install_dal(install_dal.ingest_sources.id == row.id).select()).first()
+        return row
+
+    new_id = await install_dal.ingest_sources.async_insert(
+        tenant_id=tenant_id,
+        community_id=community_id,
+        platform=platform,
+        source_id=source_id,
+        label=label,
+        secret_ciphertext=None,
+        secret_iv=None,
+        mapping=mapping,
+        enabled=True,
+        created_at=now,
+        updated_at=now,
+    )
+    return (await install_dal(install_dal.ingest_sources.id == new_id).select()).first()
+
+
 async def list_sources(install_dal: AsyncDB, *, tenant_id: int) -> list[Any]:
     """Every ingest source for a tenant. Never returns the plaintext secret."""
     rows = await install_dal(install_dal.ingest_sources.tenant_id == tenant_id).select()
