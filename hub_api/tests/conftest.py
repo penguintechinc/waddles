@@ -1525,6 +1525,31 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("occurred_at", DateTime),
         Column("reversal_of", BigInteger),
     )
+    # instance_permission_policies / instance_permission_policy_audit
+    # (migration 0033) -- sqlite-compatible mirror of the instance policy
+    # layer (services/bundle_instance_policy_service.py).
+    Table(
+        "instance_permission_policies",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("permission_key", String(255), nullable=False),
+        Column("param_scope", String(255)),
+        Column("action", String(10), nullable=False),
+        Column("set_by", Integer),
+        Column("set_at", DateTime),
+    )
+    Table(
+        "instance_permission_policy_audit",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("permission_key", String(255), nullable=False),
+        Column("param_scope", String(255)),
+        Column("previous_action", String(10)),
+        Column("new_action", String(10), nullable=False),
+        Column("cascaded_revocations", Integer, server_default="0"),
+        Column("set_by", Integer),
+        Column("set_at", DateTime),
+    )
     # `audit_log` is a pre-existing production table (services/schema.py's
     # `bind_admin_tables()`), reflected here as its sqlite-compatible
     # mirror because this fixture has no full pydal schema bootstrap --

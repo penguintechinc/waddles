@@ -30,6 +30,7 @@ from penguin_dal import AsyncDB
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
+from services import bundle_instance_policy_service as instance_policy_svc
 from services import bundle_permission_service as svc
 from services.community_authz import authorize_community
 from services.current_user import get_current_user_id
@@ -37,6 +38,23 @@ from services.errors import ApiError
 from services.tenant_service import require_matching_tenant
 
 bundle_permissions_bp = Blueprint("v1_bundle_permissions", __name__, url_prefix="/api/v1/apps")
+
+
+async def _reject_instance_denied(install_dal: AsyncDB, permission_ids: frozenset[str]) -> None:
+    """403 `instance_denied_permission` if any id's TYPE is instance-denied (spec: instance policy).
+
+    Checked ABOVE the existing 3 tiers -- an instance-wide deny applies to
+    every bundle regardless of its own catalog approval/tenant/community
+    consent, so this runs before `record_permission_requests`/
+    `grant_community_permissions` ever gets a chance to write a row.
+    """
+    denied = [
+        pid
+        for pid in sorted(permission_ids)
+        if await instance_policy_svc.is_instance_denied(install_dal, permission_id=pid)
+    ]
+    if denied:
+        raise ApiError(f"instance policy denies: {denied}", 403, "instance_denied_permission")
 
 
 def _install_dal() -> AsyncDB:
@@ -125,6 +143,9 @@ async def approve_permissions(
     install_dal = _install_dal()
     try:
         manifest = await svc.manifest_for_version(install_dal, app_id=app_id, version=version)
+        await _reject_instance_denied(
+            install_dal, frozenset(d.id for d in manifest.permission_declarations)
+        )
         await svc.record_permission_requests(
             install_dal,
             app_id=app_id,
@@ -202,6 +223,7 @@ async def grant_permissions(
     try:
         await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
         manifest = await svc.manifest_for_version(install_dal, app_id=app_id, version=data.version)
+        await _reject_instance_denied(install_dal, frozenset(data.grantedPermissions))
         new_version = await svc.grant_community_permissions(
             install_dal,
             tenant_id=ctx.tenant_id,
@@ -267,6 +289,90 @@ async def list_granted_permissions(
         return _err(exc)
     ids = await svc.get_community_granted_ids(install_dal, community_id=community_id, app_id=app_id)
     return PermissionListResponse(success=True, permissionIds=sorted(ids))
+
+
+# ---------------------------------------------------------------------------
+# INSTANCE policy tier (above GLOBAL/TENANT/COMMUNITY) -- platform:admin only
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True, frozen=True)
+class InstancePolicyDTO:
+    """One `instance_permission_policies` row, DTO-shaped for the API response."""
+
+    permissionKey: str
+    paramScope: str | None
+    action: str
+
+
+@dataclass(slots=True, frozen=True)
+class ListInstancePoliciesResponse:
+    """Response DTO for `GET .../permissions/instance-policy`."""
+
+    success: bool
+    policies: list[InstancePolicyDTO]
+
+
+@dataclass(slots=True, frozen=True)
+class SetInstancePolicyRequest:
+    """Request DTO for `PUT .../permissions/instance-policy` (spec: instance policy)."""
+
+    permissionKey: str
+    action: str
+    paramScope: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SetInstancePolicyResponse:
+    """Response DTO carrying how many existing community grants a `deny` cascade revoked."""
+
+    success: bool
+    cascadedRevocations: int
+
+
+@bundle_permissions_bp.route("/permissions/instance-policy", methods=["GET"])
+@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@validate_response(ListInstancePoliciesResponse)
+async def list_instance_policies() -> ListInstancePoliciesResponse:
+    """Every explicit instance-policy row -- global-admin-only, spans every tenant by design."""
+    install_dal = _install_dal()
+    rows = await instance_policy_svc.list_policies(install_dal)
+    return ListInstancePoliciesResponse(
+        success=True,
+        policies=[
+            InstancePolicyDTO(
+                permissionKey=r.permission_key, paramScope=r.param_scope, action=r.action
+            )
+            for r in rows
+        ],
+    )
+
+
+@bundle_permissions_bp.route("/permissions/instance-policy", methods=["PUT"])
+@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@validate_request(SetInstancePolicyRequest)
+@validate_response(SetInstancePolicyResponse)
+async def set_instance_policy(
+    data: SetInstancePolicyRequest,
+) -> SetInstancePolicyResponse | tuple[dict[str, object], int]:
+    """Allow/deny a permission TYPE instance-wide -- applies to every bundle, every tenant.
+
+    Enabling a `deny` on a type that was previously `allow`/unset cascades
+    revocation of every matching active `community_permission_grants` row
+    (spec: instance policy) -- see `bundle_instance_policy_service.
+    set_instance_policy` for the one-transaction cascade + audit shape.
+    """
+    if data.action not in ("allow", "deny"):
+        return _err(ApiError("action must be 'allow' or 'deny'", 400, "invalid_action"))
+    install_dal = _install_dal()
+    cascaded = await instance_policy_svc.set_instance_policy(
+        install_dal,
+        permission_key=data.permissionKey,
+        action=cast(Any, data.action),
+        param_scope=data.paramScope,
+        set_by=get_current_user_id(request),
+    )
+    return SetInstancePolicyResponse(success=True, cascadedRevocations=cascaded)
 
 
 BLUEPRINTS: list[Blueprint] = [bundle_permissions_bp]

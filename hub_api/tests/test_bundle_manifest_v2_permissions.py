@@ -170,12 +170,12 @@ def test_reputation_write_invalid_reason_code_rejected() -> None:
     assert exc.value.reason == "invalid_reason_code"
 
 
-def test_net_http_requires_valid_methods() -> None:
+def test_net_http_fqdn_requires_valid_methods() -> None:
     with pytest.raises(ManifestV2Error) as exc:
         _parse(
             [
                 {
-                    "id": "net.http:api.example.com",
+                    "id": "net.http.fqdn:api.example.com",
                     "justification": "Calls the example API.",
                     "params": {"methods": ["TRACE"]},
                 }
@@ -184,12 +184,12 @@ def test_net_http_requires_valid_methods() -> None:
     assert exc.value.reason == "invalid_net_http_method"
 
 
-def test_net_http_requires_methods_present() -> None:
+def test_net_http_fqdn_requires_methods_present() -> None:
     with pytest.raises(ManifestV2Error) as exc:
         _parse(
             [
                 {
-                    "id": "net.http:api.example.com",
+                    "id": "net.http.fqdn:api.example.com",
                     "justification": "Calls the example API.",
                     "params": {},
                 }
@@ -198,18 +198,136 @@ def test_net_http_requires_methods_present() -> None:
     assert exc.value.reason == "invalid_net_http_method"
 
 
-def test_net_http_valid_methods_parses() -> None:
+def test_net_http_fqdn_valid_methods_parses() -> None:
     manifest = _parse(
         [
             {
-                "id": "net.http:api.example.com",
+                "id": "net.http.fqdn:api.example.com",
                 "justification": "Calls the example API.",
                 "params": {"methods": ["GET", "POST"]},
             }
         ]
     )
     decls = manifest.permission_declarations  # type: ignore[attr-defined]
+    assert decls[0].id == "net.http.fqdn:api.example.com"
+    assert decls[0].risk == "normal"
     assert decls[0].params["methods"] == ["GET", "POST"]
+
+
+def test_net_http_public_ip_is_dangerous_and_requires_methods() -> None:
+    manifest = _parse(
+        [
+            {
+                "id": "net.http.public-ip:93.184.216.34",
+                "justification": "Calls a vendor API with no stable hostname.",
+                "params": {"methods": ["GET"]},
+            }
+        ]
+    )
+    decls = manifest.permission_declarations  # type: ignore[attr-defined]
+    assert decls[0].risk == "dangerous"
+
+
+def test_net_http_public_ip_rejects_cidr() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(
+            [
+                {
+                    "id": "net.http.public-ip:93.184.216.0/24",
+                    "justification": "x",
+                    "params": {"methods": ["GET"]},
+                }
+            ]
+        )
+    assert exc.value.reason == "unknown_permission"
+
+
+def test_net_http_private_ip_is_dangerous_within_prefix_bound() -> None:
+    manifest = _parse(
+        [
+            {
+                "id": "net.http.private-ip:10.20.0.0/16",
+                "justification": "Calls an internal partner appliance.",
+                "params": {"methods": ["GET", "POST"]},
+            }
+        ]
+    )
+    decls = manifest.permission_declarations  # type: ignore[attr-defined]
+    assert decls[0].risk == "dangerous"
+
+
+def test_net_http_private_ip_rejects_coarser_than_bound() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(
+            [
+                {
+                    "id": "net.http.private-ip:10.0.0.0/8",
+                    "justification": "x",
+                    "params": {"methods": ["GET"]},
+                }
+            ]
+        )
+    assert exc.value.reason == "unknown_permission"
+
+
+def test_net_http_private_ip_rejects_loopback() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(
+            [
+                {
+                    "id": "net.http.private-ip:127.0.0.1",
+                    "justification": "x",
+                    "params": {"methods": ["GET"]},
+                }
+            ]
+        )
+    assert exc.value.reason == "unknown_permission"
+
+
+def test_net_http_private_ip_rejects_metadata_address() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse(
+            [
+                {
+                    "id": "net.http.private-ip:169.254.169.254",
+                    "justification": "x",
+                    "params": {"methods": ["GET"]},
+                }
+            ]
+        )
+    assert exc.value.reason == "unknown_permission"
+
+
+def test_net_http_ip_family_emits_advisory_warning(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="services.bundle_manifest_v2"):
+        _parse(
+            [
+                {
+                    "id": "net.http.public-ip:93.184.216.34",
+                    "justification": "Calls a vendor API with no stable hostname.",
+                    "params": {"methods": ["GET"]},
+                }
+            ]
+        )
+    assert any("net.http.fqdn" in record.message for record in caplog.records)
+
+
+def test_net_http_fqdn_family_no_advisory_warning(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="services.bundle_manifest_v2"):
+        _parse(
+            [
+                {
+                    "id": "net.http.fqdn:api.example.com",
+                    "justification": "Calls the example API.",
+                    "params": {"methods": ["GET"]},
+                }
+            ]
+        )
+    assert caplog.records == []
 
 
 def test_methods_param_rejected_on_non_net_http_permission() -> None:

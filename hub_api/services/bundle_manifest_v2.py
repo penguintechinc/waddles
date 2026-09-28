@@ -14,6 +14,7 @@ any compiler Job would be created.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,7 +29,14 @@ from flask_core.bundle_attribution import (
     valid_notice,
 )
 
-from services.bundle_permission_catalog import is_valid_egress_host, resolve_risk
+from services.bundle_permission_catalog import (
+    NET_HTTP_IP_PREFIXES,
+    NET_HTTP_PREFIXES,
+    is_valid_egress_host,
+    resolve_risk,
+)
+
+logger = logging.getLogger(__name__)
 
 _SEGMENT = r"[a-z0-9][a-z0-9_-]*"
 _APP_ID_RE = re.compile(rf"^waddles\.{_SEGMENT}\.{_SEGMENT}\.{_SEGMENT}$")
@@ -235,7 +243,7 @@ def parse_permission_declarations(
 
         params = dict(entry.get("params") or {})
 
-        if permission_id.startswith("net.http:"):
+        if permission_id.startswith(NET_HTTP_PREFIXES):
             methods = params.get("methods")
             _require(
                 isinstance(methods, list) and bool(methods) and set(methods) <= _ALLOWED_METHODS,
@@ -243,11 +251,19 @@ def parse_permission_declarations(
                 f"{permission_id!r} params.methods must be a non-empty subset of "
                 f"{sorted(_ALLOWED_METHODS)}, got {methods!r}",
             )
+            if permission_id.startswith(NET_HTTP_IP_PREFIXES):
+                logger.warning(
+                    "bundle manifest declares an IP-literal outbound permission %r -- "
+                    "prefer net.http.fqdn:<host> where a stable hostname is available; "
+                    "net.http.public-ip/private-ip are dangerous-risk and require explicit "
+                    "per-tenant/community re-consent",
+                    permission_id,
+                )
         elif "methods" in params:
             _require(
                 False,
                 "invalid_net_http_method",
-                "params.methods is only valid for a net.http:<host> permission",
+                "params.methods is only valid for a net.http.fqdn/public-ip/private-ip permission",
             )
 
         if permission_id == "storage.tables":
