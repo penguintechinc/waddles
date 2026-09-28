@@ -34,7 +34,48 @@ read/write load, bounded by `tick_seconds` and the number of replicas.
 **Retention** (Sec7 "unchanged from rev 2", default 48h) is pruned by
 this same job on a slower cadence (`retention_tick_every` ticks) so a
 short-staffed deployment isn't required to run a second scheduled job
-just to keep `bundle_active_set_changes` bounded.
+just to keep `bundle_active_set_changes` bounded. Each prune also
+republishes `min_retained_seq` (the lowest surviving `seq`) so a
+consumer whose `last_seen_seq` has fallen below it can tell it's past
+retention and must full-reconcile instead of trusting a range poll that
+silently skips pruned rows.
+
+**`writer_xid xid8`, not the 32-bit `xmin` system column (post-review
+fix).** `xmin` wraps at 2^32 and reads back as `FrozenTransactionId` (2)
+once a tuple is frozen by `VACUUM FREEZE` -- comparing it against
+`pg_snapshot_xmin()`'s 64-bit, epoch-extended `xid8` via a `bigint` cast
+is unsound at any table age beyond a wraparound/freeze boundary. Every
+comparison here is native `xid8 < xid8` against migration 0026's
+`bundle_active_set_changes.writer_xid` column instead.
+
+**One replica computes per tick; the rest skip (post-review fix).**
+`compute_once()` being a pure function of primary state means *concurrent*
+computation across replicas converges to the same answer, but it is still
+wasted, redundant read/write load that scales with replica count for no
+benefit. `pg_try_advisory_xact_lock()` (auto-released on transaction
+end, never needs an explicit unlock) makes exactly one replica's
+transaction do the real work per tick; every other replica's
+`pg_try_advisory_xact_lock()` call returns `false` immediately and that
+replica returns the watermark's current published value unchanged. This
+is a cheap load-shedding optimization, not a correctness requirement --
+see the `UPDATE ... WHERE safe_seq < :safe_seq` monotonic guard below,
+which independently makes even a hypothetical concurrent write safe.
+
+**Bounded, contiguous-prefix scan; monotonic publish (post-review
+correctness/perf fix).** An unconditional `MAX(seq) WHERE writer_xid <
+horizon` re-scans the whole table every tick *and* can publish a `seq`
+that shadows a still-in-flight, lower-`seq` row from a transaction whose
+xid was assigned at an earlier statement than its watched-table write --
+see migration `0026`'s own docstring for the exact scenario and why
+`seq` order and xid order aren't guaranteed to coincide. Fixed by
+scanning only `seq > current safe_seq` (`LIMIT`-capped, a plain PK
+-range index scan) and using a window function to find the longest
+*contiguous* prefix of that batch where every row's `writer_xid` is
+already below the horizon -- the moment a row fails that test, nothing
+past it is considered "safe" this tick, even if a later row in the same
+batch would individually qualify. The final publish additionally guards
+`WHERE safe_seq < :safe_seq` so the watermark can never regress, even
+if ticks somehow interleave unexpectedly.
 """
 
 from __future__ import annotations
@@ -46,8 +87,8 @@ from typing import Final
 
 import structlog
 from penguin_dal import AsyncDB
+from sqlalchemy import text
 
-from services.bundle_install_dal import raw_sql_rows, raw_sql_write
 from services.bundle_telemetry import get_meter
 
 logger = structlog.get_logger()
@@ -59,19 +100,66 @@ DEFAULT_RETENTION_HOURS: Final[float] = 48.0
 #: Prune roughly every 5 minutes at the default 2s tick -- far slower than
 #: the safe_seq computation itself; retention doesn't need second-granularity.
 DEFAULT_RETENTION_TICK_EVERY: Final[int] = 150
+#: Rows scanned per compute_once() tick -- bounds the query to a PK range
+#: scan capped at this size, never a full-table scan.
+DEFAULT_BATCH_SIZE: Final[int] = 1000
 
-_HORIZON_SQL = "SELECT pg_snapshot_xmin(pg_current_snapshot())::text::bigint AS horizon"
-_SAFE_SEQ_SQL = (
-    "SELECT COALESCE(MAX(seq), 0) AS safe_seq FROM bundle_active_set_changes "
-    "WHERE xmin::text::bigint < :horizon"
+#: Cross-replica coordination key for pg_try_advisory_xact_lock() -- must
+#: stay fixed forever (it's how independent hub-api replicas agree on
+#: "who computes this tick"), never derived from anything that could
+#: change between processes/deploys. Value: ASCII "wadb" (0x77616462) in
+#: the high 32 bits, a fixed 0x00000007 tag in the low 32 bits.
+_ADVISORY_LOCK_KEY: Final[int] = 0x7761646200000007
+
+#: asyncpg decodes `xid8` natively as a Python `int` (its own codec
+#: rejects a `str` on the way back in, so no `::text` round-trip here) --
+#: `_SAFE_SEQ_SQL` re-casts it explicitly via `CAST(:horizon AS xid8)`.
+#: Never downcast to `bigint` (that's the exact 32-bit-vs-64-bit
+#: unsoundness migration 0026 fixed).
+_HORIZON_SQL = "SELECT pg_snapshot_xmin(pg_current_snapshot()) AS horizon"
+_TRY_LOCK_SQL = "SELECT pg_try_advisory_xact_lock(:key) AS acquired"
+_CURRENT_SAFE_SEQ_SQL = "SELECT safe_seq FROM bundle_active_set_watermark WHERE id = 1"
+#: Bounded PK-range scan (never a full-table scan): only rows past the
+#: currently-published safe_seq, capped at :batch_size. The window
+#: function computes, per row in seq order, whether every row from the
+#: start of this batch through this one is already xid-safe
+#: (`prefix_safe`) -- the contiguous-prefix fix migration 0026's
+#: docstring and this module's own docstring describe. MAX(seq) over only
+#: `prefix_safe` rows can never jump past a not-yet-safe row, unlike an
+#: unconditional MAX() over the whole qualifying set.
+_SAFE_SEQ_SQL = """
+WITH candidates AS (
+    SELECT seq, (writer_xid < CAST(:horizon AS xid8)) AS is_safe
+    FROM bundle_active_set_changes
+    WHERE seq > :current_safe_seq
+    ORDER BY seq
+    LIMIT :batch_size
+),
+prefixed AS (
+    SELECT seq, is_safe,
+           bool_and(is_safe) OVER (
+               ORDER BY seq ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+           ) AS prefix_safe
+    FROM candidates
 )
+SELECT COALESCE(MAX(seq), :current_safe_seq) AS new_safe_seq
+FROM prefixed
+WHERE prefix_safe
+"""
+#: Monotonic guard -- `safe_seq` can never regress even under an
+#: unexpected interleaving; a no-op UPDATE (0 rows) when new <= current.
 _UPDATE_WATERMARK_SQL = (
-    "UPDATE bundle_active_set_watermark SET safe_seq = :safe_seq, computed_at = now() WHERE id = 1"
+    "UPDATE bundle_active_set_watermark SET safe_seq = :safe_seq, computed_at = now() "
+    "WHERE id = 1 AND safe_seq < :safe_seq"
 )
 _PRUNE_SQL = (
     "DELETE FROM bundle_active_set_changes "
     "WHERE changed_at < now() - (:retention_hours * interval '1 hour') "
     "RETURNING seq"
+)
+_MIN_RETAINED_SEQ_SQL = "SELECT MIN(seq) FROM bundle_active_set_changes"
+_UPDATE_MIN_RETAINED_SEQ_SQL = (
+    "UPDATE bundle_active_set_watermark SET min_retained_seq = :min_retained_seq WHERE id = 1"
 )
 
 _meter = get_meter()
@@ -103,6 +191,7 @@ class WatermarkJobConfig:
     tick_seconds: float = DEFAULT_TICK_SECONDS
     retention_hours: float = DEFAULT_RETENTION_HOURS
     retention_tick_every: int = DEFAULT_RETENTION_TICK_EVERY
+    batch_size: int = DEFAULT_BATCH_SIZE
 
 
 class BundleActiveSetWatermarkJob:
@@ -160,23 +249,56 @@ class BundleActiveSetWatermarkJob:
                 pass
 
     async def compute_once(self) -> int:
-        """One safe_seq computation + publish, per Sec7's own SQL exactly.
+        """One safe_seq computation + publish, xid8-exact and load-shed across replicas.
 
-        Returns the newly published `safe_seq` (also true when unchanged
-        from the previous tick -- the `UPDATE` is idempotent either way).
+        Runs entirely inside one transaction (required for
+        `pg_try_advisory_xact_lock()`, which auto-releases on transaction
+        end): acquire the cross-replica lock; if another replica already
+        holds it this tick, return the currently-published value
+        unchanged. Otherwise compute the horizon, scan the bounded
+        contiguous-safe-prefix batch, and publish via the monotonic
+        `WHERE safe_seq < :safe_seq` guard -- see this module's own
+        docstring for why each piece is necessary.
+
+        Returns the published `safe_seq` (unchanged from the previous
+        tick when nothing new is safe yet, or when another replica holds
+        the lock this tick).
         """
-        horizon_rows = await raw_sql_rows(self._dal, _HORIZON_SQL)
-        horizon = horizon_rows[0]["horizon"] if len(horizon_rows) else None
-        if horizon is None:
-            # No live snapshot (e.g. a brand-new, connectionless primary) --
-            # nothing is unsafe to skip; try again next tick.
-            return 0
-        seq_rows = await raw_sql_rows(self._dal, _SAFE_SEQ_SQL, {"horizon": horizon})
-        safe_seq = int(seq_rows[0]["safe_seq"]) if len(seq_rows) else 0
-        await raw_sql_write(self._dal, _UPDATE_WATERMARK_SQL, {"safe_seq": safe_seq})
-        _safe_seq_gauge.set(safe_seq)
+        async with self._dal.engine.begin() as conn:
+            acquired = (
+                await conn.execute(text(_TRY_LOCK_SQL), {"key": _ADVISORY_LOCK_KEY})
+            ).scalar_one()
+            current_safe_seq = int((await conn.execute(text(_CURRENT_SAFE_SEQ_SQL))).scalar_one())
+            if not acquired:
+                # Another replica is computing this tick -- skip entirely,
+                # never contend for the same work (see module docstring).
+                return current_safe_seq
+
+            horizon = (await conn.execute(text(_HORIZON_SQL))).scalar_one()
+            if horizon is None:
+                # No live snapshot (e.g. a brand-new, connectionless
+                # primary) -- nothing is unsafe to skip; try again next tick.
+                return current_safe_seq
+
+            new_safe_seq = int(
+                (
+                    await conn.execute(
+                        text(_SAFE_SEQ_SQL),
+                        {
+                            "horizon": horizon,
+                            "current_safe_seq": current_safe_seq,
+                            "batch_size": self._config.batch_size,
+                        },
+                    )
+                ).scalar_one()
+            )
+            if new_safe_seq > current_safe_seq:
+                await conn.execute(text(_UPDATE_WATERMARK_SQL), {"safe_seq": new_safe_seq})
+
+        published = max(new_safe_seq, current_safe_seq)
+        _safe_seq_gauge.set(published)
         _computed_at_gauge.set(time.time())
-        return safe_seq
+        return published
 
     async def prune_once(self) -> int:
         """Delete `bundle_active_set_changes` rows older than `retention_hours`.
@@ -184,11 +306,25 @@ class BundleActiveSetWatermarkJob:
         Age-based only (Sec7 "safe past that horizon because a replica
         down longer is already in full-reconcile territory") -- never
         gated on `safe_seq`, since the retention window is far longer
-        than any realistic consumer lag.
+        than any realistic consumer lag. Republishes `min_retained_seq`
+        in the same transaction so consumers can detect falling behind
+        retention.
         """
-        result = await raw_sql_write(
-            self._dal, _PRUNE_SQL, {"retention_hours": self._config.retention_hours}
-        )
-        pruned = len(result)
+        async with self._dal.engine.begin() as conn:
+            pruned_rows = (
+                await conn.execute(
+                    text(_PRUNE_SQL), {"retention_hours": self._config.retention_hours}
+                )
+            ).fetchall()
+            min_retained = (await conn.execute(text(_MIN_RETAINED_SEQ_SQL))).scalar_one()
+            if min_retained is None:
+                # Nothing left in the log -- nothing is "behind" any point,
+                # so fall back to the currently published safe_seq.
+                min_retained = (await conn.execute(text(_CURRENT_SAFE_SEQ_SQL))).scalar_one()
+            await conn.execute(
+                text(_UPDATE_MIN_RETAINED_SEQ_SQL), {"min_retained_seq": min_retained}
+            )
+
+        pruned = len(pruned_rows)
         _pruned_rows_histogram.record(pruned)
         return pruned

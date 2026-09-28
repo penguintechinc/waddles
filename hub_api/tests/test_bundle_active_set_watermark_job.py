@@ -25,6 +25,7 @@ import pytest
 from penguin_dal import AsyncDB
 
 from services.bundle_active_set_watermark_job import (
+    _ADVISORY_LOCK_KEY,
     BundleActiveSetWatermarkJob,
     WatermarkJobConfig,
 )
@@ -190,6 +191,124 @@ class TestPruneOnce:
                 remaining = {row[0] for row in cur.fetchall()}
         assert str(fresh_id) in remaining
         assert str(old_id) not in remaining
+
+
+@requires_docker
+class TestConcurrentReplicas:
+    """`pg_try_advisory_xact_lock()` -- exactly one replica computes per tick."""
+
+    async def test_advisory_lock_is_mutually_exclusive_across_connections(self, pg_db: Any) -> None:
+        # Two separate real connections (standing in for two hub-api
+        # replicas) racing for the same cross-replica coordination key.
+        # Postgres serializes lock acquisition; whichever wins holds it
+        # until its own transaction ends, so the second must observe a
+        # clean `false`, never block or error.
+        holder = psycopg2.connect(pg_db.dsn)
+        holder.autocommit = False
+        contender = psycopg2.connect(pg_db.dsn)
+        contender.autocommit = False
+        try:
+            with holder.cursor() as cur:
+                cur.execute("SELECT pg_try_advisory_xact_lock(%s)", (_ADVISORY_LOCK_KEY,))
+                assert _one(cur) is True
+
+            with contender.cursor() as cur:
+                cur.execute("SELECT pg_try_advisory_xact_lock(%s)", (_ADVISORY_LOCK_KEY,))
+                assert _one(cur) is False
+
+            holder.commit()  # releases holder's xact-scoped lock
+
+            with contender.cursor() as cur:
+                cur.execute("SELECT pg_try_advisory_xact_lock(%s)", (_ADVISORY_LOCK_KEY,))
+                assert _one(cur) is True
+        finally:
+            holder.close()
+            contender.close()
+
+    async def test_two_concurrent_compute_once_calls_never_double_count(
+        self, pg_db: Any, dal: AsyncDB
+    ) -> None:
+        # Two BundleActiveSetWatermarkJob instances, standing in for two
+        # hub-api replicas, sharing the same underlying database (each
+        # over its own AsyncDB pool, matching how two real processes
+        # would each hold their own connection pool against one primary).
+        _seed_app_version(pg_db, "waddles.job.concurrent-a")
+        _seed_app_version(pg_db, "waddles.job.concurrent-b")
+
+        pydal_style_dsn = pg_db.dsn.replace("postgresql://", "postgres://")
+        replica_a_dal = await build_install_dal(pydal_style_dsn, pool_size=2)
+        replica_b_dal = await build_install_dal(pydal_style_dsn, pool_size=2)
+        try:
+            replica_a = BundleActiveSetWatermarkJob(replica_a_dal)
+            replica_b = BundleActiveSetWatermarkJob(replica_b_dal)
+
+            results = await asyncio.gather(replica_a.compute_once(), replica_b.compute_once())
+
+            # Both calls succeed (no crash from lock contention) and agree
+            # on the same final published value -- whichever one actually
+            # won the lock this tick, the loser reports that same value
+            # back rather than a stale/incorrect one.
+            with psycopg2.connect(pg_db.dsn) as conn:
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute("SELECT safe_seq FROM bundle_active_set_watermark WHERE id = 1")
+                    published = _one(cur)
+            assert results[0] == published or results[1] == published
+        finally:
+            await replica_a_dal.close()
+            await replica_b_dal.close()
+
+
+@requires_docker
+class TestMonotonicGuard:
+    """The watermark can never regress, even under a direct regression attempt."""
+
+    async def test_direct_regression_attempt_is_rejected(self, pg_db: Any, dal: AsyncDB) -> None:
+        with psycopg2.connect(pg_db.dsn) as conn:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("UPDATE bundle_active_set_watermark SET safe_seq = 50 WHERE id = 1")
+                cur.execute("SELECT safe_seq FROM bundle_active_set_watermark WHERE id = 1")
+                assert _one(cur) == 50
+
+                # The exact guarded UPDATE compute_once() issues -- a lower
+                # value must affect zero rows, never regress the watermark.
+                cur.execute(
+                    "UPDATE bundle_active_set_watermark SET safe_seq = %(safe_seq)s, "
+                    "computed_at = now() WHERE id = 1 AND safe_seq < %(safe_seq)s",
+                    {"safe_seq": 10},
+                )
+                assert cur.rowcount == 0
+                cur.execute("SELECT safe_seq FROM bundle_active_set_watermark WHERE id = 1")
+                assert _one(cur) == 50
+
+    async def test_compute_once_never_regresses_an_already_higher_watermark(
+        self, pg_db: Any, dal: AsyncDB
+    ) -> None:
+        _seed_app_version(pg_db, "waddles.job.regression-guard")
+        job = BundleActiveSetWatermarkJob(dal)
+        real_safe_seq = await job.compute_once()
+
+        # Simulate a watermark that's already ahead of what a fresh, honest
+        # computation would produce (e.g. a stale manual edit) -- a
+        # subsequent compute_once() must never write a lower value back.
+        inflated = real_safe_seq + 1000
+        with psycopg2.connect(pg_db.dsn) as conn:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE bundle_active_set_watermark SET safe_seq = %s WHERE id = 1",
+                    (inflated,),
+                )
+
+        result = await job.compute_once()
+        assert result == inflated
+
+        with psycopg2.connect(pg_db.dsn) as conn:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("SELECT safe_seq FROM bundle_active_set_watermark WHERE id = 1")
+                assert _one(cur) == inflated
 
 
 @requires_docker

@@ -94,11 +94,21 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _wait_ready(container: str, user: str, timeout_s: float = 60.0) -> None:
+def _wait_ready(container: str, user: str, dbname: str, timeout_s: float = 60.0) -> None:
+    """Block until `dbname` actually accepts a real query.
+
+    `pg_isready` alone is insufficient: the official Postgres image
+    accepts connections briefly during its own first-run `initdb`
+    bootstrap, then restarts once more before `POSTGRES_DB` actually
+    exists -- `pg_isready` returns success during that brief window,
+    racily reporting "ready" before the target database exists at all
+    (`FATAL: database "..." does not exist`). A real `SELECT 1` against
+    the actual database is the only check that can't false-positive here.
+    """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         result = subprocess.run(  # noqa: S603 -- fixed argv, no shell, test-only
-            ["docker", "exec", container, "pg_isready", "-U", user],
+            ["docker", "exec", container, "psql", "-U", user, "-d", dbname, "-c", "SELECT 1"],
             capture_output=True,
             check=False,
         )
@@ -138,7 +148,7 @@ def migrated_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
         check=True,
     )
     try:
-        _wait_ready(container, db.user)
+        _wait_ready(container, db.user, db.dbname)
         subprocess.run(  # noqa: S603 -- fixed argv, no shell
             ["docker", "exec", "-i", container, "psql", "-U", db.user, "-d", db.dbname],
             input=_BOOTSTRAP_SQL,

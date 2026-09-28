@@ -143,8 +143,9 @@ class TestSafeSeqExactVisibility:
 
         # A second, real, separately-committed connection opens a transaction,
         # writes to a watched table (firing the trigger, appending a row whose
-        # xmin is this transaction's own not-yet-committed xid), and holds it
-        # open -- exactly the "in-flight" case Sec7 exists to handle safely.
+        # writer_xid is this transaction's own not-yet-committed xid), and
+        # holds it open -- exactly the "in-flight" case Sec7 exists to
+        # handle safely.
         in_flight = psycopg2.connect(pg_db.dsn)
         in_flight.autocommit = False
         try:
@@ -165,13 +166,11 @@ class TestSafeSeqExactVisibility:
                 in_flight_seq = cur.fetchone()[0]
 
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT pg_snapshot_xmin(pg_current_snapshot())::text::bigint AS horizon"
-                )
+                cur.execute("SELECT pg_snapshot_xmin(pg_current_snapshot()) AS horizon")
                 horizon = cur.fetchone()[0]
                 cur.execute(
                     "SELECT COALESCE(MAX(seq), 0) FROM bundle_active_set_changes "
-                    "WHERE xmin::text::bigint < %s",
+                    "WHERE writer_xid < %s",
                     (horizon,),
                 )
                 safe_seq_while_in_flight = cur.fetchone()[0]
@@ -184,13 +183,11 @@ class TestSafeSeqExactVisibility:
             in_flight.commit()
 
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT pg_snapshot_xmin(pg_current_snapshot())::text::bigint AS horizon"
-                )
+                cur.execute("SELECT pg_snapshot_xmin(pg_current_snapshot()) AS horizon")
                 horizon_after = cur.fetchone()[0]
                 cur.execute(
                     "SELECT COALESCE(MAX(seq), 0) FROM bundle_active_set_changes "
-                    "WHERE xmin::text::bigint < %s",
+                    "WHERE writer_xid < %s",
                     (horizon_after,),
                 )
                 safe_seq_after_commit = cur.fetchone()[0]
@@ -200,6 +197,48 @@ class TestSafeSeqExactVisibility:
             assert safe_seq_after_commit >= in_flight_seq
         finally:
             in_flight.close()
+
+
+class TestSecurityDefinerSearchPath:
+    """`fn_bundle_active_set_log_change()` hardens against a SECURITY DEFINER search-path hijack."""
+
+    def test_function_pins_search_path(self, conn: psycopg2.extensions.connection) -> None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT prosecdef, proconfig FROM pg_proc "
+                "WHERE proname = 'fn_bundle_active_set_log_change'"
+            )
+            prosecdef, proconfig = cur.fetchone()
+        assert prosecdef is True
+        assert proconfig is not None
+        assert any(entry.startswith("search_path=") for entry in proconfig)
+        search_path_entry = next(entry for entry in proconfig if entry.startswith("search_path="))
+        assert search_path_entry == "search_path=pg_catalog, pg_temp"
+
+    def test_trigger_still_writes_correctly_under_restricted_search_path(
+        self, conn: psycopg2.extensions.connection
+    ) -> None:
+        # A malicious/unrelated schema earlier in the CALLING session's own
+        # search_path must have zero effect on the function's own behavior
+        # -- SECURITY DEFINER + a pinned search_path means the function
+        # body always resolves `public.bundle_active_set_changes` and
+        # `pg_current_xact_id()` correctly regardless of the caller's own
+        # setting.
+        with conn.cursor() as cur:
+            cur.execute("SET search_path = pg_temp, public")
+            cur.execute("INSERT INTO app_catalog (app_id) VALUES ('waddles.t.searchpath')")
+            cur.execute(
+                "INSERT INTO app_versions (app_id, version, language, artifact_kind) "
+                "VALUES ('waddles.t.searchpath', '1.0.0', 'rust', 'prebuilt') RETURNING id"
+            )
+            version_id = cur.fetchone()[0]
+            cur.execute(
+                "SELECT entity_id, writer_xid IS NOT NULL FROM bundle_active_set_changes "
+                "WHERE entity_id = %s",
+                (str(version_id),),
+            )
+            row = cur.fetchone()
+        assert row == (str(version_id), True)
 
 
 class TestRetention:

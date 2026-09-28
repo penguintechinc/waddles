@@ -27,11 +27,19 @@ longer depends on replication lag at all. The primary-side job itself
 (`hub_api/services/bundle_active_set_watermark_job.py`) is a parallel
 hub-api change, not part of this migration.
 
-**No `writer_xid` column.** Every Postgres heap table already carries
-an implicit `xmin` system column recording the inserting/last
--updating transaction's xid -- the design's own Sec7 SQL reads it
-directly (`WHERE xmin::text::bigint < horizon`), so this migration
-does not add a redundant explicit column for it.
+**`writer_xid xid8`, not the implicit `xmin` system column (post-review
+correctness fix).** The design's own Sec7 SQL reads the implicit
+`xmin` system column directly, but `xmin` is a 32-bit, wraparound
+-relative type -- comparing it against `pg_snapshot_xmin()`'s `xid8`
+result (64-bit, epoch-extended, wraparound-safe) via `xmin::text::bigint`
+is unsound across a `VACUUM FREEZE`/wraparound boundary: a frozen tuple's
+`xmin` reads back as `FrozenTransactionId` (2), which is *always* less
+than any real horizon regardless of how old or new the row actually is,
+and a wrapped-but-unfrozen `xmin` compares incorrectly once the 32-bit
+counter has cycled past the horizon's own epoch. `writer_xid xid8`,
+populated by the trigger via `pg_current_xact_id()` (itself the same
+64-bit epoch-extended id `pg_snapshot_xmin()` returns), compares
+natively `xid8 < xid8` -- exact at any table age, no wraparound case.
 
 **One generic trigger function, one row per watched table.** All five
 tables (`app_active_versions`, `app_install_approvals`,
@@ -47,9 +55,43 @@ consumers filter by `entity` first, so a `NULL` tenant/community on a
 platform-level row is expected, not a data gap. Triggers are `AFTER`
 (never block the write) and do exactly one cheap `INSERT`, in the same
 transaction as the write they log -- same transaction means the
-change-log row's own `xmin` always matches (or is invisible alongside)
-the write it describes, which is exactly what the safe-horizon
-computation above depends on.
+change-log row's own `writer_xid` (`pg_current_xact_id()`) always
+matches the transaction that produced the write it describes, which is
+exactly what the safe-horizon computation above depends on.
+
+**Row-level (`FOR EACH ROW`), not statement-level, and why that's fine
+here.** A row-level trigger has real per-row overhead that would matter
+on a hot data-plane write path -- these five tables are not that: they
+are hub-api-owned control-plane/config tables (installs, approvals,
+source bindings, published digests, ingest source registration), written
+at human/admin-action or publish-time cadence, not per-event. A
+statement-level trigger with a transition table would save nothing
+meaningful here and would complicate `entity_id` construction (still
+needs a per-row natural key) for no real benefit at this write volume.
+
+**Bounded, contiguous-prefix `safe_seq` computation (post-review
+correctness/perf fix).** A single unconditional `MAX(seq) WHERE
+writer_xid < horizon` -- as the design's own Sec7 SQL literally shows --
+has two problems: (1) it re-scans the whole table every tick, growing
+with the 48h retention window; (2) more subtly, `seq` allocation order
+and transaction-xid order are *not* guaranteed to coincide when a
+transaction's xid was assigned at an *earlier* statement than its
+watched-table write (a realistic pattern here -- e.g. `bundle_approval
+_service._write_approval_and_activate()` touches multiple watched
+tables, and other transactions may write an unwatched table first). A
+transaction with an older xid can therefore claim a *later* `seq` than
+a newer-xid transaction that already committed, and an unconditional
+`MAX()` can publish that later `seq` as "safe" while the older-xid
+transaction's own, lower-`seq` row is still in flight -- a permanent
+gap once a consumer advances `last_seen_seq` past it (`seq > last_seen
+AND seq <= safe_seq` would include the missing row's `seq`, but the row
+itself doesn't exist yet, so the consumer simply never sees it once it
+finally commits). Fixed in the primary-side job (not this migration) by
+scanning only `seq > current_safe_seq` (a bounded, `LIMIT`-capped PK
+-range scan) and advancing `safe_seq` only across the *contiguous safe
+prefix* of that batch, stopping at the first not-yet-safe row rather
+than jumping past it -- see `bundle_active_set_watermark_job.py`'s own
+docstring for the exact query.
 
 **Retention.** `bundle_active_set_changes` is pruned by
 `hub_api/services/bundle_active_set_watermark_job.py` on a slower
@@ -57,7 +99,11 @@ cadence than the safe_seq computation itself (default 48h, Sec7
 "unchanged from rev 2" -- safe because a replica down longer than that
 is already in full-reconcile territory); `idx_bundle_active_set_changes_changed_at`
 below exists so that prune `DELETE` is an index range scan, not a
-sequential scan of the whole table.
+sequential scan of the whole table. `bundle_active_set_watermark.
+min_retained_seq` (updated by the same prune pass) is the lowest `seq`
+still present after pruning, so a consumer whose own `last_seen_seq` has
+fallen below it can detect "I'm stale past retention, do a full
+reconcile" instead of silently polling a range that skips pruned rows.
 
 **Writer-side statement/idle timeouts (Sec7 "Bounding staleness at the
 source").** A long-running or idle-in-transaction writer on any
@@ -199,6 +245,7 @@ def upgrade() -> None:
             tenant_id INTEGER,
             community_id INTEGER,
             op TEXT NOT NULL CHECK (op IN ('INSERT', 'UPDATE', 'DELETE')),
+            writer_xid xid8 NOT NULL,
             changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
         """
@@ -212,11 +259,16 @@ def upgrade() -> None:
         "ON bundle_active_set_changes (entity, seq)"
     )
     op.execute(
+        "CREATE INDEX IF NOT EXISTS idx_bundle_active_set_changes_writer_xid "
+        "ON bundle_active_set_changes (writer_xid)"
+    )
+    op.execute(
         "COMMENT ON TABLE bundle_active_set_changes IS "
         "'Append-only change-log of every write to an active-set input table "
-        "(data-plane scale design rev4 Sec7) -- xmin (implicit system column) "
-        "is the exact-visibility key the primary-side safe_seq job reads, "
-        "never a custom writer_xid column'"
+        "(data-plane scale design Sec7) -- writer_xid (xid8, set via "
+        "pg_current_xact_id()) is the exact-visibility key the primary-side "
+        "safe_seq job compares against pg_snapshot_xmin(); never the "
+        "32-bit implicit xmin system column (unsound across wraparound/freeze)'"
     )
 
     op.execute(
@@ -224,27 +276,40 @@ def upgrade() -> None:
         CREATE TABLE IF NOT EXISTS bundle_active_set_watermark (
             id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
             safe_seq BIGINT NOT NULL DEFAULT 0,
+            min_retained_seq BIGINT NOT NULL DEFAULT 0,
             computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
         """
     )
     op.execute(
-        "INSERT INTO bundle_active_set_watermark (id, safe_seq) VALUES (1, 0) "
-        "ON CONFLICT (id) DO NOTHING"
+        "INSERT INTO bundle_active_set_watermark (id, safe_seq, min_retained_seq) "
+        "VALUES (1, 0, 0) ON CONFLICT (id) DO NOTHING"
     )
     op.execute(
         "COMMENT ON TABLE bundle_active_set_watermark IS "
-        "'Single-row published safe_seq (data-plane scale design rev4 Sec7) -- "
+        "'Single-row published safe_seq (data-plane scale design Sec7) -- "
         "written only by the primary-side job "
         "(hub_api/services/bundle_active_set_watermark_job.py), read-only "
-        "everywhere else'"
+        "everywhere else. min_retained_seq is the lowest surviving seq after "
+        "the last retention prune, so a consumer can detect falling behind "
+        "retention'"
     )
 
-    # One shared, cheap AFTER trigger function -- SECURITY DEFINER so it can
+    # One shared, cheap AFTER trigger function. SECURITY DEFINER so it can
     # always write bundle_active_set_changes regardless of which watched
     # table's writer role fired it (same convention as
-    # fn_app_versions_audit(), migration 0022). TG_ARGV carries the calling
-    # table's own natural-key column names (see _WATCHED_TABLES above).
+    # fn_app_versions_audit(), migration 0022) -- kept rather than dropped
+    # because svc-owned writer roles (see the RBAC matrix) are granted
+    # write access to their own watched tables but not necessarily to
+    # bundle_active_set_changes itself, and this function is the only
+    # writer that table needs. `SET search_path = pg_catalog, pg_temp`
+    # (post-review hardening) closes the SECURITY DEFINER search-path
+    # hijack vector (a malicious same-named function/type earlier in an
+    # attacker-controlled search_path) -- every reference below is
+    # schema-qualified (`public.bundle_active_set_changes`) so the
+    # function still resolves correctly with search_path locked down.
+    # TG_ARGV carries the calling table's own natural-key column names
+    # (see _WATCHED_TABLES above).
     op.execute(
         """
         CREATE OR REPLACE FUNCTION fn_bundle_active_set_log_change() RETURNS trigger AS $$
@@ -271,14 +336,15 @@ def upgrade() -> None:
             v_tenant_id := NULLIF(v_row ->> 'tenant_id', '')::INTEGER;
             v_community_id := NULLIF(v_row ->> 'community_id', '')::INTEGER;
 
-            INSERT INTO bundle_active_set_changes
-                (entity, entity_id, tenant_id, community_id, op)
+            INSERT INTO public.bundle_active_set_changes
+                (entity, entity_id, tenant_id, community_id, op, writer_xid)
             VALUES
-                (TG_TABLE_NAME::TEXT, v_entity_id, v_tenant_id, v_community_id, TG_OP);
+                (TG_TABLE_NAME::TEXT, v_entity_id, v_tenant_id, v_community_id, TG_OP,
+                 pg_current_xact_id());
 
             RETURN NULL;
         END;
-        $$ LANGUAGE plpgsql SECURITY DEFINER
+        $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp
         """
     )
 
