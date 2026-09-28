@@ -186,6 +186,20 @@ pub struct Config {
     /// subscription/broadcaster, docs/superpowers/specs/2026-09-28-
     /// connections-credentials-design.md §2) lands in a later increment.
     pub twitch_eventsub_secret: Option<Secret>,
+    /// `INGEST_DEV_KEK` -- switches identity-field encryption
+    /// (`crate::identity_crypto`) from the production `HubApiDekProvider`
+    /// to the dev/alpha-only `LocalDevDekProvider`. Never set in
+    /// beta/gamma/prod: `LocalDevDekProvider::new` additionally hard-gates
+    /// on [`Self::deployment_environment`] and refuses construction
+    /// outside alpha/local regardless of whether this is set.
+    pub ingest_dev_kek: Option<Secret>,
+    /// `WADDLES_ENV` -- this deployment's environment name
+    /// (`alpha`/`local`/`beta`/`gamma`/`production`), read directly from
+    /// the environment (never a CLI flag: an operator should not be able
+    /// to flip this via a pod command-line override). Gates
+    /// [`crate::identity_crypto::LocalDevDekProvider`] -- see
+    /// [`Self::deployment_environment`].
+    pub waddles_env: String,
 }
 
 impl fmt::Debug for Config {
@@ -214,6 +228,11 @@ impl fmt::Debug for Config {
                     .as_ref()
                     .map(|_| Secret::new("")),
             )
+            .field(
+                "ingest_dev_kek",
+                &self.ingest_dev_kek.as_ref().map(|_| Secret::new("")),
+            )
+            .field("waddles_env", &self.waddles_env)
             .finish()
     }
 }
@@ -241,7 +260,20 @@ impl Config {
             twitch_eventsub_secret: std::env::var("TWITCH_EVENTSUB_SECRET")
                 .ok()
                 .map(Secret::new),
+            ingest_dev_kek: std::env::var("INGEST_DEV_KEK").ok().map(Secret::new),
+            // Default `"production"` (never `"alpha"`/`"local"`) -- an
+            // unset `WADDLES_ENV` must never accidentally satisfy
+            // `LocalDevDekProvider`'s environment gate, fail closed.
+            waddles_env: std::env::var("WADDLES_ENV").unwrap_or_else(|_| "production".to_string()),
         })
+    }
+
+    /// This deployment's environment name, for
+    /// [`crate::identity_crypto::LocalDevDekProvider`]'s hard environment
+    /// gate -- see [`Self::waddles_env`]'s doc comment.
+    #[must_use]
+    pub fn deployment_environment(&self) -> &str {
+        &self.waddles_env
     }
 
     /// The `penguin_spine::Scope` every fixed-platform receiver mints
@@ -397,6 +429,8 @@ mod tests {
             discord_bot_token: None,
             envelope_binding_keys: None,
             twitch_eventsub_secret: None,
+            ingest_dev_kek: None,
+            waddles_env: "production".to_string(),
         };
         let scope = cfg.ingest_scope();
         assert_eq!(scope.tenant, "acme");
@@ -418,6 +452,8 @@ mod tests {
             discord_bot_token: None,
             envelope_binding_keys: None,
             twitch_eventsub_secret: None,
+            ingest_dev_kek: None,
+            waddles_env: "production".to_string(),
         };
         let scope = cfg.ingest_scope();
         assert_eq!(scope.community.as_deref(), Some("main"));

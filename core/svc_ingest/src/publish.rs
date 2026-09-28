@@ -28,6 +28,8 @@ use penguin_spine::{
 };
 use uuid::Uuid;
 
+use crate::identity_crypto::{self, DekProvider, DekUnavailableError};
+
 /// Fixed namespace for PA-WORKSTREAM's deterministic fixed-platform
 /// workstream ids. Generated once and never regenerated -- changing it
 /// would change every fixed-platform `workstream_id` on next deploy,
@@ -83,6 +85,19 @@ pub enum PublishError {
     /// `EventAppender::append` (the `XADD`) failed.
     #[error("spine append failed: {0}")]
     Append(#[from] SpineError),
+    /// The tenant's identity-field DEK could not be resolved -- fail
+    /// closed (`security.md`/`critical-rules.md` PII Tokenization): this
+    /// event is held (never appended, never written plaintext) rather than
+    /// silently written unencrypted. See `crate::identity_crypto`'s module
+    /// doc. Full dead-letter-queue persistence for this path is a
+    /// documented gap: `penguin_spine::SpineClient` exposes no raw
+    /// Valkey-list write primitive today (it is `XADD`/`XREADGROUP`-only,
+    /// see `src/outbound.rs`'s own doc comment on why the Twitch relay
+    /// queue uses a *direct* `redis` client instead) -- wiring a
+    /// `{stream}:identity_deadletter` `LPUSH` here is `// TODO(M5)`,
+    /// tracked alongside this crate's other documented crate-gap TODOs.
+    #[error("identity-field dek unavailable, event held (never written plaintext): {0}")]
+    DekUnavailable(#[from] DekUnavailableError),
 }
 
 /// Wraps `penguin_spine::SpineClient::append` behind a trait so callers
@@ -131,7 +146,7 @@ fn mint_trace() -> Trace {
 /// WORKSTREAM); `active_kid`/`keyring` mint `binding.mac` under the
 /// operator-configured active key version (`crate::config`).
 #[allow(clippy::too_many_arguments)]
-pub async fn publish_event<A: EventAppender, M: SpineMetrics + ?Sized>(
+pub async fn publish_event<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProvider>(
     appender: &A,
     metrics: &M,
     keyring: &KeyRing,
@@ -140,7 +155,9 @@ pub async fn publish_event<A: EventAppender, M: SpineMetrics + ?Sized>(
     source_id: &str,
     workstream_id: &str,
     session_id: Option<&str>,
-    event: PlatformEvent,
+    mut event: PlatformEvent,
+    dek_provider: &D,
+    identity_metrics: &prometheus::IntCounterVec,
 ) -> Result<String, PublishError> {
     let stream = scope.source_stream(&event.platform, source_id);
     let platform = event.platform.clone();
@@ -150,6 +167,68 @@ pub async fn publish_event<A: EventAppender, M: SpineMetrics + ?Sized>(
         .expect("mint_trace always produces a valid W3C traceparent")
         .to_string();
     let event_id = Uuid::new_v4().to_string();
+
+    // critical-rules.md PII Tokenization / security.md: every identity-
+    // bearing field this event carries -- top-level `actor` plus every
+    // `identity_crypto::PAYLOAD_IDENTITY_FIELDS` payload field present as a
+    // string (author/display_name/user_login/user_display_name/
+    // broadcaster_login/text) -- is AES-256-GCM envelope-encrypted here,
+    // one independent envelope per field, each AAD-bound to this exact
+    // (tenant, stream, <field name>, event_id, dek_version) before the
+    // XADD, so no identity value or handle-bearing message text ever sits
+    // plaintext on a stream outside the PII boundary. See
+    // `identity_crypto`'s module doc for the full field list and the
+    // (deliberate) `channel_name` exclusion. Fail closed: a DEK-
+    // unavailable error returns before any field is touched or the event
+    // is appended -- see `PublishError::DekUnavailable`'s doc comment.
+    let has_identity_payload_field = identity_crypto::PAYLOAD_IDENTITY_FIELDS
+        .iter()
+        .any(|field| {
+            matches!(
+                event.payload.get(*field),
+                Some(serde_json::Value::String(_))
+            )
+        });
+    if event.actor.is_some() || has_identity_payload_field {
+        match dek_provider.get_dek(&scope.tenant).await {
+            Ok((dek, dek_version)) => {
+                let encrypt_field = |value: &str, field: &str| -> String {
+                    let envelope = identity_crypto::encrypt_identity_value(
+                        value,
+                        &dek,
+                        dek_version,
+                        &scope.tenant,
+                        &stream,
+                        field,
+                        &event_id,
+                    );
+                    serde_json::to_string(&envelope)
+                        .expect("JsonEnvelope is always representable as JSON")
+                };
+
+                if let Some(actor) = event.actor.take() {
+                    event.actor = Some(encrypt_field(&actor, "actor"));
+                }
+                for field in identity_crypto::PAYLOAD_IDENTITY_FIELDS {
+                    if let Some(serde_json::Value::String(value)) = event.payload.get(*field) {
+                        let ciphertext = encrypt_field(value, field);
+                        event
+                            .payload
+                            .insert((*field).to_string(), serde_json::Value::String(ciphertext));
+                    }
+                }
+                identity_metrics
+                    .with_label_values(&[scope.tenant.as_str(), "success"])
+                    .inc();
+            }
+            Err(err) => {
+                identity_metrics
+                    .with_label_values(&[scope.tenant.as_str(), "dek_unavailable"])
+                    .inc();
+                return Err(PublishError::DekUnavailable(err));
+            }
+        }
+    }
 
     let mac = compute_binding_mac(
         keyring,
@@ -269,6 +348,47 @@ mod tests {
         KeyRing::new(vec![("test-kid".to_string(), vec![7u8; 32])])
     }
 
+    fn test_identity_metrics() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_identity_encryption_total", "test-only"),
+            &["tenant", "status"],
+        )
+        .unwrap()
+    }
+
+    /// Always resolves a fixed test DEK -- the "identity encryption
+    /// succeeds" path through [`publish_event`].
+    struct FakeDekProvider;
+
+    impl DekProvider for FakeDekProvider {
+        async fn get_dek(
+            &self,
+            _tenant_id: &str,
+        ) -> Result<(crate::identity_crypto::Dek, u32), DekUnavailableError> {
+            Ok((zeroize::Zeroizing::new([9u8; 32]), 3))
+        }
+    }
+
+    fn test_dek_provider() -> FakeDekProvider {
+        FakeDekProvider
+    }
+
+    /// Always fails closed -- the "identity DEK unavailable" path.
+    struct FailingDekProvider;
+
+    impl DekProvider for FailingDekProvider {
+        async fn get_dek(
+            &self,
+            tenant_id: &str,
+        ) -> Result<(crate::identity_crypto::Dek, u32), DekUnavailableError> {
+            Err(DekUnavailableError {
+                tenant_id: tenant_id.to_string(),
+                dek_version: None,
+                reason: "no broker configured in this test".to_string(),
+            })
+        }
+    }
+
     #[tokio::test]
     async fn writes_onto_the_correct_source_stream_with_d30_fields_populated() {
         let appender = FakeAppender {
@@ -288,6 +408,8 @@ mod tests {
             "ws-1",
             None,
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap();
@@ -359,6 +481,8 @@ mod tests {
             "ws-1",
             None,
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap();
@@ -397,6 +521,8 @@ mod tests {
             "ws-2",
             Some("session-abc"),
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap();
@@ -424,6 +550,8 @@ mod tests {
             "ws-1",
             None,
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap();
@@ -437,6 +565,8 @@ mod tests {
             "ws-1",
             None,
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap();
@@ -469,6 +599,8 @@ mod tests {
             "ws-1",
             None,
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap_err();
@@ -495,6 +627,8 @@ mod tests {
             "ws-1",
             None,
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap_err();
@@ -523,6 +657,8 @@ mod tests {
             "ws-1",
             None,
             test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap();
@@ -570,6 +706,8 @@ mod tests {
             "ws-1",
             None,
             event,
+            &test_dek_provider(),
+            &test_identity_metrics(),
         )
         .await
         .unwrap();
@@ -602,6 +740,263 @@ mod tests {
         assert_eq!(
             WORKSTREAM_NAMESPACE.to_string(),
             "2c9e1a40-6f8b-4c1d-9a3e-7d2f510a8b6c"
+        );
+    }
+
+    /// security.md / critical-rules.md PII Tokenization: the raw
+    /// `event.actor` value ("alice") must never appear anywhere in the
+    /// serialized envelope this crate `XADD`s.
+    #[tokio::test]
+    async fn actor_is_never_written_plaintext_onto_the_stream() {
+        let appender = FakeAppender {
+            calls: Mutex::new(vec![]),
+            fail: false,
+        };
+        let (metrics, keyring) = (RecordingMetrics::default(), test_keyring());
+        let scope = Scope::new("acme", None);
+        publish_event(
+            &appender,
+            &metrics,
+            &keyring,
+            "test-kid",
+            &scope,
+            "tw-channelA",
+            "ws-1",
+            None,
+            test_event(),
+            &test_dek_provider(),
+            &test_identity_metrics(),
+        )
+        .await
+        .unwrap();
+        let calls = appender.calls.lock().unwrap();
+        let serialized = serde_json::to_string(&calls[0].1).unwrap();
+        assert!(
+            !serialized.contains("alice"),
+            "raw actor value must never appear in the serialized envelope"
+        );
+        // The encrypted replacement is a JSON envelope object encoded as a
+        // string, matching PR #440's `json.dumps(ciphertext_envelope)`
+        // wire shape exactly.
+        let actor_field = calls[0].1.event.actor.as_deref().unwrap();
+        let parsed: crate::identity_crypto::JsonEnvelope =
+            serde_json::from_str(actor_field).unwrap();
+        assert_eq!(parsed.dek_version, 3);
+    }
+
+    /// Fail-closed: a DEK-unavailable tenant must never reach `XADD`.
+    #[tokio::test]
+    async fn dek_unavailable_fails_closed_before_any_append() {
+        let appender = FakeAppender {
+            calls: Mutex::new(vec![]),
+            fail: false,
+        };
+        let (metrics, keyring) = (RecordingMetrics::default(), test_keyring());
+        let scope = Scope::new("acme", None);
+        let err = publish_event(
+            &appender,
+            &metrics,
+            &keyring,
+            "test-kid",
+            &scope,
+            "tw-channelA",
+            "ws-1",
+            None,
+            test_event(),
+            &FailingDekProvider,
+            &test_identity_metrics(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, PublishError::DekUnavailable(_)));
+        assert!(appender.calls.lock().unwrap().is_empty());
+    }
+
+    /// A `None` actor (system/account-level event) never touches the DEK
+    /// provider at all -- no encryption needed, no DEK resolution attempt.
+    #[tokio::test]
+    async fn no_identity_fields_skips_identity_encryption_entirely() {
+        let appender = FakeAppender {
+            calls: Mutex::new(vec![]),
+            fail: false,
+        };
+        let (metrics, keyring) = (RecordingMetrics::default(), test_keyring());
+        let scope = Scope::new("acme", None);
+        let mut event = test_event();
+        event.actor = None;
+        // `test_event()`'s payload carries `text`, one of
+        // `identity_crypto::PAYLOAD_IDENTITY_FIELDS` -- clear it too so
+        // this event genuinely carries zero identity-bearing fields and
+        // the DEK provider (which fails closed) is never even called.
+        event.payload.remove("text");
+        publish_event(
+            &appender,
+            &metrics,
+            &keyring,
+            "test-kid",
+            &scope,
+            "tw-channelA",
+            "ws-1",
+            None,
+            event,
+            &FailingDekProvider,
+            &test_identity_metrics(),
+        )
+        .await
+        .unwrap();
+        let published = &appender.calls.lock().unwrap()[0].1.event;
+        assert_eq!(published.actor, None);
+        assert_eq!(published.payload.get("text"), None);
+    }
+
+    /// A payload identity field (`text`) present with a `None` `actor`
+    /// still triggers DEK resolution and encryption -- identity fields are
+    /// evaluated independently of `actor`, not gated by its presence.
+    #[tokio::test]
+    async fn payload_identity_field_alone_still_triggers_encryption() {
+        let appender = FakeAppender {
+            calls: Mutex::new(vec![]),
+            fail: false,
+        };
+        let (metrics, keyring) = (RecordingMetrics::default(), test_keyring());
+        let scope = Scope::new("acme", None);
+        let mut event = test_event();
+        event.actor = None;
+        publish_event(
+            &appender,
+            &metrics,
+            &keyring,
+            "test-kid",
+            &scope,
+            "tw-channelA",
+            "ws-1",
+            None,
+            event,
+            &test_dek_provider(),
+            &test_identity_metrics(),
+        )
+        .await
+        .unwrap();
+        let published = &appender.calls.lock().unwrap()[0].1.event;
+        assert_eq!(published.actor, None);
+        let text_field = published
+            .payload
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        let parsed: crate::identity_crypto::JsonEnvelope =
+            serde_json::from_str(text_field).unwrap();
+        assert_eq!(parsed.dek_version, 3);
+    }
+
+    /// Table test (coordinator follow-up): for realistic Discord and Twitch
+    /// normalizer output, asserts NO plaintext identity value or
+    /// handle-bearing text substring survives into the serialized stream
+    /// entry `publish_event` `XADD`s -- covers every normalizer this crate
+    /// ships (Twitch IRC, Twitch EventSub, Discord Gateway), each with a
+    /// realistic `@handle`/`<@id>` mention in the message body. A non-zero
+    /// case count is asserted directly (`critical-rules.md` Verification
+    /// Integrity: a loop that silently iterates zero times would pass
+    /// vacuously).
+    #[tokio::test]
+    async fn no_normalizer_output_leaks_plaintext_identity_or_mention_text() {
+        struct Case {
+            name: &'static str,
+            event: PlatformEvent,
+            /// Every plaintext substring that must NOT appear anywhere in
+            /// the serialized envelope once `publish_event` has run.
+            forbidden_substrings: &'static [&'static str],
+        }
+
+        let twitch_irc_msg = penguin_connector_twitch::irc::ChatMessage {
+            channel: "#somechannel".to_string(),
+            sender: "chatterbox99".to_string(),
+            text: "hey @moderator_jane can you check this out".to_string(),
+            tags: Some("display-name=ChatterBox99;user-id=555".to_string()),
+        };
+        let discord_msg = penguin_connector_discord::gateway::ChatMessage {
+            guild_id: Some("111".to_string()),
+            channel_id: "222".to_string(),
+            message_id: "333".to_string(),
+            author_id: "444".to_string(),
+            author_username: "discorduser42".to_string(),
+            content: "thanks <@999888777> for the heads up".to_string(),
+        };
+        let eventsub_event = serde_json::json!({
+            "broadcaster_user_id": "111",
+            "broadcaster_user_login": "channelowner_login",
+            "from_broadcaster_user_id": "222",
+            "from_broadcaster_user_login": "raider_login",
+            "from_broadcaster_user_name": "RaiderDisplayName",
+            "viewers": 42,
+        });
+
+        let cases = vec![
+            Case {
+                name: "twitch_irc",
+                event: crate::normalize::normalize_twitch_irc(&twitch_irc_msg),
+                forbidden_substrings: &["chatterbox99", "ChatterBox99", "moderator_jane"],
+            },
+            Case {
+                name: "discord_gateway",
+                event: crate::normalize::normalize_discord(&discord_msg),
+                forbidden_substrings: &["discorduser42", "999888777"],
+            },
+            Case {
+                name: "twitch_eventsub_raid",
+                event: crate::normalize::normalize_twitch_eventsub(
+                    "channel.raid",
+                    &eventsub_event,
+                    None,
+                ),
+                forbidden_substrings: &["channelowner_login", "raider_login", "RaiderDisplayName"],
+            },
+        ];
+
+        // Verification Integrity: assert the denominator before using it --
+        // a scanner over zero cases would otherwise report a vacuous pass.
+        assert!(
+            !cases.is_empty(),
+            "table test must examine at least one case"
+        );
+        let mut examined = 0;
+        for case in cases {
+            let appender = FakeAppender {
+                calls: Mutex::new(vec![]),
+                fail: false,
+            };
+            let (metrics, keyring) = (RecordingMetrics::default(), test_keyring());
+            let scope = Scope::new("acme", None);
+            publish_event(
+                &appender,
+                &metrics,
+                &keyring,
+                "test-kid",
+                &scope,
+                "src-under-test",
+                "ws-1",
+                None,
+                case.event,
+                &test_dek_provider(),
+                &test_identity_metrics(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("case {:?}: publish_event failed: {e}", case.name));
+
+            let calls = appender.calls.lock().unwrap();
+            let serialized = serde_json::to_string(&calls[0].1).unwrap();
+            for needle in case.forbidden_substrings {
+                assert!(
+                    !serialized.contains(needle),
+                    "case {:?}: forbidden plaintext {needle:?} leaked into the serialized envelope",
+                    case.name
+                );
+            }
+            examined += 1;
+        }
+        assert_eq!(
+            examined, 3,
+            "expected to examine exactly the 3 defined normalizer cases"
         );
     }
 }

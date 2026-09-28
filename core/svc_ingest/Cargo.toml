@@ -181,6 +181,18 @@ sha2 = "=0.10.9"
 # security-sensitive check. Already resolves to this exact version
 # transitively (via `hmac`/`digest`, confirmed in `Cargo.lock`).
 subtle = "=2.6.1"
+# Identity-field envelope encryption (`src/identity_crypto.rs`) --
+# AES-256-GCM (`aes-gcm`), per-tenant DEK derivation for the dev/alpha
+# fallback provider (`hkdf`), the JSON envelope's nonce/ciphertext encoding
+# (`base64`), and zeroizing DEK/plaintext bytes after use (`zeroize`).
+# Wire-compatible with the Python predecessor's `core/svc_ingest/
+# identity_crypto.py` (PR #440) -- see this crate's own module for the
+# format details and the cross-language golden vector test.
+aes-gcm = "=0.10.3"
+hkdf = "=0.12.4"
+base64 = "=0.22.1"
+zeroize = { version = "=1.8.1", features = ["derive"] }
+x25519-dalek = { version = "=2.0.1", features = ["getrandom"] }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"

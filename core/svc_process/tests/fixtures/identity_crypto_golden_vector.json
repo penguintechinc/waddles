@@ -1,0 +1,16 @@
+{
+  "_comment": "Cross-language golden vector for identity_crypto's AES-256-GCM envelope format, shared with core/svc_ingest/identity_crypto.py (PR #440) and core/svc_process/src/identity_crypto.rs. Generated offline from PR #440's actual Python encrypt_identity_value with os.urandom monkeypatched to a fixed 12-byte nonce -- never regenerate ad hoc; any change here must be regenerated from the real Python module and cross-checked in both languages.",
+  "dek_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "dek_version": 1,
+  "tenant_id": "acme-tenant",
+  "stream": "waddles:t:acme-tenant:c:main:src:twitch:tw-somechannel:events",
+  "field": "actor",
+  "event_id": "5b1f6f2e-8a3b-4c9d-9e2a-7f1c2d3e4a5b",
+  "plaintext": "someuser",
+  "envelope": {
+    "v": 1,
+    "dek_version": 1,
+    "nonce": "AQIDBAUGBwgJCgsM",
+    "ct": "doU3sJnnlfQegO6py0BwDqls53KZH6GA"
+  }
+}

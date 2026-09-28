@@ -42,6 +42,7 @@ pub mod error;
 pub mod hop;
 pub mod host_api;
 pub mod http;
+pub mod identity_crypto;
 pub mod license;
 pub mod source_supervisor;
 pub mod spine;

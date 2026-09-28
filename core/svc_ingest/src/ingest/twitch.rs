@@ -84,7 +84,7 @@ impl IrcConnector for TwitchIrcReceiver {
 ///   bad nick/password, an auth failure) stops this loop entirely instead
 ///   of backing off forever against a connection that can never succeed.
 #[allow(clippy::too_many_arguments)] // every parameter is independently varied across tests; a params struct would just move the same count elsewhere
-async fn run_loop<C, A, M>(
+async fn run_loop<C, A, M, Dk>(
     connector: C,
     configured_nick: &str,
     appender: &A,
@@ -92,6 +92,8 @@ async fn run_loop<C, A, M>(
     keyring: &KeyRing,
     active_kid: &str,
     scope: &Scope,
+    dek_provider: &Dk,
+    identity_metrics: &prometheus::IntCounterVec,
     source_id: String,
     mut backoff: Backoff,
     mut shutdown: oneshot::Receiver<()>,
@@ -99,6 +101,7 @@ async fn run_loop<C, A, M>(
     C: IrcConnector,
     A: EventAppender,
     M: SpineMetrics,
+    Dk: crate::identity_crypto::DekProvider,
 {
     let workstream_id = deterministic_workstream_id(&source_id);
 
@@ -162,6 +165,8 @@ async fn run_loop<C, A, M>(
                             &workstream_id,
                             None,
                             event,
+                            dek_provider,
+                            identity_metrics,
                         )
                         .await
                         {
@@ -242,7 +247,7 @@ pub fn irc_config(
 /// function `crate::lib::try_start_twitch_irc` spawns as its own background
 /// task.
 #[allow(clippy::too_many_arguments)] // mirrors run_loop's own justification
-pub async fn run<A: EventAppender, M: SpineMetrics>(
+pub async fn run<A: EventAppender, M: SpineMetrics, Dk: crate::identity_crypto::DekProvider>(
     irc_cfg: IrcConfig,
     channel: &str,
     configured_nick: &str,
@@ -251,6 +256,8 @@ pub async fn run<A: EventAppender, M: SpineMetrics>(
     keyring: &KeyRing,
     active_kid: &str,
     scope: &Scope,
+    dek_provider: &Dk,
+    identity_metrics: &prometheus::IntCounterVec,
     shutdown: oneshot::Receiver<()>,
 ) {
     let receiver = TwitchIrcReceiver::new(irc_cfg);
@@ -264,6 +271,8 @@ pub async fn run<A: EventAppender, M: SpineMetrics>(
         keyring,
         active_kid,
         scope,
+        dek_provider,
+        identity_metrics,
         sid,
         backoff,
         shutdown,
@@ -277,6 +286,54 @@ mod tests {
     use penguin_spine::SpineError;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+
+    struct FakeDekProvider;
+    impl crate::identity_crypto::DekProvider for FakeDekProvider {
+        async fn get_dek(
+            &self,
+            _tenant_id: &str,
+        ) -> Result<(crate::identity_crypto::Dek, u32), crate::identity_crypto::DekUnavailableError>
+        {
+            Ok((zeroize::Zeroizing::new([9u8; 32]), 1))
+        }
+    }
+
+    /// Decrypts a `publish_event`-encrypted payload field back to
+    /// plaintext for test assertions -- `stream`/`env.event_id` come from
+    /// the captured `EventAppender::append` call itself, so this stays
+    /// correct regardless of how `source_stream`/`event_id` are derived;
+    /// the DEK is [`FakeDekProvider`]'s fixed test key.
+    fn decrypt_test_payload_field(
+        stream: &str,
+        env: &penguin_spine::StageEnvelope,
+        field: &str,
+    ) -> String {
+        let raw = env
+            .event
+            .payload
+            .get(field)
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("payload.{field} missing"));
+        let envelope: crate::identity_crypto::JsonEnvelope = serde_json::from_str(raw).unwrap();
+        let dek = zeroize::Zeroizing::new([9u8; 32]);
+        crate::identity_crypto::decrypt_identity_value(
+            &envelope,
+            &dek,
+            "acme",
+            stream,
+            field,
+            &env.event_id,
+        )
+        .unwrap()
+    }
+
+    fn test_identity_metrics() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_twitch_identity_encryption_total", "test-only"),
+            &["tenant", "status"],
+        )
+        .unwrap()
+    }
 
     fn test_keyring() -> KeyRing {
         KeyRing::new(vec![("k1".to_string(), vec![9u8; 32])])
@@ -416,6 +473,8 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 "tw-somechannel".to_string(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -434,13 +493,8 @@ mod tests {
             "waddles:t:acme:c:_tenant:src:twitch:tw-somechannel:events"
         );
         assert_eq!(
-            calls[0]
-                .1
-                .event
-                .payload
-                .get("text")
-                .and_then(|v| v.as_str()),
-            Some("hello")
+            decrypt_test_payload_field(&calls[0].0, &calls[0].1, "text"),
+            "hello"
         );
         assert_eq!(calls[0].1.workstream_id, calls[1].1.workstream_id);
     }
@@ -469,6 +523,8 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 "tw-somechannel".to_string(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -480,13 +536,8 @@ mod tests {
         let calls = appender.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "the self-echoed message must not publish");
         assert_eq!(
-            calls[0]
-                .1
-                .event
-                .payload
-                .get("text")
-                .and_then(|v| v.as_str()),
-            Some("real")
+            decrypt_test_payload_field(&calls[0].0, &calls[0].1, "text"),
+            "real"
         );
     }
 
@@ -506,6 +557,8 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 "tw-somechannel".to_string(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -606,6 +659,8 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 "tw-somechannel".to_string(),
                 backoff,
                 rx,
@@ -661,6 +716,8 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 "tw-somechannel".to_string(),
                 Backoff::new(Duration::from_secs(30)),
                 rx,
@@ -729,6 +786,8 @@ mod tests {
                 &test_keyring(),
                 "k1",
                 &Scope::new("acme", None),
+                &FakeDekProvider,
+                &test_identity_metrics(),
                 "tw-somechannel".to_string(),
                 backoff,
                 rx,
