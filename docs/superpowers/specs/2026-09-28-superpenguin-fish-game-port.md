@@ -193,13 +193,19 @@ Read: `wit/waddle-bundle/stage.wit:110-153`, `core/bundle_executor/src/host/impo
   impossible by construction). Comment (`stage.wit:122-125`) states execution runs "under the bundle's own Postgres
   role, restricted to the manifest's `data.tables` and row-level-security scoped to the envelope's tenant/community."
   Granted only when `data.tables` is non-empty.
-- **Enforcement is not in the WASM host at all.** `core/bundle_executor/src/host/imports.rs:244-261`
-  (`impl db::Host for ExecState`) is a thin pass-through: it serializes `(statement, params)` to JSON and calls
-  `HostBridge::call(app_id, call_id, CapabilityKind::Db, "execute", args)` (`imports.rs:31-44`). All RLS/tenant/table
-  allowlist enforcement happens **stage-side**, in `core/svc_process`/`core/svc_action` (Rust), not in
-  `bundle_executor`. A code comment at `imports.rs:77-82` explicitly flags the stage-side `context` row (which
-  carries tenant/community for that enforcement) as **`currently TODO(M4)`** — treat full enforcement as
-  in-progress, not yet fully proven, as of this branch.
+- **`bundle_executor` is a thin pass-through, not the enforcement point.** `core/bundle_executor/src/host/imports.rs:244-261`
+  (`impl db::Host for ExecState`) just serializes `(statement, params)` to JSON and calls
+  `HostBridge::call(app_id, call_id, CapabilityKind::Db, "execute", args)` (`imports.rs:31-44`) — nothing is
+  fabricated or enforced locally. RLS/tenant/table-allowlist enforcement is *designed* to happen stage-side, in
+  `core/svc_process`/`core/svc_action`.
+- **HARDER FACT: `db` and `kv` are unconditionally denied on both stages today — not "unproven," non-functional.**
+  `core/svc_process/src/capabilities.rs:221-227` and `core/svc_action/src/capabilities.rs:582-588` each match
+  `CapabilityKind::Db`/`CapabilityKind::Kv` and return `Err(denied(..., "db/kv capability is not wired in this
+  build -- TODO(M4+)"/"TODO(M3+)"))` **unconditionally, for every call, regardless of manifest `data.tables`**.
+  There is no code path today where a bundle's `db.execute` or `kv.get/set` call succeeds — this is independent of
+  and more fundamental than §3.2's schema/migration gap: even a bundle whose tables already existed and were
+  correctly declared would still get `denied` on every call. (`imports.rs:77-82`'s `TODO(M4)` comment is a
+  narrower, separate note about the `context` row's tenant/community plumbing, not this dispatch-level denial.)
 - `hub_api/services/bundle_manifest_v2.py:266-274` validates `data.tables` entries are lowercase-snake, ≤63 chars,
   and not in a small reserved set (`users`, `tenants`, `communities`, `app_catalog`, `app_activations`,
   `app_tenant_availability`) — **that is the entire check**. It validates the *name is well-formed*; it does not
@@ -217,12 +223,14 @@ today (e.g. `loyalty_balances` for the loyalty system) was created by a **core-r
 not anything the bundle or its manifest can do itself. `data.tables` in `bundle.yaml` is purely an **allowlist of
 already-existing tables**; nothing provisions the tables it names.
 
-**Consequence for this port:** fishing-core/shop/tournaments cannot ship as drop-in community/third-party bundles
-that self-provision their own tables (`fish_catches`, `fishing_gold`, `fishing_shop_items`, `user_fishing_boosts`,
-`fishing_tournaments`, etc.) — every one of those tables requires a **core-repo Alembic migration PR**, merged by a
-PenguinTech maintainer, before the bundle can declare it in `data.tables` and read/write it. This is a real
-onboarding-friction blocker for "third-party bundle" as a concept, not specific to fishing, but fishing is the first
-bundle to actually need a half-dozen new owned tables and will surface it first.
+**Consequence for this port — two stacked blockers, not one:** even setting the schema-provisioning gap aside,
+§3.1's dispatch-level `denied` on every `db`/`kv` call means **no bundle of any kind can read or write a table
+today**, full stop. Fishing needs both fixed: (a) §3.1's hardcoded denial replaced with real stage-side
+implementation (wiring work already flagged `TODO(M4+)`/`TODO(M3+)` in the code itself — not net-new scope, but
+currently zero-progress), and (b) a way to provision `fish_catches`/`fishing_gold`/`fishing_shop_items`/
+`user_fishing_boosts`/`fishing_tournaments`/etc. without a hand-authored core-repo Alembic PR per table. (a) blocks
+every stateful bundle in the platform, not just fishing; (b) is a third-party-bundle-onboarding blocker fishing
+happens to be first to need at this scale (half a dozen new owned tables).
 
 **Minimum proposed mechanism (not built — flagging for a separate spec/PR):** a manifest-declared
 `data.schema: <path-to-.sql-or-alembic-migration-file>` that hub-api's bundle-approval flow (already a human-review
@@ -364,10 +372,10 @@ not a blocker, just not built yet. **Also fix in the same change:** add `"csharp
 | 0 | Write `bundle.yaml` for all 3-4 fishing bundles (manifest only, no code) | all | Phase 0 schema fields |
 | 1 | Port `FishingCalculations`/`FishingRarityWeightProfiles`/`FishingRarityThresholdRules`/`FishingValueRules` as pure C# (no host calls) + unit tests against original formulas | fishing-core | none |
 | 1 | Port `FishingInventorySellRules`/`FishingTierComparisonRules` as pure C# + unit tests | fishing-core | none |
-| 2 | Wire `process-stage`/`action-stage` exports for a single cast: rod/line snap → fish/star/weight/gold → `db.execute` insert into `fish_catches`/`fishing_gold` | fishing-core | Phase 1, §3.2 table provisioning |
+| 2 | Wire `process-stage`/`action-stage` exports for a single cast: rod/line snap → fish/star/weight/gold → `db.execute` insert into `fish_catches`/`fishing_gold` | fishing-core | Phase 1, §3.1 db/kv wiring + §3.2 table provisioning |
 | 2 | Add `kv`-based per-user cooldown (§5) | fishing-core | none |
 | 2 | Purchase/sell/equip flows against `user_fishing_boosts` | fishing-core | Phase 1 (sell rules), §3.2 |
-| 3 | Port `FishingShopItemGenerator` default catalog as seed data + `fishing_shop_items`/`fish_types` schema | fishing-shop | §3.2 table provisioning |
+| 3 | Port `FishingShopItemGenerator` default catalog as seed data + `fishing_shop_items`/`fish_types` schema | fishing-shop | §3.1 db/kv wiring + §3.2 table provisioning |
 | 3 | Dynamic tier calculation (`CalculateDynamicTiers`) as pure C# + unit tests | fishing-shop | none |
 | 4 | Tournament CRUD + eligibility filter (`IsFishEligible`) as pure C# + unit tests | fishing-tournaments | none |
 | 4 | Standings calculation (`CalculateStandings`, all 6 score categories) + unit tests | fishing-tournaments | none |
