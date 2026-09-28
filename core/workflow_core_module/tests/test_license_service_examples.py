@@ -15,7 +15,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timedelta
 
-from license_service import (
+from services.license_service import (
     LicenseService,
     LicenseStatus,
     LicenseTier,

@@ -3,8 +3,22 @@
 # Core Framework
 quart>=0.22.0
 hypercorn>=0.18.0
-grpcio>=1.84.0
-grpcio-tools>=1.84.0
+
+# gRPC runtime. Pinned to match libs/flask_core/requirements.in's grpcio pin
+# -- this module installs flask_core first (see Dockerfile), and
+# flask_core's grpc_tls.py requires grpcio>=1.83.0,<1.84.0.
+grpcio>=1.83.0,<1.84.0
+
+# grpcio-tools (protoc codegen) -- REQUIRED at Docker build time (see
+# `python -m grpc_tools.protoc` in Dockerfile). Pinned to 1.81.1: the newest
+# non-yanked grpcio-tools release requiring protobuf<7.0 (>=6.33.5), whose
+# own `grpcio>=1.81.1` constraint is satisfied by the grpcio pin above, and
+# whose generated gencode imports cleanly against flask_core's
+# protobuf==6.33.6 runtime. A bare `>=1.84.0` here (as briefly introduced by
+# the repo-wide dependency bump) resolves protobuf>=7.35.1, silently
+# overriding flask_core's protobuf<7.0 pin (needed for
+# opentelemetry-proto==1.39.1 compat) on every rebuild.
+grpcio-tools==1.81.1
 
 # HTTP Client (async)
 aiohttp>=3.14.3,<4.0.0
