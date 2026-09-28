@@ -261,7 +261,16 @@ async fn connect_kv(cfg: &penguin_spine::SpineConfig) -> Option<redis::aio::Mult
     };
 
     match client.get_multiplexed_async_connection().await {
-        Ok(conn) => Some(conn),
+        Ok(mut conn) => {
+            // Low-severity fix, security review of PR #425: `count_key`
+            // has no TTL, so an `allkeys-*` `maxmemory-policy` can evict it
+            // under memory pressure, silently resetting the kv quota --
+            // checked once here, never on the per-op hot path
+            // (`bundle_host_kv::policy`'s doc).
+            let policy_check = bundle_host_kv::policy::check_maxmemory_policy(&mut conn).await;
+            bundle_host_kv::policy::log_and_record(&policy_check);
+            Some(conn)
+        }
         Err(err) => {
             tracing::warn!(error = %err, "kv capability: Valkey connection failed; kv disabled (not_implemented on every kv host-call)");
             None
@@ -417,6 +426,11 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
             metrics,
             license: license_gate,
             kv_conn,
+            // The legacy, single-bundle, env-driven path has no active-set
+            // snapshot at all (no DB row, no consent record) -- `kv`
+            // denies by default here, always (`bundle_host_kv::authorize`'s
+            // own module doc: "undeclared means denied").
+            kv_capabilities: Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
         };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -570,6 +584,13 @@ fn try_start_db_bundle_loader(
     // resolved once the RO reader connection exists.
     let supervisor_prereqs =
         build_source_supervisor_prereqs(config, Arc::clone(&connections), Arc::clone(&gate));
+    // Shared between `bundle_loader::run`'s DB-driven poll (writer -- every
+    // tick's `ActiveBundleRow::declared_capabilities`) and every source-
+    // binding consumer's own per-invoke `StageCapabilities` (reader,
+    // `bundle_host_kv::authorize::authorize_kv`) -- one snapshot, one
+    // writer, many readers, mirroring `core/svc_action`'s identical
+    // pattern.
+    let kv_capabilities = Arc::new(bundle_host_kv::CapabilitySnapshot::new());
 
     tokio::spawn(async move {
         let db = match bundle_active_set::reader::connect(&reader_cfg, &password).await {
@@ -595,6 +616,7 @@ fn try_start_db_bundle_loader(
             Arc::clone(&gate),
             connections,
             excluded_metric,
+            Arc::clone(&kv_capabilities),
             bundle_loader_shutdown_rx,
         );
 
@@ -643,7 +665,7 @@ fn try_start_db_bundle_loader(
                 }
             };
 
-        match resolved.map(|r| finish_supervisor_deps(prereqs, r, kv_conn)) {
+        match resolved.map(|r| finish_supervisor_deps(prereqs, r, kv_conn, kv_capabilities)) {
             Some(deps) => {
                 let (supervisor_shutdown_tx, supervisor_shutdown_rx) =
                     tokio::sync::oneshot::channel();
@@ -747,6 +769,7 @@ fn finish_supervisor_deps(
     prereqs: SupervisorPrereqs,
     resolved: bundle_active_set::scope::ResolvedScope,
     kv_conn: Option<redis::aio::MultiplexedConnection>,
+    kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
 ) -> source_supervisor::SupervisorDeps {
     source_supervisor::SupervisorDeps {
         spine_cfg: prereqs.spine_cfg,
@@ -759,6 +782,7 @@ fn finish_supervisor_deps(
         tenant: resolved.tenant_slug,
         community: resolved.community_name,
         kv_conn,
+        kv_capabilities,
     }
 }
 
@@ -930,7 +954,12 @@ mod tests {
             tenant_slug: "acme".to_string(),
             community_name: Some("main".to_string()),
         };
-        let deps = finish_supervisor_deps(prereqs, resolved, None);
+        let deps = finish_supervisor_deps(
+            prereqs,
+            resolved,
+            None,
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+        );
         assert_eq!(deps.tenant, "acme");
         assert_eq!(deps.community.as_deref(), Some("main"));
     }
@@ -946,7 +975,14 @@ mod tests {
     fn supervisor_deps_are_never_built_when_scope_resolution_fails() {
         let prereqs = test_supervisor_prereqs();
         let resolved: Option<bundle_active_set::scope::ResolvedScope> = None;
-        let deps = resolved.map(|r| finish_supervisor_deps(prereqs, r, None));
+        let deps = resolved.map(|r| {
+            finish_supervisor_deps(
+                prereqs,
+                r,
+                None,
+                Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+            )
+        });
         assert!(
             deps.is_none(),
             "an unresolved scope must never produce SupervisorDeps -- the source-binding \

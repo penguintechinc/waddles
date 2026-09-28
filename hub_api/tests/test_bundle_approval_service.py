@@ -16,12 +16,15 @@ from unittest.mock import AsyncMock
 import pytest
 
 from services.bundle_approval_service import (
+    KV_PERMISSION_ID,
+    _derive_capabilities,
     approve_version,
     classify_diff,
     deny_version,
     get_permission_summary,
 )
 from services.bundle_install_dal import raw_sql_rows
+from services.bundle_manifest_v2 import parse_bundle_manifest_v2
 from services.errors import ApiError
 from tests.conftest import TENANT_SLUG
 
@@ -917,3 +920,41 @@ async def test_approve_version_rollback_also_rolls_back_bindings(
     monkeypatch.undo()
 
     assert not await _bindings(install_dal, app_id="waddles.socials.music.default")
+
+
+def _parse_derived_manifest(**overrides: object) -> Any:
+    manifest = {**_MANIFEST, **overrides}
+    return parse_bundle_manifest_v2(
+        manifest,
+        known_custom_platforms=frozenset(),
+        allow_wildcard_consumes=False,
+        allow_prebuilt=True,
+    )
+
+
+# Coordinator fix on PR #425 (`docs/superpowers/specs/
+# 2026-09-28-bundle-permissions-and-capability-gate.md` PR #419's
+# `storage.kv` permission id): `kv` is no longer in `_derive_capabilities`'s
+# unconditional "always" set -- it is only derived when the manifest's own
+# `permissions:` list declares `storage.kv`, the same shape-derived pattern
+# `http`/`db` already use.
+
+
+def test_derive_capabilities_omits_kv_when_undeclared() -> None:
+    manifest = _parse_derived_manifest(permissions=[])
+    caps = _derive_capabilities(manifest)
+    assert KV_PERMISSION_ID not in caps
+
+
+def test_derive_capabilities_includes_kv_when_declared() -> None:
+    manifest = _parse_derived_manifest(permissions=[KV_PERMISSION_ID])
+    caps = _derive_capabilities(manifest)
+    assert KV_PERMISSION_ID in caps
+
+
+def test_derive_capabilities_always_includes_the_unconditional_set() -> None:
+    manifest = _parse_derived_manifest(permissions=[])
+    caps = _derive_capabilities(manifest)
+    assert {"context", "flags", "log", "clock"} <= caps
+    assert "http" in caps  # `_MANIFEST` declares `egress`
+    assert "db" in caps  # `_MANIFEST` declares `data.tables`

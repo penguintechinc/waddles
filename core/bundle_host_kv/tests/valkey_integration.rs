@@ -9,7 +9,9 @@
 //! Requires Docker (via `testcontainers`) -- CI (`rust-bundle-host-kv.yml`)
 //! runs on `ubuntu-latest`, which ships Docker; local runs need it too.
 
-use bundle_host_kv::{KvHost, KvScope, MAX_KEYS_PER_APP, MAX_VALUE_BYTES};
+use std::sync::Arc;
+
+use bundle_host_kv::{CapabilitySnapshot, KvHost, KvScope, MAX_KEYS_PER_APP, MAX_VALUE_BYTES};
 use redis::aio::MultiplexedConnection;
 use testcontainers::core::{ContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
@@ -58,10 +60,23 @@ fn scope(tenant: &str, community: Option<&str>, app_id: &str) -> KvScope {
     KvScope::new(tenant, community.map(str::to_string), app_id)
 }
 
+/// A [`CapabilitySnapshot`] granting `storage.kv` to every `app_id` listed
+/// -- every test below exercises something other than the gate itself, so
+/// they all grant up front (`crate::authorize`'s own unit tests, and
+/// `crate::tests::kv_call_is_denied_when_the_app_never_declared_storage_kv`,
+/// cover the denial path).
+fn granting(app_ids: &[&str]) -> Arc<CapabilitySnapshot> {
+    let snapshot = CapabilitySnapshot::new();
+    for app_id in app_ids {
+        snapshot.update(*app_id, ["storage.kv".to_string()]);
+    }
+    Arc::new(snapshot)
+}
+
 #[tokio::test]
 async fn set_then_get_round_trips_through_real_valkey() {
     let (_container, url) = start().await;
-    let host = KvHost::new(connect(&url).await);
+    let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
     let scope = scope("acme", Some("main"), "waddles.bot.a");
 
     host.set(&scope, 1, "greeting", b"hello valkey", 0)
@@ -74,7 +89,7 @@ async fn set_then_get_round_trips_through_real_valkey() {
 #[tokio::test]
 async fn ttl_actually_expires_the_key_in_real_valkey() {
     let (_container, url) = start().await;
-    let host = KvHost::new(connect(&url).await);
+    let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
     let scope = scope("acme", None, "waddles.bot.a");
 
     host.set(&scope, 1, "ephemeral", b"gone-soon", 1)
@@ -92,7 +107,7 @@ async fn ttl_actually_expires_the_key_in_real_valkey() {
 #[tokio::test]
 async fn delete_is_reflected_immediately_in_real_valkey() {
     let (_container, url) = start().await;
-    let host = KvHost::new(connect(&url).await);
+    let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
     let scope = scope("acme", Some("main"), "waddles.bot.a");
 
     host.set(&scope, 1, "k", b"v", 0).await.unwrap();
@@ -103,7 +118,7 @@ async fn delete_is_reflected_immediately_in_real_valkey() {
 #[tokio::test]
 async fn increment_is_atomic_and_persists_across_calls_in_real_valkey() {
     let (_container, url) = start().await;
-    let host = KvHost::new(connect(&url).await);
+    let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
     let scope = scope("acme", Some("main"), "waddles.bot.a");
 
     assert_eq!(host.increment(&scope, 1, "hits", 5, 0).await.unwrap(), 5);
@@ -117,7 +132,10 @@ async fn increment_is_atomic_and_persists_across_calls_in_real_valkey() {
 #[tokio::test]
 async fn cross_app_isolation_holds_against_real_valkey() {
     let (_container, url) = start().await;
-    let host = KvHost::new(connect(&url).await);
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["waddles.bot.a", "waddles.bot.b"]),
+    );
     let app_a = scope("acme", Some("main"), "waddles.bot.a");
     let app_b = scope("acme", Some("main"), "waddles.bot.b");
 
@@ -138,7 +156,7 @@ async fn cross_app_isolation_holds_against_real_valkey() {
 #[tokio::test]
 async fn cross_tenant_isolation_holds_against_real_valkey() {
     let (_container, url) = start().await;
-    let host = KvHost::new(connect(&url).await);
+    let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
     let acme = scope("acme", Some("main"), "waddles.bot.a");
     let globex = scope("globex", Some("main"), "waddles.bot.a");
 
@@ -164,7 +182,7 @@ async fn key_count_quota_is_enforced_by_the_real_lua_script() {
         .await
         .unwrap();
 
-    let host = KvHost::new(connect(&url).await);
+    let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
     let err = host
         .set(&scope, 1, "one-too-many", b"x", 0)
         .await
@@ -179,7 +197,7 @@ async fn key_count_quota_is_enforced_by_the_real_lua_script() {
 async fn overwriting_an_existing_key_is_exempt_from_quota_against_real_valkey() {
     let (_container, url) = start().await;
     let scope = scope("acme", Some("main"), "waddles.bot.a");
-    let host = KvHost::new(connect(&url).await);
+    let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
 
     host.set(&scope, 1, "existing", b"v1", 0).await.unwrap();
 
@@ -203,10 +221,77 @@ async fn overwriting_an_existing_key_is_exempt_from_quota_against_real_valkey() 
 #[tokio::test]
 async fn value_size_quota_is_enforced_before_any_backend_round_trip() {
     let (_container, url) = start().await;
-    let host = KvHost::new(connect(&url).await);
+    let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
     let scope = scope("acme", Some("main"), "waddles.bot.a");
     let oversized = vec![0u8; MAX_VALUE_BYTES + 1];
 
     let err = host.set(&scope, 1, "k", &oversized, 0).await.unwrap_err();
     assert_eq!(err.wire_code(), "too_large");
+}
+
+/// `authorize()`'s "undeclared means denied" default, against a real
+/// Valkey backend (not just the fake) -- an app with an empty
+/// `CapabilitySnapshot` is refused before any Valkey round trip at all.
+#[tokio::test]
+async fn a_kv_call_is_denied_against_real_valkey_when_storage_kv_was_never_declared() {
+    let (_container, url) = start().await;
+    let host = KvHost::new(connect(&url).await, granting(&[]));
+    let scope = scope("acme", Some("main"), "waddles.bot.a");
+
+    let err = host.set(&scope, 1, "k", b"v", 0).await.unwrap_err();
+    assert_eq!(err.code(), "not_granted");
+}
+
+/// A fresh Valkey container's default `maxmemory-policy` (`noeviction`) is
+/// compliant -- proves `crate::policy::check_maxmemory_policy` runs a real
+/// `CONFIG GET` round trip correctly, not just against a mock.
+#[tokio::test]
+async fn maxmemory_policy_check_reports_compliant_against_a_fresh_valkey_container() {
+    let (_container, url) = start().await;
+    let mut conn = connect(&url).await;
+    let check = bundle_host_kv::policy::check_maxmemory_policy(&mut conn).await;
+    assert!(
+        matches!(check, bundle_host_kv::policy::PolicyCheck::Compliant(_)),
+        "expected a fresh Valkey container's default policy to be compliant, got {check:?}"
+    );
+}
+
+/// The self-heal reconciliation path (`crate::backend::KvBackend::
+/// reconcile_count_if_missing`), against a real Valkey `EVAL`, not just
+/// the fake: two live data keys, `count_key` deleted outright (the same
+/// observable state an `allkeys-*` eviction leaves -- `crate::policy`'s
+/// doc), a third write still succeeds and the counter is recomputed to
+/// the true live count via the real Lua `SCAN` loop.
+#[tokio::test]
+async fn a_deleted_count_key_is_reconciled_via_scan_against_real_valkey() {
+    let (_container, url) = start().await;
+    let scope = scope("acme", Some("main"), "waddles.bot.a");
+    let host = KvHost::new(connect(&url).await, granting(&["waddles.bot.a"]));
+
+    host.set(&scope, 1, "existing-1", b"v1", 0).await.unwrap();
+    host.set(&scope, 2, "existing-2", b"v2", 0).await.unwrap();
+
+    // Simulate the exact observable effect of an `allkeys-*` eviction of
+    // `count_key` alone -- the data keys above survive untouched.
+    let mut admin_conn = connect(&url).await;
+    redis::AsyncCommands::del::<_, ()>(&mut admin_conn, scope.count_key())
+        .await
+        .unwrap();
+
+    host.set(&scope, 3, "existing-3", b"v3", 0).await.unwrap();
+    assert_eq!(
+        host.get(&scope, 4, "existing-3").await.unwrap(),
+        Some(b"v3".to_vec()),
+        "the write must still succeed once the counter self-heals"
+    );
+
+    // The reconciled counter must reflect the true live count (2, from
+    // the two pre-existing keys, plus the 1 just admitted = 3), not 0 or
+    // 1 -- verified by seeding a hostile ceiling-1 count and confirming a
+    // 4th key is rejected exactly where 3 live keys would predict.
+    let mut check_conn = connect(&url).await;
+    let reconciled: i64 = redis::AsyncCommands::get(&mut check_conn, scope.count_key())
+        .await
+        .unwrap();
+    assert_eq!(reconciled, 3);
 }

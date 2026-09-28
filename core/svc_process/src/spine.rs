@@ -461,6 +461,16 @@ pub struct ProcessDeps<S: SpineOps> {
     /// graceful-degradation posture `core/svc_action::capabilities::
     /// StageCapabilities::with_kv`'s doc describes.
     pub kv_conn: Option<redis::aio::MultiplexedConnection>,
+    /// The manifest-declared-capability snapshot
+    /// `bundle_host_kv::authorize::authorize_kv` checks before granting
+    /// `kv` (coordinator fix on PR #425: "undeclared means denied").
+    /// Populated once per active `app_id` per poll tick by
+    /// `crate::bundle_loader::run_tick`/`crate::source_supervisor`'s own
+    /// equivalent, from `bundle_active_set::ActiveBundleRow::
+    /// declared_capabilities` -- shared (not copied) with every per-invoke
+    /// [`StageCapabilities`] this loop constructs, so a capability change
+    /// is visible to the very next `kv` host-call.
+    pub kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -577,7 +587,7 @@ async fn handle_delivered<S: SpineOps>(
             deps.app_id.clone(),
         );
         let caps = match &deps.kv_conn {
-            Some(conn) => caps.with_kv(conn.clone()),
+            Some(conn) => caps.with_kv(conn.clone(), Arc::clone(&deps.kv_capabilities)),
             None => caps,
         };
         Arc::new(caps)
@@ -1050,6 +1060,7 @@ mod tests {
             // exercised directly by `capabilities`'s own test suite
             // instead of here.
             kv_conn: None,
+            kv_capabilities: Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
         };
         (deps, metrics)
     }

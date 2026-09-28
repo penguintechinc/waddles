@@ -120,6 +120,11 @@ pub struct SupervisorDeps {
     /// binding consumer's own `ProcessDeps` in [`run_binding_consumer`]
     /// below, rather than reopened per consumer or per reconnect attempt.
     pub kv_conn: Option<redis::aio::MultiplexedConnection>,
+    /// See `spine::ProcessDeps::kv_capabilities`'s doc -- the same shared
+    /// snapshot `crate::lib::try_start_db_bundle_loader`'s `bundle_loader::
+    /// run` poll writes to, cloned (the `Arc`, not the snapshot) into every
+    /// binding consumer's own `ProcessDeps`.
+    pub kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -246,6 +251,7 @@ async fn run_binding_consumer(
             metrics: deps.metrics.clone(),
             license: Arc::clone(&deps.license),
             kv_conn: deps.kv_conn.clone(),
+            kv_capabilities: Arc::clone(&deps.kv_capabilities),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();

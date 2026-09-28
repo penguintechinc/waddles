@@ -301,8 +301,19 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     /// style so a deployment where the Valkey connection failed to open can
     /// still construct every other capability and simply skip this call,
     /// the same pattern [`Self::with_discord`] already established.
-    pub fn with_kv(mut self, backend: K) -> Self {
-        self.kv = Some(KvHost::new(backend));
+    ///
+    /// `capabilities` is the manifest-declared-capability snapshot
+    /// `bundle_host_kv::authorize::authorize_kv` checks -- the same
+    /// `Arc<CapabilitySnapshot>` `crate::bundle_loader`'s DB-driven poll
+    /// loop updates every tick, shared (not copied) so a capability
+    /// dropped from a new manifest version is visible to the very next
+    /// `kv` host-call, not just the next connection.
+    pub fn with_kv(
+        mut self,
+        backend: K,
+        capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
+    ) -> Self {
+        self.kv = Some(KvHost::new(backend, capabilities));
         self
     }
 
@@ -721,16 +732,18 @@ impl<Q: RelayQueue, K: KvBackend> CapabilityHandler for StageCapabilities<Q, K> 
                 CapabilityKind::Log => self.handle_log(scope, &call.args),
                 CapabilityKind::Http => self.egress.send(&scope.app_id, &call.args).await,
                 CapabilityKind::Kv => self.handle_kv(scope, &call).await,
-                // `db` needs the manifest's `data.tables` allowlist plus
-                // per-bundle-role Postgres RLS (`SET LOCAL waddles.tenant`/
-                // `waddles.community`, spec §7.4/§11.10), and is being
-                // extended further (single-statement -> transactional
-                // `db.execute-batch`, a manifest `capabilities` allowlist)
-                // by a separate, in-progress design -- see
-                // `docs/superpowers/specs/2026-09-28-wit-stage-v1-1-design.md`
-                // §3/§4. Denying (never silently succeeding) is the correct
-                // behavior for an unimplemented capability until that design
-                // lands and is wired here.
+                // `db` needs per-app Postgres schema provisioning
+                // (`app_core.<app_id>`/`app_community.<app_id>`), a
+                // schema-scoped runtime role, and RLS -- designed in
+                // `docs/superpowers/specs/
+                // 2026-09-28-bundle-db-capability-and-schemas.md` (PR
+                // #415), with the grant itself (the `storage.tables`
+                // permission) gated by the standard permission-catalog
+                // design in `docs/superpowers/specs/
+                // 2026-09-28-bundle-permissions-and-capability-gate.md`
+                // (PR #419) -- both in progress, neither landed here yet.
+                // Denying (never silently succeeding) is the correct
+                // behavior for an unimplemented capability until they do.
                 CapabilityKind::Db => Err(denied(
                     "not_implemented",
                     "db capability is not wired in this build",
@@ -902,6 +915,22 @@ mod tests {
             // argument parsing/error mapping, not re-prove the limiter.
             Box::pin(async move { Ok(1) })
         }
+
+        fn reconcile_count_if_missing<'a>(
+            &'a self,
+            _count_key: &'a str,
+            _data_scan_pattern: &'a str,
+            _lock_key: &'a str,
+            _lock_ttl_ms: u64,
+            _scan_limit: u64,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<bundle_host_kv::ReconcileOutcome, String>>
+        {
+            // Always "already present" -- the eviction self-heal path is
+            // `bundle_host_kv`'s own responsibility, covered by that
+            // crate's tests; this module only needs argument parsing/error
+            // mapping.
+            Box::pin(async move { Ok(bundle_host_kv::ReconcileOutcome::AlreadyPresent) })
+        }
     }
 
     fn test_egress() -> Arc<EgressGuard> {
@@ -936,13 +965,34 @@ mod tests {
         StageCapabilities::new(queue, test_egress(), usage)
     }
 
+    /// Grants `storage.kv` to `"waddles.bot.commands.default"` -- the
+    /// `app_id` every `scope()`/`call()` helper in this module uses -- so
+    /// every existing `kv_*` test below (which is testing `handle_kv`'s
+    /// argument parsing/error mapping, not the gate itself) is unaffected
+    /// by the "undeclared means denied" default.
+    /// `kv_call_is_denied_when_storage_kv_is_undeclared` below is the one
+    /// test exercising an ungranted app.
     fn caps_with_kv(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue, FakeKvBackend> {
+        caps_with_kv_and_capabilities(queue, &["waddles.bot.commands.default"])
+    }
+
+    fn caps_with_kv_and_capabilities(
+        queue: FakeRelayQueue,
+        granted_app_ids: &[&str],
+    ) -> StageCapabilities<FakeRelayQueue, FakeKvBackend> {
+        let snapshot = bundle_host_kv::CapabilitySnapshot::new();
+        for app_id in granted_app_ids {
+            snapshot.update(
+                *app_id,
+                [bundle_host_kv::authorize::KV_PERMISSION_ID.to_string()],
+            );
+        }
         StageCapabilities::new(
             queue,
             test_egress(),
             Arc::new(Mutex::new(UsageBatcher::new())),
         )
-        .with_kv(FakeKvBackend::default())
+        .with_kv(FakeKvBackend::default(), Arc::new(snapshot))
     }
 
     fn scope() -> InvokeScope {
@@ -1028,6 +1078,41 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "not_implemented");
+    }
+
+    #[tokio::test]
+    async fn kv_call_is_denied_when_storage_kv_is_undeclared() {
+        // A configured `kv` backend, but the app's `CapabilitySnapshot`
+        // grants nothing -- "undeclared means denied", distinct from
+        // `kv_is_not_implemented_when_no_backend_was_configured`'s
+        // "backend never configured at all" case.
+        let caps = caps_with_kv_and_capabilities(FakeRelayQueue::default(), &[]);
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "backend"); // KvError::wire_code() collapse
+    }
+
+    #[tokio::test]
+    async fn kv_call_succeeds_when_storage_kv_is_declared() {
+        let caps = caps_with_kv_and_capabilities(
+            FakeRelayQueue::default(),
+            &["waddles.bot.commands.default"],
+        );
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Kv,
+                "set",
+                serde_json::json!({"key": "k", "value": [1], "ttl_seconds": 0}),
+            ),
+        )
+        .await
+        .expect("set succeeds when storage.kv is declared");
     }
 
     #[tokio::test]
@@ -1187,7 +1272,10 @@ mod tests {
 
     #[tokio::test]
     async fn kv_two_apps_in_the_same_tenant_are_isolated_through_the_handler() {
-        let caps = caps_with_kv(FakeRelayQueue::default());
+        let caps = caps_with_kv_and_capabilities(
+            FakeRelayQueue::default(),
+            &["waddles.bot.commands.default", "waddles.bot.other"],
+        );
         caps.handle(
             &scope(),
             call(

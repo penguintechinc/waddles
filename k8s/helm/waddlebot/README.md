@@ -193,6 +193,9 @@ The following table lists the main configurable parameters of the WaddleBot char
 | `infrastructure.redis.port` | Redis port | `6379` |
 | `infrastructure.redis.persistence.enabled` | Enable persistence | `true` |
 | `infrastructure.redis.persistence.size` | PVC size | `5Gi` |
+| `infrastructure.redis.maxMemoryPolicy` | Eviction policy | `allkeys-lru` |
+
+**`maxMemoryPolicy` and the bundle `storage.kv` capability (PR #425 security review):** the Rust data plane's per-app `storage.kv` live-key-count quota counter (`bundlekv:...:count`) is stored with no TTL. An `allkeys-*` policy (the default above) can evict that counter under memory pressure, silently resetting the quota — `svc-process-rust`/`svc-action-rust` detect this at startup (`CONFIG GET maxmemory-policy`) and log `ERROR` + emit a metric if so, and self-heal the counter via a bounded `SCAN` on the next write, but the right fix is the policy itself. If this instance is used for `storage.kv`, set `maxMemoryPolicy` to `noeviction` or a `volatile-*` policy — both are safe for `storage.kv`'s own (non-volatile) keys; only switch off `allkeys-*` here if no *other* consumer of this same instance (spine streams, usage metering, relay queues) genuinely needs size-bounded eviction, since the policy is instance-wide, not per-key-pattern.
 
 #### MinIO
 

@@ -121,6 +121,7 @@ pub async fn run_tick(
     loaded: &mut HashMap<String, String>,
     sink: Option<&dyn BundleSink>,
     excluded_metric: &prometheus::IntCounterVec,
+    kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
 ) {
     if !gate.enabled().await {
         tracing::debug!(
@@ -170,6 +171,13 @@ pub async fn run_tick(
         excluded_metric
             .with_label_values(&[app_id, reason.as_str()])
             .inc();
+    }
+
+    // Coordinator fix on PR #425: refresh every active app's declared-
+    // capability snapshot on every tick, not just the diffed to_load set
+    // -- see `core/svc_action::bundle_loader::run_tick`'s identical doc.
+    for row in &active {
+        kv_capabilities.update(row.app_id.clone(), row.declared_capabilities.clone());
     }
 
     let plan = diff::plan(loaded, &active);
@@ -229,6 +237,7 @@ pub async fn run(
     gate: Arc<dyn FeatureGate>,
     connections: Arc<crate::host_api::ConnectionRegistry>,
     excluded_metric: prometheus::IntCounterVec,
+    kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
     let mut tracker = WatermarkTracker::new();
@@ -252,6 +261,7 @@ pub async fn run(
                     &mut loaded,
                     sink.as_ref().map(|s| s as &dyn BundleSink),
                     &excluded_metric,
+                    &kv_capabilities,
                 )
                 .await;
             }
@@ -352,6 +362,7 @@ mod tests {
             &mut loaded,
             None,
             &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         assert!(loaded.is_empty());
@@ -397,6 +408,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &metric,
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         run_tick(
@@ -408,6 +420,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &metric,
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
 
@@ -439,6 +452,7 @@ mod tests {
             &mut loaded,
             None,
             &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         assert!(
@@ -469,6 +483,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         assert_eq!(loaded.get("waddles.a"), Some(&digest));
@@ -499,6 +514,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         assert!(loaded.is_empty());
@@ -531,6 +547,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         assert!(
@@ -555,6 +572,7 @@ mod tests {
             &mut loaded,
             None,
             &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         assert!(loaded.is_empty());
@@ -622,6 +640,17 @@ mod tests {
         app_id: &str,
         version: &str,
     ) -> bundle_active_set::entities::app_install_approvals::Model {
+        // `summary_json` declares `storage.kv` by default -- every test in
+        // this module other than the `kv_capabilities_*` ones is testing
+        // load/unload/diff behavior, not the capability snapshot.
+        approval_row_with_capabilities(app_id, version, &["storage.kv"])
+    }
+
+    fn approval_row_with_capabilities(
+        app_id: &str,
+        version: &str,
+        capabilities: &[&str],
+    ) -> bundle_active_set::entities::app_install_approvals::Model {
         bundle_active_set::entities::app_install_approvals::Model {
             id: 1,
             tenant_id: 1,
@@ -629,6 +658,7 @@ mod tests {
             app_id: app_id.to_string(),
             version: version.to_string(),
             superseded_by: None,
+            summary_json: serde_json::json!({ "capabilities": capabilities }),
         }
     }
 
@@ -673,6 +703,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &metric,
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         assert_eq!(loaded.get("waddles.a"), Some(&digest));
@@ -727,6 +758,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &metric,
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -748,5 +780,78 @@ mod tests {
             1,
             "a NULL component_key must increment the shared metric with the degraded reason"
         );
+    }
+
+    /// Coordinator fix on PR #425: `run_tick` must populate the shared
+    /// `CapabilitySnapshot` from every active row's `summary_json`-derived
+    /// `declared_capabilities`, so `storage.kv` becomes checkable by
+    /// `bundle_host_kv::authorize::authorize_kv` at the host-call layer.
+    #[tokio::test]
+    async fn run_tick_populates_the_capability_snapshot_from_declared_capabilities() {
+        let digest = format!("sha256:{}", "9".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
+            .append_query_results([vec![approval_row_with_capabilities(
+                "waddles.a",
+                "1",
+                &["context", "kv", "flags", "log", "clock"],
+            )]])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        let sink = FakeSink::default();
+        let kv_capabilities = bundle_host_kv::CapabilitySnapshot::new();
+        run_tick(
+            &db,
+            1,
+            0,
+            &FixedGate(true),
+            &mut tracker,
+            &mut loaded,
+            Some(&sink as &dyn BundleSink),
+            &test_metric(),
+            &kv_capabilities,
+        )
+        .await;
+        assert!(kv_capabilities.declares("waddles.a", "kv"));
+        assert!(!kv_capabilities.declares("waddles.a", "storage.kv"));
+    }
+
+    /// A bundle whose approved manifest never declares `kv` at all must
+    /// leave the snapshot without that grant.
+    #[tokio::test]
+    async fn run_tick_never_grants_kv_for_a_bundle_that_did_not_declare_it() {
+        let digest = format!("sha256:{}", "8".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
+            .append_query_results([vec![approval_row_with_capabilities(
+                "waddles.a",
+                "1",
+                &["context", "flags", "log", "clock", "http"],
+            )]])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        let sink = FakeSink::default();
+        let kv_capabilities = bundle_host_kv::CapabilitySnapshot::new();
+        run_tick(
+            &db,
+            1,
+            0,
+            &FixedGate(true),
+            &mut tracker,
+            &mut loaded,
+            Some(&sink as &dyn BundleSink),
+            &test_metric(),
+            &kv_capabilities,
+        )
+        .await;
+        assert!(!kv_capabilities.declares("waddles.a", "kv"));
     }
 }

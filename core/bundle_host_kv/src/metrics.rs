@@ -19,6 +19,8 @@ struct Instruments {
     op_duration_seconds: Histogram<f64>,
     op_errors_total: Counter<u64>,
     quota_rejections_total: Counter<u64>,
+    authorize_denied_total: Counter<u64>,
+    maxmemory_policy_violation_total: Counter<u64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -40,6 +42,20 @@ fn instruments() -> &'static Instruments {
                 .u64_counter("waddles_bundle_kv_quota_rejections_total")
                 .with_description(
                     "Bundle `kv` host-capability quota/rate-limit rejections, by op and quota kind",
+                )
+                .build(),
+            authorize_denied_total: meter
+                .u64_counter("waddles_bundle_kv_authorize_denied_total")
+                .with_description(
+                    "Bundle `kv` host-capability authorize() denials, by app_id and permission -- \
+                     undeclared storage.kv (crate::authorize)",
+                )
+                .build(),
+            maxmemory_policy_violation_total: meter
+                .u64_counter("waddles_bundle_kv_maxmemory_policy_violation_total")
+                .with_description(
+                    "Valkey maxmemory-policy is an allkeys-* eviction policy at startup -- \
+                     count_key can be evicted, silently resetting the storage.kv quota",
                 )
                 .build(),
         }
@@ -87,6 +103,29 @@ pub fn record_quota_rejection(op: &'static str, quota: &'static str) {
     );
 }
 
+/// Increments the `authorize()` denial counter for `app_id`/`permission`
+/// (`crate::authorize::authorize_kv`) -- distinct from
+/// [`record_error`]'s generic `kind="not_granted"` bucket so a dashboard
+/// can break authorization denials down by app without parsing log lines.
+pub fn record_authorize_denied(app_id: &str, permission: &'static str) {
+    instruments().authorize_denied_total.add(
+        1,
+        &[
+            KeyValue::new("app_id", app_id.to_string()),
+            KeyValue::new("permission", permission),
+        ],
+    );
+}
+
+/// Increments the maxmemory-policy violation counter (`crate::policy`'s
+/// startup check) -- a one-shot gauge-like signal, incremented once per
+/// check, not per op.
+pub fn record_maxmemory_policy_violation(policy: &str) {
+    instruments()
+        .maxmemory_policy_violation_total
+        .add(1, &[KeyValue::new("policy", policy.to_string())]);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +140,7 @@ mod tests {
         record_op_duration("get", "ok", 0.001);
         record_error("set", "invalid_key");
         record_quota_rejection("increment", "key_count");
+        record_authorize_denied("waddles.bot.a", KV_PERMISSION_ID);
+        record_maxmemory_policy_violation("allkeys-lru");
     }
 }
