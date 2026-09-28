@@ -178,6 +178,14 @@ pub struct Config {
     /// `ENVELOPE_BINDING_KEYS`, the `KeyRing::parse` wire shape
     /// (`kid1:hexkey1,kid2:hexkey2`, spec S5.11/S12.3).
     pub envelope_binding_keys: Option<Secret>,
+    /// `TWITCH_EVENTSUB_SECRET` -- the fallback/default EventSub HMAC
+    /// secret consumed by `ingest::twitch_eventsub::EnvSecretResolver`.
+    /// **Alpha/test-only**: a single-tenant, env-backed
+    /// `SubscriptionSecretResolver` impl behind that trait -- the
+    /// credential-broker-backed impl (per-connection secret keyed by
+    /// subscription/broadcaster, docs/superpowers/specs/2026-09-28-
+    /// connections-credentials-design.md §2) lands in a later increment.
+    pub twitch_eventsub_secret: Option<Secret>,
 }
 
 impl fmt::Debug for Config {
@@ -198,6 +206,13 @@ impl fmt::Debug for Config {
             .field(
                 "envelope_binding_keys",
                 &self.envelope_binding_keys.as_ref().map(|_| Secret::new("")),
+            )
+            .field(
+                "twitch_eventsub_secret",
+                &self
+                    .twitch_eventsub_secret
+                    .as_ref()
+                    .map(|_| Secret::new("")),
             )
             .finish()
     }
@@ -223,6 +238,9 @@ impl Config {
                 .map(Secret::new),
             discord_bot_token: std::env::var("DISCORD_BOT_TOKEN").ok().map(Secret::new),
             envelope_binding_keys: std::env::var("ENVELOPE_BINDING_KEYS").ok().map(Secret::new),
+            twitch_eventsub_secret: std::env::var("TWITCH_EVENTSUB_SECRET")
+                .ok()
+                .map(Secret::new),
         })
     }
 
@@ -378,6 +396,7 @@ mod tests {
             twitch_irc_oauth_token: None,
             discord_bot_token: None,
             envelope_binding_keys: None,
+            twitch_eventsub_secret: None,
         };
         let scope = cfg.ingest_scope();
         assert_eq!(scope.tenant, "acme");
@@ -398,6 +417,7 @@ mod tests {
             twitch_irc_oauth_token: None,
             discord_bot_token: None,
             envelope_binding_keys: None,
+            twitch_eventsub_secret: None,
         };
         let scope = cfg.ingest_scope();
         assert_eq!(scope.community.as_deref(), Some("main"));
