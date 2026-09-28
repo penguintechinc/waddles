@@ -205,6 +205,54 @@ wasm-tools component wit bin/Release/net10.0/wasi-wasm/publish/<assembly-name>.w
 wasm-tools validate --features component-model bin/Release/net10.0/wasi-wasm/publish/<assembly-name>.wasm
 ```
 
+## Porting more PenguinTwitchBot (superpenguin) bundles
+
+`bundles/csharp/superpenguin-roll` is the first of many planned ports from
+[PenguinTwitchBot](https://github.com/Psychoboy/PenguinTwitchBot) (MIT,
+used with permission). superpenguintv and Psychoboy are the same person
+(confirmed) -- every subsequent `bundles/csharp/superpenguin-*` bundle's
+`bundle.yaml` must use this exact `author` string and `notice` text (copied
+verbatim from upstream's own `LICENSE` file, not paraphrased), so the
+marketplace metadata stays consistent across the whole series:
+
+```yaml
+author: "superpenguintv (Psychoboy)"
+license: MIT
+category: alternatives
+source_url: https://github.com/Psychoboy/PenguinTwitchBot
+notice: |
+  Ported from PenguinTwitchBot (<source file path>, github.com/Psychoboy/
+  PenguinTwitchBot) by superpenguintv (Psychoboy), used with permission.
+
+  MIT License
+
+  Copyright (c) 2023 Psychoboy
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to
+  deal in the Software without restriction, including without limitation the
+  rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+  sell copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  DEALINGS IN THE SOFTWARE.
+```
+
+Only the `<source file path>` in the first `notice` line changes per bundle
+(e.g. `PastyGames/Roll.cs`) -- the copyright holder is always "Psychoboy"
+(their upstream `LICENSE` file's exact wording), never "superpenguintv",
+even though `author` credits both names. See
+`bundles/csharp/superpenguin-roll/bundle.yaml` for the reference copy.
+
 ## Testing this SDK
 
 ```bash
