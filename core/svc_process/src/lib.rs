@@ -42,7 +42,9 @@ pub mod error;
 pub mod hop;
 pub mod host_api;
 pub mod http;
+pub mod hub_identity_client;
 pub mod license;
+pub mod pii_tokenize;
 pub mod source_supervisor;
 pub mod spine;
 pub mod telemetry;
@@ -116,6 +118,11 @@ where
         telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
     let source_supervisor_metrics =
         telemetry::register_source_binding_supervisor_metrics(&prom_registry);
+    // PII-tokenization pass metrics (spec S10.1/S10.3, Phase 1 Task 1) --
+    // `Arc` from the start, since it's threaded through
+    // `source_supervisor::SupervisorDeps`/`spine::ProcessDeps` alongside
+    // `metrics`/`license`.
+    let tokenize_metrics = Arc::new(telemetry::register_tokenize_metrics(&prom_registry));
 
     let state = http::AppState::new(config.clone(), prom_registry);
 
@@ -140,6 +147,7 @@ where
             connections,
             bundle_loader_excluded_metric,
             source_supervisor_metrics,
+            Arc::clone(&tokenize_metrics),
         );
     } else {
         tracing::info!(
@@ -147,7 +155,7 @@ where
              DB_READER_*/BUNDLE_SCOPE_TENANT_ID not configured); using legacy \
              PROCESS_APP_ID/PROCESS_INGEST_* env selection"
         );
-        try_start_process_loop(&config, connections);
+        try_start_process_loop(&config, connections, Arc::clone(&tokenize_metrics));
     }
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
@@ -252,7 +260,11 @@ fn try_start_host_api(cli: &config::CliConfig) -> Arc<host_api::ConnectionRegist
 ///   downstream decision -- this hardcoding only affects which stream
 ///   `PROCESS_INGEST_PLATFORM`/`_SOURCE_ID` resolves to), identical scope
 ///   to `core/svc_action::try_start_dispatch`'s own documented gap.
-fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::ConnectionRegistry>) {
+fn try_start_process_loop(
+    config: &config::Config,
+    connections: Arc<host_api::ConnectionRegistry>,
+    tokenize_metrics: Arc<telemetry::TokenizeMetrics>,
+) {
     if config.cli.process_app_id.is_empty() {
         tracing::info!(
             "PROCESS_APP_ID not set; process loop not started (blocked on distribution poll)"
@@ -345,6 +357,8 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
             },
             metrics,
             license: license_gate,
+            identity: Arc::new(crate::pii_tokenize::AlwaysEphemeralIdentityResolver::default()),
+            tokenize_metrics,
         };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -451,6 +465,7 @@ fn try_start_db_bundle_loader(
     connections: Arc<host_api::ConnectionRegistry>,
     excluded_metric: prometheus::IntCounterVec,
     source_supervisor_metrics: telemetry::SourceBindingSupervisorMetrics,
+    tokenize_metrics: Arc<telemetry::TokenizeMetrics>,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
@@ -485,6 +500,14 @@ fn try_start_db_bundle_loader(
     let community_id = config.cli.bundle_scope_community_id;
     let poll_interval = config.cli.bundle_config_poll_interval();
     let call_timeout_ms = config.cli.executor_call_timeout_ms;
+    // Owned, extracted before the `'static` spawn below (`config` is only
+    // valid for this function's own borrow) -- see
+    // `crate::hub_identity_client::HttpEphemeralIdentityMinter`'s doc.
+    let hub_api_url = config.cli.hub_api_url.clone();
+    let identity_service_api_key = config
+        .identity_service_api_key
+        .as_ref()
+        .map(|s| s.expose().to_string());
 
     // The source-binding supervisor's own optional dependencies -- built
     // eagerly (no network I/O) so a missing/invalid one only disables the
@@ -565,7 +588,29 @@ fn try_start_db_bundle_loader(
                 }
             };
 
-        match resolved.map(|r| finish_supervisor_deps(prereqs, r)) {
+        // Built from the same RO reader connection as everything else in
+        // this function, scoped to this instance's own `(tenant_id,
+        // community_id)` -- see `crate::pii_tokenize`'s module doc for why
+        // this crate (not `core/svc_ingest`) owns the tokenization pass.
+        // The minter calls hub-api's dedicated-scope mint endpoint
+        // (`crate::hub_identity_client`) -- `identity_service_api_key`
+        // unset means every call gracefully falls back to a random token
+        // rather than failing startup.
+        let minter: Arc<dyn crate::hub_identity_client::EphemeralIdentityMinter> = Arc::new(
+            crate::hub_identity_client::HttpEphemeralIdentityMinter::new(
+                hub_api_url,
+                identity_service_api_key,
+            ),
+        );
+        let identity: Arc<dyn crate::pii_tokenize::IdentityResolver> =
+            Arc::new(crate::pii_tokenize::SeaOrmIdentityResolver::new(
+                db.clone(),
+                tenant_id,
+                community_id,
+                minter,
+            ));
+
+        match resolved.map(|r| finish_supervisor_deps(prereqs, r, identity, tokenize_metrics)) {
             Some(deps) => {
                 let (supervisor_shutdown_tx, supervisor_shutdown_rx) =
                     tokio::sync::oneshot::channel();
@@ -668,6 +713,8 @@ fn build_source_supervisor_prereqs(
 fn finish_supervisor_deps(
     prereqs: SupervisorPrereqs,
     resolved: bundle_active_set::scope::ResolvedScope,
+    identity: Arc<dyn crate::pii_tokenize::IdentityResolver>,
+    tokenize_metrics: Arc<telemetry::TokenizeMetrics>,
 ) -> source_supervisor::SupervisorDeps {
     source_supervisor::SupervisorDeps {
         spine_cfg: prereqs.spine_cfg,
@@ -679,6 +726,8 @@ fn finish_supervisor_deps(
         license: prereqs.license,
         tenant: resolved.tenant_slug,
         community: resolved.community_name,
+        identity,
+        tokenize_metrics,
     }
 }
 
@@ -806,6 +855,7 @@ mod tests {
             service_api_key: crate::config::Secret::new("x"),
             envelope_binding_keys: Some(crate::config::Secret::new("k1:aabbcc")),
             db_reader_password: None,
+            identity_service_api_key: None,
         }
     }
 
@@ -838,6 +888,46 @@ mod tests {
         }
     }
 
+    /// Test-only identity resolver -- see `crate::spine`'s own
+    /// `FixedIdentityResolver` for the identical rationale (this module's
+    /// tests exercise `finish_supervisor_deps`'s plumbing, not
+    /// `crate::pii_tokenize`'s resolution behavior).
+    struct TestIdentityResolver;
+
+    impl crate::pii_tokenize::IdentityResolver for TestIdentityResolver {
+        fn resolve_by_id<'a>(
+            &'a self,
+            _platform: &'a str,
+            _platform_user_id: &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = crate::pii_tokenize::ResolvedIdentity> + Send + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                crate::pii_tokenize::ResolvedIdentity::Ephemeral(uuid::Uuid::new_v4())
+            })
+        }
+
+        fn resolve_by_handle<'a>(
+            &'a self,
+            _platform: &'a str,
+            _handle: &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = crate::pii_tokenize::ResolvedIdentity> + Send + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                crate::pii_tokenize::ResolvedIdentity::Ephemeral(uuid::Uuid::new_v4())
+            })
+        }
+    }
+
+    fn test_identity() -> Arc<dyn crate::pii_tokenize::IdentityResolver> {
+        Arc::new(TestIdentityResolver)
+    }
+
     /// Tenant-isolation regression test, resolved half: `finish_supervisor_
     /// deps` must carry the DB-resolved tenant slug/community name through
     /// into `SupervisorDeps` verbatim -- this is what
@@ -850,7 +940,8 @@ mod tests {
             tenant_slug: "acme".to_string(),
             community_name: Some("main".to_string()),
         };
-        let deps = finish_supervisor_deps(prereqs, resolved);
+        let deps =
+            finish_supervisor_deps(prereqs, resolved, test_identity(), test_tokenize_metrics());
         assert_eq!(deps.tenant, "acme");
         assert_eq!(deps.community.as_deref(), Some("main"));
     }
@@ -866,7 +957,8 @@ mod tests {
     fn supervisor_deps_are_never_built_when_scope_resolution_fails() {
         let prereqs = test_supervisor_prereqs();
         let resolved: Option<bundle_active_set::scope::ResolvedScope> = None;
-        let deps = resolved.map(|r| finish_supervisor_deps(prereqs, r));
+        let deps = resolved
+            .map(|r| finish_supervisor_deps(prereqs, r, test_identity(), test_tokenize_metrics()));
         assert!(
             deps.is_none(),
             "an unresolved scope must never produce SupervisorDeps -- the source-binding \
@@ -964,6 +1056,7 @@ mod tests {
             Arc::new(host_api::ConnectionRegistry::new()),
             test_excluded_metric(),
             test_source_supervisor_metrics(),
+            test_tokenize_metrics(),
         );
     }
 
@@ -981,6 +1074,7 @@ mod tests {
             Arc::new(host_api::ConnectionRegistry::new()),
             test_excluded_metric(),
             test_source_supervisor_metrics(),
+            test_tokenize_metrics(),
         );
     }
 
@@ -1003,6 +1097,7 @@ mod tests {
             Arc::new(host_api::ConnectionRegistry::new()),
             test_excluded_metric(),
             test_source_supervisor_metrics(),
+            test_tokenize_metrics(),
         );
     }
 
@@ -1035,6 +1130,12 @@ mod tests {
         }
     }
 
+    fn test_tokenize_metrics() -> Arc<telemetry::TokenizeMetrics> {
+        Arc::new(telemetry::register_tokenize_metrics(
+            &prometheus::Registry::new(),
+        ))
+    }
+
     #[tokio::test]
     async fn try_start_process_loop_noop_when_process_app_id_unset() {
         // Deliberately does not call `telemetry::init` (a process-global
@@ -1046,7 +1147,11 @@ mod tests {
         let cli = CliConfig::parse_from(["svc-process"]);
         assert_eq!(cli.process_app_id, "");
         let config = test_config(cli);
-        try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+        try_start_process_loop(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            test_tokenize_metrics(),
+        );
     }
 
     #[tokio::test]
@@ -1058,7 +1163,11 @@ mod tests {
         ]);
         let mut config = test_config(cli);
         config.envelope_binding_keys = None;
-        try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+        try_start_process_loop(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            test_tokenize_metrics(),
+        );
     }
 
     #[tokio::test]
@@ -1070,7 +1179,11 @@ mod tests {
         ]);
         let mut config = test_config(cli);
         config.envelope_binding_keys = Some(crate::config::Secret::new("not-kid-colon-hex"));
-        try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+        try_start_process_loop(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            test_tokenize_metrics(),
+        );
     }
 
     #[tokio::test]
@@ -1092,7 +1205,11 @@ mod tests {
             "waddles.bot.commands.default",
         ]);
         let config = test_config(cli);
-        try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+        try_start_process_loop(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            test_tokenize_metrics(),
+        );
     }
 
     #[tokio::test]
@@ -1121,7 +1238,11 @@ mod tests {
                 "waddles.bot.commands.default",
             ]);
             let config = test_config(cli);
-            try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+            try_start_process_loop(
+                &config,
+                Arc::new(host_api::ConnectionRegistry::new()),
+                test_tokenize_metrics(),
+            );
             unsafe {
                 std::env::remove_var("VALKEY_URL");
                 std::env::remove_var("VALKEY_PASSWORD");
@@ -1157,7 +1278,11 @@ mod tests {
                 "tw-channelA",
             ]);
             let config = test_config(cli);
-            try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+            try_start_process_loop(
+                &config,
+                Arc::new(host_api::ConnectionRegistry::new()),
+                test_tokenize_metrics(),
+            );
             unsafe {
                 std::env::remove_var("VALKEY_URL");
                 std::env::remove_var("VALKEY_PASSWORD");
@@ -1194,6 +1319,7 @@ mod tests {
             service_api_key: crate::config::Secret::new("x"),
             envelope_binding_keys: None,
             db_reader_password: None,
+            identity_service_api_key: None,
         };
         let state = crate::http::AppState::new(config, prometheus::Registry::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

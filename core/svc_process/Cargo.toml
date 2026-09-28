@@ -112,6 +112,15 @@ rustls-pki-types = "=1.15.1"
 prometheus = "=0.14.0"
 thiserror = "=2.0.20"
 anyhow = "=1.0.104"
+# v4 (ephemeral-pseudonym-unrelated ids, if ever needed) + v5 (deterministic
+# `UUIDv5(WADDLES_MENTION_NAMESPACE, "{platform}:{platform_user_id}")`
+# ephemeral pseudonym minting, `crate::pii_tokenize`) -- same pin as
+# `core/svc_ingest`'s own `uuid` dependency.
+uuid = { version = "=1.26.1", features = ["v4", "v5", "serde"] }
+# Unstructured mention grammar (`@handle` Twitch/IRC, `<@id>` Discord),
+# `crate::pii_tokenize` -- same pin as `core/bundle_compiler`'s own `regex`
+# dependency.
+regex = "=1.13.1"
 clap = { version = "=4.6.6", features = ["derive", "env"] }
 # rustls-tls (never native-tls/openssl) -- used today only by
 # `run_healthcheck`'s loopback GET; will also carry the future `http` bundle

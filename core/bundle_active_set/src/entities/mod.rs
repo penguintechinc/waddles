@@ -19,4 +19,5 @@ pub mod app_install_approvals;
 pub mod app_source_bindings;
 pub mod app_versions;
 pub mod communities;
+pub mod community_members;
 pub mod tenants;

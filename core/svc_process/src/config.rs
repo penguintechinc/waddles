@@ -329,6 +329,16 @@ pub struct Config {
     /// unset, the same graceful-degradation contract as
     /// `envelope_binding_keys` above.
     pub db_reader_password: Option<Secret>,
+    /// `IDENTITY_SERVICE_API_KEY` -- a DEDICATED credential (distinct from
+    /// the general `service_api_key`) authorizing only hub-api's `POST
+    /// /api/v1/internal/identities/ephemeral` mint endpoint
+    /// (`crate::hub_identity_client`), least-privilege: a compromised
+    /// caller of any other internal endpoint gains no ability to mint
+    /// pseudonyms. `Option`, same graceful-degradation contract as
+    /// `db_reader_password`: unset means `crate::hub_identity_client`
+    /// never sends an unauthenticated request and every mint falls back to
+    /// a random token, never a hard startup failure.
+    pub identity_service_api_key: Option<Secret>,
 }
 
 impl fmt::Debug for Config {
@@ -348,6 +358,13 @@ impl fmt::Debug for Config {
             .field(
                 "envelope_binding_keys",
                 &self.envelope_binding_keys.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "identity_service_api_key",
+                &self
+                    .identity_service_api_key
+                    .as_ref()
+                    .map(|_| Secret::new("")),
             )
             .finish()
     }
@@ -383,6 +400,10 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .map(Secret::new);
+        let identity_service_api_key = std::env::var("IDENTITY_SERVICE_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(Secret::new);
         Ok(Self {
             cli,
             db_password,
@@ -390,6 +411,7 @@ impl Config {
             service_api_key,
             envelope_binding_keys,
             db_reader_password,
+            identity_service_api_key,
         })
     }
 }
