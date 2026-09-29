@@ -996,6 +996,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             // Approval belongs to tenant 2, not tenant 1 -- same app_id/
             // version/community sentinel otherwise.
