@@ -2339,6 +2339,22 @@ def bind_lifecycle_tables(dal: Any, *, migrate: bool = False) -> None:
         # pre-071 row (or a row written before this column existed) reads
         # back as an empty dict, never None.
         Field("stages", "json", default={}),
+        # migration 0026 -- attribution/marketplace metadata (bundle.yaml's
+        # optional `author`/`license`/`source_url`/`alternative_to`/
+        # `homepage_url`/`notice`/`category` block, see `hub_api/services/
+        # bundle_manifest_v2.py` and `flask_core.app_manifest`). All
+        # nullable -- a pre-0026 row (or any first-party `builtin` bundle
+        # that never declares the block) reads back as `None`/`[]`.
+        # `license_review_required` is derived (`flask_core.
+        # bundle_attribution.license_requires_review`), never client-set.
+        Field("author", "string", length=255),
+        Field("license", "string", length=50),
+        Field("license_review_required", "boolean", default=False),
+        Field("source_url", "text"),
+        Field("alternative_to", "list:string", default=[]),
+        Field("homepage_url", "text"),
+        Field("notice", "text"),
+        Field("category", "string", length=50),
         primarykey=["app_id"],
         migrate=migrate,
     )
@@ -2419,6 +2435,16 @@ def bind_app_bundle_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("status", "string", length=20, default="active"),
         Field("installed_at", "datetime"),
         Field("stages", "json", default={}),
+        # migration 0026 -- kept in lockstep with `bind_lifecycle_tables()`'s
+        # own copy above; see that function's own inline comment.
+        Field("author", "string", length=255),
+        Field("license", "string", length=50),
+        Field("license_review_required", "boolean", default=False),
+        Field("source_url", "text"),
+        Field("alternative_to", "list:string", default=[]),
+        Field("homepage_url", "text"),
+        Field("notice", "text"),
+        Field("category", "string", length=50),
         primarykey=["app_id"],
         migrate=migrate,
     )
