@@ -35,6 +35,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
+use egress_assertion::ip_matches_grant;
 pub use egress_assertion::{
     AssertionSigningKey, DestinationCategory, ASSERTION_HEADER as PROXY_ASSERTION_HEADER_NAME,
     FORWARD_AUTHORIZATION_HEADER as PROXY_FORWARD_AUTHORIZATION_HEADER,
@@ -1092,13 +1093,22 @@ fn mask_u128(prefix: u8) -> u128 {
 
 /// Checks whether `pattern` (an exact IP, optionally `:port`-suffixed, or a
 /// CIDR block for the private-ip family) covers `ip` -- the resolved/
-/// literal address a request is actually targeting. An unparseable pattern
-/// never matches anything (fail closed).
-fn ip_pattern_contains(pattern: &str, ip: IpAddr) -> bool {
+/// literal address a request is actually targeting. Delegates the actual
+/// IP/CIDR containment arithmetic to the shared
+/// [`egress_assertion::ip_matches_grant`] -- the same primitive
+/// `egress_proxy` re-checks the resolved address against on the other side
+/// of the assertion -- so the two services can never silently diverge on
+/// what a grant covers (this function previously hand-rolled its own
+/// `CidrBlock`, duplicating that logic with slightly weaker semantics: no
+/// IPv4-mapped-IPv6 normalization on the containment check itself, only on
+/// the earlier classification step). `category` must be the same
+/// [`EgressCategory`] the caller already established for `ip`/`pattern`'s
+/// grant list (`PublicIp` requires exact-literal equality, `PrivateIp`
+/// additionally accepts a CIDR block) -- an unparseable pattern never
+/// matches anything (fail closed).
+fn ip_pattern_contains(category: EgressCategory, pattern: &str, ip: IpAddr) -> bool {
     let (addr_part, _) = parse_pattern(pattern);
-    CidrBlock::parse(addr_part)
-        .map(|c| c.contains(ip))
-        .unwrap_or(false)
+    ip_matches_grant(category.into(), addr_part, ip)
 }
 
 /// Operator-configured cluster pod/service/node CIDR denylist (Justin's
@@ -1206,20 +1216,21 @@ struct MatchedGrant<'a> {
 /// and vice versa; there is no fallback between the two IP lists.
 fn match_grant<'a>(host: &str, row: &'a EgressRuleRow) -> Option<MatchedGrant<'a>> {
     if let Ok(ip) = host.parse::<IpAddr>() {
-        let grants = if is_private_range(ip) {
+        let category = if is_private_range(ip) {
+            EgressCategory::PrivateIp
+        } else {
+            EgressCategory::PublicIp
+        };
+        let grants = if category == EgressCategory::PrivateIp {
             &row.private_ip_grants
         } else {
             &row.public_ip_grants
         };
         let (pattern, methods) = grants
             .iter()
-            .find(|(pattern, _)| ip_pattern_contains(pattern, ip))?;
+            .find(|(pattern, _)| ip_pattern_contains(category, pattern, ip))?;
         Some(MatchedGrant {
-            category: if is_private_range(ip) {
-                EgressCategory::PrivateIp
-            } else {
-                EgressCategory::PublicIp
-            },
+            category,
             pattern: pattern.as_str(),
             declared_port: parse_pattern(pattern).1,
             methods: methods.as_slice(),
@@ -1245,7 +1256,7 @@ fn match_grant<'a>(host: &str, row: &'a EgressRuleRow) -> Option<MatchedGrant<'a
 fn find_private_ip_grant(row: &EgressRuleRow, ip: IpAddr) -> bool {
     row.private_ip_grants
         .iter()
-        .any(|(pattern, _)| ip_pattern_contains(pattern, ip))
+        .any(|(pattern, _)| ip_pattern_contains(EgressCategory::PrivateIp, pattern, ip))
 }
 
 /// Classifies `ip` against every always-deny range (spec's original SSRF
@@ -2694,6 +2705,47 @@ mod tests {
             .send(
                 "waddles.a.b.c",
                 &serde_json::json!({"method": "GET", "url": "https://10.55.66.77/"}),
+            )
+            .await;
+        assert!(result.is_ok(), "expected success, got {result:?}");
+    }
+
+    /// Parity test for the shared `egress_assertion::ip_matches_grant`
+    /// primitive this module's `ip_pattern_contains` now delegates to: a
+    /// `net.http.private-ip:10.0.0.0/8` CIDR grant must still cover a
+    /// request host expressed as an IPv4-mapped-IPv6 literal
+    /// (`::ffff:10.55.66.77`), the same way [`private_ip_cidr_grant_covers_any_address_in_range`]
+    /// proves it for a plain v4 literal. Before this module switched to the
+    /// shared primitive, its hand-rolled `CidrBlock::contains` required an
+    /// exact address-family match (`IpNet::V4` vs `IpAddr::V6` fell through
+    /// to `_ => false`), so a v4-mapped-v6 target could never satisfy a v4
+    /// CIDR grant at all, despite `is_private_range` already recognizing it
+    /// as the same private address for routing purposes -- this would have
+    /// failed `ssrf_blocked_address` under the old implementation.
+    #[tokio::test]
+    async fn private_ip_cidr_grant_covers_an_ipv4_mapped_ipv6_target() {
+        let catalog = TestCatalog::new();
+        catalog.insert(
+            "waddles.a.b.c",
+            EgressRuleRow {
+                private_ip_grants: vec![("10.0.0.0/8".to_string(), vec!["GET".to_string()])],
+                ..EgressRuleRow::default()
+            },
+        );
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default().queue(Ok(ok_response()))),
+            default_limits(),
+            catalog,
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_instance_policy(Arc::new(RwLock::new(InstanceEgressPolicy {
+            allow_private_ip_egress: true,
+        })));
+        let result = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://[::ffff:10.55.66.77]/"}),
             )
             .await;
         assert!(result.is_ok(), "expected success, got {result:?}");
