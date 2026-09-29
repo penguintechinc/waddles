@@ -873,6 +873,8 @@ mod tests {
 
         let loaded = connection
             .request(Message::Load(LoadBody {
+                tenant_id: 1,
+                community_id: 0,
                 app_id: "waddles.bot.commands.default".to_string(),
                 version: "1".to_string(),
                 digest: "sha256:00".to_string(),
@@ -1090,6 +1092,8 @@ mod tests {
 
         connection
             .request(Message::Load(LoadBody {
+                tenant_id: 1,
+                community_id: 0,
                 app_id: "waddles.bot.commands.default".to_string(),
                 version: "1".to_string(),
                 digest: "sha256:00".to_string(),

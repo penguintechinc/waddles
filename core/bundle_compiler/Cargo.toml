@@ -51,7 +51,7 @@ tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "time"] 
 # 2026-09-22, verified to resolve from a fresh CARGO_HOME with
 # `--locked`) -- match it verbatim in any other Rust crate here that
 # needs a penguin-libs package before one publishes to a registry.
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "49f098caab95339bf8113ba5c3e9ad039d30d44b", package = "penguin-bundle-host", version = "=0.1.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69f25b007e397bcf22c20bee368495f61f0a1b8a", package = "penguin-bundle-host", version = "=0.2.0" }
 
 [dev-dependencies]
 tempfile = "=3.23.0"
