@@ -927,6 +927,39 @@ fn is_link_local_v6(ip: Ipv6Addr) -> bool {
     (ip.segments()[0] & 0xffc0) == 0xfe80
 }
 
+/// 6to4 (RFC 3056): `2002::/16`, the embedded IPv4 address occupies the
+/// next 32 bits. Recognized (see [`is_forbidden_address`]'s doc) but never
+/// decoded -- this deployment denies the whole range outright.
+fn is_6to4_v6(ip: Ipv6Addr) -> bool {
+    ip.segments()[0] == 0x2002
+}
+
+/// Teredo (RFC 4380): `2001:0000::/32`. Distinct from other `2001::`
+/// allocations (documentation `2001:db8::/32`, production ranges, etc.),
+/// which are ordinary native-v6 addresses and fall through to this
+/// function's other checks unaffected.
+fn is_teredo_v6(ip: Ipv6Addr) -> bool {
+    let seg = ip.segments();
+    seg[0] == 0x2001 && seg[1] == 0x0000
+}
+
+/// Canonicalizes `ip` to its embedded IPv4 form when it carries one
+/// (mapped/NAT64/IPv4-compatible -- see [`embedded_ipv4`]) so a deny-list
+/// comparison configured in native v4 form (e.g. an operator's
+/// [`ClusterCidrDenylist`] entry) can't be bypassed by re-encoding the same
+/// target as its IPv6 form. Deliberately reuses `embedded_ipv4` (not just
+/// `std`'s narrower `Ipv6Addr::to_canonical`, which only unwraps the mapped
+/// form) so this stays consistent with [`is_forbidden_address`]'s and
+/// [`is_private_range`]'s existing canonicalization.
+///
+/// // regression: mapped-v6 cluster bypass
+fn canonicalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => embedded_ipv4(v6).map(IpAddr::V4).unwrap_or(ip),
+        IpAddr::V4(_) => ip,
+    }
+}
+
 /// Classifies a resolved address against spec §8.2 step 6's forbidden
 /// ranges. Returns `None` when the address is permitted. `allow_private`
 /// lifts only the RFC1918/ULA private-range check (spec §8.5's
@@ -1001,6 +1034,19 @@ pub fn is_forbidden_address(ip: IpAddr, allow_private: bool) -> Option<&'static 
             }
             if is_link_local_v6(v6) {
                 return Some("link_local");
+            }
+            // regression: mapped-v6 cluster bypass (security review follow-
+            // up) -- 6to4 (`2002::/16`, RFC 3056) and Teredo (`2001::/32`,
+            // RFC 4380) both tunnel an embedded IPv4 address, but via
+            // legacy NAT-traversal mechanisms this deployment has no
+            // legitimate egress use for. Rather than decode the embedded
+            // address (6to4: direct; Teredo: XOR-obfuscated) and risk a
+            // decode bug on a security-critical path for a code path with
+            // no real caller, Justin's decision: deny both ranges outright
+            // and unconditionally -- never lifted by `allow_private`, same
+            // tier as loopback/link-local/metadata.
+            if is_6to4_v6(v6) || is_teredo_v6(v6) {
+                return Some("legacy_transition_mechanism");
             }
             if !allow_private && is_unique_local_v6(v6) {
                 return Some("private");
@@ -1134,6 +1180,24 @@ impl ClusterCidrDenylist {
             let raw = raw.as_ref();
             let block = CidrBlock::parse(raw)
                 .ok_or_else(|| format!("invalid cluster CIDR denylist entry: {raw:?}"))?;
+            // regression: mapped-v6 cluster bypass -- `contains` below
+            // canonicalizes the *checked* address to its embedded-v4 form
+            // (via `canonicalize_ip`) before comparing, so a v6-mapped/NAT64/
+            // compatible *configured* range would silently never match
+            // anything (family mismatch against the now-v4 checked
+            // address). Fail closed at config-parse time instead of
+            // shipping a denylist entry that can never fire.
+            if let IpAddr::V6(v6) = block.network {
+                if embedded_ipv4(v6).is_some() {
+                    return Err(format!(
+                        "cluster CIDR denylist entry {raw:?} is an IPv4-mapped/NAT64/IPv4-\
+                         compatible IPv6 range -- write it in native IPv4 form instead (e.g. \
+                         10.0.0.0/8): resolved addresses are canonicalized to their embedded v4 \
+                         form before this denylist is checked, so a v6-encoded entry would never \
+                         match anything"
+                    ));
+                }
+            }
             blocks.push(block);
         }
         Ok(Self(blocks))
@@ -1144,6 +1208,12 @@ impl ClusterCidrDenylist {
     }
 
     fn contains(&self, ip: IpAddr) -> bool {
+        // regression: mapped-v6 cluster bypass -- canonicalize before
+        // comparing so `::ffff:10.244.5.6` (or its NAT64/IPv4-compatible
+        // equivalents) still matches a `10.244.0.0/16` entry; the old
+        // hand-rolled `CidrBlock::contains` required an exact address-
+        // family match and silently fell through to `_ => false` otherwise.
+        let ip = canonicalize_ip(ip);
         self.0.iter().any(|c| c.contains(ip))
     }
 }
@@ -2800,6 +2870,121 @@ mod tests {
             },
         );
         assert_eq!(err2, Some("cluster_cidr_denied"));
+    }
+
+    /// regression: mapped-v6 cluster bypass -- an IPv4-mapped-IPv6 encoding
+    /// of an address inside the operator's cluster CIDR denylist must still
+    /// be denied (`cluster_cidr_denied`), even with a covering private-ip
+    /// grant and instance-policy opt-in. Before `ClusterCidrDenylist::
+    /// contains` canonicalized its input, `::ffff:10.244.5.6` (family V6)
+    /// could never match a `10.244.0.0/16` (family V4) entry at all, so the
+    /// always-forbidden cluster check silently never fired for this
+    /// encoding of the same address `cluster_cidr_denylist_beats_a_matching_
+    /// private_ip_grant` already proves is denied in plain v4 form.
+    #[tokio::test]
+    async fn cluster_cidr_denylist_denies_an_ipv4_mapped_ipv6_target() {
+        let catalog = TestCatalog::new();
+        catalog.insert(
+            "waddles.a.b.c",
+            EgressRuleRow {
+                private_ip_grants: vec![("10.0.0.0/8".to_string(), vec!["GET".to_string()])],
+                ..EgressRuleRow::default()
+            },
+        );
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default()),
+            default_limits(),
+            catalog,
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_instance_policy(Arc::new(RwLock::new(InstanceEgressPolicy {
+            allow_private_ip_egress: true,
+        })))
+        .with_cluster_denylist(ClusterCidrDenylist::parse(["10.244.0.0/16"]).unwrap());
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://[::ffff:10.244.5.6]/"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "ssrf_blocked_address");
+        let err2 = classify_dial_address(
+            "::ffff:10.244.5.6".parse().unwrap(),
+            EgressCategory::PrivateIp,
+            &EgressRuleRow {
+                private_ip_grants: vec![("10.0.0.0/8".to_string(), vec!["GET".to_string()])],
+                ..EgressRuleRow::default()
+            },
+            &ClusterCidrDenylist::parse(["10.244.0.0/16"]).unwrap(),
+            InstanceEgressPolicy {
+                allow_private_ip_egress: true,
+            },
+        );
+        assert_eq!(err2, Some("cluster_cidr_denied"));
+    }
+
+    /// regression: mapped-v6 cluster bypass -- same as the mapped-address
+    /// case above, but for the NAT64-synthesized (`64:ff9b::a.b.c.d`) and
+    /// deprecated IPv4-compatible (`::a.b.c.d`) encodings `embedded_ipv4`
+    /// also recognizes.
+    #[test]
+    fn cluster_cidr_denylist_denies_nat64_and_ipv4_compatible_encodings() {
+        let denylist = ClusterCidrDenylist::parse(["10.244.0.0/16"]).unwrap();
+        let policy = InstanceEgressPolicy {
+            allow_private_ip_egress: true,
+        };
+        let row = EgressRuleRow {
+            private_ip_grants: vec![("10.0.0.0/8".to_string(), vec!["GET".to_string()])],
+            ..EgressRuleRow::default()
+        };
+        for addr in ["64:ff9b::10.244.5.6", "::10.244.5.6"] {
+            let ip: IpAddr = addr.parse().unwrap();
+            assert_eq!(
+                classify_dial_address(ip, EgressCategory::PrivateIp, &row, &denylist, policy),
+                Some("cluster_cidr_denied"),
+                "expected {addr} to be denied by the cluster CIDR denylist"
+            );
+        }
+    }
+
+    /// regression: mapped-v6 cluster bypass -- a cluster CIDR denylist entry
+    /// itself expressed in IPv4-mapped-IPv6 form must be rejected at parse
+    /// time (fail closed) rather than silently accepted as an entry that
+    /// can never match anything, since `contains` always canonicalizes the
+    /// checked address down to its embedded v4 form first.
+    #[test]
+    fn cluster_cidr_denylist_rejects_a_mapped_ipv6_configured_range() {
+        let err = ClusterCidrDenylist::parse(["::ffff:10.244.0.0/120"]).unwrap_err();
+        assert!(
+            err.contains("IPv4-mapped"),
+            "expected a clear IPv4-mapped config error, got: {err}"
+        );
+    }
+
+    /// regression: mapped-v6 cluster bypass -- 6to4 and Teredo encodings of
+    /// the loopback/metadata addresses are denied outright (`legacy_
+    /// transition_mechanism`), not silently treated as ordinary native-v6
+    /// addresses that fall through every check.
+    #[test]
+    fn six_to_four_and_teredo_encodings_are_always_denied() {
+        // 6to4 (2002::/16) embedding 127.0.0.1 -> 2002:7f00:0001::
+        let six_to_four: IpAddr = "2002:7f00:1::".parse().unwrap();
+        assert_eq!(
+            is_forbidden_address(six_to_four, true),
+            Some("legacy_transition_mechanism")
+        );
+        // Teredo (2001:0000::/32).
+        let teredo: IpAddr = "2001:0:4136:e378:8000:63bf:3fff:fdd2".parse().unwrap();
+        assert_eq!(
+            is_forbidden_address(teredo, true),
+            Some("legacy_transition_mechanism")
+        );
+        // A same-prefix-byte ordinary v6 allocation (documentation range)
+        // must NOT be swept up by the Teredo check.
+        let docs: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(is_forbidden_address(docs, true), None);
     }
 
     /// Metadata is always denied regardless of any grant or instance
