@@ -37,6 +37,7 @@
 pub mod builtins;
 pub mod bundle_loader;
 pub mod capabilities;
+pub mod changelog_consumer;
 pub mod config;
 pub mod error;
 pub mod hop;
@@ -116,35 +117,36 @@ where
         telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
     let source_supervisor_metrics =
         telemetry::register_source_binding_supervisor_metrics(&prom_registry);
+    let changelog_consumer_metrics = telemetry::register_changelog_consumer_metrics(&prom_registry);
 
     let state = http::AppState::new(config.clone(), prom_registry);
 
     let connections = try_start_host_api(&config.cli);
     // Mutual exclusion, resolved ONCE at startup -- see
-    // `resolve_db_path_active`'s own doc for why this is not re-evaluated
-    // per-tick for this specific dispatch decision, and why that's an
-    // accepted tradeoff (a live kill-switch flip mid-run still stops
-    // DB-driven work via the existing per-tick gates inside
-    // `bundle_loader::run_tick`/`source_supervisor::run_tick`, it just
-    // doesn't fail OVER to the legacy loop without a pod restart).
-    if resolve_db_path_active(&config).await {
+    // `resolve_multi_tenant_path_active`'s own doc for why this is not
+    // re-evaluated per-tick for this specific dispatch decision (a live
+    // kill-switch flip mid-run still stops DB-driven work via
+    // `changelog_consumer::run`'s own per-tick gate check, it just doesn't
+    // fail OVER to the legacy loop without a pod restart).
+    if resolve_multi_tenant_path_active(&config).await {
         if !config.cli.process_app_id.is_empty() {
             tracing::info!(
                 process_app_id = %config.cli.process_app_id,
-                "DB-driven bundle-config path active at startup; ignoring legacy \
+                "multi-tenant changelog-consumer path active at startup; ignoring legacy \
                  PROCESS_APP_ID/PROCESS_INGEST_* env selection (restart required to fall back)"
             );
         }
-        try_start_db_bundle_loader(
+        try_start_changelog_consumer(
             &config,
             connections,
             bundle_loader_excluded_metric,
             source_supervisor_metrics,
+            changelog_consumer_metrics,
         );
     } else {
         tracing::info!(
-            "DB-driven bundle-config path inactive at startup (kill-switch on, or \
-             DB_READER_*/BUNDLE_SCOPE_TENANT_ID not configured); using legacy \
+            "multi-tenant changelog-consumer path inactive at startup (a kill-switch on, or \
+             DB_READER_PASSWORD not configured); using legacy \
              PROCESS_APP_ID/PROCESS_INGEST_* env selection"
         );
         try_start_process_loop(&config, connections);
@@ -445,8 +447,8 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
     });
 }
 
-/// Resolves, ONCE at startup, whether the DB-driven bundle-config path
-/// (`crate::bundle_loader` + `crate::source_supervisor`) or the legacy
+/// Resolves, ONCE at startup, whether the multi-tenant, change-log-driven
+/// active-set path (`crate::changelog_consumer`) or the legacy
 /// `PROCESS_APP_ID`/`PROCESS_INGEST_*` single-consumer env path
 /// (`try_start_process_loop`) is authoritative for this process's entire
 /// lifetime -- **mutual exclusion, not operator discipline**: exactly one
@@ -454,99 +456,97 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
 /// be set to.
 ///
 /// Deliberately evaluated only here, once, rather than per-tick the way
-/// `bundle_loader::run_tick`/`source_supervisor::run_tick` re-check their
-/// own kill-switch gate on every poll: a live `waddles.core.
-/// disable-db-bundle-config` flip mid-run is still caught by those
-/// per-tick gates (DB-driven load/consumption stops immediately), but this
-/// function's own path-selection decision does NOT re-run -- falling back
-/// to (or away from) the legacy loop requires a pod restart. That is an
-/// accepted tradeoff (see the coordinator's own framing: "acceptable to
-/// require a restart to switch paths"), not an oversight: it guarantees
-/// the two paths can never run concurrently against the same stream/group,
-/// which a live re-evaluation racing against already-spawned consumer
-/// tasks could not cleanly guarantee.
+/// `changelog_consumer::run_incremental_tick`/`run_full_reconcile` re-check
+/// their own kill-switch gate on every poll: a live kill-switch flip
+/// mid-run is still caught by that per-tick gate (DB-driven load/
+/// consumption stops immediately, source-binding consumers are stopped),
+/// but this function's own path-selection decision does NOT re-run --
+/// falling back to (or away from) the legacy loop requires a pod restart.
+/// That is an accepted tradeoff (mirrors the pre-multi-tenant version of
+/// this same decision): it guarantees the two paths can never run
+/// concurrently against the same stream/group, which a live re-evaluation
+/// racing against already-spawned consumer tasks could not cleanly
+/// guarantee.
 ///
-/// The DB path is active when [`db_path_selected`] says so: DB config
-/// present (`DB_READER_PASSWORD` set, `BUNDLE_SCOPE_TENANT_ID` configured)
-/// AND the kill-switch gate reports enabled (`license::
-/// DbBundleConfigGate::enabled`, already the negated "is the DB path
-/// enabled" answer -- default `true` when the flag is unseen or the
-/// license server is unreachable). A malformed `LICENSE_SERVER_URL`/
-/// `POSTHOG_HOST` (the only way `license::build_license_client` itself can
-/// fail) is treated as "DB path inactive" -- the same fail-safe posture
-/// `try_start_db_bundle_loader`'s own internal gate uses for the identical
-/// failure.
-async fn resolve_db_path_active(config: &config::Config) -> bool {
-    let db_config_present =
-        config.db_reader_password.is_some() && config.cli.bundle_scope_tenant_id.get().is_some();
+/// The multi-tenant path is active when [`multi_tenant_path_selected`]
+/// says so: `DB_READER_PASSWORD` set (no more `BUNDLE_SCOPE_TENANT_ID`/
+/// `BUNDLE_SCOPE_COMMUNITY_ID` gate -- this path serves EVERY tenant/
+/// community it finds, never a single configured scope) AND BOTH
+/// kill-switch gates report enabled (`license::DbBundleConfigGate` and
+/// `license::MultiTenantWatermarkGate`, each already the negated "is this
+/// path enabled" answer -- default `true` when unseen or the license
+/// server is unreachable). A malformed `LICENSE_SERVER_URL`/`POSTHOG_HOST`
+/// (the only way `license::build_license_client` itself can fail) is
+/// treated as "path inactive" -- the same fail-safe posture
+/// `try_start_changelog_consumer`'s own internal gate uses for the
+/// identical failure.
+async fn resolve_multi_tenant_path_active(config: &config::Config) -> bool {
+    let db_config_present = config.db_reader_password.is_some();
     if !db_config_present {
         return false;
     }
 
     let gate_enabled = match license::build_license_client("waddles") {
-        Ok(client) => license::DbBundleConfigGate::new(client).enabled().await,
+        Ok(client) => {
+            let db_bundle_config_enabled = license::DbBundleConfigGate::new(Arc::clone(&client))
+                .enabled()
+                .await;
+            let multi_tenant_enabled = license::MultiTenantWatermarkGate::new(client)
+                .enabled()
+                .await;
+            db_bundle_config_enabled && multi_tenant_enabled
+        }
         Err(err) => {
             tracing::warn!(
                 error = %err,
-                "license client config invalid; treating DB-driven bundle-config path as inactive at startup"
+                "license client config invalid; treating multi-tenant changelog-consumer path as inactive at startup"
             );
             false
         }
     };
 
-    db_path_selected(db_config_present, gate_enabled)
+    multi_tenant_path_selected(db_config_present, gate_enabled)
 }
 
-/// Pure boolean combination behind [`resolve_db_path_active`] -- split out
-/// so the "which path wins" decision is directly unit-testable with a
-/// fixed kill-switch-gate value, without needing a live/mocked
+/// Pure boolean combination behind [`resolve_multi_tenant_path_active`] --
+/// split out so the "which path wins" decision is directly unit-testable
+/// with a fixed kill-switch-gate value, without needing a live/mocked
 /// `penguin_licensing::LicenseClient` round trip to force a "kill-switch
 /// ON" flag value (not achievable in a unit test against the real client).
-fn db_path_selected(db_config_present: bool, gate_enabled: bool) -> bool {
+fn multi_tenant_path_selected(db_config_present: bool, gate_enabled: bool) -> bool {
     db_config_present && gate_enabled
 }
 
-/// Attempts to start the DB-driven active-bundle loader
-/// (`crate::bundle_loader`) AND the DB-driven source-binding supervisor
-/// (`crate::source_supervisor`) as sibling background tasks sharing one
-/// read-only Postgres connection -- spec: hub-api is the sole writer, this
-/// stage reads ACTIVE, APPROVED bundle config (and, now, source-stream
-/// bindings) from a READ-ONLY Postgres and hot-swaps both in/out with no
-/// pod restart. Two independent reasons neither ever starts, both logged
-/// and neither an error -- `DB_READER_PASSWORD` unset (the RO account
-/// hasn't been provisioned yet in this environment) or
-/// `BUNDLE_SCOPE_TENANT_ID` unset (`None` -- see `config::TenantScopeId`'s
-/// own doc for why this is no longer collapsed onto `0`, a real, selectable
-/// tenant). Either way, `try_start_process_loop`'s existing
-/// `PROCESS_APP_ID`/`PROCESS_BUNDLE_*` env selection remains the sole
-/// source; both loaders only supplement it once actually configured, and
-/// are additionally gated per-tick on the `waddles.core.disable-db-bundle-config`
-/// kill-switch (`crate::license::DbBundleConfigGate` -- already the
-/// negated "is the DB path enabled" answer, enabled by default) inside
-/// `bundle_loader::run_tick`/`source_supervisor::run_tick` regardless of
-/// whether this function's own startup gates pass.
+/// Attempts to start the multi-tenant, change-log-driven active-bundle
+/// loader + source-binding supervisor (`crate::changelog_consumer::run`) --
+/// dataplane scale design rev 4, §7/§8 step 2. One independent reason this
+/// never starts, logged and not an error -- `DB_READER_PASSWORD` unset
+/// (the RO account hasn't been provisioned yet in this environment).
+/// Either way, `try_start_process_loop`'s existing `PROCESS_APP_ID`/
+/// `PROCESS_BUNDLE_*` env selection remains the sole source, and this path
+/// is additionally gated per-tick on both `waddles.core.
+/// disable-db-bundle-config` and `waddles.core.disable-multi-tenant-
+/// watermark` (each already the negated "is this path enabled" answer,
+/// enabled by default) inside `changelog_consumer::run` regardless of
+/// whether this function's own startup gate passes.
 ///
-/// The source-binding supervisor has its own additional, independent
+/// The source-binding supervisor half has its own additional, independent
 /// startup gates -- `ENVELOPE_BINDING_KEYS` (hop verification must never
 /// silently fail open, same rule as `try_start_process_loop`) and
 /// `penguin_spine::SpineConfig::from_env()` (Valkey connectivity). Missing
-/// either disables ONLY the supervisor, logged the same way; bundle
-/// load/unload (`bundle_loader::run`) needs neither and still starts.
-fn try_start_db_bundle_loader(
+/// either disables ONLY the supervisor (`changelog_consumer::run` is
+/// called with `spawner: None`); bundle load/unload needs neither and
+/// still starts.
+fn try_start_changelog_consumer(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
     excluded_metric: prometheus::IntCounterVec,
     source_supervisor_metrics: telemetry::SourceBindingSupervisorMetrics,
+    changelog_consumer_metrics: telemetry::ChangelogConsumerMetrics,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
-            "DB_READER_PASSWORD not set; DB-driven bundle loader/source-binding supervisor not started (env selection remains authoritative)"
-        );
-        return;
-    };
-    let Some(tenant_id) = config.cli.bundle_scope_tenant_id.get() else {
-        tracing::info!(
-            "BUNDLE_SCOPE_TENANT_ID not set; DB-driven bundle loader/source-binding supervisor not started (env selection remains authoritative)"
+            "DB_READER_PASSWORD not set; multi-tenant changelog consumer not started (env selection remains authoritative)"
         );
         return;
     };
@@ -554,12 +554,16 @@ fn try_start_db_bundle_loader(
     let license_client = match license::build_license_client("waddles") {
         Ok(c) => c,
         Err(err) => {
-            tracing::warn!(error = %err, "license client config invalid; DB-driven bundle loader/source-binding supervisor not started");
+            tracing::warn!(error = %err, "license client config invalid; multi-tenant changelog consumer not started");
             return;
         }
     };
-    let gate: Arc<dyn license::FeatureGate> =
-        Arc::new(license::DbBundleConfigGate::new(license_client));
+    let gate: Arc<dyn license::FeatureGate> = Arc::new(license::AllGate(vec![
+        Arc::new(license::DbBundleConfigGate::new(Arc::clone(
+            &license_client,
+        ))),
+        Arc::new(license::MultiTenantWatermarkGate::new(license_client)),
+    ]));
 
     let reader_cfg = bundle_active_set::ReaderConfig {
         host: config.cli.db_reader_host.clone(),
@@ -568,160 +572,99 @@ fn try_start_db_bundle_loader(
         user: config.cli.db_reader_user.clone(),
     };
     let password = password.expose().to_string();
-    let community_id = config.cli.bundle_scope_community_id;
     let poll_interval = config.cli.bundle_config_poll_interval();
+    let full_reconcile_interval = config.cli.full_reconcile_interval();
     let call_timeout_ms = config.cli.executor_call_timeout_ms;
 
-    // The source-binding supervisor's own optional dependencies -- built
-    // eagerly (no network I/O) so a missing/invalid one only disables the
-    // supervisor half, never the bundle load/unload half above. Shares the
-    // SAME `connections` registry as `bundle_loader::run`/the host-api
-    // listener (`try_start_host_api`'s own registry, threaded through this
-    // function's `connections` parameter) -- a per-consumer registry of its
-    // own would never see the executor connection the listener actually
-    // accepts. Tenant/community scope is deliberately NOT included here --
-    // see [`SupervisorPrereqs`]'s own doc for why that half can only be
-    // resolved once the RO reader connection exists.
-    let supervisor_prereqs =
-        build_source_supervisor_prereqs(config, Arc::clone(&connections), Arc::clone(&gate));
-    // Shared between `bundle_loader::run`'s DB-driven poll (writer -- every
-    // tick's `ActiveBundleRow::declared_capabilities`) and every source-
-    // binding consumer's own per-invoke `StageCapabilities` (reader,
-    // `bundle_host_kv::authorize::authorize_kv`) -- one snapshot, one
-    // writer, many readers, mirroring `core/svc_action`'s identical
-    // pattern.
+    // supervisor half, never the bundle load/unload half. Unlike the
+    // pre-multi-tenant version, tenant/community scope is no longer part
+    // of this prereq (resolved per-scope, inside `changelog_consumer`, not
+    // once per whole supervisor instance). Shares the SAME `connections`
+    // registry as the host-api listener (`try_start_host_api`'s own
+    // registry, threaded through this function's `connections` parameter).
+    //
+    // `kv_capabilities`: shared between `changelog_consumer::run`'s
+    // DB-driven poll (writer -- every tick's `ActiveBundleRow::
+    // declared_capabilities`) and every source-binding consumer's own
+    // per-invoke `StageCapabilities` (reader, `bundle_host_kv::authorize::
+    // authorize_kv`) -- one snapshot, one writer, many readers, mirroring
+    // `core/svc_action`'s identical pattern. `kv_conn` is left `None` here
+    // (opened async, once, inside the spawned task below -- this function
+    // stays synchronous/no-I/O per its own doc) and filled in there before
+    // the spawner is actually constructed.
     let kv_capabilities = Arc::new(bundle_host_kv::CapabilitySnapshot::new());
+    let supervisor_deps = build_source_supervisor_deps(
+        config,
+        Arc::clone(&connections),
+        Arc::clone(&gate),
+        Arc::clone(&kv_capabilities),
+    );
 
     tokio::spawn(async move {
         let db = match bundle_active_set::reader::connect(&reader_cfg, &password).await {
             Ok(db) => db,
             Err(err) => {
-                tracing::error!(error = %err, "db-reader connection failed; DB-driven bundle loader/source-binding supervisor not started");
+                tracing::error!(error = %err, "db-reader connection failed; multi-tenant changelog consumer not started");
                 return;
             }
         };
 
-        let (bundle_loader_shutdown_tx, bundle_loader_shutdown_rx) =
-            tokio::sync::oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             shutdown_signal().await;
-            let _ = bundle_loader_shutdown_tx.send(());
+            let _ = shutdown_tx.send(());
         });
-        let bundle_loader_task = bundle_loader::run(
-            db.clone(),
-            tenant_id,
-            community_id,
-            poll_interval,
-            call_timeout_ms,
-            Arc::clone(&gate),
-            connections,
-            excluded_metric,
-            Arc::clone(&kv_capabilities),
-            bundle_loader_shutdown_rx,
-        );
-
-        let Some(prereqs) = supervisor_prereqs else {
-            bundle_loader_task.await;
-            return;
-        };
-        // `kv` host capability for every source-binding consumer this
-        // supervisor spawns -- opened once here (network I/O deliberately
-        // kept out of `build_source_supervisor_prereqs`, see that
+        // `kv` host capability connection for every source-binding consumer
+        // this supervisor spawns -- opened once here (network I/O
+        // deliberately kept out of `build_source_supervisor_deps`, see that
         // function's doc) and cloned into each consumer's `ProcessDeps`
-        // (`source_supervisor::run_binding_consumer`).
-        let kv_conn = connect_kv(&prereqs.spine_cfg).await;
-
-        // Tenant-isolation fix: resolve the real tenant slug/community name
-        // for THIS process's own numeric scope through the same RO reader
-        // connection, rather than ever hardcoding a fixed scope -- see
-        // `bundle_active_set::scope::resolve_scope`'s own fail-closed
-        // contract. A resolution failure (missing row, cross-tenant
-        // community id, or a query error) disables ONLY the supervisor;
-        // bundle load/unload has no scope-string dependency and keeps
-        // running.
-        let resolved =
-            match bundle_active_set::scope::resolve_scope(&db, tenant_id, community_id).await {
-                Ok(Some(resolved)) => Some(resolved),
-                Ok(None) => {
-                    tracing::error!(
-                    tenant_id,
-                    community_id,
-                    "tenant/community scope could not be resolved via the RO reader connection \
-                     (missing row, or a community id belonging to a different tenant); \
-                     source-binding supervisor not started (fail-closed -- never defaulting to a \
-                     hardcoded scope)"
-                );
-                    None
-                }
-                Err(err) => {
-                    tracing::error!(
-                        error = %err,
-                        tenant_id,
-                        community_id,
-                        "tenant/community scope resolution query failed; source-binding supervisor \
-                         not started (fail-closed)"
-                    );
-                    None
-                }
-            };
-
-        match resolved.map(|r| finish_supervisor_deps(prereqs, r, kv_conn, kv_capabilities)) {
-            Some(deps) => {
-                let (supervisor_shutdown_tx, supervisor_shutdown_rx) =
-                    tokio::sync::oneshot::channel();
-                tokio::spawn(async move {
-                    shutdown_signal().await;
-                    let _ = supervisor_shutdown_tx.send(());
-                });
-                let spawner: Arc<dyn source_supervisor::ConsumerSupervisor> =
-                    Arc::new(source_supervisor::SpineConsumerSupervisor {
-                        deps: Arc::new(deps),
-                    });
-                let supervisor_task = source_supervisor::run(
-                    db,
-                    tenant_id,
-                    community_id,
-                    poll_interval,
-                    gate,
-                    spawner,
-                    source_supervisor_metrics,
-                    supervisor_shutdown_rx,
-                );
-                tokio::join!(bundle_loader_task, supervisor_task);
+        // (`source_supervisor::run_binding_consumer`). Built inside this
+        // spawned task, not before it, purely because opening it is async
+        // and `try_start_changelog_consumer` itself stays synchronous.
+        let spawner: Option<Arc<dyn source_supervisor::ConsumerSupervisor>> = match supervisor_deps
+        {
+            Some(mut deps) => {
+                deps.kv_conn = connect_kv(&deps.spine_cfg).await;
+                Some(Arc::new(source_supervisor::SpineConsumerSupervisor {
+                    deps: Arc::new(deps),
+                })
+                    as Arc<dyn source_supervisor::ConsumerSupervisor>)
             }
-            None => bundle_loader_task.await,
-        }
+            None => None,
+        };
+
+        changelog_consumer::run(
+            db,
+            poll_interval,
+            full_reconcile_interval,
+            call_timeout_ms,
+            gate,
+            connections,
+            spawner,
+            excluded_metric,
+            kv_capabilities,
+            source_supervisor_metrics,
+            changelog_consumer_metrics,
+            shutdown_rx,
+        )
+        .await;
     });
 }
 
-/// Everything the source-binding supervisor needs EXCEPT its tenant/
-/// community scope -- deliberately split from [`source_supervisor::
-/// SupervisorDeps`] because those two fields can only be resolved (
-/// `bundle_active_set::scope::resolve_scope`) once the RO reader
-/// connection exists, whereas everything else here is built eagerly, with
-/// no network I/O, at startup. [`finish_supervisor_deps`] combines the two
-/// halves once resolution succeeds.
-struct SupervisorPrereqs {
-    spine_cfg: penguin_spine::SpineConfig,
-    key_ring: hop::KeyRing,
-    connections: Arc<host_api::ConnectionRegistry>,
-    call_timeout_ms: u64,
-    approved_targets: std::collections::HashMap<String, String>,
-    metrics: Arc<dyn penguin_spine::SpineMetrics>,
-    license: Arc<dyn license::FeatureGate>,
-}
-
-/// Builds [`SupervisorPrereqs`] from `config`'s optional dependencies, or
-/// `None` (logged) if either is unavailable -- split out of
-/// [`try_start_db_bundle_loader`] so that function's own control flow reads
-/// as "two independent startup gates, then dispatch" rather than nesting
-/// the supervisor's setup inline. Never touches the network itself
-/// (`penguin_spine::SpineConfig::from_env` only parses env vars).
-fn build_source_supervisor_prereqs(
+/// Everything the source-binding supervisor needs -- built eagerly, with no
+/// network I/O, at startup. `None` (logged) disables ONLY the supervisor
+/// half; bundle load/unload has no dependency on any of this. Unlike the
+/// pre-multi-tenant version's `SupervisorPrereqs`, this is the FULL
+/// `source_supervisor::SupervisorDeps` already (no tenant/community field
+/// left to resolve afterward -- see `crate::source_supervisor`'s own
+/// module doc for why that moved to per-scope resolution inside
+/// `crate::changelog_consumer`).
+fn build_source_supervisor_deps(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
     gate: Arc<dyn license::FeatureGate>,
-) -> Option<SupervisorPrereqs> {
+    kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
+) -> Option<source_supervisor::SupervisorDeps> {
     let Some(keys_raw) = config.envelope_binding_keys.as_ref() else {
         tracing::warn!(
             "ENVELOPE_BINDING_KEYS not set; source-binding supervisor disabled (hop verification must never fail open)"
@@ -746,7 +689,7 @@ fn build_source_supervisor_prereqs(
     let approved_targets = builtins::parse_approved_targets(&config.cli.process_routes_to_approved);
     let metrics: Arc<dyn penguin_spine::SpineMetrics> = Arc::new(penguin_spine::NoopMetrics);
 
-    Some(SupervisorPrereqs {
+    Some(source_supervisor::SupervisorDeps {
         spine_cfg,
         key_ring,
         connections,
@@ -754,36 +697,13 @@ fn build_source_supervisor_prereqs(
         approved_targets,
         metrics,
         license: gate,
-    })
-}
-
-/// Combines [`SupervisorPrereqs`] with a successfully-[`resolve_scope`]d
-/// tenant slug/community name into the final [`source_supervisor::
-/// SupervisorDeps`]. Pure (no I/O, no logging of its own -- the caller
-/// already logged the resolution outcome) so the "does resolution feed
-/// through correctly" contract is unit-testable without a live reader
-/// connection.
-///
-/// [`resolve_scope`]: bundle_active_set::scope::resolve_scope
-fn finish_supervisor_deps(
-    prereqs: SupervisorPrereqs,
-    resolved: bundle_active_set::scope::ResolvedScope,
-    kv_conn: Option<redis::aio::MultiplexedConnection>,
-    kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
-) -> source_supervisor::SupervisorDeps {
-    source_supervisor::SupervisorDeps {
-        spine_cfg: prereqs.spine_cfg,
-        key_ring: prereqs.key_ring,
-        connections: prereqs.connections,
-        call_timeout_ms: prereqs.call_timeout_ms,
-        approved_targets: prereqs.approved_targets,
-        metrics: prereqs.metrics,
-        license: prereqs.license,
-        tenant: resolved.tenant_slug,
-        community: resolved.community_name,
-        kv_conn,
+        // Opened async, once, inside `try_start_changelog_consumer`'s
+        // spawned task (this function stays synchronous/no-I/O, per its own
+        // doc) -- filled in there before the spawner is actually
+        // constructed.
+        kv_conn: None,
         kv_capabilities,
-    }
+    })
 }
 
 /// Waits for SIGINT (Ctrl-C) or SIGTERM (Kubernetes pod termination) and
@@ -913,213 +833,139 @@ mod tests {
         }
     }
 
-    /// A minimal, syntactically valid [`SupervisorPrereqs`] -- guarded by
-    /// `ENV_LOCK` since `penguin_spine::SpineConfig::from_env` reads
-    /// `VALKEY_URL`/`VALKEY_PASSWORD`, same rationale as
-    /// `try_start_process_loop_spawns_when_spine_config_is_valid`'s
-    /// identical setup.
-    fn test_supervisor_prereqs() -> SupervisorPrereqs {
+    /// `build_source_supervisor_deps`'s missing-`ENVELOPE_BINDING_KEYS`
+    /// fail-closed branch: hop verification must never silently fail open,
+    /// so a missing keyring disables ONLY the supervisor half (`None`),
+    /// never the bundle-loader half.
+    #[test]
+    fn build_source_supervisor_deps_is_none_without_envelope_binding_keys() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        let mut config = test_config(cli);
+        config.envelope_binding_keys = None;
+        let gate: Arc<dyn license::FeatureGate> = Arc::new(license::test_support::FixedGate(true));
+        assert!(build_source_supervisor_deps(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            gate,
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+        )
+        .is_none());
+    }
+
+    /// The happy path: valid `ENVELOPE_BINDING_KEYS` + reachable spine
+    /// config produces `Some(SupervisorDeps)`.
+    #[test]
+    fn build_source_supervisor_deps_is_some_with_valid_config() {
         let _guard = ENV_LOCK.lock().unwrap();
         // SAFETY: serialized by ENV_LOCK above.
         unsafe {
             std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
             std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
         }
-        let spine_cfg = penguin_spine::SpineConfig::from_env().expect("valid spine config");
+        let cli = CliConfig::parse_from(["svc-process"]);
+        let config = test_config(cli);
+        let gate: Arc<dyn license::FeatureGate> = Arc::new(license::test_support::FixedGate(true));
+        let deps = build_source_supervisor_deps(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            gate,
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+        );
         // SAFETY: serialized by ENV_LOCK above.
         unsafe {
             std::env::remove_var("VALKEY_URL");
             std::env::remove_var("VALKEY_PASSWORD");
         }
-        SupervisorPrereqs {
-            spine_cfg,
-            key_ring: crate::hop::KeyRing::new(vec![("k1".to_string(), vec![9u8; 32])]),
-            connections: Arc::new(host_api::ConnectionRegistry::new()),
-            call_timeout_ms: 2000,
-            approved_targets: std::collections::HashMap::new(),
-            metrics: Arc::new(penguin_spine::NoopMetrics),
-            license: Arc::new(crate::license::test_support::FixedGate(true)),
-        }
-    }
-
-    /// Tenant-isolation regression test, resolved half: `finish_supervisor_
-    /// deps` must carry the DB-resolved tenant slug/community name through
-    /// into `SupervisorDeps` verbatim -- this is what
-    /// `source_supervisor::binding_grant` then renders into the actual
-    /// Valkey stream key (see that module's own regression test).
-    #[test]
-    fn finish_supervisor_deps_uses_the_resolved_tenant_slug_and_community() {
-        let prereqs = test_supervisor_prereqs();
-        let resolved = bundle_active_set::scope::ResolvedScope {
-            tenant_slug: "acme".to_string(),
-            community_name: Some("main".to_string()),
-        };
-        let deps = finish_supervisor_deps(
-            prereqs,
-            resolved,
-            None,
-            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
-        );
-        assert_eq!(deps.tenant, "acme");
-        assert_eq!(deps.community.as_deref(), Some("main"));
-    }
-
-    /// Tenant-isolation regression test, fail-closed half ("unresolved ->
-    /// DB path not started"): this is the exact `Option::map` expression
-    /// `try_start_db_bundle_loader`'s spawned task runs against
-    /// `bundle_active_set::scope::resolve_scope`'s own `None` result --
-    /// proving a failed resolution can never produce a `SupervisorDeps`, so
-    /// the `None` match arm (bundle load/unload only, no supervisor spawn)
-    /// is the only path reachable.
-    #[test]
-    fn supervisor_deps_are_never_built_when_scope_resolution_fails() {
-        let prereqs = test_supervisor_prereqs();
-        let resolved: Option<bundle_active_set::scope::ResolvedScope> = None;
-        let deps = resolved.map(|r| {
-            finish_supervisor_deps(
-                prereqs,
-                r,
-                None,
-                Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
-            )
-        });
-        assert!(
-            deps.is_none(),
-            "an unresolved scope must never produce SupervisorDeps -- the source-binding \
-             supervisor must not start"
-        );
+        assert!(deps.is_some());
     }
 
     #[test]
-    fn db_path_selected_requires_both_config_present_and_gate_enabled() {
+    fn multi_tenant_path_selected_requires_both_config_present_and_gate_enabled() {
         assert!(
-            db_path_selected(true, true),
-            "config present + gate on -> DB path"
+            multi_tenant_path_selected(true, true),
+            "config present + gate on -> multi-tenant path"
         );
         assert!(
-            !db_path_selected(true, false),
-            "kill-switch on (gate reports disabled) -> legacy path, even with config present"
+            !multi_tenant_path_selected(true, false),
+            "either kill-switch on (gate reports disabled) -> legacy path, even with config present"
         );
         assert!(
-            !db_path_selected(false, true),
+            !multi_tenant_path_selected(false, true),
             "missing DB config -> legacy path, even with the gate enabled"
         );
-        assert!(!db_path_selected(false, false));
+        assert!(!multi_tenant_path_selected(false, false));
     }
 
     /// Mutual-exclusion regression test, missing-config half: `DB_READER_
-    /// PASSWORD`/`BUNDLE_SCOPE_TENANT_ID` absent must resolve to "legacy
-    /// path" without even constructing a license client -- mirrors
-    /// `try_start_db_bundle_loader_noop_when_db_reader_password_unset`'s
-    /// identical config-presence check, now hoisted to the startup
-    /// path-selection decision.
+    /// PASSWORD` absent must resolve to "legacy path" without even
+    /// constructing a license client. Unlike the pre-multi-tenant version,
+    /// there is no second `BUNDLE_SCOPE_TENANT_ID` config gate to test --
+    /// this path serves every tenant/community it finds, never a single
+    /// configured scope.
     #[tokio::test]
-    async fn resolve_db_path_active_is_false_when_db_reader_password_unset() {
-        let cli = CliConfig::parse_from(["svc-process", "--bundle-scope-tenant-id", "1"]);
+    async fn resolve_multi_tenant_path_active_is_false_when_db_reader_password_unset() {
+        let cli = CliConfig::parse_from(["svc-process"]);
         let mut config = test_config(cli);
         config.db_reader_password = None;
-        assert!(!resolve_db_path_active(&config).await);
+        assert!(!resolve_multi_tenant_path_active(&config).await);
     }
 
-    #[tokio::test]
-    async fn resolve_db_path_active_is_false_when_tenant_id_unset() {
-        let cli = CliConfig::parse_from(["svc-process"]);
-        assert_eq!(cli.bundle_scope_tenant_id.get(), None);
-        let mut config = test_config(cli);
-        config.db_reader_password = Some(crate::config::Secret::new("real-ro-password"));
-        assert!(!resolve_db_path_active(&config).await);
-    }
-
-    /// Mutual-exclusion regression test, DB-path-active half ("DB path
-    /// active + PROCESS_APP_ID set -> legacy loop not started"): DB config
-    /// fully present and the kill-switch flag never seen (this test's
+    /// Mutual-exclusion regression test, path-active half ("multi-tenant
+    /// path active + PROCESS_APP_ID set -> legacy loop not started"): DB
+    /// config present and both kill-switch flags never seen (this test's
     /// clean-env `license::build_license_client` call, same fail-closed-
     /// to-OFF cold-client contract every other license test in this crate
     /// relies on) must resolve `true` -- proving `run_with_shutdown`'s
-    /// `if resolve_db_path_active(...).await` branch is the one taken, so
-    /// `try_start_process_loop` (the legacy loop) is structurally never
-    /// called for this config, regardless of `process_app_id` being set.
-    /// The complementary "kill-switch ON -> legacy runs, supervisor not"
-    /// half is `db_path_selected`'s own `false` cases above -- forcing a
-    /// real `penguin_licensing::LicenseClient` to report the raw
+    /// `if resolve_multi_tenant_path_active(...).await` branch is the one
+    /// taken, so `try_start_process_loop` (the legacy loop) is structurally
+    /// never called for this config, regardless of `process_app_id` being
+    /// set. The complementary "either kill-switch ON -> legacy runs" half
+    /// is `multi_tenant_path_selected`'s own `false` cases above -- forcing
+    /// a real `penguin_licensing::LicenseClient` to report a raw
     /// kill-switch flag ON requires a live PostHog/license server this
     /// crate's test suite deliberately never depends on.
     #[tokio::test]
-    async fn resolve_db_path_active_is_true_when_db_config_present_and_kill_switch_unseen() {
+    async fn resolve_multi_tenant_path_active_is_true_when_db_config_present_and_kill_switches_unseen(
+    ) {
         let cli = CliConfig::parse_from([
             "svc-process",
-            "--bundle-scope-tenant-id",
-            "1",
             "--process-app-id",
             "waddles.bot.commands.default",
         ]);
         let mut config = test_config(cli);
         config.db_reader_password = Some(crate::config::Secret::new("real-ro-password"));
         assert!(
-            resolve_db_path_active(&config).await,
-            "DB config present + never-seen kill-switch flag must select the DB-driven path"
+            resolve_multi_tenant_path_active(&config).await,
+            "DB config present + never-seen kill-switch flags must select the multi-tenant path"
         );
     }
 
-    /// Security review fix regression test: `db_reader_password: None` (the
-    /// value `config::Config::from_cli` now produces for both a genuinely
-    /// unset `DB_READER_PASSWORD` and Helm's always-rendered-but-empty
-    /// default) must take the documented no-op branch rather than
-    /// attempting a DB connection. Mirrors `try_start_process_loop_noop_
-    /// when_process_app_id_unset`'s style -- no OTel subscriber installed,
-    /// so `tracing::info!` is a harmless no-op; success is simply that this
-    /// returns without panicking or spawning a task that reaches the
-    /// license-client/DB-connect code path.
+    /// Security review fix regression test (carried forward): `db_reader_
+    /// password: None` (the value `config::Config::from_cli` now produces
+    /// for both a genuinely unset `DB_READER_PASSWORD` and Helm's
+    /// always-rendered-but-empty default) must take the documented no-op
+    /// branch rather than attempting a DB connection. No OTel subscriber
+    /// installed, so `tracing::info!` is a harmless no-op; success is
+    /// simply that this returns without panicking or spawning a task that
+    /// reaches the license-client/DB-connect code path.
     #[tokio::test]
-    async fn try_start_db_bundle_loader_noop_when_db_reader_password_unset() {
+    async fn try_start_changelog_consumer_noop_when_db_reader_password_unset() {
         let cli = CliConfig::parse_from(["svc-process"]);
         let mut config = test_config(cli);
         config.db_reader_password = None;
-        try_start_db_bundle_loader(
+        try_start_changelog_consumer(
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             test_excluded_metric(),
             test_source_supervisor_metrics(),
+            test_changelog_consumer_metrics(),
         );
     }
 
-    /// Same no-op contract, the other independent startup gate:
-    /// `BUNDLE_SCOPE_TENANT_ID` unset (`None`, `CliConfig`'s default) even
-    /// with a real reader password present.
-    #[tokio::test]
-    async fn try_start_db_bundle_loader_noop_when_tenant_id_unset() {
-        let cli = CliConfig::parse_from(["svc-process"]);
-        assert_eq!(cli.bundle_scope_tenant_id.get(), None);
-        let mut config = test_config(cli);
-        config.db_reader_password = Some(crate::config::Secret::new("real-ro-password"));
-        try_start_db_bundle_loader(
-            &config,
-            Arc::new(host_api::ConnectionRegistry::new()),
-            test_excluded_metric(),
-            test_source_supervisor_metrics(),
-        );
-    }
-
-    /// Bug fix regression: tenant `0` is a real, legitimate tenant (not the
-    /// "unset" sentinel the old bare-`i32` field collapsed it onto) and
-    /// must clear this gate rather than being treated as not-configured.
-    /// This only asserts the gate is cleared (no panic / hang from the
-    /// synchronous portion of the function); the spawned task's own DB
-    /// connection failure against an unreachable host is covered by
-    /// `try_start_db_bundle_loader_noop_when_db_reader_password_unset`'s
-    /// sibling contract, not re-asserted here.
-    #[tokio::test]
-    async fn try_start_db_bundle_loader_clears_tenant_gate_when_tenant_id_is_zero() {
-        let cli = CliConfig::parse_from(["svc-process", "--bundle-scope-tenant-id", "0"]);
-        assert_eq!(cli.bundle_scope_tenant_id.get(), Some(0));
-        let mut config = test_config(cli);
-        config.db_reader_password = Some(crate::config::Secret::new("real-ro-password"));
-        try_start_db_bundle_loader(
-            &config,
-            Arc::new(host_api::ConnectionRegistry::new()),
-            test_excluded_metric(),
-            test_source_supervisor_metrics(),
-        );
+    /// A standalone, unregistered [`telemetry::ChangelogConsumerMetrics`] --
+    /// same rationale as [`test_excluded_metric`].
+    fn test_changelog_consumer_metrics() -> telemetry::ChangelogConsumerMetrics {
+        telemetry::register_changelog_consumer_metrics(&prometheus::Registry::new())
     }
 
     /// A standalone, unregistered `IntCounterVec` for

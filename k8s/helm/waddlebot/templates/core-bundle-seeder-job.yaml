@@ -17,6 +17,11 @@ metadata:
   annotations:
     "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "5"
+    # fix/helm-hook-rbac-ordering audit: this Job's serviceAccountName (shared
+    # "waddlebot" SA) plus its configMapRef/secretRef below are all plain/regular
+    # resources, unlike auto-provisioned-keys-job.yaml/migrations-job.yaml -- but
+    # because this hook is post-install/post-upgrade, Helm has already created every
+    # regular resource by the time it fires, so no ordering gap exists here.
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: {{ .Values.pipeline.coreBundleSeeder.backoffLimit }}

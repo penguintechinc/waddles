@@ -34,6 +34,15 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Tuple
 
+from flask_core.bundle_attribution import (
+    MARKETPLACE_CATEGORIES,
+    is_https_url,
+    is_known_spdx,
+    license_requires_review,
+    valid_alternative_to_entry,
+    valid_notice,
+)
+
 # SCCEBM product modules (docs/plans/2026-08-31-v3-sccebm-program-plan.md
 # §1.1/§9 P4) -- 7 modules, each independently toggleable as a Helm
 # deployment grouping (values.yaml `modules.<name>.enabled`): Socials,
@@ -163,6 +172,19 @@ REASON_SCRIPT_STAGE_HAS_HTML_ENTRYPOINT = "script_stage_has_html_entrypoint"
 # above); a bad value is rejected with the same stable-reason-code
 # convention as every other enum field.
 REASON_INVALID_COMMUNICATION_MODEL = "invalid_communication_model"
+# Attribution/marketplace metadata (bundle.yaml's optional `author`/
+# `license`/`source_url`/`alternative_to`/`homepage_url`/`notice`/
+# `category` block, always optional in this schema -- see this module's
+# own comment above the block in `parse_manifest` for why the
+# mandatory-for-vendors gate lives in `hub_api.services.bundle_manifest_v2`
+# instead). Shared shape rules live in `flask_core.bundle_attribution`;
+# this module only owns the reason codes below.
+REASON_UNKNOWN_SPDX_LICENSE = "unknown_spdx_license"
+REASON_INVALID_SOURCE_URL = "invalid_source_url"
+REASON_INVALID_HOMEPAGE_URL = "invalid_homepage_url"
+REASON_INVALID_ALTERNATIVE_TO = "invalid_alternative_to"
+REASON_INVALID_NOTICE = "invalid_notice"
+REASON_INVALID_CATEGORY = "invalid_category"
 
 _REQUIRED_STR_FIELDS = ("app_id", "name", "version", "feature", "module", "provider")
 
@@ -266,6 +288,14 @@ class AppManifest:
     compatible_with: Tuple[str, ...] = ()
     incompatible_with: Tuple[str, ...] = ()
     platform_compatibility: PlatformCompat = _DEFAULT_PLATFORM_COMPAT
+    author: Optional[str] = None
+    license: Optional[str] = None
+    license_requires_review: bool = False
+    source_url: Optional[str] = None
+    alternative_to: Tuple[str, ...] = ()
+    homepage_url: Optional[str] = None
+    notice: Optional[str] = None
+    category: Optional[str] = None
 
 
 def _require_str(data: Dict[str, Any], key: str) -> str:
@@ -389,6 +419,14 @@ def parse_manifest(data: Dict[str, Any]) -> AppManifest:
         declaring ``html_entrypoint``
     13. any ``stages`` entry's ``communication_model`` outside
         ``{webhook_push, rest_pull}`` (when set)
+    14. a present ``license`` that is not an allowlisted SPDX id
+        (``flask_core.bundle_attribution``); a ``source_url``/``homepage_url``
+        that is not ``https://``; an invalid ``alternative_to`` entry; an
+        empty/oversize ``notice``; a ``category`` outside the marketplace
+        enum. ``author``/``license``/etc. are always optional here -- see
+        the attribution block's own comment below for why the mandatory-
+        for-vendors gate lives in ``hub_api.services.bundle_manifest_v2``
+        instead, not this function.
 
     Two things this function deliberately does **not** check (per App
     Bundle SDK spec §3.5, left for a later, registry-aware pass): whether
@@ -491,6 +529,61 @@ def parse_manifest(data: Dict[str, Any]) -> AppManifest:
     config_schema = dict(data.get("config_schema", {}))
     is_default = bool(data.get("is_default", False))
 
+    # Attribution/marketplace metadata -- always optional here. `provider:
+    # thirdparty` in THIS schema means "wraps a third-party endpoint"
+    # (App Bundle SDK spec §3.1, `execution_model`'s own docstring above)
+    # and is not by itself evidence of who submitted the App -- pre-existing
+    # fixtures (`test_app_framework.py`'s "Acme Shoutout Pro") legitimately
+    # declare `provider: thirdparty` with no author/license at all. The
+    # actual vendor-onboarding gate (mandatory `author`/`license` for a
+    # caller authenticated via `vendor:onboard`, see `services/vendor_
+    # bundle_authz.py`) lives in `hub_api.services.bundle_manifest_v2`
+    # instead, which both knows the caller's onboarding path and is the
+    # schema real vendor uploads are actually validated against. Shared
+    # SPDX/URL/shape rules live in `flask_core.bundle_attribution` so the
+    # two manifest schemas can never silently drift on what counts as a
+    # valid license or URL for whichever fields ARE present.
+    author = data.get("author")
+    license_id = data.get("license")
+    license_needs_review = False
+    if license_id:
+        if not is_known_spdx(license_id):
+            raise ManifestError(
+                REASON_UNKNOWN_SPDX_LICENSE,
+                f"{license_id!r} is not an allowlisted SPDX identifier",
+            )
+        license_needs_review = license_requires_review(license_id)
+
+    source_url = data.get("source_url")
+    if source_url is not None and not is_https_url(source_url):
+        raise ManifestError(
+            REASON_INVALID_SOURCE_URL, f"{source_url!r} must be an https:// URL"
+        )
+
+    homepage_url = data.get("homepage_url")
+    if homepage_url is not None and not is_https_url(homepage_url):
+        raise ManifestError(
+            REASON_INVALID_HOMEPAGE_URL, f"{homepage_url!r} must be an https:// URL"
+        )
+
+    alternative_to = tuple(data.get("alternative_to") or ())
+    for entry in alternative_to:
+        if not valid_alternative_to_entry(entry):
+            raise ManifestError(REASON_INVALID_ALTERNATIVE_TO, f"{entry!r}")
+
+    notice = data.get("notice")
+    if notice is not None and not valid_notice(notice):
+        raise ManifestError(
+            REASON_INVALID_NOTICE, "notice must be non-empty and <=10000 chars"
+        )
+
+    category = data.get("category")
+    if category is not None and category not in MARKETPLACE_CATEGORIES:
+        raise ManifestError(
+            REASON_INVALID_CATEGORY,
+            f"{category!r} is not one of {sorted(MARKETPLACE_CATEGORIES)}",
+        )
+
     return AppManifest(
         app_id=app_id,
         name=name,
@@ -507,4 +600,12 @@ def parse_manifest(data: Dict[str, Any]) -> AppManifest:
         compatible_with=compatible_with,
         incompatible_with=incompatible_with,
         platform_compatibility=platform_compatibility,
+        author=author,
+        license=license_id,
+        license_requires_review=license_needs_review,
+        source_url=source_url,
+        alternative_to=alternative_to,
+        homepage_url=homepage_url,
+        notice=notice,
+        category=category,
     )

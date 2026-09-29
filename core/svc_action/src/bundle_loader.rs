@@ -36,9 +36,21 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// without a live mTLS host-API connection. Production wires
 /// [`ExecutorSink`].
 pub trait BundleSink: Send + Sync {
-    fn load<'a>(&'a self, row: &'a ActiveBundleRow) -> BoxFuture<'a, Result<(), InvokeError>>;
+    /// `tenant_id`/`community_id` identify exactly which scope this `load`
+    /// is on behalf of (wire fields added alongside the executor's
+    /// digest-keyed, scope-refcounted registry -- `core/bundle_executor/
+    /// src/invoke.rs`'s own doc has the full rationale).
+    fn load<'a>(
+        &'a self,
+        tenant_id: i32,
+        community_id: i32,
+        row: &'a ActiveBundleRow,
+    ) -> BoxFuture<'a, Result<(), InvokeError>>;
+    /// See [`BundleSink::load`]'s doc.
     fn unload<'a>(
         &'a self,
+        tenant_id: i32,
+        community_id: i32,
         app_id: &'a str,
         digest: &'a str,
     ) -> BoxFuture<'a, Result<(), InvokeError>>;
@@ -54,10 +66,17 @@ pub struct ExecutorSink {
 }
 
 impl BundleSink for ExecutorSink {
-    fn load<'a>(&'a self, row: &'a ActiveBundleRow) -> BoxFuture<'a, Result<(), InvokeError>> {
+    fn load<'a>(
+        &'a self,
+        tenant_id: i32,
+        community_id: i32,
+        row: &'a ActiveBundleRow,
+    ) -> BoxFuture<'a, Result<(), InvokeError>> {
         Box::pin(async move {
             crate::dispatch::ensure_loaded(
                 &self.connection,
+                tenant_id,
+                community_id,
                 &row.app_id,
                 &row.version,
                 &row.digest,
@@ -75,13 +94,21 @@ impl BundleSink for ExecutorSink {
 
     fn unload<'a>(
         &'a self,
+        tenant_id: i32,
+        community_id: i32,
         app_id: &'a str,
         digest: &'a str,
     ) -> BoxFuture<'a, Result<(), InvokeError>> {
         Box::pin(async move {
-            crate::dispatch::ensure_unloaded(&self.connection, app_id, digest)
-                .await
-                .map(|_| ())
+            crate::dispatch::ensure_unloaded(
+                &self.connection,
+                tenant_id,
+                community_id,
+                app_id,
+                digest,
+            )
+            .await
+            .map(|_| ())
         })
     }
 }
@@ -185,7 +212,7 @@ pub async fn run_tick(
     };
 
     for row in &plan.to_load {
-        match sink.load(row).await {
+        match sink.load(tenant_id, community_id, row).await {
             Ok(()) => {
                 tracing::info!(app_id = %row.app_id, digest = %row.digest, "db bundle-config: loaded");
                 loaded.insert(row.app_id.clone(), row.digest.clone());
@@ -196,7 +223,7 @@ pub async fn run_tick(
         }
     }
     for (app_id, digest) in &plan.to_unload {
-        match sink.unload(app_id, digest).await {
+        match sink.unload(tenant_id, community_id, app_id, digest).await {
             Ok(()) => {
                 tracing::info!(app_id, digest, "db bundle-config: unloaded");
                 loaded.remove(app_id);
@@ -286,7 +313,12 @@ mod tests {
     }
 
     impl BundleSink for FakeSink {
-        fn load<'a>(&'a self, row: &'a ActiveBundleRow) -> BoxFuture<'a, Result<(), InvokeError>> {
+        fn load<'a>(
+            &'a self,
+            _tenant_id: i32,
+            _community_id: i32,
+            row: &'a ActiveBundleRow,
+        ) -> BoxFuture<'a, Result<(), InvokeError>> {
             Box::pin(async move {
                 self.calls
                     .lock()
@@ -301,6 +333,8 @@ mod tests {
 
         fn unload<'a>(
             &'a self,
+            _tenant_id: i32,
+            _community_id: i32,
             app_id: &'a str,
             digest: &'a str,
         ) -> BoxFuture<'a, Result<(), InvokeError>> {

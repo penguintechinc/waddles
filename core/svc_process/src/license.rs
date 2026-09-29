@@ -127,6 +127,76 @@ impl FeatureGate for DbBundleConfigGate {
     }
 }
 
+/// Opt-out kill-switch for the multi-tenant, change-log-driven active-set
+/// loader (`crate::changelog_consumer`) -- dataplane scale design rev 4,
+/// §8 step 2: "Multi-tenant watermark polling ...
+/// waddles.core.disable-multi-tenant-watermark". Same inversion convention
+/// as [`DISABLE_DB_BUNDLE_CONFIG_FLAG`]: unseen/OFF/license-server-
+/// unreachable means the multi-tenant path is ENABLED (the default, and
+/// the user's own hard requirement -- "every svc_process/svc_action pod
+/// serves ALL tenants"); ON opts back OUT of it, falling back to the
+/// existing `PROCESS_APP_ID`/`PROCESS_BUNDLE_*` static env-var single-
+/// bundle selection (`crate::lib::try_start_process_loop`) -- there is no
+/// remaining single-tenant DB-driven path to fall back to (`BUNDLE_SCOPE_
+/// TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID` and their scope resolution were
+/// removed in this same change, see `crate::config`'s module doc).
+/// [`try_start_changelog_consumer`]'s own startup-time path-selection
+/// combines this with [`DISABLE_DB_BUNDLE_CONFIG_FLAG`] into one decision
+/// (both must report the DB-driven path enabled), evaluated once at
+/// startup -- never re-evaluated mid-run, exactly like the flag it
+/// complements (see that flag's own doc for why: "guarantees the two paths
+/// can never run concurrently").
+///
+/// [`try_start_changelog_consumer`]: crate::lib::try_start_changelog_consumer
+pub const DISABLE_MULTI_TENANT_WATERMARK_FLAG: &str = "waddles.core.disable-multi-tenant-watermark";
+
+/// Production [`FeatureGate`] for [`DISABLE_MULTI_TENANT_WATERMARK_FLAG`] --
+/// same bypass-aware negation shape as [`DbBundleConfigGate`] (see that
+/// type's own doc for the full bypass-awareness rationale, identical here).
+pub struct MultiTenantWatermarkGate(Arc<LicenseClient>);
+
+impl MultiTenantWatermarkGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for MultiTenantWatermarkGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            if self.0.bypass_active() {
+                return true;
+            }
+            !self
+                .0
+                .flag_enabled(DISABLE_MULTI_TENANT_WATERMARK_FLAG)
+                .await
+        })
+    }
+}
+
+/// Combines multiple [`FeatureGate`]s with logical AND, short-circuiting on
+/// the first `false` -- `crate::lib::try_start_changelog_consumer`'s own
+/// startup-time path-selection combines [`DbBundleConfigGate`] and
+/// [`MultiTenantWatermarkGate`] into one gate this way, so
+/// `crate::changelog_consumer::run`'s per-tick check reads as a single
+/// `gate.enabled()` call rather than threading two separate gates through
+/// every call site.
+pub struct AllGate(pub Vec<Arc<dyn FeatureGate>>);
+
+impl FeatureGate for AllGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            for gate in &self.0 {
+                if !gate.enabled().await {
+                    return false;
+                }
+            }
+            true
+        })
+    }
+}
+
 /// PenguinTech/Waddles-owned bypass suffix -- the sole license/flag
 /// bypass lever, and it must be a hardcoded source-level constant, never
 /// an env var, CLI flag, or Helm-templated value (`rules/critical-
@@ -194,6 +264,39 @@ fn apply_deployment_domain(cfg: LicenseConfig, raw: Option<&str>) -> LicenseConf
     match raw.map(str::trim) {
         Some(domain) if !domain.is_empty() => cfg.with_deployment_domain(domain.to_owned()),
         _ => cfg,
+    }
+}
+
+#[cfg(test)]
+mod all_gate_tests {
+    use super::test_support::{FixedGate, ToggleGate};
+    use super::*;
+
+    #[tokio::test]
+    async fn all_gate_is_enabled_only_when_every_wrapped_gate_is_enabled() {
+        let gate = AllGate(vec![Arc::new(FixedGate(true)), Arc::new(FixedGate(true))]);
+        assert!(gate.enabled().await);
+    }
+
+    #[tokio::test]
+    async fn all_gate_is_disabled_when_any_wrapped_gate_is_disabled() {
+        let gate = AllGate(vec![Arc::new(FixedGate(true)), Arc::new(FixedGate(false))]);
+        assert!(!gate.enabled().await);
+    }
+
+    #[tokio::test]
+    async fn all_gate_reacts_to_a_live_flip_in_either_wrapped_gate() {
+        let toggle = Arc::new(ToggleGate::new(true));
+        let gate = AllGate(vec![Arc::new(FixedGate(true)), toggle.clone()]);
+        assert!(gate.enabled().await);
+        toggle.set(false);
+        assert!(!gate.enabled().await);
+    }
+
+    #[tokio::test]
+    async fn all_gate_of_an_empty_list_is_enabled_vacuously() {
+        let gate = AllGate(vec![]);
+        assert!(gate.enabled().await);
     }
 }
 
@@ -324,6 +427,50 @@ mod tests {
         assert!(
             gate.enabled().await,
             "bypass must leave the DB-driven path enabled, not disabled"
+        );
+    }
+
+    #[test]
+    fn disable_multi_tenant_watermark_flag_matches_the_product_flag_key_convention() {
+        assert_eq!(
+            DISABLE_MULTI_TENANT_WATERMARK_FLAG,
+            "waddles.core.disable-multi-tenant-watermark"
+        );
+    }
+
+    /// The multi-tenant path's own fail-safe-ON regression test: a
+    /// never-seen kill-switch flag (every fresh deployment's starting
+    /// state) must leave the multi-tenant change-log consumer path
+    /// ENABLED -- this is the user's own hard requirement ("every
+    /// svc_process/svc_action pod serves ALL tenants"), not merely a
+    /// convenient default.
+    #[tokio::test]
+    async fn multi_tenant_watermark_gate_defaults_enabled_for_a_never_seen_kill_switch_flag() {
+        let cfg = LicenseConfig::new("waddles-test-multi-tenant-watermark-default")
+            .expect("valid defaults");
+        let client = LicenseClient::new(cfg).expect("client construction");
+        let gate = MultiTenantWatermarkGate::new(client);
+        assert!(
+            gate.enabled().await,
+            "an unseen kill-switch flag must leave the multi-tenant path enabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_tenant_watermark_gate_stays_enabled_under_the_hardcoded_domain_bypass() {
+        let client = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            build_license_client("waddles-test-multi-tenant-watermark-bypass")
+                .expect("valid defaults")
+        };
+        assert!(
+            client.bypass_active(),
+            "sanity check: this client must actually be bypassed"
+        );
+        let gate = MultiTenantWatermarkGate::new(client);
+        assert!(
+            gate.enabled().await,
+            "bypass must leave the multi-tenant path enabled, not disabled"
         );
     }
 
