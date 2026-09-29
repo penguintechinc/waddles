@@ -431,6 +431,10 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// - `get`: `args.row_id` (string) -> `{row_id, version, columns}`
     /// - `update`: `args.row_id`, `args.expected_version` (u64), `args.column_values` -> `{row_id, version, columns}`
     /// - `delete`: `args.row_id`, `args.expected_version` (u64) -> `{}`
+    /// - `query`: `args.limit`/`args.offset` (both optional u32, clamped to
+    ///   `MAX_QUERY_LIMIT`) -> `{rows: [{row_id, version, columns}, ...]}`
+    ///   -- host-side op ready for the proposed WIT shape, not yet
+    ///   guest-reachable in this landing (see this PR's description)
     ///
     /// Every value is a JSON scalar (`null`/bool/number/string); `bytes`
     /// values are not supported over this JSON args shape in this landing.
@@ -508,6 +512,36 @@ impl<K: KvBackend> StageCapabilities<K> {
                     .delete(&scope, &db.schemas, &db.capabilities, &id, version)
                     .await
                     .map(|()| serde_json::json!({}))
+                    .map_err(db_error_to_host_error);
+            }
+            "query" => {
+                // Host-side op ready for the proposed `query` WIT shape
+                // (this crate's PR description) -- not yet reachable from
+                // a guest bundle's `stage.wit` bindings in this landing
+                // (no WIT/`bundle_executor` change here), but already
+                // dispatchable at this untyped `{capability, op, args}`
+                // layer the same way insert/get/update/delete are.
+                let limit = call
+                    .args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                    .unwrap_or(bundle_host_db::MAX_QUERY_LIMIT);
+                let offset = call
+                    .args
+                    .get("offset")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                    .unwrap_or(0);
+                return db
+                    .host
+                    .query(&scope, &db.schemas, &db.capabilities, limit, offset)
+                    .await
+                    .map(|rows| {
+                        serde_json::json!({
+                            "rows": rows.into_iter().map(row_to_json).collect::<Vec<_>>(),
+                        })
+                    })
                     .map_err(db_error_to_host_error);
             }
             other => {
@@ -1008,6 +1042,45 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn db_capability_query_op_denies_no_table_when_unprovisioned() {
+        // `query` is dispatched the same as insert/get/update/delete at
+        // this untyped op layer -- proves the new arm actually reaches
+        // `DbHost::query` (resolve-then-authorize denies `no_table` here,
+        // same as every other op against an unprovisioned schema) rather
+        // than falling through to `unknown_op`.
+        let capabilities = caps().with_db(mock_db_wiring(true));
+        capabilities.db.as_ref().unwrap().capabilities.update(
+            "waddles.bot.commands.default",
+            ["storage.tables".to_string()],
+        );
+        let err = capabilities
+            .handle_db(&call(
+                CapabilityKind::Db,
+                "query",
+                serde_json::json!({"limit": 10, "offset": 0}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "no_table");
+    }
+
+    #[tokio::test]
+    async fn db_capability_query_op_defaults_limit_and_offset_when_omitted() {
+        // No `limit`/`offset` in args must not be `invalid_args` -- both
+        // are optional, defaulting to MAX_QUERY_LIMIT/0 respectively.
+        let capabilities = caps().with_db(mock_db_wiring(true));
+        let err = capabilities
+            .handle_db(&call(CapabilityKind::Db, "query", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        // Not `invalid_args` -- both args are optional and were accepted;
+        // this app simply never declared `storage.tables`
+        // (`DbHost::resolve_and_authorize` maps a denied authorize() to
+        // `DbError::InvalidColumn`, whose `code()` is `"invalid_column"`).
+        assert_eq!(err.code, "invalid_column");
     }
 
     #[test]
