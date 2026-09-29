@@ -772,6 +772,51 @@ detekt -i src/
     password: ${{ secrets.GITHUB_TOKEN }}
 ```
 
+### Docker Hub credentials
+
+**Why**: every build pulls upstream base images (`python`, `rust`, `debian`,
+`node`) from Docker Hub, and `helm-chart-e2e.yml` additionally pulls the
+`kindest/node` image and the `bitnami/kubectl` images the chart's hook Jobs
+run. Unauthenticated pulls share Docker Hub's per-IP anonymous rate limit
+across every GitHub-hosted runner, so CI intermittently fails with
+`429 Too Many Requests` under load. Authenticating raises the limit to the
+per-account tier.
+
+**Credentials** (repo-level, set once by a human — never by Claude):
+- Repo variable `DOCKERHUB_USERNAME`
+- Repo secret `DOCKERHUB_TOKEN` — a **read-only** Docker Hub personal access
+  token (Docker Hub → Account Settings → Personal Access Tokens → generate
+  with **Read-only** permissions). Never grant Read/Write/Delete: nothing in
+  this repo's CI pushes to Docker Hub.
+
+**Setup** (run by a human, not committed anywhere):
+```bash
+# Paste the token when prompted, or pipe it in -- never as a CLI arg:
+tr -d '\r\n' < dockerhub-token.txt | gh secret set DOCKERHUB_TOKEN
+gh variable set DOCKERHUB_USERNAME --body "your-dockerhub-username"
+```
+
+**Rotation**: regenerate the PAT in Docker Hub, then re-run the `gh secret
+set` command above with the new value. The old token can be revoked
+immediately afterward; nothing else references it.
+
+**Fork-PR fallback**: `secrets.DOCKERHUB_TOKEN` is empty for pull requests
+from forks (and for any repo that hasn't configured the secret yet). Every
+Docker Hub login step is gated on a `DOCKERHUB_LOGIN_ENABLED` env flag
+(`${{ secrets.DOCKERHUB_TOKEN != '' }}` — `if:` conditions can't read
+`secrets` directly, so it's routed through `env`), so those runs simply fall
+back to anonymous, rate-limited pulls instead of failing.
+
+**Where it's used**: `build-container.yml` (the reusable workflow behind
+27 module builds), `build-svc-action.yml`/`build-svc-ingest.yml`/
+`build-svc-process.yml`, `containers.yml`, and `helm-chart-e2e.yml`. The
+login is pull-only in every case — it is never followed by a push to
+`docker.io`. In `helm-chart-e2e.yml`, kind's node containerd is a separate
+runtime from the runner's docker daemon, so external images
+(`kindest/node`, `bitnami/kubectl`) are pulled authenticated on the runner
+and `kind load docker-image`d into the cluster instead — the token never
+touches the kind node's disk.
+
 ### Image Naming Convention
 
 **Format**: `ghcr.io/{owner}/waddlebot/{module-name}:{tag}`
