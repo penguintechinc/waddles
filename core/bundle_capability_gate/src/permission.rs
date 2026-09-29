@@ -150,6 +150,11 @@ pub enum CapabilityKind {
     Context,
     Clock,
     Log,
+    /// `interaction.pii.receive` -- raw PII delivery in form/modal/
+    /// interaction inputs. No enforcement mechanics live in this crate;
+    /// the host's default-filter behavior when this is NOT granted is a
+    /// separate implementation task.
+    Interaction,
 }
 
 /// A permission's default quota shape (spec SS1's "Default quota" column).
@@ -222,6 +227,14 @@ pub enum PermissionFamily {
     PlatformContext,
     PlatformClock,
     PlatformLog,
+    /// `interaction.pii.receive` -- raw PII (not just a tenant-tokenized
+    /// UUID) embedded in a form/modal/interaction input the bundle
+    /// receives. `Dangerous`, DEFAULT NO: without this granted, the host
+    /// filters PII out of interaction inputs before delivery (best-effort;
+    /// the host-side filter is separate implementation work, not this
+    /// catalog entry). Subject to the instance-policy layer like any other
+    /// family (spec SS1.3).
+    InteractionPiiReceive,
 }
 
 /// One row of the catalog table (spec SS1).
@@ -258,6 +271,7 @@ impl PermissionFamily {
         Self::PlatformContext,
         Self::PlatformClock,
         Self::PlatformLog,
+        Self::InteractionPiiReceive,
     ];
 
     /// The static catalog id prefix -- for a parameterized family
@@ -285,6 +299,7 @@ impl PermissionFamily {
             Self::PlatformContext => "platform.context",
             Self::PlatformClock => "platform.clock",
             Self::PlatformLog => "platform.log",
+            Self::InteractionPiiReceive => "interaction.pii.receive",
         }
     }
 
@@ -515,6 +530,18 @@ impl PermissionFamily {
                 default_quota: Quota::Unlimited,
                 notes: "Always-granted, zero-config",
             },
+            Self::InteractionPiiReceive => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Interaction,
+                default_quota: Quota::Descriptive(
+                    "no gate-enforced quota -- this permission gates raw-PII delivery, not a \
+                     call rate; the host's default-filter behavior when NOT granted is \
+                     enforced at delivery time, separate implementation work",
+                ),
+                notes: "DEFAULT NO; without this grant the host filters PII out of \
+                        form/modal/interaction inputs (best-effort)",
+            },
         }
     }
 }
@@ -555,6 +582,7 @@ pub enum PermissionId {
     PlatformContext,
     PlatformClock,
     PlatformLog,
+    InteractionPiiReceive,
 }
 
 /// Platforms compiled into this build's relay/moderation providers (spec
@@ -610,6 +638,7 @@ impl PermissionId {
             Self::PlatformContext => PermissionFamily::PlatformContext,
             Self::PlatformClock => PermissionFamily::PlatformClock,
             Self::PlatformLog => PermissionFamily::PlatformLog,
+            Self::InteractionPiiReceive => PermissionFamily::InteractionPiiReceive,
         }
     }
 
@@ -759,6 +788,7 @@ impl PermissionId {
             "platform.context" => Ok(Self::PlatformContext),
             "platform.clock" => Ok(Self::PlatformClock),
             "platform.log" => Ok(Self::PlatformLog),
+            "interaction.pii.receive" => Ok(Self::InteractionPiiReceive),
             other => Err(ParsePermissionIdError::UnknownPermission(other.to_string())),
         }
     }
@@ -792,6 +822,18 @@ mod tests {
             let parsed = PermissionId::parse(id).unwrap_or_else(|e| panic!("{id}: {e}"));
             assert_eq!(parsed.canonical_id(), id);
         }
+    }
+
+    #[test]
+    fn interaction_pii_receive_is_dangerous_and_round_trips() {
+        let id = PermissionId::parse("interaction.pii.receive").unwrap();
+        assert_eq!(id.canonical_id(), "interaction.pii.receive");
+        assert_eq!(id.family(), PermissionFamily::InteractionPiiReceive);
+        assert_eq!(id.risk(), Risk::Dangerous);
+        assert_eq!(
+            id.family().catalog_entry().capability_kind,
+            CapabilityKind::Interaction
+        );
     }
 
     #[test]
