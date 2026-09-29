@@ -211,6 +211,18 @@ infrastructure:
       POSTGRES_DB: waddlebot
       POSTGRES_USER: waddlebot
       # POSTGRES_PASSWORD should be set via secrets
+    # Bundle app-schema roles (Phase 0, docs/superpowers/specs/2026-09-28-
+    # bundle-db-capability-and-schemas.md Sec2) -- waddles_bundle_migrator
+    # (DDL owner of app_core/app_community, hub-api only) and
+    # waddles_bundle_runtime (DML-only, those two schemas; svc_process/
+    # svc_action). Both are real LOGIN roles, unlike the NOLOGIN RBAC-matrix
+    # roles above. Empty by default: alembic/versions/0030_bundle_app_schemas.py
+    # treats an unset password as "create/keep the role LOGIN with no usable
+    # password yet", never a migration failure -- same graceful-degradation
+    # posture as readerPassword below. Set before relying on either role for
+    # real traffic.
+    bundleMigratorPassword: ""
+    bundleRuntimePassword: ""
     readReplicas:
       enabled: false
       count: 2
@@ -308,6 +320,25 @@ infrastructure:
       size: 50Gi
     env:
       MINIO_BROWSER: "on"
+    # At-rest encryption (security.md Encryption: Storage — mandatory baseline, no
+    # opt-out) requires MinIO to have a KMS configured; without one, hub-api's
+    # put_object(..., ServerSideEncryption="AES256") fails with "Server side
+    # encryption specified but KMS is not configured". Static single-key KMS via
+    # MINIO_KMS_SECRET_KEY sourced from a pre-created Secret (never a literal key
+    # in git, never chart-managed) -- generate with `make generate-minio-kms-key`
+    # / scripts/generate-minio-kms-key.sh. secretName is empty here (fail-closed
+    # baseline for beta/gamma/production, see templates/infrastructure/minio.yaml's
+    # fail guard); alpha documents its own default in values-alpha.yaml. For
+    # production, a real external KMS (KES/Vault) is recommended over this static
+    # key -- see README.md MinIO KMS section and security.md Encryption tiering.
+    kms:
+      enabled: true
+      secretName: ""
+      secretKey: "MINIO_KMS_SECRET_KEY"
+      # SSE-S3 auto-encryption applied to chart-created buckets via `mc encrypt set`
+      # in the minio-init Job, so objects written without explicit SSE headers are
+      # still encrypted at rest.
+      autoEncryptBucket: true
 
   # Ollama AI Backend
   ollama:
@@ -821,11 +852,12 @@ pipeline:
       # of its svc-action-rust default. Matches HOST_API_PORT's own CliConfig default
       # (core/svc_process/src/config.rs).
       hostApiPort: 8301
-      # DB-driven active-bundle loader (core/svc_process/src/config.rs,
-      # core/bundle_active_set) -- hub-api is the sole writer, this stage reads ACTIVE,
-      # APPROVED bundle config from a READ-ONLY Postgres and hot-swaps in/out with no pod
-      # restart. Gated OFF by default behind waddles.core.db-bundle-config; while off or
-      # BUNDLE_SCOPE_TENANT_ID is unset (0, "not configured"), PROCESS_APP_ID/
+      # Multi-tenant, change-log-driven active-bundle loader (core/svc_process/
+      # src/config.rs, core/bundle_active_set, core/svc_process/src/changelog_consumer.rs)
+      # -- hub-api is the sole writer, this stage reads ACTIVE, APPROVED bundle config
+      # for EVERY tenant/community from a READ-ONLY Postgres and hot-swaps in/out with
+      # no pod restart. Enabled by default; opt out via waddles.core.disable-db-bundle-config
+      # and/or waddles.core.disable-multi-tenant-watermark, in which case PROCESS_APP_ID/
       # PROCESS_BUNDLE_* above remain the sole selection mechanism -- these defaults are
       # safe to ship even before the RO Postgres role exists.
       # dbReaderHost/Port/Name default to the SAME primary Postgres alpha already runs
@@ -840,24 +872,19 @@ pipeline:
       # the exact GRANT statements this role needs; provisioning the role itself is a
       # follow-up (not a Helm change) tracked outside this chart.
       dbReaderUser: "svc_process_ro"
-      # Bug fix: left unset ("") rather than defaulted to 0 -- the Rust side
-      # (core/svc_process/src/config.rs TenantScopeId) now distinguishes "not
-      # configured" (None) from the real, legitimate global tenant `0`
-      # (Some(0)), so this chart must not collapse those two states by
-      # defaulting to 0 either. templates/svc-process-rust.yaml only renders
-      # BUNDLE_SCOPE_TENANT_ID at all when this is non-empty; the loader
-      # stays disabled (same fail-safe posture as every other interim
-      # env-driven substitute in this block) until a values file
-      # (e.g. values-alpha.yaml) sets a real tenant scope, `0` included.
-      bundleScopeTenantId: ""
-      # 0 = tenant-wide (matches app_active_versions.community_id's own sentinel,
-      # migration 0022_app_versions_and_rbac). Unlike bundleScopeTenantId above, 0
-      # really is the intended default here, so this one keeps its literal default.
-      bundleScopeCommunityId: 0
+      # BUNDLE_SCOPE_TENANT_ID/BUNDLE_SCOPE_COMMUNITY_ID REMOVED (dataplane scale
+      # design, multi-tenant change-log consumer): the loader now discovers and
+      # serves every (tenant_id, community_id) scope in the database itself
+      # (bundle_active_set::read_active_set_all) -- there is no per-pod tenant
+      # scope left to configure.
       # Whole seconds; clamped to a 5s floor in code (CliConfig::
       # bundle_config_poll_interval) so a misconfigured 0/negative value here can never
-      # hot-loop the watermark check against the reader database.
+      # hot-loop the incremental change-log poll against the reader database.
       bundleConfigPollSeconds: 300
+      # Whole minutes; clamped to a 1m floor in code (CliConfig::
+      # full_reconcile_interval). Periodic full active-set reconcile -- bounds the
+      # blast radius of any change-log defect to one interval.
+      bundleConfigFullReconcileMinutes: 15
       resources:
         requests:
           cpu: "100m"
@@ -903,11 +930,10 @@ pipeline:
       dbReaderPort: ""
       dbReaderName: ""
       dbReaderUser: "svc_action_ro"
-      # Bug fix: left unset ("") rather than defaulted to 0 -- see svcProcess's
-      # identical field's own comment above for the full rationale.
-      bundleScopeTenantId: ""
-      bundleScopeCommunityId: 0
+      # BUNDLE_SCOPE_TENANT_ID/BUNDLE_SCOPE_COMMUNITY_ID REMOVED -- see
+      # svcProcess's identical field's own comment above for the full rationale.
       bundleConfigPollSeconds: 300
+      bundleConfigFullReconcileMinutes: 15
       resources:
         requests:
           cpu: "100m"
@@ -2076,3 +2102,54 @@ spire:
     role: child
     upstreamRoot:
       enabled: false
+
+# feature/helm-auto-provision-keys -- deploys must never require a human to run a
+# script before `helm install`/`helm upgrade` succeeds. Every Secret below is looked
+# up first (an existing Secret is KEPT untouched, never regenerated/rotated by this
+# chart) and only auto-GENERATED on a miss when global.deploymentTier is "alpha" or
+# "local". Outside those two tiers a miss render-fails the release unless
+# `externalSecret: true` is set (meaning an ExternalSecret/SealedSecret/other
+# out-of-band controller owns this Secret name and will populate it before the
+# consuming workload starts) or the Secret was pre-created by an operator. See
+# templates/auto-provisioned-secrets.yaml (symmetric keys, pure Helm template) and
+# templates/auto-provisioned-keys-job.yaml (Ed25519 keys, needs openssl -- Sprig/Helm
+# has no Ed25519-pubkey-from-privkey primitive) + chart README "Self-provisioned
+# platform keys" section.
+autoProvisionedKeys:
+  # fix/minio-kms-sse (PR #439) -- MinIO static-KMS symmetric key
+  # (infrastructure.minio.kms.secretName should point at this same name once that
+  # chart wiring lands). Value format is MinIO's own requirement:
+  # "<key-label>:<base64 32 random bytes>".
+  minioKms:
+    secretName: "minio-kms"
+    secretKey: "MINIO_KMS_SECRET_KEY"
+    keyLabel: "waddlebot-minio"
+    externalSecret: false
+  # feature/tenant-dek-broker (PR #442) -- platform-baseline root KEK wrapping every
+  # tenant's DEK (hub_api/services/tenant_keystore.py::K8sSecretKekProvider,
+  # kek_hex_env_var="TENANT_KEK_HEX"). Value MUST be lowercase hex (bytes.fromhex()),
+  # never base64 -- see templates/auto-provisioned-secrets.yaml's derivation comment.
+  tenantKek:
+    secretName: "waddlebot-tenant-kek"
+    secretKey: "TENANT_KEK_HEX"
+    externalSecret: false
+  # feature/bundle-artifact-signing (PR #431) -- platform Ed25519 keypair signing
+  # every approved bundle. Private half: BUNDLE_SIGNING_PRIVATE_KEY/
+  # BUNDLE_SIGNING_KEY_ID in secretName (hub-api only). Public half: published to
+  # publicKeyConfigMapName for the bundle-executor(s) to mount -- the private key is
+  # NEVER mounted anywhere but hub-api.
+  bundleSigning:
+    secretName: ""  # default: "<fullname>-bundle-signing" when empty
+    publicKeyConfigMapName: ""  # default: "<fullname>-bundle-signing-public" when empty
+    keyId: "waddlebot-1"
+    externalSecret: false
+  # feature/eddsa-machine-jwt (PR #438) -- per-service EdDSA machine-JWT signing key.
+  # Private half: SERVICE_JWT_PRIVATE_KEY_<kid>/SERVICE_JWT_ACTIVE_KID in secretName
+  # (hub-api only, the sole issuer). Public half: published to
+  # publicKeyConfigMapName for hub-api's own verification path and any other service
+  # that needs to verify a service JWT without holding the signing key.
+  serviceJwt:
+    secretName: "service-jwt-signing-key"
+    publicKeyConfigMapName: ""  # default: "<fullname>-service-jwt-public" when empty
+    keyId: "waddlebot-1"
+    externalSecret: false

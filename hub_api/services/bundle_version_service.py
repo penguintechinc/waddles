@@ -47,6 +47,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import yaml
+from flask_core.bundle_attribution import license_requires_review
 from flask_core.stream_pipeline import bundle_stream_key
 from penguin_dal import AsyncDB
 
@@ -326,6 +327,7 @@ async def _publish_prebuilt_version(
     digest: str,
     component_key: str,
     sidecar_key: str,
+    manifest_json: dict[str, Any] | None,
 ) -> Any:
     """Create the `app_versions` row for a staged prebuilt component and advance it to PUBLISHED.
 
@@ -339,8 +341,22 @@ async def _publish_prebuilt_version(
     separate, GLOBAL-ADMIN-gated consent step that must still run before
     a PUBLISHED version is activated (`app_active_versions`) -- reaching
     PUBLISHED here is "successfully staged", never "approved" or "active".
+
+    `author`/`license`/`source_url` (migration 0026) are copied verbatim
+    from the already-validated `manifest_json` blob -- a per-version
+    attribution snapshot on `app_versions`' own audit-triggered table
+    (`app_versions_audit_log`, migration 0022), independent of whatever
+    `app_catalog.license` currently reads (that row is written by the
+    separate `install_bundle()`/`flask_core.app_manifest` path, not this
+    one -- see `services/marketplace_lifecycle_service.py`).
+    `license_review_required` is recomputed from the stored `license` via
+    `flask_core.bundle_attribution.license_requires_review` rather than
+    trusted from the blob, matching `bundle_approval_service._reparse_
+    trusted`'s own re-derive-don't-trust-a-stored-flag convention.
     """
     now = datetime.now(UTC)
+    manifest_json = manifest_json or {}
+    license_id = manifest_json.get("license")
     new_version_id = await install_dal.app_versions.async_insert(
         app_id=app_id,
         version=version,
@@ -352,6 +368,10 @@ async def _publish_prebuilt_version(
         built_at=now,
         builder="hub_api",
         scan_status="not_scanned",
+        author=manifest_json.get("author"),
+        license=license_id,
+        license_review_required=license_requires_review(license_id) if license_id else False,
+        source_url=manifest_json.get("source_url"),
     )
     await install_dal(
         (install_dal.app_version_uploads.app_id == app_id)
@@ -494,6 +514,7 @@ async def process_prebuilt_component(
             digest=digest,
             component_key=key,
             sidecar_key=sidecar_key,
+            manifest_json=row.manifest_json,
         )
         logger.info(
             "bundle onboarding: component published",
