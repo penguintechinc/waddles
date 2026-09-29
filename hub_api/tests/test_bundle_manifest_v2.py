@@ -247,3 +247,93 @@ def test_missing_required_field_rejected() -> None:
             allow_prebuilt=True,
         )
     assert exc.value.reason == "missing_field"
+
+
+# ---------------------------------------------------------------------------
+# Attribution/marketplace metadata (migration 0026): author/license/
+# source_url/alternative_to/homepage_url/notice/category.
+# ---------------------------------------------------------------------------
+
+
+def test_vendor_bundle_without_author_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"provider": "thirdparty", "license": "MIT"})
+    assert exc.value.reason == "vendor_author_required"
+
+
+def test_vendor_bundle_without_license_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"provider": "thirdparty", "author": "Acme Corp"})
+    assert exc.value.reason == "vendor_license_required"
+
+
+def test_builtin_bundle_without_attribution_parses() -> None:
+    manifest = _parse({})
+    assert manifest.author is None  # type: ignore[attr-defined]
+    assert manifest.license is None  # type: ignore[attr-defined]
+    assert manifest.license_requires_review is False  # type: ignore[attr-defined]
+
+
+def test_unknown_spdx_license_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"provider": "thirdparty", "author": "Acme Corp", "license": "Not-A-Real-License"})
+    assert exc.value.reason == "unknown_spdx_license"
+
+
+def test_allowlisted_spdx_license_does_not_require_review() -> None:
+    manifest = _parse({"provider": "thirdparty", "author": "Acme Corp", "license": "Apache-2.0"})
+    assert manifest.license_requires_review is False  # type: ignore[attr-defined]
+
+
+def test_copyleft_spdx_license_flags_review_required() -> None:
+    manifest = _parse({"provider": "thirdparty", "author": "Acme Corp", "license": "GPL-3.0-only"})
+    assert manifest.license == "GPL-3.0-only"  # type: ignore[attr-defined]
+    assert manifest.license_requires_review is True  # type: ignore[attr-defined]
+
+
+def test_http_source_url_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"source_url": "http://example.com/repo"})
+    assert exc.value.reason == "invalid_source_url"
+
+
+def test_https_source_url_parses() -> None:
+    manifest = _parse({"source_url": "https://github.com/example/repo"})
+    assert manifest.source_url == "https://github.com/example/repo"  # type: ignore[attr-defined]
+
+
+def test_http_homepage_url_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"homepage_url": "http://example.com"})
+    assert exc.value.reason == "invalid_homepage_url"
+
+
+def test_empty_alternative_to_entry_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"alternative_to": [""]})
+    assert exc.value.reason == "invalid_alternative_to"
+
+
+def test_alternative_to_list_parses_through() -> None:
+    manifest = _parse({"alternative_to": ["waddles.socials.music.default", "Spotify Jukebox"]})
+    assert manifest.alternative_to == (  # type: ignore[attr-defined]
+        "waddles.socials.music.default",
+        "Spotify Jukebox",
+    )
+
+
+def test_empty_notice_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"notice": ""})
+    assert exc.value.reason == "invalid_notice"
+
+
+def test_invalid_category_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"category": "not-a-real-category"})
+    assert exc.value.reason == "invalid_category"
+
+
+def test_alternatives_category_parses_through() -> None:
+    manifest = _parse({"category": "alternatives"})
+    assert manifest.category == "alternatives"  # type: ignore[attr-defined]
