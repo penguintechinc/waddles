@@ -20,6 +20,7 @@ on:
       - "core/svc_action/Dockerfile.rust"
       - "scripts/alpha-deploy.sh"
       - ".github/workflows/helm-chart-e2e.yml"
+      - ".github/actions/kind-helm-e2e-setup/**"
   workflow_dispatch: {}
 
 permissions:
@@ -30,8 +31,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  KIND_VERSION: "v0.30.0"
-  KIND_NODE_IMAGE: "kindest/node@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a" # v1.34.0
+  # kind/Helm versions and the kindest/node image digest are pinned once,
+  # inside .github/actions/kind-helm-e2e-setup/action.yml.
   CHART_DIR: "k8s/helm/waddlebot"
   NAMESPACE: "waddlebot"
   HELM_TIMEOUT: "5m"
@@ -55,7 +56,7 @@ jobs:
         run: |
           set -euo pipefail
           pipx install zizmor==1.9.0
-          zizmor --persona=pedantic .github/workflows/helm-chart-e2e.yml
+          zizmor --persona=pedantic .github/workflows/helm-chart-e2e.yml .github/actions/kind-helm-e2e-setup/action.yml
 
   chart-e2e:
     name: kind install/upgrade
@@ -69,54 +70,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Install kind (checksum-verified)
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /usr/local/bin/kind \
-            "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
-          echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  /usr/local/bin/kind" | sha256sum -c -
-          chmod +x /usr/local/bin/kind
-          kind version
-
-      - name: Create kind cluster
-        run: |
-          set -euo pipefail
-          kind create cluster --name waddlebot-e2e --image "${KIND_NODE_IMAGE}" --wait 120s
-
-      - name: Build + kind-load images
-        run: |
-          set -euo pipefail
-          declare -a IMAGES=(
-            "waddlebot-migrations:ci:migrations/Dockerfile:."
-            "waddlebot-hub-api:ci:hub_api/Dockerfile:hub_api"
-            "core-bundle-seeder:ci:bundles/Dockerfile.core-bundles:."
-            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:."
-            "svc-process-rust:ci:core/svc_process/Dockerfile.rust:."
-            "svc-action-rust:ci:core/svc_action/Dockerfile.rust:."
-          )
-          built=0
-          for entry in "${IMAGES[@]}"; do
-            IFS=":" read -r name tag dockerfile context <<< "${entry}"
-            echo "::group::build ${name}:${tag}"
-            docker build -f "${dockerfile}" -t "${name}:${tag}" "${context}"
-            kind load docker-image "${name}:${tag}" --name waddlebot-e2e
-            built=$((built + 1))
-            echo "::endgroup::"
-          done
-          echo "images built and loaded: ${built}"
-          if [ "${built}" -eq 0 ]; then
-            echo "::error::zero images built - denominator check failed"
-            exit 1
-          fi
-
-      - name: Install Helm v4
-        run: |
-          set -euo pipefail
-          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
-          chmod +x get_helm.sh
-          DESIRED_VERSION=v4.0.0 ./get_helm.sh
-          rm -f get_helm.sh
-          helm version
+      - name: kind + Helm v4 cluster with images
+        uses: ./.github/actions/kind-helm-e2e-setup
+        with:
+          cluster-name: waddlebot-e2e
 
       - name: Create dummy platform-credentials secret
         run: |
@@ -310,45 +267,10 @@ jobs:
           mkdir -p /tmp/base-chart
           git worktree add --detach /tmp/base-chart "${BASE_SHA}"
 
-      - name: Install kind (checksum-verified)
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /usr/local/bin/kind \
-            "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
-          echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  /usr/local/bin/kind" | sha256sum -c -
-          chmod +x /usr/local/bin/kind
-
-      - name: Install Helm v4
-        run: |
-          set -euo pipefail
-          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
-          chmod +x get_helm.sh
-          DESIRED_VERSION=v4.0.0 ./get_helm.sh
-          rm -f get_helm.sh
-
-      - name: Create kind cluster
-        run: kind create cluster --name waddlebot-upgrade --image "${KIND_NODE_IMAGE}" --wait 120s
-
-      - name: Build + kind-load images (PR ref; base ref reuses same tags)
-        run: |
-          set -euo pipefail
-          declare -a IMAGES=(
-            "waddlebot-migrations:ci:migrations/Dockerfile:."
-            "waddlebot-hub-api:ci:hub_api/Dockerfile:hub_api"
-            "core-bundle-seeder:ci:bundles/Dockerfile.core-bundles:."
-            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:."
-            "svc-process-rust:ci:core/svc_process/Dockerfile.rust:."
-            "svc-action-rust:ci:core/svc_action/Dockerfile.rust:."
-          )
-          built=0
-          for entry in "${IMAGES[@]}"; do
-            IFS=":" read -r name tag dockerfile context <<< "${entry}"
-            docker build -f "${dockerfile}" -t "${name}:${tag}" "${context}"
-            kind load docker-image "${name}:${tag}" --name waddlebot-upgrade
-            built=$((built + 1))
-          done
-          echo "images built and loaded: ${built}"
-          [ "${built}" -gt 0 ] || { echo "::error::zero images built"; exit 1; }
+      - name: kind + Helm v4 cluster with images (PR ref; base ref reuses same tags)
+        uses: ./.github/actions/kind-helm-e2e-setup
+        with:
+          cluster-name: waddlebot-upgrade
 
       - name: helm install base ref chart
         run: |

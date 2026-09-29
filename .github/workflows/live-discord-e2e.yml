@@ -1,0 +1,267 @@
+name: Live Discord E2E
+
+# Installs waddlebot on a kind cluster wired to a REAL, dedicated CI Discord
+# bot (never the alpha bot -- separate token, so live alpha never sees a
+# duplicate reply and its IDENTIFY budget is never touched by this
+# workflow) and proves a genuine round trip: the chart's own gateway
+# connection authenticates against real Discord, and a message posted to a
+# real channel comes back out through the real Discord REST API.
+#
+# helm-chart-e2e.yml (dummy credentials) already proves the chart installs
+# and upgrades cleanly; it cannot prove the Discord connector actually
+# authenticates or that the process/action pipeline produces a real reply,
+# since a dummy token can only ever fail auth. This workflow is the one
+# place those two things are checked against the real Discord API.
+#
+# Release-branch pushes and manual dispatch ONLY -- never `pull_request`/
+# `pull_request_target`, so a PR from an untrusted fork can never reach the
+# `ci-live-credentials` environment or its secret.
+
+on:
+  push:
+    branches:
+      - "release/**"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  # Serializes every live run (release push AND manual dispatch alike) on
+  # one lane -- the CI bot is a single Discord identity; two concurrent
+  # runs sharing it would double-post `!ping`/webhooks into the same
+  # channel and make the "exactly one pong" assertion meaningless. Never
+  # cancel-in-progress: a live bot mid-round-trip must finish or time out
+  # on its own, not get its Discord-side state (webhook, in-flight message)
+  # orphaned by a superseding run.
+  group: live-discord-e2e
+  cancel-in-progress: false
+
+env:
+  CHART_DIR: "k8s/helm/waddlebot"
+  NAMESPACE: "waddlebot"
+  HELM_TIMEOUT: "5m"
+  READY_TIMEOUT_SECONDS: "120"
+  PONG_TIMEOUT_SECONDS: "90"
+  DISCORD_API_BASE: "https://discord.com/api/v10"
+
+jobs:
+  lint-workflow:
+    name: zizmor + actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: actionlint
+        run: |
+          set -euo pipefail
+          docker run --rm -v "${PWD}:/repo" -w /repo \
+            rhysd/actionlint@sha256:6e7f81c2d3617f8a95bd68d2fd8de2c6da5eb87f66d67f30f8bdfd7d5e4f7dc7 \
+            -color .github/workflows/live-discord-e2e.yml
+      - name: zizmor
+        run: |
+          set -euo pipefail
+          pipx install zizmor==1.9.0
+          zizmor --persona=pedantic .github/workflows/live-discord-e2e.yml
+
+  live-discord-e2e:
+    name: kind install + live Discord round-trip
+    runs-on: ubuntu-latest
+    needs: lint-workflow
+    # Gates DISCORD_BOT_TOKEN_CI release behind the ci-live-credentials
+    # environment's protection rules (deployment branch policy `release/*`
+    # plus a required reviewer for anything else, e.g. workflow_dispatch
+    # from a non-release ref) -- the secret is never available to this job
+    # at all until the environment approves the run.
+    environment: ci-live-credentials
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: kind + Helm v4 cluster with images
+        uses: ./.github/actions/kind-helm-e2e-setup
+        with:
+          cluster-name: waddlebot-live
+
+      - name: Create real platform-credentials secret (token via stdin, never interpolated)
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN_CI }}
+        run: |
+          set -euo pipefail
+          kubectl create namespace "${NAMESPACE}"
+          # Token flows through the shell's env, piped via stdin straight into
+          # the Secret's data -- never a CLI arg, never echoed, never assigned
+          # to a script variable that could show up in `set -x`/process list.
+          # Twitch stays the same obviously-fake CI value as helm-chart-e2e.yml;
+          # this workflow only exercises Discord.
+          kubectl create secret generic waddlebot-platform-credentials \
+            --namespace "${NAMESPACE}" \
+            --from-file=DISCORD_BOT_TOKEN=/dev/stdin \
+            --from-literal=TWITCH_OAUTH_TOKEN="oauth:ci-dummy-twitch-irc-token-never-real" \
+            <<< "${DISCORD_BOT_TOKEN}"
+
+      - name: helm dependency build
+        run: helm dependency build "${CHART_DIR}"
+
+      - name: helm install
+        run: |
+          set -euo pipefail
+          helm install waddlebot "${CHART_DIR}" \
+            --namespace "${NAMESPACE}" \
+            -f "${CHART_DIR}/values-alpha.yaml" \
+            -f "${CHART_DIR}/values-ci.yaml" \
+            --wait --timeout "${HELM_TIMEOUT}"
+          status=$(helm status waddlebot -n "${NAMESPACE}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["status"])')
+          echo "release status: ${status}"
+          [ "${status}" = "deployed" ] || { echo "::error::release not deployed after install"; exit 1; }
+
+      - name: Assert real Discord gateway READY within timeout
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + READY_TIMEOUT_SECONDS ))
+          ready_count=0
+          # "connected, awaiting session stability" (core/svc_ingest/src/ingest/discord.rs:143)
+          # is svc-ingest-rust's own READY-equivalent: it fires only after the
+          # real WS HELLO/IDENTIFY handshake against Discord succeeds -- a dummy
+          # token (values-ci.yaml's default, used by helm-chart-e2e.yml) can
+          # never reach this line, so seeing it here is proof the real
+          # DISCORD_BOT_TOKEN_CI authenticated against real Discord.
+          while [ "$(date +%s)" -lt "${deadline}" ]; do
+            ready_count=$(kubectl logs -n "${NAMESPACE}" -l app.kubernetes.io/component=svc-ingest-rust --since=5m --all-containers 2>/dev/null \
+              | grep -c "connected, awaiting session stability" || true)
+            if [ "${ready_count}" -ge 1 ]; then
+              break
+            fi
+            sleep 5
+          done
+          echo "gateway READY lines found: ${ready_count}"
+          [ "${ready_count}" -ge 1 ] || { echo "::error::zero READY lines found within ${READY_TIMEOUT_SECONDS}s - live gateway never authenticated"; exit 1; }
+
+      - name: Post !ping as a second identity (ephemeral channel webhook) + verify channel guild
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN_CI }}
+          DISCORD_CI_CHANNEL_ID: ${{ vars.DISCORD_CI_CHANNEL_ID }}
+          DISCORD_CI_GUILD_ID: ${{ vars.DISCORD_CI_GUILD_ID }}
+        run: |
+          set -euo pipefail
+          # The CI bot can't trigger itself: svc-ingest-rust's `!ping` handler
+          # sees every MESSAGE_CREATE the gateway delivers, so if the CI bot
+          # posted `!ping` with its OWN token, the reply would come from the
+          # same identity that (elsewhere in the pipeline) other services key
+          # off "the bot's own messages" -- see round-trip approach in
+          # docs/CI_LIVE_TESTS.md. Rather than registering a second bot
+          # application (a second secret the user would have to provision),
+          # this creates a throwaway CHANNEL WEBHOOK using the CI bot's own
+          # token (`MANAGE_WEBHOOKS`) -- a webhook-authored message has its
+          # own distinct author id (the webhook's id, not the bot's user id),
+          # so it is a genuinely different identity from the gateway's own
+          # `bot.user`, real Discord delivers it as a normal MESSAGE_CREATE,
+          # and the reply the CI bot posts back is a real, independent
+          # REST call -- a full, real round trip end to end.
+          guild_id=$(curl -fsS -X GET "${DISCORD_API_BASE}/channels/${DISCORD_CI_CHANNEL_ID}" \
+            -H "Authorization: Bot ${DISCORD_BOT_TOKEN}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("guild_id",""))')
+          [ "${guild_id}" = "${DISCORD_CI_GUILD_ID}" ] || { echo "::error::DISCORD_CI_CHANNEL_ID does not belong to DISCORD_CI_GUILD_ID (got guild_id=${guild_id})"; exit 1; }
+
+          webhook_json=$(curl -fsS -X POST "${DISCORD_API_BASE}/channels/${DISCORD_CI_CHANNEL_ID}/webhooks" \
+            -H "Authorization: Bot ${DISCORD_BOT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"waddlebot-ci-sender"}')
+          webhook_id=$(echo "${webhook_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+          webhook_token=$(echo "${webhook_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+          echo "webhook_id=${webhook_id}" >> "${GITHUB_ENV}"
+          # webhook_token is a short-lived, scoped-to-this-webhook credential
+          # (not the bot token) -- still never logged, passed to the cleanup
+          # step via a file readable only by this job's runner, not GITHUB_ENV
+          # (which would surface in the run's environment-variables list).
+          echo "${webhook_token}" > /tmp/webhook-token
+          chmod 600 /tmp/webhook-token
+
+          ping_json=$(curl -fsS -X POST "${DISCORD_API_BASE}/webhooks/${webhook_id}/$(cat /tmp/webhook-token)?wait=true" \
+            -H "Content-Type: application/json" \
+            -d '{"content":"!ping"}')
+          ping_message_id=$(echo "${ping_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+          echo "ping_message_id=${ping_message_id}" >> "${GITHUB_ENV}"
+          echo "posted !ping via ephemeral webhook, message id ${ping_message_id}"
+
+      - name: Poll for exactly one real pong reply
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN_CI }}
+          DISCORD_CI_CHANNEL_ID: ${{ vars.DISCORD_CI_CHANNEL_ID }}
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + PONG_TIMEOUT_SECONDS ))
+          pong_count=0
+          pong_ids=""
+          while [ "$(date +%s)" -lt "${deadline}" ]; do
+            # `after=<ping_message_id>` scopes this to messages posted strictly
+            # after our own !ping -- excludes any stale pong left over from a
+            # prior run whose cleanup step failed, and any unrelated activity
+            # already in the channel.
+            messages_json=$(curl -fsS -X GET "${DISCORD_API_BASE}/channels/${DISCORD_CI_CHANNEL_ID}/messages?after=${ping_message_id}&limit=50" \
+              -H "Authorization: Bot ${DISCORD_BOT_TOKEN}")
+            pong_ids=$(echo "${messages_json}" | python3 -c '
+          import json, sys
+          msgs = json.load(sys.stdin)
+          print(",".join(m["id"] for m in msgs if m.get("content") == "pong \U0001f427"))
+          ')
+            if [ -n "${pong_ids}" ]; then
+              pong_count=$(echo "${pong_ids}" | tr "," "\n" | grep -c . || true)
+              break
+            fi
+            sleep 5
+          done
+          echo "pong replies found: ${pong_count}"
+          echo "pong_ids=${pong_ids}" >> "${GITHUB_ENV}"
+          [ "${pong_count}" -ge 1 ] || { echo "::error::zero pong replies within ${PONG_TIMEOUT_SECONDS}s - round trip did not complete"; exit 1; }
+          if [ "${pong_count}" -ne 1 ]; then
+            echo "::error::expected exactly 1 pong, found ${pong_count} (ids: ${pong_ids}) - a duplicate consumer is attached"
+            exit 1
+          fi
+          echo "exactly one pong reply confirmed"
+
+      - name: Clean up test messages + webhook
+        if: always()
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN_CI }}
+          DISCORD_CI_CHANNEL_ID: ${{ vars.DISCORD_CI_CHANNEL_ID }}
+        run: |
+          set -euo pipefail
+          # Best-effort: cleanup failures never fail the job (the round-trip
+          # assertions above already ran and gated the result), but every
+          # delete is still attempted and its outcome logged.
+          if [ -n "${pong_ids:-}" ]; then
+            for id in $(echo "${pong_ids}" | tr "," "\n"); do
+              curl -fsS -X DELETE "${DISCORD_API_BASE}/channels/${DISCORD_CI_CHANNEL_ID}/messages/${id}" \
+                -H "Authorization: Bot ${DISCORD_BOT_TOKEN}" && echo "deleted pong ${id}" || echo "::warning::failed to delete pong ${id}"
+            done
+          fi
+          if [ -n "${ping_message_id:-}" ] && [ -f /tmp/webhook-token ]; then
+            curl -fsS -X DELETE "${DISCORD_API_BASE}/webhooks/${webhook_id}/$(cat /tmp/webhook-token)/messages/${ping_message_id}" \
+              && echo "deleted ping ${ping_message_id}" || echo "::warning::failed to delete ping message"
+          fi
+          if [ -n "${webhook_id:-}" ] && [ -f /tmp/webhook-token ]; then
+            curl -fsS -X DELETE "${DISCORD_API_BASE}/webhooks/${webhook_id}/$(cat /tmp/webhook-token)" \
+              && echo "deleted webhook ${webhook_id}" || echo "::warning::failed to delete webhook"
+          fi
+          rm -f /tmp/webhook-token
+
+      - name: Dump non-secret diagnostics on failure
+        if: failure()
+        run: |
+          # Pod/event state only -- never Secret objects, never env dumps
+          # (`kubectl get pods -o env` / `printenv` are deliberately absent).
+          kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp || true
+          kubectl get pods -n "${NAMESPACE}" -o wide || true
+          for p in $(kubectl get pods -n "${NAMESPACE}" -l app.kubernetes.io/component=svc-ingest-rust -o name); do
+            kubectl describe "${p}" -n "${NAMESPACE}" || true
+          done
+
+      - name: Delete namespace
+        if: always()
+        run: kubectl delete namespace "${NAMESPACE}" --wait=true || true
