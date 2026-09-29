@@ -27,7 +27,25 @@ Create the CI bot the same way as any Discord bot (Discord Developer Portal
 with `Send Messages`, `Manage Webhooks`, and `Manage Messages` on the test
 channel (webhook creation + cleanup deletes need both).
 
-## One-time setup (run by the repo owner, not CI)
+## Environment status: provisioned
+
+The `ci-live-credentials` GitHub Environment is provisioned (deployment
+branch policy `release/*`) with:
+
+- Secret: `DISCORD_BOT_TOKEN_CI` -- a dedicated CI bot token, never the
+  alpha/production bot.
+- Variables: `DISCORD_CI_APP_ID`, `DISCORD_CI_GUILD_ID` (the
+  `waddles-test-ci` guild), `DISCORD_CI_CHANNEL_ID` (`#general`).
+- CI bot permissions on the test channel: View Channels, Send Messages,
+  Read Message History, Manage Messages (webhook create/delete for the
+  round-trip sender identity, and cleanup deletes).
+
+`DISCORD_CI_APP_ID` is recorded here as the environment's source of truth
+for the CI bot's application identity (Developer Portal lookups, token
+rotation); the workflow itself authenticates purely via the bot token and
+does not need to reference the application ID directly.
+
+## One-time setup (already applied; kept for re-provisioning / DR)
 
 ```bash
 # 1. Environment with a deployment branch policy restricting it to release
@@ -42,7 +60,9 @@ gh secret set DISCORD_BOT_TOKEN_CI --env ci-live-credentials --body -
 # (paste the token, then Ctrl-D)
 
 # 3. Variables -- not secret, but env-scoped alongside the token for a
-#    single source of truth about which guild/channel the CI bot lives in.
+#    single source of truth about which application/guild/channel the CI
+#    bot lives in.
+gh variable set DISCORD_CI_APP_ID --env ci-live-credentials --body '<application id>'
 gh variable set DISCORD_CI_GUILD_ID --env ci-live-credentials --body '<guild id>'
 gh variable set DISCORD_CI_CHANNEL_ID --env ci-live-credentials --body '<channel id>'
 ```
@@ -52,11 +72,14 @@ gh variable set DISCORD_CI_CHANNEL_ID --env ci-live-credentials --body '<channel
 The pipeline needs a message from a **different** identity than the CI bot
 to make a real round trip observable: `core/svc_ingest/receivers/
 discord_gateway.py`'s `_is_self` filters messages authored by the gateway's
-own `bot.user.id`, and even where that filter doesn't apply (the Rust
-`svc-ingest-rust` connector, `core/svc_ingest/src/ingest/discord.rs`, has no
-such filter today), a message the CI bot posts to itself is not a realistic
-"a user typed `!ping`" scenario and risks other identity-keyed logic
-treating it specially.
+own `bot.user.id`, and `svc-ingest-rust` (the connector this workflow
+actually exercises) has the equivalent filter one layer down -- the
+`penguin_connector_discord::gateway::GatewaySession::next_chat_message`
+call that `core/svc_ingest/src/normalize.rs::normalize_discord` consumes
+already drops the bot's own messages before they ever reach Rust code
+(see the doc comment there). Either way, a message the CI bot posts to
+itself would never reach the pipeline, so a genuinely different identity
+is required to observe a real round trip at all.
 
 Two ways to get a second identity:
 
