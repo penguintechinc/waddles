@@ -58,6 +58,7 @@ pub const SERVICE_NAME: &str = "bundle-executor";
 pub async fn run() -> Result<(), ExecutorError> {
     let cfg = <CliConfig as clap::Parser>::parse();
     cfg.validate()?;
+    cfg.validate_host_api_tls()?;
 
     init_telemetry();
 
