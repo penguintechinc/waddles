@@ -308,6 +308,25 @@ infrastructure:
       size: 50Gi
     env:
       MINIO_BROWSER: "on"
+    # At-rest encryption (security.md Encryption: Storage — mandatory baseline, no
+    # opt-out) requires MinIO to have a KMS configured; without one, hub-api's
+    # put_object(..., ServerSideEncryption="AES256") fails with "Server side
+    # encryption specified but KMS is not configured". Static single-key KMS via
+    # MINIO_KMS_SECRET_KEY sourced from a pre-created Secret (never a literal key
+    # in git, never chart-managed) -- generate with `make generate-minio-kms-key`
+    # / scripts/generate-minio-kms-key.sh. secretName is empty here (fail-closed
+    # baseline for beta/gamma/production, see templates/infrastructure/minio.yaml's
+    # fail guard); alpha documents its own default in values-alpha.yaml. For
+    # production, a real external KMS (KES/Vault) is recommended over this static
+    # key -- see README.md MinIO KMS section and security.md Encryption tiering.
+    kms:
+      enabled: true
+      secretName: ""
+      secretKey: "MINIO_KMS_SECRET_KEY"
+      # SSE-S3 auto-encryption applied to chart-created buckets via `mc encrypt set`
+      # in the minio-init Job, so objects written without explicit SSE headers are
+      # still encrypted at rest.
+      autoEncryptBucket: true
 
   # Ollama AI Backend
   ollama:
