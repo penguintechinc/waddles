@@ -610,8 +610,19 @@ class WebhookExecutor:
                     if response.status_code >= 400:
                         error_msg = f"HTTP {response.status_code}: {response.text[:500]}"
 
+                        # `is_retryable()` short-circuits True for any
+                        # WebhookRetryableError/WebhookTimeoutError instance
+                        # regardless of status code -- passing a
+                        # WebhookRetryableError here (as if it were already
+                        # known-retryable) made every HTTP error status
+                        # retry unconditionally, silently making
+                        # `retryable_status_codes` and the
+                        # WebhookNonRetryableError branch below dead code.
+                        # The base WebhookExecutionError isn't in that
+                        # isinstance allowlist, so this now actually
+                        # defers to the status-code check.
                         if self.retry_policy.is_retryable(
-                            WebhookRetryableError(error_msg), response.status_code
+                            WebhookExecutionError(error_msg), response.status_code
                         ):
                             if attempt < self.retry_policy.max_retries:
                                 delay = self.retry_policy.get_delay(attempt)
@@ -655,6 +666,13 @@ class WebhookExecutor:
                         )
                         await asyncio.sleep(delay)
                         continue
+                # Non-retryable (or retries already exhausted) -- stop now.
+                # Previously fell through to the next loop iteration
+                # unconditionally, retrying errors the policy had just said
+                # not to retry (harmless when this was already the last
+                # attempt, but wasted real HTTP calls against a
+                # known-permanently-failing endpoint on every earlier one).
+                break
 
             except (WebhookRetryableError, WebhookNonRetryableError) as e:
                 last_error = e
@@ -667,6 +685,9 @@ class WebhookExecutor:
                     )
                     await asyncio.sleep(delay)
                     continue
+                # Non-retryable -- stop now instead of silently retrying a
+                # request the status-code check just said not to retry.
+                break
 
         # All retries exhausted
         execution_time = time.time() - start_time

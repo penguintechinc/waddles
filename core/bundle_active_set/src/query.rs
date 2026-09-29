@@ -274,10 +274,43 @@ pub async fn read_active_set(
         .all(conn)
         .await?;
 
+    Ok(assemble_active_set(
+        &active_rows,
+        &versions_by_id,
+        &approval_rows,
+    ))
+}
+
+/// Shared row-assembly logic behind [`read_active_set`] (one `(tenant_id,
+/// community_id)` scope, `approval_rows` pre-filtered to that scope's
+/// tenant) and `crate::multi_tenant::read_active_set_all` (every scope at
+/// once, `approval_rows` unfiltered across every tenant) -- pure, no I/O,
+/// so both callers share one tested implementation of the ACTIVE+APPROVED
+/// join/exclusion/degradation logic rather than maintaining two copies
+/// that could silently drift apart.
+///
+/// **Multi-tenant correctness fix vs. the pre-rev-4 inline version this
+/// replaces:** the approval-match predicate now also checks `appr.
+/// tenant_id == active.tenant_id` explicitly. [`read_active_set`]'s own
+/// `approval_rows` query was already tenant-filtered, so this was always
+/// implicitly true there and changes nothing for that caller -- but
+/// `read_active_set_all` intentionally reads `app_install_approvals`
+/// UNFILTERED (one bulk query across every tenant, for efficiency, see
+/// that function's own doc), so without this explicit check two different
+/// tenants' apps sharing an `app_id` string and an identical `version`
+/// value could cross-match each other's approval row. Tenant isolation is
+/// a hard invariant (`rules/security.md` Tenant Isolation) -- this must be
+/// checked here, once, rather than trusted to always be true of whatever
+/// `approval_rows` slice a caller happens to pass in.
+pub(crate) fn assemble_active_set(
+    active_rows: &[app_active_versions::Model],
+    versions_by_id: &std::collections::HashMap<i64, app_versions::Model>,
+    approval_rows: &[app_install_approvals::Model],
+) -> ActiveSetRead {
     let mut rows = Vec::with_capacity(active_rows.len());
     let mut excluded = Vec::new();
     let mut degraded = Vec::new();
-    for active in &active_rows {
+    for active in active_rows {
         let Some(version_row) = versions_by_id.get(&active.version_id) else {
             tracing::warn!(
                 app_id = %active.app_id,
@@ -290,7 +323,8 @@ pub async fn read_active_set(
         };
 
         let approved = approval_rows.iter().any(|appr| {
-            appr.app_id == active.app_id
+            appr.tenant_id == active.tenant_id
+                && appr.app_id == active.app_id
                 && appr.version == version_row.version
                 && (appr.community_id == Some(active.community_id)
                     || (appr.community_id.is_none() && active.community_id == 0))
@@ -358,11 +392,11 @@ pub async fn read_active_set(
         });
     }
 
-    Ok(ActiveSetRead {
+    ActiveSetRead {
         rows,
         excluded,
         degraded,
-    })
+    }
 }
 
 /// Tracks the last-seen [`Watermark`] for one poller instance and decides
@@ -811,6 +845,55 @@ mod tests {
         assert!(
             result.degraded.is_empty(),
             "a present component_key must never be recorded as degraded, even with a null sidecar_key"
+        );
+        Ok(())
+    }
+
+    /// Multi-tenant correctness regression: an approval row belonging to a
+    /// DIFFERENT tenant, sharing this active row's `app_id`/`version`/
+    /// community-sentinel shape, must never satisfy the approval check --
+    /// proves `assemble_active_set`'s explicit `tenant_id` comparison (added
+    /// for `crate::multi_tenant::read_active_set_all`'s unfiltered
+    /// `approval_rows`) is actually enforced, not just documented.
+    #[tokio::test]
+    async fn read_active_set_does_not_cross_match_an_approval_from_a_different_tenant(
+    ) -> Result<(), ActiveSetError> {
+        let digest = format!("sha256:{}", "9".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.shared".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.shared".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(digest),
+                scan_status: "scanned".to_string(),
+                component_key: None,
+                sidecar_key: None,
+            }]])
+            // Approval belongs to tenant 2, not tenant 1 -- same app_id/
+            // version/community sentinel otherwise.
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 1,
+                tenant_id: 2,
+                community_id: None,
+                app_id: "waddles.shared".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert!(
+            result.rows.is_empty(),
+            "a different tenant's approval must never satisfy this tenant's active row"
+        );
+        assert_eq!(
+            result.excluded,
+            vec![("waddles.shared".to_string(), ExclusionReason::NoApproval)]
         );
         Ok(())
     }
