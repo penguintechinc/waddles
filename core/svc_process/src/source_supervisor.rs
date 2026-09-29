@@ -1,29 +1,28 @@
-//! The DB-driven source-binding supervisor: polls `app_source_bindings`
-//! (`bundle_active_set::read_source_bindings`, scoped to currently ACTIVE
-//! apps) and maintains exactly one dedicated `penguin_spine::GroupReader`
-//! consumer task per `(app_id, platform, source_id)` binding, spawning one
-//! for every newly-bound source and gracefully stopping one for every
-//! binding that is removed or whose app is deactivated.
+//! The DB-driven source-binding supervisor: given a target list of
+//! [`ResolvedBinding`]s (one per `(tenant_id, community_id, app_id,
+//! platform, source_id)` binding, already carrying the tenant slug/
+//! community name its Valkey stream key needs), maintains exactly one
+//! dedicated `penguin_spine::GroupReader` consumer task per binding,
+//! spawning one for every newly-bound source and gracefully stopping one
+//! for every binding that is removed or whose app is deactivated.
 //!
-//! Replaces `crate::lib::try_start_process_loop`'s single
-//! `PROCESS_INGEST_PLATFORM`/`PROCESS_INGEST_SOURCE_ID`-configured consumer
-//! as the primary source-consumption path; that env-driven path remains
-//! only as the kill-switch/missing-config fallback (see
-//! `crate::license::DISABLE_DB_BUNDLE_CONFIG_FLAG`'s doc). Enabled/disabled
-//! per-tick by the same kill-switch gate as `crate::bundle_loader`
-//! (`crate::license::FeatureGate`, already the negated "is the DB path
-//! enabled" answer) -- while disabled, [`run_tick`] stops every running
-//! consumer rather than merely refusing to spawn new ones, so a kill-switch
-//! flip to ON during a live rollout actually falls back to the env path
-//! rather than leaving stale DB-driven consumers running alongside it.
+//! **Multi-tenant rewrite (dataplane scale design rev 4, §8 step 2):**
+//! this module used to own its own single-`(tenant_id, community_id)`
+//! poll loop (`run_tick`/`run`, `bundle_active_set::WatermarkTracker`) and
+//! carry one fixed tenant slug/community name per whole supervisor
+//! instance (`SupervisorDeps::tenant`/`community`). Both are now owned by
+//! `crate::changelog_consumer` instead: that module resolves EVERY
+//! affected `(tenant_id, community_id)` scope's slug/name (cached, fail-
+//! closed per scope -- a resolution failure skips + counts that scope
+//! rather than aborting the whole tick) and calls [`reconcile`] directly
+//! with the full multi-tenant [`ResolvedBinding`] target list. This module
+//! keeps only the tenant-agnostic mechanics: which consumers are running,
+//! diffing against a target list, and running one consumer's drain loop.
 //!
-//! Bundle load/unload onto the executor remains `crate::bundle_loader`'s
+//! Bundle load/unload onto the executor remains `crate::changelog_consumer`'s
 //! job, not this module's: each spawned consumer's [`crate::spine::
 //! ProcessDeps::digest`] is left empty (see that field's own doc for why an
-//! empty digest is a safe, already-handled "not loaded yet" state) and
-//! relies entirely on `crate::bundle_loader::run` -- polling the same
-//! Postgres reader connection -- to actually `Load`/`Unload` the bundle
-//! this app_id's invokes need onto the shared executor connection.
+//! empty digest is a safe, already-handled "not loaded yet" state).
 //!
 //! `penguin_spine::GroupReader::connect` never creates the Valkey consumer
 //! group itself (hub-api provisions it, `XGROUP CREATE`, when it grants the
@@ -36,9 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bundle_active_set::{SourceBinding, WatermarkTracker};
 use penguin_spine::{Grant, Scope, SpineClient, SpineConfig, SpineError, SpineMetrics};
-use sea_orm::DatabaseConnection;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
@@ -48,13 +45,45 @@ use crate::license::FeatureGate;
 use crate::spine::{LoadState, ProcessDeps};
 use crate::telemetry::SourceBindingSupervisorMetrics;
 
-/// Identifies one running consumer task: `(app_id, platform, source_id)`,
-/// exactly the columns of `app_source_bindings`'s own composite key (minus
-/// tenant/community, both fixed for one supervisor instance).
-type BindingKey = (String, String, String);
+/// One `app_source_bindings` row, fully resolved for consumption: the
+/// tenant/community it belongs to (both the numeric scope key AND the
+/// slug/name `penguin_spine::Scope::source_stream` needs) plus the binding
+/// itself. `crate::changelog_consumer` builds these from `bundle_active_set
+/// ::read_source_bindings_all`'s per-scope map + a cached `bundle_active_set
+/// ::scope::resolve_scope` result per scope -- never hardcoded, and never
+/// resolved from anything but the trusted DB (tenant isolation invariant,
+/// `rules/security.md`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedBinding {
+    pub tenant_id: i32,
+    pub community_id: i32,
+    pub tenant_slug: String,
+    pub community_name: Option<String>,
+    pub app_id: String,
+    pub platform: String,
+    pub source_id: String,
+}
 
-fn binding_key(b: &SourceBinding) -> BindingKey {
-    (b.app_id.clone(), b.platform.clone(), b.source_id.clone())
+/// Identifies one running consumer task: the full scope-qualified key.
+/// Includes `(tenant_id, community_id)` (not just `(app_id, platform,
+/// source_id)`, unlike the pre-multi-tenant version of this module) since
+/// two different tenants could otherwise theoretically bind the same
+/// `(app_id, platform, source_id)` triple and collide in `running`.
+pub type BindingKey = (i32, i32, String, String, String);
+
+/// The full set of currently-running consumers -- `crate::changelog_consumer`
+/// holds this across ticks and passes it to [`reconcile`]/[`stop_all`] by
+/// `&mut` reference every tick.
+pub type RunningConsumers = HashMap<BindingKey, RunningConsumer>;
+
+fn binding_key(b: &ResolvedBinding) -> BindingKey {
+    (
+        b.tenant_id,
+        b.community_id,
+        b.app_id.clone(),
+        b.platform.clone(),
+        b.source_id.clone(),
+    )
 }
 
 /// How long a per-binding consumer waits after `crate::spine::run` exits
@@ -74,30 +103,26 @@ fn is_nogroup_error(err: &SpineError) -> bool {
     matches!(err, SpineError::Redis(e) if e.code() == Some("NOGROUP"))
 }
 
-/// Builds the [`Grant`] for one binding under `tenant`/`community` --
-/// pulled out of [`run_binding_consumer`] as a pure function purely so the
-/// tenant-isolation fix (`crate::lib::resolve_scope`'s resolved slug/name
-/// actually reaching the stream key `penguin_spine::GroupReader` reads) is
-/// directly unit-testable without a live Valkey connection.
-fn binding_grant(
-    tenant: &str,
-    community: &Option<String>,
-    platform: &str,
-    source_id: &str,
-) -> Grant {
-    let scope = Scope::new(tenant.to_string(), community.clone());
+/// Builds the [`Grant`] for one resolved binding -- pulled out as a pure
+/// function so the tenant-isolation fix (the resolved slug/name actually
+/// reaching the stream key `penguin_spine::GroupReader` reads) is directly
+/// unit-testable without a live Valkey connection.
+fn binding_grant(binding: &ResolvedBinding) -> Grant {
+    let scope = Scope::new(binding.tenant_slug.clone(), binding.community_name.clone());
     Grant {
-        stream: scope.source_stream(platform, source_id),
-        platform: platform.to_string(),
-        source_id: source_id.to_string(),
+        stream: scope.source_stream(&binding.platform, &binding.source_id),
+        platform: binding.platform.clone(),
+        source_id: binding.source_id.clone(),
     }
 }
 
 /// Everything every per-binding consumer task needs that does NOT vary by
-/// binding -- built once by `crate::lib::try_start_db_bundle_loader` and
-/// shared (via `Arc`) across every spawned [`run_binding_consumer`] task,
-/// mirroring `crate::spine::ProcessDeps`'s own "bundle the dependencies"
-/// rationale.
+/// binding -- built once by `crate::changelog_consumer` and shared (via
+/// `Arc`) across every spawned [`run_binding_consumer`] task, mirroring
+/// `crate::spine::ProcessDeps`'s own "bundle the dependencies" rationale.
+/// **No `tenant`/`community` fields** (unlike the pre-multi-tenant
+/// version) -- those now live per-binding on [`ResolvedBinding`], not
+/// fixed for the whole supervisor.
 pub struct SupervisorDeps {
     pub spine_cfg: SpineConfig,
     pub key_ring: KeyRing,
@@ -106,15 +131,6 @@ pub struct SupervisorDeps {
     pub approved_targets: HashMap<String, String>,
     pub metrics: Arc<dyn SpineMetrics>,
     pub license: Arc<dyn FeatureGate>,
-    /// Tenant slug / community name for `penguin_spine::Scope::
-    /// source_stream` -- resolved from the numeric `BUNDLE_SCOPE_TENANT_ID`/
-    /// `BUNDLE_SCOPE_COMMUNITY_ID` scope via `bundle_active_set::scope::
-    /// resolve_scope` (`crate::lib::finish_supervisor_deps`), NEVER
-    /// hardcoded: this module's only caller fails closed (does not build a
-    /// `SupervisorDeps` at all, see `crate::lib::try_start_db_bundle_loader`)
-    /// when resolution fails, rather than falling back to a guessed value.
-    pub tenant: String,
-    pub community: Option<String>,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -124,8 +140,12 @@ pub struct SupervisorDeps {
 /// before the task returns) rather than firing a shutdown signal and
 /// moving on without confirmation.
 pub struct RunningConsumer {
-    shutdown: oneshot::Sender<()>,
-    handle: JoinHandle<()>,
+    // `pub(crate)`, not private: `crate::changelog_consumer`'s own tests
+    // construct a `RunningConsumer` directly around a trivial stand-in task
+    // (no live Valkey/host-API dependency needed there either) rather than
+    // duplicating this module's `ConsumerSupervisor` machinery a third time.
+    pub(crate) shutdown: oneshot::Sender<()>,
+    pub(crate) handle: JoinHandle<()>,
 }
 
 impl RunningConsumer {
@@ -149,7 +169,7 @@ impl RunningConsumer {
 /// mirroring `crate::bundle_loader::BundleSink`'s identical test-seam
 /// rationale.
 pub trait ConsumerSupervisor: Send + Sync {
-    fn spawn(&self, app_id: &str, platform: &str, source_id: &str) -> RunningConsumer;
+    fn spawn(&self, binding: &ResolvedBinding) -> RunningConsumer;
 }
 
 /// Production [`ConsumerSupervisor`]: spawns [`run_binding_consumer`] as a
@@ -159,16 +179,11 @@ pub struct SpineConsumerSupervisor {
 }
 
 impl ConsumerSupervisor for SpineConsumerSupervisor {
-    fn spawn(&self, app_id: &str, platform: &str, source_id: &str) -> RunningConsumer {
+    fn spawn(&self, binding: &ResolvedBinding) -> RunningConsumer {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let deps = Arc::clone(&self.deps);
-        let handle = tokio::spawn(run_binding_consumer(
-            app_id.to_string(),
-            platform.to_string(),
-            source_id.to_string(),
-            deps,
-            shutdown_rx,
-        ));
+        let binding = binding.clone();
+        let handle = tokio::spawn(run_binding_consumer(binding, deps, shutdown_rx));
         RunningConsumer {
             shutdown: shutdown_tx,
             handle,
@@ -195,38 +210,38 @@ async fn wait_or_shutdown(shutdown: &mut oneshot::Receiver<()>, dur: Duration) -
 /// retried rather than treated as fatal (see this module's doc).
 ///
 /// Each attempt builds a fresh [`ProcessDeps`] with an empty `digest`
-/// (`crate::bundle_loader::run`, not this consumer, is what actually
+/// (`crate::changelog_consumer`, not this consumer, is what actually
 /// `Load`s the bundle onto the executor -- see this module's doc) and a
 /// fresh [`LoadState`] (irrelevant with an empty digest, but required by
 /// `ProcessDeps`'s shape).
 async fn run_binding_consumer(
-    app_id: String,
-    platform: String,
-    source_id: String,
+    binding: ResolvedBinding,
     deps: Arc<SupervisorDeps>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     loop {
-        let grant = binding_grant(&deps.tenant, &deps.community, &platform, &source_id);
+        let grant = binding_grant(&binding);
 
-        let spine_client =
-            match SpineClient::connect(deps.spine_cfg.clone(), deps.metrics.clone()).await {
-                Ok(c) => c,
-                Err(err) => {
-                    tracing::warn!(
-                        app_id = %app_id, platform = %platform, source_id = %source_id,
-                        error = %err,
-                        "source-binding consumer: spine client connect failed, retrying"
-                    );
-                    if wait_or_shutdown(&mut shutdown, CONSUMER_RETRY_BACKOFF).await {
-                        return;
-                    }
-                    continue;
+        let spine_client = match SpineClient::connect(deps.spine_cfg.clone(), deps.metrics.clone())
+            .await
+        {
+            Ok(c) => c,
+            Err(err) => {
+                tracing::warn!(
+                    tenant_id = binding.tenant_id, community_id = binding.community_id,
+                    app_id = %binding.app_id, platform = %binding.platform, source_id = %binding.source_id,
+                    error = %err,
+                    "source-binding consumer: spine client connect failed, retrying"
+                );
+                if wait_or_shutdown(&mut shutdown, CONSUMER_RETRY_BACKOFF).await {
+                    return;
                 }
-            };
+                continue;
+            }
+        };
 
         let process_deps = ProcessDeps {
-            app_id: app_id.clone(),
+            app_id: binding.app_id.clone(),
             digest: String::new(),
             version: "1".to_string(),
             component_key: String::new(),
@@ -266,13 +281,15 @@ async fn run_binding_consumer(
                     Ok(()) => return,
                     Err(err) if is_nogroup_error(&err) => {
                         tracing::warn!(
-                            app_id = %app_id, platform = %platform, source_id = %source_id,
+                            tenant_id = binding.tenant_id, community_id = binding.community_id,
+                            app_id = %binding.app_id, platform = %binding.platform, source_id = %binding.source_id,
                             "source-binding consumer: consumer group not yet provisioned (NOGROUP), retrying"
                         );
                     }
                     Err(err) => {
                         tracing::error!(
-                            app_id = %app_id, platform = %platform, source_id = %source_id,
+                            tenant_id = binding.tenant_id, community_id = binding.community_id,
+                            app_id = %binding.app_id, platform = %binding.platform, source_id = %binding.source_id,
                             error = %err,
                             "source-binding consumer exited, retrying"
                         );
@@ -287,16 +304,16 @@ async fn run_binding_consumer(
 }
 
 /// Reconciles `running` against `target`: stops every running consumer
-/// whose binding is no longer in `target` (removed binding, or its app
-/// deactivated -- `bundle_active_set::read_source_bindings` already scopes
-/// to currently ACTIVE apps, so a deactivation surfaces here as simply
-/// "missing from `target`"), then spawns a consumer for every binding in
-/// `target` not already running. Stops before spawns so a binding that
-/// moves scope in the same tick (unlikely given the composite key, but not
-/// prevented at the type level) never briefly runs two consumers.
+/// whose binding is no longer in `target` (removed binding, app
+/// deactivated, or its whole scope skipped this tick due to a fail-closed
+/// resolution/read error -- `crate::changelog_consumer` never includes a
+/// skipped scope's bindings in `target`, so they surface here as simply
+/// "missing"), then spawns a consumer for every binding in `target` not
+/// already running. Stops before spawns so a binding that moves scope in
+/// the same tick never briefly runs two consumers.
 pub async fn reconcile(
     running: &mut HashMap<BindingKey, RunningConsumer>,
-    target: &[SourceBinding],
+    target: &[ResolvedBinding],
     spawner: &dyn ConsumerSupervisor,
     metrics: &SourceBindingSupervisorMetrics,
 ) {
@@ -310,8 +327,9 @@ pub async fn reconcile(
     for key in to_stop {
         if let Some(consumer) = running.remove(&key) {
             tracing::info!(
-                app_id = %key.0, platform = %key.1, source_id = %key.2,
-                "source-binding consumer: binding removed or app deactivated, stopping consumer"
+                tenant_id = key.0, community_id = key.1,
+                app_id = %key.2, platform = %key.3, source_id = %key.4,
+                "source-binding consumer: binding removed, app deactivated, or scope skipped this tick; stopping consumer"
             );
             consumer.stop().await;
             metrics
@@ -326,10 +344,11 @@ pub async fn reconcile(
         let key = binding_key(binding);
         if let std::collections::hash_map::Entry::Vacant(entry) = running.entry(key) {
             tracing::info!(
+                tenant_id = binding.tenant_id, community_id = binding.community_id,
                 app_id = %binding.app_id, platform = %binding.platform, source_id = %binding.source_id,
                 "source-binding consumer: new binding, spawning consumer"
             );
-            let consumer = spawner.spawn(&binding.app_id, &binding.platform, &binding.source_id);
+            let consumer = spawner.spawn(binding);
             entry.insert(consumer);
             metrics
                 .consumer_transitions_total
@@ -340,120 +359,34 @@ pub async fn reconcile(
     }
 }
 
-/// One poll tick, split out from [`run`] for direct testability against a
-/// `MockDatabase`-backed connection, a fake [`FeatureGate`], and a fake
-/// [`ConsumerSupervisor`] -- mirrors `crate::bundle_loader::run_tick`'s
-/// identical split.
-///
-/// Order of short-circuits (cheapest first, matching
-/// `crate::bundle_loader::run_tick`'s own documented rationale): kill-
-/// switch on -- stop every running consumer, no DB call at all; watermark
-/// read fails -- logged, retried next tick; watermark unchanged -- no
-/// binding read; binding read fails -- logged, retried next tick,
-/// `running` left untouched.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_tick(
-    db: &DatabaseConnection,
-    tenant_id: i32,
-    community_id: i32,
-    gate: &dyn FeatureGate,
-    tracker: &mut WatermarkTracker,
+/// Stops every currently-running consumer -- used by
+/// `crate::changelog_consumer` on shutdown, and when the multi-tenant path
+/// itself is disabled mid-run (kill-switch flip).
+pub async fn stop_all(
     running: &mut HashMap<BindingKey, RunningConsumer>,
-    spawner: &dyn ConsumerSupervisor,
     metrics: &SourceBindingSupervisorMetrics,
 ) {
-    if !gate.enabled().await {
-        if !running.is_empty() {
-            tracing::info!(
-                "db-bundle-config disabled (kill-switch on / unavailable); stopping all \
-                 DB-driven source-binding consumers, falling back to env selection"
-            );
-            reconcile(running, &[], spawner, metrics).await;
-        }
-        return;
-    }
-
-    let watermark = match bundle_active_set::read_watermark(db, tenant_id, community_id).await {
-        Ok(w) => w,
-        Err(err) => {
-            tracing::warn!(error = %err, "source-binding supervisor: watermark read failed");
-            return;
-        }
-    };
-    if !tracker.observe(watermark) {
-        return;
-    }
-
-    let bindings = match bundle_active_set::read_source_bindings(db, tenant_id, community_id).await
-    {
-        Ok(b) => b,
-        Err(err) => {
-            tracing::warn!(error = %err, "source-binding supervisor: binding read failed");
-            return;
-        }
-    };
-
-    reconcile(running, &bindings, spawner, metrics).await;
-}
-
-/// The live interval/shutdown loop `crate::lib::try_start_db_bundle_loader`
-/// spawns alongside `crate::bundle_loader::run` (same `db`/`poll_interval`/
-/// `gate`, a distinct concern). On shutdown, gracefully stops every
-/// currently-running consumer before returning -- a pod termination must
-/// never abandon in-flight consumer tasks.
-#[allow(clippy::too_many_arguments)]
-pub async fn run(
-    db: DatabaseConnection,
-    tenant_id: i32,
-    community_id: i32,
-    poll_interval: Duration,
-    gate: Arc<dyn FeatureGate>,
-    spawner: Arc<dyn ConsumerSupervisor>,
-    metrics: SourceBindingSupervisorMetrics,
-    mut shutdown: oneshot::Receiver<()>,
-) {
-    let mut tracker = WatermarkTracker::new();
-    let mut running: HashMap<BindingKey, RunningConsumer> = HashMap::new();
-    let mut interval = tokio::time::interval(poll_interval);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            _ = &mut shutdown => {
-                for (_, consumer) in running.drain() {
-                    consumer.stop().await;
-                }
-                return;
-            }
-            _ = interval.tick() => {
-                run_tick(
-                    &db,
-                    tenant_id,
-                    community_id,
-                    gate.as_ref(),
-                    &mut tracker,
-                    &mut running,
-                    spawner.as_ref(),
-                    &metrics,
-                )
-                .await;
-            }
-        }
+    for (_, consumer) in running.drain() {
+        consumer.stop().await;
+        metrics
+            .consumer_transitions_total
+            .with_label_values(&["stop"])
+            .inc();
+        metrics.active_consumers.dec();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::license::test_support::{FixedGate, ToggleGate};
-    use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::Mutex as StdMutex;
 
     /// Records every `spawn`/`stop` call it receives (as
-    /// `"spawn:app:platform:source"`/`"stop:app:platform:source"`) without
-    /// any live Valkey/host-API dependency -- the spawned task itself is a
-    /// trivial `tokio::spawn` that just awaits its own shutdown signal and
-    /// records the stop, proving [`reconcile`]/[`run_tick`]'s diff logic
-    /// without needing `penguin_spine`/`crate::spine::run` at all.
+    /// `"spawn:tenant:community:app:platform:source"`/`"stop:..."`)
+    /// without any live Valkey/host-API dependency -- the spawned task
+    /// itself is a trivial `tokio::spawn` that just awaits its own
+    /// shutdown signal and records the stop, proving [`reconcile`]'s diff
+    /// logic without needing `penguin_spine`/`crate::spine::run` at all.
     #[derive(Default)]
     struct RecordingSupervisor {
         calls: Arc<StdMutex<Vec<String>>>,
@@ -465,9 +398,16 @@ mod tests {
         }
     }
 
+    fn call_key(b: &ResolvedBinding) -> String {
+        format!(
+            "{}:{}:{}:{}:{}",
+            b.tenant_id, b.community_id, b.app_id, b.platform, b.source_id
+        )
+    }
+
     impl ConsumerSupervisor for RecordingSupervisor {
-        fn spawn(&self, app_id: &str, platform: &str, source_id: &str) -> RunningConsumer {
-            let key = format!("{app_id}:{platform}:{source_id}");
+        fn spawn(&self, binding: &ResolvedBinding) -> RunningConsumer {
+            let key = call_key(binding);
             self.calls.lock().unwrap().push(format!("spawn:{key}"));
             let calls = Arc::clone(&self.calls);
             let (tx, rx) = oneshot::channel();
@@ -497,31 +437,18 @@ mod tests {
         }
     }
 
-    fn binding(app_id: &str, platform: &str, source_id: &str) -> SourceBinding {
-        SourceBinding {
-            app_id: app_id.to_string(),
-            platform: platform.to_string(),
-            source_id: source_id.to_string(),
-        }
-    }
-
-    fn active_row(app_id: &str) -> bundle_active_set::entities::app_active_versions::Model {
-        bundle_active_set::entities::app_active_versions::Model {
-            app_id: app_id.to_string(),
-            tenant_id: 1,
-            community_id: 0,
-            version_id: 10,
-        }
-    }
-
-    fn binding_row(
+    fn binding(
+        tenant_id: i32,
+        community_id: i32,
         app_id: &str,
         platform: &str,
         source_id: &str,
-    ) -> bundle_active_set::entities::app_source_bindings::Model {
-        bundle_active_set::entities::app_source_bindings::Model {
-            tenant_id: 1,
-            community_id: 0,
+    ) -> ResolvedBinding {
+        ResolvedBinding {
+            tenant_id,
+            community_id,
+            tenant_slug: format!("tenant{tenant_id}"),
+            community_name: None,
             app_id: app_id.to_string(),
             platform: platform.to_string(),
             source_id: source_id.to_string(),
@@ -571,12 +498,14 @@ mod tests {
     }
 
     /// Tenant-isolation regression test: the DB-resolved tenant slug/
-    /// community name (`crate::lib::resolve_scope`, never a hardcoded
-    /// scope) must be exactly what ends up in the Valkey stream key a
-    /// consumer actually reads.
+    /// community name must be exactly what ends up in the Valkey stream
+    /// key a consumer actually reads.
     #[test]
     fn binding_grant_uses_the_resolved_tenant_slug_and_community_name() {
-        let grant = binding_grant("acme", &Some("main".to_string()), "twitch", "tw-channelA");
+        let mut b = binding(7, 3, "waddles.a", "twitch", "tw-channelA");
+        b.tenant_slug = "acme".to_string();
+        b.community_name = Some("main".to_string());
+        let grant = binding_grant(&b);
         assert_eq!(
             grant.stream,
             "waddles:t:acme:c:main:src:twitch:tw-channelA:events"
@@ -587,7 +516,9 @@ mod tests {
 
     #[test]
     fn binding_grant_renders_the_tenant_wide_segment_for_no_community() {
-        let grant = binding_grant("acme", &None, "discord", "dg-x");
+        let mut b = binding(7, 0, "waddles.a", "discord", "dg-x");
+        b.tenant_slug = "acme".to_string();
+        let grant = binding_grant(&b);
         assert_eq!(
             grant.stream,
             "waddles:t:acme:c:_tenant:src:discord:dg-x:events"
@@ -632,13 +563,16 @@ mod tests {
         let metrics = test_metrics();
         reconcile(
             &mut running,
-            &[binding("waddles.a", "twitch", "tw-channelA")],
+            &[binding(1, 0, "waddles.a", "twitch", "tw-channelA")],
             &spawner,
             &metrics,
         )
         .await;
         assert_eq!(running.len(), 1);
-        assert_eq!(spawner.calls(), vec!["spawn:waddles.a:twitch:tw-channelA"]);
+        assert_eq!(
+            spawner.calls(),
+            vec!["spawn:1:0:waddles.a:twitch:tw-channelA"]
+        );
         assert_eq!(metrics.active_consumers.get(), 1);
         assert_eq!(
             metrics
@@ -654,12 +588,12 @@ mod tests {
         let mut running = HashMap::new();
         let spawner = RecordingSupervisor::default();
         let metrics = test_metrics();
-        let target = [binding("waddles.a", "twitch", "tw-channelA")];
+        let target = [binding(1, 0, "waddles.a", "twitch", "tw-channelA")];
         reconcile(&mut running, &target, &spawner, &metrics).await;
         reconcile(&mut running, &target, &spawner, &metrics).await;
         assert_eq!(
             spawner.calls(),
-            vec!["spawn:waddles.a:twitch:tw-channelA"],
+            vec!["spawn:1:0:waddles.a:twitch:tw-channelA"],
             "an already-running binding must not be re-spawned"
         );
     }
@@ -671,7 +605,7 @@ mod tests {
         let metrics = test_metrics();
         reconcile(
             &mut running,
-            &[binding("waddles.a", "twitch", "tw-channelA")],
+            &[binding(1, 0, "waddles.a", "twitch", "tw-channelA")],
             &spawner,
             &metrics,
         )
@@ -681,8 +615,8 @@ mod tests {
         assert_eq!(
             spawner.calls(),
             vec![
-                "spawn:waddles.a:twitch:tw-channelA".to_string(),
-                "stop:waddles.a:twitch:tw-channelA".to_string(),
+                "spawn:1:0:waddles.a:twitch:tw-channelA".to_string(),
+                "stop:1:0:waddles.a:twitch:tw-channelA".to_string(),
             ]
         );
         assert_eq!(metrics.active_consumers.get(), 0);
@@ -695,6 +629,30 @@ mod tests {
         );
     }
 
+    /// Multi-tenant regression: two DIFFERENT tenants binding the exact
+    /// same `(app_id, platform, source_id)` triple must run as two
+    /// independent consumers, never collapsed into one -- proves
+    /// `BindingKey` genuinely includes `(tenant_id, community_id)`, not
+    /// just the old single-tenant triple.
+    #[tokio::test]
+    async fn reconcile_runs_independent_consumers_for_the_same_triple_across_tenants() {
+        let mut running = HashMap::new();
+        let spawner = RecordingSupervisor::default();
+        let metrics = test_metrics();
+        reconcile(
+            &mut running,
+            &[
+                binding(1, 0, "waddles.a", "twitch", "tw-shared"),
+                binding(2, 0, "waddles.a", "twitch", "tw-shared"),
+            ],
+            &spawner,
+            &metrics,
+        )
+        .await;
+        assert_eq!(running.len(), 2, "each tenant gets its own consumer");
+        assert_eq!(metrics.active_consumers.get(), 2);
+    }
+
     #[tokio::test]
     async fn reconcile_handles_a_mixed_add_and_remove_tick() {
         let mut running = HashMap::new();
@@ -703,8 +661,8 @@ mod tests {
         reconcile(
             &mut running,
             &[
-                binding("waddles.unchanged", "twitch", "tw-a"),
-                binding("waddles.removed", "discord", "dg-x"),
+                binding(1, 0, "waddles.unchanged", "twitch", "tw-a"),
+                binding(1, 0, "waddles.removed", "discord", "dg-x"),
             ],
             &spawner,
             &metrics,
@@ -713,33 +671,14 @@ mod tests {
         reconcile(
             &mut running,
             &[
-                binding("waddles.unchanged", "twitch", "tw-a"),
-                binding("waddles.added", "discord", "dg-y"),
+                binding(1, 0, "waddles.unchanged", "twitch", "tw-a"),
+                binding(1, 0, "waddles.added", "discord", "dg-y"),
             ],
             &spawner,
             &metrics,
         )
         .await;
-        let mut keys: Vec<&BindingKey> = running.keys().collect();
-        keys.sort();
-        assert_eq!(
-            keys,
-            vec![
-                &(
-                    "waddles.added".to_string(),
-                    "discord".to_string(),
-                    "dg-y".to_string()
-                ),
-                &(
-                    "waddles.unchanged".to_string(),
-                    "twitch".to_string(),
-                    "tw-a".to_string()
-                ),
-            ]
-        );
-        // `calls()` records both spawns and stops: 2 initial spawns
-        // ("unchanged", "removed") + 1 stop ("removed" dropped from
-        // target) + 1 new spawn ("added") = 4.
+        assert_eq!(running.len(), 2);
         assert_eq!(
             spawner.calls().len(),
             4,
@@ -748,197 +687,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_tick_skips_all_db_work_when_the_gate_is_off() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-        let mut tracker = WatermarkTracker::new();
+    async fn stop_all_stops_every_running_consumer() {
         let mut running = HashMap::new();
         let spawner = RecordingSupervisor::default();
         let metrics = test_metrics();
-        run_tick(
-            &db,
-            1,
-            0,
-            &FixedGate(false),
-            &mut tracker,
+        reconcile(
             &mut running,
+            &[binding(1, 0, "waddles.a", "twitch", "tw-channelA")],
             &spawner,
             &metrics,
         )
         .await;
+        assert_eq!(running.len(), 1);
+        stop_all(&mut running, &metrics).await;
         assert!(running.is_empty());
-        assert!(spawner.calls().is_empty());
-    }
-
-    #[tokio::test]
-    async fn run_tick_stops_running_consumers_when_the_gate_flips_off() {
-        // A full tick (gate on, watermark changed, an active app) issues
-        // FOUR queries: `read_watermark`'s own `app_active_versions` +
-        // `app_source_bindings` pair, then `read_source_bindings`'s own
-        // independent `app_active_versions` + `app_source_bindings` pair
-        // (it re-derives the active-app set itself rather than reusing
-        // `read_watermark`'s, per `bundle_active_set::bindings`'s module
-        // doc). Tick 2 (gate off) issues zero queries -- the gate check is
-        // the very first thing `run_tick` does.
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([vec![active_row("waddles.a")]])
-            .append_query_results([vec![binding_row("waddles.a", "twitch", "tw-channelA")]])
-            .append_query_results([vec![active_row("waddles.a")]])
-            .append_query_results([vec![binding_row("waddles.a", "twitch", "tw-channelA")]])
-            .into_connection();
-        let mut tracker = WatermarkTracker::new();
-        let mut running = HashMap::new();
-        let spawner = RecordingSupervisor::default();
-        let metrics = test_metrics();
-        let gate = ToggleGate::new(true);
-
-        run_tick(
-            &db,
-            1,
-            0,
-            &gate,
-            &mut tracker,
-            &mut running,
-            &spawner,
-            &metrics,
-        )
-        .await;
-        assert_eq!(running.len(), 1);
-
-        gate.set(false);
-        run_tick(
-            &db,
-            1,
-            0,
-            &gate,
-            &mut tracker,
-            &mut running,
-            &spawner,
-            &metrics,
-        )
-        .await;
-        assert!(
-            running.is_empty(),
-            "kill-switch on must stop every running consumer"
-        );
-        assert_eq!(
-            spawner.calls(),
-            vec![
-                "spawn:waddles.a:twitch:tw-channelA".to_string(),
-                "stop:waddles.a:twitch:tw-channelA".to_string(),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn run_tick_skips_the_binding_read_when_the_watermark_is_unchanged() {
-        // Tick 1: a full tick (4 queries -- see
-        // `run_tick_stops_running_consumers_when_the_gate_flips_off`'s
-        // comment for why). Tick 2: `read_watermark`'s own 2 queries return
-        // byte-identical rows to tick 1's, so the watermark is unchanged and
-        // `read_source_bindings` must never run -- the trap 5th result is
-        // only consumed if that guarantee breaks.
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            .append_query_results([vec![active_row("waddles.a")]])
-            .append_query_results([vec![binding_row("waddles.a", "twitch", "tw-channelA")]])
-            .append_query_results([vec![active_row("waddles.a")]])
-            .append_query_results([vec![binding_row("waddles.a", "twitch", "tw-channelA")]])
-            .append_query_results([vec![active_row("waddles.a")]])
-            .append_query_results([vec![binding_row("waddles.a", "twitch", "tw-channelA")]])
-            // Trap: only consumed if tick 2 incorrectly re-reads bindings
-            // despite the unchanged watermark above.
-            .append_query_results([vec![binding_row("waddles.trap", "twitch", "tw-trap")]])
-            .into_connection();
-        let mut tracker = WatermarkTracker::new();
-        let mut running = HashMap::new();
-        let spawner = RecordingSupervisor::default();
-        let metrics = test_metrics();
-        let gate = FixedGate(true);
-
-        run_tick(
-            &db,
-            1,
-            0,
-            &gate,
-            &mut tracker,
-            &mut running,
-            &spawner,
-            &metrics,
-        )
-        .await;
-        run_tick(
-            &db,
-            1,
-            0,
-            &gate,
-            &mut tracker,
-            &mut running,
-            &spawner,
-            &metrics,
-        )
-        .await;
-
-        assert_eq!(
-            spawner.calls(),
-            vec!["spawn:waddles.a:twitch:tw-channelA"],
-            "tick 2's unchanged watermark must skip the binding read -- the trap must never spawn"
-        );
-    }
-
-    #[tokio::test]
-    async fn run_tick_stops_a_consumer_when_its_app_is_deactivated() {
-        let db = MockDatabase::new(DatabaseBackend::Postgres)
-            // Tick 1: full tick (4 queries).
-            .append_query_results([vec![active_row("waddles.a")]])
-            .append_query_results([vec![binding_row("waddles.a", "twitch", "tw-channelA")]])
-            .append_query_results([vec![active_row("waddles.a")]])
-            .append_query_results([vec![binding_row("waddles.a", "twitch", "tw-channelA")]])
-            // Tick 2: the app is no longer active -- `read_watermark`'s own
-            // `app_active_versions` query returns empty (still moving the
-            // watermark even though the binding row itself is untouched),
-            // then `read_source_bindings`' own ACTIVE-app filter
-            // (`bundle_active_set::bindings`'s module doc) short-circuits
-            // on the same empty active set without a second query.
-            .append_query_results([
-                Vec::<bundle_active_set::entities::app_active_versions::Model>::new(),
-            ])
-            .append_query_results([vec![binding_row("waddles.a", "twitch", "tw-channelA")]])
-            .append_query_results([
-                Vec::<bundle_active_set::entities::app_active_versions::Model>::new(),
-            ])
-            .into_connection();
-        let mut tracker = WatermarkTracker::new();
-        let mut running = HashMap::new();
-        let spawner = RecordingSupervisor::default();
-        let metrics = test_metrics();
-        let gate = FixedGate(true);
-
-        run_tick(
-            &db,
-            1,
-            0,
-            &gate,
-            &mut tracker,
-            &mut running,
-            &spawner,
-            &metrics,
-        )
-        .await;
-        assert_eq!(running.len(), 1);
-
-        run_tick(
-            &db,
-            1,
-            0,
-            &gate,
-            &mut tracker,
-            &mut running,
-            &spawner,
-            &metrics,
-        )
-        .await;
-        assert!(
-            running.is_empty(),
-            "a deactivated app's consumer must be stopped"
-        );
     }
 }

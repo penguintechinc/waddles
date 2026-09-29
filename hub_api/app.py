@@ -38,6 +38,7 @@ from quart_schema import Info, QuartSchema
 from blueprints import register_blueprints
 from config import HubAPIConfig
 from openapi.routes import register_openapi_docs
+from services.bundle_active_set_watermark_job import BundleActiveSetWatermarkJob
 from services.bundle_install_dal import build_install_dal
 from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
 from services.keystore_invalidation import build_invalidation_publisher
@@ -291,6 +292,17 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
                     extra={"error": str(exc)},
                 )
 
+        # data-plane scale design rev4 Sec7 -- the bundle_active_set_watermark
+        # safe_seq publisher. Postgres-only: pg_snapshot_xmin() has no sqlite
+        # equivalent, and every non-Postgres config here is a test harness
+        # (see bundle_install_dal._PYDAL_MEMORY_URI's own docstring), never a
+        # real deployment.
+        watermark_job: BundleActiveSetWatermarkJob | None = None
+        if cfg.database_url.startswith("postgres"):
+            watermark_job = BundleActiveSetWatermarkJob(install_dal)
+            watermark_job.start()
+        app.config["bundle_active_set_watermark_job"] = watermark_job
+
         logger.system("hub-api started", action="startup", result="SUCCESS")
 
     @app.after_serving
@@ -308,6 +320,12 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         shared lib from this PR). Failing to release the pool cleanly on
         shutdown must never crash the ASGI lifespan.
         """
+        watermark_job = app.config.get("bundle_active_set_watermark_job")
+        if watermark_job is not None:
+            try:
+                await watermark_job.stop()
+            except Exception as exc:  # noqa: BLE001 - shutdown must not raise
+                logger.warning(f"Error stopping bundle_active_set_watermark_job on shutdown: {exc}")
         async_dal = app.config.get("async_dal")
         if async_dal is not None:
             try:

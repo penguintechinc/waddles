@@ -16,7 +16,9 @@
 # query/diff logic), so the build context must include core/bundle_active_set
 # too or `cargo build` fails closed with "unable to update /bundle_active_set"
 # (no such file). Run from core/:
-#   docker build -f svc_process/Dockerfile.rust -t localhost:32000/waddlebot/svc-process:alpha-<epoch> .
+#   docker build -f svc_process/Dockerfile.rust -t localhost:32000/waddlebot/svc-process-rust:alpha-<epoch> .
+# ("svc-process-rust", not "svc-process" -- fix/helm-alpha-self-provisioning, see
+# core/svc_ingest/Dockerfile.rust's identical comment.)
 
 FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
 
@@ -27,7 +29,7 @@ COPY bundle_active_set ./bundle_active_set
 WORKDIR /build/svc_process
 RUN cargo build --release --locked
 
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
 
 # `ca-certificates` for rustls (webpki/native roots) on outbound TLS
 # (reqwest, sea-orm's runtime-tokio-rustls, OTLP).
