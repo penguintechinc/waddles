@@ -178,6 +178,45 @@ pub fn register_source_binding_supervisor_metrics(
     }
 }
 
+/// Prometheus handle for `crate::circuit_breaker::CircuitBreaker` (connector
+/// spec SS0 condition 5): one counter, labeled by `source`/`action`
+/// (`action` in `"failure"`/`"opened"`/`"closed"`), so a source flapping
+/// open/closed or a fault storm across many sources is visible on a
+/// dashboard rather than only in the `alert=true` log line
+/// `CircuitBreaker::record_failure` emits on each trip.
+#[derive(Clone)]
+pub struct CircuitBreakerMetrics {
+    pub transitions_total: prometheus::IntCounterVec,
+}
+
+/// Registers [`CircuitBreakerMetrics`] against `registry`. Must be called
+/// exactly once per `registry` -- see
+/// [`register_bundle_loader_excluded_metrics`]'s identical constraint.
+pub fn register_circuit_breaker_metrics(registry: &prometheus::Registry) -> CircuitBreakerMetrics {
+    let transitions_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_circuit_breaker_transitions_total",
+            "Per-source circuit breaker transitions (failure/opened/closed), labeled by \
+             source/action",
+        ),
+        &["source", "action"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(transitions_total.clone()))
+        .expect("register svc_process_circuit_breaker_transitions_total");
+
+    CircuitBreakerMetrics { transitions_total }
+}
+
+impl crate::circuit_breaker::CircuitBreakerMetrics for CircuitBreakerMetrics {
+    fn transition(&self, source: &str, action: &str) {
+        self.transitions_total
+            .with_label_values(&[source, action])
+            .inc();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +266,18 @@ mod tests {
         let registry = prometheus::Registry::new();
         let rendered = render_metrics(&registry).expect("empty registry still encodes");
         assert!(rendered.is_empty());
+    }
+
+    #[test]
+    fn register_circuit_breaker_metrics_produces_a_labeled_counter() {
+        use crate::circuit_breaker::CircuitBreakerMetrics as _;
+        let registry = prometheus::Registry::new();
+        let metrics = register_circuit_breaker_metrics(&registry);
+        metrics.transition("source-a", "opened");
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_process_circuit_breaker_transitions_total"));
+        assert!(rendered.contains(r#"source="source-a""#));
+        assert!(rendered.contains(r#"action="opened""#));
     }
 
     #[test]

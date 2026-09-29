@@ -37,6 +37,7 @@
 pub mod builtins;
 pub mod bundle_loader;
 pub mod capabilities;
+pub mod circuit_breaker;
 pub mod config;
 pub mod error;
 pub mod hop;
@@ -116,6 +117,11 @@ where
         telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
     let source_supervisor_metrics =
         telemetry::register_source_binding_supervisor_metrics(&prom_registry);
+    // Connector spec SS0 condition 5: the per-source circuit breaker's
+    // Prometheus handle, registered here for the same "before prom_registry
+    // moves into AppState" reason as the two metrics above.
+    let circuit_breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics> =
+        Arc::new(telemetry::register_circuit_breaker_metrics(&prom_registry));
 
     let state = http::AppState::new(config.clone(), prom_registry);
 
@@ -140,6 +146,7 @@ where
             connections,
             bundle_loader_excluded_metric,
             source_supervisor_metrics,
+            circuit_breaker_metrics,
         );
     } else {
         tracing::info!(
@@ -147,7 +154,7 @@ where
              DB_READER_*/BUNDLE_SCOPE_TENANT_ID not configured); using legacy \
              PROCESS_APP_ID/PROCESS_INGEST_* env selection"
         );
-        try_start_process_loop(&config, connections);
+        try_start_process_loop(&config, connections, circuit_breaker_metrics);
     }
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
@@ -252,7 +259,11 @@ fn try_start_host_api(cli: &config::CliConfig) -> Arc<host_api::ConnectionRegist
 ///   downstream decision -- this hardcoding only affects which stream
 ///   `PROCESS_INGEST_PLATFORM`/`_SOURCE_ID` resolves to), identical scope
 ///   to `core/svc_action::try_start_dispatch`'s own documented gap.
-fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::ConnectionRegistry>) {
+fn try_start_process_loop(
+    config: &config::Config,
+    connections: Arc<host_api::ConnectionRegistry>,
+    breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
+) {
     if config.cli.process_app_id.is_empty() {
         tracing::info!(
             "PROCESS_APP_ID not set; process loop not started (blocked on distribution poll)"
@@ -345,6 +356,7 @@ fn try_start_process_loop(config: &config::Config, connections: Arc<host_api::Co
             },
             metrics,
             license: license_gate,
+            breaker: Arc::new(circuit_breaker::CircuitBreaker::new(breaker_metrics)),
         };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -451,6 +463,7 @@ fn try_start_db_bundle_loader(
     connections: Arc<host_api::ConnectionRegistry>,
     excluded_metric: prometheus::IntCounterVec,
     source_supervisor_metrics: telemetry::SourceBindingSupervisorMetrics,
+    breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
@@ -496,8 +509,12 @@ fn try_start_db_bundle_loader(
     // accepts. Tenant/community scope is deliberately NOT included here --
     // see [`SupervisorPrereqs`]'s own doc for why that half can only be
     // resolved once the RO reader connection exists.
-    let supervisor_prereqs =
-        build_source_supervisor_prereqs(config, Arc::clone(&connections), Arc::clone(&gate));
+    let supervisor_prereqs = build_source_supervisor_prereqs(
+        config,
+        Arc::clone(&connections),
+        Arc::clone(&gate),
+        breaker_metrics,
+    );
 
     tokio::spawn(async move {
         let db = match bundle_active_set::reader::connect(&reader_cfg, &password).await {
@@ -609,6 +626,7 @@ struct SupervisorPrereqs {
     approved_targets: std::collections::HashMap<String, String>,
     metrics: Arc<dyn penguin_spine::SpineMetrics>,
     license: Arc<dyn license::FeatureGate>,
+    breaker: Arc<circuit_breaker::CircuitBreaker>,
 }
 
 /// Builds [`SupervisorPrereqs`] from `config`'s optional dependencies, or
@@ -621,6 +639,7 @@ fn build_source_supervisor_prereqs(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
     gate: Arc<dyn license::FeatureGate>,
+    breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
 ) -> Option<SupervisorPrereqs> {
     let Some(keys_raw) = config.envelope_binding_keys.as_ref() else {
         tracing::warn!(
@@ -654,6 +673,7 @@ fn build_source_supervisor_prereqs(
         approved_targets,
         metrics,
         license: gate,
+        breaker: Arc::new(circuit_breaker::CircuitBreaker::new(breaker_metrics)),
     })
 }
 
@@ -679,6 +699,7 @@ fn finish_supervisor_deps(
         license: prereqs.license,
         tenant: resolved.tenant_slug,
         community: resolved.community_name,
+        breaker: prereqs.breaker,
     }
 }
 
@@ -835,6 +856,7 @@ mod tests {
             approved_targets: std::collections::HashMap::new(),
             metrics: Arc::new(penguin_spine::NoopMetrics),
             license: Arc::new(crate::license::test_support::FixedGate(true)),
+            breaker: Arc::new(circuit_breaker::CircuitBreaker::new(Arc::new(()))),
         }
     }
 
@@ -964,6 +986,7 @@ mod tests {
             Arc::new(host_api::ConnectionRegistry::new()),
             test_excluded_metric(),
             test_source_supervisor_metrics(),
+            Arc::new(()),
         );
     }
 
@@ -981,6 +1004,7 @@ mod tests {
             Arc::new(host_api::ConnectionRegistry::new()),
             test_excluded_metric(),
             test_source_supervisor_metrics(),
+            Arc::new(()),
         );
     }
 
@@ -1003,6 +1027,7 @@ mod tests {
             Arc::new(host_api::ConnectionRegistry::new()),
             test_excluded_metric(),
             test_source_supervisor_metrics(),
+            Arc::new(()),
         );
     }
 
@@ -1046,7 +1071,11 @@ mod tests {
         let cli = CliConfig::parse_from(["svc-process"]);
         assert_eq!(cli.process_app_id, "");
         let config = test_config(cli);
-        try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+        try_start_process_loop(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            Arc::new(()),
+        );
     }
 
     #[tokio::test]
@@ -1058,7 +1087,11 @@ mod tests {
         ]);
         let mut config = test_config(cli);
         config.envelope_binding_keys = None;
-        try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+        try_start_process_loop(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            Arc::new(()),
+        );
     }
 
     #[tokio::test]
@@ -1070,7 +1103,11 @@ mod tests {
         ]);
         let mut config = test_config(cli);
         config.envelope_binding_keys = Some(crate::config::Secret::new("not-kid-colon-hex"));
-        try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+        try_start_process_loop(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            Arc::new(()),
+        );
     }
 
     #[tokio::test]
@@ -1092,7 +1129,11 @@ mod tests {
             "waddles.bot.commands.default",
         ]);
         let config = test_config(cli);
-        try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+        try_start_process_loop(
+            &config,
+            Arc::new(host_api::ConnectionRegistry::new()),
+            Arc::new(()),
+        );
     }
 
     #[tokio::test]
@@ -1121,7 +1162,11 @@ mod tests {
                 "waddles.bot.commands.default",
             ]);
             let config = test_config(cli);
-            try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+            try_start_process_loop(
+                &config,
+                Arc::new(host_api::ConnectionRegistry::new()),
+                Arc::new(()),
+            );
             unsafe {
                 std::env::remove_var("VALKEY_URL");
                 std::env::remove_var("VALKEY_PASSWORD");
@@ -1157,7 +1202,11 @@ mod tests {
                 "tw-channelA",
             ]);
             let config = test_config(cli);
-            try_start_process_loop(&config, Arc::new(host_api::ConnectionRegistry::new()));
+            try_start_process_loop(
+                &config,
+                Arc::new(host_api::ConnectionRegistry::new()),
+                Arc::new(()),
+            );
             unsafe {
                 std::env::remove_var("VALKEY_URL");
                 std::env::remove_var("VALKEY_PASSWORD");

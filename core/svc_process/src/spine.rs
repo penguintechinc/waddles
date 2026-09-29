@@ -48,6 +48,7 @@ use penguin_spine::{
 
 use crate::builtins::RouteDecision;
 use crate::capabilities::{CapabilityHandler, StageCapabilities};
+use crate::circuit_breaker::CircuitBreaker;
 use crate::hop::KeyRing;
 use crate::host_api::{Connection, ConnectionRegistry, HostApiError};
 use crate::license::FeatureGate;
@@ -276,6 +277,21 @@ fn error_code_to_dlq_kind(code: ErrorCode) -> DlqErrorKind {
     }
 }
 
+/// Whether `code` names a guest fault (connector spec SS0 condition 5: guest
+/// trap, epoch/fuel timeout, or memory-cap OOM) as opposed to a broken bundle
+/// registration or a connection-level problem -- the three `ErrorCode`
+/// variants `crate::circuit_breaker::CircuitBreaker` should count against a
+/// source, since they are the ones a *guest*, not a host/registration bug,
+/// produced. Kept separate from [`error_code_to_dlq_kind`]'s DLQ-kind
+/// grouping (which serves a different purpose -- DLQ triage buckets) even
+/// though the fault-classifying variants happen to coincide.
+fn is_guest_fault(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::ExecutorDeadline | ErrorCode::MemoryLimit | ErrorCode::WasmTrap
+    )
+}
+
 /// Invokes the bundle's `transform` export for one delivered event over
 /// `conn`, scoped to `capabilities` for exactly this call (see
 /// `crate::host_api`'s per-invoke scoping design). Returns the classified
@@ -450,6 +466,15 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `reader.read()` at all (drains nothing; `/health`/`/metrics` are
     /// unaffected, since they run on entirely separate tasks).
     pub license: Arc<dyn FeatureGate>,
+    /// Connector spec SS0 condition 5: per-source (keyed by `d.stream`, the
+    /// closest identity svc_process has to a source/connection) circuit
+    /// breaker. [`handle_delivered`] checks [`CircuitBreaker::allow`] before
+    /// every invoke and reports guest faults (executor deadline/memory
+    /// limit/wasm trap -- see [`is_guest_fault`]) via
+    /// [`CircuitBreaker::record_failure`], so a repeatedly-faulting source
+    /// gets disabled (dead-lettered without ever reaching the executor)
+    /// without affecting any other source or tenant.
+    pub breaker: Arc<CircuitBreaker>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -498,6 +523,28 @@ async fn handle_delivered<S: SpineOps>(
             kind: DlqErrorKind::TenantBoundary,
             code: "TENANT_BOUNDARY".to_string(),
             message: reason.to_string(),
+            detail: None,
+            artifact_digest: Some(deps.digest.clone()),
+            consumer_id: deps.consumer_id.clone(),
+        };
+        return deps.spine.dead_letter(d, &err).await;
+    }
+
+    // Connector spec SS0 condition 5: a source with too many recent guest
+    // faults is disabled -- dead-lettered for redelivery without ever
+    // reaching the executor, so a source stuck in a fault loop cannot burn
+    // executor capacity that other sources/tenants need. `d.stream` is the
+    // per-source key (see `ProcessDeps::breaker`'s doc).
+    if !deps.breaker.allow(&d.stream) {
+        tracing::warn!(
+            app_id = %deps.app_id,
+            source = %d.stream,
+            "circuit breaker open for this source, dead-lettering without invoking"
+        );
+        let err = DlqError {
+            kind: DlqErrorKind::ExecutorUnavailable,
+            code: "SOURCE_CIRCUIT_OPEN".to_string(),
+            message: format!("source {} disabled by circuit breaker", d.stream),
             detail: None,
             artifact_digest: Some(deps.digest.clone()),
             consumer_id: deps.consumer_id.clone(),
@@ -580,6 +627,9 @@ async fn handle_delivered<S: SpineOps>(
 
     let event_out = match outcome {
         Err(InvokeError::ExecutorError { code, message }) => {
+            if is_guest_fault(code) {
+                deps.breaker.record_failure(&d.stream);
+            }
             let kind = error_code_to_dlq_kind(code);
             tracing::error!(app_id = %deps.app_id, ?code, %message, "transform invoke failed, dead-lettering");
             let err = DlqError {
@@ -617,10 +667,14 @@ async fn handle_delivered<S: SpineOps>(
             return deps.spine.dead_letter(d, &err).await;
         }
         Ok(TransformOutcome::NoReply) => {
+            deps.breaker.record_success(&d.stream);
             tracing::info!(app_id = %deps.app_id, "transform returned no reply");
             return deps.spine.ack(d, &deps.app_id).await;
         }
-        Ok(TransformOutcome::Reply(event)) => *event,
+        Ok(TransformOutcome::Reply(event)) => {
+            deps.breaker.record_success(&d.stream);
+            *event
+        }
     };
 
     let mut event_out = event_out;
@@ -1025,6 +1079,7 @@ mod tests {
             // unaffected -- the gate's own OFF/ON behavior is exercised
             // directly by the `license_gate_*` tests below.
             license: Arc::new(crate::license::test_support::FixedGate(true)),
+            breaker: Arc::new(CircuitBreaker::new(Arc::new(()))),
         };
         (deps, metrics)
     }

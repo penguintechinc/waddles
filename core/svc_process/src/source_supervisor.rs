@@ -115,6 +115,12 @@ pub struct SupervisorDeps {
     /// when resolution fails, rather than falling back to a guessed value.
     pub tenant: String,
     pub community: Option<String>,
+    /// Connector spec SS0 condition 5: shared across every per-binding
+    /// consumer task this supervisor runs, so a source's guest-fault history
+    /// persists across `run_binding_consumer`'s reconnect loop and stays
+    /// keyed independently per `(platform, source_id)` -- see
+    /// `crate::spine::ProcessDeps::breaker`'s doc for the full rationale.
+    pub breaker: Arc<crate::circuit_breaker::CircuitBreaker>,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -240,6 +246,7 @@ async fn run_binding_consumer(
             spine: spine_client,
             metrics: deps.metrics.clone(),
             license: Arc::clone(&deps.license),
+            breaker: Arc::clone(&deps.breaker),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();
