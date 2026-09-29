@@ -192,6 +192,20 @@ impl<L: GrantLoader> GrantCache<L> {
     pub fn invalidate(&self, key: &GrantScopeKey) {
         self.memo.write().expect("lock poisoned").remove(key);
     }
+
+    /// Every key currently resident in the memo -- the poll-fallback path
+    /// (spec SS4: "the existing 300s poll as a fallback" alongside push
+    /// invalidation) iterates this to re-[`Self::refresh`] each one, since a
+    /// poll tick has no invalidation payload naming a single key the way a
+    /// `bundle:grants:invalidate` pub/sub message does.
+    pub fn keys(&self) -> Vec<GrantScopeKey> {
+        self.memo
+            .read()
+            .expect("lock poisoned")
+            .keys()
+            .cloned()
+            .collect()
+    }
 }
 
 impl<L: GrantLoader> GrantSnapshot for GrantCache<L> {

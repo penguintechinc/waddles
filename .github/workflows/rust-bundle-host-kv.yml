@@ -1,17 +1,15 @@
-name: Rust svc-action (lint + test)
+name: Rust bundle-host-kv (lint + test)
 
 on:
   push:
     branches: [main, 'release/**']
     paths:
-      - 'core/svc_action/**'
       - 'core/bundle_host_kv/**'
-      - '.github/workflows/rust-svc-action.yml'
+      - '.github/workflows/rust-bundle-host-kv.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
     branches: [main, 'release/**']
     paths:
-      - 'core/svc_action/**'
       - 'core/bundle_host_kv/**'
   workflow_dispatch:
 
@@ -23,8 +21,7 @@ jobs:
     name: fmt + clippy + deny + coverage
     uses: ./.github/workflows/rust-crate-ci.yml
     with:
-      crate_name: svc-action
-      working_directory: core/svc_action
-      # ring needs a C compiler to build its crypto primitives.
-      extra_apt_packages: build-essential
-      extra_apt_reason: 'for ring (C compiler)'
+      crate_name: bundle-host-kv
+      working_directory: core/bundle_host_kv
+      # `tests/valkey_integration.rs` starts a real Valkey container via
+      # `testcontainers` -- needs Docker, which `ubuntu-latest` ships.

@@ -150,6 +150,28 @@ pub fn register_bundle_loader_excluded_metrics(
     excluded_total
 }
 
+/// A delivery whose pinned digest was superseded by a hot swap, but whose
+/// `app_id` is still active in scope, is redirected onto the app's CURRENT
+/// digest/version rather than dead-lettered (spec: a bundle upgrade must
+/// never silently drop in-flight deliveries) -- incremented once per
+/// redirected delivery by `dispatch::handle_delivered`, labeled by
+/// `app_id` so a spike is attributable to a specific bundle's rollout.
+pub fn register_redirect_metrics(registry: &prometheus::Registry) -> prometheus::IntCounterVec {
+    let redirected_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_action_redirected_after_upgrade_total",
+            "Deliveries redirected onto the app's current active digest/version after a hot \
+             swap superseded the pinned digest, by app_id",
+        ),
+        &["app_id"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(redirected_total.clone()))
+        .expect("register svc_action_redirected_after_upgrade_total");
+    redirected_total
+}
+
 /// Prometheus handles for `crate::changelog_consumer` (dataplane scale
 /// design rev 4, §7/§8 step 2 -- multi-tenant, change-log-driven active-set
 /// loader). Direct port of `core/svc_process::telemetry::

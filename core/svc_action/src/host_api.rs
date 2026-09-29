@@ -559,6 +559,50 @@ mod tests {
         HelloBody, HelloLimits, InvokeBody, LoadBody, LoadLimits, LoadedBody, SandboxInfo,
     };
 
+    /// A permissive [`bundle_capability_gate::CapabilityGate`] for this
+    /// module's `StageCapabilities` construction sites -- these tests
+    /// exercise the host-API connection/frame layer, not the gate itself
+    /// (`crate::capabilities`'s own tests cover that), so every relevant
+    /// permission is pre-granted here.
+    fn test_gate() -> Arc<bundle_capability_gate::CapabilityGate> {
+        let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+        let mut grants = std::collections::HashMap::new();
+        for id in [
+            "platform.context",
+            "platform.clock",
+            "platform.log",
+            "storage.kv",
+            "chat.send:twitch",
+            "chat.send:discord",
+        ] {
+            grants.insert(
+                id.to_string(),
+                bundle_capability_gate::GrantedPermission {
+                    permission_id: id.to_string(),
+                    params: serde_json::json!({}),
+                },
+            );
+        }
+        snapshot.set(
+            bundle_capability_gate::GrantScopeKey {
+                tenant_id: 7,
+                community_id: 0,
+                app_id: "waddles.bot.commands.default".to_string(),
+                app_version: 1,
+            },
+            bundle_capability_gate::GrantSet {
+                permission_snapshot_hash: "test".to_string(),
+                grants,
+            },
+        );
+        Arc::new(bundle_capability_gate::CapabilityGate::new(
+            Arc::new(snapshot),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ))
+    }
+
     fn test_limits() -> HelloLimits {
         HelloLimits {
             call_timeout_ms: 2000,
@@ -770,10 +814,14 @@ mod tests {
             .unwrap(),
             crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
+        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
+            _,
+            redis::aio::MultiplexedConnection,
+        >::new(
             NoopQueue,
             egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+            test_gate(),
         ));
 
         let executor = tokio::spawn(async move {
@@ -903,6 +951,9 @@ mod tests {
                     community: None,
                     app_id: "waddles.bot.commands.default".to_string(),
                     origin_channel_id: None,
+                    tenant_id: 7,
+                    community_id: 0,
+                    app_version: 1,
                 },
             )
             .await
@@ -989,10 +1040,14 @@ mod tests {
                 self.0.lpush(key, value)
             }
         }
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
+        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
+            _,
+            redis::aio::MultiplexedConnection,
+        >::new(
             SharedQueue(Arc::clone(&relay_queue)),
             egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+            test_gate(),
         ));
 
         let executor = tokio::spawn(async move {
@@ -1119,6 +1174,9 @@ mod tests {
                     community: Some("main".to_string()),
                     app_id: "waddles.bot.commands.default".to_string(),
                     origin_channel_id: None,
+                    tenant_id: 7,
+                    community_id: 0,
+                    app_version: 1,
                 },
             )
             .await
@@ -1183,10 +1241,14 @@ mod tests {
             .unwrap(),
             crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
+        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
+            _,
+            redis::aio::MultiplexedConnection,
+        >::new(
             NoopQueue,
             egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+            test_gate(),
         ));
 
         let executor = tokio::spawn(async move {
@@ -1287,10 +1349,14 @@ mod tests {
             .unwrap(),
             crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
+        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
+            _,
+            redis::aio::MultiplexedConnection,
+        >::new(
             NoopQueue,
             egress,
             Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+            test_gate(),
         ));
 
         let executor = tokio::spawn(async move {
@@ -1412,6 +1478,9 @@ mod tests {
                     community: None,
                     app_id: "waddles.bot.commands.default".to_string(),
                     origin_channel_id: None,
+                    tenant_id: 7,
+                    community_id: 0,
+                    app_version: 1,
                 },
             ),
             connection.invoke(
@@ -1428,6 +1497,9 @@ mod tests {
                     community: None,
                     app_id: "waddles.bot.commands.default".to_string(),
                     origin_channel_id: None,
+                    tenant_id: 7,
+                    community_id: 0,
+                    app_version: 1,
                 },
             ),
         );

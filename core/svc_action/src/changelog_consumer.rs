@@ -193,8 +193,21 @@ async fn apply_active_set(
     state: &mut ConsumerState,
     sink: Option<&dyn BundleSink>,
     excluded_metric: &prometheus::IntCounterVec,
+    app_version_snapshot: &bundle_active_set::ActiveVersionSnapshot,
 ) {
     let active = bundle_active_set::scoped_active_rows(&state.by_scope);
+    // Feeds `crate::dispatch::DispatchDeps::app_version_snapshot` (bundle
+    // capability-gate wiring, spec SS12 Phase 4) from the SAME DB truth
+    // this consumer just applied -- never a value captured once at
+    // startup. Flattened onto `app_id` alone (dropping the `(tenant,
+    // community)` scope `active` itself still preserves) is safe ONLY
+    // because `crate::dispatch`'s own dispatch loop is itself still
+    // single-`app_id`-per-pod, hardcoded to the `global` tenant scope
+    // (`crate::lib::try_start_dispatch`'s own TODO(M3+)) -- this does NOT
+    // reintroduce the retired multi-tenant collapse bug this module's own
+    // doc warns about, since that bug was about the executor load/unload
+    // signaling above, which stays scope-preserving via `plan_scoped`.
+    app_version_snapshot.update(&active.values().cloned().collect::<Vec<_>>());
     for active_set in state.by_scope.values() {
         for (app_id, reason) in &active_set.excluded {
             excluded_metric
@@ -294,12 +307,14 @@ fn update_tenant_gauges(state: &ConsumerState, metrics: &ChangelogConsumerMetric
 /// `last_seq + 1` -- remains the sole detector until upgraded. Either path
 /// short-circuits to a full multi-tenant reconcile instead of a partial
 /// apply, resetting the tracker to `safe_seq`.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_incremental_tick(
     db: &DatabaseConnection,
     state: &mut ConsumerState,
     sink: Option<&dyn BundleSink>,
     excluded_metric: &prometheus::IntCounterVec,
     metrics: &ChangelogConsumerMetrics,
+    app_version_snapshot: &bundle_active_set::ActiveVersionSnapshot,
 ) {
     let start = Instant::now();
     let watermark =
@@ -329,7 +344,15 @@ pub async fn run_incremental_tick(
              (min_retained_seq); forcing a full reconcile instead of a partial apply"
         );
         metrics.changelog_retention_exceeded_total.inc();
-        run_full_reconcile(db, state, sink, excluded_metric, metrics).await;
+        run_full_reconcile(
+            db,
+            state,
+            sink,
+            excluded_metric,
+            metrics,
+            app_version_snapshot,
+        )
+        .await;
         state.tracker.advance(safe_seq);
         metrics.changelog_lag.set(state.tracker.lag(safe_seq));
         return;
@@ -356,7 +379,15 @@ pub async fn run_incremental_tick(
                  after falling behind); forcing a full reconcile instead of a partial apply"
             );
             metrics.changelog_gap_detected_total.inc();
-            run_full_reconcile(db, state, sink, excluded_metric, metrics).await;
+            run_full_reconcile(
+                db,
+                state,
+                sink,
+                excluded_metric,
+                metrics,
+                app_version_snapshot,
+            )
+            .await;
             state.tracker.advance(safe_seq);
             metrics.changelog_lag.set(state.tracker.lag(safe_seq));
             return;
@@ -419,7 +450,7 @@ pub async fn run_incremental_tick(
     state.tracker.advance(new_last_seq);
     metrics.changelog_lag.set(state.tracker.lag(safe_seq));
 
-    apply_active_set(state, sink, excluded_metric).await;
+    apply_active_set(state, sink, excluded_metric, app_version_snapshot).await;
     update_tenant_gauges(state, metrics);
     metrics
         .reconcile_duration_seconds
@@ -439,6 +470,7 @@ pub async fn run_full_reconcile(
     sink: Option<&dyn BundleSink>,
     excluded_metric: &prometheus::IntCounterVec,
     metrics: &ChangelogConsumerMetrics,
+    app_version_snapshot: &bundle_active_set::ActiveVersionSnapshot,
 ) {
     let start = Instant::now();
     match bundle_active_set::read_active_set_all(db).await {
@@ -457,7 +489,7 @@ pub async fn run_full_reconcile(
         }
     }
 
-    apply_active_set(state, sink, excluded_metric).await;
+    apply_active_set(state, sink, excluded_metric, app_version_snapshot).await;
     update_tenant_gauges(state, metrics);
 
     metrics
@@ -478,6 +510,7 @@ pub async fn run(
     connections: Arc<crate::host_api::ConnectionRegistry>,
     excluded_metric: prometheus::IntCounterVec,
     metrics: ChangelogConsumerMetrics,
+    app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
     let mut state = match initial_state(&db).await {
@@ -487,6 +520,15 @@ pub async fn run(
             return;
         }
     };
+    // Seed `app_version_snapshot` from the same startup full read, before
+    // the first tick -- see `apply_active_set`'s doc for why flattening
+    // onto `app_id` here is safe.
+    app_version_snapshot.update(
+        &bundle_active_set::scoped_active_rows(&state.by_scope)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
 
     let mut poll_tick = tokio::time::interval(poll_interval);
     poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -526,13 +568,13 @@ pub async fn run(
                     );
                     continue;
                 }
-                run_incremental_tick(&db, &mut state, sink_ref, &excluded_metric, &metrics).await;
+                run_incremental_tick(&db, &mut state, sink_ref, &excluded_metric, &metrics, &app_version_snapshot).await;
             }
             _ = reconcile_tick.tick() => {
                 if !flag.enabled().await {
                     continue;
                 }
-                run_full_reconcile(&db, &mut state, sink_ref, &excluded_metric, &metrics).await;
+                run_full_reconcile(&db, &mut state, sink_ref, &excluded_metric, &metrics, &app_version_snapshot).await;
             }
         }
     }
@@ -765,6 +807,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_excluded_metric(),
             &metrics,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
 
@@ -786,6 +829,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_excluded_metric(),
             &test_changelog_metrics(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert!(sink.calls().is_empty());
@@ -810,6 +854,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_excluded_metric(),
             &test_changelog_metrics(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -850,6 +895,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_excluded_metric(),
             &metrics,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -882,6 +928,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_excluded_metric(),
             &test_changelog_metrics(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(state.last_seq(), 120);
@@ -905,6 +952,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_excluded_metric(),
             &test_changelog_metrics(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -935,6 +983,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_excluded_metric(),
             &test_changelog_metrics(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(state.last_seq(), 101);
@@ -959,6 +1008,7 @@ mod tests {
                 rows: vec![bundle_active_set::ActiveBundleRow {
                     app_id: "waddles.a".to_string(),
                     version: "1".to_string(),
+                    version_id: 0,
                     digest: "sha256:00".to_string(),
                     component_key: "k".to_string(),
                     sidecar_key: "s".to_string(),
@@ -980,6 +1030,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_excluded_metric(),
             &test_changelog_metrics(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
 
@@ -1007,6 +1058,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_excluded_metric(),
             &metrics,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
 
@@ -1037,6 +1089,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_excluded_metric(),
             &metrics,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
 
@@ -1061,6 +1114,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_excluded_metric(),
             &test_changelog_metrics(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(

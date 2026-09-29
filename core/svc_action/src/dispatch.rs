@@ -201,6 +201,7 @@ fn envelope_to_wire_json(env: &StageEnvelope) -> Result<serde_json::Value, Invok
 /// [`envelope_to_wire_json`] -- see that function's doc for the wire-shape
 /// bug this replaced. Returns the raw `result.payload` JSON for
 /// [`interpret_dispatch_payload`] to classify.
+#[allow(clippy::too_many_arguments)]
 pub async fn invoke_dispatch(
     conn: &Connection,
     app_id: &str,
@@ -208,6 +209,9 @@ pub async fn invoke_dispatch(
     env: &StageEnvelope,
     config_json: &str,
     deadline_ms: u64,
+    tenant_id: i32,
+    community_id: i32,
+    app_version: i64,
 ) -> Result<serde_json::Value, InvokeError> {
     let trace = env.trace.as_ref().map(|t| TraceContext {
         traceparent: t.traceparent.clone(),
@@ -230,6 +234,16 @@ pub async fn invoke_dispatch(
         // discord) -- `None` when the platform/event has no channel
         // concept. Never re-derived from anything a bundle returns.
         origin_channel_id: env.event.source.as_ref().and_then(|s| s.channel_id.clone()),
+        tenant_id,
+        community_id,
+        // Resolved once at startup from the active-set row that loaded
+        // `digest` (`crate::lib::try_start_dispatch`'s `resolve_action_app_version`
+        // call, mirroring `core/svc_process::lib::resolve_app_version_id`) --
+        // never `0` for a live invocation (spec SS4/SS5.1: grants are keyed
+        // `(tenant, community, app, app_version)`; `0` only ever matches a
+        // grant row also written under version `0`, never a real approved
+        // version).
+        app_version,
     };
     let reply = conn
         .invoke(
@@ -436,6 +450,22 @@ impl SpineOps for SpineClient {
 pub struct DispatchDeps<A: AuditSink, T: TenantResolver, S: SpineOps> {
     pub app_id: String,
     pub digest: String,
+    /// The live, poll-refreshed `app_id -> (digest, app_versions.id)`
+    /// snapshot (`crate::lib::try_start_dispatch`'s shared handle,
+    /// populated every tick by `crate::bundle_loader::run_tick`) --
+    /// resolved PER INVOCATION in [`handle_delivered`], never captured once
+    /// as a plain `i64`: a bundle hot-swap must be reflected on the very
+    /// next invocation (spec SS4/SS5.1). When `digest` has been superseded
+    /// but `app_id` is STILL active in this scope, the delivery is
+    /// redirected onto the app's current digest/version (a bundle upgrade
+    /// must never silently drop in-flight deliveries) rather than
+    /// dead-lettered -- fail-closed is reserved for an `app_id` no longer
+    /// active at all (deactivated/revoked). See [`handle_delivered`]'s doc.
+    pub app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    /// Incremented once per redirected delivery (see
+    /// `app_version_snapshot`'s doc) -- `crate::telemetry::
+    /// register_redirect_metrics`.
+    pub redirected_metric: prometheus::IntCounterVec,
     pub config_json: String,
     pub key_ring: KeyRing,
     pub connections: Arc<ConnectionRegistry>,
@@ -486,6 +516,68 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
         return deps.spine.dead_letter(d, &err).await;
     }
 
+    // Resolved PER INVOCATION against the live, poll-refreshed snapshot
+    // (`DispatchDeps::app_version_snapshot`'s doc) -- never a value
+    // captured once at startup, and checked BEFORE the executor-connection
+    // gate below (an in-memory, no-I/O check; no reason to require a live
+    // connection just to discover this invoke can't be authorized anyway).
+    //
+    // Three outcomes, in order:
+    // 1. `deps.digest` is still the app's current active digest -- invoke
+    //    normally under it.
+    // 2. `deps.digest` was superseded (a hot swap moved this app_id onto a
+    //    NEW digest), but the app_id is STILL active in this scope --
+    //    REDIRECT: invoke under the app's CURRENT digest/version instead of
+    //    dead-lettering. A bundle upgrade must never silently drop an
+    //    in-flight delivery just because this pod's own load pointer hasn't
+    //    caught up yet; grants are still checked against the CURRENT
+    //    version (`app_version` below), never the stale one.
+    // 3. The app_id is no longer active in this scope at all (deactivated
+    //    or revoked) -- fail closed by dead-lettering, the only case this
+    //    entry can never be safely processed.
+    let (invoke_digest, app_version) = match deps
+        .app_version_snapshot
+        .resolve_for_digest(&deps.app_id, &deps.digest)
+    {
+        Some(app_version) => (deps.digest.clone(), app_version),
+        None => match deps
+            .app_version_snapshot
+            .current_digest_and_version(&deps.app_id)
+        {
+            Some((current_digest, app_version)) => {
+                tracing::info!(
+                    app_id = %deps.app_id,
+                    pinned_digest = %deps.digest,
+                    current_digest = %current_digest,
+                    app_version,
+                    "pinned digest superseded by a hot swap; app is still active -- \
+                     redirecting to the current digest/version"
+                );
+                deps.redirected_metric
+                    .with_label_values(&[&deps.app_id])
+                    .inc();
+                (current_digest, app_version)
+            }
+            None => {
+                tracing::warn!(
+                    app_id = %deps.app_id,
+                    digest = %deps.digest,
+                    "app_id is no longer active in this scope (deactivated or revoked), \
+                     dead-lettering"
+                );
+                let err = penguin_spine::DlqError {
+                    kind: penguin_spine::DlqErrorKind::HostCallDenied,
+                    code: "APP_NO_LONGER_ACTIVE".to_string(),
+                    message: "app_id is not active in the current active-set snapshot".to_string(),
+                    detail: None,
+                    artifact_digest: Some(deps.digest.clone()),
+                    consumer_id: deps.consumer_id.clone(),
+                };
+                return deps.spine.dead_letter(d, &err).await;
+            }
+        },
+    };
+
     let Some(connection) = deps.connections.active() else {
         tracing::warn!(app_id = %deps.app_id, "no executor connection available, dead-lettering for redelivery");
         let err = penguin_spine::DlqError {
@@ -512,15 +604,32 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
     // catches the "no executor at all" case before ever entering this
     // loop, which is the one infra failure worth a distinct DLQ kind at
     // this stage's current scope.
+    // Resolved once per delivered envelope (memoized by `deps.tenants` after
+    // the first lookup for this `(tenant, community)` pair) and threaded
+    // into every capability `authorize()` call this invoke makes (spec
+    // `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+    // SS5.1) -- an unresolvable tenant/community falls back to the `(0, 0)`
+    // sentinel, which fails closed (never matches a real grant row) rather
+    // than skipping the gate.
+    let (tenant_id, community_id) = deps
+        .tenants
+        .resolve(&d.env.tenant, d.env.community.as_deref())
+        .await
+        .map(|(t, c)| (t, c.unwrap_or(0)))
+        .unwrap_or((0, 0));
+
     let (record, _attempts) = dispatch_with_retry(
         |_attempt| async {
             match invoke_dispatch(
                 &connection,
                 &deps.app_id,
-                &deps.digest,
+                &invoke_digest,
                 &d.env,
                 &deps.config_json,
                 deps.retry_policy.call_timeout_ms,
+                tenant_id,
+                community_id,
+                app_version,
             )
             .await
             {
@@ -977,13 +1086,32 @@ mod tests {
         }
     }
 
+    fn test_redirected_metric() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_svc_action_redirected_after_upgrade_total", "test"),
+            &["app_id"],
+        )
+        .expect("valid metric definition")
+    }
+
     fn test_deps(
         spine: FakeSpineOps,
         connections: Arc<ConnectionRegistry>,
     ) -> DispatchDeps<FakeAudit, FixedTenantResolver, FakeSpineOps> {
+        let app_version_snapshot = bundle_active_set::ActiveVersionSnapshot::new();
+        app_version_snapshot.update(&[bundle_active_set::ActiveBundleRow {
+            app_id: "waddles.bot.commands.default".to_string(),
+            version: "1".to_string(),
+            version_id: 1,
+            digest: "sha256:00".to_string(),
+            component_key: String::new(),
+            sidecar_key: String::new(),
+        }]);
         DispatchDeps {
             app_id: "waddles.bot.commands.default".to_string(),
             digest: "sha256:00".to_string(),
+            app_version_snapshot,
+            redirected_metric: test_redirected_metric(),
             config_json: "{}".to_string(),
             key_ring: test_ring(),
             connections,
@@ -1129,6 +1257,83 @@ mod tests {
         registry
     }
 
+    /// Same as [`connected_registry_with_fake_executor`], but answers
+    /// `invoke_count` invokes with the same `response` -- for tests
+    /// (e.g. the redirect-after-upgrade regression) that drive
+    /// `handle_delivered` more than once against the same live connection.
+    async fn connected_registry_with_fake_executor_multi(
+        response: serde_json::Value,
+        invoke_count: usize,
+    ) -> Arc<ConnectionRegistry> {
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, Frame, HelloBody, HelloOkBody, ResultBody, SandboxInfo,
+        };
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            let hello_ok = read_frame(&mut executor_io).await.unwrap();
+            assert!(matches!(hello_ok.message, Message::HelloOk(_)));
+
+            for _ in 0..invoke_count {
+                let invoke = read_frame(&mut executor_io).await.unwrap();
+                write_frame(
+                    &mut executor_io,
+                    &Frame::new(
+                        invoke.id,
+                        Message::Result(ResultBody {
+                            payload: response.clone(),
+                            duration_ms: 1,
+                            fuel_used: 0,
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+            }
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(crate::capabilities::DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let registry = Arc::new(ConnectionRegistry::new());
+        registry.set_active(connection);
+        registry
+    }
+
     #[tokio::test]
     async fn handle_delivered_success_records_audit_usage_and_acks() {
         let ring = test_ring();
@@ -1151,6 +1356,125 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].status, "success");
         assert_eq!(deps.usage.lock().unwrap().pending_len(), 1);
+    }
+
+    /// Regression (gh-433 follow-up): `app_version` is resolved PER
+    /// INVOCATION from the live snapshot, never captured once. The first
+    /// delivery succeeds against the seeded version; a hot swap mid-run
+    /// (`bundle_loader::run_tick`'s own `ActiveVersionSnapshot::update`,
+    /// simulated here directly) that supersedes this pod's pinned digest
+    /// must make the very NEXT delivery fail closed (dead-lettered,
+    /// `HostCallDenied`) rather than keep invoking under a version the
+    /// active set no longer recognizes.
+    #[tokio::test]
+    async fn handle_delivered_redirects_to_the_current_version_after_an_upgrade() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
+
+        // Two invokes expected: the pre-swap delivery, then the
+        // post-swap delivery redirected onto the new digest/version.
+        let connections = connected_registry_with_fake_executor_multi(
+            serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+            2,
+        )
+        .await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+
+        // First delivery: the snapshot still resolves `deps.digest` ->
+        // version 1 (seeded by `test_deps`) -- succeeds and acks.
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+        assert_eq!(deps.spine.dead_lettered.lock().unwrap().len(), 0);
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 1);
+
+        // Mid-run hot swap (an upgrade): the poller's next tick reads a NEW
+        // digest/version for this SAME app_id, still active in scope --
+        // `deps.digest` (this pod's pinned digest) is no longer current.
+        deps.app_version_snapshot
+            .update(&[bundle_active_set::ActiveBundleRow {
+                app_id: "waddles.bot.commands.default".to_string(),
+                version: "2".to_string(),
+                version_id: 2,
+                digest: "sha256:new-after-swap".to_string(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+            }]);
+
+        // Second delivery, same pinned digest: must be REDIRECTED onto the
+        // current digest/version and still succeed -- an upgrade must never
+        // silently drop an in-flight delivery.
+        let mac2 = mac_for(&ring, "acme");
+        let d2 = fixture_delivered("acme", "waddles.bot.commands.default", mac2, "k1");
+        handle_delivered(&d2, &stream_key, &deps).await.unwrap();
+
+        assert!(
+            deps.spine.dead_lettered.lock().unwrap().is_empty(),
+            "a redirected delivery must never be dead-lettered"
+        );
+        assert_eq!(
+            deps.spine.acked.lock().unwrap().len(),
+            2,
+            "both the pre- and post-upgrade deliveries must be acked"
+        );
+        assert_eq!(
+            deps.redirected_metric
+                .with_label_values(&["waddles.bot.commands.default"])
+                .get(),
+            1,
+            "exactly one delivery was redirected after the upgrade"
+        );
+    }
+
+    /// Regression (gh-433 follow-up 2): unlike an upgrade (redirect, tested
+    /// above), an app_id no longer active in scope at all -- deactivated or
+    /// revoked -- must still fail closed by dead-lettering, never redirect
+    /// to a nonexistent "current" version.
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_after_the_app_is_deactivated() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
+
+        let connections = connected_registry_with_fake_executor(
+            serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+        )
+        .await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+
+        // First delivery: succeeds and acks.
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 1);
+
+        // Deactivation: the app_id drops out of the active set entirely
+        // (never a "new digest" -- an empty active set).
+        deps.app_version_snapshot.update(&[]);
+
+        let mac2 = mac_for(&ring, "acme");
+        let d2 = fixture_delivered("acme", "waddles.bot.commands.default", mac2, "k1");
+        handle_delivered(&d2, &stream_key, &deps).await.unwrap();
+
+        assert_eq!(
+            deps.spine.acked.lock().unwrap().len(),
+            1,
+            "the post-deactivation delivery must never be acked"
+        );
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(
+            dead_lettered[0].1,
+            penguin_spine::DlqErrorKind::HostCallDenied
+        );
+        assert_eq!(
+            deps.redirected_metric
+                .with_label_values(&["waddles.bot.commands.default"])
+                .get(),
+            0,
+            "a deactivation must never increment the redirect counter"
+        );
     }
 
     /// A [`crate::usage::UsageSink`] that records every delta it is asked
