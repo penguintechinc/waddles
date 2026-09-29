@@ -476,6 +476,87 @@ kubectl delete pvc -n waddlebot --all
 kubectl delete namespace waddlebot
 ```
 
+## Self-provisioned platform keys (feature/helm-auto-provision-keys)
+
+Deploys must never require a human to run a script before `helm install`/`helm upgrade`
+succeeds. Four platform key Secrets are self-provisioned by this chart:
+
+| Secret | Values key | Consumer | Mechanism |
+|---|---|---|---|
+| `minio-kms` | `autoProvisionedKeys.minioKms` | MinIO static-KMS (PR #439) | `templates/auto-provisioned-secrets.yaml` -- pure Helm template |
+| `waddlebot-tenant-kek` | `autoProvisionedKeys.tenantKek` | hub-api tenant DEK broker (PR #442) | `templates/auto-provisioned-secrets.yaml` -- pure Helm template |
+| `<fullname>-bundle-signing` | `autoProvisionedKeys.bundleSigning` | hub-api bundle signing (PR #431) | `templates/auto-provisioned-keys-job.yaml` -- pre-install/pre-upgrade hook Job (openssl) |
+| `service-jwt-signing-key` | `autoProvisionedKeys.serviceJwt` | hub-api machine JWTs (PR #438) | `templates/auto-provisioned-keys-job.yaml` -- pre-install/pre-upgrade hook Job (openssl) |
+
+**Policy, every Secret:**
+1. **Keep** -- if the Secret already exists, it is left completely untouched (never
+   regenerated/rotated by this chart). It is also annotated `helm.sh/resource-policy:
+   keep` when this chart creates it, so it survives `helm uninstall`.
+2. **Generate** -- on a miss, auto-generated ONLY when `global.deploymentTier` is
+   `alpha` or `local`.
+3. **Fail** -- on a miss anywhere else (beta/gamma/production), the release
+   render-fails with an explicit message, UNLESS `autoProvisionedKeys.<key>.
+   externalSecret: true` is set (an ExternalSecret/SealedSecret/other out-of-band
+   controller owns that Secret name) or an operator pre-creates it directly.
+
+The two symmetric keys (`minioKms`, `tenantKek`) use `lookup` + Helm's own
+cryptographically-secure `randBytes`/`sha256sum` template functions -- no extra
+tooling needed. The two Ed25519 keys (`bundleSigning`, `serviceJwt`) need an
+`openssl`-equipped hook Job instead: Sprig/Helm has no function to derive an Ed25519
+public key from a private key, which both public-key-flow requirements below need.
+
+**Public keys flow to consumers automatically, private keys never do:** the hook Job
+derives each Ed25519 public key from its Secret and publishes it to a plain
+ConfigMap (`<fullname>-bundle-signing-public`, `<fullname>-service-jwt-public` by
+default) containing ONLY public key material -- safe for any pod to mount via
+`envFrom`/`configMapKeyRef`. The private key Secret itself is read only by this hook
+Job (to derive the public key) and by hub-api (the sole signer/issuer); no other
+Deployment's RBAC or volume mounts reference it. See `templates/
+auto-provisioned-keys-job-rbac.yaml` for the least-privilege Role backing this.
+
+**Validating (no live cluster required):**
+```bash
+helm lint k8s/helm/waddlebot
+helm template waddlebot k8s/helm/waddlebot -f k8s/helm/waddlebot/values-alpha.yaml --kube-version 1.30.0   # renders, keys generated
+helm template waddlebot k8s/helm/waddlebot -f k8s/helm/waddlebot/values-local.yaml --kube-version 1.30.0   # renders, keys generated
+helm template waddlebot k8s/helm/waddlebot -f k8s/helm/waddlebot/values-beta.yaml  --kube-version 1.30.0   # FAILS closed (no external secret / pre-existing Secret)
+```
+`lookup` always returns empty in `helm template`/`--dry-run` (no live API server to
+query), so every `helm template` run takes the "not found" branch -- this validates
+that generation renders correctly and that the fail-guard fires, but it does NOT by
+itself prove keep-on-second-run behavior against a real release (two `helm template`
+runs will in fact mint two *different* random secret values each time, since both
+independently take the "generate" branch -- that's expected, not a bug). Real
+keep/idempotency is exercised by `lookup` against the live cluster during an actual
+`helm install`/`helm upgrade`, i.e. it is proven at deploy time, not template time.
+
+## SPIRE (optional, disabled pending #437)
+
+`spire.enabled` defaults to `false` at the chart level. `values-alpha.yaml` and
+`values-local.yaml` also pin it `false` -- SPIRE server/agent crash-loops in that
+environment today (https://github.com/penguintechinc/waddles/issues/437), which made
+every `helm upgrade` fail via the `waddlebot-spire-auto-enroll` post-upgrade hook Job,
+pinning the whole release in `FAILED` status. With `spire.enabled: false` the entire
+`waddlebot-spire` subchart (including that hook) no-ops out of the render
+(`condition: spire.enabled` in `Chart.yaml`), so it can no longer block a rollout.
+Flip back to `true` once #437 is resolved and the hook has been verified green in a
+scratch namespace first.
+
+### Recovering a release already stuck FAILED because of this
+
+```bash
+# Option A: roll back to the last successful revision
+helm history waddlebot --namespace waddlebot
+helm rollback waddlebot <last-good-revision> --namespace waddlebot
+
+# Option B: upgrade in place once spire.enabled=false is in the values file being applied
+# (the failing hook simply won't render this time, so the upgrade can complete)
+helm upgrade waddlebot k8s/helm/waddlebot --namespace waddlebot -f k8s/helm/waddlebot/values-alpha.yaml
+```
+Option B is sufficient on its own -- a `FAILED` release is not "stuck" in the sense of
+refusing further upgrades, it just means the *previous* revision's hook failed; the
+next `helm upgrade` (hook now absent) is a normal upgrade attempt from that state.
+
 ## Troubleshooting
 
 ### Pods not starting

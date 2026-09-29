@@ -1,0 +1,59 @@
+# feature/helm-auto-provision-keys -- least-privilege identity for
+# auto-provisioned-keys-job.yaml. Namespaced Role (never ClusterRole) scoped to exactly
+# the four object names this Job ever touches. RBAC has no `resourceNames` support for
+# the `create` verb (a Kubernetes API limitation, not a gap in this Role) -- `get`/
+# `patch`/`delete` ARE name-restricted below, so the only privilege this identity has
+# beyond "the four named objects" is the ability to *create* a Secret/ConfigMap by any
+# name; the Job's own script (not RBAC) is what keeps that to exactly these four names.
+# No other verb (list/watch/update on arbitrary objects, anything cluster-scoped) is
+# granted. This ServiceAccount is never mounted into any other pod.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-auto-provision-keys
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-provision-keys
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-auto-provision-keys
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-provision-keys
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames:
+      - {{ .Values.autoProvisionedKeys.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
+      - {{ .Values.autoProvisionedKeys.serviceJwt.secretName }}
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames:
+      - {{ .Values.autoProvisionedKeys.bundleSigning.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" (include "waddlebot.fullname" .)) }}
+      - {{ .Values.autoProvisionedKeys.serviceJwt.publicKeyConfigMapName | default (printf "%s-service-jwt-public" (include "waddlebot.fullname" .)) }}
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-auto-provision-keys
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-provision-keys
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "waddlebot.fullname" . }}-auto-provision-keys
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "waddlebot.fullname" . }}-auto-provision-keys
+    namespace: {{ .Values.namespace }}
