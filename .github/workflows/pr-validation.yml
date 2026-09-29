@@ -400,6 +400,18 @@ jobs:
             --kube-version 1.30.0 \
           | python3 scripts/ci/check-helm-hook-dependency-ordering.py
 
+      # fix/helm-platform-credentials -- regression gate for the alpha incident where
+      # a routine `helm upgrade` overwrote the REAL Discord bot token with the
+      # values-alpha.yaml dev placeholder. Asserts no rendered Secret or workload env
+      # carries a REPLACE_ME/CHANGE_ME/changeme/example-shaped credential value.
+      - name: helm template + placeholder credential check (alpha)
+        run: |
+          set -euo pipefail
+          helm template waddlebot k8s/helm/waddlebot \
+            --values k8s/helm/waddlebot/values-alpha.yaml \
+            --kube-version 1.30.0 \
+          | python3 scripts/ci/check-no-placeholder-credentials.py
+
       # values-beta.yaml pins global.deploymentTier=production, which requires every
       # generated secret to be supplied explicitly (or already present on a live
       # cluster via `lookup`) -- neither is available to an offline `helm template` in
@@ -420,3 +432,12 @@ jobs:
             --kube-version 1.30.0 \
             --set global.deploymentTier=alpha \
           | python3 scripts/ci/check-helm-hook-dependency-ordering.py
+
+      - name: helm template + placeholder credential check (beta topology)
+        run: |
+          set -euo pipefail
+          helm template waddlebot k8s/helm/waddlebot \
+            --values k8s/helm/waddlebot/values-beta.yaml \
+            --kube-version 1.30.0 \
+            --set global.deploymentTier=alpha \
+          | python3 scripts/ci/check-no-placeholder-credentials.py

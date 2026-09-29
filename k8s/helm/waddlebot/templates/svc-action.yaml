@@ -91,11 +91,16 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: DATABASE_URL
+        # fix/helm-platform-credentials -- sourced from the operator-managed
+        # platform-credentials Secret, never the chart-rendered `-secrets`
+        # Secret; optional so a community with no Discord bot configured
+        # simply starts without this var rather than failing to schedule.
         - name: DISCORD_BOT_TOKEN
           valueFrom:
             secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
+              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
               key: DISCORD_BOT_TOKEN
+              optional: true
         {{- if .Values.modules.bot.enabled }}
         - name: MODULE_LOAD_BOT
           value: "true"

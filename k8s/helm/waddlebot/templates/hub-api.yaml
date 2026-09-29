@@ -58,6 +58,14 @@ spec:
             name: {{ include "waddlebot.fullname" . }}-config
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
+        # fix/helm-platform-credentials -- OAuth app client IDs/secrets, AWS/GCP,
+        # WaddleAI, and PostHog API key (hub_api/services/platform_integrations_crypto.py
+        # and Connections OAuth-flow initiation) come from the operator-managed
+        # platform-credentials Secret, never the chart-rendered `-secrets` Secret.
+        # `optional: true`: hub-api starts fine with zero platforms configured.
+        - secretRef:
+            name: {{ include "waddlebot.platformCredentialsSecretName" . }}
+            optional: true
         env:
         - name: MODULE_NAME
           value: "hub-api"

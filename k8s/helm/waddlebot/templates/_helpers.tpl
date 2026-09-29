@@ -307,6 +307,43 @@ Create the name of the secret for common secrets
 {{- end }}
 
 {{/*
+Platform Credentials Secret Name (fix/helm-platform-credentials)
+Returns the name of the Secret holding externally-issued third-party platform
+credentials (Discord/Twitch/Slack/YouTube/Spotify/Kick/Teams/Mattermost/
+Google Chat OAuth values, AWS/GCP, WaddleAI, PostHog API key). This chart
+NEVER renders or writes this Secret -- it is created once by the operator
+(alpha/local: `kubectl create secret generic`, see docs/PLATFORM_CREDENTIALS.md)
+or by External Secrets/Sealed Secrets (beta/gamma/prod), and is only ever READ
+via `secretRef`/`secretKeyRef` with `optional: true`. This is the fix for the
+incident where `helm upgrade` overwrote the real alpha Discord bot token with
+the values.yaml dev placeholder: a value this chart doesn't render, it can
+never clobber.
+*/}}
+{{- define "waddlebot.platformCredentialsSecretName" -}}
+{{- if .Values.platformCredentials.existingSecret }}
+{{- .Values.platformCredentials.existingSecret }}
+{{- else }}
+{{- printf "%s-platform-credentials" (include "waddlebot.fullname" .) }}
+{{- end }}
+{{- end }}
+
+{{/*
+Placeholder Guard (fix/helm-platform-credentials)
+Fails the render if a value clearly intended as a dev-only placeholder
+("REPLACE_ME", "CHANGE_ME", "changeme", "example") is about to be written into
+a rendered Secret. Call as:
+  {{- include "waddlebot.rejectPlaceholder" (dict "key" "SOME_KEY" "value" $someValue) }}
+*/}}
+{{- define "waddlebot.rejectPlaceholder" -}}
+{{- $v := .value | toString }}
+{{- if $v }}
+{{- if regexMatch "(?i)(REPLACE_ME|CHANGE_ME|changeme|example)" $v }}
+{{- fail (printf "refusing to render placeholder value for %q -- set a real value or remove the key (see docs/PLATFORM_CREDENTIALS.md)" .key) }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
 API Key Secret Name
 Returns the name of the secret containing API keys.
 */}}
