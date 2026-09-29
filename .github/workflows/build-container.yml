@@ -24,6 +24,10 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # Empty on fork PRs / repos without the secret configured -- `if:` can't
+  # read `secrets` directly, so it's routed through env. See docs/WORKFLOWS.md
+  # "Docker Hub credentials".
+  DOCKERHUB_LOGIN_ENABLED: ${{ secrets.DOCKERHUB_TOKEN != '' }}
 
 jobs:
   determine-version:
@@ -106,6 +110,20 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pull-only: authenticates the base-image pulls (python/rust/debian/node
+      # etc.) that `docker buildx build` below performs, to avoid Docker Hub's
+      # anonymous-pull rate limit. Never used to push. Runs on every event
+      # type (including PRs from the same repo) since base images are pulled
+      # regardless of push/load; empty on fork PRs, where secrets are unset,
+      # so those fall back to anonymous pulls instead of failing.
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_LOGIN_ENABLED == 'true'
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
+        with:
+          registry: docker.io
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract architecture suffix
         id: arch

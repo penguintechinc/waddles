@@ -34,6 +34,10 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # Empty on fork PRs / repos without the secret configured -- `if:` can't
+  # read `secrets` directly, so it's routed through env. See docs/WORKFLOWS.md
+  # "Docker Hub credentials".
+  DOCKERHUB_LOGIN_ENABLED: ${{ secrets.DOCKERHUB_TOKEN != '' }}
 
 jobs:
   # Determine version and tag suffix
@@ -514,6 +518,21 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pull-only: authenticates the python/node base-image pulls that
+      # `docker buildx build` below performs, to avoid Docker Hub's anonymous
+      # rate limit. Never used to push. Gated the same as the build step
+      # (unchanged modules skip both); empty on fork PRs (secrets unset),
+      # which fall back to anonymous pulls.
+      - name: Log in to Docker Hub
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
+        if: >
+          (matrix.condition == 'true' || github.event_name == 'workflow_dispatch') &&
+          env.DOCKERHUB_LOGIN_ENABLED == 'true'
+        with:
+          registry: docker.io
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract platform suffix
         id: platform-suffix

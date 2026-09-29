@@ -51,6 +51,10 @@ env:
   IMAGE_NAME: ${{ github.repository }}
   MODULE_NAME: svc-ingest-rust
   MODULE_PATH: core/svc_ingest
+  # Empty on fork PRs / repos without the secret configured -- `if:` can't
+  # read `secrets` directly, so it's routed through env. See docs/WORKFLOWS.md
+  # "Docker Hub credentials".
+  DOCKERHUB_LOGIN_ENABLED: ${{ secrets.DOCKERHUB_TOKEN != '' }}
 
 jobs:
   determine-version:
@@ -131,6 +135,18 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pull-only: authenticates the rust/debian base-image pulls that
+      # `docker buildx build` below performs, to avoid Docker Hub's anonymous
+      # rate limit. Never used to push. Runs on every event type; empty on
+      # fork PRs (secrets unset), which fall back to anonymous pulls.
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_LOGIN_ENABLED == 'true'
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
+        with:
+          registry: docker.io
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push image (${{ matrix.platform }})
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7

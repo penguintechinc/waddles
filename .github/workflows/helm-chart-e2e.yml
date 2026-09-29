@@ -35,6 +35,10 @@ env:
   CHART_DIR: "k8s/helm/waddlebot"
   NAMESPACE: "waddlebot"
   HELM_TIMEOUT: "5m"
+  # Empty on fork PRs / repos without the secret configured -- `if:` can't
+  # read `secrets` directly, so it's routed through env. See docs/WORKFLOWS.md
+  # "Docker Hub credentials".
+  DOCKERHUB_LOGIN_ENABLED: ${{ secrets.DOCKERHUB_TOKEN != '' }}
 
 jobs:
   lint-workflow:
@@ -45,6 +49,18 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+
+      # Pull-only: authenticates the `docker run rhysd/actionlint` pull below
+      # to avoid Docker Hub's anonymous rate limit. Never used to push. Empty
+      # on fork PRs (secrets unset), which fall back to anonymous pulls.
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_LOGIN_ENABLED == 'true'
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
+        with:
+          registry: docker.io
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: actionlint
         run: |
           set -euo pipefail
@@ -69,6 +85,22 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # Pull-only: authenticates the kind node image pull, the `docker build`
+      # base-image pulls below, and the bitnami/kubectl pre-pull further down,
+      # to avoid Docker Hub's anonymous rate limit. Never used to push. Empty
+      # on fork PRs (secrets unset), which fall back to anonymous pulls. Note
+      # this only authenticates the runner's own docker daemon -- kind's node
+      # containerd is separate, which is why external images are pre-pulled
+      # here and `kind load docker-image`d rather than pulled from inside
+      # the kind node.
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_LOGIN_ENABLED == 'true'
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
+        with:
+          registry: docker.io
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Install kind (checksum-verified)
         run: |
           set -euo pipefail
@@ -77,6 +109,11 @@ jobs:
           echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  /usr/local/bin/kind" | sha256sum -c -
           chmod +x /usr/local/bin/kind
           kind version
+
+      - name: Pull kind node image (authenticated)
+        run: |
+          set -euo pipefail
+          docker pull "${KIND_NODE_IMAGE}"
 
       - name: Create kind cluster
         run: |
@@ -106,6 +143,33 @@ jobs:
           echo "images built and loaded: ${built}"
           if [ "${built}" -eq 0 ]; then
             echo "::error::zero images built - denominator check failed"
+            exit 1
+          fi
+
+      - name: Pre-pull + kind-load external hook images (bitnami/kubectl)
+        # The chart's hook Jobs (spire auto-enroll, auto-provisioned-keys) run
+        # bitnami/kubectl by pinned digest. kind's node containerd is separate
+        # from this runner's docker daemon, so an unauthenticated pull would
+        # happen from inside the kind node at `helm install` time regardless
+        # of the login above. Pre-pulling here (authenticated) and kind-loading
+        # keeps the token off the kind node's disk entirely, per
+        # docs/WORKFLOWS.md "Docker Hub credentials". Digests are discovered
+        # from the chart source rather than hardcoded, so this tracks whatever
+        # the chart currently pins.
+        run: |
+          set -euo pipefail
+          count=0
+          while IFS= read -r img; do
+            [ -z "${img}" ] && continue
+            echo "::group::pre-pull ${img}"
+            docker pull "docker.io/${img}"
+            kind load docker-image "docker.io/${img}" --name waddlebot-e2e
+            count=$((count + 1))
+            echo "::endgroup::"
+          done < <(grep -rhoE 'bitnami/kubectl@sha256:[0-9a-f]{64}' "${CHART_DIR}" | sort -u)
+          echo "external hook images pre-pulled and loaded: ${count}"
+          if [ "${count}" -eq 0 ]; then
+            echo "::error::zero external hook images found - denominator check failed"
             exit 1
           fi
 
@@ -288,6 +352,19 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # Pull-only: authenticates the kind node image pull, the `docker build`
+      # base-image pulls below, and the bitnami/kubectl pre-pull further down.
+      # See the identical step in the chart-e2e job above for the full
+      # rationale; empty on fork PRs (secrets unset), which fall back to
+      # anonymous pulls.
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_LOGIN_ENABLED == 'true'
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
+        with:
+          registry: docker.io
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Determine merge-base ref
         id: mergebase
         env:
@@ -326,6 +403,11 @@ jobs:
           DESIRED_VERSION=v4.0.0 ./get_helm.sh
           rm -f get_helm.sh
 
+      - name: Pull kind node image (authenticated)
+        run: |
+          set -euo pipefail
+          docker pull "${KIND_NODE_IMAGE}"
+
       - name: Create kind cluster
         run: kind create cluster --name waddlebot-upgrade --image "${KIND_NODE_IMAGE}" --wait 120s
 
@@ -349,6 +431,27 @@ jobs:
           done
           echo "images built and loaded: ${built}"
           [ "${built}" -gt 0 ] || { echo "::error::zero images built"; exit 1; }
+
+      - name: Pre-pull + kind-load external hook images (bitnami/kubectl)
+        # Scans both the base-ref chart (installed first, below) and the PR
+        # chart (upgraded to, further below) -- see the identical step in the
+        # chart-e2e job above for the full rationale.
+        run: |
+          set -euo pipefail
+          count=0
+          while IFS= read -r img; do
+            [ -z "${img}" ] && continue
+            echo "::group::pre-pull ${img}"
+            docker pull "docker.io/${img}"
+            kind load docker-image "docker.io/${img}" --name waddlebot-upgrade
+            count=$((count + 1))
+            echo "::endgroup::"
+          done < <(grep -rhoE 'bitnami/kubectl@sha256:[0-9a-f]{64}' "${CHART_DIR}" "/tmp/base-chart/${CHART_DIR}" | sort -u)
+          echo "external hook images pre-pulled and loaded: ${count}"
+          if [ "${count}" -eq 0 ]; then
+            echo "::error::zero external hook images found - denominator check failed"
+            exit 1
+          fi
 
       - name: helm install base ref chart
         run: |
