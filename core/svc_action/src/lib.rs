@@ -517,8 +517,13 @@ async fn env_bundle_loader_loop(
                 {
                     continue;
                 }
+                // `(0, 0)`: see `distribution.rs`'s identical env/catalog-
+                // interim-path sentinel doc -- this `ACTION_BUNDLE_*` env
+                // override has no real tenant row to resolve either.
                 match dispatch::ensure_loaded(
                     &connection,
+                    0,
+                    0,
                     &app_id,
                     &version,
                     &digest,

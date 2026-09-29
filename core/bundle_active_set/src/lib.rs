@@ -69,11 +69,14 @@ pub mod reader;
 pub mod scope;
 
 pub use bindings::{read_source_bindings, SourceBinding};
-pub use changelog::{affected_scopes, read_changes, read_safe_seq, ChangeLogTracker, ChangeRow};
-pub use diff::{plan, DiffPlan};
+pub use changelog::{
+    affected_scopes, probe_min_retained_seq_supported, read_changes, read_safe_seq,
+    read_safe_seq_watermark, ChangeLogTracker, ChangeRow, SafeSeqWatermark,
+};
+pub use diff::{plan, plan_scoped, DiffPlan, ScopedDiffPlan};
 pub use multi_tenant::{
-    flatten_by_scope, read_active_set_all, read_source_bindings_all, tenant_active_app_counts,
-    ScopeKey,
+    read_active_set_all, read_source_bindings_all, scoped_active_rows, tenant_active_app_counts,
+    AppScope, ScopeKey,
 };
 pub use query::{
     derive_component_keys, read_active_set, read_watermark, ActiveBundleRow, ActiveSetError,

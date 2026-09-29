@@ -20,7 +20,10 @@
 
 use std::collections::BTreeSet;
 
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, FromQueryResult, QueryFilter,
+    QueryOrder, QuerySelect, Statement,
+};
 
 use crate::entities::{bundle_active_set_changes, bundle_active_set_watermark};
 use crate::query::ActiveSetError;
@@ -28,17 +31,106 @@ use crate::query::ActiveSetError;
 /// The single watermark row's `id` (dataplane scale design §7: "one row").
 const WATERMARK_ROW_ID: i32 = 1;
 
-/// Reads the current `safe_seq` horizon published by the primary. A
-/// missing row (the primary-side publisher job hasn't run in this
-/// environment yet, or a fresh install) reads as `0` -- the fail-safe
-/// default that simply means "nothing is safe to incrementally consume
-/// yet", never an error; the periodic full reconcile (each service's own
-/// `changelog_consumer` module) keeps the active set correct regardless.
+/// The primary's published `safe_seq` horizon AND `min_retained_seq` (hub-api
+/// migration `0026_bundle_active_set_changelog`, waddles PR #397, requires
+/// **hub-api >= the release that shipped that migration** -- see
+/// [`probe_min_retained_seq_supported`]'s doc for how an older hub-api is
+/// detected and tolerated) -- together these let [`read_safe_seq_watermark`]'s
+/// caller detect "my `last_seq` has fallen behind retention" directly,
+/// rather than only via the "lowest returned change row's seq" heuristic
+/// each service's own `changelog_consumer` module falls back to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SafeSeqWatermark {
+    pub safe_seq: i64,
+    /// `0` when the column genuinely reads as `0` (a fresh install/no prune
+    /// has ever run) OR when `supports_retention: false` was passed to
+    /// [`read_safe_seq_watermark`] (older hub-api schema) -- either way,
+    /// `last_seq + 1 < 0` is never true, so a caller's retention check
+    /// against this value simply never fires until real data is present,
+    /// never a false positive.
+    pub min_retained_seq: i64,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct SafeSeqOnly {
+    safe_seq: i64,
+}
+
+/// Probes whether this environment's `bundle_active_set_watermark` table has
+/// the `min_retained_seq` column at all (hub-api migration `0026`/PR #397 --
+/// **minimum hub-api version: any release including that migration**; an
+/// older hub-api's schema predates it entirely). Queried once per consumer
+/// instance (`crate::changelog_consumer`'s own `initial_state`, cached in
+/// `ConsumerState` for the process's lifetime -- the schema does not change
+/// while a pod is running) rather than trying the full select and catching a
+/// driver-specific "column does not exist" error: `information_schema` is a
+/// stable, ordinary `SELECT`, so both the "column present" and "column
+/// absent" cases are exercised by plain, `MockDatabase`-mockable queries in
+/// this crate's own tests -- no need to synthesize a real Postgres error.
+pub async fn probe_min_retained_seq_supported(
+    conn: &DatabaseConnection,
+) -> Result<bool, ActiveSetError> {
+    let stmt = Statement::from_string(
+        conn.get_database_backend(),
+        "SELECT 1 FROM information_schema.columns \
+         WHERE table_name = 'bundle_active_set_watermark' \
+         AND column_name = 'min_retained_seq'"
+            .to_string(),
+    );
+    let rows = conn.query_all_raw(stmt).await?;
+    Ok(!rows.is_empty())
+}
+
+/// Reads the current `safe_seq`/`min_retained_seq` horizon published by the
+/// primary. A missing row (the primary-side publisher job hasn't run in
+/// this environment yet, or a fresh install) reads as `SafeSeqWatermark::
+/// default()` (both `0`) -- the fail-safe default that simply means
+/// "nothing is safe to incrementally consume yet", never an error; the
+/// periodic full reconcile (each service's own `changelog_consumer` module)
+/// keeps the active set correct regardless.
+///
+/// `supports_retention` (from [`probe_min_retained_seq_supported`], probed
+/// once at startup): `true` selects the full row including `min_retained_
+/// seq`; `false` (older hub-api schema, migration `0026`/PR #397 not yet
+/// applied) selects ONLY `safe_seq` -- never referencing the column that
+/// doesn't exist there -- and reports `min_retained_seq: 0` (see that
+/// field's own doc for why `0` is a safe, never-false-positive default).
+pub async fn read_safe_seq_watermark(
+    conn: &DatabaseConnection,
+    supports_retention: bool,
+) -> Result<SafeSeqWatermark, ActiveSetError> {
+    if supports_retention {
+        let row = bundle_active_set_watermark::Entity::find_by_id(WATERMARK_ROW_ID)
+            .one(conn)
+            .await?;
+        Ok(row
+            .map(|r| SafeSeqWatermark {
+                safe_seq: r.safe_seq,
+                min_retained_seq: r.min_retained_seq,
+            })
+            .unwrap_or_default())
+    } else {
+        let row = bundle_active_set_watermark::Entity::find_by_id(WATERMARK_ROW_ID)
+            .select_only()
+            .column(bundle_active_set_watermark::Column::SafeSeq)
+            .into_model::<SafeSeqOnly>()
+            .one(conn)
+            .await?;
+        Ok(SafeSeqWatermark {
+            safe_seq: row.map(|r| r.safe_seq).unwrap_or(0),
+            min_retained_seq: 0,
+        })
+    }
+}
+
+/// Reads just the current `safe_seq` horizon (full row select, `min_retained_
+/// seq` included) -- a thin convenience wrapper around
+/// [`read_safe_seq_watermark`] for callers on a schema known to have the
+/// column (this crate's own tests below); production consumers call
+/// [`read_safe_seq_watermark`] directly with their probed
+/// `supports_retention` value instead.
 pub async fn read_safe_seq(conn: &DatabaseConnection) -> Result<i64, ActiveSetError> {
-    let row = bundle_active_set_watermark::Entity::find_by_id(WATERMARK_ROW_ID)
-        .one(conn)
-        .await?;
-    Ok(row.map(|r| r.safe_seq).unwrap_or(0))
+    Ok(read_safe_seq_watermark(conn, true).await?.safe_seq)
 }
 
 /// One `bundle_active_set_changes` row -- the scope it names plus enough
@@ -150,7 +242,7 @@ impl ChangeLogTracker {
     /// racing an already-applied advance -- reports `0`, not a misleading
     /// negative lag).
     pub fn lag(&self, safe_seq: i64) -> i64 {
-        (safe_seq - self.last_seq).max(0)
+        safe_seq.saturating_sub(self.last_seq).max(0)
     }
 }
 
@@ -161,9 +253,17 @@ mod tests {
     use sea_orm::{DatabaseBackend, MockDatabase};
 
     fn watermark_row(safe_seq: i64) -> bundle_active_set_watermark::Model {
+        watermark_row_with_retention(safe_seq, 0)
+    }
+
+    fn watermark_row_with_retention(
+        safe_seq: i64,
+        min_retained_seq: i64,
+    ) -> bundle_active_set_watermark::Model {
         bundle_active_set_watermark::Model {
             id: WATERMARK_ROW_ID,
             safe_seq,
+            min_retained_seq,
             computed_at: Utc::now(),
         }
     }
@@ -197,6 +297,95 @@ mod tests {
             .append_query_results([vec![watermark_row(1234)]])
             .into_connection();
         assert_eq!(read_safe_seq(&db).await?, 1234);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_safe_seq_watermark_returns_both_safe_seq_and_min_retained_seq(
+    ) -> Result<(), ActiveSetError> {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![watermark_row_with_retention(1234, 900)]])
+            .into_connection();
+        let watermark = read_safe_seq_watermark(&db, true).await?;
+        assert_eq!(watermark.safe_seq, 1234);
+        assert_eq!(watermark.min_retained_seq, 900);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_safe_seq_watermark_defaults_both_fields_when_the_row_is_missing(
+    ) -> Result<(), ActiveSetError> {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([Vec::<bundle_active_set_watermark::Model>::new()])
+            .into_connection();
+        assert_eq!(
+            read_safe_seq_watermark(&db, true).await?,
+            SafeSeqWatermark::default()
+        );
+        Ok(())
+    }
+
+    /// `supports_retention: false` (older hub-api schema, migration `0026`/
+    /// PR #397 not yet applied): reads ONLY `safe_seq`, always reporting
+    /// `min_retained_seq: 0` regardless of what a full row might otherwise
+    /// contain -- the actual regression this crate's own review asked for
+    /// ("add a test with the column missing"), now trivially expressible as
+    /// an ordinary mocked query rather than a synthesized driver error.
+    #[tokio::test]
+    async fn read_safe_seq_watermark_falls_back_to_safe_seq_only_when_retention_unsupported(
+    ) -> Result<(), ActiveSetError> {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![std::collections::BTreeMap::from([(
+                "safe_seq".to_string(),
+                sea_orm::Value::BigInt(Some(777)),
+            )])]])
+            .into_connection();
+        let watermark = read_safe_seq_watermark(&db, false).await?;
+        assert_eq!(watermark.safe_seq, 777);
+        assert_eq!(
+            watermark.min_retained_seq, 0,
+            "must never reference the missing column, even implicitly"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_safe_seq_watermark_falls_back_defaults_safe_seq_to_zero_when_row_missing(
+    ) -> Result<(), ActiveSetError> {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([
+                Vec::<std::collections::BTreeMap<String, sea_orm::Value>>::new(),
+            ])
+            .into_connection();
+        assert_eq!(
+            read_safe_seq_watermark(&db, false).await?,
+            SafeSeqWatermark::default()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn probe_min_retained_seq_supported_is_true_when_the_column_exists(
+    ) -> Result<(), ActiveSetError> {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![std::collections::BTreeMap::from([(
+                "?column?".to_string(),
+                sea_orm::Value::Int(Some(1)),
+            )])]])
+            .into_connection();
+        assert!(probe_min_retained_seq_supported(&db).await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn probe_min_retained_seq_supported_is_false_when_the_column_is_absent(
+    ) -> Result<(), ActiveSetError> {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([
+                Vec::<std::collections::BTreeMap<String, sea_orm::Value>>::new(),
+            ])
+            .into_connection();
+        assert!(!probe_min_retained_seq_supported(&db).await?);
         Ok(())
     }
 
