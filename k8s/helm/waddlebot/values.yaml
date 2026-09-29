@@ -320,6 +320,25 @@ infrastructure:
       size: 50Gi
     env:
       MINIO_BROWSER: "on"
+    # At-rest encryption (security.md Encryption: Storage — mandatory baseline, no
+    # opt-out) requires MinIO to have a KMS configured; without one, hub-api's
+    # put_object(..., ServerSideEncryption="AES256") fails with "Server side
+    # encryption specified but KMS is not configured". Static single-key KMS via
+    # MINIO_KMS_SECRET_KEY sourced from a pre-created Secret (never a literal key
+    # in git, never chart-managed) -- generate with `make generate-minio-kms-key`
+    # / scripts/generate-minio-kms-key.sh. secretName is empty here (fail-closed
+    # baseline for beta/gamma/production, see templates/infrastructure/minio.yaml's
+    # fail guard); alpha documents its own default in values-alpha.yaml. For
+    # production, a real external KMS (KES/Vault) is recommended over this static
+    # key -- see README.md MinIO KMS section and security.md Encryption tiering.
+    kms:
+      enabled: true
+      secretName: ""
+      secretKey: "MINIO_KMS_SECRET_KEY"
+      # SSE-S3 auto-encryption applied to chart-created buckets via `mc encrypt set`
+      # in the minio-init Job, so objects written without explicit SSE headers are
+      # still encrypted at rest.
+      autoEncryptBucket: true
 
   # Ollama AI Backend
   ollama:
@@ -2083,3 +2102,54 @@ spire:
     role: child
     upstreamRoot:
       enabled: false
+
+# feature/helm-auto-provision-keys -- deploys must never require a human to run a
+# script before `helm install`/`helm upgrade` succeeds. Every Secret below is looked
+# up first (an existing Secret is KEPT untouched, never regenerated/rotated by this
+# chart) and only auto-GENERATED on a miss when global.deploymentTier is "alpha" or
+# "local". Outside those two tiers a miss render-fails the release unless
+# `externalSecret: true` is set (meaning an ExternalSecret/SealedSecret/other
+# out-of-band controller owns this Secret name and will populate it before the
+# consuming workload starts) or the Secret was pre-created by an operator. See
+# templates/auto-provisioned-secrets.yaml (symmetric keys, pure Helm template) and
+# templates/auto-provisioned-keys-job.yaml (Ed25519 keys, needs openssl -- Sprig/Helm
+# has no Ed25519-pubkey-from-privkey primitive) + chart README "Self-provisioned
+# platform keys" section.
+autoProvisionedKeys:
+  # fix/minio-kms-sse (PR #439) -- MinIO static-KMS symmetric key
+  # (infrastructure.minio.kms.secretName should point at this same name once that
+  # chart wiring lands). Value format is MinIO's own requirement:
+  # "<key-label>:<base64 32 random bytes>".
+  minioKms:
+    secretName: "minio-kms"
+    secretKey: "MINIO_KMS_SECRET_KEY"
+    keyLabel: "waddlebot-minio"
+    externalSecret: false
+  # feature/tenant-dek-broker (PR #442) -- platform-baseline root KEK wrapping every
+  # tenant's DEK (hub_api/services/tenant_keystore.py::K8sSecretKekProvider,
+  # kek_hex_env_var="TENANT_KEK_HEX"). Value MUST be lowercase hex (bytes.fromhex()),
+  # never base64 -- see templates/auto-provisioned-secrets.yaml's derivation comment.
+  tenantKek:
+    secretName: "waddlebot-tenant-kek"
+    secretKey: "TENANT_KEK_HEX"
+    externalSecret: false
+  # feature/bundle-artifact-signing (PR #431) -- platform Ed25519 keypair signing
+  # every approved bundle. Private half: BUNDLE_SIGNING_PRIVATE_KEY/
+  # BUNDLE_SIGNING_KEY_ID in secretName (hub-api only). Public half: published to
+  # publicKeyConfigMapName for the bundle-executor(s) to mount -- the private key is
+  # NEVER mounted anywhere but hub-api.
+  bundleSigning:
+    secretName: ""  # default: "<fullname>-bundle-signing" when empty
+    publicKeyConfigMapName: ""  # default: "<fullname>-bundle-signing-public" when empty
+    keyId: "waddlebot-1"
+    externalSecret: false
+  # feature/eddsa-machine-jwt (PR #438) -- per-service EdDSA machine-JWT signing key.
+  # Private half: SERVICE_JWT_PRIVATE_KEY_<kid>/SERVICE_JWT_ACTIVE_KID in secretName
+  # (hub-api only, the sole issuer). Public half: published to
+  # publicKeyConfigMapName for hub-api's own verification path and any other service
+  # that needs to verify a service JWT without holding the signing key.
+  serviceJwt:
+    secretName: "service-jwt-signing-key"
+    publicKeyConfigMapName: ""  # default: "<fullname>-service-jwt-public" when empty
+    keyId: "waddlebot-1"
+    externalSecret: false

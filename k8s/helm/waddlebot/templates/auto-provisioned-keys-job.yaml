@@ -1,0 +1,194 @@
+# feature/helm-auto-provision-keys -- Ed25519 platform keys (PR #431 bundle-signing, PR
+# #438 service-jwt). These CANNOT be generated with pure Helm/Sprig template functions
+# like auto-provisioned-secrets.yaml's symmetric keys: `genPrivateKey "ed25519"` (where
+# available) only yields a PEM private key, and Sprig has no function to derive the raw
+# 32-byte Ed25519 PUBLIC key from it -- that needs a real crypto library. Runs as a
+# rootless pre-install/pre-upgrade hook (mirrors migrations-job.yaml's shape) using an
+# openssl+kubectl image, so no human ever runs scripts/generate-*.sh by hand for a
+# deploy to succeed.
+#
+# Same KEEP-vs-GENERATE policy as auto-provisioned-secrets.yaml, enforced in-script
+# (`lookup` isn't available to a plain Job pod, so this checks via `kubectl get`
+# instead): an existing Secret is left completely untouched; a miss is only generated
+# when global.deploymentTier is alpha/local; a miss anywhere else fails the Job (and
+# therefore the release) unless externalSecret: true. Deriving+publishing the PUBLIC
+# key ConfigMap, however, is NOT gated by tier -- it runs in every environment,
+# against whichever Secret is present (freshly generated here, pre-existing, or
+# populated moments earlier by an ExternalSecret controller), because publishing a
+# public key is never the sensitive step.
+#
+# Least privilege: the private key bytes are read from the Secret only to feed
+# `openssl pkey -pubout`; they are never echoed, never written to the ConfigMap, and
+# never held anywhere but this Job's own ephemeral /tmp (wiped with the pod). The
+# ConfigMap this Job writes contains ONLY public key material -- safe for any consumer
+# to mount, unlike the Secret itself which stays hub-api-only (see values.yaml
+# comment). RBAC for this exact scope: auto-provisioned-keys-job-rbac.yaml.
+{{- $tier := .Values.global.deploymentTier }}
+{{- $fullname := include "waddlebot.fullname" . }}
+{{- $bs := .Values.autoProvisionedKeys.bundleSigning }}
+{{- $bsSecretName := $bs.secretName | default (printf "%s-bundle-signing" $fullname) }}
+{{- $bsCmName := $bs.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" $fullname) }}
+{{- $sj := .Values.autoProvisionedKeys.serviceJwt }}
+{{- $sjCmName := $sj.publicKeyConfigMapName | default (printf "%s-service-jwt-public" $fullname) }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-auto-provision-keys
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-provision-keys
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-6"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: auto-provision-keys
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $fullname }}-auto-provision-keys
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: auto-provision-keys
+          # alpine/k8s -- community k8s-toolbox image bundling kubectl + openssl on an
+          # Alpine base, pinned by digest (multi-arch manifest list: amd64 + arm64).
+          image: "alpine/k8s:1.30.2@sha256:cd560fce90f76d2da46bce0624b65258c45ab3350f7073d6722fa74c7b3a3601"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: NAMESPACE
+              value: {{ .Values.namespace | quote }}
+            - name: DEPLOYMENT_TIER
+              value: {{ $tier | quote }}
+            - name: BUNDLE_SIGNING_SECRET
+              value: {{ $bsSecretName | quote }}
+            - name: BUNDLE_SIGNING_CM
+              value: {{ $bsCmName | quote }}
+            - name: BUNDLE_SIGNING_KEY_ID
+              value: {{ $bs.keyId | quote }}
+            - name: BUNDLE_SIGNING_EXTERNAL
+              value: {{ $bs.externalSecret | quote }}
+            - name: SERVICE_JWT_SECRET
+              value: {{ $sj.secretName | quote }}
+            - name: SERVICE_JWT_CM
+              value: {{ $sjCmName | quote }}
+            - name: SERVICE_JWT_KEY_ID
+              value: {{ $sj.keyId | quote }}
+            - name: SERVICE_JWT_EXTERNAL
+              value: {{ $sj.externalSecret | quote }}
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+
+              can_generate=false
+              case "${DEPLOYMENT_TIER}" in
+                alpha|local) can_generate=true ;;
+              esac
+
+              # provision_ed25519 <secret> <cm> <key-id> <external-flag> <priv-key-name> <kid-key-name> <pub-key-name>
+              provision_ed25519() {
+                local secret="$1" cm="$2" key_id="$3" external="$4"
+                local priv_key="$5" kid_key="$6" pub_key="$7"
+
+                if kubectl -n "${NAMESPACE}" get secret "${secret}" >/dev/null 2>&1; then
+                  echo "keep: secret/${secret} already exists, leaving untouched"
+                elif [ "${external}" = "true" ]; then
+                  echo "skip: secret/${secret} delegated to an external secret manager"
+                elif [ "${can_generate}" != "true" ]; then
+                  echo "FATAL: secret/${secret} missing, deploymentTier=${DEPLOYMENT_TIER} is outside alpha/local (auto-generation is alpha/local only), and externalSecret is not set. Pre-create this Secret, point an ExternalSecret/SealedSecret at it (and set the matching externalSecret: true value), or fix global.deploymentTier." >&2
+                  exit 1
+                else
+                  local wd
+                  wd="$(mktemp -d)"
+                  trap 'shred -u -f "'"${wd}"'"/* 2>/dev/null || true; rm -rf "'"${wd}"'"' RETURN
+                  umask 077
+                  openssl genpkey -algorithm ed25519 -out "${wd}/priv.pem" >/dev/null 2>&1
+                  openssl pkey -in "${wd}/priv.pem" -outform DER -out "${wd}/priv.der" >/dev/null 2>&1
+                  # PKCS8 DER for an Ed25519 key always ends in exactly the 32 raw seed
+                  # bytes after a fixed-length ASN.1 prefix (RFC 8410) -- same extraction
+                  # scripts/generate-bundle-signing-key.sh and
+                  # scripts/generate-service-jwt-key.sh use, so a Secret this Job creates
+                  # and one an operator creates via those scripts are byte-format
+                  # identical.
+                  local priv_b64
+                  priv_b64="$(tail -c 32 "${wd}/priv.der" | base64 | tr -d '\n')"
+                  kubectl -n "${NAMESPACE}" create secret generic "${secret}" \
+                    --from-literal="${priv_key}=${priv_b64}" \
+                    --from-literal="${kid_key}=${key_id}"
+                  kubectl -n "${NAMESPACE}" annotate secret "${secret}" \
+                    helm.sh/resource-policy=keep --overwrite
+                  echo "generated: secret/${secret} (kid=${key_id})"
+                fi
+
+                # Always (re)derive + publish the PUBLIC key from whatever private key is
+                # present now -- idempotent and safe whether the secret pre-existed,
+                # was just generated above, or was just populated by an external
+                # controller. Never runs for a still-missing+skipped (external,
+                # not-yet-populated) secret -- there is nothing to derive from yet;
+                # the external controller's own consumers wait on the Secret itself.
+                if ! kubectl -n "${NAMESPACE}" get secret "${secret}" >/dev/null 2>&1; then
+                  echo "skip: no ${secret} yet to derive a public key from"
+                  return 0
+                fi
+                local wd2
+                wd2="$(mktemp -d)"
+                trap 'shred -u -f "'"${wd2}"'"/* 2>/dev/null || true; rm -rf "'"${wd2}"'"' RETURN
+                umask 077
+                kubectl -n "${NAMESPACE}" get secret "${secret}" -o jsonpath="{.data.${priv_key}}" \
+                  | base64 -d | base64 -d > "${wd2}/priv.raw"
+                # Re-wrap the raw 32-byte seed into a minimal PKCS8 DER (fixed Ed25519
+                # prefix, RFC 8410) so openssl can load it back and derive the public key.
+                printf '\x30\x2e\x02\x01\x00\x30\x05\x06\x03\x2b\x65\x70\x04\x22\x04\x20' > "${wd2}/priv.der"
+                cat "${wd2}/priv.raw" >> "${wd2}/priv.der"
+                openssl pkey -inform DER -in "${wd2}/priv.der" -pubout -outform DER -out "${wd2}/pub.der" >/dev/null 2>&1
+                local pub_b64 actual_kid
+                pub_b64="$(tail -c 32 "${wd2}/pub.der" | base64 | tr -d '\n')"
+                actual_kid="$(kubectl -n "${NAMESPACE}" get secret "${secret}" -o jsonpath="{.data.${kid_key}}" | base64 -d)"
+                kubectl -n "${NAMESPACE}" create configmap "${cm}" \
+                  --from-literal="${kid_key}=${actual_kid}" \
+                  --from-literal="${pub_key}=${pub_b64}" \
+                  --dry-run=client -o yaml | kubectl -n "${NAMESPACE}" apply -f -
+                echo "published: configmap/${cm} (public key only, kid=${actual_kid})"
+              }
+
+              provision_ed25519 "${BUNDLE_SIGNING_SECRET}" "${BUNDLE_SIGNING_CM}" "${BUNDLE_SIGNING_KEY_ID}" "${BUNDLE_SIGNING_EXTERNAL}" \
+                BUNDLE_SIGNING_PRIVATE_KEY BUNDLE_SIGNING_KEY_ID BUNDLE_SIGNING_PUBLIC_KEY
+
+              provision_ed25519 "${SERVICE_JWT_SECRET}" "${SERVICE_JWT_CM}" "${SERVICE_JWT_KEY_ID}" "${SERVICE_JWT_EXTERNAL}" \
+                SERVICE_JWT_PRIVATE_KEY SERVICE_JWT_ACTIVE_KID SERVICE_JWT_PUBLIC_KEY
+
+              echo "auto-provision-keys: done"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
