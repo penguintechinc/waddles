@@ -58,7 +58,35 @@ spec:
             name: {{ include "waddlebot.fullname" . }}-config
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
+        # Per-service EdDSA machine JWT signing key (feature/eddsa-machine-jwt,
+        # security review HIGH finding) -- SERVICE_JWT_ACTIVE_KID and
+        # SERVICE_JWT_PRIVATE_KEY_<kid> land directly as env vars from the
+        # externally-managed Secret `scripts/generate-service-jwt-key.sh`
+        # creates (never from `values.yaml`, see serviceJwt's own comment).
+        # hub-api ONLY -- no other Deployment in this chart mounts this
+        # Secret; `optional: true` lets a deployment boot with issuance
+        # disabled (fails closed, see hub_api/app.py::startup) before the
+        # Secret has ever been generated.
+        - secretRef:
+            name: {{ .Values.serviceJwt.signingSecretName }}
+            optional: true
         env:
+        # `flask_core.service_jwt.load_issuer_from_env` also reads
+        # SERVICE_JWT_PUBLIC_KEY_<kid> for every still-valid-for-verification
+        # rotation key -- these are public keys, safe to render directly
+        # from values.yaml rather than round-tripping through a Secret.
+        {{- range $kid, $pem := .Values.serviceJwt.publicKeys }}
+        - name: SERVICE_JWT_PUBLIC_KEY_{{ $kid }}
+          value: {{ $pem | quote }}
+        {{- end }}
+        - name: SERVICE_JWT_AUDIENCE
+          value: {{ .Values.serviceJwt.audience | quote }}
+        - name: SERVICE_JWT_BOOTSTRAP_AUDIENCE
+          value: {{ .Values.serviceJwt.bootstrapAudience | quote }}
+        # `blueprints/service_jwt_bp.py`'s allow-list -- see
+        # templates/_service_jwt.tpl::waddlebot.serviceJwtIdentitiesJson.
+        - name: SERVICE_JWT_IDENTITIES
+          value: {{ include "waddlebot.serviceJwtIdentitiesJson" . | quote }}
         - name: MODULE_NAME
           value: "hub-api"
         - name: PIPELINE_STAGE

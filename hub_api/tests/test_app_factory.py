@@ -143,6 +143,34 @@ class TestVersionedRoutersMounted:
             assert response.status_code == 401
 
 
+class TestServiceJwtBlueprintMounted:
+    """security review HIGH finding: `service_jwt_bp` was never registered.
+
+    `_test_config()` sets no `SERVICE_JWT_*` env vars, so issuance is
+    disabled (`app.py::startup`'s `except (ServiceJwtError, KeyError)`
+    path) -- these assert the blueprint is reachable (not 404) and fails
+    closed (503), not that a real token is minted end-to-end (covered by
+    `libs/flask_core/tests/test_service_jwt.py` instead).
+    """
+
+    async def test_service_token_route_reachable_but_unconfigured(self, app: Quart) -> None:
+        async with app.test_app():
+            client = app.test_client()
+            response = await client.post(
+                "/internal/service-token",
+                headers={"Authorization": "Bearer whatever"},
+                json={"scope": "identity:ephemeral:mint"},
+            )
+            assert response.status_code == 503
+
+    async def test_service_jwks_route_reachable(self, app: Quart) -> None:
+        async with app.test_app():
+            client = app.test_client()
+            response = await client.get("/internal/service-jwks.json")
+            assert response.status_code == 200
+            assert (await response.get_json())["keys"] == []
+
+
 class TestSessionCookieBridgeWiredIntoRealApp:
     """security.md C4 fix -- `app.py`'s cookie->bearer bridge is actually mounted.
 
