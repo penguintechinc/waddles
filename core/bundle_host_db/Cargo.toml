@@ -1,0 +1,47 @@
+[package]
+name = "bundle-host-db"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Shared `db` bundle host-capability implementation (structured tables.* ops: insert/get/query/update/delete -- see crate doc for why this differs from stage.wit's current raw-SQL `execute` shape) for the data-plane's two invoke-side stages (svc_process + svc_action). A path dependency within this repo -- NOT a penguin-libs crate: table-identity resolution, quotas, and isolation rules here are this repo's own security boundary for untrusted vendor bundle data, evolved alongside the bundle-db-capability design doc and hub-api's app_core/app_community schema ownership. Backed by the shared `waddles` Postgres instance via SeaORM, under the least-privilege `waddles_bundle_runtime` role; every row is scoped server-side to the invocation's authenticated (tenant, community, app_id), never from guest input."
+
+[lib]
+name = "bundle_host_db"
+path = "src/lib.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- rules/critical-rules.md
+# Dependency Pinning. Cargo.lock is committed in every crate that depends
+# on this one (svc_process, svc_action) alongside this file. Versions
+# mirror core/svc_process's/core/svc_action's own pins for the same
+# crates (sea-orm in particular: both already declare `=2.0.2` with the
+# `sqlx-postgres` feature for this exact future purpose -- see
+# svc_process/Cargo.toml's own comment on its sea-orm dependency).
+[dependencies]
+sea-orm = { version = "=2.0.2", default-features = false, features = [
+    "sqlx-postgres",
+    "runtime-tokio-rustls",
+    "macros",
+    "with-uuid",
+] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+thiserror = "=2.0.20"
+tracing = "=0.1.44"
+tokio = { version = "=1.53.1", features = ["time", "sync"] }
+uuid = { version = "=1.26.1", features = ["v4"] }
+# Custom OTel metrics (span per call, latency/rows histograms, denial
+# counters -- rules/critical-rules.md Observability), same pattern as
+# `core/bundle_host_kv`'s own `metrics.rs`: reads whatever global
+# `SdkMeterProvider` `penguin-logging` already installed, never builds its
+# own provider.
+opentelemetry = "=0.32.0"
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }
+# Integration test against a real Postgres container -- same rationale and
+# exact version as `core/bundle_host_kv`'s `testcontainers` dev-dependency
+# (RustSec-patched `astral-tokio-tar` line via `testcontainers` >=0.28.0).
+testcontainers = "=0.28.0"
+sea-orm = { version = "=2.0.2", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid"] }
