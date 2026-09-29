@@ -1,7 +1,10 @@
-//! Resolves the numeric `BUNDLE_SCOPE_TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID`
-//! scope (already an `(i32, i32)` pair by the time any caller in this
-//! crate's dependents reaches this module) to the tenant slug/community
-//! name `penguin_spine::Scope::source_stream` needs -- the two are
+//! Resolves a `(tenant_id, community_id)` scope (an `(i32, i32)` pair --
+//! previously operator-configured via the now-removed `BUNDLE_SCOPE_
+//! TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID` env vars, now discovered
+//! per-scope by the multi-tenant change-log consumer,
+//! `crate::changelog`/each service's own `changelog_consumer` module) to
+//! the tenant slug/community name `penguin_spine::Scope::source_stream`
+//! needs -- the two are
 //! independent identifier spaces (`app_active_versions.tenant_id` is a
 //! plain numeric scope key, `penguin_spine::Scope` keys Valkey streams by
 //! slug/name strings), and conflating them (e.g. hardcoding a fixed

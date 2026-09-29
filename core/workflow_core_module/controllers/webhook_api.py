@@ -758,7 +758,12 @@ async def list_webhooks(workflow_id: str):
     )
 
     if not perms.can_view:
-        raise WorkflowPermissionException("Permission denied")
+        # WorkflowPermissionException(workflow_id, permission) -- a bare
+        # message-only call raised TypeError (missing required `permission`
+        # arg) on every permission denial; undetected because this
+        # blueprint is dead code (never registered by app.py) with 0%
+        # coverage.
+        raise WorkflowPermissionException(workflow_id, "can_view")
 
     # Get webhooks from database
     dal = get_dal()
@@ -901,7 +906,7 @@ async def create_webhook(workflow_id: str):
     )
 
     if not perms.can_edit:
-        raise WorkflowPermissionException("Permission denied")
+        raise WorkflowPermissionException(workflow_id, "can_edit")
 
     # Generate webhook token and secret
     token = generate_webhook_token()
@@ -1041,14 +1046,14 @@ async def delete_webhook(workflow_id: str, webhook_id: str):
     )
 
     if not perms.can_edit:
-        raise WorkflowPermissionException("Permission denied")
+        raise WorkflowPermissionException(workflow_id, "can_edit")
 
     # Get and verify webhook exists
     dal = get_dal()
     webhook = await get_webhook_from_db(dal, workflow_id, webhook_id)
 
     if not webhook:
-        raise WorkflowNotFoundException("Webhook not found")
+        raise WorkflowNotFoundException(webhook_id)
 
     # Delete webhook from database
     try:
