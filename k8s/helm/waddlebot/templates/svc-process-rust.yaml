@@ -42,7 +42,7 @@ spec:
       {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
       containers:
       - name: svc-process-rust
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-process" "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcProcess.imageRepository | default "svc-process-rust") "imageTag" .Values.global.imageTag) }}"
         # Hardcoded Always (not .Values.global.imagePullPolicy) -- this Rust data-plane image
         # iterates rapidly against the mutable `alpha` tag on the in-cluster registry and the
         # node's containerd IfNotPresent cache was proven to serve a stale binary after a
@@ -168,20 +168,22 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: DB_READER_PASSWORD
-        {{- /* Bug fix: rendered only when explicitly set -- never defaulted to 0.
-        core/svc_process/src/config.rs's TenantScopeId treats an unset/empty env var
-        as None ("not configured") and Some(0) as the real, legitimate global tenant;
-        defaulting this to the string "0" here would make the loader indistinguishable
-        from "explicitly scoped to tenant 0" and reintroduce the exact bug this chart
-        change is paired with. */}}
-        {{- if ne (.Values.pipeline.rustDataPlane.svcProcess.bundleScopeTenantId | toString) "" }}
-        - name: BUNDLE_SCOPE_TENANT_ID
-          value: {{ .Values.pipeline.rustDataPlane.svcProcess.bundleScopeTenantId | quote }}
-        {{- end }}
-        - name: BUNDLE_SCOPE_COMMUNITY_ID
-          value: {{ .Values.pipeline.rustDataPlane.svcProcess.bundleScopeCommunityId | default 0 | quote }}
+        {{- /* BUNDLE_SCOPE_TENANT_ID/BUNDLE_SCOPE_COMMUNITY_ID REMOVED (dataplane
+        scale design, multi-tenant change-log consumer -- user requirement: "every
+        svc_process/svc_action pod serves ALL tenants"). This loader now discovers
+        and serves every (tenant_id, community_id) scope in the database itself
+        (bundle_active_set::read_active_set_all); there is no per-pod tenant scope
+        left to configure. */}}
         - name: BUNDLE_CONFIG_POLL_SECONDS
+          # Incremental change-log poll interval, in whole seconds (floor: 5s,
+          # core/svc_process/src/config.rs CliConfig::bundle_config_poll_interval).
+          # Semantics unchanged from the retired single-tenant watermark loader.
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.bundleConfigPollSeconds | default 300 | quote }}
+        - name: BUNDLE_CONFIG_FULL_RECONCILE_MINUTES
+          # Periodic full active-set reconcile interval, in whole minutes (floor:
+          # 1m) -- bounds the blast radius of any change-log defect to one
+          # interval, independent of the change-log's own correctness.
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.bundleConfigFullReconcileMinutes | default 15 | quote }}
         livenessProbe:
           httpGet:
             path: /health

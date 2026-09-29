@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import pytest
 
-from .webhook_executor import (
+from services.webhook_executor import (
     ExpressionTemplater,
     SafeExpressionEvaluator,
     UnsafeExpressionError,
