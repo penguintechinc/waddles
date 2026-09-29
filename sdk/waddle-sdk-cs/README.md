@@ -253,6 +253,10 @@ Only the `<source file path>` in the first `notice` line changes per bundle
 even though `author` credits both names. See
 `bundles/csharp/superpenguin-roll/bundle.yaml` for the reference copy.
 
+## Network access
+
+Bundles should never see or target private IP addresses. Use public FQDNs (`net.http.fqdn:<host>`), which is the preferred form. Public IPs (`net.http.public-ip`) are **HIGH risk**. `net.http.private-ip` is **HIGH risk, DENIED instance-wide by default** — a global admin must opt in, it exists only for exceptional self-hosted/on-prem cases, requires separate explicit approval, and is never available for the platform's own cluster networks. Reviewers and admins should treat any private-ip request as a red flag.
+
 ## Testing this SDK
 
 ```bash
