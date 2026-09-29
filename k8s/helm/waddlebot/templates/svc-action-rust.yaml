@@ -43,7 +43,7 @@ spec:
       {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
       containers:
       - name: svc-action-rust
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-action" "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcAction.imageRepository | default "svc-action-rust") "imageTag" .Values.global.imageTag) }}"
         # Hardcoded Always -- see templates/svc-process-rust.yaml's comment on this same line
         # for the node-image-cache rationale (identical here).
         imagePullPolicy: Always

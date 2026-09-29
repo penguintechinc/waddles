@@ -42,7 +42,7 @@ spec:
       {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
       containers:
       - name: svc-process-rust
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-process" "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcProcess.imageRepository | default "svc-process-rust") "imageTag" .Values.global.imageTag) }}"
         # Hardcoded Always (not .Values.global.imagePullPolicy) -- this Rust data-plane image
         # iterates rapidly against the mutable `alpha` tag on the in-cluster registry and the
         # node's containerd IfNotPresent cache was proven to serve a stale binary after a
