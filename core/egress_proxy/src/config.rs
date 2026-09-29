@@ -82,14 +82,33 @@ fn parse_cidrs(raw: &str, var: &'static str) -> Result<Vec<IpNet>, ConfigError> 
         .map(|s| {
             // Bare IPs (no `/prefix`, e.g. a single node IP) are accepted as
             // a /32 or /128 host route.
-            if s.contains('/') {
+            let net = if s.contains('/') {
                 s.parse::<IpNet>()
-                    .map_err(|_| ConfigError::Invalid(var, s.to_string()))
+                    .map_err(|_| ConfigError::Invalid(var, s.to_string()))?
             } else {
                 s.parse::<IpAddr>()
                     .map(IpNet::from)
-                    .map_err(|_| ConfigError::Invalid(var, s.to_string()))
+                    .map_err(|_| ConfigError::Invalid(var, s.to_string()))?
+            };
+            // regression: mapped-v6 cluster bypass -- `ip_policy::is_denied`
+            // canonicalizes every checked address to its embedded-v4 form
+            // (via `bundle_host_http::egress::canonicalize_ip`) before
+            // comparing against this list, so a range configured in IPv4-
+            // mapped/NAT64/IPv4-compatible IPv6 form could never match
+            // anything post-canonicalization. Fail closed at startup rather
+            // than silently shipping a deny entry that can never fire.
+            if let IpAddr::V6(v6) = net.addr() {
+                if bundle_host_http::egress::embedded_ipv4(v6).is_some() {
+                    return Err(ConfigError::Invalid(
+                        var,
+                        format!(
+                            "{s} is an IPv4-mapped/NAT64/IPv4-compatible IPv6 range -- write it \
+                             in native IPv4 form instead (e.g. 10.0.0.0/8)"
+                        ),
+                    ));
+                }
             }
+            Ok(net)
         })
         .collect()
 }
@@ -181,5 +200,48 @@ impl Config {
             tunnel_max_duration: Duration::from_secs(tunnel_max_duration_secs),
             allow_private_ip,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_cidrs_accepts_a_plain_v4_range_and_a_bare_ip() {
+        let parsed = parse_cidrs("10.244.0.0/16, 1.2.3.4", "DENY_CIDRS").unwrap();
+        assert_eq!(parsed.len(), 2);
+    }
+
+    /// regression: mapped-v6 cluster bypass -- a deny-CIDR entry written in
+    /// IPv4-mapped-IPv6 form is rejected at config-parse time (fail closed)
+    /// rather than silently accepted as an entry `ip_policy::is_denied`'s
+    /// canonicalization would ensure can never match anything.
+    #[test]
+    fn parse_cidrs_rejects_a_mapped_ipv6_range() {
+        let err = parse_cidrs("::ffff:10.244.0.0/120", "DENY_CLUSTER_CIDRS").unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("IPv4-mapped"),
+            "expected a clear IPv4-mapped config error, got: {message}"
+        );
+    }
+
+    /// regression: mapped-v6 cluster bypass -- same rejection for the
+    /// NAT64-synthesized and IPv4-compatible encodings.
+    #[test]
+    fn parse_cidrs_rejects_nat64_and_ipv4_compatible_ranges() {
+        for raw in ["64:ff9b::10.244.0.0/120", "::10.244.0.0/120"] {
+            assert!(
+                parse_cidrs(raw, "DENY_CIDRS").is_err(),
+                "expected {raw} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_cidrs_accepts_a_native_v6_range() {
+        let parsed = parse_cidrs("fd00::/8", "DENY_CIDRS").unwrap();
+        assert_eq!(parsed.len(), 1);
     }
 }

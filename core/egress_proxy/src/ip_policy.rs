@@ -9,7 +9,7 @@
 
 use std::net::IpAddr;
 
-use bundle_host_http::egress::is_forbidden_address;
+use bundle_host_http::egress::{canonicalize_ip, is_forbidden_address};
 use ipnet::IpNet;
 
 /// The three `net.http.*` permission families (connector spec) -- the
@@ -45,6 +45,17 @@ pub fn is_denied(
     deny_cidrs: &[IpNet],
     allow_private_ip_enabled: bool,
 ) -> Option<&'static str> {
+    // regression: mapped-v6 cluster bypass -- `IpNet::contains` requires an
+    // exact address-family match, so an IPv4-mapped/NAT64/IPv4-compatible
+    // IPv6 encoding of a denied address (e.g. `::ffff:10.42.0.5` against a
+    // configured `10.42.0.0/16`) never matched either CIDR list below, even
+    // though `is_forbidden_address` already canonicalizes the same address
+    // for its own checks. Canonicalize once, up front, and use that value
+    // for every check in this function -- shares `bundle_host_http::
+    // egress::canonicalize_ip` so this proxy can never diverge from the
+    // in-process guard's `ClusterCidrDenylist` on what counts as "the same
+    // address".
+    let ip = canonicalize_ip(ip);
     if cluster_cidrs.iter().any(|net| net.contains(&ip)) {
         return Some("cluster_cidr");
     }
@@ -146,6 +157,87 @@ mod tests {
         assert_eq!(
             is_denied(ip, DestinationCategory::Fqdn, &cluster_cidrs(), &[], true),
             None
+        );
+    }
+
+    /// regression: mapped-v6 cluster bypass -- the exact SSRF this module
+    /// was written to close: `::ffff:10.244.1.5` (a resolver/attacker
+    /// encoding of the same cluster-pod address `cluster_pod_cidr_denied_
+    /// even_with_private_ip_category` proves is denied in plain v4 form)
+    /// must be denied too, even with `PrivateIp` category and the
+    /// deployment-wide private-IP gate enabled. Before `is_denied`
+    /// canonicalized `ip` up front, `IpNet::contains`'s exact-family
+    /// requirement let this straight through: `cluster_cidrs`/`deny_cidrs`
+    /// never matched (v4 net vs v6 ip), and `is_forbidden_address`'s own
+    /// canonicalization only ever gated the private-range check, not the
+    /// cluster/operator deny lists.
+    #[test]
+    fn cluster_pod_cidr_denies_an_ipv4_mapped_ipv6_target() {
+        let ip: IpAddr = "::ffff:10.244.1.5".parse().unwrap();
+        assert_eq!(
+            is_denied(
+                ip,
+                DestinationCategory::PrivateIp,
+                &cluster_cidrs(),
+                &[],
+                true
+            ),
+            Some("cluster_cidr")
+        );
+    }
+
+    /// regression: mapped-v6 cluster bypass -- same bypass via the NAT64-
+    /// synthesized and deprecated IPv4-compatible encodings of the same
+    /// cluster address.
+    #[test]
+    fn cluster_pod_cidr_denies_nat64_and_ipv4_compatible_encodings() {
+        for addr in ["64:ff9b::10.244.1.5", "::10.244.1.5"] {
+            let ip: IpAddr = addr.parse().unwrap();
+            assert_eq!(
+                is_denied(
+                    ip,
+                    DestinationCategory::PrivateIp,
+                    &cluster_cidrs(),
+                    &[],
+                    true
+                ),
+                Some("cluster_cidr"),
+                "expected {addr} to be denied by the cluster CIDR list"
+            );
+        }
+    }
+
+    /// regression: mapped-v6 cluster bypass -- the operator `DENY_CIDRS`
+    /// list (`deny_cidrs`) must canonicalize the same way `cluster_cidrs`
+    /// does; it is a second, independent `IpNet::contains` call site in the
+    /// same function.
+    #[test]
+    fn operator_deny_cidr_denies_an_ipv4_mapped_ipv6_target() {
+        let ip: IpAddr = "::ffff:203.0.113.5".parse().unwrap();
+        let deny_cidrs: Vec<IpNet> = vec!["203.0.113.0/24".parse().unwrap()];
+        assert_eq!(
+            is_denied(ip, DestinationCategory::PublicIp, &[], &deny_cidrs, true),
+            Some("operator_deny_cidr")
+        );
+    }
+
+    /// regression: mapped-v6 cluster bypass -- mapped/NAT64/compatible
+    /// encodings of cloud metadata and loopback must still be denied
+    /// through this proxy's own `is_denied` entry point (not just the
+    /// shared `is_forbidden_address` this delegates to), proving the
+    /// canonicalization added here doesn't accidentally skip that delegate
+    /// call.
+    #[test]
+    fn ipv4_mapped_metadata_and_loopback_are_denied_through_is_denied() {
+        let metadata: IpAddr = "::ffff:169.254.169.254".parse().unwrap();
+        assert_eq!(
+            is_denied(metadata, DestinationCategory::PrivateIp, &[], &[], true),
+            Some("cloud_metadata")
+        );
+        let loopback: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert_eq!(
+            is_denied(loopback, DestinationCategory::PrivateIp, &[], &[], true),
+            Some("loopback")
         );
     }
 }
