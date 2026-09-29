@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Installs every Python dependency `make test-unit` / tests/k8s/alpha/05-unit-tests.sh
 # needs to collect and run the full unit suite (legacy tests/unit +
-# identity_core_module, community_module, hub_api, libs/* (flask_core +
-# SCCEMBS module libraries), and every core/svc_* stage-runner container).
+# identity_core_module, workflow_core_module, community_module, hub_api,
+# libs/* (flask_core + SCCEMBS module libraries), and every core/svc_*
+# stage-runner container).
 #
 # Each subproject ships its own requirements.txt with its own pins -- most
 # are hash-pinned (--require-hashes) and some legitimately disagree on
@@ -46,6 +47,17 @@ echo "[install-unit-test-deps] penguin-dal (libs/flask_core's undeclared runtime
 
 echo "[install-unit-test-deps] core/identity_core_module + editable libs/flask_core"
 "${PIP[@]}" -r core/identity_core_module/requirements.txt -e libs/flask_core
+
+# core/workflow_core_module's requirements.txt is hash-pinned
+# (--generate-hashes, like libs/waddle_transports below) -- installed
+# without --require-hashes since there's no accompanying unhashed/editable
+# spec in this call to conflict with pip's auto-enabled hash-checking mode.
+# It also needs grpc_tools.protoc at test-collection time (tests/conftest.py
+# generates workflow_pb2*.py from proto/workflow.proto on the fly, mirroring
+# the Dockerfile's build-time codegen step) -- grpcio-tools is already
+# declared in this requirements.txt for exactly that reason.
+echo "[install-unit-test-deps] core/workflow_core_module"
+"${PIP[@]}" -r core/workflow_core_module/requirements.txt
 
 echo "[install-unit-test-deps] core/community_module"
 "${PIP[@]}" -r core/community_module/requirements.txt
