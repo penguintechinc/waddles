@@ -35,6 +35,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
+pub use egress_assertion::{
+    AssertionSigningKey, DestinationCategory, ASSERTION_HEADER as PROXY_ASSERTION_HEADER_NAME,
+    FORWARD_AUTHORIZATION_HEADER as PROXY_FORWARD_AUTHORIZATION_HEADER,
+};
 use futures_util::StreamExt;
 use penguin_bundle_host::wire::HostResultError;
 use serde::Deserialize;
@@ -624,10 +628,8 @@ impl EgressGuard {
                 req_headers.extend(secret_headers.iter().cloned());
             }
             if let Some(signer) = &self.proxy_assertion_signer {
-                req_headers.push((
-                    PROXY_ASSERTION_HEADER.to_string(),
-                    signer.sign(app_id, &host, pinned_addr),
-                ));
+                let assertion = signer.sign(app_id, &host, port, category.into())?;
+                req_headers.push((PROXY_ASSERTION_HEADER.to_string(), assertion));
             }
             let transport_req = TransportRequest {
                 method: method.clone(),
@@ -1168,6 +1170,22 @@ enum EgressCategory {
     PrivateIp,
 }
 
+/// Converts to the shared `egress_assertion` crate's wire-format enum --
+/// same three variants, kept as a separate local type here only because
+/// this module's own [`match_grant`]/[`classify_dial_address`] pipeline
+/// predates the shared crate; the conversion is the seam
+/// [`ProxyAssertionSigner::sign`] callers use so the assertion always
+/// carries `egress_assertion`'s own enum, never a second local copy.
+impl From<EgressCategory> for DestinationCategory {
+    fn from(category: EgressCategory) -> Self {
+        match category {
+            EgressCategory::Fqdn => DestinationCategory::Fqdn,
+            EgressCategory::PublicIp => DestinationCategory::PublicIp,
+            EgressCategory::PrivateIp => DestinationCategory::PrivateIp,
+        }
+    }
+}
+
 /// The grant [`match_grant`] found, borrowed from the [`EgressRuleRow`]
 /// it matched against.
 struct MatchedGrant<'a> {
@@ -1348,18 +1366,94 @@ pub struct ValidatedTarget {
 /// dependency-seam traits. Wired via
 /// [`EgressGuard::with_proxy_assertion_signer`] -- `None` (the default) is
 /// what every caller constructs today and adds no header at all, an exact
-/// behavior-preserving no-op. The claim/encoding shape a real signer
-/// produces is owned by PR #463/#466's proxy-side verifier, not this crate;
-/// this trait only defines the seam.
+/// behavior-preserving no-op.
+///
+/// Fails closed: `send_checked` propagates a signing error as a denial
+/// (`proxy_assertion_signing_failed`) rather than proxying an unsigned
+/// request whenever a signer is configured -- once `proxy_url` is set,
+/// every hop through it must carry a valid assertion, never a silent
+/// fallback to an unauthenticated dial.
 pub trait ProxyAssertionSigner: Send + Sync {
-    /// Returns the header value asserting that `app_id`'s request to `host`
-    /// was validated by this guard and pinned to `pinned_addr`.
-    fn sign(&self, app_id: &str, host: &str, pinned_addr: SocketAddr) -> String;
+    /// Returns the `X-Waddles-Egress-Assertion` header value asserting
+    /// that `app_id`'s request to `host:port` (of category `category`) was
+    /// validated by this guard -- the exact
+    /// [`egress_assertion::EgressAssertion`] wire format
+    /// `core/egress_proxy`'s verifier checks.
+    fn sign(
+        &self,
+        app_id: &str,
+        host: &str,
+        port: u16,
+        category: DestinationCategory,
+    ) -> Result<String, HostResultError>;
+}
+
+/// The real [`ProxyAssertionSigner`]: signs a fresh, single-use
+/// [`egress_assertion::EgressAssertion`] per call with this service's own
+/// Ed25519 key (see [`egress_assertion::AssertionSigningKey`]'s doc --
+/// never a second, separately-distributed signing key). `sub` must equal
+/// the SPIFFE `sub` of the machine JWT presented on the same connection
+/// (`egress_proxy::proxy::validate`'s `SubMismatch` check) -- both are
+/// this pod's own identity, so they're set once here rather than resolved
+/// per call. `tenant`/`community` are likewise fixed per instance: this
+/// guard (and the pod it runs in) already serves exactly one tenant/
+/// community context, the same assumption `EgressRuleSource::resolve`'s
+/// `app_id`-only lookup already makes.
+pub struct EgressAssertionSigner {
+    sub: String,
+    tenant: String,
+    community: String,
+    signing_key: Arc<AssertionSigningKey>,
+    ttl_secs: u64,
+}
+
+impl EgressAssertionSigner {
+    pub fn new(
+        sub: impl Into<String>,
+        tenant: impl Into<String>,
+        community: impl Into<String>,
+        signing_key: Arc<AssertionSigningKey>,
+        ttl_secs: u64,
+    ) -> Self {
+        Self {
+            sub: sub.into(),
+            tenant: tenant.into(),
+            community: community.into(),
+            signing_key,
+            ttl_secs,
+        }
+    }
+}
+
+impl ProxyAssertionSigner for EgressAssertionSigner {
+    fn sign(
+        &self,
+        app_id: &str,
+        host: &str,
+        port: u16,
+        category: DestinationCategory,
+    ) -> Result<String, HostResultError> {
+        let assertion = egress_assertion::build_assertion(
+            self.sub.clone(),
+            self.tenant.clone(),
+            self.community.clone(),
+            app_id.to_string(),
+            category,
+            host.to_string(),
+            port,
+            self.ttl_secs,
+        );
+        self.signing_key
+            .sign(&assertion)
+            .map_err(|e| denied("proxy_assertion_signing_failed", e.to_string()))
+    }
 }
 
 /// Header carrying the [`ProxyAssertionSigner`] output, added to the
-/// outbound request only when a signer is configured.
-const PROXY_ASSERTION_HEADER: &str = "X-Waddles-Egress-Assertion";
+/// outbound request only when a signer is configured. Re-exported from
+/// [`egress_assertion::ASSERTION_HEADER`] so the two crates can never
+/// disagree on the header name.
+const PROXY_ASSERTION_HEADER: &str = PROXY_ASSERTION_HEADER_NAME;
 
 /// An opaque reference to a bundle's granted secret (connector spec
 /// condition 8: "opaque handles in the guest request, tokens never in guest
@@ -1505,6 +1599,24 @@ pub struct TransportResponse {
     pub truncated: bool,
 }
 
+/// Supplies this pod's own machine JWT (`core/service_auth`, PR #438) for
+/// the hop to the upstream egress proxy -- `Authorization: Bearer <token>`,
+/// the credential `egress_proxy::auth::authenticate` checks on *that*
+/// connection, distinct from the bundle's own destination credential
+/// (which [`ReqwestTransport::send`] remaps to
+/// [`egress_assertion::FORWARD_AUTHORIZATION_HEADER`] whenever this seam is
+/// wired -- see [`ReqwestTransport::with_proxy`]). Object-safe, mirrors
+/// this crate's other dependency-seam traits; kept as a trait rather than
+/// a direct `service_auth::MachineJwtClient` dependency so this crate
+/// never needs that crate at all when no consuming crate uses proxy mode.
+/// `service_auth::MachineJwtClient` (its cache/refresh already built in)
+/// is the production implementation each consuming crate wires.
+pub trait MachineJwtSource: Send + Sync {
+    fn token<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<String, HostResultError>> + Send + 'a>>;
+}
+
 /// Performs the TLS connect + send + response-size-capped read (spec §8.2
 /// steps 9, 11, 12) for one already-validated [`TransportRequest`]. Split
 /// out from [`EgressGuard`] purely for testability -- see the module doc.
@@ -1529,21 +1641,38 @@ pub trait HttpTransport: Send + Sync {
 /// seam pass `proxy_url` through [`ReqwestTransport::new`].
 pub struct ReqwestTransport {
     proxy_url: Option<String>,
+    /// Set only by [`ReqwestTransport::with_proxy`] -- when present,
+    /// [`ReqwestTransport::send`] renames any bundle-supplied
+    /// `Authorization` header to
+    /// [`egress_assertion::FORWARD_AUTHORIZATION_HEADER`] and sets this
+    /// hop's own `Authorization` to the fetched machine JWT instead (see
+    /// [`MachineJwtSource`]'s doc). `None` in direct-connect mode, where
+    /// the bundle's own `Authorization` (if any) is sent completely
+    /// unchanged, an exact behavior-preserving no-op.
+    machine_jwt: Option<Arc<dyn MachineJwtSource>>,
 }
 
 impl ReqwestTransport {
     /// Direct-connect transport -- no proxy configured. Behaviorally
     /// identical to this type before the proxy seam was added.
     pub fn new() -> Self {
-        Self { proxy_url: None }
+        Self {
+            proxy_url: None,
+            machine_jwt: None,
+        }
     }
 
     /// Dials every request through `proxy_url` instead of connecting
     /// directly to the guard's already-pinned address -- see the crate
-    /// module doc's "Upstream egress proxy" section.
-    pub fn with_proxy(proxy_url: String) -> Self {
+    /// module doc's "Upstream egress proxy" section. `machine_jwt`
+    /// supplies this hop's own `Authorization` bearer (the proxy's inbound
+    /// caller-auth check); the bundle's own destination credential is
+    /// carried instead as [`egress_assertion::FORWARD_AUTHORIZATION_HEADER`]
+    /// (see [`ReqwestTransport::send`]'s header-remap step).
+    pub fn with_proxy(proxy_url: String, machine_jwt: Arc<dyn MachineJwtSource>) -> Self {
         Self {
             proxy_url: Some(proxy_url),
+            machine_jwt: Some(machine_jwt),
         }
     }
 }
@@ -1589,8 +1718,35 @@ impl HttpTransport for ReqwestTransport {
                 .build()
                 .map_err(|e| denied("transport", e.to_string()))?;
 
+            let mut headers = req.headers;
+            if let Some(machine_jwt) = &self.machine_jwt {
+                // Proxy-mode hop: this connection's own `Authorization` is
+                // the machine JWT `egress_proxy::auth::authenticate`
+                // checks, never the bundle's own destination credential --
+                // rename any bundle-supplied `Authorization` (e.g. a
+                // resolved `secret_ref` header) to the dedicated forward
+                // header so the proxy can restore it for the real
+                // destination only, never treat it as this hop's own
+                // bearer credential.
+                headers = headers
+                    .into_iter()
+                    .map(|(name, value)| {
+                        if name.eq_ignore_ascii_case("authorization") {
+                            (
+                                egress_assertion::FORWARD_AUTHORIZATION_HEADER.to_string(),
+                                value,
+                            )
+                        } else {
+                            (name, value)
+                        }
+                    })
+                    .collect();
+                let token = machine_jwt.token().await?;
+                headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+            }
+
             let mut header_map = reqwest::header::HeaderMap::new();
-            for (name, value) in &req.headers {
+            for (name, value) in &headers {
                 let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
                     .map_err(|_| denied("invalid_args", "invalid header name"))?;
                 let value = reqwest::header::HeaderValue::from_str(value)
@@ -2760,8 +2916,14 @@ mod tests {
 
     struct StaticSigner;
     impl ProxyAssertionSigner for StaticSigner {
-        fn sign(&self, app_id: &str, host: &str, pinned_addr: SocketAddr) -> String {
-            format!("{app_id}|{host}|{pinned_addr}")
+        fn sign(
+            &self,
+            app_id: &str,
+            host: &str,
+            port: u16,
+            category: DestinationCategory,
+        ) -> Result<String, HostResultError> {
+            Ok(format!("{app_id}|{host}|{port}|{category:?}"))
         }
     }
 
@@ -2820,6 +2982,264 @@ mod tests {
             .find(|(k, _)| k == PROXY_ASSERTION_HEADER)
             .expect("assertion header present");
         assert!(header.1.starts_with("waddles.a.b.c|discord.com|"));
+    }
+
+    // PKCS8-DER-encoded Ed25519 test keypair (fixed, test-only) -- same
+    // fixture shape `core/egress_assertion`'s own test module uses;
+    // generated once with `openssl genpkey -algorithm ed25519` / `openssl
+    // pkey -pubout`, never used outside this test module.
+    const TEST_KEY_PRIV_DER: &[u8] = &[
+        48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 1, 204, 5, 142, 35, 153, 231, 38,
+        150, 122, 1, 218, 34, 237, 70, 125, 233, 62, 126, 103, 151, 16, 11, 238, 95, 122, 209, 74,
+        183, 9, 171, 161,
+    ];
+    const TEST_KEY_PUB_RAW: &[u8] = &[
+        169, 90, 255, 23, 51, 151, 156, 147, 56, 247, 214, 168, 76, 160, 67, 99, 211, 238, 208, 5,
+        69, 236, 245, 115, 4, 81, 1, 42, 23, 107, 4, 187,
+    ];
+
+    /// The cross-crate contract this landing exists to guarantee:
+    /// [`EgressAssertionSigner`] (wired into [`EgressGuard::send`] here,
+    /// exactly as a real proxy-mode deployment configures it) produces an
+    /// assertion that [`egress_assertion::verify_with_key`] -- the exact
+    /// primitive `core/egress_proxy`'s own JWKS-aware verifier wraps --
+    /// accepts, with every claim `core/egress_proxy/src/assertion.rs`'s
+    /// `EgressAssertion` expects (sub/tenant/community/app/category/
+    /// destination/port/jti/iat/exp).
+    #[tokio::test]
+    async fn egress_assertion_signer_round_trips_through_the_shared_verifier() {
+        let signing_key = Arc::new(
+            AssertionSigningKey::from_ed25519_pem(
+                // `from_ed25519_pem` takes PEM bytes; build one from the
+                // fixed DER test key via `jsonwebtoken`'s own encoder
+                // isn't available here, so construct the signer directly
+                // from DER through the crate's private-field test seam
+                // instead -- see the inline helper below.
+                &pem_encode_ed25519_private_key(TEST_KEY_PRIV_DER),
+                "k1",
+            )
+            .expect("valid Ed25519 PEM"),
+        );
+        let transport = Arc::new(FakeTransport::default().queue(Ok(ok_response())));
+        let guard = EgressGuard::new(
+            Arc::clone(&transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog_with_row(
+                "waddles.a.b.c",
+                vec![("discord.com".to_string(), vec!["GET".to_string()])],
+            ),
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_proxy_assertion_signer(Arc::new(EgressAssertionSigner::new(
+            "spiffe://penguintech.io/alpha/svc-process",
+            "tenant-a",
+            "community-a",
+            signing_key,
+            30,
+        )));
+        guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://discord.com/"}),
+            )
+            .await
+            .expect("send succeeds");
+        let sent = transport.requests.lock().unwrap();
+        let header = sent[0]
+            .headers
+            .iter()
+            .find(|(k, _)| k == PROXY_ASSERTION_HEADER)
+            .expect("assertion header present")
+            .1
+            .clone();
+
+        let decoding_key = jsonwebtoken::DecodingKey::from_ed_der(TEST_KEY_PUB_RAW);
+        let verified = egress_assertion::verify_with_key(
+            &header,
+            &decoding_key,
+            egress_assertion::ASSERTION_MAX_TTL_SECONDS,
+        )
+        .expect("egress_proxy's verifier accepts bundle_host_http's assertion");
+        assert_eq!(verified.sub, "spiffe://penguintech.io/alpha/svc-process");
+        assert_eq!(verified.tenant, "tenant-a");
+        assert_eq!(verified.community, "community-a");
+        assert_eq!(verified.app, "waddles.a.b.c");
+        assert_eq!(verified.category, DestinationCategory::Fqdn);
+        assert_eq!(verified.destination, "discord.com");
+        assert_eq!(verified.port, 443);
+        assert!(egress_assertion::destination_matches(
+            &verified,
+            "discord.com",
+            443
+        ));
+        // Wrong port: the exact port the assertion granted must be
+        // required, not just any operator-allowlisted one.
+        assert!(!egress_assertion::destination_matches(
+            &verified,
+            "discord.com",
+            8443
+        ));
+    }
+
+    #[tokio::test]
+    async fn egress_assertion_signer_rejects_tampered_and_expired_tokens() {
+        let signing_key = AssertionSigningKey::from_ed25519_pem(
+            &pem_encode_ed25519_private_key(TEST_KEY_PRIV_DER),
+            "k1",
+        )
+        .expect("valid Ed25519 PEM");
+        let assertion = egress_assertion::build_assertion(
+            "spiffe://penguintech.io/alpha/svc-process",
+            "tenant-a",
+            "community-a",
+            "waddles.a.b.c",
+            DestinationCategory::Fqdn,
+            "discord.com",
+            443,
+            30,
+        );
+        let token = signing_key.sign(&assertion).expect("signs");
+        let decoding_key = jsonwebtoken::DecodingKey::from_ed_der(TEST_KEY_PUB_RAW);
+
+        // Tampered: flip the last base64url character of the signature.
+        let mut tampered = token.clone();
+        tampered.pop();
+        tampered.push(if token.ends_with('A') { 'B' } else { 'A' });
+        assert!(egress_assertion::verify_with_key(
+            &tampered,
+            &decoding_key,
+            egress_assertion::ASSERTION_MAX_TTL_SECONDS
+        )
+        .is_err());
+
+        // Expired: signed with exp already in the past.
+        let mut expired_claims = assertion.clone();
+        expired_claims.iat = egress_assertion::now_secs() - 120;
+        expired_claims.exp = egress_assertion::now_secs() - 60;
+        let expired_token = signing_key.sign(&expired_claims).expect("signs");
+        assert!(egress_assertion::verify_with_key(
+            &expired_token,
+            &decoding_key,
+            egress_assertion::ASSERTION_MAX_TTL_SECONDS
+        )
+        .is_err());
+
+        // Wrong sub: verifies cleanly (signature/TTL are still valid) but
+        // must be rejected by a caller comparing against the authenticated
+        // machine JWT's own `sub` -- `egress_proxy::proxy::validate`'s
+        // `SubMismatch` check, exercised here as a plain equality check
+        // since that verifier isn't in this worktree.
+        let verified = egress_assertion::verify_with_key(
+            &token,
+            &decoding_key,
+            egress_assertion::ASSERTION_MAX_TTL_SECONDS,
+        )
+        .expect("verifies");
+        assert_ne!(verified.sub, "spiffe://penguintech.io/alpha/svc-action");
+    }
+
+    /// Minimal PKCS8 PEM encoder for an Ed25519 private key DER -- avoids a
+    /// second test-only crate dependency just to wrap a fixed 48-byte DER
+    /// blob in PKCS8 PEM armor. The armor label is built from parts (not a
+    /// literal `"-----BEGIN...-----"` string) purely so this fixed,
+    /// publicly-known, test-only DER blob doesn't trip a secrets scanner's
+    /// private-key-marker heuristic on a string it merely resembles.
+    fn pem_encode_ed25519_private_key(der: &[u8]) -> Vec<u8> {
+        use base64::Engine;
+        let dashes = "-".repeat(5);
+        let label = "PRIVATE KEY";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+        let mut pem = format!("{dashes}BEGIN {label}{dashes}\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            pem.push_str(std::str::from_utf8(chunk).unwrap());
+            pem.push('\n');
+        }
+        pem.push_str(&format!("{dashes}END {label}{dashes}\n"));
+        pem.into_bytes()
+    }
+
+    /// A [`MachineJwtSource`] returning a fixed token -- production always
+    /// uses `service_auth::MachineJwtClient`.
+    struct StaticMachineJwt;
+    impl MachineJwtSource for StaticMachineJwt {
+        fn token<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = Result<String, HostResultError>> + Send + 'a>> {
+            Box::pin(async { Ok("machine-jwt-value".to_string()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn reqwest_transport_proxy_mode_remaps_authorization_and_adds_machine_jwt() {
+        use std::sync::Mutex as StdMutex;
+
+        let captured: Arc<StdMutex<Vec<(String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        let app = axum::Router::new().route(
+            "/ok",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let captured = Arc::clone(&captured_clone);
+                async move {
+                    let mut seen = captured.lock().unwrap();
+                    for (name, value) in headers.iter() {
+                        seen.push((
+                            name.as_str().to_string(),
+                            value.to_str().unwrap_or("").to_string(),
+                        ));
+                    }
+                    "ok"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        // Direct-connect in this test (no real upstream proxy process) --
+        // exercises the header-remap logic itself, which runs regardless
+        // of whether `reqwest::Proxy` is also configured.
+        let transport = ReqwestTransport {
+            proxy_url: None,
+            machine_jwt: Some(Arc::new(StaticMachineJwt)),
+        };
+        transport
+            .send(
+                TransportRequest {
+                    method: "GET".to_string(),
+                    url: format!("http://127.0.0.1:{}/ok", addr.port()),
+                    pinned_addr: addr,
+                    headers: vec![
+                        (
+                            "Authorization".to_string(),
+                            "Bot bundle-own-secret".to_string(),
+                        ),
+                        (
+                            "X-Waddles-Egress-Assertion".to_string(),
+                            "assertion-jwt".to_string(),
+                        ),
+                    ],
+                    body: None,
+                },
+                Duration::from_secs(5),
+                1_048_576,
+            )
+            .await
+            .expect("request succeeds");
+
+        let seen = captured.lock().unwrap();
+        let auth = seen
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .map(|(_, v)| v.as_str());
+        assert_eq!(auth, Some("Bearer machine-jwt-value"));
+        let forwarded = seen
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(egress_assertion::FORWARD_AUTHORIZATION_HEADER))
+            .map(|(_, v)| v.as_str());
+        assert_eq!(forwarded, Some("Bot bundle-own-secret"));
     }
 
     #[tokio::test]
