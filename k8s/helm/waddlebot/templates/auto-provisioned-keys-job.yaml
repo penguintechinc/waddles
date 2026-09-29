@@ -7,6 +7,23 @@
 # openssl+kubectl image, so no human ever runs scripts/generate-*.sh by hand for a
 # deploy to succeed.
 #
+# fix/helm-provision-keys-openssl -- the image below was previously alpine/k8s:1.30.2,
+# whose comment claimed it bundled openssl alongside kubectl. It never has: alpine/k8s
+# ships libssl3 (the shared library) but not the openssl CLI binary, on every tag probed
+# (1.30.2 AND 1.31.4). That made every hook run here fail at the first `openssl` call
+# with exit 127 and zero output -- confirmed live on alpha and by a `command -v` probe
+# against the exact pinned digest. bitnami/kubectl (Broadcom/VMware, Western-maintained,
+# Photon OS-based) is the replacement: proven below to carry bash, openssl, kubectl,
+# base64, mktemp, tr, printf AND shred. One caveat required a second fix: Photon OS's
+# default /etc/ssl distro config auto-loads an OpenSSL FIPS provider whose 3.1.2 module
+# doesn't implement Ed25519 ("Error initializing ed25519 context"), so OPENSSL_CONF is
+# pinned to /dev/null below -- this only affects the `openssl` CLI calls in this
+# container (kubectl's own TLS stack is Go's crypto/tls, untouched by this env var) and
+# simply falls back to OpenSSL's ordinary default+base providers, which do implement
+# Ed25519. bitnami/kubectl only publishes a mutable `latest` tag (no versioned tags) --
+# acceptable per dependency-pinning policy because the image reference below pins the
+# immutable digest, never the tag.
+#
 # Same KEEP-vs-GENERATE policy as auto-provisioned-secrets.yaml, enforced in-script
 # (`lookup` isn't available to a plain Job pod, so this checks via `kubectl get`
 # instead): an existing Secret is left completely untouched; a miss is only generated
@@ -41,6 +58,14 @@ metadata:
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "-6"
+    # fix/helm-hook-rbac-ordering -- before-hook-creation (not hook-failed) is the
+    # right policy: it already guarantees a stale/failed Job from a previous attempt
+    # is deleted and replaced automatically the next time this hook fires, so nobody
+    # ever has to `kubectl delete job` by hand before retrying. Adding hook-failed
+    # would additionally delete the Job the instant it fails, during the SAME release
+    # attempt -- destroying the failed pod's logs before an operator can inspect them.
+    # RBAC this Job depends on (auto-provisioned-keys-job-rbac.yaml) is now its own
+    # pre-install/pre-upgrade hook at weight -10, strictly before this Job's -6.
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 1
@@ -62,9 +87,11 @@ spec:
           type: RuntimeDefault
       containers:
         - name: auto-provision-keys
-          # alpine/k8s -- community k8s-toolbox image bundling kubectl + openssl on an
-          # Alpine base, pinned by digest (multi-arch manifest list: amd64 + arm64).
-          image: "alpine/k8s:1.30.2@sha256:cd560fce90f76d2da46bce0624b65258c45ab3350f7073d6722fa74c7b3a3601"
+          # bitnami/kubectl -- Broadcom/VMware-maintained image proven (see header
+          # comment) to bundle bash, openssl AND kubectl (plus base64/mktemp/tr/shred),
+          # pinned by digest. Not multi-arch-manifest-verified beyond amd64 in this
+          # probe; re-verify before enabling on an arm64 node pool.
+          image: "bitnami/kubectl@sha256:ab90e1058e5a658cc94b4e7eb6d48e5758cfd6d77b5dd1869513aec3a3054673"
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsNonRoot: true
@@ -76,6 +103,12 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           env:
+            # See header comment: bitnami/kubectl's Photon OS base auto-loads an
+            # OpenSSL FIPS provider that lacks Ed25519 support; this drops that
+            # distro config so the CLI's default provider (which does implement
+            # Ed25519) loads instead. Scoped to this container's openssl calls only.
+            - name: OPENSSL_CONF
+              value: "/dev/null"
             - name: NAMESPACE
               value: {{ .Values.namespace | quote }}
             - name: DEPLOYMENT_TIER

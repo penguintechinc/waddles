@@ -7,6 +7,20 @@
 # name; the Job's own script (not RBAC) is what keeps that to exactly these four names.
 # No other verb (list/watch/update on arbitrary objects, anything cluster-scoped) is
 # granted. This ServiceAccount is never mounted into any other pod.
+#
+# fix/helm-hook-rbac-ordering -- this RBAC bundle MUST itself be a pre-install/
+# pre-upgrade hook, at a LOWER weight (-10) than auto-provisioned-keys-job.yaml's Job
+# (-6). Helm always finishes the pre-* hook phase in ascending weight order BEFORE
+# applying any regular (non-hook) resource -- so on a true first install (or the first
+# upgrade that introduces this Job), a plain/regular SA here would not exist yet when
+# the Job's pod is admitted, and the ServiceAccount admission controller rejects the
+# pod with "serviceaccounts ... not found" until activeDeadlineSeconds kills the Job.
+# That was the confirmed live-alpha bug this fixes. Delete-policy is
+# before-hook-creation ONLY (never hook-succeeded): hook-succeeded would delete this
+# RBAC immediately after the Job's own pod exits successfully, which is fine for this
+# Job's single run, but before-hook-creation is what actually matters -- it guarantees
+# a stale copy from a previous (possibly failed) release is replaced automatically the
+# next time this hook fires, so nobody ever has to `kubectl delete` it by hand.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -15,6 +29,10 @@ metadata:
   labels:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: auto-provision-keys
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -24,6 +42,10 @@ metadata:
   labels:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: auto-provision-keys
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
 rules:
   - apiGroups: [""]
     resources: ["secrets", "configmaps"]
@@ -49,6 +71,10 @@ metadata:
   labels:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: auto-provision-keys
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
