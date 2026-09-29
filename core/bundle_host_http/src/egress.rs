@@ -108,6 +108,22 @@ pub struct EgressRuleRow {
     pub private_ip_grants: Vec<(String, Vec<String>)>,
     pub egress_rps: Option<u32>,
     pub granted_secret_refs: HashMap<String, String>,
+    /// Exact hosts (lowercase, spec §8.2's declared-host comparison -- same
+    /// as every other host check in this module) a resolved `secret_refs`
+    /// header may be forwarded to, *beyond* the host the bundle's own
+    /// request originally targeted. Empty (the `Default`, and what
+    /// [`EgressRuleRow::from_legacy_patterns`] produces today -- no caller
+    /// wires this field yet) is the strict, backward-compatible posture:
+    /// a secret-derived header is attached only on the hop whose host
+    /// equals the *original* request's host, dropped on every redirect to
+    /// a different one, and re-attached if a later hop redirects back.
+    /// Security review finding (PR #468, HIGH): `send`'s redirect loop
+    /// previously cloned one `headers` vec -- secret headers included --
+    /// unconditionally on every hop, forwarding e.g. a Discord bot token to
+    /// whatever host a 3xx `Location` named. This field is the seam a
+    /// future host-scoped secret grant (hub-api/manifest) can populate to
+    /// deliberately widen that beyond the single originating host.
+    pub secret_granted_hosts: HashSet<String>,
 }
 
 impl EgressRuleRow {
@@ -396,7 +412,12 @@ impl EgressGuard {
         // resolution below is allowed to consult.
         let row = self.catalog.resolve(app_id);
 
-        let mut headers: Vec<(String, String)> =
+        // Bundle-declared headers only -- kept separate from the resolved
+        // secret-ref headers below (`secret_headers`) so the redirect loop
+        // can scope the latter to the host they were granted for (security
+        // review finding, PR #468, HIGH) instead of forwarding both
+        // indiscriminately to every hop.
+        let base_headers: Vec<(String, String)> =
             req.headers.drain(..).map(|h| (h.name, h.value)).collect();
         // Security review finding (post-M3-capabilities landing): a bundle
         // names a *symbolic* secret reference per call (spec §6.5's
@@ -413,6 +434,7 @@ impl EgressGuard {
         // granted set is refused before any environment lookup happens at
         // all.
         let granted = row.as_ref().map(|r| &r.granted_secret_refs);
+        let mut secret_headers: Vec<(String, String)> = Vec::with_capacity(req.secret_refs.len());
         for (header_name, secret_ref) in &req.secret_refs {
             let env_var_name = granted
                 .and_then(|g| g.get(secret_ref))
@@ -432,9 +454,14 @@ impl EgressGuard {
             // any guest-visible state.
             let handle = SecretHandle::from_granted_env_var(env_var_name);
             let value = self.credential_broker.resolve(&handle)?;
-            headers.push((header_name.clone(), value));
+            secret_headers.push((header_name.clone(), value));
         }
 
+        // The host `secret_headers` is bound to -- captured once, at hop 0,
+        // from the bundle's own originally-requested URL (the host it
+        // presumably holds the credential for). `None` until the first
+        // iteration below sets it.
+        let mut secret_bound_host: Option<String> = None;
         let mut hop: u8 = 0;
         loop {
             let url = reqwest::Url::parse(&req.url)
@@ -460,6 +487,9 @@ impl EgressGuard {
                 .trim_start_matches('[')
                 .trim_end_matches(']')
                 .to_ascii_lowercase();
+            if hop == 0 {
+                secret_bound_host = Some(host.clone());
+            }
 
             let empty_row = EgressRuleRow::default();
             let row_ref = row.as_ref().unwrap_or(&empty_row);
@@ -567,7 +597,32 @@ impl EgressGuard {
                 }
             }
 
-            let mut req_headers = headers.clone();
+            // Secret-scoped-to-host re-check (security review finding, PR
+            // #468, HIGH): a resolved secret header (Authorization etc.)
+            // rides along only when this hop's host is the one it was
+            // resolved for, or the manifest row explicitly widens that via
+            // `secret_granted_hosts` ("B has its own grant" -- the host
+            // itself, not just the originating one, is authorized to
+            // receive it). Every other hop drops it outright rather than
+            // re-resolving a value the bundle never asked to send here.
+            let is_secret_bound_host = secret_bound_host.as_deref() == Some(host.as_str());
+            let secret_reattach_allowed =
+                is_secret_bound_host || row_ref.secret_granted_hosts.contains(&host);
+            let mut req_headers = base_headers.clone();
+            if !is_secret_bound_host {
+                // Cross-host hop (even one the manifest still allowlists):
+                // never forward a Cookie or Proxy-Authorization the bundle
+                // set for the *original* host -- both are ambient
+                // credentials, not scoped to a declared `secret_ref`, so
+                // `secret_granted_hosts` doesn't apply to them.
+                req_headers.retain(|(name, _)| {
+                    !name.eq_ignore_ascii_case("cookie")
+                        && !name.eq_ignore_ascii_case("proxy-authorization")
+                });
+            }
+            if secret_reattach_allowed {
+                req_headers.extend(secret_headers.iter().cloned());
+            }
             if let Some(signer) = &self.proxy_assertion_signer {
                 req_headers.push((
                     PROXY_ASSERTION_HEADER.to_string(),
@@ -3165,6 +3220,250 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "host_not_declared");
+    }
+
+    // -- Secret headers scoped to the host they were granted for (security
+    // review finding, PR #468, HIGH): a redirect must never carry a
+    // resolved `secret_refs` header, Cookie, or Proxy-Authorization to a
+    // different host than the one the bundle's request originally
+    // targeted, even when that new host is itself on the allowlist. --
+
+    /// A redirect to a *different* allowlisted host drops the secret header
+    /// that was resolved for the original host -- the core HIGH finding:
+    /// `send`'s redirect loop used to clone one `headers` vec, secret
+    /// headers included, unconditionally on every hop.
+    #[tokio::test]
+    async fn a_redirect_to_a_different_host_drops_the_originating_hosts_secret_header() {
+        let broker = Arc::new(FakeCredentialBroker {
+            value: "host-a-token".to_string(),
+            resolved_handles: Mutex::new(Vec::new()),
+        });
+        let transport = Arc::new(FakeTransport::default().queue(Ok(ok_response())).queue(Ok(
+            TransportResponse {
+                status: 302,
+                headers: vec![(
+                    "location".to_string(),
+                    "https://host-b.example.com/next".to_string(),
+                )],
+                body: vec![],
+                truncated: false,
+            },
+        )));
+        let guard = EgressGuard::new(
+            Arc::clone(&transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog_with_row_and_secrets(
+                "waddles.a.b.c",
+                vec![
+                    ("host-a.example.com".to_string(), vec!["GET".to_string()]),
+                    ("host-b.example.com".to_string(), vec!["GET".to_string()]),
+                ],
+                HashMap::from([("TOKEN_REF".to_string(), "EGRESS_TEST_HOST_A".to_string())]),
+            ),
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_credential_broker(Arc::clone(&broker) as Arc<dyn CredentialBroker>)
+        .with_resolver(Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            addr: "93.184.216.34:443".parse().unwrap(),
+        }) as Arc<dyn Resolver>);
+
+        guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({
+                    "method": "GET",
+                    "url": "https://host-a.example.com/start",
+                    "headers": [{"name": "Cookie", "value": "session=host-a-only"}],
+                    "secret_refs": {"Authorization": "TOKEN_REF"}
+                }),
+            )
+            .await
+            .expect("redirect followed to a successful terminal response");
+
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0]
+                .headers
+                .iter()
+                .any(|(k, v)| k == "Authorization" && v == "host-a-token"),
+            "the first hop, to the bound host, keeps the secret header"
+        );
+        assert!(
+            !requests[1]
+                .headers
+                .iter()
+                .any(|(k, _)| k == "Authorization"),
+            "the second hop, redirected to a different host, must not carry host-a's secret"
+        );
+        assert!(
+            !requests[1].headers.iter().any(|(k, _)| k == "Cookie"),
+            "Cookie is never forwarded across a host change either"
+        );
+    }
+
+    /// A redirect that stays on the *same* host the secret was resolved for
+    /// keeps carrying it -- confirms the fix scopes by host, not "never
+    /// reattach after any redirect at all".
+    #[tokio::test]
+    async fn a_redirect_to_the_same_host_keeps_the_secret_header() {
+        let broker = Arc::new(FakeCredentialBroker {
+            value: "host-a-token".to_string(),
+            resolved_handles: Mutex::new(Vec::new()),
+        });
+        let transport = Arc::new(FakeTransport::default().queue(Ok(ok_response())).queue(Ok(
+            TransportResponse {
+                status: 302,
+                headers: vec![(
+                    "location".to_string(),
+                    "https://host-a.example.com/next".to_string(),
+                )],
+                body: vec![],
+                truncated: false,
+            },
+        )));
+        let guard = EgressGuard::new(
+            Arc::clone(&transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog_with_row_and_secrets(
+                "waddles.a.b.c",
+                vec![("host-a.example.com".to_string(), vec!["GET".to_string()])],
+                HashMap::from([("TOKEN_REF".to_string(), "EGRESS_TEST_HOST_A".to_string())]),
+            ),
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_credential_broker(Arc::clone(&broker) as Arc<dyn CredentialBroker>)
+        .with_resolver(Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            addr: "93.184.216.34:443".parse().unwrap(),
+        }) as Arc<dyn Resolver>);
+
+        guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({
+                    "method": "GET",
+                    "url": "https://host-a.example.com/start",
+                    "secret_refs": {"Authorization": "TOKEN_REF"}
+                }),
+            )
+            .await
+            .expect("redirect to the same host is followed to a successful terminal response");
+
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for (hop, req) in requests.iter().enumerate() {
+            assert!(
+                req.headers
+                    .iter()
+                    .any(|(k, v)| k == "Authorization" && v == "host-a-token"),
+                "hop {hop} (same host throughout) should keep the secret header"
+            );
+        }
+    }
+
+    /// A redirect to a different host that the manifest row explicitly
+    /// widens via `secret_granted_hosts` ("B has its own grant") does
+    /// receive the resolved secret -- proves the drop above is a host
+    /// scoping check, not a blanket "never on hop > 0" rule, and that
+    /// widening it is an explicit, auditable manifest opt-in rather than
+    /// the previous unconditional behavior.
+    #[tokio::test]
+    async fn a_redirect_to_a_host_explicitly_granted_the_secret_keeps_it() {
+        let broker = Arc::new(FakeCredentialBroker {
+            value: "shared-token".to_string(),
+            resolved_handles: Mutex::new(Vec::new()),
+        });
+        let transport = Arc::new(FakeTransport::default().queue(Ok(ok_response())).queue(Ok(
+            TransportResponse {
+                status: 302,
+                headers: vec![(
+                    "location".to_string(),
+                    "https://host-b.example.com/next".to_string(),
+                )],
+                body: vec![],
+                truncated: false,
+            },
+        )));
+        let mut row = EgressRuleRow::from_legacy_patterns(
+            vec![
+                ("host-a.example.com".to_string(), vec!["GET".to_string()]),
+                ("host-b.example.com".to_string(), vec!["GET".to_string()]),
+            ],
+            None,
+            HashMap::from([("TOKEN_REF".to_string(), "EGRESS_TEST_HOST_A".to_string())]),
+        );
+        row.secret_granted_hosts = HashSet::from(["host-b.example.com".to_string()]);
+        let catalog = TestCatalog::new();
+        catalog.insert("waddles.a.b.c", row);
+        let guard = EgressGuard::new(
+            Arc::clone(&transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog,
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_credential_broker(Arc::clone(&broker) as Arc<dyn CredentialBroker>)
+        .with_resolver(Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            addr: "93.184.216.34:443".parse().unwrap(),
+        }) as Arc<dyn Resolver>);
+
+        guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({
+                    "method": "GET",
+                    "url": "https://host-a.example.com/start",
+                    "secret_refs": {"Authorization": "TOKEN_REF"}
+                }),
+            )
+            .await
+            .expect("redirect to the explicitly-granted host succeeds");
+
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[1]
+                .headers
+                .iter()
+                .any(|(k, v)| k == "Authorization" && v == "shared-token"),
+            "host-b was explicitly granted this secret via secret_granted_hosts"
+        );
+    }
+
+    /// A redirect `Location` naming a plain `http://` URL is denied, never
+    /// dialed -- the same per-hop scheme check `send` already runs on
+    /// `req.url` at the top of the loop applies again once `req.url` is
+    /// rewritten to the redirect target, so a downgrade is structurally
+    /// impossible, not just discouraged.
+    #[tokio::test]
+    async fn a_redirect_to_a_plain_http_url_is_denied_never_downgraded() {
+        let transport = FakeTransport::default().queue(Ok(TransportResponse {
+            status: 302,
+            headers: vec![(
+                "location".to_string(),
+                "http://discord.com/downgraded".to_string(),
+            )],
+            body: vec![],
+            truncated: false,
+        }));
+        let guard = guard_with(
+            "waddles.a.b.c",
+            vec![("discord.com".to_string(), vec!["GET".to_string()])],
+            transport,
+        );
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://discord.com/start"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "scheme_not_https");
     }
 
     #[tokio::test]

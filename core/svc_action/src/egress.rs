@@ -20,9 +20,9 @@
 //! wiring (`crate::senders`/`crate::distribution::BundleCatalog`).
 
 pub use bundle_host_http::egress::{
-    boxed, is_forbidden_address, CredentialBroker, EgressGuard, EgressLimits, EgressRuleRow,
-    EgressRuleSource, EnvCredentialBroker, FeatureFlag, HttpTransport, ReqwestTransport,
-    SecretHandle, TransportRequest, TransportResponse,
+    boxed, is_forbidden_address, ClusterCidrDenylist, CredentialBroker, EgressGuard, EgressLimits,
+    EgressRuleRow, EgressRuleSource, EnvCredentialBroker, FeatureFlag, HttpTransport,
+    InstanceEgressPolicy, ReqwestTransport, SecretHandle, TransportRequest, TransportResponse,
 };
 
 impl EgressRuleSource for crate::distribution::BundleCatalog {
