@@ -550,6 +550,7 @@ jobs:
           matrix.platform == 'linux/amd64'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
+          version: v0.69.3
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-amd64
           format: 'table'
           severity: 'HIGH,CRITICAL'
@@ -908,6 +909,7 @@ jobs:
           matrix.platform == 'linux/amd64'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
+          version: v0.69.3
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-amd64
           format: 'table'
           severity: 'HIGH,CRITICAL'
@@ -1086,6 +1088,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
         with:
+          version: v0.69.3
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.image }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
           format: 'sarif'
           output: 'trivy-${{ matrix.image }}.sarif'
