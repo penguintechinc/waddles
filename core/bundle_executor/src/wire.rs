@@ -65,6 +65,32 @@ pub trait RequestHandler: Send + Sync + 'static {
 
     /// Handle `shutdown`: the read loop exits right after this returns.
     fn on_shutdown(&self, body: ShutdownBody) -> impl std::future::Future<Output = ()> + Send;
+
+    /// Called exactly once by [`run_connection`] right before it returns,
+    /// for ANY reason (clean `shutdown`, EOF, a fatal protocol error) --
+    /// gh security review item 4 on PR #406: "when a peer disconnects, drop
+    /// every scope that connection owned". Default: no-op (most test
+    /// doubles in this file don't need it).
+    ///
+    /// **Why a full wipe, not per-scope bookkeeping:** this executor holds
+    /// exactly ONE live connection at a time (`crate::run`'s dial loop is
+    /// sequential, never concurrent -- `EXECUTOR_STAGE_CONNECTIONS` is a
+    /// documented, not-yet-wired future knob, see `crate::config`), so
+    /// "every scope the disconnected connection owned" and "every scope,
+    /// period" are the same set. This is also what makes item 1's "a peer
+    /// can only unload scopes it loaded itself" hold by construction rather
+    /// than needing per-scope connection-identity tracking: only the
+    /// CURRENTLY connected peer can ever send `load`/`unload` at all (a
+    /// disconnected peer's connection is gone), and a full wipe on
+    /// disconnect means no stale scope ever survives to be unloaded by a
+    /// different, later connection. The stage's own `changelog_consumer`
+    /// symmetrically detects this executor reconnecting (a new `Connection`
+    /// identity) and resends its full authoritative active set on the next
+    /// tick, replacing whatever this wipe just cleared -- see that module's
+    /// own doc.
+    fn on_disconnect(&self) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
 }
 
 /// One host-API connection's request/reply bookkeeping: correlation ids
@@ -219,6 +245,13 @@ where
         None => read_loop_fut.await,
     };
     writer_task.abort();
+    // Item 4 (gh security review on PR #406): the handshake succeeded, so
+    // `load`/`unload` may have run against this connection -- always clean
+    // up on the way out, regardless of whether the read loop ended cleanly
+    // or with an error. Never called for a connection that failed its OWN
+    // handshake (the early-return paths above): nothing could have been
+    // loaded through a connection that never completed `hello`.
+    handler.on_disconnect().await;
     result
 }
 
@@ -449,6 +482,8 @@ mod tests {
             &Frame::new(
                 100,
                 Message::Load(LoadBody {
+                    tenant_id: 1,
+                    community_id: 0,
                     app_id: "waddles.test.app".to_string(),
                     version: "1".to_string(),
                     digest: "sha256:00".to_string(),
@@ -713,6 +748,8 @@ mod tests {
             &Frame::new(
                 300,
                 Message::Unload(UnloadBody {
+                    tenant_id: 1,
+                    community_id: 0,
                     app_id: "waddles.test.app".to_string(),
                     digest: "sha256:00".to_string(),
                 }),
@@ -846,5 +883,106 @@ mod tests {
             .await
             .expect("executor task")
             .expect("clean shutdown despite the dropped orphan reply");
+    }
+
+    /// A minimal handler recording only whether `on_disconnect` fired --
+    /// kept separate from [`EchoHandler`] (used by every other test in this
+    /// file) so this test doesn't need to touch its seven existing
+    /// construction sites just to add one more `AtomicBool` field.
+    #[derive(Default)]
+    struct DisconnectRecordingHandler {
+        disconnected: AtomicBool,
+    }
+
+    impl RequestHandler for DisconnectRecordingHandler {
+        async fn on_load(&self, body: LoadBody) -> Result<LoadedBody, ErrorBody> {
+            Ok(LoadedBody {
+                app_id: body.app_id,
+                digest: body.digest,
+                precompile_ms: 1,
+                exports: vec!["transform".to_string()],
+            })
+        }
+        async fn on_unload(&self, body: UnloadBody) -> Result<UnloadedBody, ErrorBody> {
+            Ok(UnloadedBody {
+                app_id: body.app_id,
+                digest: body.digest,
+            })
+        }
+        async fn on_invoke(
+            &self,
+            _body: InvokeBody,
+            _invoke_id: u64,
+            _connection: Arc<Connection>,
+        ) -> Result<ResultBody, ErrorBody> {
+            unreachable!("this test never issues an invoke")
+        }
+        async fn on_shutdown(&self, _body: ShutdownBody) {}
+        async fn on_disconnect(&self) {
+            self.disconnected.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// **Item 4 integration regression (gh security review on PR #406):**
+    /// `run_connection` must call `on_disconnect` exactly once when the
+    /// connection ends, on the REAL wire path (not just a direct unit-level
+    /// call to `Executor::on_disconnect`, which `crate::invoke`'s own tests
+    /// already cover) -- proven here via a `shutdown` frame, the normal
+    /// clean-exit path.
+    #[tokio::test]
+    async fn run_connection_calls_on_disconnect_when_the_connection_ends() {
+        let (executor_io, mut stage_io) = tokio::io::duplex(4096);
+        let handler = std::sync::Arc::new(DisconnectRecordingHandler::default());
+        let handler_for_conn = handler.clone();
+
+        struct HandlerRef(std::sync::Arc<DisconnectRecordingHandler>);
+        impl RequestHandler for HandlerRef {
+            async fn on_load(&self, body: LoadBody) -> Result<LoadedBody, ErrorBody> {
+                self.0.on_load(body).await
+            }
+            async fn on_unload(&self, body: UnloadBody) -> Result<UnloadedBody, ErrorBody> {
+                self.0.on_unload(body).await
+            }
+            async fn on_invoke(
+                &self,
+                body: InvokeBody,
+                invoke_id: u64,
+                connection: Arc<Connection>,
+            ) -> Result<ResultBody, ErrorBody> {
+                self.0.on_invoke(body, invoke_id, connection).await
+            }
+            async fn on_shutdown(&self, body: ShutdownBody) {
+                self.0.on_shutdown(body).await
+            }
+            async fn on_disconnect(&self) {
+                self.0.on_disconnect().await
+            }
+        }
+
+        let executor = tokio::spawn(async move {
+            run_connection(executor_io, test_hello(), HandlerRef(handler_for_conn)).await
+        });
+
+        complete_handshake(&mut stage_io).await;
+        assert!(
+            !handler.disconnected.load(Ordering::SeqCst),
+            "must not fire before the connection actually ends"
+        );
+
+        write_frame(
+            &mut stage_io,
+            &Frame::new(1, Message::Shutdown(ShutdownBody { grace_ms: 10 })),
+        )
+        .await
+        .expect("write shutdown");
+        executor
+            .await
+            .expect("executor task")
+            .expect("clean shutdown");
+
+        assert!(
+            handler.disconnected.load(Ordering::SeqCst),
+            "on_disconnect must fire once the connection ends"
+        );
     }
 }

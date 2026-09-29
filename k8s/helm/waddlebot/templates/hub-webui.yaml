@@ -94,6 +94,19 @@ metadata:
     app.kubernetes.io/component: hub-webui-v3
 spec:
   type: {{ .Values.pipeline.hubWebui.service.type | default "ClusterIP" }}
+  # fix/helm-apply-errors -- `Service.spec.ports` is keyed by `port` (not `name`) for
+  # kubectl's strategic merge patch. A live Service whose `.Values.pipeline.hubWebui.port`
+  # was ever different from the current value (an earlier alpha revision ran this on
+  # 8205, current default is {{ .Values.pipeline.hubWebui.port }}) merges as a SECOND,
+  # unmatched ports[] entry rather than an in-place update -- both entries keep
+  # `name: http`, and the API server rejects the object with `spec.ports[1].name:
+  # Duplicate value: "http"` (confirmed via `kubectl apply --dry-run=server` against
+  # live alpha; scripts/ci/check-helm-rendered-manifest-invariants.py's module
+  # docstring). This is a diff-against-live-history bug, not a self-conflict in this
+  # rendered document -- no static check on the rendered manifest alone can catch it.
+  # A cluster already carrying an old port number needs one `helm upgrade
+  # --force-replace` (Helm v4) to recreate the Service cleanly; avoid changing this
+  # port number casually afterward.
   ports:
   - port: {{ .Values.pipeline.hubWebui.port }}
     targetPort: http

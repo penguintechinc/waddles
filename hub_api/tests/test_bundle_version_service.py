@@ -501,7 +501,9 @@ _COMPONENT_VERSION = "1.0.0"
 _COMPONENT_BYTES = b"fake-wasm-component-bytes"
 
 
-async def _seed_prebuilt_upload(install_dal: Any) -> None:
+async def _seed_prebuilt_upload(
+    install_dal: Any, *, manifest_json: dict[str, Any] | None = None
+) -> None:
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
         app_id=_COMPONENT_APP_ID,
@@ -510,6 +512,7 @@ async def _seed_prebuilt_upload(install_dal: Any) -> None:
         artifact_kind="prebuilt",
         language="python",
         status=STATUS_UPLOADED,
+        manifest_json=manifest_json,
         created_at=now,
         updated_at=now,
     )
@@ -577,6 +580,83 @@ async def test_process_prebuilt_component_happy_path(
         assert call.args[1] == _COMPONENT_APP_ID  # group == app_id
     # caller-supplied client is never closed by process_prebuilt_component itself
     fake_client.aclose.assert_not_called()
+
+
+async def test_process_prebuilt_component_persists_attribution_to_app_versions(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`author`/`license`/`source_url` (migration 0026) round-trip from `manifest_json`."""
+    await _seed_prebuilt_upload(
+        install_dal,
+        manifest_json={
+            "author": "Acme Corp",
+            "license": "GPL-3.0-only",
+            "source_url": "https://github.com/acme/mybundle",
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "validate_component",
+        AsyncMock(return_value=ComponentValidationResult(ok=True)),
+    )
+    monkeypatch.setattr(
+        svc.storage_service,
+        "upload_bundle_component",
+        AsyncMock(return_value="ignored-key"),
+    )
+
+    await process_prebuilt_component(
+        install_dal,
+        app_id=_COMPONENT_APP_ID,
+        version=_COMPONENT_VERSION,
+        component_bytes=_COMPONENT_BYTES,
+        tenant_slug="acme",
+        valkey_client=AsyncMock(),
+    )
+
+    upload = await get_version(install_dal, app_id=_COMPONENT_APP_ID, version=_COMPONENT_VERSION)
+    published = (
+        await install_dal(install_dal.app_versions.id == upload.app_version_id).select()
+    ).first()
+    assert published.author == "Acme Corp"
+    assert published.license == "GPL-3.0-only"
+    assert published.license_review_required is True
+    assert published.source_url == "https://github.com/acme/mybundle"
+
+
+async def test_process_prebuilt_component_without_manifest_json_defaults_attribution(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row with no `manifest_json` (legacy seed) publishes with `None`/`False` attribution."""
+    await _seed_prebuilt_upload(install_dal)
+    monkeypatch.setattr(
+        svc,
+        "validate_component",
+        AsyncMock(return_value=ComponentValidationResult(ok=True)),
+    )
+    monkeypatch.setattr(
+        svc.storage_service,
+        "upload_bundle_component",
+        AsyncMock(return_value="ignored-key"),
+    )
+
+    await process_prebuilt_component(
+        install_dal,
+        app_id=_COMPONENT_APP_ID,
+        version=_COMPONENT_VERSION,
+        component_bytes=_COMPONENT_BYTES,
+        tenant_slug="acme",
+        valkey_client=AsyncMock(),
+    )
+
+    upload = await get_version(install_dal, app_id=_COMPONENT_APP_ID, version=_COMPONENT_VERSION)
+    published = (
+        await install_dal(install_dal.app_versions.id == upload.app_version_id).select()
+    ).first()
+    assert published.author is None
+    assert published.license is None
+    assert published.license_review_required is False
+    assert published.source_url is None
 
 
 async def test_process_prebuilt_component_rejects_nonconformant(
