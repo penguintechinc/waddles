@@ -293,6 +293,7 @@ Per `backend.md`, every RPC still carries `api_version`/routes on proto package 
 | `connector.send:<platform>` | **dangerous** | Same shape, outbound side. Subsumes `chat.send:<platform>`'s existing relay grant for platforms that migrate to a connector sender bundle (§5) — `chat.send:<platform>` is retired for a platform once its sender cuts over, not run in parallel. |
 | `connector.pii.read` | **dangerous** | Gates `identity.lookup` (§1, §3.3) — the one capability in the entire catalog that returns raw PII (handle, display name) to a guest. **Global-approved, first-party-core-only, no exceptions** — never offered to a vendor bundle, never restrictable/grantable at tenant or community tier (same carve-out as `connector.receive`/`connector.send`, below). |
 | `net.http` | dangerous (existing) | **Gemini condition 2: a strict per-connector, per-host allowlist — default deny, no wildcards.** Reuses PR #419's `net.http:<host>` shape verbatim (one permission id per exact host, e.g. `net.http:discord.com`, `net.http:id.twitch.tv`) — a connector's manifest declares exactly the platform API hosts it calls (subscription management, token refresh bookkeeping), never a bare `net.http` grant covering arbitrary hosts, and never a subdomain/wildcard pattern (`*.twitch.tv` is rejected at manifest validation, same `_EGRESS_HOST_RE` host-literal check PR #419 already applies). |
+| `forms.pii.collect` | **dangerous** | **App-bundle permission** (not connector-only — normal 3-tier consent applies, §8.4). Required only to *detokenize* a modal `text_input` field the bundle's own manifest marked `pii_sensitivity: possible`/`always` (§8.4, rich interactions) — without it, such a field is delivered as an opaque reference/redaction only. Unlike `connector.*`, this is a per-community-consentable grant (a community may deliberately want a support-ticket-style app to collect member-submitted text), same envelope-encryption/audit/erasure-cascade posture as `connection_credentials`/PR #419 §10.5's `user_ref` rule. |
 
 **No 3-tier consent flow for connector bundles.** PR #419's global→tenant→community consent ladder is for tenant-installed app bundles; a connector bundle is platform infrastructure, not something a tenant activates. Its permission grant is a **global-tier-only, platform-ops action** (enable this connector digest for a given platform/shard rollout) — `app_tenant_permission_restrictions`/`community_permission_grants` never apply to a `connector.*` permission id. This is a deliberate carve-out from §3 of PR #419, not an oversight: there is no tenant/community layer to ask, because the connector serves every tenant on that platform at once.
 
@@ -459,6 +460,11 @@ Every connector's WASM `on-frame` output is verified against the native/Python i
 | 5 | Discord shard supervisor (watermark-poll hot add/remove, scale-design §3.1/3.3) | Rust (svc_ingest) | previous task |
 | 5 | Discord Gateway connector bundle: `on-connect` builds IDENTIFY/RESUME, `on-frame` ports `normalize_discord` | Rust bundle | Phase 5's session-storage task |
 | 5 | Golden-vector parity test, Discord, shadow mode | Rust tests | previous task |
+| 5 | Neutral rich-interactions schema validator (§8.1) + signed `custom_id` issuance/verification (§8.3, HMAC over app_route_token/scope/state_ref) | Rust (`bundle_executor`/svc_ingest) | Phase 5's Discord bundle task |
+| 5 | Discord rendering of `components`/`view`/`modal` (§8.2): message-component/ActionRow mapping, modal interaction-response mapping | Rust bundle (Discord connector) | previous task |
+| 5 | `command-reply` interface (§7.5) + `interaction` event dispatch sharing the unified command route | Rust (svc_process, svc_action) | Phase 5's session-storage task, §7.5 |
+| 5 | Twitch/Kick/IRC degradation (§8.2): numbered-choice `!choose` flow + signed hub-webui-form-link fallback | Rust (svc_ingest, svc_action) + hub-webui | Phase 4, previous task |
+| 5 | `forms.pii.collect` permission + short-TTL envelope-encrypted free-text store (§8.4) | hub-api | Phase 0's permission-catalog task |
 | 6 | `sender` world wiring in `svc_action`: `build-request` dispatch replacing `handle_relay`'s Twitch path | Rust (svc_action) | Phase 1, Phase 4 |
 | 6 | `sender` world wiring in `svc_action`: `build-request` dispatch replacing `handle_discord_relay` | Rust (svc_action) | Phase 1, Phase 5 |
 | 6 | Output-detokenization inside `sender.build-request` via `identity.lookup` (placeholder render immediately before the request template is returned, §3.3) — no host-side rendering path needed | Rust bundle | previous two tasks |
@@ -476,6 +482,8 @@ Every connector's WASM `on-frame` output is verified against the native/Python i
 | 10 | Flip each platform's `waddles.core.disable-<platform>-connector-bundle` off (WASM path live) once its shadow soak is clean | Ops (per platform) | Phases 3–9's respective parity tests |
 | 10 | Decommission: delete `core/svc_ingest/src/ingest/{discord,twitch,twitch_eventsub}.rs`'s native normalize path, `core/svc_action`'s `handle_relay`/`handle_discord_relay`, and every per-platform kill-switch, once all platforms have soaked clean | Rust (svc_ingest, svc_action) | previous task, all platforms |
 | 11 | OTel metrics for `on-frame`/`identity.lookup` latency (histograms, §4's budget), `waddles_connector_pii_lookup_total{platform,cache_hit}` (§3.4), connector-specific `authorize()` denial counters | Rust (both) | Phase 1 |
+| 11 | `waddle-sdk` (Python) typed builders: `Button`/`SelectMenu`/`View`/`Modal`/`TextInput` emitting the §8.1 neutral schema | Python (`sdk/waddle-sdk`) | Phase 5's schema-validator task |
+| 11 | `waddle-sdk-cs` (C#) equivalent typed builders, once that SDK lands | C# (`sdk/waddle-sdk-cs`) | previous task, C# SDK existence |
 
 ---
 
@@ -534,7 +542,7 @@ Discord's HTTP Interactions Endpoint (§2's Webhook transport family gains a fou
 
 ### 7.3 `custom_id` routing: how a component/modal interaction finds its app bundle across restarts
 
-A button, select menu, or modal is created by some **tenant app bundle** (via its normal outbound path), but the resulting interaction is delivered generically through the Discord connector — the connector itself has no idea which app owns a given `custom_id`, and a process restart must not lose that routing.
+A button, select menu, or modal is created by some **tenant app bundle** (via its normal outbound path), but the resulting interaction is delivered generically through the Discord connector — the connector itself has no idea which app owns a given `custom_id`, and a process restart must not lose that routing. **§8.3 strengthens this into a signed, unforgeable token** once rich-interactions components are involved; read this section for the baseline routing convention, §8.3 for why it needs a MAC.
 
 - **Convention: a reserved routing prefix.** `custom_id = "{app-route-token}:{app-opaque-suffix}"` — `app-route-token` is a short, stable, non-secret identifier for the owning app_id (not the raw `app_id` string, to stay under Discord's 100-char `custom_id` limit at scale — a compact hash/registry-assigned short id is fine, since it's routing metadata, not a capability token), and `app-opaque-suffix` is whatever the app bundle itself wants to encode (its own business-logic state key), passed through unmodified.
 - **The host strips the prefix before the app ever sees `custom_id`.** svc_process's dispatch layer (the same layer that resolves `target-app-id` for commands, §7.2) parses the prefix, resolves it to `app_id`, sets `target-app-id`, and hands the app bundle only the `app-opaque-suffix` portion as its own `custom_id` — an app bundle's own component-handling logic never needs to know the prefixing scheme exists.
@@ -609,7 +617,97 @@ The app bundle calls `command-reply.reply` exactly once per invocation it wants 
 
 ---
 
-## 8. Open questions (not blockers, flagged for follow-up)
+## 8. Rich interactions (platform-neutral) — Justin's requirement
+
+**A standard, platform-neutral way for any app bundle to use forms, modals, and views (buttons, selects, etc.) — Discord now, Slack and Mattermost later.** Bundles author against **one neutral schema**, never platform-native JSON; rendering to a specific platform's wire format is entirely a connector concern. This generalizes §7's Discord-specific components/modals rows and §7.5's unified command routing into a cross-platform mechanism.
+
+### 8.1 The neutral schema
+
+Carried as canonical JSON in `command-reply.reply`'s `message-json` (§7.5) and `relay.push`'s `message-json` (`stage.wit`, unchanged) — no new WIT record type, following the same "open-ended structure = canonical JSON text, validated both sides" convention `stage.wit` already documents for every other structured field. The **host validates every such payload against this schema before rendering**, on every platform, regardless of whether that platform's connector is implemented yet (§8.2).
+
+| Object | Shape | Notes |
+|---|---|---|
+| `message` | `{ text: string, embeds: [embed] }` | `embed` is platform-neutral: `{ title, description, color, fields: [{name, value, inline}], image_url, footer }` — a connector's rendering maps this to Discord embeds, Slack Block Kit sections, Mattermost message attachments, etc. |
+| `components` (top-level, outside a modal) | `[[component]]` — **rows** of components, a neutral grid concept every platform's own component layout (Discord ActionRows, Slack Block Kit `actions` blocks, Mattermost `actions`) maps onto | |
+| `component: button` | `{ type: "button", style: "primary"\|"secondary"\|"danger"\|"link", label, custom_id (omitted for style: "link"), url (style: "link" only), disabled, emoji? }` | `custom_id` is host-assigned/signed at render time (§8.3) — a bundle supplies only its own opaque suffix, never the full signed value |
+| `component: select` | `{ type: "select", select_kind: "string"\|"user"\|"role"\|"channel"\|"mentionable", custom_id, placeholder, options: [{label, value, description?}] (string kind only), min_values, max_values, disabled }` | Non-`string` kinds (user/role/channel/mentionable) are Discord-native concepts today; §8.2 states how other platforms degrade |
+| `view` | `{ components: [[component]], persistent: bool, timeout_seconds: option<u32> }` | `persistent: true` opts into surviving restarts (§8.3); `timeout_seconds` drives the existing scheduled-stage-based expiry pattern (§7 table, View timeouts row) |
+| `modal` | `{ title: string, custom_id, inputs: [text_input] }` | Returned from `command-reply.reply` in place of an immediate message, when the app bundle wants to collect input before responding |
+| `component: text_input` (modal only) | `{ type: "text_input", custom_id, label, style: "short"\|"paragraph", placeholder, required, min_length, max_length, value?, pii_sensitivity: "none"\|"possible"\|"always" }` | `pii_sensitivity` is mandatory, not optional — §8.4 defines its handling |
+
+A bundle SDK (§8.5) never hand-writes this JSON — it uses typed builders that serialize to it.
+
+### 8.2 Per-connector rendering, capability matrix, and degradation
+
+| Platform | v3.0 status | Native mapping |
+|---|---|---|
+| **Discord** | **Full, v3.0** | `components` → message components (buttons, selects) in ActionRows; `view` persistence → the signed `custom_id` scheme (§8.3), no Discord-side "view" concept beyond the message's own components; `modal` → Discord's `MODAL` interaction-response type; `text_input` → Discord's `TextInput` component |
+| **Slack** | **Specified here, implemented later** (tracked in a follow-up issue, same treatment as voice/§7's #462) | `components`/`message` → Block Kit blocks (`section`, `actions`); `modal` → `views.open` using the interaction's `trigger_id` (Slack's short-lived interaction handle, the same role Discord's interaction token plays, §7.1) |
+| **Mattermost** | **Specified here, implemented later** | `components` → interactive message attachments (`actions` array, each posting back to an `integration.url` callback); `modal` → dialogs (`POST /api/v4/actions/dialogs/open`, its own `trigger_id`-equivalent) |
+| **Twitch, Kick, IRC** (no native rich-component concept) | **Degradation only, v3.0** — required now since these platforms are already in the v3.0 migration list (§5) | See degradation rule below — never silently drops the interaction |
+
+**Capability matrix (what each platform can natively render):**
+
+| Capability | Discord | Slack | Mattermost | Twitch/Kick/IRC |
+|---|---|---|---|---|
+| Buttons | Yes | Yes (Block Kit) | Yes (attachments) | Degrade |
+| Selects (string) | Yes | Yes | Partial (attachment select) | Degrade |
+| Selects (user/role/channel/mentionable) | Yes | No native equivalent — degrade to a string select of names | No native equivalent — degrade | Degrade |
+| Modals / forms | Yes | Yes (`views.open`) | Yes (dialogs) | Degrade |
+| Persistent views across restarts | Yes (§8.3) | Yes (Block Kit `block_id` is a comparable anchor) | Yes (attachment `callback_id`) | N/A (no session concept beyond the running degradation flow) |
+
+**Degradation rule, defined precisely — never a silent drop:**
+
+1. **Numbered text choices, for a bounded set of discrete options with no free text.** A button row or a `string`-kind select with a small option count (`≤9`, single-digit-addressable) renders as a chat message — `"1) Option A  2) Option B  3) Option C — reply with !choose <n>"` — and the connector registers a short-lived listener for `{command_prefix}choose <n>` scoped to the specific `reply-handle`/user/channel, sharing §7.5's unified command-route machinery (a `!choose` invocation is itself just another `command.invoke` event, routed back through the same `command-reply.reply` path).
+2. **Signed link to a hub-webui form, for anything with free text or too many options for (1).** A `modal` (any `text_input`), or a component set exceeding the numbered-choice threshold, instead posts a chat message containing a **signed, single-use, expiring URL** to a hub-webui page that renders the *same* neutral schema as an HTML form. The URL's signature (reusing the platform's existing signing-key infrastructure — the same class of key as PR #419 §5.6's artifact signing or connections-credentials §4.3's outbound webhook signing, not a new key-management scheme) carries the same opaque app/scope/state information §8.3's `custom_id` does; hub-webui verifies it, renders the form, and on submission POSTs back through the same verified-webhook path (§2's Webhook family) into the identical normalized `interaction` event (§8.3) a native modal submission would produce — the app bundle's handler code does not know or care which degradation path (if any) delivered the submission.
+3. **Never a silent drop.** An interactive payload arriving for a platform/degradation case this design doesn't yet cover is rejected at the point of construction (`command-reply.reply`/`relay.push` returns an error) rather than silently rendering nothing — the app bundle finds out immediately, not from a user report.
+
+### 8.3 Interaction round-trip: one normalized event, signed and unforgeable
+
+**One normalized `interaction` event** (`event-type = "interaction"`, canonical JSON `payload-json` carrying `interaction_kind: "button" | "select" | "modal_submit"`, the selected/submitted values, and a `reply-handle`) is produced by every connector's receiver, for every platform, and routed back to the **originating app bundle** — sharing §7.5's unified command route in full: same `target-app-id` resolution mechanism, same `command-reply.reply` capability for the app's response, same reply-handle shape. A component click and a `/command` invocation are the same kind of thing from the app bundle's point of view: an invocation that gets one reply.
+
+**Component ids are host-namespaced, signed, and opaque — not just "hard to guess" (strengthens §7.3).** Every `custom_id` the host hands to a connector for rendering is a MAC over its routing content, not a bare identifier:
+
+```
+custom_id = base64url(HMAC-SHA256(host_signing_key, app_route_token || scope || state_ref)[:N]) + ":" + app_route_token + ":" + state_ref
+```
+
+- `app_route_token` — the owning `app_id`'s short registry token (§7.3, unchanged).
+- `scope` — the `(tenant, community)` the interaction was created under, host-derived at render time exactly like `InvokeScope` (PR #419 §5.1's confused-deputy rule) — never guest-suppliable.
+- `state_ref` — an opaque reference into the app bundle's own `kv`/`db` (unchanged, existing capability) for anything beyond what fits inline.
+- `host_signing_key` — the same class of durable, KMS-held, rotatable platform signing key already established elsewhere in this design (PR #419 §5.6 artifact signing, connections-credentials §4.3 outbound webhook signing) — no new key-management scheme.
+
+**On receipt, the host verifies the MAC before doing anything else** — a `custom_id` a user hand-typed, a bundle attempting to forge another app's routing, or a tampered value from any source fails verification and is **denied at the connector's dispatch layer**, never reaching any app bundle's `process-stage`/`action-stage`. This is what makes "can't be forged by users or other bundles" true structurally, not just by obscurity.
+
+- **State lives in the bundle's `kv`/`table`, unchanged** — `state_ref` is a reference, not a payload; the actual state contents never round-trip through Discord/Slack/Mattermost at all.
+- **The persistent-view registry survives restarts because verification is stateless.** No database row remembers "this view exists" — the signature is self-contained and checked fresh on every interaction, exactly as §7.3 already argued for the unsigned case, now with cryptographic integrity added on top rather than a new persistence mechanism.
+
+### 8.4 Permissions: no new grant for components, a new one for free-text PII
+
+**Using interactive components requires only the existing `chat.send:<platform>` (or its connector-sender equivalent, §3.1) — no new permission.** A button, select, or non-PII modal field is exactly as sensitive as any other outbound message content the app bundle already has permission to send; `command-reply.reply`/`relay.push` gate on the same platform-send permission they already require, unchanged.
+
+**Free-text modal input is the one place this section adds a new permission, `forms.pii.collect` (§3.1) — because a `text_input` is the one component a *user*, not the platform, fills with arbitrary content, and that content may be PII the zero-PII rule was never designed to pass through untouched.**
+
+- **Every `text_input` field is marked at declaration time** — `pii_sensitivity: none | possible | always` (§8.1), a mandatory field on the schema, not an afterthought.
+- **`none`** — delivered to the app bundle as-is in the `interaction` event, still passing through the existing mention-tokenization safety net (§3.3/PR #419 §10.3 — any recognized `@mention`/user-reference inside the text is still substituted) as defense-in-depth, but with no further gating. A bundle mis-declaring a field that turns out to carry PII is a manifest-review problem, not something this mechanism can catch structurally — same honesty PR #419 §10.3 already applies to its own free-text-mention gap.
+- **`possible`/`always`** — the raw value is **not** delivered to the app bundle by default, full stop, same zero-PII invariant every ordinary app bundle already operates under. The connector (already PII-adjacent per §3.3) stores the raw text in a short-TTL, envelope-encrypted, purpose-scoped store — the same encryption/audit posture `connection_credentials` already uses, not a new scheme — and the `interaction` event carries only an **opaque reference** plus an optional bundle-declared coarse redaction (e.g. length, a masked preview) if the manifest asks for one.
+- **Detokenizing that reference requires `forms.pii.collect` (§3.1)** — a **community-consentable** permission (normal 3-tier consent, §3 of PR #419, unlike every `connector.*` id), since an individual community may deliberately want a specific installed app (e.g. a support-ticket bundle) to handle its own members' submitted text. Without the grant, a bundle declaring `possible`/`always` fields still works — it just never sees more than the opaque reference/redaction, exactly like any other capability-gated resource in this platform.
+- **Lifecycle:** the same TTL/erasure discipline as every other PII store in this platform — a bounded TTL (proposed short, e.g. hours, since a modal submission is a point-in-time interaction, not a standing record) if the bundle never detokenizes it, and inclusion in the standard DSAR/erasure walk (PR #419 §10.5's `user_ref` cascade pattern) once detokenized into a bundle's own `storage.tables` row.
+
+### 8.5 SDK: typed builders emitting the neutral schema
+
+Bundle authors never hand-write the JSON in §8.1 — both Tier-1 SDKs gain typed builder APIs that serialize to it:
+
+| SDK | Builders |
+|---|---|
+| `sdk/waddle-sdk` (Python) | `waddle_sdk.interactions.Button(...)`, `.SelectMenu(...)`, `.View(...)`, `.Modal(...)`, `.TextInput(...)` — each a typed dataclass with a `.to_json()` matching §8.1 exactly; `command-reply.reply`/`relay.push` wrappers accept these objects directly, never a raw dict a caller assembled by hand |
+| `sdk/waddle-sdk-cs` (C#, once it lands — wit-v1.1 §5 already tracks a future C# SDK) | Equivalent typed builder classes (`Button`, `SelectMenu`, `View`, `Modal`, `TextInput`), same serialization contract |
+
+No WIT change is needed for this — the schema is canonical JSON by design (§8.1), so SDK support is purely an ergonomics layer, shippable independently of any connector's WIT-surface work.
+
+---
+
+## 9. Open questions (not blockers, flagged for follow-up)
 
 - **Verified vendor connector tier** (§3.2) — a future, narrower connector shape (no raw-frame/PII access, host-pre-extraction model) for third-party platform integrations. Not designed here.
 - **Teams/Google Chat/Mattermost** — explicitly deferred past v3.0; the WIT world (§1) is shaped to accept a webhook-family transport for them without a breaking change, but no implementation phase above builds them.
@@ -618,3 +716,6 @@ The app bundle calls `command-reply.reply` exactly once per invocation it wants 
 - **Discord permission-check query API shape** (§7 table, Permissions checks row) — the exact host capability a connector uses to query the non-PII guild-state cache. Not designed here.
 - **Discord dynamic presence-update export** (§7 table, Presence row) — a small `receiver` (or separate) export for changing status/activity after connect. Not designed here.
 - **Voice** (§7 table) — deferred to v3.1 (Justin's decision), tracked in issue #462; needs its own design (Voice Gateway + UDP/RTP transport, Opus, DAVE E2EE, likely `svc-streaming`-tied).
+- **Slack/Mattermost rich-interactions implementation timeline** (§8.2) — specified now, implemented later; needs a tracking issue analogous to #462 once prioritized, not designed further here.
+- **hub-webui signed-form rendering page** (§8.2's degradation path 2) — the generic form-renderer page itself (layout, styling, the submit-webhook's exact route) is a hub-webui implementation detail, not specified here beyond "renders the §8.1 schema and posts back through the verified-webhook path."
+- **`forms.pii.collect` exact TTL/storage schema** (§8.4) — the lifecycle principle (short TTL, envelope-encrypted, erasure-cascade-eligible once detokenized) is stated; the concrete table/column design is left to the implementation phase, same treatment PR #419 gives several of its own new tables.
