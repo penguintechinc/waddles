@@ -51,22 +51,30 @@
 //! `tenants`/`communities` (migration `058_tenants_and_claims.sql`) are the
 //! same tables hub-api's own auth chain reads (`hub_api/app.py::
 //! _bind_reference_tables`) -- `crate::scope::resolve_scope` reads them to
-//! translate the numeric `BUNDLE_SCOPE_TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID`
-//! scope into the tenant slug/community name `penguin_spine::Scope` needs.
+//! translate a `(tenant_id, community_id)` scope (discovered per-scope by
+//! the multi-tenant change-log consumer, `crate::changelog`) into the
+//! tenant slug/community name `penguin_spine::Scope` needs.
 //!
 //! `app_catalog` itself is never queried directly by this crate (only
 //! joined-through via `app_id` FKs already resolved on the rows it does
 //! read), so it needs no grant here.
 
 pub mod bindings;
+pub mod changelog;
 pub mod diff;
 pub mod entities;
+pub mod multi_tenant;
 pub mod query;
 pub mod reader;
 pub mod scope;
 
 pub use bindings::{read_source_bindings, SourceBinding};
+pub use changelog::{affected_scopes, read_changes, read_safe_seq, ChangeLogTracker, ChangeRow};
 pub use diff::{plan, DiffPlan};
+pub use multi_tenant::{
+    flatten_by_scope, read_active_set_all, read_source_bindings_all, tenant_active_app_counts,
+    ScopeKey,
+};
 pub use query::{
     derive_component_keys, read_active_set, read_watermark, ActiveBundleRow, ActiveSetError,
     ActiveSetRead, DegradedReason, ExclusionReason, Watermark, WatermarkTracker,

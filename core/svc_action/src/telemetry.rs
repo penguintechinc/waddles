@@ -150,6 +150,99 @@ pub fn register_bundle_loader_excluded_metrics(
     excluded_total
 }
 
+/// Prometheus handles for `crate::changelog_consumer` (dataplane scale
+/// design rev 4, §7/§8 step 2 -- multi-tenant, change-log-driven active-set
+/// loader). Direct port of `core/svc_process::telemetry::
+/// ChangelogConsumerMetrics` under the `svc_action_` metric-name prefix.
+#[derive(Clone)]
+pub struct ChangelogConsumerMetrics {
+    pub applied_scopes_total: prometheus::IntCounter,
+    pub scope_failures_total: prometheus::IntCounterVec,
+    pub changelog_lag: prometheus::IntGauge,
+    pub reconcile_duration_seconds: prometheus::Histogram,
+    pub tenant_active_apps: prometheus::IntGaugeVec,
+    pub flatten_conflicts_total: prometheus::IntCounter,
+}
+
+/// Registers [`ChangelogConsumerMetrics`] against `registry`. Must be
+/// called exactly once per `registry` -- see
+/// [`register_bundle_loader_excluded_metrics`]'s identical constraint.
+pub fn register_changelog_consumer_metrics(
+    registry: &prometheus::Registry,
+) -> ChangelogConsumerMetrics {
+    let applied_scopes_total = prometheus::IntCounter::new(
+        "svc_action_changelog_applied_scopes_total",
+        "Tenant/community scopes successfully re-read and applied by the change-log consumer",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(applied_scopes_total.clone()))
+        .expect("register svc_action_changelog_applied_scopes_total");
+
+    let scope_failures_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_action_changelog_scope_failures_total",
+            "Per-scope re-read failures, fail-closed (skip, never abort the tick), by reason",
+        ),
+        &["reason"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(scope_failures_total.clone()))
+        .expect("register svc_action_changelog_scope_failures_total");
+
+    let changelog_lag = prometheus::IntGauge::new(
+        "svc_action_changelog_lag",
+        "safe_seq minus last_seq after the most recent incremental change-log poll",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(changelog_lag.clone()))
+        .expect("register svc_action_changelog_lag");
+
+    let reconcile_duration_seconds = prometheus::Histogram::with_opts(
+        prometheus::HistogramOpts::new(
+            "svc_action_changelog_reconcile_duration_seconds",
+            "Wall-clock duration of each periodic full active-set reconcile",
+        )
+        .buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0]),
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(reconcile_duration_seconds.clone()))
+        .expect("register svc_action_changelog_reconcile_duration_seconds");
+
+    let tenant_active_apps = prometheus::IntGaugeVec::new(
+        prometheus::Opts::new(
+            "svc_action_tenant_active_apps",
+            "Active app count per tenant, summed across every community it owns",
+        ),
+        &["tenant_id"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(tenant_active_apps.clone()))
+        .expect("register svc_action_tenant_active_apps");
+
+    let flatten_conflicts_total = prometheus::IntCounter::new(
+        "svc_action_changelog_flatten_conflicts_total",
+        "Cross-tenant app_id/digest conflicts detected while flattening the multi-tenant active set",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(flatten_conflicts_total.clone()))
+        .expect("register svc_action_changelog_flatten_conflicts_total");
+
+    ChangelogConsumerMetrics {
+        applied_scopes_total,
+        scope_failures_total,
+        changelog_lag,
+        reconcile_duration_seconds,
+        tenant_active_apps,
+        flatten_conflicts_total,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,6 +297,29 @@ mod tests {
         assert!(rendered.contains("svc_action_bundle_active_set_excluded_total"));
         assert!(rendered.contains(r#"app_id="waddles.a""#));
         assert!(rendered.contains(r#"reason="no_approval""#));
+    }
+
+    #[test]
+    fn register_changelog_consumer_metrics_produces_the_expected_series() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_changelog_consumer_metrics(&registry);
+        metrics.applied_scopes_total.inc();
+        metrics
+            .scope_failures_total
+            .with_label_values(&["read_failed"])
+            .inc();
+        metrics.changelog_lag.set(42);
+        metrics.reconcile_duration_seconds.observe(0.25);
+        metrics.tenant_active_apps.with_label_values(&["7"]).set(3);
+        metrics.flatten_conflicts_total.inc();
+
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_action_changelog_applied_scopes_total 1"));
+        assert!(rendered.contains(r#"reason="read_failed""#));
+        assert!(rendered.contains("svc_action_changelog_lag 42"));
+        assert!(rendered.contains("svc_action_changelog_reconcile_duration_seconds"));
+        assert!(rendered.contains(r#"tenant_id="7""#));
+        assert!(rendered.contains("svc_action_changelog_flatten_conflicts_total 1"));
     }
 
     #[test]
