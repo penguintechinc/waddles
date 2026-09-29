@@ -871,6 +871,26 @@ cache-to: type=gha,mode=max,scope=router
 
 ## Deployment Workflows
 
+### Helm Chart Kind E2E (`helm-chart-e2e.yml`)
+
+**Triggers**: PRs touching `k8s/helm/**` or chart-relevant Dockerfiles; `workflow_dispatch`
+
+Installs/upgrades `k8s/helm/waddlebot` on an ephemeral kind cluster with
+dummy platform credentials (`values-ci.yaml`) -- catches hook-ordering,
+missing-binary, and live-object bugs `helm lint`/`helm template` can't see.
+Shares kind/Helm install + image build steps with the live workflow below
+via `.github/actions/kind-helm-e2e-setup`.
+
+### Live Discord E2E (`live-discord-e2e.yml`)
+
+**Triggers**: Push to `release/**`; `workflow_dispatch` — never `pull_request`
+
+Installs the same chart with a **real** dedicated CI Discord bot token
+(`ci-live-credentials` environment) and proves a genuine round trip: real
+gateway auth, then a `!ping`/`pong` exchange through real Discord REST
+calls. Full setup, secret rotation, and round-trip design: see
+[`docs/CI_LIVE_TESTS.md`](CI_LIVE_TESTS.md).
+
 ### Kubernetes Deployment (`deploy-k8s` job in `ci-cd.yml`)
 
 **Triggers**: Push to main branch after successful container builds
