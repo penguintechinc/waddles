@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Static check for dev-only placeholder credentials leaking into a render.
 
 fix/helm-platform-credentials -- a routine `helm upgrade` on alpha once
@@ -19,6 +18,7 @@ critical-rules.md Verification Integrity).
 from __future__ import annotations
 
 import base64
+import binascii
 import re
 import sys
 from typing import Any
@@ -41,15 +41,18 @@ CREDENTIAL_NAME_RE = re.compile(
 )
 
 
-def _decode_secret_value(kind: str, key: str, value: Any) -> str | None:
-    """Returns the plaintext string for a Secret data/stringData entry."""
+def _decode_secret_value(kind: str, value: Any) -> str | None:
+    """Returns the plaintext string for a Secret data/stringData entry.
+
+    Raises `binascii.Error`/`UnicodeDecodeError` for a `data` entry that
+    isn't valid base64-encoded UTF-8 -- the caller treats that as a finding
+    (fail closed) rather than silently skipping an unreadable value. Any
+    other exception is unexpected and propagates.
+    """
     if not isinstance(value, str):
         return None
     if kind == "data":
-        try:
-            return base64.b64decode(value).decode("utf-8", errors="replace")
-        except Exception:
-            return value
+        return base64.b64decode(value, validate=True).decode("utf-8")
     return value
 
 
@@ -62,7 +65,14 @@ def check_secret(doc: dict[str, Any], findings: list[str]) -> int:
         block = doc.get(field) or {}
         for key, raw in block.items():
             examined += 1
-            plaintext = _decode_secret_value(field, key, raw)
+            try:
+                plaintext = _decode_secret_value(field, raw)
+            except (binascii.Error, UnicodeDecodeError):
+                findings.append(
+                    f"Secret/{name} {field}.{key}: undecodable value -- "
+                    f"cannot verify it is not a placeholder credential"
+                )
+                continue
             if plaintext:
                 match = PLACEHOLDER_RE.search(plaintext)
                 if match:

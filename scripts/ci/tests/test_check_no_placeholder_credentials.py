@@ -39,7 +39,7 @@ metadata:
   name: waddlebot-secrets
 type: Opaque
 data:
-  discord_bot_token: {value}
+  discord_bot_token: "{value}"
 """
 
 
@@ -129,6 +129,42 @@ class TestFindingsOmitValue:
         assert "waddlebot-core" in findings[0]
         assert "DISCORD_BOT_TOKEN" in findings[0]
         assert "REPLACE_ME" in findings[0]
+
+
+class TestUndecodableSecretFailsClosed:
+    """A Secret `data` value that isn't valid base64/UTF-8 must be reported
+    as a finding (fail closed, BLE001 fix) -- never silently skipped, and
+    never printed."""
+
+    def test_undecodable_value_is_a_finding(self) -> None:
+        findings: list[str] = []
+        doc = {
+            "kind": "Secret",
+            "metadata": {"name": "waddlebot-secrets"},
+            "data": {"discord_bot_token": "not_valid_base64_@@@"},
+        }
+
+        examined = mod.check_secret(doc, findings)
+
+        assert examined == 1
+        assert len(findings) == 1
+        assert "undecodable" in findings[0].lower()
+        assert "waddlebot-secrets" in findings[0]
+        assert "discord_bot_token" in findings[0]
+        assert "not_valid_base64_@@@" not in findings[0]
+
+    def test_undecodable_value_fails_the_full_check_without_printing_it(
+        self,
+    ) -> None:
+        undecodable = "not_valid_base64_@@@"
+        render = SECRET_RENDER.format(value=undecodable)
+        result = _run(render)
+        combined = result.stdout + result.stderr
+
+        assert result.returncode == 1
+        assert "FAIL" in combined
+        assert "undecodable" in combined.lower()
+        assert undecodable not in combined
 
 
 class TestZeroDenominatorGate:
