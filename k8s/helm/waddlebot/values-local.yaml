@@ -6,6 +6,12 @@ global:
   imageRegistry: "localhost:32000/waddlebot"
   imagePullPolicy: Always
   storageClass: "microk8s-hostpath"
+  # feature/helm-auto-provision-keys -- was unset here, silently inheriting values.yaml's
+  # "production" default (values.yaml global.deploymentTier comment), which would have
+  # blocked auto-provisioned-secrets.yaml/auto-provisioned-keys-job.yaml's alpha/local
+  # generation path for local/MicroK8s dev. "local" is the second tier (alongside
+  # "alpha") that path treats as safe to auto-generate platform keys in.
+  deploymentTier: "local"
   jwtSecret: "local-dev-jwt-secret-change-in-production"
   moduleSecretKey: "local-dev-module-secret-change-in-production"
   serviceApiKey: "local-dev-api-key-change-in-production"
@@ -57,9 +63,15 @@ qdrant:
   replicas: 1
 
 # Namespace configuration
-namespace:
-  create: true
-  name: waddlebot
+# feature/helm-auto-provision-keys -- pre-existing bug fix: this was a nested
+# {create, name} map, but every template (including base values.yaml's own
+# `namespace: waddlebot`) treats `.Values.namespace` as a plain string; the map shape
+# rendered literally as the garbage string "map[create:true name:waddlebot]" in several
+# resources (silently, no template error) and broke `lookup`/other string-typed calls
+# outright (hard error) in the new auto-provisioned-secrets.yaml. Namespace *creation*
+# is controlled separately by the top-level `namespaceCreate: true` (values.yaml),
+# already effectively true for local via that default.
+namespace: waddlebot
 
 # Service port configuration for ingress
 hub:
@@ -632,6 +644,9 @@ modules:
       <<: *module_defaults
       enabled: false
 
+# See values-alpha.yaml's spire.enabled comment: false pending
+# https://github.com/penguintechinc/waddles/issues/437 (SPIRE crash-loop
+# breaks the waddlebot-spire-auto-enroll post-upgrade hook Job).
 spire:
-  enabled: true
+  enabled: false
   environment: "alpha"

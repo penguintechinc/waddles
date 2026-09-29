@@ -199,6 +199,162 @@ pub fn register_source_binding_supervisor_metrics(
     }
 }
 
+/// Prometheus handles for `crate::changelog_consumer` (dataplane scale
+/// design rev 4, §7/§8 step 2 -- multi-tenant, change-log-driven active-set
+/// loader). Histograms/gauges for load/latency and current state come
+/// alongside counters per `rules/critical-rules.md` Observability -- a lone
+/// counter is not instrumentation.
+#[derive(Clone)]
+pub struct ChangelogConsumerMetrics {
+    /// Total `(tenant_id, community_id)` scopes successfully re-read and
+    /// applied, across every incremental tick and full reconcile.
+    pub applied_scopes_total: prometheus::IntCounter,
+    /// Per-scope re-read/resolution failures, fail-closed (skip that scope,
+    /// never abort the whole tick) -- labeled by `reason`
+    /// (`"read_failed"`/`"resolve_failed"`).
+    pub scope_failures_total: prometheus::IntCounterVec,
+    /// `safe_seq - last_seq` after the most recent incremental tick --
+    /// `bundle_active_set::ChangeLogTracker::lag`'s exact value.
+    pub changelog_lag: prometheus::IntGauge,
+    /// Wall-clock duration of each periodic full active-set reconcile.
+    pub reconcile_duration_seconds: prometheus::Histogram,
+    /// Active-app count per tenant, summed across every community that
+    /// tenant owns -- labeled by `tenant_id` ONLY (bounded cardinality:
+    /// 100s of tenants, `rules/critical-rules.md` Observability), never by
+    /// `(tenant_id, community_id)` or `app_id` (10,000s-30,000s wide).
+    pub tenant_active_apps: prometheus::IntGaugeVec,
+    /// A scope evicted after failing its active-set re-read for longer than
+    /// `changelog_consumer::SCOPE_STALE_EVICTION_BOUND` -- fail-closed
+    /// (never serve an unboundedly stale bundle set), never silent.
+    pub scope_stale_evicted_total: prometheus::IntCounter,
+    /// A change-log gap detected (the lowest returned `seq` exceeded
+    /// `last_seq + 1`, most plausibly retention truncation) -- forces a full
+    /// reconcile instead of a partial apply, never silent.
+    pub changelog_gap_detected_total: prometheus::IntCounter,
+    /// `last_seq + 1 < min_retained_seq` detected via the primary's
+    /// authoritative `bundle_active_set_watermark.min_retained_seq` column
+    /// (hub-api migration `0026`/PR #397) -- forces a full reconcile, never
+    /// silent. Distinct from `changelog_gap_detected_total` (the heuristic
+    /// fallback) so on-call can tell "confirmed by the primary" apart from
+    /// "inferred from a returned row's seq".
+    pub changelog_retention_exceeded_total: prometheus::IntCounter,
+    /// A NEW executor connection detected (by pointer identity), never
+    /// silent -- gh security review item 4 on PR #406: the executor wipes
+    /// its bundle registry on every disconnect, so this consumer resets its
+    /// own `loaded` bookkeeping in lockstep and resends the full
+    /// authoritative active set.
+    pub executor_reconnect_detected_total: prometheus::IntCounter,
+}
+
+/// Registers [`ChangelogConsumerMetrics`] against `registry`. Must be
+/// called exactly once per `registry` -- see
+/// [`register_bundle_loader_excluded_metrics`]'s identical constraint.
+pub fn register_changelog_consumer_metrics(
+    registry: &prometheus::Registry,
+) -> ChangelogConsumerMetrics {
+    let applied_scopes_total = prometheus::IntCounter::new(
+        "svc_process_changelog_applied_scopes_total",
+        "Tenant/community scopes successfully re-read and applied by the change-log consumer",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(applied_scopes_total.clone()))
+        .expect("register svc_process_changelog_applied_scopes_total");
+
+    let scope_failures_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_changelog_scope_failures_total",
+            "Per-scope re-read/resolution failures, fail-closed (skip, never abort the tick), by reason",
+        ),
+        &["reason"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(scope_failures_total.clone()))
+        .expect("register svc_process_changelog_scope_failures_total");
+
+    let changelog_lag = prometheus::IntGauge::new(
+        "svc_process_changelog_lag",
+        "safe_seq minus last_seq after the most recent incremental change-log poll",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(changelog_lag.clone()))
+        .expect("register svc_process_changelog_lag");
+
+    let reconcile_duration_seconds = prometheus::Histogram::with_opts(
+        prometheus::HistogramOpts::new(
+            "svc_process_changelog_reconcile_duration_seconds",
+            "Wall-clock duration of each periodic full active-set reconcile",
+        )
+        .buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0]),
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(reconcile_duration_seconds.clone()))
+        .expect("register svc_process_changelog_reconcile_duration_seconds");
+
+    let tenant_active_apps = prometheus::IntGaugeVec::new(
+        prometheus::Opts::new(
+            "svc_process_tenant_active_apps",
+            "Active app count per tenant, summed across every community it owns",
+        ),
+        &["tenant_id"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(tenant_active_apps.clone()))
+        .expect("register svc_process_tenant_active_apps");
+
+    let scope_stale_evicted_total = prometheus::IntCounter::new(
+        "svc_process_changelog_scope_stale_evicted_total",
+        "Scopes evicted after failing their active-set re-read longer than the staleness bound",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(scope_stale_evicted_total.clone()))
+        .expect("register svc_process_changelog_scope_stale_evicted_total");
+
+    let changelog_gap_detected_total = prometheus::IntCounter::new(
+        "svc_process_changelog_gap_detected_total",
+        "Change-log gaps detected (likely retention truncation), forcing a full reconcile",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(changelog_gap_detected_total.clone()))
+        .expect("register svc_process_changelog_gap_detected_total");
+
+    let changelog_retention_exceeded_total = prometheus::IntCounter::new(
+        "svc_process_changelog_retention_exceeded_total",
+        "last_seq fell behind min_retained_seq (primary-confirmed), forcing a full reconcile",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(changelog_retention_exceeded_total.clone()))
+        .expect("register svc_process_changelog_retention_exceeded_total");
+
+    let executor_reconnect_detected_total = prometheus::IntCounter::new(
+        "svc_process_executor_reconnect_detected_total",
+        "New executor connections detected (by pointer identity), resetting loaded-state",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(executor_reconnect_detected_total.clone()))
+        .expect("register svc_process_executor_reconnect_detected_total");
+
+    ChangelogConsumerMetrics {
+        applied_scopes_total,
+        scope_failures_total,
+        changelog_lag,
+        reconcile_duration_seconds,
+        tenant_active_apps,
+        scope_stale_evicted_total,
+        changelog_gap_detected_total,
+        changelog_retention_exceeded_total,
+        executor_reconnect_detected_total,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +389,35 @@ mod tests {
         assert!(rendered.contains("svc_process_bundle_active_set_excluded_total"));
         assert!(rendered.contains(r#"app_id="waddles.a""#));
         assert!(rendered.contains(r#"reason="no_approval""#));
+    }
+
+    #[test]
+    fn register_changelog_consumer_metrics_produces_the_expected_series() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_changelog_consumer_metrics(&registry);
+        metrics.applied_scopes_total.inc();
+        metrics
+            .scope_failures_total
+            .with_label_values(&["read_failed"])
+            .inc();
+        metrics.changelog_lag.set(42);
+        metrics.reconcile_duration_seconds.observe(0.25);
+        metrics.tenant_active_apps.with_label_values(&["7"]).set(3);
+        metrics.scope_stale_evicted_total.inc();
+        metrics.changelog_gap_detected_total.inc();
+        metrics.changelog_retention_exceeded_total.inc();
+        metrics.executor_reconnect_detected_total.inc();
+
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_process_changelog_applied_scopes_total 1"));
+        assert!(rendered.contains(r#"reason="read_failed""#));
+        assert!(rendered.contains("svc_process_changelog_lag 42"));
+        assert!(rendered.contains("svc_process_changelog_reconcile_duration_seconds"));
+        assert!(rendered.contains(r#"tenant_id="7""#));
+        assert!(rendered.contains("svc_process_changelog_scope_stale_evicted_total 1"));
+        assert!(rendered.contains("svc_process_changelog_gap_detected_total 1"));
+        assert!(rendered.contains("svc_process_changelog_retention_exceeded_total 1"));
+        assert!(rendered.contains("svc_process_executor_reconnect_detected_total 1"));
     }
 
     #[test]

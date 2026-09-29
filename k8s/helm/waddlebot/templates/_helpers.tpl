@@ -410,6 +410,24 @@ Usage: {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
         name: {{ include "waddlebot.fullname" . }}-secrets
         key: INITIAL_ADMIN_PASSWORD
         optional: true
+  # Bundle app-schema roles (alembic/versions/0030_bundle_app_schemas.py) --
+  # this initContainer is the actual consumer: the migration bridges these
+  # into CREATE/ALTER ROLE ... PASSWORD statements for waddles_bundle_migrator/
+  # waddles_bundle_runtime. optional: true, matching INITIAL_ADMIN_* above --
+  # an unset value means the migration creates/leaves each role LOGIN with
+  # no usable password yet, never a migration failure.
+  - name: BUNDLE_MIGRATOR_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: {{ include "waddlebot.fullname" . }}-secrets
+        key: BUNDLE_MIGRATOR_PASSWORD
+        optional: true
+  - name: BUNDLE_RUNTIME_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: {{ include "waddlebot.fullname" . }}-secrets
+        key: BUNDLE_RUNTIME_PASSWORD
+        optional: true
   resources:
     requests:
       cpu: "50m"
@@ -580,11 +598,61 @@ falls back cleanly to Valkey's existing plaintext-only listener (dual-listener n
 attempted) instead of a mounted-but-empty file producing an opaque low-level TLS parse
 error.
 */}}
+{{/*
+fix/helm-alpha-self-provisioning -- templates/infrastructure/valkey-tls-secret.yaml now
+guarantees the <fullname>-valkey-tls Secret exists (kept, explicitly supplied, generated
+alpha/local, or the whole release fails to render) whenever redis.tls.enabled is true --
+the material itself is never stored back into .Values (generated inline via genCA/
+genSignedCert), so gating on .Values.global.valkeyTls.*.crt being non-empty (the old
+check) would wrongly stay false on the generate path. Gate on the enabled flag alone.
+*/}}
 {{- define "waddlebot.valkeyTlsMaterialAvailable" -}}
-{{- if and .Values.infrastructure.redis.tls.enabled .Values.global.valkeyTls.ca.crt .Values.global.valkeyTls.tls.crt .Values.global.valkeyTls.tls.key -}}
+{{- if .Values.infrastructure.redis.tls.enabled -}}
 true
 {{- end -}}
 {{- end }}
+
+{{/*
+fix/helm-alpha-self-provisioning -- lookup-then-generate-or-require for a single key
+inside the monolithic waddlebot-secrets Secret (templates/secrets.yaml). Mirrors
+templates/auto-provisioned-secrets.yaml's KEEP-vs-GENERATE policy but at per-key
+granularity, since waddlebot-secrets also carries user-supplied pass-through values
+(OAuth tokens, AWS/GCP creds, etc.) that must always reflect current .Values and are
+therefore never routed through this helper.
+
+Args (dict): ctx (the root "."), key (Secret data key name, e.g. "JWT_SECRET"),
+explicit (the value already resolved from .Values, "" if unset/placeholder), length
+(random byte-string length, default 32).
+
+Precedence: explicit non-placeholder value from .Values wins outright (operator/
+ExternalSecret already deliberately set it) > existing Secret key (KEEP, never
+rotated) > fresh random generation (alpha/local only) > fail closed elsewhere.
+*/}}
+{{- define "waddlebot.autoSecretValue" -}}
+{{- $ctx := .ctx -}}
+{{- $key := .key -}}
+{{- $explicit := .explicit | default "" -}}
+{{- $length := .length | default 32 -}}
+{{- $hex := .hex | default false -}}
+{{- if ne $explicit "" -}}
+{{- $explicit -}}
+{{- else -}}
+{{- $tier := $ctx.Values.global.deploymentTier -}}
+{{- $canGenerate := or (eq $tier "alpha") (eq $tier "local") -}}
+{{- $existing := lookup "v1" "Secret" $ctx.Values.namespace "waddlebot-secrets" -}}
+{{- if and $existing $existing.data (hasKey $existing.data $key) -}}
+{{- index $existing.data $key | b64dec -}}
+{{- else if $canGenerate -}}
+{{- if $hex -}}
+{{- sha256sum (randBytes 32) -}}
+{{- else -}}
+{{- randAlphaNum (int $length) -}}
+{{- end -}}
+{{- else -}}
+{{- fail (printf "waddlebot-secrets: key %q has no value and global.deploymentTier=%q is outside alpha/local -- auto-generation is alpha/local only. Set the corresponding value explicitly (or pre-populate this Secret via ExternalSecret/SealedSecret) before deploying." $key $tier) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 
 {{/* Server-role volume: full cert+key+CA bundle, mounted by templates/infrastructure/redis.yaml. */}}
 {{- define "waddlebot.valkeyTlsServerVolume" -}}

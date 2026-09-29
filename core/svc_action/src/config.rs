@@ -55,37 +55,6 @@ impl fmt::Debug for Secret {
     }
 }
 
-/// Parsed value of `BUNDLE_SCOPE_TENANT_ID`/`--bundle-scope-tenant-id`,
-/// distinguishing "not configured" (`None`) from every valid tenant
-/// including `0` (`Some(0)`). Field-for-field mirror of
-/// `core/svc_process::config::TenantScopeId` -- see that type's doc for the
-/// full rationale (a plain `Option<i32>` field can't express this via
-/// `clap`: pairing this type's `FromStr` with `default_value = ""` makes
-/// clap always call `FromStr`, so both "genuinely unset" and Helm's "set
-/// but rendered empty" collapse onto the same `None` instead of a hard
-/// parse error).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TenantScopeId(Option<i32>);
-
-impl TenantScopeId {
-    /// Unwraps to the `Option<i32>` callers actually want: `Some(id)` for
-    /// any configured tenant (including `Some(0)`), `None` when unset.
-    pub fn get(self) -> Option<i32> {
-        self.0
-    }
-}
-
-impl std::str::FromStr for TenantScopeId {
-    type Err = std::num::ParseIntError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.is_empty() {
-            return Ok(Self(None));
-        }
-        s.parse::<i32>().map(|v| Self(Some(v)))
-    }
-}
-
 /// CLI/env-configurable operational settings (non-secret). Every field has
 /// an `env` fallback so Helm/Docker deployments never need CLI args.
 #[derive(Parser, Debug, Clone)]
@@ -307,26 +276,29 @@ pub struct CliConfig {
     /// grants this role needs.
     #[arg(long, env = "DB_READER_USER", default_value = "svc_action_ro")]
     pub db_reader_user: String,
-    /// Tenant scope for the active-set read. `None` -- a genuinely unset
-    /// env var/flag, or Helm rendering the env var to `""` before a real
-    /// scope is configured (see [`TenantScopeId`]) -- means "not
-    /// configured, stay disabled". Bug fix: this used to be a bare `i32`
-    /// defaulting to `0` with `0` doubling as the "unset" sentinel, but `0`
-    /// is this system's actual global/default tenant, so it could never be
-    /// selected. `Some(0)` is now a valid, distinct value from `None`.
-    #[arg(long, env = "BUNDLE_SCOPE_TENANT_ID", default_value = "")]
-    pub bundle_scope_tenant_id: TenantScopeId,
-    /// Community scope for the active-set read; `0` is the tenant-wide
-    /// sentinel (matches `app_active_versions.community_id`'s own
-    /// convention, migration `0022_app_versions_and_rbac`).
-    #[arg(long, env = "BUNDLE_SCOPE_COMMUNITY_ID", default_value_t = 0)]
-    pub bundle_scope_community_id: i32,
-    /// Poll interval, in whole seconds, for the DB-driven loader's cheap
-    /// watermark check. Clamped to a 5s floor by
+    // **`BUNDLE_SCOPE_TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID` REMOVED**
+    // (dataplane scale design, user requirement: "every svc_process/
+    // svc_action pod serves ALL tenants") -- this loader now discovers and
+    // serves every `(tenant_id, community_id)` scope in the database
+    // itself (`bundle_active_set::read_active_set_all`), never a single
+    // operator-configured scope. There is no replacement env var.
+    /// Poll interval, in whole seconds, for the change-log consumer's
+    /// incremental tick. Clamped to a 5s floor by
     /// [`CliConfig::bundle_config_poll_interval`] so a misconfigured
     /// `0`/negative value can never hot-loop against the reader database.
+    /// Semantics unchanged from the retired single-tenant watermark loader
+    /// this replaces -- same env var, same floor.
     #[arg(long, env = "BUNDLE_CONFIG_POLL_SECONDS", default_value_t = 300)]
     pub bundle_config_poll_seconds: i64,
+    /// Periodic full-reconcile interval, in whole minutes (dataplane scale
+    /// design §7), default `15`. Clamped to a 1m floor by
+    /// [`CliConfig::full_reconcile_interval`].
+    #[arg(
+        long,
+        env = "BUNDLE_CONFIG_FULL_RECONCILE_MINUTES",
+        default_value_t = 15
+    )]
+    pub bundle_config_full_reconcile_minutes: i64,
 }
 
 impl CliConfig {
@@ -407,6 +379,15 @@ impl CliConfig {
     /// hot-loop the watermark check against the reader database.
     pub fn bundle_config_poll_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.bundle_config_poll_seconds.max(5) as u64)
+    }
+
+    /// [`Self::bundle_config_full_reconcile_minutes`] clamped to a 1-minute
+    /// floor -- a misconfigured `0`/negative value must never hot-loop the
+    /// full active-set re-read against the reader database.
+    pub fn full_reconcile_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            (self.bundle_config_full_reconcile_minutes.max(1) as u64) * 60,
+        )
     }
 }
 
@@ -852,49 +833,37 @@ mod tests {
         clear_secret_env();
     }
 
-    /// Bug fix regression: a genuinely unset `BUNDLE_SCOPE_TENANT_ID` (no
-    /// CLI flag, no env var) must parse to `None`, not `Some(0)`.
+    /// Removal regression (dataplane scale design, multi-tenant): the
+    /// retired `BUNDLE_SCOPE_TENANT_ID`/`--bundle-scope-tenant-id` flag must
+    /// no longer be a recognized CLI arg -- proves it was actually removed
+    /// from `CliConfig`, not merely stopped being read.
     #[test]
-    fn bundle_scope_tenant_id_defaults_to_unset() {
+    fn bundle_scope_tenant_id_flag_no_longer_exists() {
+        let result = CliConfig::try_parse_from(["svc-action", "--bundle-scope-tenant-id", "42"]);
+        assert!(
+            result.is_err(),
+            "BUNDLE_SCOPE_TENANT_ID must be fully removed, not just unused"
+        );
+    }
+
+    #[test]
+    fn bundle_config_full_reconcile_minutes_defaults_to_fifteen() {
         let cli = CliConfig::parse_from(["svc-action"]);
-        assert_eq!(cli.bundle_scope_tenant_id.get(), None);
-    }
-
-    /// Bug fix regression (the actual bug): tenant `0` is a real,
-    /// legitimate tenant and must be selectable, not collapsed onto the
-    /// "unset" sentinel the way the old bare-`i32` implementation did.
-    #[test]
-    fn bundle_scope_tenant_id_zero_is_a_valid_configured_value() {
-        let cli = CliConfig::parse_from(["svc-action", "--bundle-scope-tenant-id", "0"]);
-        assert_eq!(cli.bundle_scope_tenant_id.get(), Some(0));
+        assert_eq!(cli.bundle_config_full_reconcile_minutes, 15);
+        assert_eq!(
+            cli.full_reconcile_interval(),
+            std::time::Duration::from_secs(15 * 60)
+        );
     }
 
     #[test]
-    fn bundle_scope_tenant_id_nonzero_value_parses() {
-        let cli = CliConfig::parse_from(["svc-action", "--bundle-scope-tenant-id", "42"]);
-        assert_eq!(cli.bundle_scope_tenant_id.get(), Some(42));
-    }
-
-    /// Bug fix regression: Helm always renders `BUNDLE_SCOPE_TENANT_ID`
-    /// today (see `templates/svc-action-rust.yaml`); an empty rendered
-    /// value must load as `None`, same as a truly-absent env var, not fail
-    /// CLI parsing outright.
-    #[test]
-    fn bundle_scope_tenant_id_empty_string_env_loads_as_unset() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: serialized by ENV_LOCK above.
-        unsafe { std::env::set_var("BUNDLE_SCOPE_TENANT_ID", "") };
-        let cli = CliConfig::parse_from(["svc-action"]);
-        assert_eq!(cli.bundle_scope_tenant_id.get(), None);
-        // SAFETY: serialized by ENV_LOCK above.
-        unsafe { std::env::remove_var("BUNDLE_SCOPE_TENANT_ID") };
-    }
-
-    #[test]
-    fn bundle_scope_tenant_id_invalid_value_fails_parsing() {
-        let result =
-            CliConfig::try_parse_from(["svc-action", "--bundle-scope-tenant-id", "not-a-number"]);
-        assert!(result.is_err());
+    fn full_reconcile_interval_is_clamped_to_a_one_minute_floor() {
+        let cli =
+            CliConfig::parse_from(["svc-action", "--bundle-config-full-reconcile-minutes", "0"]);
+        assert_eq!(
+            cli.full_reconcile_interval(),
+            std::time::Duration::from_secs(60)
+        );
     }
 
     #[test]

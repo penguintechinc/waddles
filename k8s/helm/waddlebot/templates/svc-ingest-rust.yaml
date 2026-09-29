@@ -4,13 +4,16 @@
 # plus this stage's own .enabled sub-flag, so flipping the parent flag alone doesn't force
 # every stage on.
 #
-# Resource name carries a `-rust` suffix (see pipeline.rustDataPlane's values.yaml comment
-# for why) even though the image repository:tag below (waddlebot.legacyModuleImage,
-# module "svc-ingest") is the exact same one templates/svc-ingest.yaml's Python Deployment
-# already uses -- core/svc_ingest/Dockerfile.rust's own build comment tags the Rust image
-# with that identical repo:tag (M6 cutover-in-place convention), so an operator doing the
-# e2e cutover builds+pushes the Rust image over that tag and disables the Python
-# Deployment (pipeline.svcIngest.enabled=false) alongside enabling this one.
+# fix/helm-alpha-self-provisioning -- Resource name carries a `-rust` suffix (see
+# pipeline.rustDataPlane's values.yaml comment for why), AND the image repository below
+# (waddlebot.legacyModuleImage, module rustDataPlane.svcIngest.imageRepository, default
+# "svc-ingest-rust") is now a DISTINCT repository from templates/svc-ingest.yaml's Python
+# Deployment (module "svc-ingest") -- previously both resolved to the identical
+# repository:tag, which broke the documented alpha COEXISTENCE state (both Deployments
+# enabled simultaneously, see pipeline.rustDataPlane's values-alpha.yaml comment): whichever
+# image was pushed to that shared tag last silently became what BOTH Deployments ran.
+# core/svc_ingest/Dockerfile.rust's own build-tag comment predates this split and should be
+# updated to build+push "svc-ingest-rust" going forward.
 #
 # KNOWN GAP: core/svc_ingest/src/config.rs has no VALKEY_URL/DB/Discord+Twitch receiver-
 # credential fields yet (TODO(M5)) -- the env below is wired ahead of that landing so no
@@ -45,7 +48,7 @@ spec:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
       - name: svc-ingest-rust
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-ingest" "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcIngest.imageRepository | default "svc-ingest-rust") "imageTag" .Values.global.imageTag) }}"
         # Hardcoded Always -- see templates/svc-process-rust.yaml's comment on this same line
         # for the node-image-cache rationale (identical here).
         imagePullPolicy: Always

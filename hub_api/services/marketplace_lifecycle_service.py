@@ -83,6 +83,13 @@ def _manifest_dict_from_row(row: Any) -> dict[str, Any]:
             "min_version": platform_compat.get("min_version"),
             "max_version": platform_compat.get("max_version"),
         },
+        "author": row.author,
+        "license": row.license,
+        "source_url": row.source_url,
+        "alternative_to": list(row.alternative_to or []),
+        "homepage_url": row.homepage_url,
+        "notice": row.notice,
+        "category": row.category,
     }
 
 
@@ -164,6 +171,14 @@ async def install_bundle(
         },
         status=_ACTIVE_STATUS,
         installed_at=datetime.now(UTC),
+        author=manifest.author,
+        license=manifest.license,
+        license_review_required=manifest.license_requires_review,
+        source_url=manifest.source_url,
+        alternative_to=list(manifest.alternative_to),
+        homepage_url=manifest.homepage_url,
+        notice=manifest.notice,
+        category=manifest.category,
     )
     dal.commit()
     row = dal(dal.app_catalog.app_id == manifest.app_id).select().first()
@@ -188,10 +203,17 @@ async def list_installed(
     feature: str | None,
     provider: str | None,
     status: str | None,
+    category: str | None = None,
     page: int,
     limit: int,
 ) -> tuple[list[Any], int, int]:
-    """List `app_catalog` rows with optional filters + pagination."""
+    """List `app_catalog` rows with optional filters + pagination.
+
+    `category` (migration 0026, e.g. `alternatives`) is the marketplace
+    listing category -- lets a browsing tenant filter down to bundles
+    positioned as an alternative to a feature/product they don't want to
+    self-host, paired with each row's own `alternative_to` list.
+    """
     # `app_catalog` has no surrogate `id` column (`primarykey=["app_id"]`,
     # see `services/schema.py::bind_lifecycle_tables`) -- the usual
     # `dal.<table>.id > 0` always-true base query (see `platform_service.py`)
@@ -206,6 +228,8 @@ async def list_installed(
         query &= dal.app_catalog.provider == provider
     if status:
         query &= dal.app_catalog.status == status
+    if category:
+        query &= dal.app_catalog.category == category
 
     total = dal(query).count()
     page = max(1, page)
