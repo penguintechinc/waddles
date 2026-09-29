@@ -226,6 +226,11 @@ def parse_permission_declarations(
     a non-empty `allowed_hosts` and a `max_duration_seconds` within the
     catalog ceiling; `reputation.*.write` bounds `delta_min`/`delta_max`
     within `|delta| <= 5` and validates every `reason_codes` entry.
+    `interaction.pii.receive` (raw PII in form/modal/interaction inputs,
+    DEFAULT NO/`dangerous`) takes no special `params` -- like any other
+    dangerous, non-parameterized catalog entry it only needs the
+    justification above; the host's default-filter behavior when it is
+    NOT granted is enforced at delivery time, not at manifest-parse time.
     """
     declarations: list[PermissionDeclaration] = []
     for entry in raw_entries:

@@ -71,6 +71,23 @@ def test_dangerous_permission_requires_justification() -> None:
     assert exc.value.reason == "missing_justification"
 
 
+def test_interaction_pii_receive_parses_as_dangerous() -> None:
+    """No `params` shape required -- same as any other non-parameterized dangerous entry."""
+    manifest = _parse(
+        [{"id": "interaction.pii.receive", "justification": "Reads a viewer-typed email."}]
+    )
+    decls = manifest.permission_declarations  # type: ignore[attr-defined]
+    assert len(decls) == 1
+    assert decls[0].id == "interaction.pii.receive"
+    assert decls[0].risk == "dangerous"
+
+
+def test_interaction_pii_receive_requires_justification() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse([{"id": "interaction.pii.receive", "justification": ""}])
+    assert exc.value.reason == "missing_justification"
+
+
 def test_justification_too_long_rejected() -> None:
     with pytest.raises(ManifestV2Error) as exc:
         _parse([{"id": "storage.kv", "justification": "x" * 281}])

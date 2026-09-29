@@ -12,6 +12,16 @@ Valkey stream `bundle:grants:invalidate` (spec Sec4's push-invalidation
 path) -- the data-plane subscriber that turns this into a `GrantSnapshot`
 refresh is a separate, parallel task (Rust `svc_process`/`svc_action`),
 out of this module's scope.
+
+`interaction.pii.receive` (raw PII in form/modal/interaction inputs) is a
+catalog member like any other `dangerous`-risk permission -- no
+special-cased consent code lives here. It goes through the same
+dangerous-ack requirement (`record_permission_requests`), the same
+community activation grant, the same instance-policy deny check
+(`bundle_permissions.py::_reject_instance_denied`), and the same
+`is_dangerous` revoke warning as `ai.generate`/`overlay.media`. Until a
+community explicitly grants it, the host filters PII out of interaction
+inputs before delivery (best-effort; the filter itself is separate work).
 """
 
 from __future__ import annotations

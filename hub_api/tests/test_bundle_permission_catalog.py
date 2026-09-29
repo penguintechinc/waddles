@@ -29,6 +29,13 @@ def test_static_dangerous_permission_resolves() -> None:
     assert is_dangerous("ai.generate")
 
 
+def test_interaction_pii_receive_is_dangerous() -> None:
+    """Raw PII in form/modal/interaction inputs is a `dangerous`, default-no catalog member."""
+    assert resolve_risk("interaction.pii.receive") == "dangerous"
+    assert is_dangerous("interaction.pii.receive")
+    assert is_known_permission("interaction.pii.receive")
+
+
 def test_chat_send_family_is_normal_for_known_platform() -> None:
     assert resolve_risk("chat.send:discord") == "normal"
     assert resolve_risk("chat.send:twitch") == "normal"

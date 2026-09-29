@@ -92,6 +92,15 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     "storage.objects": "normal",
     "overlay.media": "dangerous",
     "ai.generate": "dangerous",
+    #: Raw PII (not just a tenant-tokenized UUID) embedded in a form/modal/
+    #: interaction input the bundle receives -- e.g. a free-text field the
+    #: user typed a name/email/phone into. DEFAULT NO, `dangerous`: without
+    #: this permission granted, the host filters PII out of interaction
+    #: inputs before they ever reach the bundle (best-effort filtering --
+    #: the host-side filter implementation is separate work, not this
+    #: catalog entry). Subject to the instance-wide deny policy like any
+    #: other permission (`_reject_instance_denied` in `bundle_permissions.py`).
+    "interaction.pii.receive": "dangerous",
     "users.profile.read": "normal",
     "telemetry.logs": "normal",
     "telemetry.metrics": "normal",

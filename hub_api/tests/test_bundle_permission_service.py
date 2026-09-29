@@ -145,6 +145,50 @@ async def test_record_permission_requests_happy_path(install_dal: Any) -> None:
     assert ids == frozenset({"storage.kv", "ai.generate"})
 
 
+async def test_record_permission_requests_requires_ack_for_interaction_pii_receive(
+    install_dal: Any,
+) -> None:
+    """`interaction.pii.receive` goes through the identical dangerous-ack gate as `ai.generate`."""
+    app_id = "waddles.socials.forms.default"
+    manifest_raw = {
+        **_MANIFEST_RAW,
+        "app_id": app_id,
+        "feature": "waddles.socials.forms",
+        "permissions": [
+            {"id": "storage.kv", "justification": "Stores state."},
+            {"id": "interaction.pii.receive", "justification": "Reads a viewer-typed email."},
+        ],
+    }
+    await _seed_upload(install_dal, app_id=app_id)
+    manifest = parse_bundle_manifest_v2(
+        manifest_raw,
+        known_custom_platforms=frozenset(),
+        allow_wildcard_consumes=False,
+        allow_prebuilt=True,
+    )
+    with pytest.raises(ApiError) as exc:
+        await svc.record_permission_requests(
+            install_dal,
+            app_id=app_id,
+            version=_VERSION,
+            declarations=manifest.permission_declarations,
+            approved_by=1,
+            approved_permissions=frozenset(),
+        )
+    assert exc.value.code == "incomplete_dangerous_ack"
+
+    await svc.record_permission_requests(
+        install_dal,
+        app_id=app_id,
+        version=_VERSION,
+        declarations=manifest.permission_declarations,
+        approved_by=1,
+        approved_permissions=frozenset({"interaction.pii.receive"}),
+    )
+    ids = await svc.get_approved_permission_ids(install_dal, app_id=app_id, version=_VERSION)
+    assert ids == frozenset({"storage.kv", "interaction.pii.receive"})
+
+
 async def test_record_permission_requests_system_source_rejects_non_core_app(
     install_dal: Any,
 ) -> None:
