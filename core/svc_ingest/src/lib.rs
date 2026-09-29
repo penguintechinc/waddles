@@ -71,6 +71,7 @@ pub mod license;
 pub mod normalize;
 pub mod outbound;
 pub mod publish;
+pub mod routing;
 pub mod telemetry;
 
 use std::net::SocketAddr;

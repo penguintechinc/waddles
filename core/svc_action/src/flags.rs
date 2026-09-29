@@ -56,6 +56,15 @@ pub const BUNDLE_EGRESS_FLAG: &str = "waddles.core.bundle-egress";
 /// exclusion, `crate::lib`'s top doc.
 pub const DISABLE_DB_BUNDLE_CONFIG_FLAG: &str = "waddles.core.disable-db-bundle-config";
 
+/// Gates the multi-tenant per-tenant-bot credential resolution path
+/// (`crate::credentials`, #500 data-plane half) -- same key as
+/// `core/svc_ingest/src/license.rs::GUILD_PAIRING_FLAG`, checked
+/// independently by each service. OFF preserves today's single
+/// platform-bot-for-everyone send path unchanged; ON routes sends through
+/// `crate::credentials::resolve_credentials` (tenant 0 -> platform bot,
+/// every other tenant -> its own app, fail-closed, no fallback).
+pub const GUILD_PAIRING_FLAG: &str = "waddles.guild-pairing";
+
 /// One flag's live enabled/disabled state. Object-safe (a manually-boxed
 /// future, matching every other async trait in this crate) so callers can
 /// hold `Arc<dyn FeatureFlag>` without an `async_trait` dependency.

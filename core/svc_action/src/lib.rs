@@ -54,6 +54,7 @@ pub mod bundle_loader;
 pub mod capabilities;
 pub mod changelog_consumer;
 pub mod config;
+pub mod credentials;
 pub(crate) mod crypto;
 pub mod db;
 pub mod dispatch;

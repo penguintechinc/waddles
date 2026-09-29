@@ -31,6 +31,14 @@ use std::sync::Arc;
 /// relay drain (spec S13.5's convention: `{product}.{feature-name}`).
 pub const RUST_DATA_PLANE_FLAG: &str = "waddles.core.rust-data-plane";
 
+/// Gates the multi-tenant guild<->community resolution path
+/// (`crate::routing`, #500 data-plane half) -- default OFF. OFF preserves
+/// today's single-binding-per-guild legacy resolution
+/// (`crate::ingest::discord::source_id`) unchanged; ON switches inbound
+/// Discord events to `crate::routing::GuildRouter` precedence resolution
+/// against `v_guild_routing`, tenant-attributed per gateway connection.
+pub const GUILD_PAIRING_FLAG: &str = "waddles.guild-pairing";
+
 /// Product identifier passed to `penguin_licensing::LicenseConfig` --
 /// distinct from the flag key's own leading segment only by convention
 /// (both happen to be `"waddles"` today).
