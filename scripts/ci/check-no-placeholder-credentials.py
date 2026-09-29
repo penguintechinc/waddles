@@ -63,11 +63,13 @@ def check_secret(doc: dict[str, Any], findings: list[str]) -> int:
         for key, raw in block.items():
             examined += 1
             plaintext = _decode_secret_value(field, key, raw)
-            if plaintext and PLACEHOLDER_RE.search(plaintext):
-                findings.append(
-                    f"Secret/{name} {field}.{key}: placeholder-looking value "
-                    f"{plaintext!r}"
-                )
+            if plaintext:
+                match = PLACEHOLDER_RE.search(plaintext)
+                if match:
+                    findings.append(
+                        f"Secret/{name} {field}.{key}: matched placeholder "
+                        f"pattern {match.group(0)[:20]!r}"
+                    )
     return examined
 
 
@@ -100,12 +102,14 @@ def check_workload_env(doc: dict[str, Any], findings: list[str]) -> int:
                     continue
                 examined += 1
                 value = env.get("value")
-                if isinstance(value, str) and PLACEHOLDER_RE.search(value):
-                    findings.append(
-                        f"{kind}/{name} container {container.get('name')} "
-                        f"env {env.get('name')}: placeholder-looking value "
-                        f"{value!r}"
-                    )
+                if isinstance(value, str):
+                    match = PLACEHOLDER_RE.search(value)
+                    if match:
+                        findings.append(
+                            f"{kind}/{name} container {container.get('name')} "
+                            f"env {env.get('name')}: matched placeholder "
+                            f"pattern {match.group(0)[:20]!r}"
+                        )
     return examined
 
 
