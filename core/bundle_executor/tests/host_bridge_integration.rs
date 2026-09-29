@@ -131,6 +131,8 @@ async fn run_fake_stage<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>
         &Frame::new(
             1000,
             Message::Load(LoadBody {
+                tenant_id: 1,
+                community_id: 0,
                 app_id: APP_ID.to_string(),
                 version: "1".to_string(),
                 digest: digest.clone(),
@@ -345,6 +347,8 @@ async fn socket_probe_completes_without_trapping_the_component() {
             &Frame::new(
                 1,
                 Message::Load(LoadBody {
+                    tenant_id: 1,
+                    community_id: 0,
                     app_id: APP_ID.to_string(),
                     version: "1".to_string(),
                     digest: digest.clone(),

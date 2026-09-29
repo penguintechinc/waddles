@@ -1,10 +1,14 @@
-"""v1 `bundle_approvals` group -- GET permissions, POST approve/deny (spec Sec9.7).
+"""v1 `bundle_approvals` group -- GET permissions, GLOBAL tier install/uninstall/list (spec Sec9.7).
 
 R52 (coordinator ruling): every handler reads
-`current_app.config["install_dal"]` -- `app_install_approvals`/
-`app_version_uploads`/`app_versions` are this milestone's own new
-tables. Global tier (`platform:admin`) -- the admin approving/denying
-an install-time consent screen is a platform-wide action (spec Sec9.7.2).
+`current_app.config["install_dal"]` -- `app_version_uploads`/`app_versions`/
+`app_global_installs` are hub-api-owned control-plane tables. GLOBAL tier
+(`platform:admin`) -- installing a version into the platform catalog is a
+platform-wide action; it no longer activates anything for any tenant or
+community (see `services/bundle_approval_service.py`'s own module
+docstring for the full 3-tier split -- TENANT tier is
+`blueprints/v1/bundle_tenant_availability.py`, COMMUNITY tier is
+`blueprints/v1/bundle_activation.py`).
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ from typing import Any, cast
 
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
-from flask_core.tenancy import get_tenant_context, tenant_middleware
+from flask_core.tenancy import tenant_middleware
 from penguin_dal import AsyncDB
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
@@ -36,6 +40,10 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     )
 
 
+def _iso(value: Any) -> str | None:
+    return value.isoformat() if value else None
+
+
 @dataclass(slots=True, frozen=True)
 class PermissionSummaryResponse:
     """Response DTO for `GET .../permissions`."""
@@ -47,9 +55,8 @@ class PermissionSummaryResponse:
 
 @dataclass(slots=True, frozen=True)
 class ApproveRequest:
-    """Request DTO for `POST .../approve`."""
+    """Request DTO for `POST .../approve` (GLOBAL tier install -- no tenant/community anymore)."""
 
-    communityId: int | None = None
     permissionHash: str | None = None
 
 
@@ -74,6 +81,35 @@ class ApproveResponse:
 
     success: bool
     permissionHash: str
+
+
+@dataclass(slots=True, frozen=True)
+class GlobalInstallDTO:
+    """Response DTO: one `app_global_installs` row."""
+
+    appId: str
+    version: str
+    installSource: str
+    installedAt: str | None
+    revokedAt: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class GlobalInstallListResponse:
+    """Response DTO for `GET /api/v1/apps/installs`."""
+
+    success: bool
+    installs: list[GlobalInstallDTO]
+
+
+def _install_dto(row: Any) -> GlobalInstallDTO:
+    return GlobalInstallDTO(
+        appId=row.app_id,
+        version=row.version,
+        installSource=row.install_source,
+        installedAt=_iso(row.installed_at),
+        revokedAt=_iso(row.revoked_at),
+    )
 
 
 @bundle_approvals_bp.route("/<app_id>/versions/<version>/permissions", methods=["GET"])
@@ -102,19 +138,15 @@ async def get_permissions(
 async def post_approve(
     data: ApproveRequest, app_id: str, version: str
 ) -> tuple[ApproveResponse | dict[str, object], int]:
-    """Approve a version. A headless caller supplies `permissionHash`; a mismatch fails closed."""
+    """GLOBAL tier: install a version into the platform catalog. No tenant/community activation."""
     install_dal = _install_dal()
-    ctx = get_tenant_context(request)
-    assert ctx is not None  # nosec B101
     caller_id = get_current_user_id(request)
     try:
-        row = await svc.approve_version(
+        row = await svc.install_version_globally(
             install_dal,
             app_id=app_id,
             version=version,
-            tenant_id=ctx.tenant_id,
-            community_id=data.communityId,
-            approved_by=caller_id,
+            installed_by=caller_id,
             expected_permission_hash=data.permissionHash,
         )
     except ApiError as exc:
@@ -152,6 +184,37 @@ async def post_deny(
     return MessageResponse(
         success=True, message=f"version {version} of {app_id} denied: {data.reason}"
     )
+
+
+@bundle_approvals_bp.route("/<app_id>/uninstall", methods=["POST"])
+@tenant_middleware  # type: ignore[untyped-decorator]
+@require_scope("platform:admin")  # type: ignore[untyped-decorator]
+@validate_response(MessageResponse)
+async def post_uninstall(app_id: str) -> MessageResponse | tuple[dict[str, object], int]:
+    """GLOBAL tier: revoke `app_id`'s platform-catalog install.
+
+    Cascades: hidden in every tenant's marketplace + deactivated in every
+    community that had it running (`services.bundle_approval_service.
+    uninstall_globally()`'s own cascade).
+    """
+    install_dal = _install_dal()
+    try:
+        await svc.uninstall_globally(
+            install_dal, app_id=app_id, revoked_by=get_current_user_id(request)
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return MessageResponse(success=True, message=f"{app_id} uninstalled")
+
+
+@bundle_approvals_bp.route("/installs", methods=["GET"])
+@tenant_middleware  # type: ignore[untyped-decorator]
+@validate_response(GlobalInstallListResponse)
+async def list_installs() -> GlobalInstallListResponse:
+    """List the platform catalog's current installs -- any authenticated tenant member."""
+    install_dal = _install_dal()
+    rows = await svc.list_global_installs(install_dal)
+    return GlobalInstallListResponse(success=True, installs=[_install_dto(r) for r in rows])
 
 
 BLUEPRINTS: list[Blueprint] = [bundle_approvals_bp]
