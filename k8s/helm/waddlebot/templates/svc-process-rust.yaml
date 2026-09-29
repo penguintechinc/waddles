@@ -161,6 +161,12 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderPort | default .Values.infrastructure.postgresql.service.port | quote }}
         - name: DB_READER_NAME
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderName | default .Values.infrastructure.postgresql.database | quote }}
+        # fix/helm-apply-errors -- see templates/svc-action-rust.yaml's identical comment
+        # on this same env var name for the full rationale (identical here): never
+        # switch DB_READER_USER back to valueFrom, a retired chart revision's
+        # valueFrom(waddlebot-bundle-reader/...) for this exact name is why a live
+        # upgrade fails with "env[N].valueFrom: ... may not be specified when value is
+        # not empty" (kubectl's merge-by-name deep-merges the old and new field sets).
         - name: DB_READER_USER
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderUser | default "svc_process_ro" | quote }}
         - name: DB_READER_PASSWORD
