@@ -109,7 +109,7 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
 
     dal.define_table(
         "hub_users",
-        # `uuid` (migration 0033_hub_users_identity_uuid): the real-user
+        # `uuid` (migration 0034_hub_users_identity_uuid): the real-user
         # identity `{user:<uuid>}` data-plane tokenization (PR #429) and the
         # egress detokenizer (PR #427, `internal_identity_service.py`,
         # feature-checked on `"uuid" in dal.hub_users.fields`) both require
