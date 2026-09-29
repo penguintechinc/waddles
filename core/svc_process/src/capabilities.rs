@@ -30,11 +30,13 @@
 //! shared `bundle_host_http::egress::EgressGuard` pipeline (extracted from
 //! `core/svc_action`, PR #459 follow-up) and the interim capability-gate
 //! seam this stage's own catalog stands in for ahead of PR #433's standard
-//! `core/bundle_capability_gate::authorize` landing. `db`/`flags` remain
-//! documented seams -- see [`StageCapabilities::handle`]'s match arms --
-//! since a real `db` wiring needs the manifest's `data.tables` allowlist
-//! plus per-bundle-role RLS (`SET LOCAL waddles.tenant`/`waddles.community`,
-//! spec §7.4/§11.10), tracked as a separate design in progress (PR #498).
+//! `core/bundle_capability_gate::authorize` landing. `db` is wired too
+//! (PR #498) -- structured insert/get/update/delete against a bundle's own
+//! `app_core`/`app_community` table via [`DbWiring`], gated by
+//! `crate::license::BUNDLE_DB_CAPABILITY_FLAG` (unseen/OFF denies
+//! `feature_disabled`); `query` remains unimplemented (see
+//! `bundle_host_db`'s crate doc). `flags` remains a documented seam -- see
+//! [`StageCapabilities::handle`]'s match arms.
 //! `relay` is never granted to a process-stage bundle at all (spec §6.5:
 //! "Capability: granted only to action-stage bundles") and is denied
 //! unconditionally, not merely unimplemented.
@@ -48,9 +50,15 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
+use bundle_host_db::{
+    CapabilitySnapshot as DbCapabilitySnapshot, DbError, DbHost, DbScope, DbValue, PostgresBackend,
+    SchemaCache,
+};
 use bundle_host_http::egress::{EgressGuard, EgressRuleRow, EgressRuleSource};
 use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
+
+use crate::license::FeatureGate;
 
 /// Answers one `host-call` for a given `capability`/`op`. Object-safe (a
 /// manually-boxed future rather than `async fn` in a trait) so the host-API
@@ -164,6 +172,24 @@ impl EgressRuleSource for HttpEgressCatalog {
     }
 }
 
+/// Everything `handle_db` needs, shared across every invocation this
+/// process serves -- constructed once at startup (never per-invoke, unlike
+/// [`StageCapabilities`] itself) and cloned cheaply into each one via
+/// `Arc` (`crate::spine`'s call site). `schemas`/`capabilities` are
+/// refreshed by this service's own `bundle_loader` poll (not wired in this
+/// landing -- see `bundle_host_db`'s crate doc "remaining work"); an
+/// `app_id` neither has ever heard of fails closed by construction
+/// ([`DbHost`]'s own resolve-then-authorize order).
+#[derive(Clone)]
+pub struct DbWiring {
+    pub host: Arc<DbHost<PostgresBackend>>,
+    pub schemas: Arc<SchemaCache>,
+    pub capabilities: Arc<DbCapabilitySnapshot>,
+    /// `crate::license::BUNDLE_DB_CAPABILITY_FLAG` gate -- OFF denies every
+    /// `db` call `feature_disabled` before any schema/authorize lookup.
+    pub flag: Arc<dyn FeatureGate>,
+}
+
 /// The real capability implementation this stage wires today, scoped to
 /// exactly one invocation's `(tenant, community, app_id)` -- see the
 /// module doc for why this is constructed per-invoke, never per-connection.
@@ -187,6 +213,12 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// the Valkey connection for `kv` was never configured).
     kv: Option<KvHost<K>>,
     egress: Arc<EgressGuard>,
+    /// `None` until `crate::lib`'s startup wiring provisions a live
+    /// Postgres pool + flag client -- every `db` call denies
+    /// `feature_disabled` in that state, never panics (mirrors every other
+    /// unimplemented-seam capability's fail-closed default in
+    /// [`Self::handle`]).
+    db: Option<DbWiring>,
 }
 
 impl<K: KvBackend> StageCapabilities<K> {
@@ -207,6 +239,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             app_id,
             kv: None,
             egress,
+            db: None,
         }
     }
 
@@ -228,6 +261,15 @@ impl<K: KvBackend> StageCapabilities<K> {
         capabilities: std::sync::Arc<bundle_host_kv::CapabilitySnapshot>,
     ) -> Self {
         self.kv = Some(KvHost::new(backend, capabilities));
+        self
+    }
+
+    /// Attaches the `db` capability's live wiring -- called once at
+    /// startup (`crate::lib`) with the shared, process-wide [`DbWiring`],
+    /// never per-invoke. Builder-style so existing `StageCapabilities::new`
+    /// call sites (including every current test) are unaffected.
+    pub fn with_db(mut self, db: DbWiring) -> Self {
+        self.db = Some(db);
         self
     }
 
@@ -375,6 +417,164 @@ impl<K: KvBackend> StageCapabilities<K> {
             )),
         }
     }
+
+    /// Structured insert/get/update/delete against this app's own
+    /// `app_core`/`app_community` table (design doc
+    /// `docs/superpowers/specs/2026-09-28-bundle-db-capability-and-schemas.md`).
+    /// `query` is not implemented in this landing -- returns `not_implemented`
+    /// (see `bundle_host_db`'s crate doc "remaining work").
+    ///
+    /// Op/args shape (host-API `{capability, op, args}` dispatch, ahead of
+    /// a corresponding `stage.wit`/`bundle_executor` change -- see this
+    /// PR's description for the proposed WIT shape):
+    /// - `insert`: `args.column_values` = `{col: value, ...}` -> `{row_id, version, columns}`
+    /// - `get`: `args.row_id` (string) -> `{row_id, version, columns}`
+    /// - `update`: `args.row_id`, `args.expected_version` (u64), `args.column_values` -> `{row_id, version, columns}`
+    /// - `delete`: `args.row_id`, `args.expected_version` (u64) -> `{}`
+    ///
+    /// Every value is a JSON scalar (`null`/bool/number/string); `bytes`
+    /// values are not supported over this JSON args shape in this landing.
+    async fn handle_db(&self, call: &HostCallBody) -> Result<serde_json::Value, HostResultError> {
+        let Some(db) = &self.db else {
+            return Err(denied(
+                "not_implemented",
+                "db capability is not wired in this build -- TODO(M4+)",
+            ));
+        };
+
+        if !db.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "db capability is disabled (waddles.bundle-db-capability is OFF)",
+            ));
+        }
+
+        let scope = DbScope::new(
+            self.tenant.clone(),
+            self.community.clone(),
+            self.app_id.clone(),
+        );
+
+        let column_values =
+            |args: &serde_json::Value| -> Result<Vec<(String, DbValue)>, HostResultError> {
+                let obj = args
+                    .get("column_values")
+                    .and_then(|v| v.as_object())
+                    .ok_or_else(|| denied("invalid_args", "column_values must be a JSON object"))?;
+                obj.iter()
+                    .map(|(k, v)| Ok((k.clone(), json_to_db_value(v)?)))
+                    .collect()
+            };
+
+        let row_id = |args: &serde_json::Value| -> Result<String, HostResultError> {
+            args.get("row_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| denied("invalid_args", "row_id must be a string"))
+        };
+
+        let expected_version = |args: &serde_json::Value| -> Result<u64, HostResultError> {
+            args.get("expected_version")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| denied("invalid_args", "expected_version must be a u64"))
+        };
+
+        let result = match call.op.as_str() {
+            "insert" => {
+                let values = column_values(&call.args)?;
+                db.host
+                    .insert(&scope, &db.schemas, &db.capabilities, values)
+                    .await
+            }
+            "get" => {
+                let id = row_id(&call.args)?;
+                db.host
+                    .get(&scope, &db.schemas, &db.capabilities, &id)
+                    .await
+            }
+            "update" => {
+                let id = row_id(&call.args)?;
+                let version = expected_version(&call.args)?;
+                let values = column_values(&call.args)?;
+                db.host
+                    .update(&scope, &db.schemas, &db.capabilities, &id, version, values)
+                    .await
+            }
+            "delete" => {
+                let id = row_id(&call.args)?;
+                let version = expected_version(&call.args)?;
+                return db
+                    .host
+                    .delete(&scope, &db.schemas, &db.capabilities, &id, version)
+                    .await
+                    .map(|()| serde_json::json!({}))
+                    .map_err(db_error_to_host_error);
+            }
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("db op {other:?} not supported"),
+                ))
+            }
+        };
+
+        result.map(row_to_json).map_err(db_error_to_host_error)
+    }
+}
+
+fn json_to_db_value(v: &serde_json::Value) -> Result<DbValue, HostResultError> {
+    Ok(match v {
+        serde_json::Value::Null => DbValue::Null,
+        serde_json::Value::Bool(b) => DbValue::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                DbValue::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                DbValue::Float(f)
+            } else {
+                return Err(denied("invalid_args", "unsupported numeric value"));
+            }
+        }
+        serde_json::Value::String(s) => DbValue::Text(s.clone()),
+        _ => {
+            return Err(denied(
+                "invalid_args",
+                "unsupported value shape (array/object)",
+            ))
+        }
+    })
+}
+
+fn db_value_to_json(v: &DbValue) -> serde_json::Value {
+    match v {
+        DbValue::Null => serde_json::Value::Null,
+        DbValue::Bool(b) => serde_json::json!(b),
+        DbValue::Int(i) => serde_json::json!(i),
+        DbValue::Float(f) => serde_json::json!(f),
+        DbValue::Text(s) => serde_json::json!(s),
+        DbValue::Bytes(b) => serde_json::json!(b),
+    }
+}
+
+fn row_to_json(row: bundle_host_db::Row) -> serde_json::Value {
+    let columns: serde_json::Map<String, serde_json::Value> = row
+        .columns
+        .into_iter()
+        .map(|(k, v)| (k, db_value_to_json(&v)))
+        .collect();
+    serde_json::json!({
+        "row_id": row.row_id,
+        "version": row.version,
+        "columns": columns,
+    })
+}
+
+/// Maps [`DbError`] to the `{code, message}` shape the executor forwards
+/// to the guest -- never leaks a raw SQL error string beyond `DbError`'s
+/// own already-sanitized `Backend` variant (no row data or PII in any
+/// `DbError` variant to begin with, `bundle_host_db`'s own doc).
+fn db_error_to_host_error(err: DbError) -> HostResultError {
+    denied(err.code(), err.to_string())
 }
 
 /// `{"key": String}` -- `kv.get`/`kv.delete`'s args.
@@ -442,10 +642,7 @@ impl<K: KvBackend> CapabilityHandler for StageCapabilities<K> {
                 // (PR #498 wires this next). Denying (never silently
                 // succeeding) is the correct behavior for an unimplemented
                 // capability until it does.
-                CapabilityKind::Db => Err(denied(
-                    "not_implemented",
-                    "db capability is not wired in this build",
-                )),
+                CapabilityKind::Db => self.handle_db(&call).await,
                 CapabilityKind::Flags => Err(denied(
                     "not_implemented",
                     "flags capability is not wired in this build -- TODO(M4+)",
@@ -735,6 +932,82 @@ mod tests {
             args,
             call_id: 1,
         }
+    }
+
+    fn mock_db_wiring(flag_on: bool) -> DbWiring {
+        let conn = sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection();
+        DbWiring {
+            host: Arc::new(DbHost::new(bundle_host_db::PostgresBackend::new(conn))),
+            schemas: Arc::new(SchemaCache::new()),
+            capabilities: Arc::new(DbCapabilitySnapshot::new()),
+            flag: Arc::new(crate::license::test_support::FixedGate(flag_on)),
+        }
+    }
+
+    #[tokio::test]
+    async fn db_capability_denies_not_implemented_when_never_wired() {
+        let capabilities = caps();
+        let err = capabilities
+            .handle_db(&call(
+                CapabilityKind::Db,
+                "get",
+                serde_json::json!({"row_id": "x"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_implemented");
+    }
+
+    #[tokio::test]
+    async fn db_capability_denies_feature_disabled_when_flag_is_off() {
+        let capabilities = caps().with_db(mock_db_wiring(false));
+        let err = capabilities
+            .handle_db(&call(
+                CapabilityKind::Db,
+                "get",
+                serde_json::json!({"row_id": "x"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "feature_disabled");
+    }
+
+    #[tokio::test]
+    async fn db_capability_denies_no_table_when_flag_on_but_unprovisioned() {
+        let capabilities = caps().with_db(mock_db_wiring(true));
+        capabilities.db.as_ref().unwrap().capabilities.update(
+            "waddles.bot.commands.default",
+            ["storage.tables".to_string()],
+        );
+        let err = capabilities
+            .handle_db(&call(
+                CapabilityKind::Db,
+                "get",
+                serde_json::json!({"row_id": "00000000-0000-0000-0000-000000000000"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "no_table");
+    }
+
+    #[tokio::test]
+    async fn db_capability_rejects_an_unknown_op() {
+        let capabilities = caps().with_db(mock_db_wiring(true));
+        let err = capabilities
+            .handle_db(&call(CapabilityKind::Db, "truncate", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "unknown_op");
+    }
+
+    #[tokio::test]
+    async fn db_capability_rejects_missing_row_id_for_get() {
+        let capabilities = caps().with_db(mock_db_wiring(true));
+        let err = capabilities
+            .handle_db(&call(CapabilityKind::Db, "get", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
     }
 
     #[test]
