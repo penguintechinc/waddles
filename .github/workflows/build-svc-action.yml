@@ -29,6 +29,12 @@ env:
   IMAGE_NAME: ${{ github.repository }}
   MODULE_NAME: svc-action-rust
   MODULE_PATH: core/svc_action
+  # Dockerfile.rust COPYs the sibling `bundle_active_set` crate (same-repo
+  # path dependency), so the build context must be `core/` (the parent of
+  # MODULE_PATH), not MODULE_PATH itself -- see the Dockerfile.rust header
+  # comment. `file` stays MODULE_PATH-relative since docker/build-push-action
+  # resolves `file` relative to the workflow's working directory, not context.
+  BUILD_CONTEXT: core
 
 jobs:
   determine-version:
@@ -110,7 +116,7 @@ jobs:
       - name: Build and push image (${{ matrix.platform }})
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         with:
-          context: ${{ env.MODULE_PATH }}
+          context: ${{ env.BUILD_CONTEXT }}
           file: ${{ env.MODULE_PATH }}/Dockerfile.rust
           push: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           load: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && matrix.platform == 'linux/amd64' }}
