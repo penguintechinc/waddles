@@ -8,7 +8,11 @@
 #
 # Build (context = this directory, not the repo root -- no shared libs to
 # pull in for a Rust crate):
-#   docker build -f Dockerfile.rust -t localhost:32000/waddles/svc-ingest:alpha-<epoch> .
+#   docker build -f Dockerfile.rust -t localhost:32000/waddlebot/svc-ingest-rust:alpha-<epoch> .
+# ("svc-ingest-rust", not "svc-ingest" -- fix/helm-alpha-self-provisioning gives the Rust
+# build its own repository so it never collides with the Python Deployment's tag while
+# both coexist in alpha; the Helm chart's rustDataPlane.svcIngest.imageRepository default
+# matches this exactly.)
 #
 # No SeaORM/database, so unlike svc_streaming's builder stage this one
 # needs no cmake/build-essential -- the M5 skeleton's `reqwest` (rustls-tls)

@@ -133,6 +133,12 @@ global:
     tls:
       crt: ""
       key: ""
+    # fix/helm-alpha-self-provisioning -- true delegates provisioning of the
+    # <fullname>-valkey-tls Secret to an out-of-band ExternalSecret/SealedSecret
+    # controller instead of failing the render on beta/gamma/production. Alpha/local
+    # ignore this flag entirely (auto-generated instead, see templates/infrastructure/
+    # valkey-tls-secret.yaml).
+    externalSecret: false
 
   # First-run super-admin bootstrap (PR #256, CWE-798 -- admin/hub_module backend
   # adminBootstrap.js / config/postgres/migrations/081_seed_default_hub_admin.sql). Both
@@ -788,6 +794,12 @@ pipeline:
 
     svcIngest:
       enabled: true
+      # fix/helm-alpha-self-provisioning -- distinct image repository from
+      # pipeline.svcIngest's Python Deployment (module "svc-ingest"), so the two
+      # coexisting Deployments never resolve to the same repository:tag and therefore
+      # never race on which binary a shared tag actually points at. Matches
+      # core/svc_ingest/Dockerfile.rust's build tag.
+      imageRepository: "svc-ingest-rust"
       port: 8200
       metricsPort: 9090
       replicas: 1
@@ -809,6 +821,8 @@ pipeline:
 
     svcProcess:
       enabled: true
+      # fix/helm-alpha-self-provisioning -- see svcIngest.imageRepository's comment above.
+      imageRepository: "svc-process-rust"
       port: 8201
       metricsPort: 9090
       replicas: 1
@@ -883,6 +897,9 @@ pipeline:
 
     svcAction:
       enabled: true
+      # fix/helm-alpha-self-provisioning -- see rustDataPlane.svcIngest.imageRepository's
+      # comment above.
+      imageRepository: "svc-action-rust"
       port: 8202
       metricsPort: 9090
       replicas: 1

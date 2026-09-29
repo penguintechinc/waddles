@@ -1,7 +1,7 @@
 .PHONY: dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
-        verify-csping-fixture verify-ping-bundle-reproducible generate-minio-kms-key
+        verify-csping-fixture verify-ping-bundle-reproducible generate-minio-kms-key alpha-deploy
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -110,6 +110,14 @@ verify-ping-bundle-reproducible:
 generate-minio-kms-key:
 	@test -n "$(KUBE_CONTEXT)" || { echo "ERROR: KUBE_CONTEXT is required, e.g. make generate-minio-kms-key KUBE_CONTEXT=dal2-beta" >&2; exit 1; }
 	@bash scripts/generate-minio-kms-key.sh --context "$(KUBE_CONTEXT)" $(if $(NAMESPACE),--namespace "$(NAMESPACE)",)
+
+# Builds+pushes images at HEAD's SHA (Rust svc-ingest/svc-process/svc-action into their
+# own "*-rust" repositories), then `helm upgrade --install` with only the image tag set --
+# no secret/TLS material, ever: k8s/helm/waddlebot self-provisions everything alpha needs
+# (fix/helm-alpha-self-provisioning). Waits on migrations + rollout, re-runs the seeder,
+# verifies. Requires kube context local-alpha. Usage: make alpha-deploy [ARGS="--skip-build"]
+alpha-deploy:
+	@bash scripts/alpha-deploy.sh $(ARGS)
 
 pre-commit:
 	@echo "=== Pre-commit checks ==="
