@@ -1,0 +1,254 @@
+name: Build svc-action
+
+# Publishes the Rust data-plane svc-action image (`svc-action-rust`) built
+# from `core/svc_action/Dockerfile.rust`. See build-svc-ingest.yml for the
+# full rationale (self-contained build, `-rust` naming, gated Trivy scan).
+
+on:
+  push:
+    branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
+    tags: ['v*']
+    paths:
+      - 'core/svc_action/**'
+      - '.version'
+      - '.github/workflows/build-svc-action.yml'
+  pull_request:
+    branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
+    paths:
+      - 'core/svc_action/**'
+  merge_group:
+    types: [checks_requested]
+    branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  MODULE_NAME: svc-action-rust
+  MODULE_PATH: core/svc_action
+  # Dockerfile.rust COPYs the sibling `bundle_active_set` crate (same-repo
+  # path dependency), so the build context must be `core/` (the parent of
+  # MODULE_PATH), not MODULE_PATH itself -- see the Dockerfile.rust header
+  # comment. `file` stays MODULE_PATH-relative since docker/build-push-action
+  # resolves `file` relative to the workflow's working directory, not context.
+  BUILD_CONTEXT: core
+
+jobs:
+  determine-version:
+    name: Determine Version and Tags
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      suffix: ${{ steps.version.outputs.suffix }}
+      is_release: ${{ steps.version.outputs.is_release }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Determine version and suffix
+        id: version
+        # Uses the default $GITHUB_REF/$GITHUB_HEAD_REF env vars rather than
+        # interpolating github.ref/github.head_ref directly into the script
+        # (zizmor template-injection).
+        run: |
+          if [ -f .version ]; then
+            VERSION=$(tr -d '[:space:]' < .version)
+          else
+            VERSION="0.0.0"
+          fi
+
+          echo "version=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "suffix=" >> "$GITHUB_OUTPUT"
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$GITHUB_REF" == refs/heads/v* ]] || [[ "$GITHUB_HEAD_REF" == v* ]]; then
+            echo "suffix=-beta" >> "$GITHUB_OUTPUT"
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            echo "suffix=-gamma" >> "$GITHUB_OUTPUT"
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "suffix=-alpha" >> "$GITHUB_OUTPUT"
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-platform:
+    name: Build (${{ matrix.platform }})
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    runs-on: ${{ matrix.runner }}
+    needs: determine-version
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
+        if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image (${{ matrix.platform }})
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
+        with:
+          context: ${{ env.BUILD_CONTEXT }}
+          file: ${{ env.MODULE_PATH }}/Dockerfile.rust
+          push: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          load: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && matrix.platform == 'linux/amd64' }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ matrix.suffix }}
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=${{ env.MODULE_NAME }}-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=${{ env.MODULE_NAME }}-${{ matrix.suffix }}
+
+      - name: Run Trivy on locally-built image (PR gate)
+        # PR/merge_group runs never push (see `load` above) -- this scans
+        # the exact image docker/build-push-action just loaded into the
+        # runner's local daemon, never a mutable tag this run didn't
+        # produce. amd64-only since that's the only arch loaded on PRs.
+        if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && matrix.platform == 'linux/amd64'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          version: v0.69.3
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ matrix.suffix }}
+          format: 'table'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '1'
+
+  merge:
+    name: Merge Multi-Arch Manifest
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    needs: [determine-version, build-platform]
+    if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifest
+        env:
+          VERSION: ${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
+          IS_RELEASE: ${{ needs.determine-version.outputs.is_release }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}
+        run: |
+          docker buildx imagetools create \
+            -t "${IMAGE}:${VERSION}" \
+            "${IMAGE}:${VERSION}-amd64" \
+            "${IMAGE}:${VERSION}-arm64"
+
+          if [ "$IS_RELEASE" = "true" ]; then
+            docker buildx imagetools create \
+              -t "${IMAGE}:latest" \
+              "${IMAGE}:${VERSION}-amd64" \
+              "${IMAGE}:${VERSION}-arm64"
+          fi
+
+          {
+            echo "## Build Complete: ${{ env.MODULE_NAME }}"
+            echo "**Image:** \`${IMAGE}\`"
+            echo "**Tag:** \`${VERSION}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Get manifest digest
+        # Captures the digest of the manifest just pushed above, in this
+        # same job/runner, so the Trivy scan below is guaranteed to target
+        # the exact image this run built -- never a stale/mutable tag.
+        id: digest
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}
+          VERSION: ${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
+        run: |
+          DIGEST=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{json .Manifest}}' | jq -r '.digest')
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
+          format: spdx-json
+          output-file: sbom-${{ env.MODULE_NAME }}.spdx.json
+          upload-artifact: true
+          upload-artifact-retention: 90
+
+  trivy-scan:
+    name: Trivy Image Scan (gated)
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    runs-on: ubuntu-latest
+    needs: [determine-version, merge]
+    steps:
+      - name: Log in to Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Trivy vulnerability scanner (gate)
+        # Scans by the digest captured in the `merge` job -- never the
+        # mutable tag, which can otherwise point at a stale, already-built
+        # image. See rules/critical-rules.md Verification Integrity.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          version: v0.69.3
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}@${{ needs.merge.outputs.digest }}
+          format: 'table'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '1'
+
+      - name: Run Trivy vulnerability scanner (SARIF)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          version: v0.69.3
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}@${{ needs.merge.outputs.digest }}
+          format: 'sarif'
+          output: 'trivy-${{ env.MODULE_NAME }}.sarif'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225  # v4
+        if: always()
+        with:
+          sarif_file: 'trivy-${{ env.MODULE_NAME }}.sarif'
