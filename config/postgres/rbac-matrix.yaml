@@ -81,6 +81,12 @@ grants:
   - role: hub_api_keystore
     table: app_source_bindings
     privileges: []
+  - role: hub_api_keystore
+    table: app_global_installs
+    privileges: []
+  - role: hub_api_keystore
+    table: bundle_tenant_availability
+    privileges: []
 
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
