@@ -1334,6 +1334,12 @@ def _create_bundle_install_tables(conn: Any) -> None:
         # bundle_version_service.py::_publish_prebuilt_version().
         Column("component_key", Text),
         Column("sidecar_key", Text),
+        # migration 0026 -- per-version attribution snapshot, written by
+        # bundle_version_service.py::_publish_prebuilt_version().
+        Column("author", String(255)),
+        Column("license", String(50)),
+        Column("license_review_required", Boolean, server_default="0"),
+        Column("source_url", Text),
     )
     Table(
         "app_active_versions",

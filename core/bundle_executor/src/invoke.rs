@@ -1,9 +1,32 @@
 //! [`Executor`]: the [`RequestHandler`] implementation that actually runs
 //! bundles -- `load`/`unload` manage a registry of compiled
-//! `wasmtime::component::Component`s keyed by `app_id`, and `invoke`
-//! instantiates one under the per-call epoch deadline and services every
-//! host call it makes against the stage over [`HostBridge`] (spec
+//! `wasmtime::component::Component`s keyed by **content-addressed digest**
+//! (`sha256:<64 hex>`), and `invoke` instantiates one under the per-call
+//! epoch deadline and services every host call it makes against the stage
+//! over [`HostBridge`] (spec
 //! `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md` SS7).
+//!
+//! **Multi-tenant correctness fix (dataplane scale design §3, "bundles are
+//! content-addressed by digest"):** every svc_process/svc_action pod now
+//! serves ALL tenants (`bundle_active_set::multi_tenant`), so two different
+//! `(tenant_id, community_id)` scopes can independently activate two
+//! DIFFERENT digests of the exact same `app_id` at the same time (e.g. a
+//! gradual per-tenant version rollout). The registry used to be keyed by
+//! `app_id` alone -- one process-wide slot per `app_id` -- which meant only
+//! one of those two scopes' digests could ever occupy that slot; the other
+//! scope's events would silently run the WRONG bundle version. The registry
+//! is now keyed by digest instead: `load`/`unload` are refcounted by the
+//! number of outstanding scopes referencing a given digest (the caller
+//! sends one `load`/`unload` pair per `(tenant, community, app)` scope
+//! that starts/stops referencing a digest, see `bundle_active_set::diff::
+//! plan_scoped`), so a shared digest across tenants compiles once and stays
+//! resident until every referencing scope has unloaded it, while two
+//! DIFFERENT digests for the same `app_id` coexist as two independent
+//! registry entries. `invoke` looks up strictly by the digest the caller
+//! resolved for that specific event's own scope (`InvokeBody.digest`) --
+//! never by `app_id` -- so an unknown/unloaded digest is a fail-closed
+//! `UNKNOWN_BUNDLE` error, never a silent fallback to "whatever happens to
+//! be loaded under this app_id".
 //!
 //! **Scope note (task instruction: "never fake a host call"; realistic-
 //! scope items may be scaffolded with a TODO):** digest verification
@@ -14,12 +37,13 @@
 //! ([`UnimplementedBucketSource`]) fails closed with `LOAD_FAILED` rather
 //! than pretending to fetch anything. Likewise, precompiled `.cwasm`
 //! caching under `EXECUTOR_PRECOMPILE_DIR` (spec SS7.2/SS7.6) is not
-//! wired -- every `load` calls `wasmtime::component::Component::new`
-//! (a real, from-source JIT compile) instead of loading a cached
-//! artifact; correctness holds, the ~3-4s cold-compile cost SS7.2
+//! wired -- every fresh digest's `load` calls `wasmtime::component::
+//! Component::new` (a real, from-source JIT compile) instead of loading a
+//! cached artifact; correctness holds, the ~3-4s cold-compile cost SS7.2
 //! measured for a large component does not yet get amortized away.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use penguin_bundle_host::wire::{
@@ -69,16 +93,52 @@ impl ComponentSource for UnimplementedBucketSource {
     }
 }
 
+/// A `(tenant_id, community_id, app_id)` triple -- exactly the identity
+/// carried on every `Load`/`Unload` wire body's `tenant_id`/`community_id`/
+/// `app_id` fields (`penguin_bundle_host::wire`, added specifically for this
+/// registry -- see [`LoadedBundle::scopes`]'s doc for why a bare counter is
+/// unsafe).
+type Scope = (i32, i32, String);
+
 struct LoadedBundle {
-    digest: String,
+    /// The `app_id` from the FIRST `load` call that registered this digest
+    /// -- informational only (logging/error messages): the registry's real
+    /// identity is the digest (this struct's `HashMap` key), never this
+    /// field, so a second scope loading the same digest under a different
+    /// `app_id` string never causes a collision or a silent overwrite.
+    app_id: String,
     component: Component,
     /// This bundle's effective per-instance linear-memory cap in MiB,
-    /// resolved once at `on_load` time (spec SS7.3, sandbox layer 8):
-    /// `body.limits.memory_mb` when the stage supplied a non-zero value,
-    /// else `EXECUTOR_MEMORY_LIMIT_MB`; always clamped to
-    /// `EXECUTOR_MAX_MEMORY_LIMIT_MB`. `on_invoke` wires this into every
-    /// `Store::limiter` for the bundle rather than re-deriving it per call.
+    /// resolved once from the FIRST `load` call for this digest (spec
+    /// SS7.3, sandbox layer 8): `body.limits.memory_mb` when the stage
+    /// supplied a non-zero value, else `EXECUTOR_MEMORY_LIMIT_MB`; always
+    /// clamped to `EXECUTOR_MAX_MEMORY_LIMIT_MB`. `on_invoke` wires this
+    /// into every `Store::limiter` for the bundle rather than re-deriving
+    /// it per call. A later `load` for an already-resident digest (a second
+    /// scope referencing the same content) does NOT re-resolve this value
+    /// -- the compiled component is shared, so its resource policy is
+    /// fixed at first residency; a differing `limits.memory_mb` on a later
+    /// load is logged, never silently applied.
     memory_limit_mb: u32,
+    /// The SET of `(tenant_id, community_id, app_id)` scopes currently
+    /// referencing this digest (spec: "load/unload refcounted by the set of
+    /// (tenant, community, app) scopes referencing that digest").
+    ///
+    /// **Deliberately a `HashSet<Scope>`, not a bare counter (gh security
+    /// review finding on PR #406):** a bare integer refcount is unsafe --
+    /// `bundle_active_set::diff::plan_scoped`'s own doc already documents
+    /// that a `load`/`unload` failure the stage perceives (e.g. a timeout)
+    /// may in fact have succeeded server-side (the reply was merely lost),
+    /// so the stage's own retry-on-perceived-failure logic can send a
+    /// SECOND `unload` for a scope that already successfully left. Against
+    /// a bare counter, that duplicate would double-decrement and evict a
+    /// digest another scope still needs -- exactly the failure mode this
+    /// type prevents structurally: `on_load` inserting a scope already in
+    /// the set is a no-op (`HashSet::insert` is idempotent by construction)
+    /// and `on_unload` removing a scope NOT in the set is also a no-op
+    /// (logged + counted, never treated as an error) -- eviction only
+    /// happens when this set becomes genuinely empty.
+    scopes: HashSet<Scope>,
 }
 
 /// Runs loaded bundles against real wasmtime instantiation. One per
@@ -101,6 +161,25 @@ pub struct Executor<S: ComponentSource> {
     /// `EXECUTOR_FUEL_LIMIT_DISPATCH` (connector spec SS0 condition 4).
     fuel_limit_dispatch: u64,
     bundles: RwLock<HashMap<String, LoadedBundle>>,
+    /// Single-flight compile-in-progress tracker (gh security review item
+    /// 2): concurrent `load`s for the SAME cold digest share one `OnceCell`,
+    /// so N scopes activating an identical never-before-seen digest at once
+    /// trigger exactly one bucket fetch + one `Component::new` JIT compile
+    /// (spec SS7.2's ~3-4s cold-compile cost), not N redundant ones. Entries
+    /// are removed once their compile resolves (success or failure) --
+    /// never left to accumulate across the process's lifetime; a digest
+    /// already resident in `bundles` never touches this map at all (the
+    /// fast path in `on_load`).
+    compiling: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Component>>>>,
+    /// Count of `unload` calls naming a scope that was NOT in the digest's
+    /// referencing set (a duplicate/retried/orphaned unload, see
+    /// [`LoadedBundle::scopes`]'s doc) -- never an error, but never silent
+    /// either. `pub(crate)` so tests can assert on it directly; a follow-up
+    /// wires this into a real Prometheus counter once this crate stands up
+    /// a metrics registry (none exists yet, see this crate's own TODOs for
+    /// the bucket source/precompile cache -- same "documented gap, not
+    /// silently glossed over" convention).
+    pub(crate) orphaned_unload_total: AtomicU64,
     /// Advances `engine`'s epoch on a fixed tick (spec SS7.2/SS7.3,
     /// assumption A16's executor-side half) so `on_invoke`'s
     /// `Store::set_epoch_deadline` and `Store::epoch_deadline_trap` calls
@@ -148,6 +227,8 @@ impl<S: ComponentSource> Executor<S> {
             fuel_limit_transform: cfg.executor_fuel_limit_transform,
             fuel_limit_dispatch: cfg.executor_fuel_limit_dispatch,
             bundles: RwLock::new(HashMap::new()),
+            compiling: tokio::sync::Mutex::new(HashMap::new()),
+            orphaned_unload_total: AtomicU64::new(0),
             epoch_ticker,
         })
     }
@@ -202,6 +283,21 @@ pub fn verify_digest(bytes: &[u8], expected: &str) -> Result<(), ExecutorError> 
     }
 }
 
+/// Resolves a `load` request's effective per-instance memory cap (spec
+/// SS7.3): `requested_mb == 0` means "no preference", falling back to
+/// `default_mb`; either way the result never exceeds `max_mb` and is never
+/// less than 1 MiB. Pulled out of `on_load` so both the fast (already-
+/// resident) and slow (first-compile) paths resolve it identically.
+fn resolve_memory_limit_mb(requested_mb: u32, default_mb: u32, max_mb: u32) -> u32 {
+    if requested_mb == 0 {
+        default_mb
+    } else {
+        requested_mb
+    }
+    .min(max_mb)
+    .max(1)
+}
+
 fn error_body(code: ErrorCode, message: impl Into<String>) -> ErrorBody {
     ErrorBody {
         code,
@@ -210,49 +306,209 @@ fn error_body(code: ErrorCode, message: impl Into<String>) -> ErrorBody {
     }
 }
 
+/// **The ONLY constructor for a `Store<ExecState>` this crate's production
+/// code may use** (gh security review CRITICAL finding on PR #406, item 3:
+/// "no other `Store::new` may exist outside tests"). Every `Store` this
+/// executor ever runs a guest export against MUST be CPU- and memory-bounded
+/// -- unconditionally wiring both bounds in the one place a `Store` is born
+/// makes "forgot to arm the epoch deadline/memory limiter on this call path"
+/// a structurally impossible mistake, rather than a convention every new
+/// call site has to remember to repeat:
+///
+/// - **CPU bound**: `Store::set_epoch_deadline`/`Store::epoch_deadline_trap`
+///   (spec SS7.2/SS7.3) -- `deadline_ms` converted to engine epoch ticks via
+///   `ticks_for_deadline`; the guest traps with `EXECUTOR_DEADLINE`
+///   (`trap_to_error_body`) once `self.epoch_ticker` advances the engine
+///   epoch past this deadline, regardless of what the guest is doing (proven
+///   against a real unbounded guest loop by `on_invoke_traps_an_infinite_
+///   guest_loop_within_its_deadline` below).
+/// - **Memory bound**: `Store::limiter` wired to `ExecState`'s own
+///   `StoreLimits` (`exec_state.with_memory_limit_mb` must already be called
+///   by the caller before this function -- sandbox layer 8, spec SS7.3).
+///
+/// `grep -n "Store::new" core/bundle_executor/src/invoke.rs` (this crate's
+/// only production module that ever runs a guest) must show exactly one hit:
+/// the one inside this function's own body.
+fn new_bounded_store(engine: &Engine, exec_state: ExecState, deadline_ms: u64) -> Store<ExecState> {
+    let mut store = Store::new(engine, exec_state);
+    store.set_epoch_deadline(ticks_for_deadline(deadline_ms));
+    store.epoch_deadline_trap();
+    store.limiter(|state| &mut state.limits);
+    store
+}
+
 impl<S: ComponentSource> RequestHandler for Executor<S> {
     async fn on_load(&self, body: LoadBody) -> Result<LoadedBody, ErrorBody> {
         let start = std::time::Instant::now();
-        let bytes = self
-            .source
-            .fetch(&body.component_key, &body.sidecar_key)
-            .await
-            .map_err(|e| error_body(ErrorCode::LoadFailed, e.to_string()))?;
-
-        verify_digest(&bytes, &body.digest)
-            .map_err(|e| error_body(ErrorCode::DigestMismatch, e.to_string()))?;
-
-        let component = Component::new(&self.engine, &bytes)
-            .map_err(|e| error_body(ErrorCode::LoadFailed, e.to_string()))?;
-
         let app_id = body.app_id.clone();
         let digest = body.digest.clone();
+        let scope: Scope = (body.tenant_id, body.community_id, app_id.clone());
+
+        // Content-addressed fast path: a digest already resident (loaded by
+        // an earlier scope, possibly under a different `app_id`) is never
+        // re-fetched or re-compiled -- just scope-inserted (idempotent, see
+        // `LoadedBundle::scopes`'s doc). This is what makes a digest shared
+        // across tenants compile exactly once.
+        {
+            let mut bundles = self.bundles.write().await;
+            if let Some(existing) = bundles.get_mut(&digest) {
+                let newly_referenced = existing.scopes.insert(scope.clone());
+                if existing.app_id != app_id {
+                    // Purely observational: two different `app_id` strings
+                    // resolving to the identical content digest is unusual
+                    // but not unsafe (the digest, not `app_id`, is this
+                    // registry's actual identity) -- surfaced so an
+                    // operator can investigate an unexpected content-reuse
+                    // case, never blocked.
+                    info!(
+                        app_id,
+                        digest,
+                        first_registered_app_id = existing.app_id,
+                        "digest already resident under a different app_id"
+                    );
+                }
+                if existing.memory_limit_mb
+                    != resolve_memory_limit_mb(
+                        body.limits.memory_mb,
+                        self.default_memory_limit_mb,
+                        self.max_memory_limit_mb,
+                    )
+                {
+                    // Non-fatal by design: the compiled component is shared
+                    // and its resource policy was fixed at first residency
+                    // (see `LoadedBundle::memory_limit_mb`'s doc) -- a
+                    // differing request is surfaced, never silently applied
+                    // or treated as an error that would block a legitimate
+                    // second scope from sharing the digest.
+                    warn!(
+                        app_id,
+                        digest,
+                        existing_memory_limit_mb = existing.memory_limit_mb,
+                        requested_memory_mb = body.limits.memory_mb,
+                        "bundle already resident under a different memory limit request; \
+                         keeping the limit resolved at first residency"
+                    );
+                }
+                info!(
+                    app_id,
+                    digest,
+                    tenant_id = scope.0,
+                    community_id = scope.1,
+                    newly_referenced,
+                    referencing_scopes = existing.scopes.len(),
+                    "bundle already resident, scope registered"
+                );
+                return Ok(LoadedBody {
+                    app_id,
+                    digest,
+                    precompile_ms: start.elapsed().as_millis() as u64,
+                    exports: vec!["transform".to_string(), "dispatch".to_string()],
+                });
+            }
+        }
+
+        // Single-flight fetch+verify+compile (gh security review item 2):
+        // get-or-create this digest's `OnceCell` under a short, map-only
+        // critical section, then await ITS `get_or_try_init` outside any
+        // lock -- a concurrent `load` for the identical digest (from a
+        // different scope, or a different connection entirely) awaits the
+        // SAME cell and gets the SAME compiled `Component` clone back,
+        // rather than redundantly re-fetching/re-compiling. `Component::new`
+        // (~3-4s for a large component, spec SS7.2) and the bucket fetch
+        // both run OUTSIDE `self.bundles`'s lock either way -- only the map
+        // insert further below (and the fast-path/re-check reads) ever hold
+        // it, so a slow compile never blocks other connections' `invoke`/
+        // `load`/`unload` calls against unrelated digests.
+        let cell = {
+            let mut compiling = self.compiling.lock().await;
+            Arc::clone(
+                compiling
+                    .entry(digest.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+            )
+        };
+        let compiled: Result<&Component, ExecutorError> = cell
+            .get_or_try_init(|| async {
+                let bytes = self
+                    .source
+                    .fetch(&body.component_key, &body.sidecar_key)
+                    .await?;
+                verify_digest(&bytes, &body.digest)?;
+                Component::new(&self.engine, &bytes).map_err(ExecutorError::from)
+            })
+            .await;
+        let component = match compiled {
+            Ok(c) => c.clone(),
+            Err(err) => {
+                // Never leave a failed attempt's slot behind -- a future
+                // `load` for this same digest (a legitimate retry, e.g.
+                // after a transient bucket outage) must start fresh, never
+                // be told "already failed" indefinitely.
+                self.compiling.lock().await.remove(&digest);
+                let code = match err {
+                    ExecutorError::DigestMismatch { .. } => ErrorCode::DigestMismatch,
+                    _ => ErrorCode::LoadFailed,
+                };
+                return Err(error_body(code, err.to_string()));
+            }
+        };
+        // The compile succeeded -- this digest will now live in `bundles`
+        // (below), so its `OnceCell` slot in `compiling` is no longer
+        // needed; removing it keeps this map bounded to genuinely in-flight
+        // compiles, never accumulating one entry per digest ever seen.
+        self.compiling.lock().await.remove(&digest);
+
         // spec SS7.3: a `load` may request its own `limits.memory_mb`; `0`
         // means "no preference" and falls back to `EXECUTOR_MEMORY_LIMIT_MB`.
         // Either way the effective cap never exceeds
         // `EXECUTOR_MAX_MEMORY_LIMIT_MB`, and is never less than 1 MiB.
-        let memory_limit_mb = if body.limits.memory_mb == 0 {
-            self.default_memory_limit_mb
-        } else {
-            body.limits.memory_mb
-        }
-        .min(self.max_memory_limit_mb)
-        .max(1);
-        self.bundles.write().await.insert(
-            app_id.clone(),
-            LoadedBundle {
-                digest: digest.clone(),
-                component,
-                memory_limit_mb,
-            },
+        let memory_limit_mb = resolve_memory_limit_mb(
+            body.limits.memory_mb,
+            self.default_memory_limit_mb,
+            self.max_memory_limit_mb,
         );
 
-        info!(
-            app_id,
-            digest,
-            ms = start.elapsed().as_millis() as u64,
-            "bundle loaded"
-        );
+        // Re-check under the write lock: a concurrent `load` for the same
+        // digest (two scopes activating it at almost the same moment) may
+        // have won the race and already inserted while this branch was
+        // fetching/compiling -- never insert a second, wasted `Component`
+        // for a digest that's already resident; scope-insert instead. This
+        // critical section is map-only (no I/O, no compile) -- see the
+        // comment on `Component::new` above.
+        let mut bundles = self.bundles.write().await;
+        if let Some(existing) = bundles.get_mut(&digest) {
+            existing.scopes.insert(scope.clone());
+            info!(
+                app_id,
+                digest,
+                tenant_id = scope.0,
+                community_id = scope.1,
+                referencing_scopes = existing.scopes.len(),
+                "bundle became resident concurrently, scope registered"
+            );
+        } else {
+            let mut scopes = HashSet::with_capacity(1);
+            scopes.insert(scope.clone());
+            bundles.insert(
+                digest.clone(),
+                LoadedBundle {
+                    app_id: app_id.clone(),
+                    component,
+                    memory_limit_mb,
+                    scopes,
+                },
+            );
+            info!(
+                app_id,
+                digest,
+                tenant_id = scope.0,
+                community_id = scope.1,
+                ms = start.elapsed().as_millis() as u64,
+                "bundle loaded"
+            );
+        }
+        drop(bundles);
+
         Ok(LoadedBody {
             app_id,
             digest,
@@ -266,30 +522,57 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
     }
 
     async fn on_unload(&self, body: UnloadBody) -> Result<UnloadedBody, ErrorBody> {
+        let scope: Scope = (body.tenant_id, body.community_id, body.app_id.clone());
         let mut bundles = self.bundles.write().await;
-        match bundles.get(&body.app_id) {
-            Some(loaded) if loaded.digest == body.digest => {
-                bundles.remove(&body.app_id);
-                info!(
-                    app_id = body.app_id,
-                    digest = body.digest,
-                    "bundle unloaded"
-                );
+        match bundles.get_mut(&body.digest) {
+            Some(loaded) => {
+                if loaded.scopes.remove(&scope) {
+                    if loaded.scopes.is_empty() {
+                        bundles.remove(&body.digest);
+                        info!(
+                            app_id = body.app_id,
+                            digest = body.digest,
+                            tenant_id = scope.0,
+                            community_id = scope.1,
+                            "bundle unloaded (last referencing scope)"
+                        );
+                    } else {
+                        info!(
+                            app_id = body.app_id,
+                            digest = body.digest,
+                            tenant_id = scope.0,
+                            community_id = scope.1,
+                            referencing_scopes = loaded.scopes.len(),
+                            "scope unregistered, still referenced by another scope"
+                        );
+                    }
+                } else {
+                    // Orphaned/duplicate unload (gh security review finding
+                    // on PR #406): this exact scope was never registered
+                    // against this digest, or already removed by an earlier
+                    // unload -- a documented, counted no-op, NEVER a
+                    // decrement of anything else's residency (see
+                    // `LoadedBundle::scopes`'s doc for the exact failure
+                    // mode this prevents).
+                    self.orphaned_unload_total.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        app_id = body.app_id,
+                        digest = body.digest,
+                        tenant_id = scope.0,
+                        community_id = scope.1,
+                        referencing_scopes = loaded.scopes.len(),
+                        "unload named a scope not currently referencing this digest \
+                         (duplicate/orphaned unload); no-op, other scopes unaffected"
+                    );
+                }
                 Ok(UnloadedBody {
                     app_id: body.app_id,
                     digest: body.digest,
                 })
             }
-            Some(loaded) => Err(error_body(
-                ErrorCode::UnknownBundle,
-                format!(
-                    "unload digest {} does not match loaded digest {}",
-                    body.digest, loaded.digest
-                ),
-            )),
             None => Err(error_body(
                 ErrorCode::UnknownBundle,
-                format!("{} is not loaded", body.app_id),
+                format!("digest {} is not loaded", body.digest),
             )),
         }
     }
@@ -300,20 +583,16 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
         invoke_id: u64,
         connection: Arc<Connection>,
     ) -> Result<ResultBody, ErrorBody> {
+        // Fail-closed, digest-only lookup (spec §3): never falls back to
+        // "whatever happens to be loaded under this app_id" -- an
+        // unrecognized digest is always `UNKNOWN_BUNDLE`, even if some OTHER
+        // digest is currently resident for this same `app_id` under a
+        // different scope.
         let (component, memory_limit_mb) = {
             let bundles = self.bundles.read().await;
             let loaded = bundles
-                .get(&body.app_id)
-                .ok_or_else(|| error_body(ErrorCode::UnknownBundle, body.app_id.clone()))?;
-            if loaded.digest != body.digest {
-                return Err(error_body(
-                    ErrorCode::DigestMismatch,
-                    format!(
-                        "invoke digest {} does not match loaded digest {}",
-                        body.digest, loaded.digest
-                    ),
-                ));
-            }
+                .get(&body.digest)
+                .ok_or_else(|| error_body(ErrorCode::UnknownBundle, body.digest.clone()))?;
             (loaded.component.clone(), loaded.memory_limit_mb)
         };
 
@@ -321,15 +600,13 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
         let bridge = HostBridge::new(connection);
         let exec_state = ExecState::new(Some(bridge), body.app_id.clone(), invoke_id)
             .with_memory_limit_mb(memory_limit_mb);
-        let mut store = Store::new(&self.engine, exec_state);
-        store.set_epoch_deadline(ticks_for_deadline(deadline_ms));
-        store.epoch_deadline_trap();
+        let mut store = new_bounded_store(&self.engine, exec_state, deadline_ms);
         // Connector spec SS0 condition 4: fuel per invocation, budgeted by
         // world (`transform` vs `dispatch`, see `CliConfig`'s doc), alongside
-        // the epoch deadline above -- never a replacement for it. The engine
-        // was built with `consume_fuel(true)` (`crate::engine::build_engine`)
-        // so a `Store` starts at zero fuel and traps immediately unless armed
-        // here on every call.
+        // the epoch deadline `new_bounded_store` already armed -- never a
+        // replacement for it. The engine was built with `consume_fuel(true)`
+        // (`crate::engine::build_engine`) so a `Store` starts at zero fuel
+        // and traps immediately unless armed here on every call.
         let fuel_budget = match body.export {
             ExportKind::Transform => self.fuel_limit_transform,
             ExportKind::Dispatch => self.fuel_limit_dispatch,
@@ -340,15 +617,6 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                 format!("failed to arm fuel budget: {e}"),
             )
         })?;
-        // Sandbox layer 8 (spec SS7.3): caps this instance's linear memory
-        // to the bundle's resolved `memory_limit_mb` (`on_load`,
-        // `EXECUTOR_MEMORY_LIMIT_MB`/`limits.memory_mb`) via
-        // `ExecState::with_memory_limit_mb`'s `StoreLimits`, so a
-        // `memory.grow` past the cap traps (`trap_on_grow_failure`) rather
-        // than growing unbounded or the epoch deadline alone (CPU only)
-        // being the sole containment layer -- gh security review MED
-        // finding, previously a TODO.
-        store.limiter(|state| &mut state.limits);
 
         let start = std::time::Instant::now();
         let stage = match Stage::instantiate_async(&mut store, &component, &self.linker).await {
@@ -429,12 +697,38 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
     async fn on_shutdown(&self, body: ShutdownBody) {
         warn!(grace_ms = body.grace_ms, "stage requested shutdown");
     }
+
+    /// Wipes the ENTIRE bundle registry and any in-flight compiles (gh
+    /// security review item 4 on PR #406) -- see the trait method's own doc
+    /// for why a full wipe, rather than per-scope bookkeeping, is both
+    /// sufficient and correct for this executor's single-active-connection
+    /// architecture. `self.orphaned_unload_total` is deliberately NOT reset
+    /// -- it's a lifetime counter, not per-connection state.
+    async fn on_disconnect(&self) {
+        let evicted = {
+            let mut bundles = self.bundles.write().await;
+            let evicted = bundles.len();
+            bundles.clear();
+            evicted
+        };
+        self.compiling.lock().await.clear();
+        if evicted > 0 {
+            info!(
+                evicted_digests = evicted,
+                "host-api connection closed; wiped the bundle registry \
+                 (the reconnecting stage resends its full authoritative active set)"
+            );
+        }
+    }
 }
 
 /// Delegating impl so an `Arc<Executor<S>>` -- the shape shared across
-/// every reconnect attempt in `crate::run`'s dial loop, since the bundle
-/// registry must survive a single connection dropping -- satisfies
-/// `RequestHandler` directly without a wrapper newtype.
+/// every reconnect attempt in `crate::run`'s dial loop, since rebuilding
+/// the wasmtime `Engine`/`Linker` on every reconnect would be wasteful --
+/// satisfies `RequestHandler` directly without a wrapper newtype. The
+/// bundle REGISTRY itself does NOT survive a reconnect (`on_disconnect`
+/// above wipes it) -- only the underlying engine/linker construction is
+/// preserved.
 impl<S: ComponentSource> RequestHandler for Arc<Executor<S>> {
     async fn on_load(&self, body: LoadBody) -> Result<LoadedBody, ErrorBody> {
         (**self).on_load(body).await
@@ -455,6 +749,10 @@ impl<S: ComponentSource> RequestHandler for Arc<Executor<S>> {
 
     async fn on_shutdown(&self, body: ShutdownBody) {
         (**self).on_shutdown(body).await
+    }
+
+    async fn on_disconnect(&self) {
+        (**self).on_disconnect().await
     }
 }
 
@@ -587,6 +885,8 @@ mod tests {
         let executor = Executor::new(&test_config(), UnimplementedBucketSource)?;
         let result = executor
             .on_unload(UnloadBody {
+                tenant_id: 1,
+                community_id: 0,
                 app_id: "waddles.never-loaded".to_string(),
                 digest: "sha256:00".to_string(),
             })
@@ -606,6 +906,8 @@ mod tests {
         let executor = Executor::new(&test_config(), UnimplementedBucketSource)?;
         let result = executor
             .on_load(LoadBody {
+                tenant_id: 1,
+                community_id: 0,
                 app_id: "waddles.test.app".to_string(),
                 version: "1".to_string(),
                 digest: format!("sha256:{}", "0".repeat(64)),
@@ -641,6 +943,24 @@ mod tests {
         }
     }
 
+    /// Counts every `fetch` call and sleeps briefly before returning, so a
+    /// test can force several concurrent `on_load`s to genuinely overlap
+    /// (without the sleep, a fast in-memory fetch could resolve before a
+    /// second `on_load` even reaches the single-flight check, making the
+    /// test flaky rather than a real concurrency proof).
+    #[derive(Default)]
+    struct CountingFixtureSource {
+        fetch_count: std::sync::Arc<AtomicU64>,
+    }
+
+    impl ComponentSource for CountingFixtureSource {
+        async fn fetch(&self, _c: &str, _s: &str) -> Result<Vec<u8>, ExecutorError> {
+            self.fetch_count.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            Ok(FIXTURE_WASM.to_vec())
+        }
+    }
+
     fn fixture_digest() -> String {
         let mut hasher = Sha256::new();
         hasher.update(FIXTURE_WASM);
@@ -648,7 +968,18 @@ mod tests {
     }
 
     fn fixture_load_body(app_id: &str) -> LoadBody {
+        fixture_load_body_scoped(app_id, 1, 0)
+    }
+
+    /// Same as [`fixture_load_body`] but for an explicit `(tenant_id,
+    /// community_id)` scope -- the tests that actually exercise the
+    /// scope-set registry (two DIFFERENT scopes sharing or independently
+    /// versioning a digest) need to tell scope A and scope B apart, which a
+    /// fixed `(1, 0)` default can't do.
+    fn fixture_load_body_scoped(app_id: &str, tenant_id: i32, community_id: i32) -> LoadBody {
         LoadBody {
+            tenant_id,
+            community_id,
             app_id: app_id.to_string(),
             version: "1".to_string(),
             digest: fixture_digest(),
@@ -659,6 +990,22 @@ mod tests {
                 timeout_ms: 2000,
                 memory_mb: 64,
             },
+        }
+    }
+
+    /// Builds an `UnloadBody` for `app_id`/`digest` scoped to `(tenant_id,
+    /// community_id)` -- the counterpart to [`fixture_load_body_scoped`].
+    fn fixture_unload_body(
+        app_id: &str,
+        tenant_id: i32,
+        community_id: i32,
+        digest: &str,
+    ) -> UnloadBody {
+        UnloadBody {
+            app_id: app_id.to_string(),
+            digest: digest.to_string(),
+            tenant_id,
+            community_id,
         }
     }
 
@@ -718,6 +1065,8 @@ mod tests {
         // as "not this exact loaded version").
         let mismatch = executor
             .on_unload(UnloadBody {
+                tenant_id: 1,
+                community_id: 0,
                 app_id: "waddles.test.app".to_string(),
                 digest: format!("sha256:{}", "1".repeat(64)),
             })
@@ -732,6 +1081,8 @@ mod tests {
 
         let unloaded = executor
             .on_unload(UnloadBody {
+                tenant_id: 1,
+                community_id: 0,
                 app_id: "waddles.test.app".to_string(),
                 digest: fixture_digest(),
             })
@@ -770,8 +1121,14 @@ mod tests {
         Ok(())
     }
 
+    /// Digest-only lookup, fail-closed (spec §3): a digest that is not
+    /// resident is `UNKNOWN_BUNDLE`, even when a DIFFERENT digest is loaded
+    /// under the exact same `app_id` -- there is no "loaded under this
+    /// app_id but wrong digest" case anymore since the registry no longer
+    /// has an `app_id`-keyed slot to mismatch against. This is the direct
+    /// regression test for "never invoke whatever is loaded under app_id".
     #[tokio::test]
-    async fn on_invoke_rejects_a_digest_mismatch_against_the_loaded_bundle(
+    async fn on_invoke_fails_closed_on_an_unrecognized_digest_even_under_a_loaded_app_id(
     ) -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
@@ -798,7 +1155,505 @@ mod tests {
         assert!(matches!(
             result,
             Err(ErrorBody {
-                code: ErrorCode::DigestMismatch,
+                code: ErrorCode::UnknownBundle,
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    /// **Multi-tenant correctness regression (the primary bug this module
+    /// was fixed for):** two different `(tenant, community)` scopes
+    /// activating two DIFFERENT digests of the SAME `app_id` must each get
+    /// their own independent, correctly-versioned registry entry -- never
+    /// collapse onto one `app_id`-keyed slot where the second scope's load
+    /// would silently evict or shadow the first.
+    #[tokio::test]
+    async fn two_scopes_with_different_digests_of_the_same_app_id_both_stay_loaded(
+    ) -> Result<(), ExecutorError> {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        // Same FixtureSource always returns the same bytes/digest in this
+        // test module, so this test verifies the REGISTRY KEY behavior
+        // (two loads under the same app_id but told apart by a caller-
+        // supplied "second digest") using an artificial second entry
+        // inserted directly -- the wire-level `on_load` always compiles the
+        // one fixture; the registry-identity property under test is that a
+        // SECOND, DIFFERENT digest for `waddles.test.app` occupies its own
+        // slot rather than overwriting the first `on_load`'s entry.
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("first scope's load succeeds");
+        assert_eq!(executor.bundles.read().await.len(), 1);
+
+        // A second, distinct digest for the identical app_id (a different
+        // tenant's independently-activated version) must land in its OWN
+        // registry slot, not overwrite the first.
+        let other_digest = format!("sha256:{}", "2".repeat(64));
+        {
+            let mut bundles = executor.bundles.write().await;
+            let first = bundles
+                .values()
+                .next()
+                .expect("first scope's bundle is registered")
+                .component
+                .clone();
+            let mut scopes = HashSet::with_capacity(1);
+            scopes.insert((2, 0, "waddles.test.app".to_string()));
+            bundles.insert(
+                other_digest.clone(),
+                LoadedBundle {
+                    app_id: "waddles.test.app".to_string(),
+                    component: first,
+                    memory_limit_mb: 64,
+                    scopes,
+                },
+            );
+        }
+        assert_eq!(
+            executor.bundles.read().await.len(),
+            2,
+            "two different digests for the same app_id must both be resident"
+        );
+        assert!(
+            executor
+                .bundles
+                .read()
+                .await
+                .contains_key(&fixture_digest()),
+            "the first scope's digest must still be resident, untouched by the second"
+        );
+        assert!(
+            executor.bundles.read().await.contains_key(&other_digest),
+            "the second scope's digest must be independently resident"
+        );
+        Ok(())
+    }
+
+    /// Invokes the fixture's `transform` export once for `app_id`/`digest`
+    /// under the given scope's connection-independent context, returning
+    /// whether it succeeded -- shared by every test below that needs to
+    /// prove "still genuinely invokable", not just "still in the map".
+    async fn invoke_noop<S: ComponentSource>(
+        executor: &Executor<S>,
+        app_id: &str,
+        digest: &str,
+    ) -> Result<ResultBody, ErrorBody> {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let connection = crate::wire::Connection::new(tx);
+        executor
+            .on_invoke(
+                InvokeBody {
+                    app_id: app_id.to_string(),
+                    digest: digest.to_string(),
+                    export: ExportKind::Transform,
+                    payload: serde_json::json!({
+                        "platform": "test",
+                        "event_type": "noop",
+                        "actor": null,
+                        "payload_json": "{}",
+                        "occurred_at": "2026-09-22T00:00:00.000Z",
+                    }),
+                    deadline_ms: 1000,
+                    trace: None,
+                },
+                1,
+                connection,
+            )
+            .await
+    }
+
+    /// **Single-flight compile regression (gh security review item 2):**
+    /// several concurrent `load`s for the exact same COLD digest (from
+    /// different scopes) must trigger exactly ONE `ComponentSource::fetch`
+    /// (and by extension one `Component::new` JIT compile) -- never one per
+    /// concurrent caller. Uses a real, genuinely-overlapping concurrent
+    /// `tokio::join!` (not sequential `.await`s) against a fetch source that
+    /// sleeps, so this actually proves concurrency rather than an artifact
+    /// of running one at a time.
+    #[tokio::test]
+    async fn concurrent_loads_of_a_cold_digest_share_one_compile() -> Result<(), ExecutorError> {
+        let fetch_count = std::sync::Arc::new(AtomicU64::new(0));
+        let executor = Executor::new(
+            &test_config(),
+            CountingFixtureSource {
+                fetch_count: fetch_count.clone(),
+            },
+        )?;
+
+        let (a, b, c) = tokio::join!(
+            executor.on_load(fixture_load_body_scoped("waddles.test.app", 1, 0)),
+            executor.on_load(fixture_load_body_scoped("waddles.test.app", 2, 0)),
+            executor.on_load(fixture_load_body_scoped("waddles.test.app", 3, 0)),
+        );
+        a.expect("scope 1's load succeeds");
+        b.expect("scope 2's load succeeds");
+        c.expect("scope 3's load succeeds");
+
+        assert_eq!(
+            fetch_count.load(Ordering::SeqCst),
+            1,
+            "three concurrent loads of the same cold digest must fetch/compile exactly once"
+        );
+        let bundles = executor.bundles.read().await;
+        assert_eq!(bundles.len(), 1, "one registry entry for the shared digest");
+        assert_eq!(
+            bundles
+                .get(&fixture_digest())
+                .expect("resident")
+                .scopes
+                .len(),
+            3,
+            "all three scopes must be registered against the one compiled entry"
+        );
+        Ok(())
+    }
+
+    /// The SAME digest loaded by two DIFFERENT scopes must compile once
+    /// (one registry entry, two scopes in the set) -- verified by inserting
+    /// the second `load` under a different `(tenant_id, community_id)` and
+    /// observing the registry stays at one entry with two referencing
+    /// scopes.
+    #[tokio::test]
+    async fn shared_digest_across_two_scopes_loads_once_and_tracks_both_scopes(
+    ) -> Result<(), ExecutorError> {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .await
+            .expect("scope A's load succeeds");
+        executor
+            .on_load(fixture_load_body_scoped("waddles.test.app", 2, 0))
+            .await
+            .expect("scope B's load of the identical digest succeeds");
+
+        let bundles = executor.bundles.read().await;
+        assert_eq!(
+            bundles.len(),
+            1,
+            "a shared digest must occupy exactly one registry slot"
+        );
+        let resident = bundles.get(&fixture_digest()).expect("resident");
+        assert_eq!(
+            resident.scopes.len(),
+            2,
+            "two referencing scopes must both be tracked"
+        );
+        assert!(resident
+            .scopes
+            .contains(&(1, 0, "waddles.test.app".to_string())));
+        assert!(resident
+            .scopes
+            .contains(&(2, 0, "waddles.test.app".to_string())));
+        Ok(())
+    }
+
+    /// Unloading one of two scopes referencing a shared digest must NOT
+    /// evict the compiled component -- the other scope still needs it. Only
+    /// the SECOND (last) unload actually removes the registry entry.
+    #[tokio::test]
+    async fn unload_of_one_scope_does_not_unload_a_digest_still_referenced(
+    ) -> Result<(), ExecutorError> {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .await
+            .expect("scope A load succeeds");
+        executor
+            .on_load(fixture_load_body_scoped("waddles.test.app", 2, 0))
+            .await
+            .expect("scope B load succeeds");
+
+        // Scope A goes away first.
+        executor
+            .on_unload(fixture_unload_body(
+                "waddles.test.app",
+                1,
+                0,
+                &fixture_digest(),
+            ))
+            .await
+            .expect("scope A unload succeeds");
+        assert!(
+            executor
+                .bundles
+                .read()
+                .await
+                .contains_key(&fixture_digest()),
+            "scope B still references this digest -- it must remain resident"
+        );
+
+        // An invoke from scope B must still succeed against the resident
+        // component -- proves this isn't just a bookkeeping artifact.
+        let still_invokable = invoke_noop(&executor, "waddles.test.app", &fixture_digest()).await;
+        assert!(
+            still_invokable.is_ok(),
+            "scope B's invoke must still succeed while its digest is still referenced: {still_invokable:?}"
+        );
+
+        // Scope B goes away second -- now the digest actually unloads.
+        executor
+            .on_unload(fixture_unload_body(
+                "waddles.test.app",
+                2,
+                0,
+                &fixture_digest(),
+            ))
+            .await
+            .expect("scope B unload succeeds");
+        assert!(
+            !executor
+                .bundles
+                .read()
+                .await
+                .contains_key(&fixture_digest()),
+            "the last referencing scope's unload must actually evict the digest"
+        );
+        Ok(())
+    }
+
+    /// **The exact regression Gemini's review of PR #406 was filed for:** a
+    /// DUPLICATE/retried `unload` from scope A (e.g. the stage perceiving a
+    /// timeout on a call that actually succeeded, per `bundle_active_set::
+    /// diff::plan_scoped`'s own doc on why this can happen) must NEVER
+    /// evict a digest scope B still references. Against the old bare
+    /// `refcount: usize` this would double-decrement past B's own
+    /// contribution and evict the digest out from under B.
+    #[tokio::test]
+    async fn duplicate_unload_from_one_scope_never_evicts_a_digest_another_scope_still_needs(
+    ) -> Result<(), ExecutorError> {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .await
+            .expect("scope A load succeeds");
+        executor
+            .on_load(fixture_load_body_scoped("waddles.test.app", 2, 0))
+            .await
+            .expect("scope B load succeeds");
+
+        // Scope A unloads, then -- a duplicate/retried unload for the exact
+        // SAME scope -- unloads again.
+        for attempt in 0..2 {
+            executor
+                .on_unload(fixture_unload_body(
+                    "waddles.test.app",
+                    1,
+                    0,
+                    &fixture_digest(),
+                ))
+                .await
+                .unwrap_or_else(|e| panic!("scope A unload attempt {attempt} must succeed (a duplicate is a documented no-op, never an error): {e:?}"));
+        }
+
+        assert!(
+            executor
+                .bundles
+                .read()
+                .await
+                .contains_key(&fixture_digest()),
+            "scope B's reference must survive scope A's duplicate unload"
+        );
+        let still_invokable = invoke_noop(&executor, "waddles.test.app", &fixture_digest()).await;
+        assert!(
+            still_invokable.is_ok(),
+            "scope B must still be able to invoke after scope A's duplicate unload: {still_invokable:?}"
+        );
+        assert_eq!(
+            executor.orphaned_unload_total.load(Ordering::Relaxed),
+            1,
+            "exactly the second, duplicate unload must be counted as orphaned"
+        );
+        Ok(())
+    }
+
+    /// An `unload` naming a scope that never actually loaded this digest
+    /// (a different tenant/community than any real referencing scope) is a
+    /// documented no-op -- it must not affect the digest's real referencing
+    /// scope at all.
+    #[tokio::test]
+    async fn unload_for_a_scope_that_never_loaded_has_no_effect() -> Result<(), ExecutorError> {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .await
+            .expect("scope A load succeeds");
+
+        // Scope (99, 0) never loaded anything.
+        let result = executor
+            .on_unload(fixture_unload_body(
+                "waddles.test.app",
+                99,
+                0,
+                &fixture_digest(),
+            ))
+            .await;
+        assert!(
+            result.is_ok(),
+            "an unload for a never-loaded scope is a no-op, not an error: {result:?}"
+        );
+        assert!(
+            executor
+                .bundles
+                .read()
+                .await
+                .contains_key(&fixture_digest()),
+            "the real scope A must be completely unaffected"
+        );
+        let still_invokable = invoke_noop(&executor, "waddles.test.app", &fixture_digest()).await;
+        assert!(
+            still_invokable.is_ok(),
+            "scope A must still invoke: {still_invokable:?}"
+        );
+        assert_eq!(
+            executor.orphaned_unload_total.load(Ordering::Relaxed),
+            1,
+            "the never-loaded scope's unload must be counted as orphaned"
+        );
+        Ok(())
+    }
+
+    /// Both real referencing scopes (A and B) unloading must actually evict
+    /// the digest -- the positive-path counterpart to the two negative tests
+    /// above, proving the set-based model still reaches zero correctly.
+    #[tokio::test]
+    async fn unload_from_both_referencing_scopes_evicts_the_digest() -> Result<(), ExecutorError> {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .await
+            .expect("scope A load succeeds");
+        executor
+            .on_load(fixture_load_body_scoped("waddles.test.app", 2, 0))
+            .await
+            .expect("scope B load succeeds");
+
+        executor
+            .on_unload(fixture_unload_body(
+                "waddles.test.app",
+                1,
+                0,
+                &fixture_digest(),
+            ))
+            .await
+            .expect("scope A unload succeeds");
+        executor
+            .on_unload(fixture_unload_body(
+                "waddles.test.app",
+                2,
+                0,
+                &fixture_digest(),
+            ))
+            .await
+            .expect("scope B unload succeeds");
+
+        assert!(
+            !executor
+                .bundles
+                .read()
+                .await
+                .contains_key(&fixture_digest()),
+            "once every referencing scope has unloaded, the digest must be evicted"
+        );
+        Ok(())
+    }
+
+    /// **CPU-bound guest, gh security review HIGH finding:** an unbounded
+    /// guest loop (the fixture's `busy-loop` branch, no natural
+    /// termination, no host import) must trap with `EXECUTOR_DEADLINE`
+    /// within its `deadline_ms`, never hang the executor forever. Proves
+    /// the epoch-deadline wiring at `Store::set_epoch_deadline`/
+    /// `epoch_deadline_trap` (`crate::invoke::RequestHandler::on_invoke`)
+    /// actually bounds guest CPU time on a REAL compiled guest, not a
+    /// contrived host-side timeout.
+    ///
+    /// **`flavor = "multi_thread"` is load-bearing, not stylistic:** the
+    /// guest's `busy-loop` branch makes zero host imports/await points, so
+    /// wasmtime's async component call resolves in one synchronous `poll()`
+    /// that never yields back to the runtime on its own. On a
+    /// single-threaded (`current_thread`) runtime that poll would
+    /// permanently monopolize the only OS thread, so `Executor::new`'s
+    /// separately-`tokio::spawn`ed epoch ticker (`self.epoch_ticker`, spec
+    /// SS7.2/SS7.3) would never get scheduled to advance the epoch at all --
+    /// the trap would never fire and this test would hang forever. A real
+    /// second worker thread is what lets the ticker keep incrementing the
+    /// engine's epoch counter while this test's own task is stuck inside
+    /// the guest's tight loop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn on_invoke_traps_an_infinite_guest_loop_within_its_deadline(
+    ) -> Result<(), ExecutorError> {
+        crate::init_test_tracing();
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("load succeeds");
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let connection = crate::wire::Connection::new(tx);
+        let deadline_ms = 500;
+        let start = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            executor.on_invoke(
+                InvokeBody {
+                    app_id: "waddles.test.app".to_string(),
+                    digest: fixture_digest(),
+                    export: ExportKind::Transform,
+                    payload: serde_json::json!({
+                        "platform": "test",
+                        "event_type": "busy-loop",
+                        "actor": null,
+                        "payload_json": "{}",
+                        "occurred_at": "2026-09-22T00:00:00.000Z",
+                    }),
+                    deadline_ms,
+                    trace: None,
+                },
+                1,
+                connection,
+            ),
+        )
+        .await
+        .expect(
+            "on_invoke itself must return well within the outer 10s test timeout -- if this \
+             outer timeout fires instead, the epoch deadline never interrupted the guest at all",
+        );
+        assert!(
+            matches!(
+                result,
+                Err(ErrorBody {
+                    code: ErrorCode::ExecutorDeadline,
+                    ..
+                })
+            ),
+            "an unbounded guest loop must trap with EXECUTOR_DEADLINE, got {result:?}"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "the trap must fire close to the {deadline_ms}ms deadline, not linger; took {:?}",
+            start.elapsed()
+        );
+        Ok(())
+    }
+
+    /// An unload for a digest that was never loaded (or already fully
+    /// unloaded) is `UNKNOWN_BUNDLE` -- fail-closed, never a silent no-op.
+    #[tokio::test]
+    async fn unload_of_a_never_loaded_digest_fails_closed() -> Result<(), ExecutorError> {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        let result = executor
+            .on_unload(UnloadBody {
+                tenant_id: 1,
+                community_id: 0,
+                app_id: "waddles.test.app".to_string(),
+                digest: format!("sha256:{}", "3".repeat(64)),
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(ErrorBody {
+                code: ErrorCode::UnknownBundle,
                 ..
             })
         ));
@@ -890,6 +1745,8 @@ mod tests {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
             .on_load(LoadBody {
+                tenant_id: 1,
+                community_id: 0,
                 app_id: "waddles.test.memory-hog".to_string(),
                 version: "1".to_string(),
                 digest: fixture_digest(),
@@ -1046,6 +1903,8 @@ mod tests {
                 component_key: "k".to_string(),
                 sidecar_key: "s".to_string(),
                 capabilities: vec![],
+                tenant_id: 1,
+                community_id: 0,
                 limits: penguin_bundle_host::wire::LoadLimits {
                     timeout_ms: 10_000,
                     memory_mb: 128,
@@ -1386,6 +2245,77 @@ mod tests {
             "fuel_overhead[host_call_heavy]: {N} calls in {elapsed:?} ({:.4} ms/call)",
             elapsed.as_secs_f64() * 1000.0 / f64::from(N)
         );
+        Ok(())
+    }
+
+    /// **Item 4 regression (gh security review on PR #406):** a disconnect
+    /// must wipe the ENTIRE bundle registry -- every scope from every
+    /// digest, not just some -- so a subsequent reconnect starts from a
+    /// clean slate rather than serving a stale, orphaned scope set.
+    #[tokio::test]
+    async fn on_disconnect_wipes_the_entire_bundle_registry() -> Result<(), ExecutorError> {
+        crate::init_test_tracing();
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .await
+            .expect("scope A load succeeds");
+        executor
+            .on_load(fixture_load_body_scoped("waddles.test.app", 2, 0))
+            .await
+            .expect("scope B load succeeds");
+        assert_eq!(executor.bundles.read().await.len(), 1);
+
+        executor.on_disconnect().await;
+
+        assert!(
+            executor.bundles.read().await.is_empty(),
+            "every scope from every digest must be gone after a disconnect"
+        );
+
+        // The digest must also be re-fetchable/re-compilable from scratch --
+        // proves `compiling`'s in-flight tracker was cleared too, not left
+        // pointing at a stale resolved cell from before the wipe.
+        let reloaded = executor
+            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .await;
+        assert!(
+            reloaded.is_ok(),
+            "a fresh load after disconnect must succeed: {reloaded:?}"
+        );
+        assert_eq!(executor.bundles.read().await.len(), 1);
+        Ok(())
+    }
+
+    /// **Item 1's "a peer can only unload scopes it loaded itself", proven
+    /// at the connection level:** once a connection disconnects (wiping its
+    /// scopes), NO subsequent `unload` naming those same scopes can find
+    /// anything to act on -- it's a fail-closed `UNKNOWN_BUNDLE`, never a
+    /// silent success that could be confused with actually owning them.
+    #[tokio::test]
+    async fn unload_after_disconnect_fails_closed_as_unknown() -> Result<(), ExecutorError> {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("load succeeds");
+        executor.on_disconnect().await;
+
+        let result = executor
+            .on_unload(fixture_unload_body(
+                "waddles.test.app",
+                1,
+                0,
+                &fixture_digest(),
+            ))
+            .await;
+        assert!(matches!(
+            result,
+            Err(ErrorBody {
+                code: ErrorCode::UnknownBundle,
+                ..
+            })
+        ));
         Ok(())
     }
 }

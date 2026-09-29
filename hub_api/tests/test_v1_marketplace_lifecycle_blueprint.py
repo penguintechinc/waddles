@@ -52,20 +52,28 @@ APP_ID_A = "waddles.bot.shoutout.custom-a"
 APP_ID_B = "waddles.bot.shoutout.custom-b"
 
 
-def _manifest(app_id: str, *, incompatible_with: list[str] | None = None) -> dict[str, Any]:
-    return {
+def _manifest(
+    app_id: str,
+    *,
+    incompatible_with: list[str] | None = None,
+    provider: str = "builtin",
+    **attribution: Any,
+) -> dict[str, Any]:
+    manifest: dict[str, Any] = {
         "appId": app_id,
         "name": "Custom Shoutout",
         "version": "1.0.0",
         "feature": "waddles.bot.shoutout",
         "module": "bot",
-        "provider": "builtin",
+        "provider": provider,
         "executionModel": "native",
         "isDefault": False,
         "compatibleWith": [],
         "incompatibleWith": incompatible_with or [],
         "platformCompatibility": {"testedWith": "release/v3.0.X"},
     }
+    manifest.update(attribution)
+    return manifest
 
 
 @pytest.fixture(autouse=True)
@@ -120,6 +128,113 @@ async def _install(client: Any, app_id: str = APP_ID_A, **kw: Any) -> Any:
         headers=_platform_admin_headers(),
         json=_manifest(app_id, **kw),
     )
+
+
+class TestAttributionMetadata:
+    """`author`/`license`/`source_url`/`alternative_to`/`homepage_url`/`notice`/`category`.
+
+    Round-trips the migration-0026 attribution block through
+    `POST /bundles` -> `app_catalog` -> `GET /bundles`'s `BundleDTO`, and
+    exercises the SPDX-allowlist + https-only-URL shape rules
+    `flask_core.app_manifest.parse_manifest` enforces on whichever fields
+    ARE present. `author`/`license` are never REQUIRED at this endpoint --
+    it is `platform:admin`-gated (not `vendor:onboard`), so it is not the
+    vendor-onboarding path; that mandatory-for-vendors gate is exercised in
+    `hub_api/tests/test_bundle_manifest_v2.py` instead, against the schema
+    the real vendor-upload endpoint (`bundle_version_service.create_version`)
+    actually validates against.
+    """
+
+    async def test_builtin_without_attribution_still_installs(self, client: Any) -> None:
+        """A first-party `builtin` bundle never has to declare the block at all."""
+        response = await _install(client)
+        assert response.status_code == 201
+
+    async def test_thirdparty_provider_without_attribution_still_installs(
+        self, client: Any
+    ) -> None:
+        """`provider: thirdparty` alone (admin-installed) needs no attribution here."""
+        response = await _install(client, provider="thirdparty")
+        assert response.status_code == 201
+
+    async def test_unknown_spdx_license_is_400(self, client: Any) -> None:
+        response = await _install(
+            client, provider="thirdparty", author="Acme Corp", license="Not-A-Real-License"
+        )
+        assert response.status_code == 400
+        body = await response.get_json()
+        assert "unknown_spdx_license" in body["error"]["message"]
+
+    async def test_http_source_url_is_400(self, client: Any) -> None:
+        response = await _install(
+            client,
+            provider="thirdparty",
+            author="Acme Corp",
+            license="MIT",
+            sourceUrl="http://example.com/repo",
+        )
+        assert response.status_code == 400
+        body = await response.get_json()
+        assert "invalid_source_url" in body["error"]["message"]
+
+    async def test_invalid_category_is_400(self, client: Any) -> None:
+        response = await _install(client, category="not-a-real-category")
+        assert response.status_code == 400
+        body = await response.get_json()
+        assert "invalid_category" in body["error"]["message"]
+
+    async def test_vendor_attribution_round_trips_to_catalog_listing(self, client: Any) -> None:
+        response = await _install(
+            client,
+            provider="thirdparty",
+            author="Acme Corp",
+            license="MIT",
+            sourceUrl="https://github.com/acme/waddles-bundle",
+            homepageUrl="https://acme.example.com",
+            alternativeTo=["waddles.bot.shoutout.builtin"],
+            notice="Portions (c) Acme Corp, under MIT.",
+            category="alternatives",
+        )
+        assert response.status_code == 201
+
+        listing = await client.get(
+            "/api/v1/marketplace/bundles?category=alternatives", headers=_tenant_admin_headers()
+        )
+        assert listing.status_code == 200
+        body = await listing.get_json()
+        bundle = body["bundles"][0]
+        assert bundle["appId"] == APP_ID_A
+        assert bundle["author"] == "Acme Corp"
+        assert bundle["license"] == "MIT"
+        assert bundle["licenseReviewRequired"] is False
+        assert bundle["sourceUrl"] == "https://github.com/acme/waddles-bundle"
+        assert bundle["homepageUrl"] == "https://acme.example.com"
+        assert bundle["alternativeTo"] == ["waddles.bot.shoutout.builtin"]
+        assert bundle["notice"] == "Portions (c) Acme Corp, under MIT."
+        assert bundle["category"] == "alternatives"
+
+    async def test_copyleft_license_flags_review_required_but_installs(self, client: Any) -> None:
+        response = await _install(
+            client,
+            provider="thirdparty",
+            author="Acme Corp",
+            license="GPL-3.0-only",
+        )
+        assert response.status_code == 201
+
+        listing = await client.get("/api/v1/marketplace/bundles", headers=_tenant_admin_headers())
+        body = await listing.get_json()
+        assert body["bundles"][0]["licenseReviewRequired"] is True
+
+    async def test_category_filter_excludes_non_matching_bundles(self, client: Any) -> None:
+        await _install(client, app_id=APP_ID_A, category="alternatives")
+        await _install(client, app_id=APP_ID_B)
+
+        listing = await client.get(
+            "/api/v1/marketplace/bundles?category=alternatives", headers=_tenant_admin_headers()
+        )
+        body = await listing.get_json()
+        assert [b["appId"] for b in body["bundles"]] == [APP_ID_A]
 
 
 async def _make_available(client: Any, app_id: str = APP_ID_A) -> Any:
