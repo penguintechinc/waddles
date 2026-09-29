@@ -25,6 +25,11 @@ path = "src/lib.rs"
 # (RUSTSEC-2023-0071 Marvin timing sidechannel) even though EdDSA is the
 # only algorithm ever used here.
 jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+# CIDR/IP-literal parsing for `PublicIp`/`PrivateIp` grant matching
+# (`destination_matches`/`ip_matches_grant`) -- same pin as
+# `core/egress_proxy`'s own `ipnet` dependency so no dependent crate
+# resolves a second version.
+ipnet = "=2.11.0"
 serde = { version = "=1.0.229", features = ["derive"] }
 thiserror = "=2.0.20"
 uuid = { version = "=1.26.1", features = ["v4"] }
