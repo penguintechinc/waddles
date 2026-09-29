@@ -79,6 +79,10 @@ Waddles uses a sophisticated multi-workflow CI/CD pipeline that automates:
 ├── build-spotify-interaction.yml
 ├── build-loyalty-interaction.yml
 │
+├── build-svc-ingest.yml               # Rust data-plane (3 files, `-rust` images)
+├── build-svc-process.yml
+├── build-svc-action.yml
+│
 ├── android.yml                        # Android validation
 └── pr-validation.yml                  # Pull request and merge-queue tests
 ```
@@ -465,6 +469,12 @@ jobs:
 - `build-youtube-music-interaction.yml` - YouTube Music (port 8015)
 - `build-spotify-interaction.yml` - Spotify integration (port 8016)
 - `build-loyalty-interaction.yml` - Loyalty points (port 8017)
+
+**Rust Data-Plane Modules** (3) — `-rust`-suffixed images published alongside
+the still-deployed Python alpha builds; see `core/<module>/Dockerfile.rust`:
+- `build-svc-ingest.yml` - `svc-ingest-rust` (port 8200)
+- `build-svc-process.yml` - `svc-process-rust` (port 8201)
+- `build-svc-action.yml` - `svc-action-rust` (port 8202)
 
 ---
 
