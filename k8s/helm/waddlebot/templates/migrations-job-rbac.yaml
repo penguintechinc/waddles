@@ -1,0 +1,32 @@
+# fix/helm-hook-rbac-ordering -- dedicated identity for migrations-job.yaml.
+#
+# migrations-job.yaml previously ran as `include "waddlebot.serviceAccountName" .`,
+# the SAME shared "waddlebot" ServiceAccount every long-lived Deployment in this chart
+# uses (serviceaccount.yaml) -- but that SA is a plain/regular resource, and Helm
+# finishes the ENTIRE pre-install hook phase before creating any regular resource. On
+# a true first install (or the first upgrade that introduces migrations-job.yaml), the
+# shared SA does not exist yet when this Job's pre-install pod is admitted, so it hits
+# the exact same "serviceaccounts ... not found" failure class as
+# auto-provisioned-keys-job.yaml did. This dedicated SA is itself a pre-install/
+# pre-upgrade hook at a lower weight (-10) than migrations-job.yaml's Job (-5), so it
+# always exists first.
+#
+# No Role/RoleBinding: migrations-job.yaml never calls the Kubernetes API -- it only
+# runs `alembic upgrade head` against Postgres using credentials mounted from
+# waddlebot-secrets via envFrom. automountServiceAccountToken is disabled to match
+# (no token this Job could ever use).
+{{- if .Values.pipeline.migrationsJob.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-db-migrate
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: db-migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+automountServiceAccountToken: false
+{{- end }}

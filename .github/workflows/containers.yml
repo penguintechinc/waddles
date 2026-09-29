@@ -214,12 +214,20 @@ jobs:
   # ============================================================
   # Build Docker images — parallel multi-arch
   # ============================================================
+  # Push-path only -- pull_request/merge_group is handled entirely by
+  # build-pr below so packages:write is never granted to a job building
+  # an untrusted PR's Dockerfile (gh-476).
   build-platform:
     name: Build ${{ matrix.module }} (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     needs: [determine-version, detect-changes]
+    permissions:
+      contents: read
+      packages: write
     if: >
-      needs.detect-changes.outputs.router == 'true' ||
+      github.event_name != 'pull_request' &&
+      github.event_name != 'merge_group' &&
+      (needs.detect-changes.outputs.router == 'true' ||
       needs.detect-changes.outputs.marketplace == 'true' ||
       needs.detect-changes.outputs.migrations == 'true' ||
       needs.detect-changes.outputs.core-data == 'true' ||
@@ -235,7 +243,7 @@ jobs:
       needs.detect-changes.outputs.action-platforms == 'true' ||
       needs.detect-changes.outputs.action-serverless == 'true' ||
       needs.detect-changes.outputs.libs == 'true' ||
-      github.event_name == 'workflow_dispatch'
+      github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
       matrix:
@@ -529,6 +537,385 @@ jobs:
             MODULE_NAME=${{ matrix.module }}
             MODULE_PORT=${{ matrix.port }}
 
+      # Gated (non-masked) Trivy scan against the image this job just loaded
+      # locally -- PR/merge_group never reach merge-manifests (skipped, see
+      # that job's `if:`), so without this the push-path's informational-only
+      # security-scan job (continue-on-error: true) is the only scan these
+      # events would otherwise get, and it doesn't run on PR either. This
+      # step is what actually gates a PR on HIGH/CRITICAL findings.
+      - name: Trivy vulnerability scan (gated, local image)
+        if: >
+          (matrix.condition == 'true' || github.event_name == 'workflow_dispatch') &&
+          (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+          matrix.platform == 'linux/amd64'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          version: v0.69.3
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-amd64
+          format: 'table'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '1'
+
+      - name: Run container tests
+        if: >
+          (matrix.condition == 'true' || github.event_name == 'workflow_dispatch') &&
+          matrix.port != 0 &&
+          ((github.event_name != 'pull_request' && github.event_name != 'merge_group') ||
+          matrix.platform == 'linux/amd64')
+        run: |
+          docker run --rm --name test-${{ matrix.module }} -d -p ${{ matrix.port }}:${{ matrix.port }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ steps.platform-suffix.outputs.suffix }}
+          sleep 10
+          if curl -f http://localhost:${{ matrix.port }}/health; then
+            echo "Health check passed for ${{ matrix.module }}"
+          else
+            echo "Health check failed for ${{ matrix.module }}"
+            exit 1
+          fi
+          docker stop test-${{ matrix.module }}
+
+  # PR/merge_group path: same matrix, amd64-only effective work (steps
+  # below already gate on matrix.platform == 'linux/amd64' for PR), no
+  # registry write scope -- see build-platform's comment above.
+  build-pr:
+    name: Build ${{ matrix.module }} (${{ matrix.platform }}) [PR]
+    runs-on: ${{ matrix.runner }}
+    needs: [determine-version, detect-changes]
+    permissions:
+      contents: read
+    if: >
+      (github.event_name == 'pull_request' ||
+      github.event_name == 'merge_group') &&
+      (needs.detect-changes.outputs.router == 'true' ||
+      needs.detect-changes.outputs.marketplace == 'true' ||
+      needs.detect-changes.outputs.migrations == 'true' ||
+      needs.detect-changes.outputs.core-data == 'true' ||
+      needs.detect-changes.outputs.core-identity == 'true' ||
+      needs.detect-changes.outputs.core-community == 'true' ||
+      needs.detect-changes.outputs.trigger-streaming == 'true' ||
+      needs.detect-changes.outputs.trigger-webhooks == 'true' ||
+      needs.detect-changes.outputs.interactive-social == 'true' ||
+      needs.detect-changes.outputs.interactive-gaming == 'true' ||
+      needs.detect-changes.outputs.interactive-media == 'true' ||
+      needs.detect-changes.outputs.interactive-productivity == 'true' ||
+      needs.detect-changes.outputs.hub == 'true' ||
+      needs.detect-changes.outputs.action-platforms == 'true' ||
+      needs.detect-changes.outputs.action-serverless == 'true' ||
+      needs.detect-changes.outputs.libs == 'true' ||
+      github.event_name == 'workflow_dispatch')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Core modules
+          - module: router
+            platform: linux/amd64
+            runner: ubuntu-latest
+            condition: ${{ needs.detect-changes.outputs.router == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./processing/router_module/Dockerfile
+            context: .
+            port: 0
+          - module: router
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            condition: ${{ needs.detect-changes.outputs.router == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./processing/router_module/Dockerfile
+            context: .
+            port: 0
+
+          - module: marketplace
+            platform: linux/amd64
+            runner: ubuntu-latest
+            condition: ${{ needs.detect-changes.outputs.marketplace == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./admin/marketplace_module/Dockerfile
+            context: .
+            port: 0
+          - module: marketplace
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            condition: ${{ needs.detect-changes.outputs.marketplace == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./admin/marketplace_module/Dockerfile
+            context: .
+            port: 0
+
+          - module: migrations
+            platform: linux/amd64
+            runner: ubuntu-latest
+            condition: ${{ needs.detect-changes.outputs.migrations == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./migrations/Dockerfile
+            context: .
+            port: 0
+          - module: migrations
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            condition: ${{ needs.detect-changes.outputs.migrations == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./migrations/Dockerfile
+            context: .
+            port: 0
+
+          - module: core-data
+            platform: linux/amd64
+            runner: ubuntu-latest
+            condition: ${{ needs.detect-changes.outputs.core-data == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/core-data/Dockerfile
+            context: .
+            port: 0
+          - module: core-data
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            condition: ${{ needs.detect-changes.outputs.core-data == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/core-data/Dockerfile
+            context: .
+            port: 0
+
+          - module: core-identity
+            platform: linux/amd64
+            runner: ubuntu-latest
+            condition: ${{ needs.detect-changes.outputs.core-identity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/core-identity/Dockerfile
+            context: .
+            port: 0
+          - module: core-identity
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            condition: ${{ needs.detect-changes.outputs.core-identity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/core-identity/Dockerfile
+            context: .
+            port: 0
+
+          - module: core-community
+            platform: linux/amd64
+            runner: ubuntu-latest
+            condition: ${{ needs.detect-changes.outputs.core-community == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/core-community/Dockerfile
+            context: .
+            port: 0
+          - module: core-community
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            condition: ${{ needs.detect-changes.outputs.core-community == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/core-community/Dockerfile
+            context: .
+            port: 0
+
+          # Trigger modules
+          - module: trigger-streaming
+            platform: linux/amd64
+            runner: ubuntu-latest
+            condition: ${{ needs.detect-changes.outputs.trigger-streaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/trigger-streaming/Dockerfile
+            context: .
+            port: 0
+          - module: trigger-streaming
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            condition: ${{ needs.detect-changes.outputs.trigger-streaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/trigger-streaming/Dockerfile
+            context: .
+            port: 0
+
+          - module: trigger-webhooks
+            platform: linux/amd64
+            runner: ubuntu-latest
+            condition: ${{ needs.detect-changes.outputs.trigger-webhooks == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/trigger-webhooks/Dockerfile
+            context: .
+            port: 0
+          - module: trigger-webhooks
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            condition: ${{ needs.detect-changes.outputs.trigger-webhooks == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/trigger-webhooks/Dockerfile
+            context: .
+            port: 0
+
+          # Interactive modules
+          - module: interactive-social
+            platform: linux/amd64
+            runner: ubuntu-latest
+            condition: ${{ needs.detect-changes.outputs.interactive-social == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/interactive-social/Dockerfile
+            context: .
+            port: 0
+          - module: interactive-social
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            condition: ${{ needs.detect-changes.outputs.interactive-social == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/interactive-social/Dockerfile
+            context: .
+            port: 0
+
+          - module: interactive-gaming
+            platform: linux/amd64
+            runner: ubuntu-latest
+            condition: ${{ needs.detect-changes.outputs.interactive-gaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/interactive-gaming/Dockerfile
+            context: .
+            port: 0
+          - module: interactive-gaming
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            condition: ${{ needs.detect-changes.outputs.interactive-gaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/interactive-gaming/Dockerfile
+            context: .
+            port: 0
+
+          - module: interactive-media
+            platform: linux/amd64
+            runner: ubuntu-latest
+            condition: ${{ needs.detect-changes.outputs.interactive-media == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/interactive-media/Dockerfile
+            context: .
+            port: 0
+          - module: interactive-media
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            condition: ${{ needs.detect-changes.outputs.interactive-media == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/interactive-media/Dockerfile
+            context: .
+            port: 0
+
+          - module: interactive-productivity
+            platform: linux/amd64
+            runner: ubuntu-latest
+            condition: ${{ needs.detect-changes.outputs.interactive-productivity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/interactive-productivity/Dockerfile
+            context: .
+            port: 0
+          - module: interactive-productivity
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            condition: ${{ needs.detect-changes.outputs.interactive-productivity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/interactive-productivity/Dockerfile
+            context: .
+            port: 0
+
+          # Admin modules
+          - module: hub-api
+            platform: linux/amd64
+            runner: ubuntu-latest
+            condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./admin/hub_module/Dockerfile
+            context: .
+            port: 8060
+          - module: hub-api
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./admin/hub_module/Dockerfile
+            context: .
+            port: 8060
+
+          - module: hub-webui
+            platform: linux/amd64
+            runner: ubuntu-latest
+            condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./admin/hub_module/Dockerfile.webui
+            context: .
+            port: 8080
+          - module: hub-webui
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./admin/hub_module/Dockerfile.webui
+            context: .
+            port: 8080
+
+          # Action modules
+          - module: action-platforms
+            platform: linux/amd64
+            runner: ubuntu-latest
+            condition: ${{ needs.detect-changes.outputs.action-platforms == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/action-platforms/Dockerfile
+            context: .
+            port: 0
+          - module: action-platforms
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            condition: ${{ needs.detect-changes.outputs.action-platforms == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/action-platforms/Dockerfile
+            context: .
+            port: 0
+
+          - module: action-serverless
+            platform: linux/amd64
+            runner: ubuntu-latest
+            condition: ${{ needs.detect-changes.outputs.action-serverless == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/action-serverless/Dockerfile
+            context: .
+            port: 0
+          - module: action-serverless
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            condition: ${{ needs.detect-changes.outputs.action-serverless == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+            dockerfile: ./services/action-serverless/Dockerfile
+            context: .
+            port: 0
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      # Native per-arch builds (amd64 on ubuntu-latest, arm64 on ubuntu-24.04-arm)
+      # require no QEMU emulation. Docker setup is gated on matrix.condition so
+      # unchanged modules don't pull tooling from Docker Hub only to skip the build.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
+        if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
+        if: >
+          (matrix.condition == 'true' || github.event_name == 'workflow_dispatch') &&
+          github.event_name != 'pull_request' &&
+          github.event_name != 'merge_group'
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract platform suffix
+        id: platform-suffix
+        run: |
+          PLATFORM_SUFFIX=$(echo "${{ matrix.platform }}" | sed 's|linux/||')
+          echo "suffix=${PLATFORM_SUFFIX}" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
+        if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+          load: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && matrix.platform == 'linux/amd64' }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ steps.platform-suffix.outputs.suffix }}
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=${{ matrix.module }}-${{ steps.platform-suffix.outputs.suffix }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.module }}-${{ steps.platform-suffix.outputs.suffix }}
+          build-args: |
+            MODULE_NAME=${{ matrix.module }}
+            MODULE_PORT=${{ matrix.port }}
+
+      # Gated (non-masked) Trivy scan against the image this job just loaded
+      # locally -- PR/merge_group never reach merge-manifests (skipped, see
+      # that job's `if:`), so without this the push-path's informational-only
+      # security-scan job (continue-on-error: true) is the only scan these
+      # events would otherwise get, and it doesn't run on PR either. This
+      # step is what actually gates a PR on HIGH/CRITICAL findings.
+      - name: Trivy vulnerability scan (gated, local image)
+        if: >
+          (matrix.condition == 'true' || github.event_name == 'workflow_dispatch') &&
+          (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+          matrix.platform == 'linux/amd64'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          version: v0.69.3
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-amd64
+          format: 'table'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '1'
+
       - name: Run container tests
         if: >
           (matrix.condition == 'true' || github.event_name == 'workflow_dispatch') &&
@@ -701,6 +1088,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
         with:
+          version: v0.69.3
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.image }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
           format: 'sarif'
           output: 'trivy-${{ matrix.image }}.sarif'

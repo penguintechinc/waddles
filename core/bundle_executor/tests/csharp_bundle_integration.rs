@@ -143,6 +143,8 @@ async fn csharp_component_loads_and_runs_transform_and_dispatch_through_the_real
             &Frame::new(
                 1000,
                 Message::Load(LoadBody {
+                    tenant_id: 1,
+                    community_id: 0,
                     app_id: APP_ID.to_string(),
                     version: "1".to_string(),
                     digest: digest.clone(),
