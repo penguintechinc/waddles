@@ -48,10 +48,10 @@ use penguin_spine::{
 
 use crate::builtins::RouteDecision;
 use crate::capabilities::{CapabilityHandler, StageCapabilities};
-use crate::circuit_breaker::CircuitBreaker;
 use crate::hop::KeyRing;
 use crate::host_api::{Connection, ConnectionRegistry, HostApiError};
 use crate::license::FeatureGate;
+use circuit_breaker::CircuitBreaker;
 
 /// Converts a `penguin_spine::PlatformEvent` into the WIT `platform-event`
 /// record's JSON shape (see the module doc's wire-JSON convention) -- the
@@ -280,7 +280,7 @@ fn error_code_to_dlq_kind(code: ErrorCode) -> DlqErrorKind {
 /// Whether `code` names a guest fault (connector spec SS0 condition 5: guest
 /// trap, epoch/fuel timeout, or memory-cap OOM) as opposed to a broken bundle
 /// registration or a connection-level problem -- the three `ErrorCode`
-/// variants `crate::circuit_breaker::CircuitBreaker` should count against a
+/// variants `circuit_breaker::CircuitBreaker` should count against a
 /// source, since they are the ones a *guest*, not a host/registration bug,
 /// produced. Kept separate from [`error_code_to_dlq_kind`]'s DLQ-kind
 /// grouping (which serves a different purpose -- DLQ triage buckets) even

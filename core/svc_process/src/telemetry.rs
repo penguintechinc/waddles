@@ -178,7 +178,7 @@ pub fn register_source_binding_supervisor_metrics(
     }
 }
 
-/// Prometheus handle for `crate::circuit_breaker::CircuitBreaker` (connector
+/// Prometheus handle for `circuit_breaker::CircuitBreaker` (connector
 /// spec SS0 condition 5): one counter, labeled by `source`/`action`
 /// (`action` in `"failure"`/`"opened"`/`"closed"`), so a source flapping
 /// open/closed or a fault storm across many sources is visible on a
@@ -209,7 +209,7 @@ pub fn register_circuit_breaker_metrics(registry: &prometheus::Registry) -> Circ
     CircuitBreakerMetrics { transitions_total }
 }
 
-impl crate::circuit_breaker::CircuitBreakerMetrics for CircuitBreakerMetrics {
+impl circuit_breaker::CircuitBreakerMetrics for CircuitBreakerMetrics {
     fn transition(&self, source: &str, action: &str) {
         self.transitions_total
             .with_label_values(&[source, action])
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn register_circuit_breaker_metrics_produces_a_labeled_counter() {
-        use crate::circuit_breaker::CircuitBreakerMetrics as _;
+        use circuit_breaker::CircuitBreakerMetrics as _;
         let registry = prometheus::Registry::new();
         let metrics = register_circuit_breaker_metrics(&registry);
         metrics.transition("source-a", "opened");

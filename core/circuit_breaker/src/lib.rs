@@ -1,16 +1,33 @@
-//! Per-source circuit breaker for guest faults (connector spec
+//! Shared, generic per-key circuit breaker for guest faults (connector spec
 //! `docs/superpowers/specs/2026-09-28-connector-bundles.md` SS0 condition 5):
 //! a bundle-executor trap, epoch/fuel timeout, or OOM must disable only the
-//! offending source (`Delivered.stream`, the closest thing svc_process has
-//! to a source/connection identity -- spec's dataplane-scale design keys
-//! streams by `hash(source_id)`), never crash the host process, and never
-//! affect any other source or tenant's traffic.
+//! offending key, never crash the host process, and never affect any other
+//! key's traffic.
+//!
+//! A path dependency within this repo (see `Cargo.toml`'s doc), used by
+//! every stage service that invokes bundle-executor per some unit of
+//! traffic:
+//!
+//! - `svc_process`: keyed by `Delivered.stream` -- the closest thing it has
+//!   to a source/connection identity (the dataplane-scale design keys
+//!   streams by `hash(source_id)`)
+//! - `svc_action`: keyed by a composite of `(app_id, scope, destination)` --
+//!   see `svc_action::dispatch`'s own doc for why all three dimensions are
+//!   folded into one key rather than three independent breakers
+//! - `svc_ingest`'s connector host (once connector bundles land, same spec
+//!   SS2.6): keyed by `source_id`/connection, the same shape this module was
+//!   originally written against
+//!
+//! Each caller picks its own key granularity and composition -- this module
+//! only owns the failure-counting/open/backoff/reset state machine.
 //!
 //! Deliberately process-local, in-memory state (not shared via Valkey/DB):
-//! each svc_process pod already only owns a fixed shard of sources (fixed
-//! 2048-partition hashing, `dataplane-scale-design`), so a breaker tripped
-//! on one pod for a source that pod owns is the complete blast-radius
-//! containment the spec asks for -- no cross-pod coordination needed.
+//! each pod already only owns a fixed shard of its own keys (fixed
+//! 2048-partition hashing for `svc_process`'s sources, `dataplane-scale-
+//! design`; a fixed app/scope/destination set for `svc_action`), so a
+//! breaker tripped on one pod for a key that pod owns is the complete
+//! blast-radius containment the spec asks for -- no cross-pod coordination
+//! needed.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

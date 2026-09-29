@@ -150,9 +150,57 @@ pub fn register_bundle_loader_excluded_metrics(
     excluded_total
 }
 
+/// Prometheus handle for `circuit_breaker::CircuitBreaker` (connector spec
+/// SS0 condition 5): one counter, labeled by `key`/`action` (`action` in
+/// `"failure"`/`"opened"`/`"closed"`) -- see `crate::dispatch`'s doc for the
+/// `(app_id, scope, destination)` composite key this stage breaks on.
+#[derive(Clone)]
+pub struct CircuitBreakerMetrics {
+    pub transitions_total: prometheus::IntCounterVec,
+}
+
+/// Registers [`CircuitBreakerMetrics`] against `registry`. Must be called
+/// exactly once per `registry` -- see
+/// [`register_bundle_loader_excluded_metrics`]'s identical constraint.
+pub fn register_circuit_breaker_metrics(registry: &prometheus::Registry) -> CircuitBreakerMetrics {
+    let transitions_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_action_circuit_breaker_transitions_total",
+            "Per-(app_id,scope,destination) circuit breaker transitions (failure/opened/closed), \
+             labeled by key/action",
+        ),
+        &["key", "action"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(transitions_total.clone()))
+        .expect("register svc_action_circuit_breaker_transitions_total");
+
+    CircuitBreakerMetrics { transitions_total }
+}
+
+impl circuit_breaker::CircuitBreakerMetrics for CircuitBreakerMetrics {
+    fn transition(&self, key: &str, action: &str) {
+        self.transitions_total
+            .with_label_values(&[key, action])
+            .inc();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn register_circuit_breaker_metrics_produces_a_labeled_counter() {
+        use circuit_breaker::CircuitBreakerMetrics as _;
+        let registry = prometheus::Registry::new();
+        let metrics = register_circuit_breaker_metrics(&registry);
+        metrics.transition("app|t:-|chan", "opened");
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_action_circuit_breaker_transitions_total"));
+        assert!(rendered.contains(r#"action="opened""#));
+    }
 
     #[test]
     fn register_request_metrics_produces_a_non_empty_exposition() {

@@ -42,6 +42,40 @@ use crate::host_api::{Connection, ConnectionRegistry, HostApiError};
 use crate::retry::{dispatch_with_retry, AttemptOutcome, DispatchRecord, Jitter};
 use crate::usage::UsageBatcher;
 
+/// Whether `code` (an `InvokeError::ExecutorError`'s `Debug`-formatted
+/// `penguin_bundle_host::wire::ErrorCode`, see [`invoke_dispatch`]'s match
+/// arm) names a guest fault -- a bundle-executor trap, epoch/fuel timeout,
+/// or memory-cap OOM -- as opposed to a broken bundle registration or a
+/// connection-level problem. The same three-variant set `core/svc_process/
+/// src/spine.rs::is_guest_fault` matches on, compared by string since this
+/// module only ever sees the error code after it has already been
+/// `Debug`-formatted into a `String` (`InvokeError::ExecutorError.code`).
+fn is_guest_fault(code: &str) -> bool {
+    matches!(code, "ExecutorDeadline" | "MemoryLimit" | "WasmTrap")
+}
+
+/// Connector spec SS0 condition 5's composite circuit-breaker key for
+/// action-stage dispatch: `(app_id, tenant:community, destination)`. Unlike
+/// `svc_process`'s single `Delivered.stream` key, a dispatch attempt's
+/// isolation unit is all three dimensions together -- the same bundle can
+/// serve multiple tenants/communities (scope) and send to multiple
+/// platform channels (destination, `env.event.source.channel_id`, the same
+/// field `invoke_dispatch`'s own `InvokeScope.origin_channel_id` already
+/// reads), and a fault talking to one destination must never disable the
+/// bundle for every other destination or tenant it also serves.
+fn breaker_key(app_id: &str, env: &StageEnvelope) -> String {
+    format!(
+        "{app_id}|{}:{}|{}",
+        env.tenant,
+        env.community.as_deref().unwrap_or("-"),
+        env.event
+            .source
+            .as_ref()
+            .and_then(|s| s.channel_id.clone())
+            .unwrap_or_else(|| "unknown".to_string()),
+    )
+}
+
 /// Tunables `run()` needs beyond what `penguin_spine::SpineConfig` already
 /// covers (spec §4.3).
 #[derive(Debug, Clone)]
@@ -444,6 +478,9 @@ pub struct DispatchDeps<A: AuditSink, T: TenantResolver, S: SpineOps> {
     pub consumer_id: String,
     pub spine: S,
     pub metrics: Arc<dyn SpineMetrics>,
+    /// Connector spec SS0 condition 5: per-(app_id, scope, destination)
+    /// circuit breaker -- see [`breaker_key`]'s doc for the key shape.
+    pub breaker: Arc<circuit_breaker::CircuitBreaker>,
 }
 
 /// Handles exactly one delivered entry end to end. Returns `Ok(())` in
@@ -490,6 +527,29 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
         return deps.spine.dead_letter(d, &err).await;
     };
 
+    // Connector spec SS0 condition 5: a (app_id, scope, destination) tuple
+    // with too many recent guest faults is disabled -- dead-lettered for
+    // redelivery without ever reaching the executor, so a bad destination
+    // (or a faulting bundle version for one tenant) cannot burn executor
+    // capacity other destinations/tenants need.
+    let breaker_key = breaker_key(&deps.app_id, &d.env);
+    if !deps.breaker.allow(&breaker_key) {
+        tracing::warn!(
+            app_id = %deps.app_id,
+            key = %breaker_key,
+            "circuit breaker open for this app/scope/destination, dead-lettering without invoking"
+        );
+        let err = penguin_spine::DlqError {
+            kind: penguin_spine::DlqErrorKind::ExecutorUnavailable,
+            code: "DISPATCH_CIRCUIT_OPEN".to_string(),
+            message: format!("{breaker_key} disabled by circuit breaker"),
+            detail: None,
+            artifact_digest: Some(deps.digest.clone()),
+            consumer_id: deps.consumer_id.clone(),
+        };
+        return deps.spine.dead_letter(d, &err).await;
+    }
+
     // Every attempt -- including the first -- goes through the same
     // in-process retry-with-backoff loop (spec §4.3: "the runner owns all
     // backoff timing; a bundle never sleeps"), matching the Python
@@ -515,11 +575,21 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
             )
             .await
             {
-                Ok(p) => interpret_dispatch_payload(&p, "irc_relay"),
-                Err(e) => AttemptOutcome::NonRetryable {
-                    http_status: None,
-                    detail: format!("invoke failed: {e}"),
-                },
+                Ok(p) => {
+                    deps.breaker.record_success(&breaker_key);
+                    interpret_dispatch_payload(&p, "irc_relay")
+                }
+                Err(e) => {
+                    if let InvokeError::ExecutorError { code, .. } = &e {
+                        if is_guest_fault(code) {
+                            deps.breaker.record_failure(&breaker_key);
+                        }
+                    }
+                    AttemptOutcome::NonRetryable {
+                        http_status: None,
+                        detail: format!("invoke failed: {e}"),
+                    }
+                }
             }
         },
         deps.retry_policy.max_retries,
@@ -991,6 +1061,7 @@ mod tests {
             consumer_id: "test-pod-consumer".to_string(),
             spine,
             metrics: Arc::new(RecordingSpineMetrics::default()),
+            breaker: Arc::new(circuit_breaker::CircuitBreaker::new(Arc::new(()))),
         }
     }
 

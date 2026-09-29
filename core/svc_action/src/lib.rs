@@ -152,6 +152,11 @@ where
     // excluded-row counter.
     let bundle_loader_excluded_metric =
         telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
+    // Connector spec SS0 condition 5: the per-(app_id,scope,destination)
+    // circuit breaker's Prometheus handle, registered here for the same
+    // "before prom_registry moves into AppState" reason as the metric above.
+    let circuit_breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics> =
+        Arc::new(telemetry::register_circuit_breaker_metrics(&prom_registry));
 
     let state = http::AppState::new(config.clone(), prom_registry);
 
@@ -193,7 +198,13 @@ where
         );
         try_start_env_bundle_loader(&config.cli, Arc::clone(&connections));
     }
-    try_start_dispatch(&config, connections, usage, license);
+    try_start_dispatch(
+        &config,
+        connections,
+        usage,
+        license,
+        circuit_breaker_metrics,
+    );
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
     let metrics_addr = SocketAddr::new(config.cli.bind_addr, config.cli.metrics_port);
@@ -713,6 +724,7 @@ fn try_start_dispatch(
     connections: Arc<host_api::ConnectionRegistry>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
+    breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
 ) {
     if config.cli.action_app_id.is_empty() {
         tracing::info!("ACTION_APP_ID not set; dispatch loop not started (no bundle assigned)");
@@ -794,6 +806,7 @@ fn try_start_dispatch(
             consumer_id: spine_cfg.consumer_id.clone(),
             spine,
             metrics,
+            breaker: Arc::new(circuit_breaker::CircuitBreaker::new(breaker_metrics)),
         };
 
         try_start_usage_flush(
@@ -1269,7 +1282,7 @@ mod tests {
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
         let usage = Arc::new(std::sync::Mutex::new(usage::UsageBatcher::new()));
-        try_start_dispatch(&config, connections, usage, None);
+        try_start_dispatch(&config, connections, usage, None, Arc::new(()));
     }
 
     /// `try_start_env_bundle_loader`'s own gate: `ACTION_BUNDLE_DIGEST`

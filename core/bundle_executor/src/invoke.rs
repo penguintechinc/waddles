@@ -1263,22 +1263,29 @@ mod tests {
 
     /// Ad-hoc fuel-metering overhead measurement (connector spec SS0
     /// condition 4's "measure the overhead" requirement) -- not a
-    /// correctness assertion (wall-clock timing in CI is noisy), so this is
-    /// `#[ignore]`d and run manually:
-    /// `cargo test --lib measure_fuel_overhead -- --ignored --nocapture`.
-    /// Average per-call latency for a cheap, no-host-call transform
-    /// (`socket-probe`, denied natively with no stage round trip) over many
-    /// calls against the same loaded bundle, with fuel metering enabled
-    /// exactly as `crate::engine::build_engine` always configures it today.
+    /// correctness assertion (wall-clock timing in CI is noisy, and
+    /// meaningful only in `--release`), so this is `#[ignore]`d and run
+    /// manually:
+    /// `cargo test --release --lib measure_fuel_overhead_tight_compute_loop -- --ignored --nocapture`.
+    /// Average per-call latency for a real, host-call-free compute loop
+    /// (`memory-hog`: 64 x 1 MiB allocate-and-touch) over many calls against
+    /// the same loaded bundle, with fuel metering enabled exactly as
+    /// `crate::engine::build_engine` always configures it today.
     #[ignore]
     #[tokio::test(flavor = "multi_thread")]
-    async fn measure_fuel_overhead() -> Result<(), ExecutorError> {
+    async fn measure_fuel_overhead_tight_compute_loop() -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.bench.app"))
+            .on_load(LoadBody {
+                limits: penguin_bundle_host::wire::LoadLimits {
+                    timeout_ms: 10_000,
+                    memory_mb: 256,
+                },
+                ..fixture_load_body("waddles.bench.app")
+            })
             .await
             .expect("load succeeds");
-        const N: u32 = 2000;
+        const N: u32 = 500;
         let start = std::time::Instant::now();
         for i in 0..N {
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1291,7 +1298,75 @@ mod tests {
                         export: ExportKind::Transform,
                         payload: serde_json::json!({
                             "platform": "test",
-                            "event_type": "socket-probe",
+                            "event_type": "memory-hog",
+                            "actor": null,
+                            "payload_json": "{}",
+                            "occurred_at": "2026-09-28T00:00:00.000Z",
+                        }),
+                        deadline_ms: 10_000,
+                        trace: None,
+                    },
+                    u64::from(i),
+                    connection,
+                )
+                .await
+                .expect("memory-hog succeeds");
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "fuel_overhead[tight_compute_loop]: {N} calls in {elapsed:?} ({:.4} ms/call)",
+            elapsed.as_secs_f64() * 1000.0 / f64::from(N)
+        );
+        Ok(())
+    }
+
+    /// Same measurement as [`measure_fuel_overhead_tight_compute_loop`], for
+    /// a host-call-heavy guest instead: `log-write` round-trips through
+    /// [`HostBridge`] on every call. Since this benchmark drives real
+    /// `on_invoke` calls (not `crate::host::imports`'s narrower `ExecState`-
+    /// level tests), the `Connection` needs something answering every
+    /// `host-call` frame the guest's `log.write` import issues -- `respond`
+    /// spawns exactly that: a background task that replies `Ok({})` to
+    /// every `HostCall` frame it sees on `rx`, standing in for a real stage.
+    #[ignore]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn measure_fuel_overhead_host_call_heavy() -> Result<(), ExecutorError> {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body("waddles.bench.app"))
+            .await
+            .expect("load succeeds");
+        const N: u32 = 500;
+        let start = std::time::Instant::now();
+        for i in 0..N {
+            let (tx, mut rx) =
+                tokio::sync::mpsc::unbounded_channel::<penguin_bundle_host::wire::Frame>();
+            let connection = crate::wire::Connection::new(tx);
+            let responder_conn = Arc::clone(&connection);
+            let responder = tokio::spawn(async move {
+                while let Some(frame) = rx.recv().await {
+                    if let penguin_bundle_host::wire::Message::HostCall(_) = frame.message {
+                        let _ = responder_conn.deliver(penguin_bundle_host::wire::Frame::new(
+                            frame.id,
+                            penguin_bundle_host::wire::Message::HostResult(
+                                penguin_bundle_host::wire::HostResultBody {
+                                    result: Some(serde_json::json!({})),
+                                    error: None,
+                                },
+                            ),
+                        ));
+                    }
+                }
+            });
+            executor
+                .on_invoke(
+                    InvokeBody {
+                        app_id: "waddles.bench.app".to_string(),
+                        digest: fixture_digest(),
+                        export: ExportKind::Transform,
+                        payload: serde_json::json!({
+                            "platform": "test",
+                            "event_type": "log-write",
                             "actor": null,
                             "payload_json": "{}",
                             "occurred_at": "2026-09-28T00:00:00.000Z",
@@ -1303,11 +1378,12 @@ mod tests {
                     connection,
                 )
                 .await
-                .expect("socket-probe succeeds");
+                .expect("log-write succeeds");
+            responder.abort();
         }
         let elapsed = start.elapsed();
         println!(
-            "fuel_overhead: {N} calls in {elapsed:?} ({:.4} ms/call)",
+            "fuel_overhead[host_call_heavy]: {N} calls in {elapsed:?} ({:.4} ms/call)",
             elapsed.as_secs_f64() * 1000.0 / f64::from(N)
         );
         Ok(())

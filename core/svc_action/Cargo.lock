@@ -575,6 +575,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "circuit-breaker"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3233,6 +3240,7 @@ dependencies = [
  "base64 0.22.1",
  "bundle-active-set",
  "chrono",
+ "circuit-breaker",
  "clap",
  "futures-util",
  "hex",

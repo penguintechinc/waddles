@@ -37,7 +37,6 @@
 pub mod builtins;
 pub mod bundle_loader;
 pub mod capabilities;
-pub mod circuit_breaker;
 pub mod config;
 pub mod error;
 pub mod hop;

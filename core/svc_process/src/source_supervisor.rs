@@ -120,7 +120,7 @@ pub struct SupervisorDeps {
     /// persists across `run_binding_consumer`'s reconnect loop and stays
     /// keyed independently per `(platform, source_id)` -- see
     /// `crate::spine::ProcessDeps::breaker`'s doc for the full rationale.
-    pub breaker: Arc<crate::circuit_breaker::CircuitBreaker>,
+    pub breaker: Arc<circuit_breaker::CircuitBreaker>,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
