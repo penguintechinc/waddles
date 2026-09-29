@@ -203,6 +203,51 @@ The following table lists the main configurable parameters of the WaddleBot char
 | `infrastructure.minio.apiPort` | MinIO API port | `9000` |
 | `infrastructure.minio.consolePort` | MinIO console port | `9001` |
 | `infrastructure.minio.persistence.size` | PVC size | `50Gi` |
+| `infrastructure.minio.kms.enabled` | Require a KMS for at-rest (SSE) encryption | `true` |
+| `infrastructure.minio.kms.secretName` | Pre-created Secret holding `MINIO_KMS_SECRET_KEY` | `""` (`"minio-kms"` in `values-alpha.yaml`) |
+| `infrastructure.minio.kms.secretKey` | Key name inside that Secret | `MINIO_KMS_SECRET_KEY` |
+| `infrastructure.minio.kms.autoEncryptBucket` | Apply SSE-S3 default encryption to chart-created buckets | `true` |
+
+##### MinIO KMS (mandatory at-rest encryption)
+
+At-rest encryption is mandatory for every store holding sensitive data (see
+`~/.claude/rules/security.md` Encryption). hub-api calls
+`put_object(..., ServerSideEncryption="AES256")`, which MinIO refuses with
+*"Server side encryption specified but KMS is not configured"* unless a KMS
+is wired up — dropping SSE is never an acceptable fix.
+
+This chart configures MinIO's static single-key KMS via the `MINIO_KMS_SECRET_KEY`
+env var, sourced from a Kubernetes Secret you pre-create (never chart-managed,
+never a literal key in git):
+
+```bash
+make generate-minio-kms-key KUBE_CONTEXT=dal2-beta [NAMESPACE=waddlebot]
+# or directly:
+./scripts/generate-minio-kms-key.sh --context dal2-beta --namespace waddlebot \
+  [--secret-name minio-kms] [--key-name waddlebot-minio]
+```
+
+This creates/updates a Secret (default name `minio-kms`) with a single key
+`MINIO_KMS_SECRET_KEY` in the format `<key-name>:<base64 32 bytes>`. Point the
+chart at it by setting `infrastructure.minio.kms.secretName` (via `--set` or
+an out-of-git values override) to that Secret's name.
+
+`values.yaml`'s baseline leaves `secretName` empty (fail-closed) and
+`templates/infrastructure/minio.yaml` renders a `fail` guard: any release
+with `infrastructure.minio.enabled=true` outside alpha (beta/gamma/production)
+that hasn't set `infrastructure.minio.kms.secretName` fails to template.
+Alpha alone documents a default (`values-alpha.yaml` sets it to `minio-kms`).
+
+When `infrastructure.minio.kms.autoEncryptBucket` is true, the `minio-init`
+Job also runs `mc encrypt set sse-s3` on every chart-created bucket so objects
+written without an explicit `ServerSideEncryption` header are still encrypted.
+
+**Production note:** this static-key mechanism is a stopgap. For production, a
+real external KMS such as MinIO KES or HashiCorp Vault is recommended instead
+of a static key — see `~/.claude/rules/security.md` Encryption tiering
+(baseline platform-managed keys vs. Enterprise-tier customer-managed/external
+KMS). Migrating to KES/Vault does not require an application change — only
+MinIO's own KMS backend configuration.
 
 #### Ollama
 
