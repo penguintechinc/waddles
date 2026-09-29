@@ -46,6 +46,8 @@ version: 1.0.0
 feature: waddles.integrations.vendor-42
 module: integrations
 provider: thirdparty
+author: Acme Corp
+license: MIT
 language: python
 artifact: prebuilt
 stages:
