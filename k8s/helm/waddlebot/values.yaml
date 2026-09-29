@@ -217,6 +217,18 @@ infrastructure:
       POSTGRES_DB: waddlebot
       POSTGRES_USER: waddlebot
       # POSTGRES_PASSWORD should be set via secrets
+    # Bundle app-schema roles (Phase 0, docs/superpowers/specs/2026-09-28-
+    # bundle-db-capability-and-schemas.md Sec2) -- waddles_bundle_migrator
+    # (DDL owner of app_core/app_community, hub-api only) and
+    # waddles_bundle_runtime (DML-only, those two schemas; svc_process/
+    # svc_action). Both are real LOGIN roles, unlike the NOLOGIN RBAC-matrix
+    # roles above. Empty by default: alembic/versions/0030_bundle_app_schemas.py
+    # treats an unset password as "create/keep the role LOGIN with no usable
+    # password yet", never a migration failure -- same graceful-degradation
+    # posture as readerPassword below. Set before relying on either role for
+    # real traffic.
+    bundleMigratorPassword: ""
+    bundleRuntimePassword: ""
     readReplicas:
       enabled: false
       count: 2

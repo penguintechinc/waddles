@@ -410,6 +410,24 @@ Usage: {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
         name: {{ include "waddlebot.fullname" . }}-secrets
         key: INITIAL_ADMIN_PASSWORD
         optional: true
+  # Bundle app-schema roles (alembic/versions/0030_bundle_app_schemas.py) --
+  # this initContainer is the actual consumer: the migration bridges these
+  # into CREATE/ALTER ROLE ... PASSWORD statements for waddles_bundle_migrator/
+  # waddles_bundle_runtime. optional: true, matching INITIAL_ADMIN_* above --
+  # an unset value means the migration creates/leaves each role LOGIN with
+  # no usable password yet, never a migration failure.
+  - name: BUNDLE_MIGRATOR_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: {{ include "waddlebot.fullname" . }}-secrets
+        key: BUNDLE_MIGRATOR_PASSWORD
+        optional: true
+  - name: BUNDLE_RUNTIME_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: {{ include "waddlebot.fullname" . }}-secrets
+        key: BUNDLE_RUNTIME_PASSWORD
+        optional: true
   resources:
     requests:
       cpu: "50m"
