@@ -8,25 +8,28 @@ gated by `connector.pii.read`, `core/bundle_executor/src/manifest.rs`'s
 read ONLY the identity columns a connector needs -- never any other PII
 column (email, IP, payment, address) and never a non-identity table.
 
-**Real tables, not the spec table's literal names.** The spec's S3.3
-comparison table describes the target shape ("hub_users.uuid",
-"community_members/the identity view") in terms of a parallel, not-yet-
-merged design; this schema's actual tables (`config/postgres/migrations/
-000_create_base_schema.sql`) are:
-  - `hub_users` -- the one identity table (PII Tokenization rule). It has
-    no `uuid` column today (`0023_bundle_install_schema`'s own docstring:
-    "hub_users is this codebase's one identity table and uses an integer
-    SERIAL key"). A stable, external-safe token is exactly what
-    `identity.lookup`'s WIT contract needs (`identity-record.uuid: string`,
-    `wit/waddle-connector/connector.wit`) -- this migration adds it
-    (`UUID UNIQUE NOT NULL DEFAULT gen_random_uuid()`), backfilling
-    existing rows, rather than reusing the raw SERIAL id (sequential,
-    enumerable) as the token a WASM guest receives.
+**Depends on `0033_hub_users_identity_uuid` (PR #434, `feature/users-uuid-token`)
+for `hub_users.uuid` -- this migration does NOT add or backfill that
+column.** An earlier version of this file did add/backfill `hub_users.uuid`
+directly; that duplicated PR #434's `0033_hub_users_identity_uuid`
+(`ALTER TABLE hub_users ADD COLUMN ... uuid UUID`, backfill, `UNIQUE`
+constraint) and would conflict with it at merge. This migration now only
+creates the new role and grants column-scoped `SELECT` on the identity
+columns those two migrations, taken together, already establish:
+
+  - `hub_users` -- `id` (join key) and `uuid` (0033's external-safe
+    token; `identity-record.uuid: string` in
+    `wit/waddle-connector/connector.wit`).
   - `hub_user_identities` -- the platform-identity mapping
     (`hub_user_id -> (platform, platform_user_id, platform_username)`)
     inbound tokenization resolves through.
   - `community_members` -- per-community `display_name` (outbound mention
-    rendering wants a display name, not just a bare handle).
+    rendering wants a display name, not just a bare handle). Note this is
+    a **direct, PII-exposing** grant, deliberately distinct from 0033's
+    own `community_member_identities` view (which excludes `display_name`
+    on purpose, for the PII-free `waddles_bundle_reader` role) -- spec
+    S3.3's whole point is that `waddles_connector_pii_reader` IS allowed
+    to read PII, unlike `waddles_bundle_reader`.
 
 Grants are column-scoped `GRANT SELECT (...)` statements, hand-written in
 this migration rather than routed through `scripts/db/rbac_matrix.py` --
@@ -34,14 +37,23 @@ that generator's `GrantSpec`/`render_grant_sql` only knows table-level
 privileges (`ALL_PRIVILEGES` applied to a whole table), so it cannot
 express "SELECT on these three columns only". This mirrors the existing,
 already-established precedent for this exact class of role:
-`waddles_bundle_reader` (PR #434) is likewise NOT part of
+`waddles_bundle_reader` (0033/0025) is likewise NOT part of
 `config/postgres/rbac-matrix.yaml`'s `roles:` list and is granted via
-hand-written, idempotent `DO $$ ... $$` blocks in its own migration
-(`0028_bundle_active_set_changelog._bundle_reader_grant_sql`) -- this
+hand-written, idempotent `DO $$ ... $$` blocks in its own migration -- this
 migration follows that same convention for the new role.
 
+**Down-revision chain / renumbering note.** This branch's own
+`alembic/versions/` only goes up to `0028_bundle_active_set_changelog`
+(0029-0035 are queued on separate, not-yet-merged branches: 0033
+`feature/users-uuid-token` PR #434, 0034 `fix/seeder-stalled-upload-
+recovery` PR #435, 0035 `feature/tenant-dek-broker` PR #442). `down_revision`
+below is set to `0035_keystore_tenant_dek` per the intended merge order;
+**this WILL need re-chaining if the actual merged order on
+`release/v3.0.X` differs** -- same caveat `0035_keystore_tenant_dek`'s own
+docstring already carries for its own position in this same queue.
+
 Revision ID: 0036_connector_pii_reader_role
-Revises: 0028_bundle_active_set_changelog
+Revises: 0035_keystore_tenant_dek
 Create Date: 2026-09-28
 """
 
@@ -50,7 +62,7 @@ from __future__ import annotations
 from alembic import op
 
 revision = "0036_connector_pii_reader_role"
-down_revision = "0028_bundle_active_set_changelog"
+down_revision = "0035_keystore_tenant_dek"
 branch_labels = None
 depends_on = None
 
@@ -65,11 +77,13 @@ _ROLE = "waddles_connector_pii_reader"
 def _role_exists_guard(body: str) -> str:
     """Wrap `body` in a `DO $$ ... $$` block that only runs if `_ROLE` exists.
 
-    Same idempotent-and-order-independent posture as migration 0028's
-    `_bundle_reader_grant_sql`/`_bundle_reader_revoke_sql`: this migration
-    may run before or after whatever future migration provisions the
-    login role that becomes a member of `_ROLE` (helm auto-provision,
-    PR #445) -- both orders must be safe no-ops on the missing side.
+    Same idempotent-and-order-independent posture as `0028_bundle_active_
+    set_changelog`'s `_bundle_reader_grant_sql`/`_bundle_reader_revoke_sql`
+    and `0033_hub_users_identity_uuid`'s own `waddles_bundle_reader` grant:
+    this migration may run before or after whatever future migration
+    provisions the login role that becomes a member of `_ROLE` (helm
+    auto-provision, PR #445) -- both orders must be safe no-ops on the
+    missing side.
     """
     return (
         f"DO $$ BEGIN\n"  # noqa: S608  # nosec B608 -- role name is a fixed literal, never user input
@@ -81,24 +95,6 @@ def _role_exists_guard(body: str) -> str:
 
 
 def upgrade() -> None:
-    # hub_users gets a real external-safe identity token. `gen_random_uuid()`
-    # needs pgcrypto's extension in some Postgres builds pre-13; this schema
-    # already targets Postgres 17 (backend-database.md), which ships
-    # gen_random_uuid() in core (pgcrypto not required).
-    op.execute(
-        "ALTER TABLE hub_users "
-        "ADD COLUMN IF NOT EXISTS uuid UUID NOT NULL DEFAULT gen_random_uuid()"
-    )
-    op.execute(
-        "DO $$ BEGIN\n"
-        "  IF NOT EXISTS (\n"
-        "    SELECT 1 FROM pg_constraint WHERE conname = 'hub_users_uuid_key'\n"
-        "  ) THEN\n"
-        "    ALTER TABLE hub_users ADD CONSTRAINT hub_users_uuid_key UNIQUE (uuid);\n"
-        "  END IF;\n"
-        "END $$;"
-    )
-
     op.execute(
         f"DO $$ BEGIN\n"
         f"  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{_ROLE}') THEN\n"
@@ -114,6 +110,8 @@ def upgrade() -> None:
     # the join predicate (hub_user_identities.hub_user_id = hub_users.id)
     # references it -- Postgres requires column-level SELECT on every
     # column a query touches, including join keys, not just selected ones.
+    # `uuid` itself is 0033_hub_users_identity_uuid's column, not this
+    # migration's -- this migration only grants access to it.
     op.execute(_role_exists_guard(f"GRANT SELECT (id, uuid) ON hub_users TO {_ROLE};"))
     op.execute(
         _role_exists_guard(
@@ -131,6 +129,8 @@ def upgrade() -> None:
     # Belt-and-suspenders default-deny: explicit REVOKE ALL from PUBLIC on
     # the touched tables, matching rbac_matrix.py's `render_revoke_public_sql`
     # baseline for every other identity/PII-adjacent table in this schema.
+    # Idempotent/harmless to repeat even though 0033 may already have run
+    # an equivalent REVOKE for its own role's tables.
     op.execute("REVOKE ALL ON hub_users FROM PUBLIC;")
     op.execute("REVOKE ALL ON hub_user_identities FROM PUBLIC;")
     op.execute("REVOKE ALL ON community_members FROM PUBLIC;")
@@ -155,13 +155,3 @@ def downgrade() -> None:
         f"  NULL; -- role still owns objects from a later migration; leave it\n"
         f"END $$;"
     )
-    op.execute(
-        "DO $$ BEGIN\n"
-        "  IF EXISTS (\n"
-        "    SELECT 1 FROM pg_constraint WHERE conname = 'hub_users_uuid_key'\n"
-        "  ) THEN\n"
-        "    ALTER TABLE hub_users DROP CONSTRAINT hub_users_uuid_key;\n"
-        "  END IF;\n"
-        "END $$;"
-    )
-    op.execute("ALTER TABLE hub_users DROP COLUMN IF EXISTS uuid")

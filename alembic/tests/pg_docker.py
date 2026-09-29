@@ -64,25 +64,7 @@ CREATE TABLE communities (
     name TEXT
 );
 CREATE TABLE hub_users (
-    id SERIAL PRIMARY KEY,
-    email TEXT,
-    password_hash TEXT
-);
-CREATE TABLE hub_user_identities (
-    id SERIAL PRIMARY KEY,
-    hub_user_id INTEGER NOT NULL REFERENCES hub_users(id) ON DELETE CASCADE,
-    platform VARCHAR(50) NOT NULL,
-    platform_user_id VARCHAR(255) NOT NULL,
-    platform_username VARCHAR(255),
-    linked_at TIMESTAMP
-);
-CREATE TABLE community_members (
-    id SERIAL PRIMARY KEY,
-    community_id INTEGER REFERENCES communities(id) ON DELETE CASCADE,
-    platform VARCHAR(50),
-    platform_user_id VARCHAR(255),
-    display_name VARCHAR(255),
-    bio TEXT
+    id SERIAL PRIMARY KEY
 );
 CREATE TABLE app_catalog (
     app_id VARCHAR(255) PRIMARY KEY
