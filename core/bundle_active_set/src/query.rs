@@ -29,6 +29,17 @@ pub struct ActiveBundleRow {
     pub digest: String,
     pub component_key: String,
     pub sidecar_key: String,
+    /// Artifact-signature columns (spec SS5.6/Gemini review condition 9,
+    /// migration `0031_bundle_artifact_signature`) -- surfaced here for
+    /// observability/audit only. The AUTHORITATIVE check is
+    /// `core/bundle_executor/src/signing.rs`'s verification of the signed
+    /// `.json` sidecar fetched from the bucket at `sidecar_key`, not a
+    /// comparison against these columns directly (see
+    /// `entities::app_versions`'s module doc for why: the wire protocol's
+    /// `LoadBody` has no field to carry them to the executor).
+    pub artifact_signature: Option<String>,
+    pub artifact_signature_key_id: Option<String>,
+    pub artifact_signed_approval_id: Option<i64>,
 }
 
 /// A cheap change signal for one `(tenant_id, community_id)` scope: a
@@ -274,10 +285,43 @@ pub async fn read_active_set(
         .all(conn)
         .await?;
 
+    Ok(assemble_active_set(
+        &active_rows,
+        &versions_by_id,
+        &approval_rows,
+    ))
+}
+
+/// Shared row-assembly logic behind [`read_active_set`] (one `(tenant_id,
+/// community_id)` scope, `approval_rows` pre-filtered to that scope's
+/// tenant) and `crate::multi_tenant::read_active_set_all` (every scope at
+/// once, `approval_rows` unfiltered across every tenant) -- pure, no I/O,
+/// so both callers share one tested implementation of the ACTIVE+APPROVED
+/// join/exclusion/degradation logic rather than maintaining two copies
+/// that could silently drift apart.
+///
+/// **Multi-tenant correctness fix vs. the pre-rev-4 inline version this
+/// replaces:** the approval-match predicate now also checks `appr.
+/// tenant_id == active.tenant_id` explicitly. [`read_active_set`]'s own
+/// `approval_rows` query was already tenant-filtered, so this was always
+/// implicitly true there and changes nothing for that caller -- but
+/// `read_active_set_all` intentionally reads `app_install_approvals`
+/// UNFILTERED (one bulk query across every tenant, for efficiency, see
+/// that function's own doc), so without this explicit check two different
+/// tenants' apps sharing an `app_id` string and an identical `version`
+/// value could cross-match each other's approval row. Tenant isolation is
+/// a hard invariant (`rules/security.md` Tenant Isolation) -- this must be
+/// checked here, once, rather than trusted to always be true of whatever
+/// `approval_rows` slice a caller happens to pass in.
+pub(crate) fn assemble_active_set(
+    active_rows: &[app_active_versions::Model],
+    versions_by_id: &std::collections::HashMap<i64, app_versions::Model>,
+    approval_rows: &[app_install_approvals::Model],
+) -> ActiveSetRead {
     let mut rows = Vec::with_capacity(active_rows.len());
     let mut excluded = Vec::new();
     let mut degraded = Vec::new();
-    for active in &active_rows {
+    for active in active_rows {
         let Some(version_row) = versions_by_id.get(&active.version_id) else {
             tracing::warn!(
                 app_id = %active.app_id,
@@ -290,7 +334,8 @@ pub async fn read_active_set(
         };
 
         let approved = approval_rows.iter().any(|appr| {
-            appr.app_id == active.app_id
+            appr.tenant_id == active.tenant_id
+                && appr.app_id == active.app_id
                 && appr.version == version_row.version
                 && (appr.community_id == Some(active.community_id)
                     || (appr.community_id.is_none() && active.community_id == 0))
@@ -355,14 +400,17 @@ pub async fn read_active_set(
             digest,
             component_key,
             sidecar_key,
+            artifact_signature: version_row.artifact_signature.clone(),
+            artifact_signature_key_id: version_row.artifact_signature_key_id.clone(),
+            artifact_signed_approval_id: version_row.artifact_signed_approval_id,
         });
     }
 
-    Ok(ActiveSetRead {
+    ActiveSetRead {
         rows,
         excluded,
         degraded,
-    })
+    }
 }
 
 /// Tracks the last-seen [`Watermark`] for one poller instance and decides
@@ -649,6 +697,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([Vec::<app_install_approvals::Model>::new()])
             .into_connection();
@@ -688,6 +739,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -744,6 +798,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: Some(real_component_key.clone()),
                 sidecar_key: Some(real_sidecar_key.clone()),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -767,6 +824,102 @@ mod tests {
             result.degraded.is_empty(),
             "a present component_key must never be recorded as degraded"
         );
+        Ok(())
+    }
+
+    /// Artifact-signature columns (migration `0031_bundle_artifact_
+    /// signature`) pass through `ActiveBundleRow` verbatim -- surfaced for
+    /// observability only, the authoritative check lives in
+    /// `core/bundle_executor/src/signing.rs` against the bucket sidecar
+    /// (see `entities::app_versions`'s module doc).
+    #[tokio::test]
+    async fn read_active_set_surfaces_the_artifact_signature_columns() -> Result<(), ActiveSetError>
+    {
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.test.app".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(digest),
+                scan_status: "scanned".to_string(),
+                component_key: Some("bundles/waddles.test.app/1/real.wasm".to_string()),
+                sidecar_key: Some("bundles/waddles.test.app/1/real.json".to_string()),
+                artifact_signature: Some("c2lnbmF0dXJl".to_string()),
+                artifact_signature_key_id: Some("platform-2026-09".to_string()),
+                artifact_signed_approval_id: Some(42),
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 42,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].artifact_signature.as_deref(),
+            Some("c2lnbmF0dXJl")
+        );
+        assert_eq!(
+            result.rows[0].artifact_signature_key_id.as_deref(),
+            Some("platform-2026-09")
+        );
+        assert_eq!(result.rows[0].artifact_signed_approval_id, Some(42));
+        Ok(())
+    }
+
+    /// A not-yet-signed row (pre-migration backfill, or approved before
+    /// hub-api's signing step ran) surfaces `None` for all three columns
+    /// rather than erroring or excluding the row -- `bundle_executor`'s own
+    /// sidecar-based check is what fails closed on a genuinely missing
+    /// signature, not this crate.
+    #[tokio::test]
+    async fn read_active_set_surfaces_none_when_artifact_signature_columns_are_unset(
+    ) -> Result<(), ActiveSetError> {
+        let digest = format!("sha256:{}", "e".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.test.app".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(digest),
+                scan_status: "scanned".to_string(),
+                component_key: Some("bundles/waddles.test.app/1/real.wasm".to_string()),
+                sidecar_key: Some("bundles/waddles.test.app/1/real.json".to_string()),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 1,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert_eq!(result.rows.len(), 1);
+        assert!(result.rows[0].artifact_signature.is_none());
+        assert!(result.rows[0].artifact_signature_key_id.is_none());
+        assert!(result.rows[0].artifact_signed_approval_id.is_none());
         Ok(())
     }
 
@@ -794,6 +947,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: Some(real_component_key.clone()),
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -815,6 +971,55 @@ mod tests {
         Ok(())
     }
 
+    /// Multi-tenant correctness regression: an approval row belonging to a
+    /// DIFFERENT tenant, sharing this active row's `app_id`/`version`/
+    /// community-sentinel shape, must never satisfy the approval check --
+    /// proves `assemble_active_set`'s explicit `tenant_id` comparison (added
+    /// for `crate::multi_tenant::read_active_set_all`'s unfiltered
+    /// `approval_rows`) is actually enforced, not just documented.
+    #[tokio::test]
+    async fn read_active_set_does_not_cross_match_an_approval_from_a_different_tenant(
+    ) -> Result<(), ActiveSetError> {
+        let digest = format!("sha256:{}", "9".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.shared".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.shared".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(digest),
+                scan_status: "scanned".to_string(),
+                component_key: None,
+                sidecar_key: None,
+            }]])
+            // Approval belongs to tenant 2, not tenant 1 -- same app_id/
+            // version/community sentinel otherwise.
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 1,
+                tenant_id: 2,
+                community_id: None,
+                app_id: "waddles.shared".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert!(
+            result.rows.is_empty(),
+            "a different tenant's approval must never satisfy this tenant's active row"
+        );
+        assert_eq!(
+            result.excluded,
+            vec![("waddles.shared".to_string(), ExclusionReason::NoApproval)]
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn read_active_set_excludes_a_version_missing_its_digest() -> Result<(), ActiveSetError> {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
@@ -832,6 +1037,9 @@ mod tests {
                 scan_status: "not_scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,

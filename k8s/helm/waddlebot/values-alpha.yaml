@@ -189,8 +189,18 @@ pipeline:
   #   1. global.hostApiTls real mTLS material (--set-file; no insecureDev escape hatch
   #      exists, unlike global.grpcTls);
   #   2. global.envelopeBindingKeys (kid e2e1) -- HMAC key material, secret, never committed.
+  #   3. feature/bundle-artifact-signing -- `make generate-bundle-signing-key KEY_ID=... \
+  #      KUBE_CONTEXT=local-prealpha NAMESPACE=waddlebot` BEFORE this executor starts (it
+  #      fails closed with no configured platform key, `PlatformPublicKeys::
+  #      from_cli_required`), then set pipeline.rustDataPlane.bundleSigningPublicKeys below
+  #      to the printed `key_id: public_key` pair -- see the chart README's rollout order.
   rustDataPlane:
     enabled: true
+    # OVERRIDE REQUIRED via --set/--set-file before the executor(s) will start signature
+    # verification successfully -- see the numbered comment above (item 3) and
+    # scripts/generate-bundle-signing-key.sh. Left empty here (never a real key
+    # committed): e.g. --set pipeline.rustDataPlane.bundleSigningPublicKeys.e2e1=<base64 pubkey>
+    bundleSigningPublicKeys: {}
     svcIngest:
       replicas: 1
       # kid `e2e1` -- must match a key present in global.envelopeBindingKeys (secret,
@@ -235,19 +245,17 @@ pipeline:
       processBundleVersion: "1.0.0"
       processBundleComponentKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.wasm"
       processBundleSidecarKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.json"
-      # DB-driven active-bundle loader (core/svc_process/src/config.rs,
-      # core/bundle_active_set) -- gated OFF by default (waddles.core.db-bundle-config).
-      # bundleScopeTenantId is set to 0 here (the global/default tenant) for this
-      # cluster's own scope, but the RO Postgres role (svc_process_ro) still isn't
-      # provisioned yet -- DB_READER_PASSWORD stays empty (templates/secrets.yaml
-      # default), which is `try_start_db_bundle_loader`'s own independent disable gate
-      # (core/svc_process/src/lib.rs). So PROCESS_APP_ID/PROCESS_BUNDLE_* above remain
-      # this alpha e2e proof's sole bundle source, unaffected by this block, until that
-      # role exists. Only overriding the poll interval here (tunable per deployment, per
-      # the task's own instruction) -- a shorter interval than the 300s chart default so
-      # a future alpha e2e proof of the hot-swap path itself doesn't need a
-      # multi-minute wait between DB writes and the loader noticing.
-      bundleScopeTenantId: 0
+      # Multi-tenant, change-log-driven active-bundle loader (core/svc_process/
+      # src/config.rs, core/bundle_active_set, core/svc_process/src/
+      # changelog_consumer.rs) -- the RO Postgres role (svc_process_ro) still
+      # isn't provisioned yet -- DB_READER_PASSWORD stays empty (templates/
+      # secrets.yaml default), which is `try_start_changelog_consumer`'s own
+      # independent disable gate (core/svc_process/src/lib.rs). So PROCESS_APP_ID/
+      # PROCESS_BUNDLE_* above remain this alpha e2e proof's sole bundle source,
+      # unaffected by this block, until that role exists. Only overriding the poll
+      # interval here (tunable per deployment) -- a shorter interval than the 300s
+      # chart default so a future alpha e2e proof of the hot-swap path itself
+      # doesn't need a multi-minute wait between DB writes and the loader noticing.
       bundleConfigPollSeconds: 30
       resources:
         requests: { cpu: "100m", memory: "128Mi" }
@@ -264,8 +272,7 @@ pipeline:
       actionBundleVersion: "1.0.0"
       actionBundleComponentKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.wasm"
       actionBundleSidecarKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.json"
-      # DB-driven active-bundle loader -- see svcProcess's identical comment above.
-      bundleScopeTenantId: 0
+      # Multi-tenant changelog consumer -- see svcProcess's identical comment above.
       bundleConfigPollSeconds: 30
       resources:
         requests: { cpu: "100m", memory: "128Mi" }

@@ -40,8 +40,13 @@ impl ComponentSource for FixtureSource {
         &self,
         _component_key: &str,
         _sidecar_key: &str,
-    ) -> Result<Vec<u8>, bundle_executor::error::ExecutorError> {
-        Ok(FIXTURE_WASM.to_vec())
+    ) -> Result<(Vec<u8>, Vec<u8>), bundle_executor::error::ExecutorError> {
+        // `test_config()` below sets no `bundle_signing_public_keys`, so
+        // `Executor::on_load` skips signature verification -- this `{}`
+        // stub sidecar (the same one `storage_service.
+        // upload_bundle_component()` writes before an artifact is signed)
+        // is never parsed.
+        Ok((FIXTURE_WASM.to_vec(), b"{}".to_vec()))
     }
 }
 
@@ -131,6 +136,8 @@ async fn run_fake_stage<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>
         &Frame::new(
             1000,
             Message::Load(LoadBody {
+                tenant_id: 1,
+                community_id: 0,
                 app_id: APP_ID.to_string(),
                 version: "1".to_string(),
                 digest: digest.clone(),
@@ -345,6 +352,8 @@ async fn socket_probe_completes_without_trapping_the_component() {
             &Frame::new(
                 1,
                 Message::Load(LoadBody {
+                    tenant_id: 1,
+                    community_id: 0,
                     app_id: APP_ID.to_string(),
                     version: "1".to_string(),
                     digest: digest.clone(),

@@ -658,6 +658,50 @@ pipeline:
       limits:
         cpu: "1000m"
         memory: "1Gi"
+    # feature/bundle-artifact-signing -- BUNDLE_SIGNING_PRIVATE_KEY/BUNDLE_SIGNING_KEY_ID
+    # (hub_api/services/bundle_signing_service.py) are wired via secretKeyRef against this
+    # externally-managed Secret, NEVER templated from values (the private key must never
+    # pass through `helm template`/`helm install --set`/a values file). Generate + apply
+    # with `make generate-bundle-signing-key` (scripts/generate-bundle-signing-key.sh)
+    # BEFORE deploying hub-api -- see the chart README's rollout-order section. `optional:
+    # true` on the env's secretKeyRef so hub-api still starts (approvals just fail closed
+    # per PlatformSigner.from_env()) before that script has been run once.
+    bundleSigning:
+      secretName: ""  # default: "{{ fullname }}-bundle-signing" -- computed in the template when empty
+    # One-off backfill CLI (hub_api/cli/sign_approved_bundles.py) as a Helm Job --
+    # templates/bundle-signing-backfill-job.yaml. Disabled by default: this is a deliberate
+    # rollout step (create secret -> deploy hub-api -> run this Job once -> deploy
+    # executor), not a hook that should fire on every `helm upgrade`. Flip to true for one
+    # `helm upgrade --set pipeline.hubApi.bundleSigningBackfill.enabled=true`, then back to
+    # false -- idempotent either way (module docstring), so a stray extra run is harmless.
+    bundleSigningBackfill:
+      enabled: false
+      backoffLimit: 2
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+    # MEDIUM security-review finding -- CronJob that re-uploads any missing signed bucket
+    # sidecar for a version that IS signed in Postgres (artifact_signature NOT NULL) but
+    # whose sidecar object is missing/stale (e.g. a prior upload_signed_sidecar() failure
+    # that was only ever recorded as a backfill-CLI row outcome, never retried). Runs
+    # hub_api/cli/reconcile_signed_sidecars.py on a schedule; metrics via the same
+    # bundle_telemetry meter the backfill CLI uses.
+    bundleSigningReconciler:
+      enabled: true
+      schedule: "*/30 * * * *"
+      backoffLimit: 3
+      concurrencyPolicy: Forbid
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
 
   hubWebui:
     enabled: true
@@ -779,6 +823,20 @@ pipeline:
   rustDataPlane:
     enabled: false
 
+    # feature/bundle-artifact-signing -- BUNDLE_SIGNING_PUBLIC_KEYS (core/bundle_executor/
+    # src/config.rs, core/bundle_executor/src/signing.rs::PlatformPublicKeys), shared by
+    # both bundleExecutor and bundleExecutorAction below (each executor verifies against
+    # the same platform key set regardless of which stage it dials). Map of
+    # `key_id -> base64(32-byte Ed25519 public key)` -- NOT secret (public keys), so this
+    # is safe to carry directly in values (unlike hubApi.bundleSigning's private-key
+    # secretKeyRef above). Rendered into the container env as a JSON object. Empty by
+    # default; `crate::signing::PlatformPublicKeys::from_cli_required` (the real
+    # production path, `crate::lib::run`) fails closed at startup if this is unset once
+    # `pipeline.rustDataPlane.enabled` is true -- set per-environment via
+    # values-{alpha,beta,gamma,production}.yaml once `make generate-bundle-signing-key`
+    # has printed the corresponding public key.
+    bundleSigningPublicKeys: {}
+
     svcIngest:
       enabled: true
       port: 8200
@@ -833,11 +891,12 @@ pipeline:
       # of its svc-action-rust default. Matches HOST_API_PORT's own CliConfig default
       # (core/svc_process/src/config.rs).
       hostApiPort: 8301
-      # DB-driven active-bundle loader (core/svc_process/src/config.rs,
-      # core/bundle_active_set) -- hub-api is the sole writer, this stage reads ACTIVE,
-      # APPROVED bundle config from a READ-ONLY Postgres and hot-swaps in/out with no pod
-      # restart. Gated OFF by default behind waddles.core.db-bundle-config; while off or
-      # BUNDLE_SCOPE_TENANT_ID is unset (0, "not configured"), PROCESS_APP_ID/
+      # Multi-tenant, change-log-driven active-bundle loader (core/svc_process/
+      # src/config.rs, core/bundle_active_set, core/svc_process/src/changelog_consumer.rs)
+      # -- hub-api is the sole writer, this stage reads ACTIVE, APPROVED bundle config
+      # for EVERY tenant/community from a READ-ONLY Postgres and hot-swaps in/out with
+      # no pod restart. Enabled by default; opt out via waddles.core.disable-db-bundle-config
+      # and/or waddles.core.disable-multi-tenant-watermark, in which case PROCESS_APP_ID/
       # PROCESS_BUNDLE_* above remain the sole selection mechanism -- these defaults are
       # safe to ship even before the RO Postgres role exists.
       # dbReaderHost/Port/Name default to the SAME primary Postgres alpha already runs
@@ -852,24 +911,19 @@ pipeline:
       # the exact GRANT statements this role needs; provisioning the role itself is a
       # follow-up (not a Helm change) tracked outside this chart.
       dbReaderUser: "svc_process_ro"
-      # Bug fix: left unset ("") rather than defaulted to 0 -- the Rust side
-      # (core/svc_process/src/config.rs TenantScopeId) now distinguishes "not
-      # configured" (None) from the real, legitimate global tenant `0`
-      # (Some(0)), so this chart must not collapse those two states by
-      # defaulting to 0 either. templates/svc-process-rust.yaml only renders
-      # BUNDLE_SCOPE_TENANT_ID at all when this is non-empty; the loader
-      # stays disabled (same fail-safe posture as every other interim
-      # env-driven substitute in this block) until a values file
-      # (e.g. values-alpha.yaml) sets a real tenant scope, `0` included.
-      bundleScopeTenantId: ""
-      # 0 = tenant-wide (matches app_active_versions.community_id's own sentinel,
-      # migration 0022_app_versions_and_rbac). Unlike bundleScopeTenantId above, 0
-      # really is the intended default here, so this one keeps its literal default.
-      bundleScopeCommunityId: 0
+      # BUNDLE_SCOPE_TENANT_ID/BUNDLE_SCOPE_COMMUNITY_ID REMOVED (dataplane scale
+      # design, multi-tenant change-log consumer): the loader now discovers and
+      # serves every (tenant_id, community_id) scope in the database itself
+      # (bundle_active_set::read_active_set_all) -- there is no per-pod tenant
+      # scope left to configure.
       # Whole seconds; clamped to a 5s floor in code (CliConfig::
       # bundle_config_poll_interval) so a misconfigured 0/negative value here can never
-      # hot-loop the watermark check against the reader database.
+      # hot-loop the incremental change-log poll against the reader database.
       bundleConfigPollSeconds: 300
+      # Whole minutes; clamped to a 1m floor in code (CliConfig::
+      # full_reconcile_interval). Periodic full active-set reconcile -- bounds the
+      # blast radius of any change-log defect to one interval.
+      bundleConfigFullReconcileMinutes: 15
       resources:
         requests:
           cpu: "100m"
@@ -915,11 +969,10 @@ pipeline:
       dbReaderPort: ""
       dbReaderName: ""
       dbReaderUser: "svc_action_ro"
-      # Bug fix: left unset ("") rather than defaulted to 0 -- see svcProcess's
-      # identical field's own comment above for the full rationale.
-      bundleScopeTenantId: ""
-      bundleScopeCommunityId: 0
+      # BUNDLE_SCOPE_TENANT_ID/BUNDLE_SCOPE_COMMUNITY_ID REMOVED -- see
+      # svcProcess's identical field's own comment above for the full rationale.
       bundleConfigPollSeconds: 300
+      bundleConfigFullReconcileMinutes: 15
       resources:
         requests:
           cpu: "100m"

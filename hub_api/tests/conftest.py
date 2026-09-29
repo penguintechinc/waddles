@@ -48,6 +48,7 @@ take any `AsyncDAL`-like fixture with a `.dal` attribute, not just
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 import pytest
@@ -68,6 +69,7 @@ from sqlalchemy import (
     String,
     Table,
     Text,
+    UniqueConstraint,
 )
 
 from services.schema import (
@@ -95,6 +97,51 @@ TENANT_SLUG = "acme-corp"
 
 #: Second tenant slug -- `lifecycle_db`'s cross-tenant IDOR fixture data.
 OTHER_TENANT_SLUG = "other-corp"
+
+#: Test-only Ed25519 signing seed (NEVER a real platform key) -- see
+#: `bundle_signing_test_env` below.
+_TEST_SIGNING_PRIVATE_KEY_B64 = base64.b64encode(b"t" * 32).decode("ascii")
+_TEST_SIGNING_KEY_ID = "test-key-1"
+
+
+@pytest.fixture(autouse=True)
+def bundle_signing_test_env(monkeypatch: Any) -> None:
+    """Every test gets a valid (test-only) Ed25519 artifact-signing key configured.
+
+    `bundle_approval_service.approve_version()` (spec SS5.6, artifact
+    signing) fails closed without `BUNDLE_SIGNING_PRIVATE_KEY`/
+    `BUNDLE_SIGNING_KEY_ID` set -- rather than mock signing away across
+    the ~30 existing `approve_version()`/`seed_one()` call sites in this
+    suite, this autouse fixture makes REAL Ed25519 signing happen on every
+    approval, matching this codebase's own "prove the wiring, don't fake
+    it" standard for security-sensitive code. A test specifically
+    exercising the "no key configured" failure path removes these with
+    `monkeypatch.delenv(...)` itself.
+    """
+    monkeypatch.setenv("BUNDLE_SIGNING_PRIVATE_KEY", _TEST_SIGNING_PRIVATE_KEY_B64)
+    monkeypatch.setenv("BUNDLE_SIGNING_KEY_ID", _TEST_SIGNING_KEY_ID)
+
+
+@pytest.fixture(autouse=True)
+def bundle_signing_sidecar_upload_mock(monkeypatch: Any) -> Any:
+    """Stubs `storage_service.write_bundle_sidecar()` so no test hits a real MinIO/S3 endpoint.
+
+    `approve_version()`'s new post-commit signed-sidecar upload
+    (`bundle_signing_service.upload_signed_sidecar()`) would otherwise
+    reach out for real -- mirrors `test_bundle_version_service.py`'s own
+    `monkeypatch.setattr(svc.storage_service, "upload_bundle_component",
+    ...)` pattern for the same reason. Returns the `AsyncMock` so a test
+    that specifically wants to assert the upload happened (call count/
+    args) can import this fixture and inspect it, or override it again
+    with its own `monkeypatch.setattr` for a real-upload/failure-path test.
+    """
+    from unittest.mock import AsyncMock
+
+    from services import storage_service
+
+    mock = AsyncMock(return_value="bundles/mock/1/mock.json")
+    monkeypatch.setattr(storage_service, "write_bundle_sidecar", mock)
+    return mock
 
 
 @pytest.fixture
@@ -1261,6 +1308,17 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("enabled", Boolean, server_default="1"),
         Column("created_at", DateTime),
         Column("updated_at", DateTime),
+        # Mirrors migration 0020's real `UNIQUE (tenant_id, platform,
+        # source_id)` -- this sqlite fixture previously omitted it (every
+        # other column-set-only table mirror in this function does too), but
+        # services/ingest_source_registry_service.py's `create_ingest_source`
+        # specifically depends on this constraint firing (caught as
+        # `IntegrityError`, surfaced as a documented 409) for its own
+        # "same source, second community of one tenant" gap -- untestable
+        # without it. Every existing seeder in this file already uses
+        # distinct `source_id` values per tenant/platform, so adding it here
+        # doesn't perturb any other test.
+        UniqueConstraint("tenant_id", "platform", "source_id"),
     )
     Table(
         "workstreams",
@@ -1328,6 +1386,13 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("license", String(50)),
         Column("license_review_required", Boolean, server_default="0"),
         Column("source_url", Text),
+        # migration 0031 -- artifact signing (spec SS5.6/Gemini review
+        # condition 9), written by bundle_signing_service.py at approval
+        # time (bundle_approval_service._write_approval_and_activate()).
+        Column("artifact_signature", Text),
+        Column("artifact_signature_key_id", String(100)),
+        Column("artifact_signed_approval_id", BigInteger),
+        Column("artifact_signed_at", DateTime),
     )
     Table(
         "app_active_versions",

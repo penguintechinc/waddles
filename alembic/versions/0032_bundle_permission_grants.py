@@ -42,7 +42,7 @@ follow-up rebase/renumbering commit will retarget `down_revision` to
 own description.
 
 Revision ID: 0032_bundle_permission_grants
-Revises: 0030_bundle_app_schemas
+Revises: 0031_bundle_artifact_signature
 Create Date: 2026-09-28
 """
 
@@ -56,7 +56,7 @@ from pathlib import Path
 from alembic import op
 
 revision = "0032_bundle_permission_grants"
-down_revision = "0030_bundle_app_schemas"
+down_revision = "0031_bundle_artifact_signature"
 branch_labels = None
 depends_on = None
 

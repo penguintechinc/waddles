@@ -96,6 +96,22 @@ pub struct CliConfig {
     #[arg(long, env = "HOST_API_CA_FILE")]
     pub host_api_ca_file: Option<PathBuf>,
 
+    /// The stage's expected peer identity (gh security review CRITICAL
+    /// finding on PR #406, item 1) -- a SPIFFE URI SAN (e.g.
+    /// `spiffe://penguintech.io/beta/svc-process`) or, if none is
+    /// configured on the stage's certificate yet, its DNS SAN/CN. Standard
+    /// TLS chain+hostname verification alone (`crate::tls::
+    /// build_client_config`'s base behavior) proves "issued by our CA for
+    /// this DNS name"; this additionally pins WHICH exact service identity
+    /// this executor will accept `load`/`unload`/`invoke` commands from --
+    /// spec SS6.6's "otherwise pinned by configuration" requirement.
+    /// `validate()` requires this in production; `crate::tls::
+    /// build_client_config` falls back to base verification only (no
+    /// identity pinning) when unset, which every existing test that
+    /// doesn't exercise pinning relies on.
+    #[arg(long, env = "HOST_API_STAGE_IDENTITY")]
+    pub host_api_stage_identity: Option<String>,
+
     /// S3-compatible bucket endpoint bundle components are fetched from,
     /// e.g. `http://minio.waddles.svc.cluster.local:9000` (spec SS7.6/
     /// SS12.7). `Option` (rather than a required arg) so every existing
@@ -147,6 +163,22 @@ pub struct CliConfig {
     /// unbounded misconfiguration- or compromise-controlled data.
     #[arg(long, env = "BUNDLE_MAX_COMPONENT_BYTES", default_value_t = 33_554_432)]
     pub bundle_max_component_bytes: u64,
+
+    /// JSON object mapping `key_id -> base64(32-byte Ed25519 public key)`
+    /// (spec SS5.6/Gemini condition 9) -- the platform key(s)
+    /// `crate::signing::verify_artifact_signature` checks a bundle's
+    /// signed sidecar against, supporting rotation via multiple entries.
+    /// `Option` (rather than required) for the same reason
+    /// `bundle_bucket_endpoint` is: every existing test's `CliConfig`
+    /// fixture keeps parsing without setting it, and `crate::invoke::
+    /// Executor::new` treats an unset/blank value as "verification off"
+    /// (`crate::signing::PlatformPublicKeys::from_cli`) -- but the real
+    /// production path (`crate::lib::run`, via `PlatformPublicKeys::
+    /// from_cli_required`) fails closed at startup if it's unset, so that
+    /// "off" state is never reachable outside a test that never claimed
+    /// to enforce signatures in the first place.
+    #[arg(long, env = "BUNDLE_SIGNING_PUBLIC_KEYS")]
+    pub bundle_signing_public_keys: Option<String>,
 }
 
 impl CliConfig {
@@ -172,6 +204,7 @@ impl CliConfig {
             host_api_client_cert_file: None,
             host_api_client_key_file: None,
             host_api_ca_file: None,
+            host_api_stage_identity: None,
             bundle_bucket_endpoint: None,
             bundle_bucket_name: None,
             bundle_bucket_region: "us-east-1".to_string(),
@@ -180,6 +213,7 @@ impl CliConfig {
             bundle_bucket_ca_file: None,
             bundle_fetch_timeout_s: 30,
             bundle_max_component_bytes: 33_554_432,
+            bundle_signing_public_keys: None,
         }
     }
 
@@ -218,6 +252,47 @@ impl CliConfig {
         }
         Ok(())
     }
+
+    /// Validates that the host-API mutual-TLS material is fully configured
+    /// (gh security review CRITICAL finding on PR #406, item 1) -- called
+    /// by `crate::run` immediately before ever dialing the stage, kept
+    /// SEPARATE from [`Self::validate`] rather than folded into it: this
+    /// crate's own healthcheck path (`for_healthcheck`, `run_healthcheck`)
+    /// builds a real `Engine`/`Linker` but never dials the stage at all, so
+    /// it has no TLS material to validate and must keep calling the general
+    /// [`Self::validate`] successfully; the narrower host-API tests in
+    /// `crate::tls`/`crate::wire` likewise construct a `CliConfig` directly
+    /// without either validation call by design.
+    pub fn validate_host_api_tls(&self) -> Result<(), ExecutorError> {
+        if self.host_api_ca_file.is_none() {
+            return Err(ExecutorError::Config(
+                "HOST_API_CA_FILE is required -- the host-API connection must verify the \
+                 stage's certificate against a configured CA, never the public trust store"
+                    .to_string(),
+            ));
+        }
+        if self.host_api_client_cert_file.is_none() || self.host_api_client_key_file.is_none() {
+            return Err(ExecutorError::Config(
+                "HOST_API_CLIENT_CERT_FILE and HOST_API_CLIENT_KEY_FILE are both required -- \
+                 mutual TLS (this executor presenting its own client certificate) is mandatory, \
+                 never optional, for the host-API connection"
+                    .to_string(),
+            ));
+        }
+        if self
+            .host_api_stage_identity
+            .as_deref()
+            .is_none_or(str::is_empty)
+        {
+            return Err(ExecutorError::Config(
+                "HOST_API_STAGE_IDENTITY is required -- the stage's certificate must be pinned \
+                 to an explicit expected identity (SPIFFE URI SAN or CN), not merely \"chains to \
+                 the configured CA\""
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -236,6 +311,7 @@ mod tests {
         assert_eq!(cfg.bundle_bucket_region, "us-east-1");
         assert_eq!(cfg.bundle_fetch_timeout_s, 30);
         assert_eq!(cfg.bundle_max_component_bytes, 33_554_432);
+        assert!(cfg.bundle_signing_public_keys.is_none());
         Ok(())
     }
 
@@ -251,6 +327,20 @@ mod tests {
         assert!(cfg.bundle_bucket_secret_access_key.is_none());
         assert!(cfg.bundle_bucket_ca_file.is_none());
         assert_eq!(cfg.bundle_bucket_region, "us-east-1");
+        assert!(cfg.bundle_signing_public_keys.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn bundle_signing_public_keys_parses_from_its_env_flag(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut args = base_args();
+        args.extend_from_slice(&["--bundle-signing-public-keys", r#"{"k1":"AAAA"}"#]);
+        let cfg = CliConfig::try_parse_from(args)?;
+        assert_eq!(
+            cfg.bundle_signing_public_keys.as_deref(),
+            Some(r#"{"k1":"AAAA"}"#)
+        );
         Ok(())
     }
 

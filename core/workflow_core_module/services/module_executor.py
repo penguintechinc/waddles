@@ -25,8 +25,8 @@ from dataclasses import dataclass
 import aiohttp
 import grpc
 
-from ..config import Config
-from ..models.execution import ExecutionContext
+from config import Config
+from models.execution import ExecutionContext
 
 logger = logging.getLogger(__name__)
 

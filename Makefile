@@ -1,7 +1,7 @@
 .PHONY: dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
-        verify-csping-fixture
+        verify-csping-fixture generate-bundle-signing-key verify-ping-bundle-reproducible
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -79,6 +79,16 @@ deploy-dev:
 deploy-prod:
 	$(error deploy-prod requires CI — tag a release to trigger the production pipeline)
 
+# Generates a fresh Ed25519 platform bundle-signing keypair and creates/updates the
+# BUNDLE_SIGNING_PRIVATE_KEY/BUNDLE_SIGNING_KEY_ID Secret hub-api reads -- see
+# scripts/generate-bundle-signing-key.sh and the chart README's rollout-order section.
+# Usage: make generate-bundle-signing-key KEY_ID=2026-09-key1 KUBE_CONTEXT=dal2-beta NAMESPACE=waddlebot
+generate-bundle-signing-key:
+	@test -n "$(KEY_ID)" || { echo "KEY_ID is required" >&2; exit 1; }
+	@test -n "$(KUBE_CONTEXT)" || { echo "KUBE_CONTEXT is required" >&2; exit 1; }
+	@test -n "$(NAMESPACE)" || { echo "NAMESPACE is required" >&2; exit 1; }
+	@bash scripts/generate-bundle-signing-key.sh "$(KEY_ID)" "$(KUBE_CONTEXT)" "$(NAMESPACE)" $(SECRET_NAME)
+
 run-ai-local: ## Run ai_interaction_module container locally (standalone, 1 worker)
 	docker build -f action/interactive/ai_interaction_module/Dockerfile -t waddlebot/ai-interaction:local . && \
 	docker run --rm \
@@ -96,6 +106,12 @@ run-ai-local: ## Run ai_interaction_module container locally (standalone, 1 work
 # committed binary auditable instead of a trust-me blob.
 verify-csping-fixture:
 	@bash scripts/verify-csping-fixture.sh
+
+# Proves bundles/rust/ping's WASI 0.2 component build (bundles/Dockerfile.core-bundles's
+# rust-bundle-builder stage) is byte-reproducible -- two independent --no-cache builds must
+# produce an identical sha256. See scripts/verify-ping-bundle-reproducible.sh for why.
+verify-ping-bundle-reproducible:
+	@bash scripts/verify-ping-bundle-reproducible.sh
 
 pre-commit:
 	@echo "=== Pre-commit checks ==="

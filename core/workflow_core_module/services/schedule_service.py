@@ -927,7 +927,15 @@ class ScheduleService:
             if not row:
                 return
 
-            context_data = json.loads(row[0][2]) if row[0][2] else {}
+            # Query selects (context_data, execution_count, max_executions) in
+            # that order -- this read `row[0][2]` (max_executions, an int)
+            # for context_data instead of `row[0][0]`, so `json.loads()`
+            # raised TypeError ("must be str, bytes or bytearray, not int")
+            # on every APScheduler-triggered execution of any cron/interval
+            # schedule with `max_executions` set, silently swallowed by the
+            # except block below -- the workflow simply never ran. Undetected
+            # because this file had 0% test coverage.
+            context_data = json.loads(row[0][0]) if row[0][0] else {}
             exec_count = row[0][1]
             max_execs = row[0][2]
 
