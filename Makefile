@@ -115,7 +115,8 @@ generate-minio-kms-key:
 # own "*-rust" repositories), then `helm upgrade --install` with only the image tag set --
 # no secret/TLS material, ever: k8s/helm/waddlebot self-provisions everything alpha needs
 # (fix/helm-alpha-self-provisioning). Waits on migrations + rollout, re-runs the seeder,
-# verifies. Requires kube context local-alpha. Usage: make alpha-deploy [ARGS="--skip-build"]
+# verifies. Requires kube context local-alpha or microk8s (validated by the script,
+# rejects any other KUBE_CONTEXT before build/push/helm run). Usage: make alpha-deploy [ARGS="--skip-build"]
 alpha-deploy:
 	@bash scripts/alpha-deploy.sh $(ARGS)
 

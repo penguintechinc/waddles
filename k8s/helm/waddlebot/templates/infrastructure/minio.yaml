@@ -29,6 +29,20 @@ spec:
 ---
 # MinIO bucket initialization Job (creates bucketName if it doesn't exist)
 # MinIO License: AGPL-3.0 — self-hosted object store, not linked into our code
+#
+# fix/helm-apply-errors -- was previously a plain (non-hook) Job, which made every
+# `helm upgrade` fail with "field is immutable" once the Job existed from an earlier
+# release (Job.spec.template is immutable in-place). post-install/post-upgrade hook +
+# before-hook-creation delete policy makes this idempotent across installs/upgrades:
+# Helm deletes the prior run's Job (delete has no immutability restriction, unlike
+# update) before creating the fresh one. post- (not pre-) hook because this Job talks
+# to the MinIO Service over the network (`mc alias set`/`mc mb`) -- it needs the
+# regular MinIO Deployment/Service/PVC above already created, which post-install/
+# post-upgrade guarantees (Helm finishes creating every regular resource before the
+# post-* hook phase starts); backoffLimit below covers the transient case where the
+# MinIO pod is created but not yet Ready. Weight "1" runs it before
+# core-bundle-seeder-job.yaml's weight "5" in case seeded bundles ever need the
+# buckets to exist first.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -39,6 +53,10 @@ metadata:
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: storage-init
     app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 3
   template:

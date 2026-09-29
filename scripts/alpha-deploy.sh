@@ -8,6 +8,12 @@
 # release/v3.0.X SHA you want deployed -- never from the main checkout, which
 # may carry stale/unrelated branches (see mem0 "waddles k8s-ops" notes).
 #
+# fix/alpha-deploy-context-allowlist -- KUBE_CONTEXT is validated against an
+# allowlist (local-alpha, microk8s) before any build/push/helm step runs.
+# values-alpha.yaml auto-generates secrets on upgrade; running this against a
+# shared/non-alpha context (e.g. dal2-beta) would silently provision throwaway
+# secrets there. See the validation block below.
+#
 # fix/helm-alpha-self-provisioning -- this script NEVER generates or rotates
 # any secret material. `helm upgrade -f values-alpha.yaml` is self-sufficient
 # on its own now: every platform Secret (minio-kms, tenant-kek, bundle-signing,
@@ -27,9 +33,11 @@
 # --skip-build   Reuse whatever is already pushed under the current HEAD's
 #                sha8 tag (skips the build+push step).
 #
-# Requires: docker, kubectl, helm. Kube context local-alpha. bash 3.2
-# compatible (no associative arrays, no `mapfile`, no `&>>`) -- macOS ships
-# bash 3.2 as /bin/bash and this script must run there unmodified.
+# Requires: docker, kubectl, helm. Kube context must be local-alpha or
+# microk8s (validated below; KUBE_CONTEXT set to anything else is rejected
+# before any build/push/helm step). bash 3.2 compatible (no associative
+# arrays, no `mapfile`, no `&>>`) -- macOS ships bash 3.2 as /bin/bash and
+# this script must run there unmodified.
 
 set -euo pipefail
 
@@ -37,12 +45,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 readonly SCRIPT_DIR PROJECT_ROOT
 
-KUBE_CONTEXT="${KUBE_CONTEXT:-local-alpha}"
 NAMESPACE="${NAMESPACE:-waddlebot}"
 RELEASE="${RELEASE:-waddlebot}"
 HELM_CHART="${HELM_CHART:-k8s/helm/waddlebot}"
 REGISTRY="${REGISTRY:-localhost:32000/waddlebot}"
-readonly KUBE_CONTEXT NAMESPACE RELEASE HELM_CHART REGISTRY
+readonly NAMESPACE RELEASE HELM_CHART REGISTRY
 
 SKIP_BUILD=false
 for arg in "$@"; do
@@ -54,6 +61,34 @@ done
 
 info() { echo "[INFO] $*"; }
 err()  { echo "[ERROR] $*" >&2; }
+
+# ---------------------------------------------------------------------------
+# KUBE_CONTEXT allowlist -- alpha-deploy.sh may only ever target local-alpha
+# or microk8s. values-alpha.yaml auto-generates platform secrets on upgrade;
+# pointing this script at a shared/non-alpha context (e.g. `KUBE_CONTEXT=
+# dal2-beta make alpha-deploy`) would silently provision throwaway secrets
+# there. This check runs before any build, push, or helm step.
+# ---------------------------------------------------------------------------
+is_allowed_kube_context() {
+    case "$1" in
+        local-alpha|microk8s) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [[ -n "${KUBE_CONTEXT:-}" ]]; then
+    if ! is_allowed_kube_context "${KUBE_CONTEXT}"; then
+        err "KUBE_CONTEXT='${KUBE_CONTEXT}' is not allowed. alpha-deploy.sh may only target: local-alpha microk8s"
+        exit 1
+    fi
+else
+    KUBE_CONTEXT="$(kubectl config current-context)"
+    if ! is_allowed_kube_context "${KUBE_CONTEXT}"; then
+        err "current kubectl context '${KUBE_CONTEXT}' is not allowed. alpha-deploy.sh may only target: local-alpha microk8s. Set KUBE_CONTEXT explicitly to one of these."
+        exit 1
+    fi
+fi
+readonly KUBE_CONTEXT
 
 cd "${PROJECT_ROOT}"
 
