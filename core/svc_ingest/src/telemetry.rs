@@ -123,6 +123,15 @@ pub struct IngestMetrics {
     /// (load/latency histograms first, not just a counter).
     pub eventsub_request_duration_seconds: prometheus::HistogramVec,
     pub receiver_connection_healthy: prometheus::IntGaugeVec,
+    /// #500 guild-pairing routing resolution latency (`crate::routing`),
+    /// labeled by platform and outcome (`resolved`/`fail_closed`) --
+    /// `rules/critical-rules.md` Observability's "histograms for
+    /// load/latency first" applied to the new resolution path.
+    pub guild_routing_resolution_seconds: prometheus::HistogramVec,
+    /// #500 guild-pairing fail-closed resolutions, labeled by platform and
+    /// `crate::routing::RouteError::reason()` -- never a broadcast
+    /// fallback, always a drop; this is the metric proving that.
+    pub guild_routing_fail_closed_total: prometheus::IntCounterVec,
 }
 
 /// Registers this service's ingest-path metrics against `registry`. Must be
@@ -217,6 +226,31 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         .register(Box::new(receiver_connection_healthy.clone()))
         .expect("register svc_ingest_receiver_connection_healthy");
 
+    let guild_routing_resolution_seconds = prometheus::HistogramVec::new(
+        prometheus::HistogramOpts::new(
+            "svc_ingest_guild_routing_resolution_seconds",
+            "#500 guild<->community routing resolution latency in seconds, labeled by platform/outcome",
+        ),
+        &["platform", "outcome"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(guild_routing_resolution_seconds.clone()))
+        .expect("register svc_ingest_guild_routing_resolution_seconds");
+
+    let guild_routing_fail_closed_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_ingest_guild_routing_fail_closed_total",
+            "#500 guild<->community routing resolutions that failed closed (dropped, never broadcast), \
+             labeled by platform and RouteError::reason()",
+        ),
+        &["platform", "reason"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(guild_routing_fail_closed_total.clone()))
+        .expect("register svc_ingest_guild_routing_fail_closed_total");
+
     IngestMetrics {
         events_published_total,
         publish_errors_total,
@@ -225,6 +259,8 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         eventsub_dedup_hits_total,
         eventsub_request_duration_seconds,
         receiver_connection_healthy,
+        guild_routing_resolution_seconds,
+        guild_routing_fail_closed_total,
     }
 }
 
@@ -240,6 +276,28 @@ impl IngestMetrics {
     /// Records one Twitch EventSub duplicate-message-id rejection.
     pub fn record_eventsub_dedup_hit(&self) {
         self.eventsub_dedup_hits_total.inc();
+    }
+
+    /// Records one #500 guild-pairing routing resolution outcome --
+    /// `crate::routing::GuildRouter::resolve`'s caller. `outcome` is
+    /// `"resolved"` or `"fail_closed"`; on `fail_closed`, `reason` must be
+    /// `Some(RouteError::reason())` so [`Self::guild_routing_fail_closed_total`]
+    /// is incremented too.
+    pub fn record_guild_routing_resolution(
+        &self,
+        platform: &str,
+        elapsed_seconds: f64,
+        outcome: &str,
+        reason: Option<&str>,
+    ) {
+        self.guild_routing_resolution_seconds
+            .with_label_values(&[platform, outcome])
+            .observe(elapsed_seconds);
+        if let Some(reason) = reason {
+            self.guild_routing_fail_closed_total
+                .with_label_values(&[platform, reason])
+                .inc();
+        }
     }
 
     /// Observes one Twitch EventSub webhook handler's end-to-end latency,
