@@ -19,6 +19,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from flask_core.app_manifest import KNOWN_MODULES
+from flask_core.bundle_attribution import (
+    MARKETPLACE_CATEGORIES,
+    is_https_url,
+    is_known_spdx,
+    license_requires_review,
+    valid_alternative_to_entry,
+    valid_notice,
+)
 
 _SEGMENT = r"[a-z0-9][a-z0-9_-]*"
 _APP_ID_RE = re.compile(rf"^waddles\.{_SEGMENT}\.{_SEGMENT}\.{_SEGMENT}$")
@@ -102,6 +110,20 @@ class BundleManifestV2:
     permissions: tuple[str, ...]
     routes_to: tuple[str, ...]
     consumes: tuple[ConsumeRule, ...]
+    # Attribution/marketplace metadata (migration 0026) -- defaulted so
+    # every pre-existing direct `BundleManifestV2(...)` construction site
+    # (test fixtures building one by hand, not through `parse_bundle_
+    # manifest_v2`) keeps working unchanged; `parse_bundle_manifest_v2` and
+    # `bundle_approval_service._reparse_trusted` both always pass these
+    # explicitly.
+    author: str | None = None
+    license: str | None = None
+    license_requires_review: bool = False
+    source_url: str | None = None
+    alternative_to: tuple[str, ...] = ()
+    homepage_url: str | None = None
+    notice: str | None = None
+    category: str | None = None
 
 
 def _require(condition: bool, reason: str, detail: str) -> None:
@@ -225,6 +247,66 @@ def parse_bundle_manifest_v2(
     if raw["artifact"] == "prebuilt":
         _require(allow_prebuilt, "prebuilt_not_allowed", "bundles.allow_prebuilt is false")
 
+    # Attribution/marketplace metadata (optional for a first-party
+    # `builtin` bundle; mandatory for a `thirdparty` -- i.e. vendor --
+    # bundle, per house supply-chain policy: a vendor port must be
+    # credited and its license terms known before it is ever onboarded).
+    is_vendor_bundle = raw["provider"] == "thirdparty"
+    author = raw.get("author")
+    _require(
+        bool(author) or not is_vendor_bundle,
+        "vendor_author_required",
+        "author is required for provider: thirdparty (vendor) bundles",
+    )
+    license_id = raw.get("license")
+    _require(
+        bool(license_id) or not is_vendor_bundle,
+        "vendor_license_required",
+        "license is required for provider: thirdparty (vendor) bundles",
+    )
+    requires_review = False
+    if license_id:
+        _require(
+            is_known_spdx(license_id),
+            "unknown_spdx_license",
+            f"{license_id!r} is not an allowlisted SPDX identifier",
+        )
+        requires_review = license_requires_review(license_id)
+
+    source_url = raw.get("source_url")
+    if source_url is not None:
+        _require(
+            is_https_url(source_url),
+            "invalid_source_url",
+            f"{source_url!r} must be an https:// URL",
+        )
+
+    homepage_url = raw.get("homepage_url")
+    if homepage_url is not None:
+        _require(
+            is_https_url(homepage_url),
+            "invalid_homepage_url",
+            f"{homepage_url!r} must be an https:// URL",
+        )
+
+    alternative_to = tuple(raw.get("alternative_to") or [])
+    for entry in alternative_to:
+        _require(valid_alternative_to_entry(entry), "invalid_alternative_to", f"{entry!r}")
+
+    notice = raw.get("notice")
+    if notice is not None:
+        _require(
+            valid_notice(notice), "invalid_notice", "notice must be non-empty and <=10000 chars"
+        )
+
+    category = raw.get("category")
+    if category is not None:
+        _require(
+            category in MARKETPLACE_CATEGORIES,
+            "invalid_category",
+            f"{category!r} is not one of {sorted(MARKETPLACE_CATEGORIES)}",
+        )
+
     stages = raw["stages"]
     _require(bool(stages), "no_stages_declared", "stages must be non-empty")
     _require(
@@ -300,4 +382,12 @@ def parse_bundle_manifest_v2(
         permissions=tuple(raw.get("permissions") or []),
         routes_to=tuple(raw.get("routes_to") or []),
         consumes=consumes,
+        author=author,
+        license=license_id,
+        license_requires_review=requires_review,
+        source_url=source_url,
+        alternative_to=alternative_to,
+        homepage_url=homepage_url,
+        notice=notice,
+        category=category,
     )

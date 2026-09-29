@@ -1,0 +1,85 @@
+# feature/helm-auto-provision-keys -- least-privilege identity for
+# auto-provisioned-keys-job.yaml. Namespaced Role (never ClusterRole) scoped to exactly
+# the four object names this Job ever touches. RBAC has no `resourceNames` support for
+# the `create` verb (a Kubernetes API limitation, not a gap in this Role) -- `get`/
+# `patch`/`delete` ARE name-restricted below, so the only privilege this identity has
+# beyond "the four named objects" is the ability to *create* a Secret/ConfigMap by any
+# name; the Job's own script (not RBAC) is what keeps that to exactly these four names.
+# No other verb (list/watch/update on arbitrary objects, anything cluster-scoped) is
+# granted. This ServiceAccount is never mounted into any other pod.
+#
+# fix/helm-hook-rbac-ordering -- this RBAC bundle MUST itself be a pre-install/
+# pre-upgrade hook, at a LOWER weight (-10) than auto-provisioned-keys-job.yaml's Job
+# (-6). Helm always finishes the pre-* hook phase in ascending weight order BEFORE
+# applying any regular (non-hook) resource -- so on a true first install (or the first
+# upgrade that introduces this Job), a plain/regular SA here would not exist yet when
+# the Job's pod is admitted, and the ServiceAccount admission controller rejects the
+# pod with "serviceaccounts ... not found" until activeDeadlineSeconds kills the Job.
+# That was the confirmed live-alpha bug this fixes. Delete-policy is
+# before-hook-creation ONLY (never hook-succeeded): hook-succeeded would delete this
+# RBAC immediately after the Job's own pod exits successfully, which is fine for this
+# Job's single run, but before-hook-creation is what actually matters -- it guarantees
+# a stale copy from a previous (possibly failed) release is replaced automatically the
+# next time this hook fires, so nobody ever has to `kubectl delete` it by hand.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-auto-provision-keys
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-provision-keys
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-auto-provision-keys
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-provision-keys
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+rules:
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames:
+      - {{ .Values.autoProvisionedKeys.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
+      - {{ .Values.autoProvisionedKeys.serviceJwt.secretName }}
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames:
+      - {{ .Values.autoProvisionedKeys.bundleSigning.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" (include "waddlebot.fullname" .)) }}
+      - {{ .Values.autoProvisionedKeys.serviceJwt.publicKeyConfigMapName | default (printf "%s-service-jwt-public" (include "waddlebot.fullname" .)) }}
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-auto-provision-keys
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-provision-keys
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "waddlebot.fullname" . }}-auto-provision-keys
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "waddlebot.fullname" . }}-auto-provision-keys
+    namespace: {{ .Values.namespace }}

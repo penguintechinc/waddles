@@ -25,6 +25,22 @@ metadata:
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "-5"
+    # fix/helm-hook-rbac-ordering -- serviceAccountName below is now the dedicated
+    # {{ include "waddlebot.fullname" . }}-db-migrate hook SA (migrations-job-rbac.yaml,
+    # weight -10), not the shared "waddlebot" SA -- see that file for why the shared SA
+    # was an ordering bug here too.
+    #
+    # fix/helm-migrations-fresh-install -- envFrom below now pulls the dedicated
+    # {{ include "waddlebot.fullname" . }}-db-migrate-secret hook Secret (templates/
+    # secrets.yaml, weight -10), not the shared waddlebot-secrets Secret. That Secret is
+    # a plain/regular resource consumed by ~20 other Deployments -- Helm applies regular
+    # resources only AFTER every pre-install/pre-upgrade hook has run, so it was never
+    # guaranteed to exist yet when this Job's pod is admitted on a true first install
+    # (CreateContainerConfigError). The dedicated hook Secret carries only DATABASE_URL,
+    # the one value this image's entrypoint (migrations/run-alembic.sh, alembic/env.py)
+    # actually reads, and is guaranteed to derive the identical DB password as
+    # waddlebot-secrets -- see secrets.yaml's comment on that Secret for the
+    # no-divergence guarantee.
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 3
@@ -36,7 +52,7 @@ spec:
         app.kubernetes.io/component: db-migrate
     spec:
       restartPolicy: Never
-      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      serviceAccountName: {{ include "waddlebot.fullname" . }}-db-migrate
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -66,7 +82,7 @@ spec:
           {{- toYaml .Values.securityContext | nindent 10 }}
         envFrom:
         - secretRef:
-            name: {{ include "waddlebot.fullname" . }}-secrets
+            name: {{ include "waddlebot.fullname" . }}-db-migrate-secret
         resources:
           {{- toYaml .Values.pipeline.migrationsJob.resources | nindent 10 }}
         volumeMounts:
