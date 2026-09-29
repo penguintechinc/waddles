@@ -142,6 +142,38 @@ fn extract_http_host(args: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// Classifies an extracted `http.send` host into the specific
+/// [`PermissionId`] family `bundle_capability_gate`'s catalog actually
+/// grants against (`NetHttpFqdn`/`NetHttpPublicIp`/`NetHttpPrivateIp`) --
+/// a literal IP address is classified directly (no DNS lookup, since only
+/// literal-IP syntax can be classified without one); anything else is a
+/// hostname, gated as `NetHttpFqdn`. This is a permission-family choice,
+/// NOT the SSRF wall itself -- `crate::egress::EgressGuard::send`'s own
+/// resolved-IP `is_forbidden_address` check remains the authoritative
+/// defense against a hostname that DNS-resolves to a private address; a
+/// bundle merely holding `net.http.fqdn` never bypasses that downstream
+/// check.
+fn classify_net_http_permission(host: &str) -> PermissionId {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            if v4.is_private() || v4.is_loopback() || v4.is_link_local() {
+                PermissionId::NetHttpPrivateIp(host.to_string())
+            } else {
+                PermissionId::NetHttpPublicIp(host.to_string())
+            }
+        }
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let is_unique_local = (v6.segments()[0] & 0xfe00) == 0xfc00;
+            if v6.is_loopback() || v6.is_unicast_link_local() || is_unique_local {
+                PermissionId::NetHttpPrivateIp(host.to_string())
+            } else {
+                PermissionId::NetHttpPublicIp(host.to_string())
+            }
+        }
+        Err(_) => PermissionId::NetHttpFqdn(host.to_string()),
+    }
+}
+
 /// Answers one `host-call` for a given `capability`/`op`, scoped to the
 /// invoke it happened during. Object-safe (a manually-boxed future rather
 /// than `async fn` in a trait) so the host-API connection can hold
@@ -860,7 +892,7 @@ impl<Q: RelayQueue, K: KvBackend> CapabilityHandler for StageCapabilities<Q, K> 
                     self.gate
                         .authorize(
                             &scope.gate_scope(),
-                            PermissionId::NetHttp(host),
+                            classify_net_http_permission(&host),
                             ResourceRef::AppScoped(AppScopedResource::None),
                         )
                         .map_err(denied_from_gate)?;
@@ -1108,7 +1140,7 @@ mod tests {
                 "storage.kv",
                 "chat.send:twitch",
                 "chat.send:discord",
-                "net.http:example.com",
+                "net.http.fqdn:example.com",
                 "storage.tables",
                 "flags.read",
             ] {
@@ -1137,6 +1169,7 @@ mod tests {
             Arc::new(snapshot),
             Arc::new(bundle_capability_gate::InMemoryMembership::new()),
             Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
         ))
     }
 
@@ -1147,6 +1180,7 @@ mod tests {
             Arc::new(bundle_capability_gate::InMemoryGrantSnapshot::new()),
             Arc::new(bundle_capability_gate::InMemoryMembership::new()),
             Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
         ))
     }
 
@@ -2173,6 +2207,7 @@ mod tests {
             Arc::new(snapshot),
             Arc::new(bundle_capability_gate::InMemoryMembership::new()),
             Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
         ));
         let caps = StageCapabilities::new(
             FakeRelayQueue::default(),
@@ -2226,6 +2261,7 @@ mod tests {
             cache.clone(),
             Arc::new(bundle_capability_gate::InMemoryMembership::new()),
             Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
         ));
         let caps = StageCapabilities::new(
             FakeRelayQueue::default(),

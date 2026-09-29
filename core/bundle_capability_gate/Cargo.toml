@@ -17,7 +17,10 @@ path = "src/lib.rs"
 [dependencies]
 thiserror = "=2.0.20"
 tracing = "=0.1.44"
-serde = { version = "=1.0.229", features = ["derive"] }
+# `GrantedPermission.params`/`AuthorizedCall.params` are opaque
+# `serde_json::Value` -- this crate never derives `Serialize`/`Deserialize`
+# on its own types, so the plain `serde` crate (as opposed to `serde_json`,
+# which vendors what it needs) is not a direct dependency.
 serde_json = "=1.0.151"
 # `target_user` (ReputationScoped) and canonical Waddles user ids (spec
 # SS10.1) are always UUIDs, never a platform handle. Same feature set

@@ -77,8 +77,11 @@ pub enum InvokeError {
 /// `loaded` reply (spec §6.6). A real, fully-wired wrapper around
 /// [`Connection::request`] -- see the module doc for what remains a seam
 /// (deciding *when*/*which* digest to load).
+#[allow(clippy::too_many_arguments)]
 pub async fn ensure_loaded(
     conn: &Connection,
+    tenant_id: i32,
+    community_id: i32,
     app_id: &str,
     version: &str,
     digest: &str,
@@ -88,6 +91,8 @@ pub async fn ensure_loaded(
 ) -> Result<LoadedBody, InvokeError> {
     let reply = conn
         .request(Message::Load(LoadBody {
+            tenant_id,
+            community_id,
             app_id: app_id.to_string(),
             version: version.to_string(),
             digest: digest.to_string(),
@@ -121,11 +126,15 @@ pub async fn ensure_loaded(
 /// freshly-read DB value that might already differ.
 pub async fn ensure_unloaded(
     conn: &Connection,
+    tenant_id: i32,
+    community_id: i32,
     app_id: &str,
     digest: &str,
 ) -> Result<UnloadedBody, InvokeError> {
     let reply = conn
         .request(Message::Unload(UnloadBody {
+            tenant_id,
+            community_id,
             app_id: app_id.to_string(),
             digest: digest.to_string(),
         }))
@@ -1737,6 +1746,8 @@ mod tests {
 
         let loaded = ensure_loaded(
             &connection,
+            1,
+            0,
             "waddles.bot.commands.default",
             "1",
             "sha256:00",

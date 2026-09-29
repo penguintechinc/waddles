@@ -429,6 +429,33 @@ fn parse_kv_args<T: serde::de::DeserializeOwned>(
 /// Maps [`KvError`] onto the `{code, message}` shape every `host-call`
 /// error reply carries -- see `core/svc_action::capabilities::
 /// kv_err_to_host`'s identical doc.
+/// Classifies an extracted `http.send` host into the specific
+/// [`PermissionId`] family `bundle_capability_gate`'s catalog actually
+/// grants against (`NetHttpFqdn`/`NetHttpPublicIp`/`NetHttpPrivateIp`) --
+/// see `core/svc_action::capabilities`'s identical helper for the full
+/// rationale (literal IPs classified directly, hostnames as `NetHttpFqdn`;
+/// this is a permission-family choice, not the SSRF wall itself).
+fn classify_net_http_permission(host: &str) -> PermissionId {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            if v4.is_private() || v4.is_loopback() || v4.is_link_local() {
+                PermissionId::NetHttpPrivateIp(host.to_string())
+            } else {
+                PermissionId::NetHttpPublicIp(host.to_string())
+            }
+        }
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let is_unique_local = (v6.segments()[0] & 0xfe00) == 0xfc00;
+            if v6.is_loopback() || v6.is_unicast_link_local() || is_unique_local {
+                PermissionId::NetHttpPrivateIp(host.to_string())
+            } else {
+                PermissionId::NetHttpPublicIp(host.to_string())
+            }
+        }
+        Err(_) => PermissionId::NetHttpFqdn(host.to_string()),
+    }
+}
+
 fn kv_err_to_host(err: KvError) -> HostResultError {
     denied(err.wire_code(), err.wire_message())
 }
@@ -462,7 +489,7 @@ impl<K: KvBackend> CapabilityHandler for StageCapabilities<K> {
                     self.gate
                         .authorize(
                             &self.gate_scope(),
-                            PermissionId::NetHttp(host),
+                            classify_net_http_permission(&host),
                             ResourceRef::AppScoped(AppScopedResource::None),
                         )
                         .map_err(denied_from_gate)?;
@@ -586,11 +613,13 @@ mod tests {
             "storage.kv",
             "storage.tables",
             "flags.read",
-            "net.http:example.com",
+            "net.http.fqdn:example.com",
             // The `http_db_flags_capabilities_are_documented_seams` test
             // calls `Http` with no `url` arg at all -- `extract_http_host`'s
-            // svc_process equivalent then resolves an empty host string.
-            "net.http:",
+            // svc_process equivalent then resolves an empty host string,
+            // which `classify_net_http_permission` classifies as `NetHttpFqdn`
+            // (an empty string never parses as a literal IP address).
+            "net.http.fqdn:",
         ] {
             grants.insert(
                 id.to_string(),
@@ -616,6 +645,7 @@ mod tests {
             Arc::new(snapshot),
             Arc::new(bundle_capability_gate::InMemoryMembership::new()),
             Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
         ))
     }
 
@@ -626,6 +656,7 @@ mod tests {
             Arc::new(bundle_capability_gate::InMemoryGrantSnapshot::new()),
             Arc::new(bundle_capability_gate::InMemoryMembership::new()),
             Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
         ))
     }
 
@@ -707,6 +738,7 @@ mod tests {
             Arc::new(snapshot),
             Arc::new(bundle_capability_gate::InMemoryMembership::new()),
             Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
         ))
     }
 
@@ -1230,6 +1262,7 @@ mod tests {
             Arc::new(snapshot),
             Arc::new(bundle_capability_gate::InMemoryMembership::new()),
             Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
         ));
         let caps = StageCapabilities::new(
             "acme".to_string(),
@@ -1283,6 +1316,7 @@ mod tests {
             cache.clone(),
             Arc::new(bundle_capability_gate::InMemoryMembership::new()),
             Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
         ));
         let caps = StageCapabilities::new(
             "acme".to_string(),

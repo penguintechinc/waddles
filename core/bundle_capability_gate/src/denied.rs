@@ -5,6 +5,17 @@
 //! are reserved so capability-specific, post-authorize validation (spec
 //! SS5.3, not this gate) reports through the same shared vocabulary for
 //! consistent audit logging and metrics.
+//!
+//! **Out of scope, intentionally:** the *global* per-bundle and
+//! per-publisher reputation caps and the distribution/entropy anomaly
+//! auto-suspend threshold (spec SS7.3, Gemini condition 4) are hub-api-side
+//! controls -- they aggregate across every community/tenant an app is
+//! activated in platform-wide, which is outside any single `authorize()`
+//! call's (tenant, community, app) scope. This crate's [`crate::quota`]
+//! ledger only enforces the per-call, per-user, and per-scope
+//! (community/tenant) caps that *are* checkable from a single call's
+//! `InvokeScope`. Spec SS12 Phase 10 tracks the hub-api-side aggregation job
+//! and its platform-wide suspend-and-notify action as separate work.
 
 use std::fmt;
 
@@ -45,6 +56,13 @@ pub enum Denied {
     /// Reserved for `ai.generate`'s host-side PII rejection (spec SS9) --
     /// capability-specific, not triggered by this crate.
     ContainsPii,
+    /// The permission's TYPE (family) is instance-denied platform-wide (spec:
+    /// instance policy, above the 3 consent tiers) -- checked even when an
+    /// active `GrantSnapshot` entry exists, so a stale/unrevoked grant can
+    /// never bypass an instance-wide deny (defense in depth against the
+    /// push-invalidation cascade not having landed yet). Triggered by this
+    /// crate.
+    InstanceDenied,
 }
 
 impl Denied {
@@ -59,6 +77,7 @@ impl Denied {
             Self::DeltaOutOfBounds => "delta_out_of_bounds",
             Self::UnsupportedPlatform => "unsupported_platform",
             Self::ContainsPii => "contains_pii",
+            Self::InstanceDenied => "instance_denied",
         }
     }
 }
@@ -91,5 +110,6 @@ mod tests {
             "unsupported_platform"
         );
         assert_eq!(Denied::ContainsPii.reason_str(), "contains_pii");
+        assert_eq!(Denied::InstanceDenied.reason_str(), "instance_denied");
     }
 }

@@ -599,6 +599,7 @@ mod tests {
             Arc::new(snapshot),
             Arc::new(bundle_capability_gate::InMemoryMembership::new()),
             Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
         ))
     }
 
@@ -918,6 +919,8 @@ mod tests {
 
         let loaded = connection
             .request(Message::Load(LoadBody {
+                tenant_id: 1,
+                community_id: 0,
                 app_id: "waddles.bot.commands.default".to_string(),
                 version: "1".to_string(),
                 digest: "sha256:00".to_string(),
@@ -1140,6 +1143,8 @@ mod tests {
 
         connection
             .request(Message::Load(LoadBody {
+                tenant_id: 1,
+                community_id: 0,
                 app_id: "waddles.bot.commands.default".to_string(),
                 version: "1".to_string(),
                 digest: "sha256:00".to_string(),

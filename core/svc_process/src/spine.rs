@@ -129,8 +129,11 @@ pub enum InvokeError {
 /// doc names as the drain-loop shape to mirror) -- identical wire-level
 /// behavior, just returning this module's own [`InvokeError`] instead of
 /// `svc_action::dispatch::InvokeError`.
+#[allow(clippy::too_many_arguments)]
 pub async fn ensure_loaded(
     conn: &Connection,
+    tenant_id: i32,
+    community_id: i32,
     app_id: &str,
     version: &str,
     digest: &str,
@@ -140,6 +143,8 @@ pub async fn ensure_loaded(
 ) -> Result<LoadedBody, InvokeError> {
     let reply = conn
         .request(Message::Load(LoadBody {
+            tenant_id,
+            community_id,
             app_id: app_id.to_string(),
             version: version.to_string(),
             digest: digest.to_string(),
@@ -172,11 +177,15 @@ pub async fn ensure_loaded(
 /// freshly-read DB value that might already differ.
 pub async fn ensure_unloaded(
     conn: &Connection,
+    tenant_id: i32,
+    community_id: i32,
     app_id: &str,
     digest: &str,
 ) -> Result<UnloadedBody, InvokeError> {
     let reply = conn
         .request(Message::Unload(UnloadBody {
+            tenant_id,
+            community_id,
             app_id: app_id.to_string(),
             digest: digest.to_string(),
         }))
@@ -616,8 +625,19 @@ async fn handle_delivered<S: SpineOps>(
     // as before this fix, so the executor's own `UNKNOWN_BUNDLE` reply
     // still drives the existing `BundleError` DLQ path below.
     if !deps.digest.is_empty() && !deps.load_state.is_loaded_on(&connection, &deps.digest) {
+        // `(0, 0)`: this interim, env-configured single-app-per-pod path
+        // predates the numeric `(tenant_id, community_id)` scoping
+        // `bundle_active_set` introduced (TODO(M4+) real distribution poll,
+        // see `ProcessDeps::digest`'s own doc) -- it has no real tenant row
+        // to resolve, only `d.env.tenant`/`d.env.community` STRING slugs
+        // (Valkey stream naming, a different identifier space entirely).
+        // `(0, 0)` is a reserved sentinel (`bundle_active_set` tenant ids
+        // start at 1 in every real schema row) naming "no real DB scope",
+        // never confusable with a genuine tenant.
         if let Err(e) = ensure_loaded(
             &connection,
+            0,
+            0,
             &deps.app_id,
             &deps.version,
             &deps.digest,
@@ -921,6 +941,7 @@ mod tests {
             ))),
             Arc::new(bundle_capability_gate::InMemoryMembership::new()),
             Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
         ))
     }
 

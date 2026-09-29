@@ -402,6 +402,7 @@ pub fn build_production_gate<L: GrantLoader + 'static>(
         cache,
         Arc::new(InMemoryMembership::new()),
         Arc::new(InMemoryQuotaLedger::new()),
+        Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
     ))
 }
 
@@ -579,6 +580,7 @@ mod tests {
             cache.clone(),
             Arc::new(InMemoryMembership::new()),
             Arc::new(InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
         );
         let key = GrantScopeKey::from_scope(&scope);
         cache.refresh(&key).await.expect("seeded row loads cleanly");
@@ -596,6 +598,7 @@ mod tests {
             deny_cache.clone(),
             Arc::new(InMemoryMembership::new()),
             Arc::new(InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
         );
         deny_cache
             .refresh(&key)
@@ -622,6 +625,7 @@ mod tests {
             revoke_cache.clone(),
             Arc::new(InMemoryMembership::new()),
             Arc::new(InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
         );
         revoke_cache
             .refresh(&key)

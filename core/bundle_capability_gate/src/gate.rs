@@ -18,6 +18,7 @@ use std::time::Duration;
 use crate::audit;
 use crate::denied::Denied;
 use crate::grant::GrantSnapshot;
+use crate::instance_policy::{InstanceAction, InstancePolicySnapshot};
 use crate::membership::MembershipCheck;
 use crate::permission::{PermissionId, Quota};
 use crate::quota::{QuotaDenial, QuotaLedger};
@@ -37,6 +38,7 @@ pub struct CapabilityGate {
     snapshot: Arc<dyn GrantSnapshot>,
     membership: Arc<dyn MembershipCheck>,
     quota: Arc<dyn QuotaLedger>,
+    instance_policy: Arc<dyn InstancePolicySnapshot>,
 }
 
 impl CapabilityGate {
@@ -44,11 +46,13 @@ impl CapabilityGate {
         snapshot: Arc<dyn GrantSnapshot>,
         membership: Arc<dyn MembershipCheck>,
         quota: Arc<dyn QuotaLedger>,
+        instance_policy: Arc<dyn InstancePolicySnapshot>,
     ) -> Self {
         Self {
             snapshot,
             membership,
             quota,
+            instance_policy,
         }
     }
 
@@ -69,6 +73,16 @@ impl CapabilityGate {
     ) -> Result<AuthorizedCall, Denied> {
         let key = GrantScopeKey::from_scope(scope);
         let canonical_id = permission.canonical_id();
+
+        // Instance policy (spec: instance policy, above the 3 consent
+        // tiers) -- checked BEFORE the grant lookup, and regardless of
+        // whether a grant row exists, so a stale/not-yet-revoked grant can
+        // never bypass a platform-wide deny (defense in depth: hub-api's
+        // own cascade revoke is the primary enforcement, this is the
+        // belt-and-suspenders check on the data-plane's own hot path).
+        if self.instance_policy.action(permission.family()) == InstanceAction::Deny {
+            return Err(self.deny(scope, &permission, Denied::InstanceDenied));
+        }
 
         // Fail-closed on a missing snapshot or a missing grant entry alike
         // (spec SS4/SS5.3: a cache miss -- whether from never having been
@@ -243,6 +257,7 @@ mod tests {
     use crate::grant::{
         GrantCache, GrantSet, GrantedPermission, InMemoryGrantLoader, InMemoryGrantSnapshot,
     };
+    use crate::instance_policy::InMemoryInstancePolicySnapshot;
     use crate::membership::InMemoryMembership;
     use crate::quota::InMemoryQuotaLedger;
     use crate::resource::{AppScopedResource, ReputationTarget, ScopeKind};
@@ -279,10 +294,18 @@ mod tests {
     }
 
     fn gate_with(snapshot: Arc<dyn GrantSnapshot>) -> CapabilityGate {
+        gate_with_policy(snapshot, Arc::new(InMemoryInstancePolicySnapshot::new()))
+    }
+
+    fn gate_with_policy(
+        snapshot: Arc<dyn GrantSnapshot>,
+        instance_policy: Arc<dyn InstancePolicySnapshot>,
+    ) -> CapabilityGate {
         CapabilityGate::new(
             snapshot,
             Arc::new(InMemoryMembership::new()),
             Arc::new(InMemoryQuotaLedger::new()),
+            instance_policy,
         )
     }
 
@@ -460,6 +483,7 @@ mod tests {
             Arc::new(snapshot),
             Arc::new(membership),
             Arc::new(InMemoryQuotaLedger::new()),
+            Arc::new(InMemoryInstancePolicySnapshot::new()),
         );
 
         let call = gate
@@ -525,6 +549,7 @@ mod tests {
             Arc::new(snapshot),
             Arc::new(membership),
             Arc::new(InMemoryQuotaLedger::new()),
+            Arc::new(InMemoryInstancePolicySnapshot::new()),
         );
 
         let call = gate
@@ -561,6 +586,7 @@ mod tests {
             Arc::new(snapshot),
             Arc::new(membership),
             Arc::new(InMemoryQuotaLedger::new()),
+            Arc::new(InMemoryInstancePolicySnapshot::new()),
         );
 
         let err = gate
@@ -596,6 +622,7 @@ mod tests {
             Arc::new(snapshot),
             Arc::new(membership),
             Arc::new(InMemoryQuotaLedger::new()),
+            Arc::new(InMemoryInstancePolicySnapshot::new()),
         );
 
         let err = gate
@@ -636,6 +663,7 @@ mod tests {
             Arc::new(snapshot),
             Arc::new(membership),
             Arc::new(InMemoryQuotaLedger::new()),
+            Arc::new(InMemoryInstancePolicySnapshot::new()),
         );
 
         // First 10 members each contribute +5: 10 * 5 == 50, exactly the
@@ -689,6 +717,7 @@ mod tests {
             Arc::new(snapshot),
             Arc::new(membership),
             Arc::new(InMemoryQuotaLedger::new()),
+            Arc::new(InMemoryInstancePolicySnapshot::new()),
         );
 
         assert!(gate
@@ -814,5 +843,93 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err, Denied::NotGranted);
+    }
+
+    /// Instance policy (spec: instance policy, above the 3 consent tiers):
+    /// `net.http.private-ip` is deny-by-default -- and this must hold even
+    /// when the `GrantSnapshot` still carries an active grant row for it
+    /// (the exact "stale grant + instance deny" defense-in-depth scenario --
+    /// hub-api's own cascade revoke is the primary enforcement, but the gate
+    /// must never rely on that cascade having landed yet).
+    #[test]
+    fn net_http_private_ip_is_instance_denied_by_default_even_with_an_active_grant() {
+        let snapshot = InMemoryGrantSnapshot::new();
+        snapshot.set(
+            GrantScopeKey::from_scope(&scope()),
+            grants(&[(
+                "net.http.private-ip:10.20.0.0/16",
+                serde_json::json!({"methods": ["GET"]}),
+            )]),
+        );
+        let gate = gate_with(Arc::new(snapshot));
+
+        let err = gate
+            .authorize(
+                &scope(),
+                PermissionId::NetHttpPrivateIp("10.20.0.0/16".to_string()),
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .unwrap_err();
+        assert_eq!(err, Denied::InstanceDenied);
+    }
+
+    /// A global admin's explicit `allow` override lets an otherwise-granted
+    /// `net.http.private-ip` call through.
+    #[test]
+    fn net_http_private_ip_authorizes_once_a_global_admin_opts_in() {
+        let snapshot = InMemoryGrantSnapshot::new();
+        snapshot.set(
+            GrantScopeKey::from_scope(&scope()),
+            grants(&[(
+                "net.http.private-ip:10.20.0.0/16",
+                serde_json::json!({"methods": ["GET"]}),
+            )]),
+        );
+        let policy = Arc::new(InMemoryInstancePolicySnapshot::new());
+        policy.set(
+            crate::permission::PermissionFamily::NetHttpPrivateIp,
+            InstanceAction::Allow,
+        );
+        let gate = gate_with_policy(Arc::new(snapshot), policy);
+
+        let call = gate
+            .authorize(
+                &scope(),
+                PermissionId::NetHttpPrivateIp("10.20.0.0/16".to_string()),
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .unwrap();
+        assert_eq!(
+            call.permission,
+            PermissionId::NetHttpPrivateIp("10.20.0.0/16".to_string())
+        );
+    }
+
+    /// `net.http.fqdn`/`net.http.public-ip` are unaffected by the
+    /// `private-ip`-only default deny -- an active grant for either still
+    /// authorizes normally.
+    #[test]
+    fn net_http_fqdn_and_public_ip_are_unaffected_by_the_private_ip_default_deny() {
+        let snapshot = InMemoryGrantSnapshot::new();
+        snapshot.set(
+            GrantScopeKey::from_scope(&scope()),
+            grants(&[(
+                "net.http.fqdn:api.example.com",
+                serde_json::json!({"methods": ["GET"]}),
+            )]),
+        );
+        let gate = gate_with(Arc::new(snapshot));
+
+        let call = gate
+            .authorize(
+                &scope(),
+                PermissionId::NetHttpFqdn("api.example.com".to_string()),
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .unwrap();
+        assert_eq!(
+            call.permission,
+            PermissionId::NetHttpFqdn("api.example.com".to_string())
+        );
     }
 }

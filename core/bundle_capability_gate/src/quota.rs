@@ -3,6 +3,18 @@
 //! (rate-limited call counts and `reputation.*.write`'s daily aggregate
 //! caps, spec SS1/SS7.3) -- byte/row/object-count ceilings remain the
 //! capability-specific implementation's job (spec SS5.3 "post-authorize").
+//!
+//! **This ledger deliberately stops at per-call/per-user/per-scope
+//! (community or tenant) caps.** The *global* per-bundle and per-publisher
+//! caps plus the distribution/entropy anomaly auto-suspend threshold (spec
+//! SS7.3, Gemini condition 4) aggregate a single app's -- or a single
+//! publisher's multiple apps' -- reputation writes across *every*
+//! community/tenant it's activated in platform-wide, which no single
+//! `authorize()` call's `InvokeScope` can see or bound. Those controls are a
+//! hub-api background job (spec SS12 Phase 10), reading the same
+//! `bundle_reputation_adjustments` audit ledger this crate's callers write
+//! to -- not a responsibility of [`InMemoryQuotaLedger`] or any future
+//! `QuotaLedger` implementation in this crate.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};

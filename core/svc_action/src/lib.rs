@@ -24,31 +24,35 @@
 //! multi-bundle/hot-swap distribution reconciliation
 //! (`crate::distribution`'s module doc).
 //!
-//! **Bundle-selection path, mutual exclusion (2026-09-27).** Exactly one of
-//! two sources ever selects which bundle this pod runs, resolved ONCE at
-//! startup by [`resolve_db_path_active`] -- never both, never re-evaluated
-//! mid-run (mirrors `core/svc_process`'s identical
-//! `resolve_db_path_active`/`db_path_selected` pair):
+//! **Bundle-selection sources (dataplane scale design rev 4, multi-tenant,
+//! 2026-09-28).** Two sources run side by side, neither exclusive of the
+//! other:
 //!
-//! - **DB-driven active-bundle loader** (`crate::bundle_loader`,
-//!   `core/bundle_active_set`) -- the default: hub-api is the sole writer,
-//!   this stage reads ACTIVE, APPROVED bundle config from a READ-ONLY
-//!   Postgres and hot-swaps in/out with no pod restart. Active whenever
-//!   `DB_READER_PASSWORD`/`BUNDLE_SCOPE_TENANT_ID` are configured and the
-//!   `waddles.core.disable-db-bundle-config` kill-switch is not raw-ON.
+//! - **Multi-tenant, change-log-driven active-bundle loader**
+//!   (`crate::changelog_consumer`, `core/bundle_active_set`,
+//!   [`try_start_changelog_consumer`]) -- hub-api is the sole writer, this
+//!   stage reads ACTIVE, APPROVED bundle config from a READ-ONLY Postgres
+//!   and hot-swaps in/out with no pod restart, discovering every
+//!   `(tenant_id, community_id)` scope in the database itself (no
+//!   operator-configured tenant scope -- see `config::CliConfig`'s doc:
+//!   `BUNDLE_SCOPE_TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID` are retired).
+//!   Active whenever `DB_READER_PASSWORD` is configured and the
+//!   `waddles.core.disable-db-bundle-config`/`waddles.core.
+//!   disable-multi-tenant-watermark` kill-switches are not raw-ON.
 //! - **Legacy `ACTION_BUNDLE_*` env override** (`try_start_env_bundle_loader`,
 //!   `config::CliConfig::action_bundle_digest`'s doc) -- sends `load` for a
 //!   statically configured bundle directly over the host-API connection,
-//!   independent of any external service. Used only when the DB path above
-//!   is inactive.
+//!   independent of any external service. Runs unconditionally alongside
+//!   the DB-driven loader above; the two are gated independently.
 //!
 //! The now-retired `GET /api/v1/distribution/bundles?stage=action` poll
-//! (spec §6.7) that used to be the third, primary source has been removed
-//! -- superseded by the DB-driven loader; see `crate::distribution`'s module
-//! doc for what that leaves as a documented seam.
+//! (spec §6.7) that used to be a third source has been removed -- superseded
+//! by the DB-driven loader; see `crate::distribution`'s module doc for what
+//! that leaves as a documented seam.
 
 pub mod bundle_loader;
 pub mod capabilities;
+pub mod changelog_consumer;
 pub mod config;
 pub(crate) mod crypto;
 pub mod db;
@@ -153,9 +157,16 @@ where
     // excluded-row counter.
     let bundle_loader_excluded_metric =
         telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
-    // Same registration timing constraint as the excluded-row counter above
-    // (`register_redirect_metrics` only borrows `prom_registry`, must run
-    // before it's moved into `AppState::new`).
+    let changelog_consumer_metrics = telemetry::register_changelog_consumer_metrics(&prom_registry);
+    // Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
+    // the live, poll-refreshed `app_id -> (digest, app_versions.id)`
+    // snapshot `dispatch::handle_delivered` resolves PER INVOCATION so
+    // `bundle_capability_gate::authorize()` is never called with a
+    // hardcoded `app_version: 0` -- see `dispatch::DispatchDeps::
+    // app_version_snapshot`'s doc. Fed by `try_start_changelog_consumer`
+    // below on every tick; `try_start_dispatch` seeds a one-shot sentinel
+    // when the DB-driven path is unconfigured.
+    let app_version_snapshot = bundle_active_set::ActiveVersionSnapshot::new();
     let redirected_metric = telemetry::register_redirect_metrics(&prom_registry);
 
     let state = http::AppState::new(config.clone(), prom_registry);
@@ -169,52 +180,21 @@ where
         license.clone(),
         config.db_reader_password.clone(),
     );
-    // Mutual exclusion, resolved ONCE at startup -- see
-    // `resolve_db_path_active`'s own doc for why this is not re-evaluated
-    // per-tick for this specific selection decision, and why that's an
-    // accepted tradeoff (a live kill-switch flip mid-run still stops
-    // DB-driven work via `bundle_loader::run_tick`'s own per-tick gate, it
-    // just doesn't fail OVER to the legacy env override without a pod
-    // restart). Mirrors `core/svc_process`'s identical
-    // `resolve_db_path_active`/`db_path_selected` pair exactly.
-    // Shared, poll-refreshed `app_id -> (digest, app_versions.id)` snapshot
-    // (`bundle_active_set::ActiveVersionSnapshot`) -- populated by
-    // `try_start_db_bundle_loader`'s own poll tick below when the DB-driven
-    // path is active, so `try_start_dispatch`'s per-invocation resolution
-    // (never captured once at startup) always sees the CURRENT hot-swapped
-    // version, not a stale one.
-    let app_version_snapshot = bundle_active_set::ActiveVersionSnapshot::new();
-    let db_path_active = resolve_db_path_active(&config, &license).await;
-    if db_path_active {
-        if !config.cli.action_bundle_digest.is_empty() {
-            tracing::info!(
-                action_bundle_digest = %config.cli.action_bundle_digest,
-                "DB-driven bundle-config path active at startup; ignoring legacy \
-                 ACTION_BUNDLE_* env override (restart required to fall back)"
-            );
-        }
-        try_start_db_bundle_loader(
-            &config,
-            Arc::clone(&connections),
-            license.clone(),
-            bundle_loader_excluded_metric,
-            app_version_snapshot.clone(),
-        );
-    } else {
-        tracing::info!(
-            "DB-driven bundle-config path inactive at startup (kill-switch on, or \
-             DB_READER_*/BUNDLE_SCOPE_TENANT_ID not configured); using legacy \
-             ACTION_BUNDLE_* env override"
-        );
-        try_start_env_bundle_loader(&config.cli, Arc::clone(&connections));
-    }
+    try_start_env_bundle_loader(&config.cli, Arc::clone(&connections));
+    try_start_changelog_consumer(
+        &config,
+        Arc::clone(&connections),
+        license.clone(),
+        bundle_loader_excluded_metric,
+        changelog_consumer_metrics,
+        app_version_snapshot.clone(),
+    );
     try_start_dispatch(
         &config,
         connections,
         usage,
         license,
         app_version_snapshot,
-        db_path_active,
         redirected_metric,
     );
 
@@ -404,6 +384,7 @@ fn build_redis_client(cfg: &penguin_spine::SpineConfig) -> Option<redis::Client>
 /// partial capability set without a larger refactor than this landing's
 /// scope; a bundle sees `access-denied` on every capability, never a
 /// crash, until the next connection attempt).
+#[allow(clippy::too_many_arguments)]
 async fn build_stage_capabilities(
     cli: &config::CliConfig,
     discord_bot_token: Option<config::Secret>,
@@ -443,21 +424,18 @@ async fn build_stage_capabilities(
     ));
     // `kv` reuses this same direct Valkey connection (cloned -- a cheap
     // handle clone over one shared TCP connection, not a second socket)
-    // rather than opening a dedicated one: `relay_conn` already IS the
-    // "second, direct redis connection" `usage.rs`'s module doc describes,
-    // and `kv`'s isolation/quota model needs nothing about the connection
-    // itself that `relay`/usage don't already require (`crate::capabilities`'
-    // `StageCapabilities::with_kv`'s doc).
+    // rather than opening a dedicated one (`crate::capabilities::
+    // StageCapabilities::with_kv`'s doc).
     let kv_conn = relay_conn.clone();
     // `core/bundle_capability_gate::CapabilityGate` (spec
     // `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
     // SS5): `PgGrantLoader` against the RO-replica reader account when
     // `DB_READER_PASSWORD` is configured (the same account
-    // `crate::bundle_loader`'s DB-driven path uses), `InMemoryGrantLoader`
-    // (always denies every non-platform permission) otherwise --
-    // `build_production_gate` unions the always-granted platform trio over
-    // either and spawns the push-invalidation/poll-refresh loop against
-    // this same Valkey connection's client.
+    // `crate::changelog_consumer`'s DB-driven path uses),
+    // `InMemoryGrantLoader` (always denies every non-platform permission)
+    // otherwise -- `build_production_gate` unions the always-granted
+    // platform trio over either and spawns the push-invalidation/poll-
+    // refresh loop against this same Valkey connection's client.
     let redis_client = build_redis_client(&spine_cfg);
     let poll_interval = cli.bundle_config_poll_interval();
     let gate = match db_reader_password {
@@ -522,6 +500,7 @@ async fn build_stage_capabilities(
 /// HTTP/metrics servers served alongside it -- the same graceful-
 /// degradation contract `core/svc_process`'s `try_start_spine_drain`
 /// applies to its own optional dependency.
+#[allow(clippy::too_many_arguments)]
 fn try_start_host_api(
     cli: &config::CliConfig,
     discord_bot_token: Option<config::Secret>,
@@ -558,58 +537,6 @@ fn try_start_host_api(
     registry
 }
 
-/// Resolves, ONCE at startup, whether the DB-driven bundle-config path
-/// (`crate::bundle_loader`) or the legacy `ACTION_BUNDLE_*` env override
-/// (`try_start_env_bundle_loader`) is authoritative for this process's
-/// entire lifetime -- **mutual exclusion, not operator discipline**: exactly
-/// one of the two ever starts, regardless of what `ACTION_BUNDLE_DIGEST`
-/// happens to be set to. Field-for-field mirror of `core/svc_process`'s own
-/// `resolve_db_path_active` -- see that function's doc for the full
-/// rationale, reproduced here only where it differs.
-///
-/// Deliberately evaluated only here, once, rather than per-tick the way
-/// `bundle_loader::run_tick` re-checks its own kill-switch gate on every
-/// poll: a live `waddles.core.disable-db-bundle-config` flip mid-run is
-/// still caught by that per-tick gate (DB-driven load/unload stops
-/// immediately), but this function's own path-selection decision does NOT
-/// re-run -- falling back to (or away from) the legacy env override requires
-/// a pod restart. That is an accepted tradeoff, not an oversight: it
-/// guarantees the two paths can never send conflicting `load`/`unload`
-/// frames over the same host-API connection, which a live re-evaluation
-/// racing against an already-spawned loader task could not cleanly
-/// guarantee.
-///
-/// The DB path is active when [`db_path_selected`] says so: DB config
-/// present (`DB_READER_PASSWORD` set, `BUNDLE_SCOPE_TENANT_ID` configured)
-/// AND the kill-switch gate reports enabled (`flags::db_bundle_config_flag`
-/// over the already-built, already-refreshing shared `license` client --
-/// already the negated "is the DB path enabled" answer, default `true` when
-/// the flag is unseen or the license server is unreachable). Reuses the
-/// caller's own `license` rather than constructing a second one, unlike
-/// `core/svc_process`'s equivalent (which has no shared client in scope at
-/// its own call site).
-async fn resolve_db_path_active(
-    config: &config::Config,
-    license: &Option<Arc<penguin_licensing::LicenseClient>>,
-) -> bool {
-    let db_config_present =
-        config.db_reader_password.is_some() && config.cli.bundle_scope_tenant_id.get().is_some();
-    if !db_config_present {
-        return false;
-    }
-    let gate_enabled = flags::db_bundle_config_flag(license).enabled().await;
-    db_path_selected(db_config_present, gate_enabled)
-}
-
-/// Pure boolean combination behind [`resolve_db_path_active`] -- split out
-/// so the "which path wins" decision is directly unit-testable with a fixed
-/// kill-switch-gate value, without needing a live/mocked
-/// `penguin_licensing::LicenseClient` round trip to force a "kill-switch ON"
-/// flag value (not achievable in a unit test against the real client).
-fn db_path_selected(db_config_present: bool, gate_enabled: bool) -> bool {
-    db_config_present && gate_enabled
-}
-
 /// Resolves the digest/config JSON the dispatch loop's `deps.digest` starts
 /// with. Now that the distribution poll (this crate's former primary
 /// source, retired 2026-09-27) is gone, the `ACTION_BUNDLE_*` env override
@@ -635,10 +562,10 @@ fn resolve_initial_bundle(env_bundle_digest: &str) -> (String, String) {
 
 /// Sends `load` for a statically-configured bundle (`ACTION_BUNDLE_*` env
 /// vars, `config::CliConfig::action_bundle_digest`'s doc) directly over the
-/// host-API connection -- the legacy bundle-selection path, active only when
-/// [`resolve_db_path_active`] says the DB-driven path is not (this module's
-/// top doc). A no-op (never spawns a task) when `ACTION_BUNDLE_DIGEST` is
-/// unset.
+/// host-API connection -- the legacy bundle-selection path, runs
+/// unconditionally alongside [`try_start_changelog_consumer`] (this
+/// module's top doc). A no-op (never spawns a task) when
+/// `ACTION_BUNDLE_DIGEST` is unset.
 fn try_start_env_bundle_loader(
     cli: &config::CliConfig,
     connections: Arc<host_api::ConnectionRegistry>,
@@ -718,8 +645,13 @@ async fn env_bundle_loader_loop(
                 {
                     continue;
                 }
+                // `(0, 0)`: see `distribution.rs`'s identical env/catalog-
+                // interim-path sentinel doc -- this `ACTION_BUNDLE_*` env
+                // override has no real tenant row to resolve either.
                 match dispatch::ensure_loaded(
                     &connection,
+                    0,
+                    0,
                     &app_id,
                     &version,
                     &digest,
@@ -745,52 +677,53 @@ async fn env_bundle_loader_loop(
     }
 }
 
-/// Attempts to start the DB-driven active-bundle loader
-/// (`crate::bundle_loader`, spec: hub-api is the sole writer, this stage
-/// reads ACTIVE, APPROVED bundle config from a READ-ONLY Postgres and
-/// hot-swaps in/out with no pod restart). Two independent reasons this
-/// never starts, both logged and neither an error -- `DB_READER_PASSWORD`
-/// unset (the RO account hasn't been provisioned yet in this environment)
-/// or `BUNDLE_SCOPE_TENANT_ID` unset (`None` -- see `config::TenantScopeId`'s
-/// own doc for why this is no longer collapsed onto `0`, a real, selectable
-/// tenant). Called only when `resolve_db_path_active` has already selected
-/// this path (`run_with_shutdown`'s mutual-exclusion dispatch, this module's
-/// top doc) -- these are defense-in-depth startup gates, not the primary
-/// selection mechanism; the loader is additionally gated per-tick on the
-/// `waddles.core.disable-db-bundle-config` kill-switch
-/// (`flags::db_bundle_config_flag`) inside `bundle_loader::run_tick`
-/// regardless of whether this function's own startup gates pass. Reuses the
+/// Attempts to start the multi-tenant, change-log-driven active-bundle
+/// loader (`crate::changelog_consumer`, dataplane scale design rev 4,
+/// §7/§8 step 2). One reason this never starts, logged and not an error --
+/// `DB_READER_PASSWORD` unset (the RO account hasn't been provisioned yet
+/// in this environment). Either way, the existing `ACTION_APP_ID`/
+/// `ACTION_BUNDLE_*` env selection remains the sole other source (the
+/// former `crate::distribution` catalog poll was retired 2026-09-27); this
+/// loader only supplements it once actually configured, and is
+/// additionally gated per-tick on BOTH `waddles.core.disable-db-bundle-config`
+/// and `waddles.core.disable-multi-tenant-watermark` (each already the
+/// negated "is this path enabled" answer, enabled by default, combined via
+/// `flags::AllFlags`) inside `changelog_consumer::run` regardless of
+/// whether this function's own startup gate passes. Reuses the
 /// already-built, already-refreshing `license` client (`run_with_shutdown`'s
 /// own `build_license_client` call) rather than constructing a second one.
-fn try_start_db_bundle_loader(
+///
+/// **`BUNDLE_SCOPE_TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID` REMOVED**
+/// (dataplane scale design, user requirement: "every svc_process/
+/// svc_action pod serves ALL tenants") -- this loader now discovers and
+/// serves every `(tenant_id, community_id)` scope in the database itself.
+#[allow(clippy::too_many_arguments)]
+fn try_start_changelog_consumer(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
     excluded_metric: prometheus::IntCounterVec,
+    changelog_consumer_metrics: telemetry::ChangelogConsumerMetrics,
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
-            "DB_READER_PASSWORD not set; DB-driven bundle loader not started (unreachable: \
-             resolve_db_path_active already checked this)"
-        );
-        return;
-    };
-    let Some(tenant_id) = config.cli.bundle_scope_tenant_id.get() else {
-        tracing::info!(
-            "BUNDLE_SCOPE_TENANT_ID not set; DB-driven bundle loader not started (unreachable: \
-             resolve_db_path_active already checked this)"
+            "DB_READER_PASSWORD not set; multi-tenant changelog consumer not started (env selection remains authoritative)"
         );
         return;
     };
 
-    // `flags::db_bundle_config_flag` (not the generic `flag_or_closed` +
-    // `NegatedFlag` composition) -- this crate's own hardcoded
-    // license-bypass domain (`build_license_client` above) makes
-    // `flag_enabled` read `true` for ANY key, so a bare negation would
-    // report the DB-driven path permanently DISABLED for every deployment
-    // of this service; see `flags::DisableDbBundleConfigFlag`'s doc.
-    let flag = flags::db_bundle_config_flag(&license);
+    // `flags::db_bundle_config_flag`/`multi_tenant_watermark_flag` (not the
+    // generic `flag_or_closed` + `NegatedFlag` composition) -- this crate's
+    // own hardcoded license-bypass domain (`build_license_client` above)
+    // makes `flag_enabled` read `true` for ANY key, so a bare negation
+    // would report the multi-tenant path permanently DISABLED for every
+    // deployment of this service; see `flags::DisableDbBundleConfigFlag`'s
+    // doc.
+    let flag: Arc<dyn flags::FeatureFlag> = Arc::new(flags::AllFlags(vec![
+        flags::db_bundle_config_flag(&license),
+        flags::multi_tenant_watermark_flag(&license),
+    ]));
     let reader_cfg = bundle_active_set::ReaderConfig {
         host: config.cli.db_reader_host.clone(),
         port: config.cli.db_reader_port,
@@ -798,15 +731,15 @@ fn try_start_db_bundle_loader(
         user: config.cli.db_reader_user.clone(),
     };
     let password = password.expose().to_string();
-    let community_id = config.cli.bundle_scope_community_id;
     let poll_interval = config.cli.bundle_config_poll_interval();
+    let full_reconcile_interval = config.cli.full_reconcile_interval();
     let call_timeout_ms = config.cli.executor_call_timeout_ms;
 
     tokio::spawn(async move {
         let db = match bundle_active_set::reader::connect(&reader_cfg, &password).await {
             Ok(db) => db,
             Err(err) => {
-                tracing::error!(error = %err, "db-reader connection failed; DB-driven bundle loader not started");
+                tracing::error!(error = %err, "db-reader connection failed; multi-tenant changelog consumer not started");
                 return;
             }
         };
@@ -815,17 +748,17 @@ fn try_start_db_bundle_loader(
             shutdown_signal().await;
             let _ = shutdown_tx.send(());
         });
-        bundle_loader::run(
+        changelog_consumer::run(
             db,
-            tenant_id,
-            community_id,
             poll_interval,
+            full_reconcile_interval,
             call_timeout_ms,
             flag,
             connections,
             excluded_metric,
-            shutdown_rx,
+            changelog_consumer_metrics,
             app_version_snapshot,
+            shutdown_rx,
         )
         .await;
     });
@@ -848,7 +781,6 @@ fn try_start_dispatch(
     usage: Arc<Mutex<usage::UsageBatcher>>,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
-    db_path_active: bool,
     redirected_metric: prometheus::IntCounterVec,
 ) {
     if config.cli.action_app_id.is_empty() {
@@ -889,17 +821,15 @@ fn try_start_dispatch(
         let (digest, config_json) = resolve_initial_bundle(&config.cli.action_bundle_digest);
         // `app_version_snapshot` is resolved PER INVOCATION in
         // `dispatch::handle_delivered`, never captured once here (a bundle
-        // hot-swap -- `crate::bundle_loader`'s poll tick -- must be
-        // reflected on the very next invocation, spec SS4/SS5.1). When the
-        // DB-driven path is inactive (unconfigured, or the kill-switch
-        // fell back to this legacy env override -- `db_path_active`, the
-        // SAME decision `crate::resolve_db_path_active` already made for
-        // bundle load/unload), no poller ever populates the snapshot for
+        // hot-swap must be reflected on the very next invocation, spec
+        // SS4/SS5.1). When the DB-driven changelog consumer path is
+        // unconfigured (`DB_READER_PASSWORD` unset -- `try_start_changelog_
+        // consumer`'s own gate), no poller ever populates the snapshot for
         // this `app_id`, so seed it ONCE with the `0` sentinel here --
         // identical posture to `core/svc_process::lib::
         // try_start_process_loop`'s own documented unconfigured-mode
         // fallback.
-        if !db_path_active {
+        if config.db_reader_password.is_none() {
             app_version_snapshot.update(&[bundle_active_set::ActiveBundleRow {
                 app_id: app_id.clone(),
                 version: String::new(),
@@ -1247,58 +1177,6 @@ mod tests {
         assert_eq!(config_json, "{}");
     }
 
-    #[test]
-    fn db_path_selected_requires_both_config_present_and_gate_enabled() {
-        assert!(db_path_selected(true, true));
-        assert!(!db_path_selected(true, false));
-        assert!(!db_path_selected(false, true));
-        assert!(!db_path_selected(false, false));
-    }
-
-    /// Mutual-exclusion regression test, missing-config half: `DB_READER_
-    /// PASSWORD` absent must resolve to "legacy path" without even
-    /// resolving the kill-switch gate -- mirrors
-    /// `try_start_db_bundle_loader_noop_when_db_reader_password_unset`'s
-    /// identical config-presence check, now hoisted to the startup
-    /// path-selection decision.
-    #[tokio::test]
-    async fn resolve_db_path_active_is_false_when_db_reader_password_unset() {
-        let cli = CliConfig::parse_from(["svc-action", "--bundle-scope-tenant-id", "1"]);
-        let mut config = ephemeral_config();
-        config.cli = cli;
-        config.db_reader_password = None;
-        assert!(!resolve_db_path_active(&config, &None).await);
-    }
-
-    #[tokio::test]
-    async fn resolve_db_path_active_is_false_when_tenant_id_unset() {
-        let cli = CliConfig::parse_from(["svc-action"]);
-        assert_eq!(cli.bundle_scope_tenant_id.get(), None);
-        let mut config = ephemeral_config();
-        config.cli = cli;
-        config.db_reader_password = Some(Secret::new("real-ro-password"));
-        assert!(!resolve_db_path_active(&config, &None).await);
-    }
-
-    /// Mutual-exclusion regression test, DB-path-active half: DB config
-    /// fully present with no license client available (`&None`) must
-    /// resolve `true` -- `flags::db_bundle_config_flag(&None)` fails closed
-    /// to "DB path enabled" (its own doc), so `run_with_shutdown`'s
-    /// `if resolve_db_path_active(...).await` branch is the one taken,
-    /// meaning `try_start_env_bundle_loader` (the legacy path) is
-    /// structurally never called for this config.
-    #[tokio::test]
-    async fn resolve_db_path_active_is_true_when_db_config_present_and_no_license_client() {
-        let cli = CliConfig::parse_from(["svc-action", "--bundle-scope-tenant-id", "1"]);
-        let mut config = ephemeral_config();
-        config.cli = cli;
-        config.db_reader_password = Some(Secret::new("real-ro-password"));
-        assert!(
-            resolve_db_path_active(&config, &None).await,
-            "DB config present + no license client must fail closed to the DB-driven path"
-        );
-    }
-
     #[tokio::test]
     async fn run_with_shutdown_binds_and_shuts_down_cleanly() {
         let _guard = ENV_LOCK.lock().await;
@@ -1436,9 +1314,8 @@ mod tests {
             usage,
             None,
             bundle_active_set::ActiveVersionSnapshot::new(),
-            false,
             prometheus::IntCounterVec::new(
-                prometheus::Opts::new("test_redirected_after_upgrade_total", "test"),
+                prometheus::Opts::new("test_redirected_total", "test"),
                 &["app_id"],
             )
             .expect("valid metric definition"),
@@ -1455,15 +1332,15 @@ mod tests {
         try_start_env_bundle_loader(&cli, connections);
     }
 
-    /// Security review fix regression test: `db_reader_password: None` (the
-    /// value `config::Config::from_cli` now produces for both a genuinely
-    /// unset `DB_READER_PASSWORD` and Helm's always-rendered-but-empty
-    /// default) must take `try_start_db_bundle_loader`'s documented no-op
-    /// branch rather than attempting a DB connection -- fire-and-forget,
-    /// same shape as `try_start_env_bundle_loader_disabled_without_digest`
-    /// above.
+    /// Security review fix regression test (carried forward): `db_reader_
+    /// password: None` (the value `config::Config::from_cli` now produces
+    /// for both a genuinely unset `DB_READER_PASSWORD` and Helm's
+    /// always-rendered-but-empty default) must take
+    /// `try_start_changelog_consumer`'s documented no-op branch rather than
+    /// attempting a DB connection -- fire-and-forget, same shape as
+    /// `try_start_env_bundle_loader_disabled_without_digest` above.
     #[tokio::test]
-    async fn try_start_db_bundle_loader_noop_when_db_reader_password_unset() {
+    async fn try_start_changelog_consumer_noop_when_db_reader_password_unset() {
         let cli = CliConfig::parse_from(["svc-action"]);
         let config = Config {
             cli,
@@ -1473,68 +1350,27 @@ mod tests {
             db_reader_password: None,
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
-        try_start_db_bundle_loader(
+        try_start_changelog_consumer(
             &config,
             connections,
             None,
             test_excluded_metric(),
+            test_changelog_consumer_metrics(),
             bundle_active_set::ActiveVersionSnapshot::new(),
         );
     }
 
-    /// Same no-op contract, the other independent startup gate:
-    /// `BUNDLE_SCOPE_TENANT_ID` unset (`None`, `CliConfig`'s default) even
-    /// with a real reader password present.
-    #[tokio::test]
-    async fn try_start_db_bundle_loader_noop_when_tenant_id_unset() {
-        let cli = CliConfig::parse_from(["svc-action"]);
-        assert_eq!(cli.bundle_scope_tenant_id.get(), None);
-        let config = Config {
-            cli,
-            db_password: Secret::new("test-password"),
-            envelope_binding_keys: None,
-            discord_bot_token: None,
-            db_reader_password: Some(Secret::new("real-ro-password")),
-        };
-        let connections = Arc::new(host_api::ConnectionRegistry::new());
-        try_start_db_bundle_loader(
-            &config,
-            connections,
-            None,
-            test_excluded_metric(),
-            bundle_active_set::ActiveVersionSnapshot::new(),
-        );
-    }
-
-    /// Bug fix regression (the actual bug): tenant `0` is a real,
-    /// legitimate tenant and must clear this gate rather than being treated
-    /// as not-configured. Only asserts the gate is cleared (no panic/hang
-    /// from the synchronous portion of the function) -- the spawned task's
-    /// own DB connection failure against an unreachable host isn't
-    /// re-asserted here.
-    #[tokio::test]
-    async fn try_start_db_bundle_loader_clears_tenant_gate_when_tenant_id_is_zero() {
-        let cli = CliConfig::parse_from(["svc-action", "--bundle-scope-tenant-id", "0"]);
-        assert_eq!(cli.bundle_scope_tenant_id.get(), Some(0));
-        let config = Config {
-            cli,
-            db_password: Secret::new("test-password"),
-            envelope_binding_keys: None,
-            discord_bot_token: None,
-            db_reader_password: Some(Secret::new("real-ro-password")),
-        };
-        let connections = Arc::new(host_api::ConnectionRegistry::new());
-        try_start_db_bundle_loader(
-            &config,
-            connections,
-            None,
-            test_excluded_metric(),
-            bundle_active_set::ActiveVersionSnapshot::new(),
-        );
+    /// Removal regression (dataplane scale design, multi-tenant): the
+    /// retired `BUNDLE_SCOPE_TENANT_ID`/`--bundle-scope-tenant-id` flag must
+    /// no longer be a recognized CLI arg.
+    #[test]
+    fn bundle_scope_tenant_id_flag_removed_from_svc_action() {
+        let result = CliConfig::try_parse_from(["svc-action", "--bundle-scope-tenant-id", "0"]);
+        assert!(result.is_err());
     }
 
     /// A standalone, unregistered `IntCounterVec` for
-    /// `try_start_db_bundle_loader` tests -- see `bundle_loader::tests::
+    /// `try_start_changelog_consumer` tests -- see `bundle_loader::tests::
     /// test_metric`'s identical rationale (no `Registry` needed for
     /// `.inc()` to work correctly).
     fn test_excluded_metric() -> prometheus::IntCounterVec {
@@ -1543,6 +1379,12 @@ mod tests {
             &["app_id", "reason"],
         )
         .expect("valid metric definition")
+    }
+
+    /// A standalone, unregistered [`telemetry::ChangelogConsumerMetrics`] --
+    /// same rationale as [`test_excluded_metric`].
+    fn test_changelog_consumer_metrics() -> telemetry::ChangelogConsumerMetrics {
+        telemetry::register_changelog_consumer_metrics(&prometheus::Registry::new())
     }
 
     /// The core of this PR's fix: once a host-API connection is active,
