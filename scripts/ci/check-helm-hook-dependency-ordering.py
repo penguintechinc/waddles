@@ -42,13 +42,6 @@ ALLOWLIST: dict[str, str] = {
         "namespace as soon as the namespace exists; it is never a chart "
         "resource."
     ),
-    "waddlebot-secrets": (
-        "KNOWN GAP, deliberately deferred (see migrations-job.yaml's "
-        "fix/helm-hook-rbac-ordering comment): this Secret is consumed by "
-        "~20 other Deployments and converting it into a hook changes its "
-        "helm uninstall/rollback lifecycle chart-wide -- out of scope for "
-        "this RBAC-ordering fix, tracked as separate follow-up work."
-    ),
 }
 
 HOOK_ANNOTATION = "helm.sh/hook"
