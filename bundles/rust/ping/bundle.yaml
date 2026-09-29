@@ -7,6 +7,9 @@ version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
+author: PenguinTech/waddles
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/rust/ping
 language: rust
 artifact: component
 execution_model: wasi-component
