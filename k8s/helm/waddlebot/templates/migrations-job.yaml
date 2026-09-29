@@ -25,6 +25,18 @@ metadata:
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "-5"
+    # fix/helm-hook-rbac-ordering -- serviceAccountName below is now the dedicated
+    # {{ include "waddlebot.fullname" . }}-db-migrate hook SA (migrations-job-rbac.yaml,
+    # weight -10), not the shared "waddlebot" SA -- see that file for why the shared SA
+    # was an ordering bug here too.
+    #
+    # KNOWN REMAINING GAP (not fixed in this change, tracked separately): this Job's
+    # envFrom below still pulls waddlebot-secrets, which is also a plain/regular
+    # resource -- on a true first install it is likewise not guaranteed to exist yet
+    # during the pre-install phase. Converting waddlebot-secrets itself into a hook is
+    # out of scope for this RBAC-ordering fix: it is consumed by ~20 other Deployments
+    # and changes its helm uninstall/rollback lifecycle chart-wide, which needs its own
+    # reviewed change rather than folding into this one.
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 3
@@ -36,7 +48,7 @@ spec:
         app.kubernetes.io/component: db-migrate
     spec:
       restartPolicy: Never
-      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      serviceAccountName: {{ include "waddlebot.fullname" . }}-db-migrate
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}

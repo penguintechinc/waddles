@@ -41,6 +41,14 @@ metadata:
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "-6"
+    # fix/helm-hook-rbac-ordering -- before-hook-creation (not hook-failed) is the
+    # right policy: it already guarantees a stale/failed Job from a previous attempt
+    # is deleted and replaced automatically the next time this hook fires, so nobody
+    # ever has to `kubectl delete job` by hand before retrying. Adding hook-failed
+    # would additionally delete the Job the instant it fails, during the SAME release
+    # attempt -- destroying the failed pod's logs before an operator can inspect them.
+    # RBAC this Job depends on (auto-provisioned-keys-job-rbac.yaml) is now its own
+    # pre-install/pre-upgrade hook at weight -10, strictly before this Job's -6.
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 1

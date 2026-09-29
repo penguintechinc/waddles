@@ -358,3 +358,65 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  helm-chart-lint:
+    name: Helm chart lint + hook dependency ordering
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Install Helm
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2  # v5
+        with:
+          version: 'v3.13.0'
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Install check dependencies
+        run: pip install --no-cache-dir pyyaml==6.0.2
+
+      # fix/helm-hook-rbac-ordering -- helm.sh/hook-annotated Jobs run BEFORE any
+      # regular (non-hook) chart resource. A pre-install/pre-upgrade Job whose
+      # serviceAccountName or mounted ConfigMap/Secret resolves to a regular resource
+      # (instead of a hook at a strictly lower weight, or a documented allowlist entry)
+      # will fail on first install with "serviceaccounts/secrets ... not found" once
+      # activeDeadlineSeconds expires -- exactly the class of bug fixed on this branch.
+      # scripts/ci/check-helm-hook-dependency-ordering.py asserts this statically for
+      # every environment's rendered manifests so it can never silently regress.
+      - name: helm lint (alpha)
+        run: |
+          set -euo pipefail
+          helm lint k8s/helm/waddlebot --values k8s/helm/waddlebot/values-alpha.yaml
+
+      - name: helm template + hook dependency ordering check (alpha)
+        run: |
+          set -euo pipefail
+          helm template waddlebot k8s/helm/waddlebot \
+            --values k8s/helm/waddlebot/values-alpha.yaml \
+            --kube-version 1.30.0 \
+          | python3 scripts/ci/check-helm-hook-dependency-ordering.py
+
+      # values-beta.yaml pins global.deploymentTier=production, which requires every
+      # generated secret to be supplied explicitly (or already present on a live
+      # cluster via `lookup`) -- neither is available to an offline `helm template` in
+      # CI. Overriding to the alpha secret-generation tier here renders the SAME
+      # beta topology/resource set (hooks, weights, RBAC) purely so this ordering
+      # check can run against it; it is not a substitute for the real beta deploy.
+      - name: helm lint (beta topology)
+        run: |
+          set -euo pipefail
+          helm lint k8s/helm/waddlebot --values k8s/helm/waddlebot/values-beta.yaml \
+            --set global.deploymentTier=alpha
+
+      - name: helm template + hook dependency ordering check (beta topology)
+        run: |
+          set -euo pipefail
+          helm template waddlebot k8s/helm/waddlebot \
+            --values k8s/helm/waddlebot/values-beta.yaml \
+            --kube-version 1.30.0 \
+            --set global.deploymentTier=alpha \
+          | python3 scripts/ci/check-helm-hook-dependency-ordering.py
