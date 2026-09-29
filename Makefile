@@ -2,8 +2,8 @@
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll \
-        build-superpenguin-roll-bundle verify-ping-bundle-reproducible \
-        generate-minio-kms-key alpha-deploy
+        build-superpenguin-roll-bundle test-csharp-bundle-compile \
+        verify-ping-bundle-reproducible generate-minio-kms-key alpha-deploy
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -118,6 +118,13 @@ test-superpenguin-roll:
 # core/bundle_executor/tests/fixtures/).
 build-superpenguin-roll-bundle:
 	@bash scripts/verify-superpenguin-roll-fixture.sh
+
+# End-to-end: builds the real bundles/csharp/csping spike bundle through
+# CSharpBuilder (core/bundle_compiler/src/build/csharp.rs), the
+# builder_for("csharp") arm now returns -- ignored by default cargo test
+# (needs docker + network, ~1-2 minutes), so this is its only run path.
+test-csharp-bundle-compile:
+	@cd core/bundle_compiler && cargo test --locked builds_csping_via_docker -- --ignored --nocapture
 
 # Proves bundles/rust/ping's WASI 0.2 component build (bundles/Dockerfile.core-bundles's
 # rust-bundle-builder stage) is byte-reproducible -- two independent --no-cache builds must
