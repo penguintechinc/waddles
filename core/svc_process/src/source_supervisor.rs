@@ -106,6 +106,9 @@ pub struct SupervisorDeps {
     pub approved_targets: HashMap<String, String>,
     pub metrics: Arc<dyn SpineMetrics>,
     pub license: Arc<dyn FeatureGate>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::egress`'s doc.
+    pub egress: Arc<bundle_host_http::egress::EgressGuard>,
     /// Tenant slug / community name for `penguin_spine::Scope::
     /// source_stream` -- resolved from the numeric `BUNDLE_SCOPE_TENANT_ID`/
     /// `BUNDLE_SCOPE_COMMUNITY_ID` scope via `bundle_active_set::scope::
@@ -240,6 +243,7 @@ async fn run_binding_consumer(
             spine: spine_client,
             metrics: deps.metrics.clone(),
             license: Arc::clone(&deps.license),
+            egress: Arc::clone(&deps.egress),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();
