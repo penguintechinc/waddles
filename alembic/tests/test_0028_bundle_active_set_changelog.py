@@ -284,9 +284,24 @@ class TestRetention:
 
 
 class TestMigrationUpDown:
-    """`alembic downgrade -1` / `upgrade head` against the real container, round-tripped."""
+    """`alembic downgrade <down_revision>` / `upgrade <revision>` against the real container, round-tripped.
+
+    Targets this migration's own revision id and `down_revision` explicitly
+    rather than relative `-1`/`head` -- the session-scoped `pg_db` fixture
+    migrates to true `head`, which may sit on top of later migrations
+    stacked above this one (e.g. 0029+), so a relative `-1`/`head` pair
+    would silently test the wrong migration's up/down once anything lands
+    on top of this revision.
+    """
+
+    _REVISION = "0028_bundle_active_set_changelog"
+    _DOWN_REVISION = "0027_app_bundle_three_tier"
 
     def test_downgrade_then_upgrade_round_trips_schema(self, pg_db: PgTestDatabase) -> None:
+        # Normalize to this migration's own revision first -- `pg_db` may
+        # already be at true `head`, ahead of this revision.
+        alembic_cli("downgrade", self._REVISION, dsn=pg_db.dsn)
+
         with psycopg2.connect(pg_db.dsn) as check_conn:
             check_conn.autocommit = True
             with check_conn.cursor() as cur:
@@ -296,7 +311,7 @@ class TestMigrationUpDown:
                 )
                 assert tuple(cur.fetchone()) == (True, True)
 
-        alembic_cli("downgrade", "-1", dsn=pg_db.dsn)
+        alembic_cli("downgrade", self._DOWN_REVISION, dsn=pg_db.dsn)
 
         with psycopg2.connect(pg_db.dsn) as check_conn:
             check_conn.autocommit = True
@@ -315,7 +330,7 @@ class TestMigrationUpDown:
                 )
                 assert cur.fetchone()[0] == 0
 
-        alembic_cli("upgrade", "head", dsn=pg_db.dsn)
+        alembic_cli("upgrade", self._REVISION, dsn=pg_db.dsn)
 
         with psycopg2.connect(pg_db.dsn) as check_conn:
             check_conn.autocommit = True
@@ -331,3 +346,7 @@ class TestMigrationUpDown:
                     "SELECT COUNT(*) FROM pg_trigger WHERE tgname = 'trg_bundle_active_set_log'"
                 )
                 assert cur.fetchone()[0] == 5
+
+        # Restore true head for any later test in this session-scoped module
+        # (only this class touches migration state; siblings only read data).
+        alembic_cli("upgrade", "head", dsn=pg_db.dsn)

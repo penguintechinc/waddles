@@ -43,7 +43,7 @@ spec:
       {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
       containers:
       - name: svc-action-rust
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "svc-action" "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcAction.imageRepository | default "svc-action-rust") "imageTag" .Values.global.imageTag) }}"
         # Hardcoded Always -- see templates/svc-process-rust.yaml's comment on this same line
         # for the node-image-cache rationale (identical here).
         imagePullPolicy: Always
@@ -117,6 +117,22 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcAction.dbReaderPort | default .Values.infrastructure.postgresql.service.port | quote }}
         - name: DB_READER_NAME
           value: {{ .Values.pipeline.rustDataPlane.svcAction.dbReaderName | default .Values.infrastructure.postgresql.database | quote }}
+        # fix/helm-apply-errors -- DB_READER_USER is a plain `value:` here (never
+        # valueFrom) and must stay that way. A now-retired chart revision shipped this
+        # SAME env var name as `valueFrom: secretKeyRef(waddlebot-bundle-reader/...)`
+        # (that Secret no longer exists anywhere in this chart). `kubectl`'s strategic
+        # merge patch keys env list items by `name` and deep-merges the matched dict,
+        # so any live pod still carrying that old revision's env entry gets BOTH
+        # fields on upgrade -- API server then rejects the whole object with
+        # `env[N].valueFrom: Invalid value: "": may not be specified when value is not
+        # empty` (see scripts/ci/check-helm-rendered-manifest-invariants.py's module
+        # docstring; confirmed via `kubectl apply --dry-run=server` against live
+        # alpha). That check validates the rendered manifest in isolation and cannot
+        # see this class of bug -- it only exists as a diff against a specific live
+        # object's history, not a self-conflict in any single rendered document. A
+        # cluster already carrying the old revision needs one `helm upgrade
+        # --force-replace` (Helm v4) to clear it; never reintroduce `valueFrom` for
+        # this name afterward.
         - name: DB_READER_USER
           value: {{ .Values.pipeline.rustDataPlane.svcAction.dbReaderUser | default "svc_action_ro" | quote }}
         - name: DB_READER_PASSWORD
@@ -124,17 +140,15 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: DB_READER_PASSWORD
-        {{- /* Bug fix: rendered only when explicitly set -- see
+        {{- /* BUNDLE_SCOPE_TENANT_ID/BUNDLE_SCOPE_COMMUNITY_ID REMOVED -- see
         templates/svc-process-rust.yaml's identical block for the full rationale
-        (core/svc_action/src/config.rs TenantScopeId mirrors svc_process's own). */}}
-        {{- if ne (.Values.pipeline.rustDataPlane.svcAction.bundleScopeTenantId | toString) "" }}
-        - name: BUNDLE_SCOPE_TENANT_ID
-          value: {{ .Values.pipeline.rustDataPlane.svcAction.bundleScopeTenantId | quote }}
-        {{- end }}
-        - name: BUNDLE_SCOPE_COMMUNITY_ID
-          value: {{ .Values.pipeline.rustDataPlane.svcAction.bundleScopeCommunityId | default 0 | quote }}
+        (dataplane scale design, multi-tenant change-log consumer). */}}
         - name: BUNDLE_CONFIG_POLL_SECONDS
+          # Incremental change-log poll interval, in whole seconds (floor: 5s).
           value: {{ .Values.pipeline.rustDataPlane.svcAction.bundleConfigPollSeconds | default 300 | quote }}
+        - name: BUNDLE_CONFIG_FULL_RECONCILE_MINUTES
+          # Periodic full active-set reconcile interval, in whole minutes (floor: 1m).
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.bundleConfigFullReconcileMinutes | default 15 | quote }}
         - name: ENVELOPE_BINDING_KEYS
           valueFrom:
             secretKeyRef:

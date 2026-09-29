@@ -82,6 +82,12 @@ infrastructure:
     resources:
       requests: { cpu: "50m", memory: "128Mi" }
       limits: { cpu: "300m", memory: "512Mi" }
+    # fix/minio-kms-sse -- alpha is exempt from the beta/gamma/production fail guard
+    # (templates/infrastructure/minio.yaml) and may reference this well-known secret
+    # name; the Secret itself is never committed -- provision it once per cluster via
+    # `make generate-minio-kms-key` / scripts/generate-minio-kms-key.sh before deploy.
+    kms:
+      secretName: "minio-kms"
   ollama:
     enabled: false
   qdrant:
@@ -235,19 +241,17 @@ pipeline:
       processBundleVersion: "1.0.0"
       processBundleComponentKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.wasm"
       processBundleSidecarKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.json"
-      # DB-driven active-bundle loader (core/svc_process/src/config.rs,
-      # core/bundle_active_set) -- gated OFF by default (waddles.core.db-bundle-config).
-      # bundleScopeTenantId is set to 0 here (the global/default tenant) for this
-      # cluster's own scope, but the RO Postgres role (svc_process_ro) still isn't
-      # provisioned yet -- DB_READER_PASSWORD stays empty (templates/secrets.yaml
-      # default), which is `try_start_db_bundle_loader`'s own independent disable gate
-      # (core/svc_process/src/lib.rs). So PROCESS_APP_ID/PROCESS_BUNDLE_* above remain
-      # this alpha e2e proof's sole bundle source, unaffected by this block, until that
-      # role exists. Only overriding the poll interval here (tunable per deployment, per
-      # the task's own instruction) -- a shorter interval than the 300s chart default so
-      # a future alpha e2e proof of the hot-swap path itself doesn't need a
-      # multi-minute wait between DB writes and the loader noticing.
-      bundleScopeTenantId: 0
+      # Multi-tenant, change-log-driven active-bundle loader (core/svc_process/
+      # src/config.rs, core/bundle_active_set, core/svc_process/src/
+      # changelog_consumer.rs) -- the RO Postgres role (svc_process_ro) still
+      # isn't provisioned yet -- DB_READER_PASSWORD stays empty (templates/
+      # secrets.yaml default), which is `try_start_changelog_consumer`'s own
+      # independent disable gate (core/svc_process/src/lib.rs). So PROCESS_APP_ID/
+      # PROCESS_BUNDLE_* above remain this alpha e2e proof's sole bundle source,
+      # unaffected by this block, until that role exists. Only overriding the poll
+      # interval here (tunable per deployment) -- a shorter interval than the 300s
+      # chart default so a future alpha e2e proof of the hot-swap path itself
+      # doesn't need a multi-minute wait between DB writes and the loader noticing.
       bundleConfigPollSeconds: 30
       resources:
         requests: { cpu: "100m", memory: "128Mi" }
@@ -264,8 +268,7 @@ pipeline:
       actionBundleVersion: "1.0.0"
       actionBundleComponentKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.wasm"
       actionBundleSidecarKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.json"
-      # DB-driven active-bundle loader -- see svcProcess's identical comment above.
-      bundleScopeTenantId: 0
+      # Multi-tenant changelog consumer -- see svcProcess's identical comment above.
       bundleConfigPollSeconds: 30
       resources:
         requests: { cpu: "100m", memory: "128Mi" }
@@ -366,8 +369,17 @@ egressPolicy:
     serviceCidr: "10.152.183.0/24"
     nodeCidr: "10.0.0.0/8"
 
+# spire.enabled defaults to false at the chart level (values.yaml) pending
+# https://github.com/penguintechinc/waddles/issues/437 (SPIRE server/agent
+# crash-loop -- the waddlebot-spire-auto-enroll post-upgrade hook Job fails
+# every rollout while this is true, which pins the whole release in FAILED
+# state). Flip back to true once #437 is resolved and the hook has been
+# verified green in a scratch namespace first. If a release is ALREADY stuck
+# FAILED because of this, see the chart README "Recovering a FAILED release"
+# section (helm rollback to the last good revision, or helm upgrade once
+# this flag -- and therefore the hook -- is false).
 spire:
-  enabled: true
+  enabled: false
   environment: "alpha"
   server:
     resources:
