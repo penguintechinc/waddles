@@ -421,6 +421,113 @@ async def test_approve_adopted_role_succeeds(app: Quart) -> None:
     assert body["managedRole"]["approvedByUserId"] == 1
 
 
+async def test_reject_adopted_role_write_scope_required(app: Quart) -> None:
+    install_dal = app.config["install_dal"]
+    community_id = await _seed_community(install_dal, tenant_id=1)
+    pairing_id = await _seed_pairing(install_dal, tenant_id=1)
+    created = await app.test_client().post(
+        f"/api/v1/tenant/guild-pairings/{pairing_id}/roles",
+        headers={"Authorization": f"Bearer {_admin_token()}"},
+        json={"communityId": community_id, "roleId": "600002", "registeredVia": "adopted"},
+    )
+    managed_role_id = (await created.get_json())["managedRole"]["id"]
+    response = await app.test_client().post(
+        f"/api/v1/guild-authority/managed-roles/{managed_role_id}/reject",
+        headers={"Authorization": f"Bearer {_guild_authority_read_only_token()}"},
+    )
+    assert response.status_code == 403
+
+
+async def test_reject_adopted_role_response_has_exact_field_set(app: Quart) -> None:
+    install_dal = app.config["install_dal"]
+    community_id = await _seed_community(install_dal, tenant_id=1)
+    pairing_id = await _seed_pairing(install_dal, tenant_id=1)
+    created = await app.test_client().post(
+        f"/api/v1/tenant/guild-pairings/{pairing_id}/roles",
+        headers={"Authorization": f"Bearer {_admin_token()}"},
+        json={"communityId": community_id, "roleId": "600003", "registeredVia": "adopted"},
+    )
+    managed_role_id = (await created.get_json())["managedRole"]["id"]
+    response = await app.test_client().post(
+        f"/api/v1/guild-authority/managed-roles/{managed_role_id}/reject",
+        headers={"Authorization": f"Bearer {_guild_authority_token()}"},
+    )
+    assert response.status_code == 201
+    body = await response.get_json()
+    assert set(body.keys()) == {"success", "managedRole"}
+    assert set(body["managedRole"].keys()) == {
+        "id",
+        "platform",
+        "guildId",
+        "roleId",
+        "owningCommunityId",
+        "registeredVia",
+        "status",
+        "approvalStatus",
+        "approvedByUserId",
+        "createdAt",
+    }
+    assert body["managedRole"]["approvalStatus"] == "rejected"
+    assert body["managedRole"]["approvedByUserId"] is None
+
+
+async def test_reject_then_reregister_the_same_role_succeeds(app: Quart) -> None:
+    """Migration 0039's partial unique index -- a rejected row must not block re-registration."""
+    install_dal = app.config["install_dal"]
+    community_id = await _seed_community(install_dal, tenant_id=1)
+    pairing_id = await _seed_pairing(install_dal, tenant_id=1)
+    client = app.test_client()
+    created = await client.post(
+        f"/api/v1/tenant/guild-pairings/{pairing_id}/roles",
+        headers={"Authorization": f"Bearer {_admin_token()}"},
+        json={"communityId": community_id, "roleId": "600004", "registeredVia": "adopted"},
+    )
+    managed_role_id = (await created.get_json())["managedRole"]["id"]
+    rejected = await client.post(
+        f"/api/v1/guild-authority/managed-roles/{managed_role_id}/reject",
+        headers={"Authorization": f"Bearer {_guild_authority_token()}"},
+    )
+    assert rejected.status_code == 201
+
+    second = await client.post(
+        f"/api/v1/tenant/guild-pairings/{pairing_id}/roles",
+        headers={"Authorization": f"Bearer {_admin_token()}"},
+        json={"communityId": community_id, "roleId": "600004", "registeredVia": "adopted"},
+    )
+    assert second.status_code == 201
+    second_body = await second.get_json()
+    assert second_body["managedRole"]["id"] != managed_role_id
+    assert second_body["managedRole"]["approvalStatus"] == "pending"
+
+
+async def test_two_live_owners_of_the_same_role_is_409(app: Quart) -> None:
+    install_dal = app.config["install_dal"]
+    community_id = await _seed_community(install_dal, tenant_id=1)
+    pairing_id = await _seed_pairing(install_dal, tenant_id=1)
+    client = app.test_client()
+    first = await client.post(
+        f"/api/v1/tenant/guild-pairings/{pairing_id}/roles",
+        headers={"Authorization": f"Bearer {_admin_token()}"},
+        json={"communityId": community_id, "roleId": "600005", "registeredVia": "created"},
+    )
+    assert first.status_code == 201
+
+    second = await client.post(
+        f"/api/v1/tenant/guild-pairings/{pairing_id}/roles",
+        headers={"Authorization": f"Bearer {_admin_token()}"},
+        json={"communityId": community_id, "roleId": "600005", "registeredVia": "adopted"},
+    )
+    assert second.status_code == 409
+
+
+async def test_reject_unknown_managed_role_is_404(app: Quart) -> None:
+    response = await app.test_client().post(
+        "/api/v1/guild-authority/managed-roles/999999/reject",
+        headers={"Authorization": f"Bearer {_guild_authority_token()}"},
+    )
+    assert response.status_code == 404
+
+
 async def test_guild_overview_no_member_data_field(app: Quart) -> None:
     install_dal = app.config["install_dal"]
     community_id = await _seed_community(install_dal, tenant_id=1)

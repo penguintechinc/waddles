@@ -23,6 +23,7 @@ from services.errors import ApiError
 from services.guild_pairing_authority_service import (
     approve_adopted_role,
     guild_overview,
+    reject_adopted_role,
     revoke_pairing,
 )
 from services.guild_pairing_service import create_binding, request_role_registration
@@ -306,6 +307,148 @@ class TestAdoptedRoleApproval:
                 dal, verifier, managed_role_id=created.id, approver_hub_user_id=1
             )
         assert exc.value.status_code == 422
+
+
+@requires_docker
+class TestRejectAdoptedRole:
+    async def test_reject_sets_approval_status_rejected(self, pg_db: Any, dal: AsyncDB) -> None:
+        tenant_id = _seed_tenant(pg_db, slug="t-reject")
+        community_id = _seed_community(pg_db, tenant_id=tenant_id, name="c-reject")
+        guild_id = "800000"
+        pairing_id = _seed_active_pairing(pg_db, tenant_id=tenant_id, guild_id=guild_id)
+
+        pending = await request_role_registration(
+            dal,
+            tenant_id=tenant_id,
+            pairing_id=pairing_id,
+            community_id=community_id,
+            role_id="800001",
+            registered_via="adopted",
+            requested_by=None,
+        )
+        verifier = FakeVerifier(allow=True)
+        row = await reject_adopted_role(
+            dal, verifier, managed_role_id=pending.id, rejecter_hub_user_id=42
+        )
+        assert row.approval_status == "rejected"
+        assert row.approved_by_user_id is None
+        assert verifier.calls == [("discord", guild_id, 42)]
+
+    async def test_reject_denied_without_guild_authority(self, pg_db: Any, dal: AsyncDB) -> None:
+        tenant_id = _seed_tenant(pg_db, slug="t-reject-denied")
+        community_id = _seed_community(pg_db, tenant_id=tenant_id, name="c-reject-denied")
+        pairing_id = _seed_active_pairing(pg_db, tenant_id=tenant_id, guild_id="800100")
+
+        pending = await request_role_registration(
+            dal,
+            tenant_id=tenant_id,
+            pairing_id=pairing_id,
+            community_id=community_id,
+            role_id="800101",
+            registered_via="adopted",
+            requested_by=None,
+        )
+        verifier = FakeVerifier(allow=False)
+        with pytest.raises(ApiError) as exc:
+            await reject_adopted_role(
+                dal, verifier, managed_role_id=pending.id, rejecter_hub_user_id=42
+            )
+        assert exc.value.status_code == 403
+
+    async def test_reject_unknown_request_is_404(self, pg_db: Any, dal: AsyncDB) -> None:
+        verifier = FakeVerifier(allow=True)
+        with pytest.raises(ApiError) as exc:
+            await reject_adopted_role(
+                dal,
+                verifier,
+                managed_role_id="00000000-0000-0000-0000-000000000000",
+                rejecter_hub_user_id=1,
+            )
+        assert exc.value.status_code == 404
+
+    async def test_reject_already_approved_row_is_rejected(self, pg_db: Any, dal: AsyncDB) -> None:
+        tenant_id = _seed_tenant(pg_db, slug="t-reject-already-approved")
+        community_id = _seed_community(pg_db, tenant_id=tenant_id, name="c-reject-approved")
+        pairing_id = _seed_active_pairing(pg_db, tenant_id=tenant_id, guild_id="800200")
+
+        created = await request_role_registration(
+            dal,
+            tenant_id=tenant_id,
+            pairing_id=pairing_id,
+            community_id=community_id,
+            role_id="800201",
+            registered_via="created",
+            requested_by=None,
+        )
+        verifier = FakeVerifier(allow=True)
+        with pytest.raises(ApiError) as exc:
+            await reject_adopted_role(
+                dal, verifier, managed_role_id=created.id, rejecter_hub_user_id=1
+            )
+        assert exc.value.status_code == 422
+
+    async def test_reject_then_reregister_succeeds(self, pg_db: Any, dal: AsyncDB) -> None:
+        """Migration 0039's partial unique index -- rejecting must not block re-registration."""
+        tenant_id = _seed_tenant(pg_db, slug="t-reject-reregister")
+        community_id = _seed_community(pg_db, tenant_id=tenant_id, name="c-reject-reregister")
+        guild_id = "800300"
+        pairing_id = _seed_active_pairing(pg_db, tenant_id=tenant_id, guild_id=guild_id)
+
+        pending = await request_role_registration(
+            dal,
+            tenant_id=tenant_id,
+            pairing_id=pairing_id,
+            community_id=community_id,
+            role_id="800301",
+            registered_via="adopted",
+            requested_by=None,
+        )
+        verifier = FakeVerifier(allow=True)
+        await reject_adopted_role(dal, verifier, managed_role_id=pending.id, rejecter_hub_user_id=1)
+
+        # Re-registration for the exact same role succeeds -- 0038's own
+        # request_role_registration pre-check + the DB's own partial unique
+        # index both agree the rejected row no longer counts as owned/pending.
+        second = await request_role_registration(
+            dal,
+            tenant_id=tenant_id,
+            pairing_id=pairing_id,
+            community_id=community_id,
+            role_id="800301",
+            registered_via="adopted",
+            requested_by=None,
+        )
+        assert second.id != pending.id
+        assert second.approval_status == "pending"
+
+    async def test_two_live_owners_of_the_same_role_still_conflict(
+        self, pg_db: Any, dal: AsyncDB
+    ) -> None:
+        tenant_id = _seed_tenant(pg_db, slug="t-two-live-owners")
+        community_id = _seed_community(pg_db, tenant_id=tenant_id, name="c-two-live")
+        guild_id = "800400"
+        pairing_id = _seed_active_pairing(pg_db, tenant_id=tenant_id, guild_id=guild_id)
+
+        await request_role_registration(
+            dal,
+            tenant_id=tenant_id,
+            pairing_id=pairing_id,
+            community_id=community_id,
+            role_id="800401",
+            registered_via="created",
+            requested_by=None,
+        )
+        with pytest.raises(ApiError) as exc:
+            await request_role_registration(
+                dal,
+                tenant_id=tenant_id,
+                pairing_id=pairing_id,
+                community_id=community_id,
+                role_id="800401",
+                registered_via="adopted",
+                requested_by=None,
+            )
+        assert exc.value.status_code == 409
 
 
 @requires_docker

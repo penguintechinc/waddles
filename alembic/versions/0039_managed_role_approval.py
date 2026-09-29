@@ -34,17 +34,26 @@ Changes:
   is required only once `approval_status = 'approved'`, not for every
   `adopted` row unconditionally -- a pending adopted row can now exist
   before anyone has approved it.
-
-**Known, documented limitation carried over from migration 0038, not
-introduced here:** `UNIQUE (platform, guild_id, role_id)` is
-unconditional, not a partial index scoped to `active`/`pending_approval`
-rows (contrast `community_channel_bindings`'s partial unique indexes) --
-a `rejected` or `removed` row permanently occupies that role's slot.
-Narrowing it to a partial index is a follow-up, not implemented here to
-keep this migration to the single, requested change (a pending-approval
-state); no `reject` endpoint is implemented in this PR for the same
-reason -- `rejected` is defined as a value applications may use, not yet
-reachable via this API.
+- Role-ownership uniqueness narrowed to LIVE rows only. Migration 0038's
+  `UNIQUE (platform, guild_id, role_id)` (auto-named
+  `managed_roles_platform_guild_id_role_id_key`, verified against a real
+  container) is dropped and replaced with a partial unique index scoped
+  to `approval_status IN ('pending', 'approved') AND status <> 'removed'`
+  -- a `rejected` request or a fully `removed` role (the data plane's own
+  terminal state for its best-effort unwind pass, `revoke_pairing`'s
+  `pending_cleanup` marker) no longer permanently occupies that role's
+  slot; `active`/`pending_cleanup`/`pending_approval` `status` values are
+  all still "live" (the role assignment may still exist in Discord) and
+  stay exclusive. Reviewed and rejected the coordinator's own filter
+  (`approval_status` alone): a revoked pairing's roles keep
+  `approval_status='approved'` (only `status` flips to
+  `pending_cleanup`), so filtering on `approval_status` alone would never
+  free a role until the data plane's cleanup pass actually ran a second,
+  separate write to change it -- `status <> 'removed'` is the one column
+  that already reaches every terminal case (0038's own `revoked_by`
+  cascade included). Amended on this branch pre-merge, not a follow-up:
+  the guild-authority reject endpoint this PR also adds would otherwise
+  create an unreachable-forever role slot the moment it was used.
 
 Revision ID: 0039_managed_role_approval
 Revises: 0038_guild_tenant_pairing
@@ -100,8 +109,37 @@ def upgrade() -> None:
         "OR approved_by_user_id IS NOT NULL)"
     )
 
+    # Role ownership unique only among LIVE rows (module docstring) --
+    # drops 0038's unconditional UNIQUE, replaces it with a partial index.
+    op.execute(
+        "ALTER TABLE managed_roles DROP CONSTRAINT IF EXISTS "
+        "managed_roles_platform_guild_id_role_id_key"
+    )
+    op.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_managed_roles_live_role "
+        "ON managed_roles (platform, guild_id, role_id) "
+        "WHERE approval_status IN ('pending', 'approved') AND status <> 'removed'"
+    )
+    op.execute(
+        "COMMENT ON INDEX uq_managed_roles_live_role IS "
+        "'Replaces 0038''s unconditional UNIQUE(platform, guild_id, role_id) -- a "
+        "rejected request or a fully removed role (status=''removed'') frees the "
+        "slot for re-registration; active/pending_cleanup/pending_approval stay "
+        "exclusive since the Discord-side assignment may still exist.'"
+    )
+
 
 def downgrade() -> None:
+    op.execute("DROP INDEX IF EXISTS uq_managed_roles_live_role")
+    op.execute(
+        "DO $$ BEGIN "
+        "IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = "
+        "'managed_roles_platform_guild_id_role_id_key') THEN "
+        "ALTER TABLE managed_roles ADD CONSTRAINT "
+        "managed_roles_platform_guild_id_role_id_key "
+        "UNIQUE (platform, guild_id, role_id); "
+        "END IF; END $$"
+    )
     op.execute(
         "ALTER TABLE managed_roles DROP CONSTRAINT IF EXISTS chk_managed_roles_adopted_approval"
     )

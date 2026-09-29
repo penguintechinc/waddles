@@ -271,15 +271,18 @@ async def request_role_registration(
             install_dal, community_id=community_id, tenant_id=tenant_id
         )
 
-        # `status IN ('active', 'pending_approval')` catches both an already-owned
-        # role AND an already-pending request -- the DB's own unconditional
-        # UNIQUE (platform, guild_id, role_id) enforces this regardless, this
-        # is just a clear pre-check instead of a raw IntegrityError.
+        # Mirrors migration 0039's own partial unique index
+        # (`uq_managed_roles_live_role`, `WHERE approval_status IN ('pending',
+        # 'approved') AND status <> 'removed'`) -- a `rejected` or fully
+        # `removed` row is NOT "already owned" and must not block
+        # re-registration; this is a clear pre-check instead of a raw
+        # `IntegrityError`, but the DB's own index is the actual guarantee.
         existing = await install_dal(
             (install_dal.managed_roles.platform == pairing.platform)
             & (install_dal.managed_roles.guild_id == pairing.guild_id)
             & (install_dal.managed_roles.role_id == role_id)
-            & (install_dal.managed_roles.status.belongs(["active", "pending_approval"]))
+            & (install_dal.managed_roles.approval_status.belongs(["pending", "approved"]))
+            & (install_dal.managed_roles.status != "removed")
         ).select()
         if existing.first() is not None:
             raise ApiError(_ROLE_OWNED_CONFLICT_MESSAGE, 409, "ROLE_ALREADY_OWNED")

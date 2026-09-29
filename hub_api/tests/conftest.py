@@ -1578,7 +1578,17 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("status", String(20), nullable=False, server_default="active"),
         Column("created_at", DateTime),
         Column("updated_at", DateTime),
-        UniqueConstraint("platform", "guild_id", "role_id", name="uq_managed_roles_role"),
+        # Partial unique index (migration 0039) -- role ownership is unique
+        # only among LIVE rows; a rejected or fully removed row must not
+        # block re-registration. Mirrors `uq_managed_roles_live_role`.
+        Index(
+            "uq_managed_roles_live_role",
+            "platform",
+            "guild_id",
+            "role_id",
+            unique=True,
+            sqlite_where=text("approval_status IN ('pending', 'approved') AND status <> 'removed'"),
+        ),
     )
     metadata.create_all(conn)
 

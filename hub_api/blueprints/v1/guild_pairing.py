@@ -357,6 +357,14 @@ class ApproveAdoptedRoleResponse:
 
 
 @dataclass(slots=True, frozen=True)
+class RejectAdoptedRoleResponse:
+    """Response DTO for the reject-adopted-role route."""
+
+    success: bool
+    managedRole: ManagedRoleDTO
+
+
+@dataclass(slots=True, frozen=True)
 class RevokePairingResponse:
     """Response DTO for the guild-authority pairing-revoke route."""
 
@@ -403,6 +411,28 @@ async def approve_adopted_role(
     except ApiError as exc:
         return _err(exc)
     return ApproveAdoptedRoleResponse(success=True, managedRole=_managed_role_to_dto(row)), 201
+
+
+@guild_authority_bp.route("/managed-roles/<string:managed_role_id>/reject", methods=["POST"])
+@tenant_middleware  # type: ignore[untyped-decorator]
+@require_scope("guild.authority:write")  # type: ignore[untyped-decorator]
+@validate_response(RejectAdoptedRoleResponse, status_code=201)
+async def reject_adopted_role(
+    managed_role_id: str,
+) -> tuple[RejectAdoptedRoleResponse | dict[str, object], int]:
+    """`POST /api/v1/guild-authority/managed-roles/<managedRoleId>/reject`."""
+    if not await _flag_enabled():
+        return _FLAG_DISABLED_RESPONSE
+    try:
+        row = await authority_svc.reject_adopted_role(
+            _install_dal(),
+            _verifier(),
+            managed_role_id=managed_role_id,
+            rejecter_hub_user_id=get_current_user_id(request),
+        )
+    except ApiError as exc:
+        return _err(exc)
+    return RejectAdoptedRoleResponse(success=True, managedRole=_managed_role_to_dto(row)), 201
 
 
 @guild_authority_bp.route("/<string:pairing_id>/revoke", methods=["POST"])

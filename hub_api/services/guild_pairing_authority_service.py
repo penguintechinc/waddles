@@ -89,6 +89,17 @@ class GuildOverviewEntry:
     ownedRoleIds: list[str]
 
 
+async def _get_pending_adoption(install_dal: AsyncDB, *, managed_role_id: str) -> Any:
+    """The `managed_roles` row for `managed_role_id`, asserting it is a pending adoption request."""
+    rows = await install_dal(install_dal.managed_roles.id == managed_role_id).select()
+    role_row = rows.first()
+    if role_row is None:
+        raise not_found("Managed role registration not found")
+    if role_row.registered_via != "adopted" or role_row.approval_status != "pending":
+        raise unprocessable("This managed role registration is not a pending adoption request")
+    return role_row
+
+
 async def approve_adopted_role(
     install_dal: AsyncDB,
     verifier: GuildAuthorityVerifier | None,
@@ -107,12 +118,7 @@ async def approve_adopted_role(
     async with bundle_span(
         "hub.guild_pairing.approve_adopted_role", managed_role_id=managed_role_id
     ):
-        rows = await install_dal(install_dal.managed_roles.id == managed_role_id).select()
-        role_row = rows.first()
-        if role_row is None:
-            raise not_found("Managed role registration not found")
-        if role_row.registered_via != "adopted" or role_row.approval_status != "pending":
-            raise unprocessable("This managed role registration is not a pending adoption request")
+        role_row = await _get_pending_adoption(install_dal, managed_role_id=managed_role_id)
 
         await _assert_authority(
             verifier,
@@ -133,6 +139,52 @@ async def approve_adopted_role(
             install_dal,
             actor_id=approver_hub_user_id,
             action="guild_pairing.role_adoption_approved",
+            target_type="managed_role",
+            target_id=str(managed_role_id),
+            details={"tenant_id": role_row.tenant_id, "role_id": role_row.role_id},
+        )
+        return (await install_dal(install_dal.managed_roles.id == managed_role_id).select()).first()
+
+
+async def reject_adopted_role(
+    install_dal: AsyncDB,
+    verifier: GuildAuthorityVerifier | None,
+    *,
+    managed_role_id: str,
+    rejecter_hub_user_id: int,
+) -> Any:
+    """Reject a pending `adopted` role registration -- `approval_status='rejected'` in place.
+
+    Migration 0039's partial unique index (`uq_managed_roles_live_role`,
+    `WHERE approval_status IN ('pending', 'approved') AND status <> 'removed'`)
+    excludes a rejected row immediately -- the same `(platform, guild_id,
+    role_id)` can be re-registered right away, `created` or `adopted`,
+    without waiting on any cleanup pass. `managed_roles` has no
+    `rejected_by`/`rejected_at` column (deliberately -- no new migration
+    for this beyond 0039's own scope); who/when is captured by the
+    `audit_log` row instead, same append-only-evidence split every other
+    action in this module already uses.
+    """
+    async with bundle_span(
+        "hub.guild_pairing.reject_adopted_role", managed_role_id=managed_role_id
+    ):
+        role_row = await _get_pending_adoption(install_dal, managed_role_id=managed_role_id)
+
+        await _assert_authority(
+            verifier,
+            platform=role_row.platform,
+            guild_id=role_row.guild_id,
+            hub_user_id=rejecter_hub_user_id,
+        )
+
+        now = datetime.now(UTC)
+        await install_dal(install_dal.managed_roles.id == managed_role_id).update(
+            approval_status="rejected", updated_at=now
+        )
+        await bundle_audit.record(
+            install_dal,
+            actor_id=rejecter_hub_user_id,
+            action="guild_pairing.role_adoption_rejected",
             target_type="managed_role",
             target_id=str(managed_role_id),
             details={"tenant_id": role_row.tenant_id, "role_id": role_row.role_id},
@@ -246,5 +298,6 @@ __all__ = [
     "GuildOverviewEntry",
     "approve_adopted_role",
     "guild_overview",
+    "reject_adopted_role",
     "revoke_pairing",
 ]
