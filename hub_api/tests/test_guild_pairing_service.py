@@ -26,7 +26,6 @@ from penguin_dal import AsyncDB
 from services.bundle_install_dal import build_install_dal
 from services.errors import ApiError
 from services.guild_pairing_service import (
-    PendingRoleRegistration,
     create_binding,
     list_managed_roles,
     list_pairings,
@@ -319,19 +318,21 @@ class TestRoleRegistration:
             requested_by=None,
         )
         assert row.status == "active"
+        assert row.approval_status == "approved"
         assert row.approved_by_user_id is None
 
         roles = await list_managed_roles(dal, tenant_id=tenant_id)
         assert len(roles) == 1
 
-    async def test_adopted_role_is_staged_pending_not_inserted(
+    async def test_adopted_role_is_inserted_pending_not_active(
         self, pg_db: Any, dal: AsyncDB
     ) -> None:
+        """A real `managed_roles` row from the start (migration 0039) -- never `audit_log`."""
         tenant_id = _seed_tenant(pg_db, slug="t-role-adopted")
         community_id = _seed_community(pg_db, tenant_id=tenant_id, name="c-role-adopted")
         pairing_id = _seed_active_pairing(pg_db, tenant_id=tenant_id, guild_id="666666")
 
-        result = await request_role_registration(
+        row = await request_role_registration(
             dal,
             tenant_id=tenant_id,
             pairing_id=pairing_id,
@@ -340,8 +341,45 @@ class TestRoleRegistration:
             registered_via="adopted",
             requested_by=None,
         )
-        assert isinstance(result, PendingRoleRegistration)
-        assert await list_managed_roles(dal, tenant_id=tenant_id) == []
+        # status='pending_approval', NOT 'active' -- v_managed_roles_active filters
+        # on status='active' only, so this row is invisible to the data plane
+        # (module docstring) without needing a second, separate table.
+        assert row.status == "pending_approval"
+        assert row.approval_status == "pending"
+        assert row.approved_by_user_id is None
+
+        # It IS a real row in managed_roles -- listed for the tenant.
+        roles = await list_managed_roles(dal, tenant_id=tenant_id)
+        assert len(roles) == 1
+        assert roles[0].id == row.id
+
+    async def test_second_adoption_request_for_same_role_is_a_conflict(
+        self, pg_db: Any, dal: AsyncDB
+    ) -> None:
+        tenant_id = _seed_tenant(pg_db, slug="t-role-adopted-conflict")
+        community_id = _seed_community(pg_db, tenant_id=tenant_id, name="c-role-adopted-conflict")
+        pairing_id = _seed_active_pairing(pg_db, tenant_id=tenant_id, guild_id="666700")
+
+        await request_role_registration(
+            dal,
+            tenant_id=tenant_id,
+            pairing_id=pairing_id,
+            community_id=community_id,
+            role_id="778888",
+            registered_via="adopted",
+            requested_by=None,
+        )
+        with pytest.raises(ApiError) as exc:
+            await request_role_registration(
+                dal,
+                tenant_id=tenant_id,
+                pairing_id=pairing_id,
+                community_id=community_id,
+                role_id="778888",
+                registered_via="adopted",
+                requested_by=None,
+            )
+        assert exc.value.status_code == 409
 
     async def test_registering_an_already_owned_role_is_a_conflict(
         self, pg_db: Any, dal: AsyncDB

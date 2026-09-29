@@ -27,24 +27,22 @@ the conflicting binding (`_CHANNEL_BINDING_CONFLICT_MESSAGE`/
 `_GUILD_DEFAULT_CONFLICT_MESSAGE` are static, generic strings; the caught
 `IntegrityError` is never echoed to the client).
 
-**Adopted-role registration, a documented schema gap.** `managed_roles`'s own
-`chk_managed_roles_adopted_approval` CHECK constraint requires
-`approved_by_user_id IS NOT NULL` for any `registered_via='adopted'` row --
-so an adopted registration literally cannot be inserted before guild-authority
-approves it, and migration 0038 has no separate "pending role registration"
-table to stage the request in the meantime. Rather than add a new migration
-(out of this slice's scope), a pending adoption request is staged as an
-`audit_log` row (`action='managed_role.adoption_requested'`) -- the audit
-log's own `id` is the request handle guild-authority approval acts on (see
-`guild_pairing_authority_service.approve_adopted_role`). This is a real,
-called-out gap in the same "known gap, documented, not silently bridged"
-style the migration's own docstring uses, not a defect.
+**Adopted-role registration is a real `managed_roles` row from the start.**
+Migration 0039 added `managed_roles.approval_status` (`pending`/`approved`/
+`rejected`) precisely so a pending adoption request is the actual resource in
+its actual table, not evidence staged in `audit_log` -- `audit_log` is
+append-only evidence of what happened, never the source of truth for what
+*is* currently true. An `adopted` request is inserted immediately with
+`approval_status='pending'`, `status='pending_approval'` (invisible to
+`v_managed_roles_active`, which still filters on `status='active'`); guild-
+authority's `approve_adopted_role` (`guild_pairing_authority_service.py`)
+flips both columns in place. An `audit_log` row is still written for every
+request/approval as append-only evidence, never as the workflow's state.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -123,23 +121,6 @@ async def _validate_community_tenant(
     ).select()
     if rows.first() is None:
         raise not_found("Community not found")
-
-
-@dataclass(slots=True, frozen=True)
-class PendingRoleRegistration:
-    """An `adopted` role registration awaiting guild-authority approval.
-
-    `requestId` is the backing `audit_log.id` -- the handle
-    `guild_pairing_authority_service.approve_adopted_role` consumes.
-    """
-
-    requestId: int
-    platform: str
-    guildId: str
-    roleId: str
-    communityId: int
-    pairingId: str
-    requestedAt: str
 
 
 async def list_pairings(install_dal: AsyncDB, *, tenant_id: int) -> list[Any]:
@@ -269,10 +250,13 @@ async def request_role_registration(
 ) -> Any:
     """Register (`created`) or request adoption (`adopted`) of a Discord role for a community.
 
-    `created` rows are inserted immediately, active, no approval needed.
-    `adopted` rows are NOT inserted into `managed_roles` yet -- see module
-    docstring's "documented schema gap" -- a `PendingRoleRegistration` is
-    returned instead, backed by an `audit_log` row.
+    `created` rows are inserted immediately, `approval_status='approved'`,
+    `status='active'`, no approval needed. `adopted` rows are inserted
+    immediately too, but `approval_status='pending'`, `status='pending_approval'`
+    -- a real `managed_roles` row from the start (migration 0039), invisible
+    to `v_managed_roles_active` until `guild_pairing_authority_service.
+    approve_adopted_role` flips both columns. Callers distinguish the two by
+    the returned row's `approval_status`.
     """
     async with bundle_span(
         "hub.guild_pairing.request_role_registration", tenant_id=tenant_id, role_id=role_id
@@ -287,74 +271,55 @@ async def request_role_registration(
             install_dal, community_id=community_id, tenant_id=tenant_id
         )
 
+        # `status IN ('active', 'pending_approval')` catches both an already-owned
+        # role AND an already-pending request -- the DB's own unconditional
+        # UNIQUE (platform, guild_id, role_id) enforces this regardless, this
+        # is just a clear pre-check instead of a raw IntegrityError.
         existing = await install_dal(
             (install_dal.managed_roles.platform == pairing.platform)
             & (install_dal.managed_roles.guild_id == pairing.guild_id)
             & (install_dal.managed_roles.role_id == role_id)
-            & (install_dal.managed_roles.status == "active")
+            & (install_dal.managed_roles.status.belongs(["active", "pending_approval"]))
         ).select()
         if existing.first() is not None:
             raise ApiError(_ROLE_OWNED_CONFLICT_MESSAGE, 409, "ROLE_ALREADY_OWNED")
 
         now = datetime.now(UTC)
-        if registered_via == "created":
-            try:
-                new_id = await install_dal.managed_roles.async_insert(
-                    platform=pairing.platform,
-                    guild_id=pairing.guild_id,
-                    role_id=role_id,
-                    tenant_id=tenant_id,
-                    pairing_id=pairing_id,
-                    owning_community_id=community_id,
-                    registered_via="created",
-                    approved_by_user_id=None,
-                    approved_at=None,
-                    status="active",
-                    created_at=now,
-                    updated_at=now,
-                )
-            except IntegrityError as exc:
-                raise ApiError(_ROLE_OWNED_CONFLICT_MESSAGE, 409, "ROLE_ALREADY_OWNED") from exc
-            await bundle_audit.record(
-                install_dal,
-                actor_id=requested_by,
-                action="guild_pairing.role_created",
-                target_type="managed_role",
-                target_id=str(new_id),
-                details={"tenant_id": tenant_id, "community_id": community_id, "role_id": role_id},
+        is_created = registered_via == "created"
+        try:
+            new_id = await install_dal.managed_roles.async_insert(
+                platform=pairing.platform,
+                guild_id=pairing.guild_id,
+                role_id=role_id,
+                tenant_id=tenant_id,
+                pairing_id=pairing_id,
+                owning_community_id=community_id,
+                registered_via=registered_via,
+                approval_status="approved" if is_created else "pending",
+                approved_by_user_id=None,
+                approved_at=None,
+                status="active" if is_created else "pending_approval",
+                created_at=now,
+                updated_at=now,
             )
-            return (await install_dal(install_dal.managed_roles.id == new_id).select()).first()
+        except IntegrityError as exc:
+            raise ApiError(_ROLE_OWNED_CONFLICT_MESSAGE, 409, "ROLE_ALREADY_OWNED") from exc
 
-        # registered_via == "adopted" -- stage as a pending audit_log request.
-        request_id = await install_dal.audit_log.async_insert(
-            user_id=requested_by,
-            action="managed_role.adoption_requested",
+        await bundle_audit.record(
+            install_dal,
+            actor_id=requested_by,
+            action="guild_pairing.role_created"
+            if is_created
+            else "guild_pairing.role_adoption_requested",
             target_type="managed_role",
-            target_id=f"{pairing.platform}:{pairing.guild_id}:{role_id}",
-            details={
-                "tenant_id": tenant_id,
-                "pairing_id": pairing_id,
-                "community_id": community_id,
-                "platform": pairing.platform,
-                "guild_id": pairing.guild_id,
-                "role_id": role_id,
-            },
-            created_at=now,
+            target_id=str(new_id),
+            details={"tenant_id": tenant_id, "community_id": community_id, "role_id": role_id},
         )
-        return PendingRoleRegistration(
-            requestId=int(request_id),
-            platform=pairing.platform,
-            guildId=pairing.guild_id,
-            roleId=role_id,
-            communityId=community_id,
-            pairingId=pairing_id,
-            requestedAt=now.isoformat(),
-        )
+        return (await install_dal(install_dal.managed_roles.id == new_id).select()).first()
 
 
 __all__ = [
     "SUPPORTED_PLATFORMS",
-    "PendingRoleRegistration",
     "create_binding",
     "list_managed_roles",
     "list_pairings",

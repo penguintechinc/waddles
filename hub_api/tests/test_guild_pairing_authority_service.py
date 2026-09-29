@@ -241,12 +241,14 @@ class TestAdoptedRoleApproval:
             registered_via="adopted",
             requested_by=None,
         )
+        assert pending.approval_status == "pending"
 
         verifier = FakeVerifier(allow=True)
         row = await approve_adopted_role(
-            dal, verifier, request_id=pending.requestId, approver_hub_user_id=42
+            dal, verifier, managed_role_id=pending.id, approver_hub_user_id=42
         )
         assert row.status == "active"
+        assert row.approval_status == "approved"
         assert row.approved_by_user_id == 42
         assert row.registered_via == "adopted"
         assert verifier.calls == [("discord", guild_id, 42)]
@@ -268,15 +270,42 @@ class TestAdoptedRoleApproval:
         verifier = FakeVerifier(allow=False)
         with pytest.raises(ApiError) as exc:
             await approve_adopted_role(
-                dal, verifier, request_id=pending.requestId, approver_hub_user_id=42
+                dal, verifier, managed_role_id=pending.id, approver_hub_user_id=42
             )
         assert exc.value.status_code == 403
 
     async def test_approve_unknown_request_is_404(self, pg_db: Any, dal: AsyncDB) -> None:
         verifier = FakeVerifier(allow=True)
         with pytest.raises(ApiError) as exc:
-            await approve_adopted_role(dal, verifier, request_id=999999, approver_hub_user_id=1)
+            await approve_adopted_role(
+                dal,
+                verifier,
+                managed_role_id="00000000-0000-0000-0000-000000000000",
+                approver_hub_user_id=1,
+            )
         assert exc.value.status_code == 404
+
+    async def test_approve_already_approved_row_is_rejected(self, pg_db: Any, dal: AsyncDB) -> None:
+        """A `created` row (`approval_status='approved'` immediately) is not an adoption request."""
+        tenant_id = _seed_tenant(pg_db, slug="t-adopt-already-approved")
+        community_id = _seed_community(pg_db, tenant_id=tenant_id, name="c-already-approved")
+        pairing_id = _seed_active_pairing(pg_db, tenant_id=tenant_id, guild_id="444777")
+
+        created = await request_role_registration(
+            dal,
+            tenant_id=tenant_id,
+            pairing_id=pairing_id,
+            community_id=community_id,
+            role_id="778000",
+            registered_via="created",
+            requested_by=None,
+        )
+        verifier = FakeVerifier(allow=True)
+        with pytest.raises(ApiError) as exc:
+            await approve_adopted_role(
+                dal, verifier, managed_role_id=created.id, approver_hub_user_id=1
+            )
+        assert exc.value.status_code == 422
 
 
 @requires_docker

@@ -93,67 +93,40 @@ async def approve_adopted_role(
     install_dal: AsyncDB,
     verifier: GuildAuthorityVerifier | None,
     *,
-    request_id: int,
+    managed_role_id: str,
     approver_hub_user_id: int,
 ) -> Any:
-    """Approve a pending `adopted` role registration (audit-log-staged by `guild_pairing_service`).
+    """Approve a pending `adopted` role registration -- a real `managed_roles` row (migration 0039).
 
-    Resolves the staged `audit_log` row (`action='managed_role.adoption_requested'`),
-    verifies the approver's guild-authority over that request's guild, then
-    inserts the real `managed_roles` row with `approved_by_user_id` set --
-    satisfying `chk_managed_roles_adopted_approval` for the first time.
+    Looks up the `managed_roles` row itself (`approval_status='pending'`),
+    verifies the approver's guild-authority over its guild, then flips
+    `approval_status='approved'`, `status='active'`, `approved_by_user_id` in
+    place -- an UPDATE, never a second INSERT, since the pending row already
+    IS the resource (module docstring: `audit_log` is evidence, never state).
     """
-    async with bundle_span("hub.guild_pairing.approve_adopted_role", request_id=request_id):
-        rows = await install_dal(
-            (install_dal.audit_log.id == request_id)
-            & (install_dal.audit_log.action == "managed_role.adoption_requested")
-        ).select()
-        request_row = rows.first()
-        if request_row is None:
-            raise not_found("Role adoption request not found")
-
-        details = dict(request_row.details or {})
-        platform = details.get("platform")
-        guild_id = details.get("guild_id")
-        role_id = details.get("role_id")
-        pairing_id = details.get("pairing_id")
-        tenant_id = details.get("tenant_id")
-        community_id = details.get("community_id")
-        if not all([platform, guild_id, role_id, pairing_id, tenant_id, community_id]):
-            raise unprocessable("Role adoption request is malformed")
-        assert isinstance(platform, str)  # nosec B101 -- validated by the all([...]) check above
-        assert isinstance(guild_id, str)  # nosec B101
+    async with bundle_span(
+        "hub.guild_pairing.approve_adopted_role", managed_role_id=managed_role_id
+    ):
+        rows = await install_dal(install_dal.managed_roles.id == managed_role_id).select()
+        role_row = rows.first()
+        if role_row is None:
+            raise not_found("Managed role registration not found")
+        if role_row.registered_via != "adopted" or role_row.approval_status != "pending":
+            raise unprocessable("This managed role registration is not a pending adoption request")
 
         await _assert_authority(
-            verifier, platform=platform, guild_id=guild_id, hub_user_id=approver_hub_user_id
+            verifier,
+            platform=role_row.platform,
+            guild_id=role_row.guild_id,
+            hub_user_id=approver_hub_user_id,
         )
 
-        existing = await install_dal(
-            (install_dal.managed_roles.platform == platform)
-            & (install_dal.managed_roles.guild_id == guild_id)
-            & (install_dal.managed_roles.role_id == role_id)
-            & (install_dal.managed_roles.status == "active")
-        ).select()
-        if existing.first() is not None:
-            raise ApiError(
-                "This role is already registered to a community in this guild.",
-                409,
-                "ROLE_ALREADY_OWNED",
-            )
-
         now = datetime.now(UTC)
-        new_id = await install_dal.managed_roles.async_insert(
-            platform=platform,
-            guild_id=guild_id,
-            role_id=role_id,
-            tenant_id=tenant_id,
-            pairing_id=pairing_id,
-            owning_community_id=community_id,
-            registered_via="adopted",
+        await install_dal(install_dal.managed_roles.id == managed_role_id).update(
+            approval_status="approved",
+            status="active",
             approved_by_user_id=approver_hub_user_id,
             approved_at=now,
-            status="active",
-            created_at=now,
             updated_at=now,
         )
         await bundle_audit.record(
@@ -161,10 +134,10 @@ async def approve_adopted_role(
             actor_id=approver_hub_user_id,
             action="guild_pairing.role_adoption_approved",
             target_type="managed_role",
-            target_id=str(new_id),
-            details={"request_id": request_id, "tenant_id": tenant_id, "role_id": role_id},
+            target_id=str(managed_role_id),
+            details={"tenant_id": role_row.tenant_id, "role_id": role_row.role_id},
         )
-        return (await install_dal(install_dal.managed_roles.id == new_id).select()).first()
+        return (await install_dal(install_dal.managed_roles.id == managed_role_id).select()).first()
 
 
 async def revoke_pairing(

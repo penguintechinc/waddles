@@ -27,6 +27,7 @@ from flask_core.auth import (
     setup_default_roles,
     verify_jwt_token,
 )
+from flask_core.authz import has_required_scopes
 from flask_core.tenancy import (
     TenantContext,
     TenantIsolationError,
@@ -247,6 +248,39 @@ class TestScopeBundles:
                 "'users:admin' scope -- this reopens the C3 tenant-owner-to-"
                 "platform-super-admin privilege escalation"
             )
+
+    def test_guild_authority_scopes_present_at_global_admin_and_maintainer(self):
+        """hub_api's guild-authority routes (#500/#501) require these two literal scopes.
+
+        `guild.authority:write` gates approve/revoke; `guild.authority:read`
+        gates the cross-tenant overview. `GuildAuthorityVerifier` (a live
+        Discord permission check) remains the real admission decision for
+        those routes -- this scope only proves the caller is an authenticated
+        platform user, per `guild_pairing.py`'s own module docstring.
+        """
+        assert "guild.authority:read" in SCOPE_BUNDLES["global"]["admin"]
+        assert "guild.authority:write" in SCOPE_BUNDLES["global"]["admin"]
+        assert "guild.authority:read" in SCOPE_BUNDLES["global"]["maintainer"]
+        assert "guild.authority:read" in SCOPE_BUNDLES["global"]["viewer"]
+
+    def test_guild_authority_write_not_granted_to_maintainer_or_viewer(self):
+        """Only global admin gets the destructive/approval action -- maintainer/viewer are read-only."""
+        assert "guild.authority:write" not in SCOPE_BUNDLES["global"]["maintainer"]
+        assert "guild.authority:write" not in SCOPE_BUNDLES["global"]["viewer"]
+
+    def test_guild_authority_write_scope_satisfied_via_wildcard_and_literal(self):
+        """`has_required_scopes` accepts either the literal scope or the `*:write` wildcard.
+
+        Both paths are live: a token minted with the literal scope (a
+        future, more granular bundle) and a token minted from the existing
+        `global:admin`/`global:maintainer` `*:write` wildcard (this bundle,
+        today) must both satisfy `require_scope("guild.authority:write")`.
+        """
+        assert has_required_scopes(
+            frozenset({"guild.authority:write"}), ("guild.authority:write",)
+        )
+        assert has_required_scopes(frozenset({"*:write"}), ("guild.authority:write",))
+        assert not has_required_scopes(frozenset({"*:read"}), ("guild.authority:write",))
 
 
 class TestResolveTenantContextDbResilience:

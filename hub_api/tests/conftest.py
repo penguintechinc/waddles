@@ -62,6 +62,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Float,
+    Index,
     Integer,
     LargeBinary,
     MetaData,
@@ -69,6 +70,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    text,
 )
 
 from services.schema import (
@@ -1488,6 +1490,95 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("ip_address", String(45)),
         Column("user_agent", String),
         Column("created_at", DateTime),
+    )
+    # guild_tenant_pairings / community_channel_bindings / managed_roles
+    # (migrations 0038-0039, #500/#501) -- sqlite-compatible mirror of the
+    # real Postgres schema for `blueprints/v1/guild_pairing.py`'s own HTTP-
+    # layer blueprint tests. `id` columns are `Integer` autoincrement here
+    # (real Postgres is `UUID DEFAULT gen_random_uuid()`) -- `install_dal.
+    # reflect()` re-inspects the live sqlite schema into a fresh Table
+    # object that has no knowledge of a Python-side column default (only
+    # DB-visible metadata survives reflection), so a client-side UUID
+    # default silently vanishes post-reflect and every unqualified
+    # `async_insert()` would violate the PK NOT NULL constraint. Every
+    # caller (service layer, blueprint DTOs) already treats these ids as
+    # opaque strings (`str(row.id)`), so an integer surrogate key round-
+    # trips through the same code paths unchanged -- same convention this
+    # fixture's own `workstream_id: String(36)` comment describes for a
+    # different reason (a real cross-backend type difference, not a
+    # reflection limitation). The two partial unique indexes reproduce
+    # migration 0038's real exclusivity constraints
+    # (`uq_channel_binding_exclusive`/`uq_guild_default_binding_exclusive`)
+    # -- sqlite supports `WHERE`-qualified unique indexes, so the same
+    # `IntegrityError`-on-conflict path the service layer maps to a 409
+    # fires here too.
+    Table(
+        "guild_tenant_pairings",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("platform", String(50), nullable=False, server_default="discord"),
+        Column("guild_id", String(255), nullable=False),
+        Column("tenant_id", Integer, nullable=False),
+        Column("status", String(20), nullable=False, server_default="pending"),
+        Column("installed_by_user_id", Integer),
+        Column("granted_permissions", BigInteger),
+        Column("oauth_scopes", String(255)),
+        Column("consent_at", DateTime),
+        Column("last_verified_at", DateTime),
+        Column("revoked_at", DateTime),
+        Column("revoked_by", String(30)),
+        Column("revoked_by_user_id", Integer),
+        Column("created_at", DateTime),
+        Column("updated_at", DateTime),
+    )
+    Table(
+        "community_channel_bindings",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("platform", String(50), nullable=False, server_default="discord"),
+        Column("guild_id", String(255), nullable=False),
+        Column("channel_id", String(255)),
+        Column("community_id", Integer, nullable=False),
+        Column("tenant_id", Integer, nullable=False),
+        Column("pairing_id", Integer, nullable=False),
+        Column("status", String(20), nullable=False, server_default="active"),
+        Column("created_by", Integer),
+        Column("created_at", DateTime),
+        Column("updated_at", DateTime),
+        Index(
+            "uq_channel_binding_exclusive",
+            "platform",
+            "guild_id",
+            "channel_id",
+            unique=True,
+            sqlite_where=text("channel_id IS NOT NULL AND status = 'active'"),
+        ),
+        Index(
+            "uq_guild_default_binding_exclusive",
+            "platform",
+            "guild_id",
+            unique=True,
+            sqlite_where=text("channel_id IS NULL AND status = 'active'"),
+        ),
+    )
+    Table(
+        "managed_roles",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("platform", String(50), nullable=False, server_default="discord"),
+        Column("guild_id", String(255), nullable=False),
+        Column("role_id", String(255), nullable=False),
+        Column("tenant_id", Integer, nullable=False),
+        Column("pairing_id", Integer, nullable=False),
+        Column("owning_community_id", Integer, nullable=False),
+        Column("registered_via", String(20), nullable=False),
+        Column("approval_status", String(20), nullable=False, server_default="approved"),
+        Column("approved_by_user_id", Integer),
+        Column("approved_at", DateTime),
+        Column("status", String(20), nullable=False, server_default="active"),
+        Column("created_at", DateTime),
+        Column("updated_at", DateTime),
+        UniqueConstraint("platform", "guild_id", "role_id", name="uq_managed_roles_role"),
     )
     metadata.create_all(conn)
 

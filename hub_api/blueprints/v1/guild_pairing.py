@@ -17,13 +17,12 @@ actors and authorization models (schema contract:
   security.md) to validate the bearer token, but the actual admission
   decision is the injected verifier -- a caller may legitimately act on a
   guild paired with a tenant they have no role in at all. `require_scope`
-  is layered on top as defense-in-depth using literal `guild.authority:*`
-  scopes; **known gap** (documented, not silently bridged): no
-  `SCOPE_BUNDLES` entry in `libs/flask_core/flask_core/auth.py` grants
-  these yet (that file is shared infra, out of this slice's scope) -- until
-  a follow-up adds one, only a token issued with that literal scope, or a
-  `global:admin`/`global:maintainer` bundle's `*:read`/`*:write` wildcard,
-  satisfies the check; the `GuildAuthorityVerifier` remains the real gate.
+  is layered on top as defense-in-depth using `guild.authority:read`/
+  `guild.authority:write`, explicit entries in the `global` level of
+  `libs/flask_core/flask_core/auth.py`'s `SCOPE_BUNDLES` (admin: both,
+  maintainer/viewer: read only) -- `GuildAuthorityVerifier` remains the
+  real, live-Discord-permission gate; this scope only proves the caller is
+  an authenticated platform user in the first place.
 
 Feature-flagged behind `waddles.guild-pairing` (default OFF) -- every route
 below 404s while the flag is off, per this task's own "Security and flags"
@@ -160,7 +159,7 @@ class CreateBindingRequest:
 
 @dataclass(slots=True, frozen=True)
 class ManagedRoleDTO:
-    """One `managed_roles` row on the wire."""
+    """One `managed_roles` row -- `approvalStatus` distinguishes pending/approved/rejected."""
 
     id: str
     platform: str
@@ -169,6 +168,7 @@ class ManagedRoleDTO:
     owningCommunityId: int
     registeredVia: str
     status: str
+    approvalStatus: str
     approvedByUserId: int | None
     createdAt: str
 
@@ -182,25 +182,11 @@ class ManagedRoleListResponse:
 
 
 @dataclass(slots=True, frozen=True)
-class PendingRoleRegistrationDTO:
-    """An `adopted` role registration awaiting guild-authority approval, on the wire."""
-
-    requestId: int
-    platform: str
-    guildId: str
-    roleId: str
-    communityId: int
-    pairingId: str
-    requestedAt: str
-
-
-@dataclass(slots=True, frozen=True)
 class ManagedRoleResponse:
-    """Response DTO for role registration -- exactly one of the two fields is set."""
+    """Response DTO for role registration -- `approvalStatus` is `pending` for adopted."""
 
     success: bool
-    managedRole: ManagedRoleDTO | None = None
-    pendingRegistration: PendingRoleRegistrationDTO | None = None
+    managedRole: ManagedRoleDTO
 
 
 @dataclass(slots=True, frozen=True)
@@ -250,6 +236,7 @@ def _managed_role_to_dto(row: Any) -> ManagedRoleDTO:
         owningCommunityId=row.owning_community_id,
         registeredVia=row.registered_via,
         status=row.status,
+        approvalStatus=row.approval_status,
         approvedByUserId=row.approved_by_user_id,
         createdAt=row.created_at.isoformat() if row.created_at else "",
     )
@@ -328,7 +315,7 @@ async def request_role_registration(
     if not await _flag_enabled():
         return _FLAG_DISABLED_RESPONSE
     try:
-        result = await svc.request_role_registration(
+        row = await svc.request_role_registration(
             _install_dal(),
             tenant_id=_tenant_id(),
             pairing_id=pairing_id,
@@ -339,24 +326,7 @@ async def request_role_registration(
         )
     except ApiError as exc:
         return _err(exc)
-
-    if isinstance(result, svc.PendingRoleRegistration):
-        return (
-            ManagedRoleResponse(
-                success=True,
-                pendingRegistration=PendingRoleRegistrationDTO(
-                    requestId=result.requestId,
-                    platform=result.platform,
-                    guildId=result.guildId,
-                    roleId=result.roleId,
-                    communityId=result.communityId,
-                    pairingId=result.pairingId,
-                    requestedAt=result.requestedAt,
-                ),
-            ),
-            201,
-        )
-    return ManagedRoleResponse(success=True, managedRole=_managed_role_to_dto(result)), 201
+    return ManagedRoleResponse(success=True, managedRole=_managed_role_to_dto(row)), 201
 
 
 @guild_pairing_bp.route("/roles", methods=["GET"])
@@ -413,23 +383,21 @@ class GuildOverviewResponse:
     entries: list[GuildOverviewEntryDTO] = field(default_factory=list)
 
 
-@guild_authority_bp.route(
-    "/<string:platform>/<string:guild_id>/roles/<int:request_id>/approve", methods=["POST"]
-)
+@guild_authority_bp.route("/managed-roles/<string:managed_role_id>/approve", methods=["POST"])
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("guild.authority:write")  # type: ignore[untyped-decorator]
 @validate_response(ApproveAdoptedRoleResponse, status_code=201)
 async def approve_adopted_role(
-    platform: str, guild_id: str, request_id: int
+    managed_role_id: str,
 ) -> tuple[ApproveAdoptedRoleResponse | dict[str, object], int]:
-    """`POST /api/v1/guild-authority/<platform>/<guildId>/roles/<requestId>/approve`."""
+    """`POST /api/v1/guild-authority/managed-roles/<managedRoleId>/approve`."""
     if not await _flag_enabled():
         return _FLAG_DISABLED_RESPONSE
     try:
         row = await authority_svc.approve_adopted_role(
             _install_dal(),
             _verifier(),
-            request_id=request_id,
+            managed_role_id=managed_role_id,
             approver_hub_user_id=get_current_user_id(request),
         )
     except ApiError as exc:
