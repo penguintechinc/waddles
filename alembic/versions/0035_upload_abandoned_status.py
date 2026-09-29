@@ -28,8 +28,8 @@ SYSTEM-actor path; an explicit `platform:admin` action for a stuck
 vendor upload) -- this migration only makes the resulting state
 representable and the resubmission path possible.
 
-Revision ID: 0034_upload_abandoned_status
-Revises: 0033_hub_users_identity_uuid
+Revision ID: 0035_upload_abandoned_status
+Revises: 0034_hub_users_identity_uuid
 Create Date: 2026-09-28
 
 NOTE (queued-migration renumbering, 2026-09-28): this PR branched before
@@ -44,8 +44,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0034_upload_abandoned_status"
-down_revision = "0033_hub_users_identity_uuid"
+revision = "0035_upload_abandoned_status"
+down_revision = "0034_hub_users_identity_uuid"
 branch_labels = None
 depends_on = None
 

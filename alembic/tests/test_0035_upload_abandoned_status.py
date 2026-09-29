@@ -1,4 +1,4 @@
-"""Regression test for 0034_upload_abandoned_status (fix/seeder-stalled-upload-recovery).
+"""Regression test for 0035_upload_abandoned_status (fix/seeder-stalled-upload-recovery).
 
 Same harness convention as `test_0019_kick_app.py` et al. -- no pytest-level fixture runs
 Alembic against a real Postgres in CI, so this mocks `alembic.op.execute` and asserts the
@@ -21,13 +21,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 _MIGRATION_PATH = (
-    Path(__file__).resolve().parent.parent / "versions" / "0034_upload_abandoned_status.py"
+    Path(__file__).resolve().parent.parent / "versions" / "0035_upload_abandoned_status.py"
 )
 
 
 def _load_migration():  # type: ignore[no-untyped-def]
     spec = importlib.util.spec_from_file_location(
-        "migration_0034_upload_abandoned_status", _MIGRATION_PATH
+        "migration_0035_upload_abandoned_status", _MIGRATION_PATH
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -38,14 +38,14 @@ def _load_migration():  # type: ignore[no-untyped-def]
 def test_revision_and_down_revision_are_pinned_explicitly() -> None:
     """Fails loudly if this migration is renumbered/rebased without updating this test.
 
-    NOTE: `down_revision` is a forward reference to 0033_hub_users_identity_uuid, which was
+    NOTE: `down_revision` is a forward reference to 0034_hub_users_identity_uuid, which was
     still queued on another branch when this test was written -- verify this still matches
     0033's actual final revision ID at merge time; adjust both here and in the migration
     file if it was renamed.
     """
     module = _load_migration()
-    assert module.revision == "0034_upload_abandoned_status"
-    assert module.down_revision == "0033_hub_users_identity_uuid"
+    assert module.revision == "0035_upload_abandoned_status"
+    assert module.down_revision == "0034_hub_users_identity_uuid"
     assert module.branch_labels is None
     assert module.depends_on is None
 
