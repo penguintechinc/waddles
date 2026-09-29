@@ -1,0 +1,30 @@
+# Combined Streaming Trigger Receiver - Dependencies
+# Union of Twitch, YouTube Live, and Kick module requirements
+
+# Core Framework
+quart>=0.20.0
+hypercorn>=0.16.0
+
+# HTTP Clients (async)
+httpx>=0.27.0,<0.28.0
+aiohttp>=3.10.0,<4.0.0
+
+# Twitch IRC Bot (TwitchIO)
+# Capped <3.0.0: v3 is a breaking rewrite of the commands.Bot API used by
+# trigger/receiver/twitch_module/services/twitch_bot.py; not required by any
+# advisory (no known twitchio vulns) so pin stays on the compatible 2.x line.
+twitchio>=2.9.1,<3.0.0
+
+# Kick Streaming
+pysher>=1.0.0
+psycopg2-binary>=2.9.9
+penguin-dal>=0.3.0
+pydal>=20240601.1
+
+# Environment
+python-dotenv>=1.0.0
+
+# Development
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0
