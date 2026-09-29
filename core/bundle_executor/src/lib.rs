@@ -66,6 +66,7 @@ pub async fn run() -> Result<(), ExecutorError> {
     // only ever reached with an empty key set in a test that never called
     // this function. See `crate::signing::PlatformPublicKeys::from_cli_required`.
     crate::signing::PlatformPublicKeys::from_cli_required(&cfg)?;
+    cfg.validate_host_api_tls()?;
 
     init_telemetry();
 

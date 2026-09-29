@@ -1,8 +1,11 @@
-# cargo-deny configuration for bundle_active_set.
+# cargo-deny configuration for bundle-active-set.
 # Run: cargo deny check  (advisories + licenses + bans + sources)
 # See rules/critical-rules.md Dependency Pinning + rules/general.md Supply
 # Chain Security for the policy this enforces. Mirrors
-# core/svc_streaming/deny.toml (the M4 reference template).
+# core/svc_process/deny.toml (the established per-service template) -- this
+# crate has no `penguin-libs` git dependency at all (Cargo.toml's own doc:
+# "NOT a penguin-libs crate"), so `[sources] allow-git` stays empty, unlike
+# every service crate that depends on it.
 
 [graph]
 all-features = false
@@ -31,8 +34,6 @@ allow = [
     "MPL-2.0",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
-    # `xxhash-rust` (transitive via `penguin-spine` -> `redis`, Cargo.toml)
-    # -- permissive, OSI-approved and FSF-free (same tier as MIT/BSD).
     "BSL-1.0",
 ]
 exceptions = []
@@ -60,10 +61,7 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# `penguin-spine`/`penguin-logging` (Cargo.toml) -- unpublished penguin-libs
-# crates pinned by commit `rev`, not by mutable branch name. See the
-# Cargo.toml dependency-pattern comment above `[dependencies]`.
-allow-git = ["https://github.com/penguintechinc/penguin-libs.git"]
+allow-git = []
 
 [sources.allow-org]
 github = []

@@ -77,7 +77,7 @@ hmac = "=0.12.1"
 # Message shapes and correlation-id table shared verbatim with the stage
 # side (spec SS6.6). Pinned to the HEAD of `release/rust-bundle-host/v0.1.x`
 # at the time of this commit (PR penguintechinc/penguin-libs#93).
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "49f098caab95339bf8113ba5c3e9ad039d30d44b", package = "penguin-bundle-host", version = "=0.1.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69f25b007e397bcf22c20bee368495f61f0a1b8a", package = "penguin-bundle-host", version = "=0.2.0" }
 tracing = "=0.1.44"
 # `penguin-logging` (spec SS4.5's dependency list) is deliberately NOT
 # depended on here, unlike every other Rust data-plane service in this
@@ -113,6 +113,16 @@ tracing-subscriber = { version = "=0.3.23", default-features = false, features =
 # lives in this binary, only public keys).
 ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
 base64 = "=0.22.1"
+# Parses the stage's server certificate's SAN/Subject (gh security review
+# CRITICAL finding on PR #406, item 1: pin the host-API TLS peer to an
+# explicit allowlisted identity -- SPIFFE URI SAN or CN -- not just "chains
+# to the configured CA", per spec SS6.6's "otherwise pinned by
+# configuration"). Pure Rust ASN.1/X.509 parsing, no networking/HTTP
+# dependency of its own -- verified against `tests/dependency_policy.rs`'s
+# banned-crate list (redis/sea-orm/sqlx/deadpool-redis/reqwest): none of
+# its own dependency tree (nom/der-parser/asn1-rs/oid-registry/ring/
+# data-encoding) pulls any of them in.
+x509-parser = "=0.18.1"
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }

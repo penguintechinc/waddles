@@ -146,7 +146,18 @@ class WorkflowValidationService:
             # Step 6: Validate trigger configuration
             trigger_nodes = workflow_def.get_trigger_nodes()
             if not trigger_nodes:
+                # A workflow with no trigger node can never be invoked, so
+                # this must reject the workflow (is_valid=False) -- but the
+                # informational "Workflow has no trigger nodes" message
+                # stays a warning (tests/test_validation_service.py asserts
+                # it's present in result.warnings specifically). Previously
+                # this was add_warning() only, leaving is_valid=True for an
+                # unexecutable workflow; undetected because this file had
+                # no test coverage.
                 result.add_warning("Workflow has no trigger nodes")
+                result.add_error(
+                    "Workflow is not executable: at least one trigger node is required"
+                )
             else:
                 for trigger_id in trigger_nodes:
                     trigger_node = workflow_def.get_node(trigger_id)

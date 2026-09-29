@@ -1002,6 +1002,8 @@ mod tests {
 
         let loaded = executor
             .on_load(LoadBody {
+                tenant_id: 1,
+                community_id: 0,
                 app_id: APP_ID.to_string(),
                 version: "1".to_string(),
                 digest: digest.clone(),

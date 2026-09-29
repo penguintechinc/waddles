@@ -96,6 +96,22 @@ pub struct CliConfig {
     #[arg(long, env = "HOST_API_CA_FILE")]
     pub host_api_ca_file: Option<PathBuf>,
 
+    /// The stage's expected peer identity (gh security review CRITICAL
+    /// finding on PR #406, item 1) -- a SPIFFE URI SAN (e.g.
+    /// `spiffe://penguintech.io/beta/svc-process`) or, if none is
+    /// configured on the stage's certificate yet, its DNS SAN/CN. Standard
+    /// TLS chain+hostname verification alone (`crate::tls::
+    /// build_client_config`'s base behavior) proves "issued by our CA for
+    /// this DNS name"; this additionally pins WHICH exact service identity
+    /// this executor will accept `load`/`unload`/`invoke` commands from --
+    /// spec SS6.6's "otherwise pinned by configuration" requirement.
+    /// `validate()` requires this in production; `crate::tls::
+    /// build_client_config` falls back to base verification only (no
+    /// identity pinning) when unset, which every existing test that
+    /// doesn't exercise pinning relies on.
+    #[arg(long, env = "HOST_API_STAGE_IDENTITY")]
+    pub host_api_stage_identity: Option<String>,
+
     /// S3-compatible bucket endpoint bundle components are fetched from,
     /// e.g. `http://minio.waddles.svc.cluster.local:9000` (spec SS7.6/
     /// SS12.7). `Option` (rather than a required arg) so every existing
@@ -188,6 +204,7 @@ impl CliConfig {
             host_api_client_cert_file: None,
             host_api_client_key_file: None,
             host_api_ca_file: None,
+            host_api_stage_identity: None,
             bundle_bucket_endpoint: None,
             bundle_bucket_name: None,
             bundle_bucket_region: "us-east-1".to_string(),
@@ -232,6 +249,47 @@ impl CliConfig {
                 "EXECUTOR_WASM_COLLECTOR {:?} is not supported by this build (only \"drc\")",
                 self.executor_wasm_collector
             )));
+        }
+        Ok(())
+    }
+
+    /// Validates that the host-API mutual-TLS material is fully configured
+    /// (gh security review CRITICAL finding on PR #406, item 1) -- called
+    /// by `crate::run` immediately before ever dialing the stage, kept
+    /// SEPARATE from [`Self::validate`] rather than folded into it: this
+    /// crate's own healthcheck path (`for_healthcheck`, `run_healthcheck`)
+    /// builds a real `Engine`/`Linker` but never dials the stage at all, so
+    /// it has no TLS material to validate and must keep calling the general
+    /// [`Self::validate`] successfully; the narrower host-API tests in
+    /// `crate::tls`/`crate::wire` likewise construct a `CliConfig` directly
+    /// without either validation call by design.
+    pub fn validate_host_api_tls(&self) -> Result<(), ExecutorError> {
+        if self.host_api_ca_file.is_none() {
+            return Err(ExecutorError::Config(
+                "HOST_API_CA_FILE is required -- the host-API connection must verify the \
+                 stage's certificate against a configured CA, never the public trust store"
+                    .to_string(),
+            ));
+        }
+        if self.host_api_client_cert_file.is_none() || self.host_api_client_key_file.is_none() {
+            return Err(ExecutorError::Config(
+                "HOST_API_CLIENT_CERT_FILE and HOST_API_CLIENT_KEY_FILE are both required -- \
+                 mutual TLS (this executor presenting its own client certificate) is mandatory, \
+                 never optional, for the host-API connection"
+                    .to_string(),
+            ));
+        }
+        if self
+            .host_api_stage_identity
+            .as_deref()
+            .is_none_or(str::is_empty)
+        {
+            return Err(ExecutorError::Config(
+                "HOST_API_STAGE_IDENTITY is required -- the stage's certificate must be pinned \
+                 to an explicit expected identity (SPIFFE URI SAN or CN), not merely \"chains to \
+                 the configured CA\""
+                    .to_string(),
+            ));
         }
         Ok(())
     }
