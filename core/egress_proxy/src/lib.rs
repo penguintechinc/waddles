@@ -9,11 +9,13 @@
 //!   `core/service_auth` (PR #438), scoped `egress:connect`, `sub` one of
 //!   the allowed data-plane services.
 //! - `X-Waddles-Egress-Assertion: <compact EdDSA JWT>` -- the signed
-//!   per-tenant/community/app allowlist grant (`net.http.fqdn`/
-//!   `.public-ip`/`.private-ip`), verified against the single static
-//!   public key mounted at `ALLOWLIST_SIGNING_KEY_PATH`. See
-//!   `assertion` module doc for why this is a second token rather than a
-//!   machine-JWT claim.
+//!   per-tenant/community/app/port allowlist grant (`net.http.fqdn`/
+//!   `.public-ip`/`.private-ip`), signed by the *calling service's own*
+//!   per-service Ed25519 key (the same one it signs its machine JWT with)
+//!   and verified against the identical hub-api JWKS trust bundle used
+//!   for the machine JWT -- see `assertion` module doc for why this is a
+//!   second token rather than a machine-JWT claim, and for the redesign
+//!   away from a single static hub-api-held signing key.
 //!
 //! This proxy re-validates the destination against the assertion itself
 //! (never trusts the in-process guard's own check), re-resolves DNS
@@ -43,19 +45,20 @@ use limits::TenantLimiter;
 use proxy::ProxyState;
 
 /// Builds the shared [`ProxyState`] from environment configuration --
-/// loads the assertion-verification public key and constructs the
-/// hub-api JWKS-backed machine-JWT trust bundle. Fails closed: a missing
-/// or unparseable signing key never falls back to "accept anything".
-/// `registry` is the shared Prometheus registry `telemetry::init` hands
-/// back, so this service's own metrics and the OTel meter provider's
-/// `target_info` series render from the same `/metrics` surface.
+/// constructs the hub-api JWKS-backed machine-JWT trust bundle, which now
+/// also verifies the allowlist assertion (both tokens are signed by the
+/// same per-service key set, see `assertion` module doc), and the
+/// per-instance replay cache. `registry` is the shared Prometheus registry
+/// `telemetry::init` hands back, so this service's own metrics and the
+/// OTel meter provider's `target_info` series render from the same
+/// `/metrics` surface.
 pub async fn build_state(registry: &prometheus::Registry) -> anyhow::Result<Arc<ProxyState>> {
     let cfg = Config::from_env().map_err(anyhow::Error::from)?;
-    let assertion_key = assertion::load_signing_key(&cfg.allowlist_signing_key_path)
-        .map_err(anyhow::Error::from)?;
     let trust_bundle: Arc<dyn service_auth::TrustBundle> = Arc::new(
         service_auth::JwksTrustBundle::new(cfg.machine_jwt_jwks_url.clone()),
     );
+    let replay_cache: Arc<dyn assertion::ReplayCache> =
+        Arc::new(assertion::InMemoryReplayCache::new());
     let cluster_cidrs = cfg.deny_cluster_cidrs.clone();
     let limiter = TenantLimiter::new(
         cfg.per_tenant_max_connections,
@@ -66,7 +69,7 @@ pub async fn build_state(registry: &prometheus::Registry) -> anyhow::Result<Arc<
     Ok(Arc::new(ProxyState {
         cfg: Arc::new(cfg),
         trust_bundle,
-        assertion_key,
+        replay_cache,
         cluster_cidrs,
         resolver: Arc::new(TokioResolver),
         limiter,
@@ -115,9 +118,17 @@ pub async fn serve_proxy(listener: TcpListener, state: Arc<ProxyState>) -> anyho
         let (stream, _peer) = listener.accept().await?;
         let io = TokioIo::new(stream);
         let state = state.clone();
+        let header_read_timeout = state.cfg.header_read_timeout;
         tokio::spawn(async move {
             let service = service_fn(move |req| proxy::handle(state.clone(), req));
+            // `header_read_timeout` requires an explicit `Timer` to take
+            // effect at all (hyper 1.x: silently does nothing without one,
+            // rather than falling back to its documented 30s default) --
+            // bounds a slow-loris-style caller trickling request headers in
+            // indefinitely.
             if let Err(err) = hyper::server::conn::http1::Builder::new()
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(header_read_timeout)
                 .serve_connection(io, service)
                 .with_upgrades()
                 .await

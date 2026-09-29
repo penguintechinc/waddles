@@ -9,8 +9,10 @@
 //! resolve -> address-category policy); [`handle`] wires it into the
 //! actual hyper HTTP CONNECT / forward-HTTP server.
 
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -22,7 +24,6 @@ use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use ipnet::IpNet;
-use jsonwebtoken::DecodingKey;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::Instrument;
@@ -111,7 +112,7 @@ impl ProxyError {
 
 pub struct ValidationDeps<'a> {
     pub trust_bundle: &'a dyn service_auth::TrustBundle,
-    pub assertion_key: &'a DecodingKey,
+    pub replay_cache: &'a dyn assertion::ReplayCache,
     pub cfg: &'a Config,
     pub cluster_cidrs: &'a [IpNet],
     pub resolver: &'a dyn Resolver,
@@ -138,7 +139,7 @@ pub async fn validate(
         .iter()
         .map(String::as_str)
         .collect();
-    auth::authenticate(
+    let caller = auth::authenticate(
         headers,
         deps.trust_bundle,
         &deps.cfg.machine_jwt_audience,
@@ -150,15 +151,30 @@ pub async fn validate(
 
     let assertion = assertion::verify_from_header(
         headers,
-        deps.assertion_key,
+        deps.trust_bundle,
         deps.cfg.assertion_max_ttl.as_secs(),
-    )?;
+        deps.replay_cache,
+    )
+    .await?;
+
+    // The assertion must be signed by the same identity the machine JWT
+    // just authenticated -- otherwise a token minted by service A (even a
+    // validly-signed one) could be replayed alongside service B's own
+    // machine JWT.
+    if assertion.sub != caller.sub {
+        return Err(ProxyError::Assertion(
+            assertion::AssertionError::SubMismatch {
+                assertion_sub: assertion.sub.clone(),
+                jwt_sub: caller.sub.clone(),
+            },
+        ));
+    }
 
     if !deps.cfg.allowed_ports.contains(&port) {
         return Err(ProxyError::PortNotAllowed(port));
     }
 
-    if !assertion::destination_matches(&assertion, host) {
+    if !assertion::destination_matches(&assertion, host, port) {
         return Err(ProxyError::DestinationMismatch);
     }
 
@@ -188,6 +204,7 @@ pub async fn validate(
         assertion.category,
         deps.cluster_cidrs,
         &deps.cfg.deny_cidrs,
+        deps.cfg.allow_private_ip,
     ) {
         return Err(ProxyError::Denied(reason));
     }
@@ -205,7 +222,7 @@ pub async fn validate(
 pub struct ProxyState {
     pub cfg: Arc<Config>,
     pub trust_bundle: Arc<dyn service_auth::TrustBundle>,
-    pub assertion_key: DecodingKey,
+    pub replay_cache: Arc<dyn assertion::ReplayCache>,
     pub cluster_cidrs: Vec<IpNet>,
     pub resolver: Arc<dyn Resolver>,
     pub limiter: Arc<TenantLimiter>,
@@ -227,16 +244,21 @@ fn target_host_port(req: &Request<Incoming>) -> Result<(String, u16), ProxyError
         let port = req.uri().port_u16().unwrap_or(80);
         return Ok((host.to_string(), port));
     }
-    // Origin-form request (no absolute URI) -- fall back to the Host header.
+    // Origin-form request (no absolute URI) -- fall back to the Host
+    // header, parsed as an `http::uri::Authority` (IPv6-aware: handles
+    // bracketed literals like `[::1]:8443` correctly) rather than a naive
+    // `splitn(2, ':')`, which would misparse an unbracketed IPv6 literal
+    // (multiple colons) as an ambiguous host/port split -- silently
+    // truncating the host to the first colon-delimited segment.
     let host_header = req
         .headers()
         .get(http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| ProxyError::BadRequest("no absolute URI and no Host header".into()))?;
-    let mut parts = host_header.splitn(2, ':');
-    let host = parts.next().unwrap_or_default().to_string();
-    let port = parts.next().and_then(|p| p.parse().ok()).unwrap_or(80);
-    Ok((host, port))
+    let authority = http::uri::Authority::from_str(host_header)
+        .map_err(|e| ProxyError::BadRequest(format!("invalid Host header: {e}")))?;
+    let port = authority.port_u16().unwrap_or(80);
+    Ok((authority.host().to_string(), port))
 }
 
 fn error_response(err: &ProxyError) -> Response<RespBody> {
@@ -287,7 +309,7 @@ async fn handle_inner(
     let started = Instant::now();
     let deps = ValidationDeps {
         trust_bundle: state.trust_bundle.as_ref(),
-        assertion_key: &state.assertion_key,
+        replay_cache: state.replay_cache.as_ref(),
         cfg: state.cfg.as_ref(),
         cluster_cidrs: &state.cluster_cidrs,
         resolver: state.resolver.as_ref(),
@@ -307,14 +329,31 @@ async fn handle_inner(
             target.category,
         ),
         // Best-effort audit context for a request that failed validation
-        // before/at the assertion step -- audit never blocks on this.
-        Err(_) => match assertion::verify_from_header(
-            req.headers(),
-            &state.assertion_key,
-            state.cfg.assertion_max_ttl.as_secs(),
-        ) {
-            Ok(a) => (a.tenant, a.community, a.app, a.category),
-            Err(_) => (
+        // before/at the assertion step -- audit never blocks on this, and
+        // deliberately uses the bare `assertion::verify` (never
+        // `verify_from_header`) so a request that already failed
+        // validation elsewhere never itself consumes a replay-cache slot.
+        Err(_) => match req
+            .headers()
+            .get(assertion::ASSERTION_HEADER)
+            .and_then(|v| v.to_str().ok())
+        {
+            Some(token) => match assertion::verify(
+                token,
+                state.trust_bundle.as_ref(),
+                state.cfg.assertion_max_ttl.as_secs(),
+            )
+            .await
+            {
+                Ok(a) => (a.tenant, a.community, a.app, a.category),
+                Err(_) => (
+                    "unknown".to_string(),
+                    "unknown".to_string(),
+                    "unknown".to_string(),
+                    DestinationCategory::Fqdn,
+                ),
+            },
+            None => (
                 "unknown".to_string(),
                 "unknown".to_string(),
                 "unknown".to_string(),
@@ -384,6 +423,8 @@ fn handle_connect(
     let metrics = state.metrics.clone();
     let limiter = state.limiter.clone();
     let connect_timeout = state.cfg.connect_timeout;
+    let idle_timeout = state.cfg.tunnel_idle_timeout;
+    let max_duration = state.cfg.tunnel_max_duration;
     let tenant = target.tenant.clone();
     let addr = target.addr;
 
@@ -391,8 +432,17 @@ fn handle_connect(
         let _guard = guard; // held for the tunnel's lifetime
         match hyper::upgrade::on(req).await {
             Ok(upgraded) => {
-                if let Err(e) =
-                    run_tunnel(upgraded, addr, connect_timeout, tenant, limiter, metrics).await
+                if let Err(e) = run_tunnel(
+                    upgraded,
+                    addr,
+                    connect_timeout,
+                    idle_timeout,
+                    max_duration,
+                    tenant,
+                    limiter,
+                    metrics,
+                )
+                .await
                 {
                     tracing::warn!(error = %e, "egress_proxy.tunnel_error");
                 }
@@ -404,10 +454,13 @@ fn handle_connect(
     Response::new(empty_body())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_tunnel(
     upgraded: Upgraded,
     addr: SocketAddr,
     connect_timeout: std::time::Duration,
+    idle_timeout: std::time::Duration,
+    max_duration: std::time::Duration,
     tenant: String,
     limiter: Arc<TenantLimiter>,
     metrics: Arc<Metrics>,
@@ -427,6 +480,7 @@ async fn run_tunnel(
         tenant.clone(),
         metrics.clone(),
         "egress",
+        idle_timeout,
     );
     let ingress = copy_with_throttle(
         server_r,
@@ -435,8 +489,19 @@ async fn run_tunnel(
         tenant.clone(),
         metrics.clone(),
         "ingress",
+        idle_timeout,
     );
-    let (egress_bytes, ingress_bytes) = tokio::join!(egress, ingress);
+    // Hard ceiling on the whole tunnel's lifetime regardless of activity --
+    // dropping this future on timeout drops both copy futures, closing
+    // both socket halves they own.
+    let (egress_bytes, ingress_bytes) =
+        match tokio::time::timeout(max_duration, join_copy_futures(egress, ingress)).await {
+            Ok(pair) => pair,
+            Err(_) => {
+                tracing::debug!(tenant = %tenant, "egress_proxy.tunnel_max_duration_exceeded");
+                (0, 0)
+            }
+        };
 
     // Observed once per tunnel, on close -- the "connection-duration" and
     // "bytes-transferred" histograms `critical-rules.md` Observability
@@ -446,12 +511,25 @@ async fn run_tunnel(
         .connection_duration_seconds
         .with_label_values(&["connect"])
         .observe(started.elapsed().as_secs_f64());
-    let total_bytes = egress_bytes.unwrap_or(0) + ingress_bytes.unwrap_or(0);
+    let total_bytes = egress_bytes + ingress_bytes;
     metrics
         .connection_bytes
         .with_label_values(&[&tenant])
         .observe(total_bytes as f64);
     Ok(())
+}
+
+/// `tokio::join!` isn't itself expressible as a value that
+/// `tokio::time::timeout` can wrap directly (it's a macro, not a future) --
+/// this tiny helper packages the pair as a single `Future` so the whole
+/// join can be raced against `max_duration` as one unit, dropping both
+/// copy loops together on timeout.
+async fn join_copy_futures(
+    egress: impl std::future::Future<Output = std::io::Result<u64>>,
+    ingress: impl std::future::Future<Output = std::io::Result<u64>>,
+) -> (u64, u64) {
+    let (e, i) = tokio::join!(egress, ingress);
+    (e.unwrap_or(0), i.unwrap_or(0))
 }
 
 async fn copy_with_throttle<R, W>(
@@ -461,6 +539,7 @@ async fn copy_with_throttle<R, W>(
     tenant: String,
     metrics: Arc<Metrics>,
     direction: &'static str,
+    idle_timeout: std::time::Duration,
 ) -> std::io::Result<u64>
 where
     R: AsyncRead + Unpin,
@@ -469,7 +548,17 @@ where
     let mut buf = vec![0u8; 16 * 1024];
     let mut total = 0u64;
     loop {
-        let n = reader.read(&mut buf).await?;
+        let n = match tokio::time::timeout(idle_timeout, reader.read(&mut buf)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                // No bytes in either direction within `idle_timeout` --
+                // close gracefully rather than holding the tenant's
+                // connection-limiter slot (and the underlying sockets)
+                // open indefinitely.
+                let _ = writer.shutdown().await;
+                return Ok(total);
+            }
+        };
         if n == 0 {
             let _ = writer.shutdown().await;
             return Ok(total);
@@ -506,6 +595,79 @@ async fn handle_forward(
     }
 }
 
+/// The inbound header this proxy accepts as an explicit, deliberate
+/// end-to-end credential the calling bundle wants delivered to the
+/// destination's own `Authorization` header (e.g. a third-party API key
+/// substituted by `bundle_host_http`'s secret-handle broker). Kept
+/// distinct from `Authorization` itself specifically so the blanket
+/// proxy-hop-credential strip in [`build_outbound_headers`] can never
+/// accidentally let a caller-supplied `Authorization` (which, on the
+/// inbound side, is *this proxy's own* machine-JWT bearer credential --
+/// see `auth::authenticate`) leak straight through under its own name.
+const FORWARD_AUTHORIZATION_HEADER: &str = "x-waddles-forward-authorization";
+
+/// Builds the outbound request headers from an explicit allowlist of the
+/// inbound headers, rather than relaying `inbound` verbatim (CRITICAL
+/// security-review finding: verbatim relay leaked this proxy's own
+/// `Authorization` machine-JWT bearer and `X-Waddles-Egress-Assertion`
+/// straight to arbitrary internet destinations).
+///
+/// Stripped, always:
+/// - `Authorization` / `Proxy-Authorization` -- these are *this proxy
+///   hop's own* credentials (the calling service's machine JWT), never
+///   meant for the destination.
+/// - Every `X-Waddles-*` header -- proxy-internal signaling
+///   (`X-Waddles-Egress-Assertion`, this function's own
+///   `X-Waddles-Forward-Authorization`), never end-to-end.
+/// - Standard HTTP/1.1 hop-by-hop headers (RFC 7230 §6.1) plus whatever
+///   extra header names the caller's own `Connection` header lists.
+///
+/// [`FORWARD_AUTHORIZATION_HEADER`] is the one deliberate escape hatch: a
+/// bundle that needs to send its *own* credential to the destination
+/// (after `bundle_host_http`'s secret-handle substitution) sets that
+/// distinct header, which is mapped back to a real `Authorization` header
+/// on the outbound request only -- after every other `x-waddles-*`/
+/// `authorization` header has already been stripped, so it can never be
+/// smuggled in under a different name.
+fn build_outbound_headers(inbound: &http::HeaderMap) -> http::HeaderMap {
+    let mut hop_by_hop: HashSet<String> = [
+        "connection",
+        "keep-alive",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    if let Some(connection) = inbound
+        .get(http::header::CONNECTION)
+        .and_then(|v| v.to_str().ok())
+    {
+        for token in connection.split(',') {
+            hop_by_hop.insert(token.trim().to_ascii_lowercase());
+        }
+    }
+
+    let mut outbound = http::HeaderMap::with_capacity(inbound.len());
+    for (name, value) in inbound.iter() {
+        let lower = name.as_str().to_ascii_lowercase();
+        if lower == "authorization"
+            || lower == "proxy-authorization"
+            || lower.starts_with("x-waddles-")
+            || hop_by_hop.contains(lower.as_str())
+        {
+            continue;
+        }
+        outbound.append(name, value.clone());
+    }
+    if let Some(forwarded_auth) = inbound.get(FORWARD_AUTHORIZATION_HEADER) {
+        outbound.insert(http::header::AUTHORIZATION, forwarded_auth.clone());
+    }
+    outbound
+}
+
 async fn forward_inner(
     state: &Arc<ProxyState>,
     req: Request<Incoming>,
@@ -524,13 +686,16 @@ async fn forward_inner(
 
     // Rewrite absolute-form ("http://host/path") to origin-form ("/path")
     // before handing the request to the upstream server, as any HTTP/1.1
-    // forward proxy must.
+    // forward proxy must, and rebuild the headers from the allowlist
+    // instead of relaying the inbound set verbatim (see
+    // `build_outbound_headers`).
     let (mut parts, body) = req.into_parts();
     if let Some(path_and_query) = parts.uri.path_and_query().cloned() {
         let mut new_uri_parts = http::uri::Parts::default();
         new_uri_parts.path_and_query = Some(path_and_query);
         parts.uri = http::Uri::from_parts(new_uri_parts).unwrap_or(parts.uri);
     }
+    parts.headers = build_outbound_headers(&parts.headers);
     let req = Request::from_parts(parts, body);
 
     let resp = sender.send_request(req).await?;

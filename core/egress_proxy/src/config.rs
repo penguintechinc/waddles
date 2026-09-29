@@ -17,7 +17,6 @@ pub struct Config {
     pub listen_port: u16,
     pub metrics_port: u16,
     pub allowed_ports: Vec<u16>,
-    pub allowlist_signing_key_path: String,
     pub deny_cidrs: Vec<IpNet>,
     pub deny_cluster_cidrs: Vec<IpNet>,
     pub machine_jwt_jwks_url: String,
@@ -29,6 +28,28 @@ pub struct Config {
     pub per_tenant_bandwidth_bytes_per_sec: u64,
     pub connect_timeout: Duration,
     pub assertion_max_ttl: Duration,
+    /// Timeout for reading a client's request headers off the wire
+    /// (`hyper::server::conn::http1::Builder::header_read_timeout`) --
+    /// bounds a slow-loris-style caller that opens a connection and
+    /// trickles headers in indefinitely.
+    pub header_read_timeout: Duration,
+    /// Inactivity timeout applied to each direction of a CONNECT tunnel's
+    /// byte-copy loop: no bytes read within this window closes the
+    /// tunnel, freeing the tenant's connection-limiter slot.
+    pub tunnel_idle_timeout: Duration,
+    /// Hard ceiling on a single CONNECT tunnel's total lifetime,
+    /// regardless of activity -- bounds a connection an operator's
+    /// destination keeps trickling just enough traffic through to dodge
+    /// the idle timeout forever.
+    pub tunnel_max_duration: Duration,
+    /// Defense-in-depth, operator-controlled kill switch for the
+    /// `PrivateIp` assertion category: even a validly-signed, correctly
+    /// destination-matched private-IP grant is refused unless this
+    /// deployment has explicitly opted in. Independent of (layered
+    /// underneath) the assertion's own category -- a compromised/
+    /// misconfigured signer minting private-IP grants is still contained
+    /// by this being `false` by default. `EGRESS_PROXY_ALLOW_PRIVATE_IP`.
+    pub allow_private_ip: bool,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -92,8 +113,6 @@ impl Config {
             .parse()
             .map_err(|_| ConfigError::Invalid("METRICS_PORT", "not a u16".into()))?;
         let allowed_ports = parse_ports(&env_or("ALLOWED_PORTS", "80,443,6697"))?;
-        let allowlist_signing_key_path = std::env::var("ALLOWLIST_SIGNING_KEY_PATH")
-            .map_err(|_| ConfigError::Missing("ALLOWLIST_SIGNING_KEY_PATH"))?;
         let deny_cidrs = parse_cidrs(&env_or("DENY_CIDRS", ""), "DENY_CIDRS")?;
         let deny_cluster_cidrs =
             parse_cidrs(&env_or("DENY_CLUSTER_CIDRS", ""), "DENY_CLUSTER_CIDRS")?;
@@ -125,12 +144,27 @@ impl Config {
         let assertion_max_ttl_secs: u64 = env_or("ASSERTION_MAX_TTL_SECONDS", "60")
             .parse()
             .map_err(|_| ConfigError::Invalid("ASSERTION_MAX_TTL_SECONDS", "not a u64".into()))?;
+        let header_read_timeout_secs: u64 = env_or("HEADER_READ_TIMEOUT_SECONDS", "10")
+            .parse()
+            .map_err(|_| ConfigError::Invalid("HEADER_READ_TIMEOUT_SECONDS", "not a u64".into()))?;
+        let tunnel_idle_timeout_secs: u64 = env_or("TUNNEL_IDLE_TIMEOUT_SECONDS", "300")
+            .parse()
+            .map_err(|_| ConfigError::Invalid("TUNNEL_IDLE_TIMEOUT_SECONDS", "not a u64".into()))?;
+        let tunnel_max_duration_secs: u64 = env_or("TUNNEL_MAX_DURATION_SECONDS", "3600")
+            .parse()
+            .map_err(|_| {
+            ConfigError::Invalid("TUNNEL_MAX_DURATION_SECONDS", "not a u64".into())
+        })?;
+        let allow_private_ip: bool = env_or("EGRESS_PROXY_ALLOW_PRIVATE_IP", "false")
+            .parse()
+            .map_err(|_| {
+                ConfigError::Invalid("EGRESS_PROXY_ALLOW_PRIVATE_IP", "not a bool".into())
+            })?;
 
         Ok(Self {
             listen_port,
             metrics_port,
             allowed_ports,
-            allowlist_signing_key_path,
             deny_cidrs,
             deny_cluster_cidrs,
             machine_jwt_jwks_url,
@@ -142,6 +176,10 @@ impl Config {
             per_tenant_bandwidth_bytes_per_sec,
             connect_timeout: Duration::from_secs(connect_timeout_secs),
             assertion_max_ttl: Duration::from_secs(assertion_max_ttl_secs),
+            header_read_timeout: Duration::from_secs(header_read_timeout_secs),
+            tunnel_idle_timeout: Duration::from_secs(tunnel_idle_timeout_secs),
+            tunnel_max_duration: Duration::from_secs(tunnel_max_duration_secs),
+            allow_private_ip,
         })
     }
 }
