@@ -30,12 +30,17 @@ from flask_core import (
     setup_aaa_logging,
 )
 from flask_core.mcp_routes import create_mcp_blueprint
-from flask_core.service_jwt import load_identities_from_env, load_issuer_from_env
+from flask_core.service_jwt import (
+    ServiceJwtError,
+    load_identities_from_env,
+    load_issuer_from_env,
+)
 from pydal import Field
 from quart import Quart, request
 from quart_schema import Info, QuartSchema
 
 from blueprints import register_blueprints
+from blueprints.service_jwt_bp import service_jwt_bp
 from config import HubAPIConfig
 from grpc_internal.server import start_internal_grpc_server, stop_internal_grpc_server
 from openapi.routes import register_openapi_docs
@@ -210,6 +215,7 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
 
     app.register_blueprint(create_health_blueprint(cfg.module_name, cfg.module_version))
     app.register_blueprint(create_mcp_blueprint())
+    app.register_blueprint(service_jwt_bp)
     register_blueprints(app)
     register_openapi_docs(app)
 
@@ -219,6 +225,27 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     async def startup() -> None:
         """Initialize the DAL, connect the rate limiter, bind reference tables."""
         logger.system("Starting hub-api", action="startup", extra={"port": cfg.module_port})
+        # Per-service EdDSA machine JWT issuance (flask_core.service_jwt,
+        # feature/eddsa-machine-jwt) -- built from the `service-jwt-
+        # signing-key` Secret (SERVICE_JWT_ACTIVE_KID/SERVICE_JWT_PRIVATE_
+        # KEY_<kid>, mounted env-only into this container, see chart's
+        # hub-api.yaml) plus the `serviceJwt.identities` allow-list
+        # (SERVICE_JWT_IDENTITIES, JSON, see values.yaml). Missing/invalid
+        # config logs a warning and leaves issuance disabled (service_jwt_bp
+        # fails closed with 503) rather than crashing hub-api's whole app
+        # factory -- most non-prod/local deployments never call
+        # /internal/service-token at all.
+        try:
+            identities = load_identities_from_env(env=cfg.deployment_env)
+            issuer = load_issuer_from_env(identities)
+        except (ServiceJwtError, KeyError) as exc:
+            logger.warning(f"service_jwt not configured, issuance disabled: {exc}")
+            issuer = None
+            app.config["SERVICE_JWT_ISSUER"] = None
+            app.config["SERVICE_JWT_VERIFIER"] = None
+        else:
+            app.config["SERVICE_JWT_ISSUER"] = issuer
+            app.config["SERVICE_JWT_VERIFIER"] = issuer.as_verifier()
         # Connects to Redis/Valkey; falls back to an in-memory limiter
         # (per-process, non-distributed) if unreachable -- see
         # flask_core.rate_limiter.RateLimiter.connect()'s own fail-open
@@ -259,22 +286,32 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         app.config["bundle_active_set_watermark_job"] = watermark_job
 
         # Internal gRPC (waddles.hub.internal.v1) -- serves svc-ingest/
-        # svc-process/svc-action only, see grpc_internal/server.py. Fails
-        # OPEN for the surrounding Quart app (never crashes hub-api's HTTP
-        # surface over a gRPC misconfiguration) but fails CLOSED for the
-        # gRPC surface itself: a missing TLS cert or empty service-identity
-        # allow-list means the internal listener simply never starts, not
-        # that it starts unauthenticated.
+        # svc-process/svc-action only, see grpc_internal/server.py. Reuses
+        # the single `issuer` built above (same signing key material,
+        # same identity allow-list) rather than re-deriving it from env a
+        # second time -- avoids parsing the Ed25519 private key twice and
+        # widening its in-memory exposure window (see
+        # flask_core.service_jwt module docstring). Fails OPEN for the
+        # surrounding Quart app (never crashes hub-api's HTTP surface over
+        # a gRPC misconfiguration) but fails CLOSED for the gRPC surface
+        # itself: no issuer (service_jwt unconfigured), a missing TLS
+        # cert, or an empty service-identity allow-list all mean the
+        # internal listener simply never starts, not that it starts
+        # unauthenticated.
         app.config["grpc_server"] = None
-        if cfg.grpc_enabled:
+        if cfg.grpc_enabled and issuer is not None:
             try:
-                issuer = load_issuer_from_env(load_identities_from_env(env=cfg.deployment_env))
                 app.config["grpc_server"] = await start_internal_grpc_server(issuer=issuer)
             except Exception as exc:  # noqa: BLE001 - see fail-open/fail-closed note above
                 logger.error(
                     f"hub-api internal gRPC server did not start: {exc}",
                     extra={"action": "grpc_startup_failed"},
                 )
+        elif cfg.grpc_enabled:
+            logger.warning(
+                "hub-api internal gRPC server not started: service_jwt issuer unconfigured",
+                extra={"action": "grpc_startup_skipped"},
+            )
         logger.system("hub-api started", action="startup", result="SUCCESS")
 
     @app.after_serving

@@ -35,7 +35,14 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-action-rust
     spec:
-      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      # Dedicated identity (feature/eddsa-machine-jwt, security review HIGH
+      # finding) -- distinguishes this deployment's pods from every other
+      # workload in the namespace for `flask_core.service_jwt`'s TokenReview
+      # bootstrap; see templates/service-jwt-rbac.yaml. Shared with the
+      # Python svc-action Deployment above -- both are the same logical
+      # caller identity, never both running against hub-api at once in a
+      # given environment.
+      serviceAccountName: svc-action
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -202,9 +209,11 @@ spec:
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
+        {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
       {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
       {{- end }}
