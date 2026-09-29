@@ -27,10 +27,8 @@ pub use bundle_host_http::egress::{
 
 impl EgressRuleSource for crate::distribution::BundleCatalog {
     fn resolve(&self, app_id: &str) -> Option<EgressRuleRow> {
-        self.get(app_id).map(|row| EgressRuleRow {
-            egress: row.egress,
-            egress_rps: row.egress_rps,
-            granted_secret_refs: row.granted_secret_refs,
+        self.get(app_id).map(|row| {
+            EgressRuleRow::from_legacy_patterns(row.egress, row.egress_rps, row.granted_secret_refs)
         })
     }
 }
