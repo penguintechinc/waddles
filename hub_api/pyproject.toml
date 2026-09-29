@@ -223,6 +223,16 @@ convention = "google"
 # bundle_approvals.py above -- no tenant_middleware assert here (this
 # endpoint is deliberately cross-tenant), so only N815 is needed.
 "blueprints/v1/bundle_admin.py" = ["N815"]
+# Same camelCase-DTO-wire-contract rationale as ingest_sources.py above
+# (guild-pairing REST DTOs match this repo's existing camelCase wire
+# convention); S101 is the tenant_middleware postcondition assert.
+"blueprints/v1/guild_pairing.py" = ["N815", "S101"]
+"services/guild_pairing_service.py" = ["N815"]
+# S101: narrowing `details.get(...)` (`Any | None`) to `str` after an
+# explicit `all([...])` truthiness check just above -- same
+# already-validated-postcondition-assert rationale as `blueprints/v1/
+# ingest_sources.py`'s own S101 ignore.
+"services/guild_pairing_authority_service.py" = ["N815", "S101"]
 
 [tool.mypy]
 python_version = "3.13"
