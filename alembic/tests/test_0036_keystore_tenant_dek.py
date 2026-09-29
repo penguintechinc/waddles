@@ -1,4 +1,4 @@
-"""Regression test for 0035_keystore_tenant_dek.
+"""Regression test for 0036_keystore_tenant_dek.
 
 Same harness convention as `test_0019_kick_app.py`/`test_0018_slack_youtube_
 apps.py` -- this repo has no pytest-level fixture that runs Alembic against
@@ -8,9 +8,9 @@ the exact SQL text this migration's `upgrade()`/`downgrade()` emit.
 **Revision pinning note:** this migration was authored against a worktree
 whose visible `alembic/versions/` head was `0026_app_install_approval_
 source`, but the real merge-queue chain runs through
-`0034_upload_abandoned_status` (not present in this checkout). `revision`/
-`down_revision` are pinned to `0035_keystore_tenant_dek` /
-`0034_upload_abandoned_status` per that queue -- **the single-head check
+`0035_upload_abandoned_status` (not present in this checkout). `revision`/
+`down_revision` are pinned to `0036_keystore_tenant_dek` /
+`0035_upload_abandoned_status` per that queue -- **the single-head check
 below only verifies uniqueness among files actually present in this
 checkout; it cannot detect a real collision against `0034_upload_
 abandoned_status` until that file exists here too.** Re-verify (and
@@ -27,11 +27,11 @@ from unittest.mock import patch
 import pytest
 
 _MIGRATION_PATH = (
-    Path(__file__).resolve().parent.parent / "versions" / "0035_keystore_tenant_dek.py"
+    Path(__file__).resolve().parent.parent / "versions" / "0036_keystore_tenant_dek.py"
 )
 
-EXPECTED_REVISION = "0035_keystore_tenant_dek"
-EXPECTED_DOWN_REVISION = "0034_upload_abandoned_status"
+EXPECTED_REVISION = "0036_keystore_tenant_dek"
+EXPECTED_DOWN_REVISION = "0035_upload_abandoned_status"
 
 
 def _load_migration():
@@ -74,7 +74,7 @@ class TestMigrationMetadata:
 
     def test_single_head_among_files_present_in_this_checkout(self) -> None:
         """No other version file *actually present here* also chains off
-        `0034_upload_abandoned_status` -- see module docstring: this
+        `0035_upload_abandoned_status` -- see module docstring: this
         cannot see a real collision until that file exists in the same
         checkout, so it only guards against a second *local* collision.
         """

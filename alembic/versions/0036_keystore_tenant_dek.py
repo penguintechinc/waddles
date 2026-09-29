@@ -26,7 +26,7 @@ time differs from what's assumed here** (i.e. if `0034_upload_abandoned_
 status` lands under a different number, or something else lands after it
 first).
 
-The id is abbreviated to `0035_keystore_tenant_dek` (not the more
+The id is abbreviated to `0036_keystore_tenant_dek` (not the more
 descriptive `..._tenant_encryption_keys`) to stay under
 `alembic_version.version_num`'s VARCHAR(32) column -- same constraint
 that already shortened 0011's `communities_license_cols` and 0020's
@@ -50,8 +50,8 @@ alongside the original `at-rest` DEK -- see
 Sec5a. Existing rows (none in practice, since this table and this
 migration ship together) default to `at-rest`.
 
-Revision ID: 0035_keystore_tenant_dek
-Revises: 0034_upload_abandoned_status
+Revision ID: 0036_keystore_tenant_dek
+Revises: 0035_upload_abandoned_status
 Create Date: 2026-09-28
 """
 
@@ -64,8 +64,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0035_keystore_tenant_dek"
-down_revision = "0034_upload_abandoned_status"
+revision = "0036_keystore_tenant_dek"
+down_revision = "0035_upload_abandoned_status"
 branch_labels = None
 depends_on = None
 

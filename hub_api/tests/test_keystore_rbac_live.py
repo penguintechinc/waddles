@@ -1,7 +1,7 @@
 """Real-Postgres verification of migration 0035's RBAC grants (security review HIGH, PR #442).
 
 Applies the migration's actual `upgrade()` SQL (captured the same way
-`alembic/tests/test_0035_keystore_tenant_dek.py` does -- patch
+`alembic/tests/test_0036_keystore_tenant_dek.py` does -- patch
 `alembic.op.execute`, replay the captured statements) against a live
 Postgres, then asserts via `has_table_privilege()` that:
 
@@ -38,7 +38,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 _MIGRATION_PATH = (
-    Path(__file__).resolve().parents[2] / "alembic" / "versions" / "0035_keystore_tenant_dek.py"
+    Path(__file__).resolve().parents[2] / "alembic" / "versions" / "0036_keystore_tenant_dek.py"
 )
 
 _DATA_PLANE_ROLES = (
