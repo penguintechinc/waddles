@@ -99,6 +99,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 name = "egress-assertion"
 version = "0.1.0"
 dependencies = [
+ "ipnet",
  "jsonwebtoken",
  "serde",
  "thiserror",
@@ -173,6 +174,12 @@ dependencies = [
  "libc",
  "r-efi",
 ]
+
+[[package]]
+name = "ipnet"
+version = "2.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "469fb0b9cefa57e3ef31275ee7cacb78f2fdca44e4765491884a2b119d4eb130"
 
 [[package]]
 name = "itoa"

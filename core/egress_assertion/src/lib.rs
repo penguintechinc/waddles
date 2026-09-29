@@ -44,8 +44,10 @@
 //! [`FORWARD_AUTHORIZATION_HEADER`] carries it instead, so it is never
 //! confused with the proxy-hop's own machine-JWT `Authorization` bearer.
 
+use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ipnet::IpNet;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 
@@ -240,11 +242,113 @@ pub fn verify_with_key(
     Ok(claims)
 }
 
+/// Normalizes an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) down to its
+/// plain IPv4 form so a grant written as a bare IPv4 literal/CIDR still
+/// matches a request/resolved address that arrives in mapped form (and
+/// vice versa is a non-issue: a real IPv4 address never needs unmapping).
+/// Deliberately narrower than `bundle_host_http::egress::embedded_ipv4`
+/// (which also canonicalizes NAT64 and deprecated IPv4-compatible forms
+/// for its own resolved-address SSRF classification) -- the assertion's
+/// `destination` is always written by this org's own signer, never by an
+/// attacker-controlled resolver response, so the mapped-address case is
+/// the only one worth guarding here.
+fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(v6)),
+        v4 @ IpAddr::V4(_) => v4,
+    }
+}
+
+/// `Fqdn` grant comparison: exact match, case-insensitive, with a
+/// trailing-dot (DNS root label) normalized away on both sides -- no
+/// implicit subdomain wildcard (matches `bundle_host_http::egress::
+/// host_matches`, the connector-spec-defined semantics for
+/// `net.http.fqdn:<host>`; a wildcard grant is a distinct, explicit manifest
+/// syntax this crate doesn't need to know about since it only ever sees
+/// the fully-resolved grant string handed to it).
+fn fqdn_matches(requested_host: &str, granted: &str) -> bool {
+    fn normalize(host: &str) -> String {
+        host.trim_end_matches('.').to_ascii_lowercase()
+    }
+    normalize(requested_host) == normalize(granted)
+}
+
+/// Does a resolved/literal address `ip` satisfy a `PublicIp`/`PrivateIp`
+/// grant string. Shared by [`destination_matches`] (checked against the
+/// *requested* host, once it's confirmed to parse as a literal) and, in
+/// `egress_proxy`, the DNS-rebinding re-check against the *resolved*
+/// address -- the one CIDR/IP-parsing implementation both call, so the two
+/// can never silently diverge (the bug this function replaces: a plain
+/// `==` string comparison that could never match a CIDR grant against an
+/// IP dial target at all).
+///
+/// - `PublicIp` grants are always a single IP literal (connector spec:
+///   `net.http.public-ip:<ip>`, no CIDR) -- exact address equality after
+///   [`normalize_ip`].
+/// - `PrivateIp` grants may be a single IP literal or a CIDR block
+///   (connector spec: `net.http.private-ip:<ip|cidr>`) -- parsed as an
+///   [`IpNet`] first (covers both shapes: `ipnet` parses a bare address
+///   with no `/prefix` as an error, so a plain-literal grant falls back to
+///   [`IpAddr`] parsing below); containment is checked after normalizing
+///   both sides, so a v4-mapped-v6 grant or target still matches its plain
+///   v4 counterpart.
+///
+/// An unparsable grant, or a `granted`/`ip` family that can never overlap
+/// (e.g. a native IPv6 address against an IPv4 grant), is rejected --
+/// fail-closed, never matched. `Fqdn` has no IP concept here and always
+/// returns `false`; callers with a DNS-resolution concept (this crate
+/// deliberately has none) must handle that category themselves.
+pub fn ip_matches_grant(category: DestinationCategory, granted: &str, ip: IpAddr) -> bool {
+    let ip = normalize_ip(ip);
+    match category {
+        DestinationCategory::Fqdn => false,
+        DestinationCategory::PublicIp => granted
+            .parse::<IpAddr>()
+            .map(|g| normalize_ip(g) == ip)
+            .unwrap_or(false),
+        DestinationCategory::PrivateIp => {
+            if let Ok(net) = granted.parse::<IpNet>() {
+                net_contains(net, ip)
+            } else {
+                granted
+                    .parse::<IpAddr>()
+                    .map(|g| normalize_ip(g) == ip)
+                    .unwrap_or(false)
+            }
+        }
+    }
+}
+
+/// [`IpNet::contains`] requires matching address families -- this bridges
+/// an IPv4-mapped-IPv6 grant/target pair to the family the other side of
+/// the comparison is actually in, rather than failing the match outright.
+fn net_contains(net: IpNet, ip: IpAddr) -> bool {
+    match (net, ip) {
+        (IpNet::V4(net), IpAddr::V4(ip)) => net.contains(&ip),
+        (IpNet::V6(net), IpAddr::V6(ip)) => net.contains(&ip),
+        (IpNet::V6(net), IpAddr::V4(ip)) => net.contains(&ip.to_ipv6_mapped()),
+        (IpNet::V4(net), IpAddr::V6(ip)) => ip
+            .to_ipv4_mapped()
+            .map(|ip| net.contains(&ip))
+            .unwrap_or(false),
+    }
+}
+
 /// Step 4 of the pipeline (spec-equivalent to `bundle_host_http`'s
 /// declared-host check): does the *requested* destination (host **and**
 /// port) match what the assertion actually grants. The port check is
 /// exact -- a grant for `:443` never authorizes the same host on a
 /// different (even operator-allowlisted) port.
+///
+/// `PublicIp`/`PrivateIp` grants are matched via [`ip_matches_grant`] (CIDR-
+/// aware for `PrivateIp`) rather than a plain string comparison -- fixes a
+/// bug where a `net.http.private-ip` grant expressed as a CIDR (the
+/// connector spec's own `<ip|cidr>` syntax) could never match an IP dial
+/// target at all, since no dialed literal is ever byte-for-byte equal to a
+/// `a.b.c.d/24`-shaped string.
 pub fn destination_matches(
     assertion: &EgressAssertion,
     requested_host: &str,
@@ -255,12 +359,13 @@ pub fn destination_matches(
     }
     match assertion.category {
         DestinationCategory::Fqdn => {
-            requested_host.parse::<std::net::IpAddr>().is_err()
-                && requested_host.eq_ignore_ascii_case(&assertion.destination)
+            requested_host.parse::<IpAddr>().is_err()
+                && fqdn_matches(requested_host, &assertion.destination)
         }
-        DestinationCategory::PublicIp | DestinationCategory::PrivateIp => {
-            requested_host == assertion.destination
-        }
+        DestinationCategory::PublicIp | DestinationCategory::PrivateIp => requested_host
+            .parse::<IpAddr>()
+            .map(|ip| ip_matches_grant(assertion.category, &assertion.destination, ip))
+            .unwrap_or(false),
     }
 }
 
@@ -419,5 +524,188 @@ mod tests {
     fn destination_matches_rejects_ip_literal_against_fqdn_grant() {
         let assertion = base_assertion();
         assert!(!destination_matches(&assertion, "1.2.3.4", 443));
+    }
+
+    #[test]
+    fn destination_matches_fqdn_is_case_insensitive_and_ignores_trailing_dot() {
+        let assertion = base_assertion(); // grants "discord.com"
+        assert!(destination_matches(&assertion, "DISCORD.COM", 443));
+        assert!(destination_matches(&assertion, "discord.com.", 443));
+        assert!(destination_matches(&assertion, "Discord.Com.", 443));
+    }
+
+    #[test]
+    fn destination_matches_fqdn_has_no_implicit_subdomain_wildcard() {
+        let assertion = base_assertion(); // grants "discord.com"
+        assert!(!destination_matches(&assertion, "api.discord.com", 443));
+    }
+
+    fn ip_assertion(
+        category: DestinationCategory,
+        destination: &str,
+        port: u16,
+    ) -> EgressAssertion {
+        build_assertion(
+            "spiffe://penguintech.io/alpha/svc-process",
+            "tenant-a",
+            "community-a",
+            "waddles.a.b.c",
+            category,
+            destination,
+            port,
+            30,
+        )
+    }
+
+    /// Table-driven coverage of [`destination_matches`]'s `PublicIp`/
+    /// `PrivateIp` arms: single-IP grants, CIDR grants (`PrivateIp` only --
+    /// the connector spec's `net.http.public-ip:<ip>` syntax never allows a
+    /// CIDR), IPv6, IPv4-mapped-IPv6 normalization both directions, and the
+    /// fail-closed unparsable/mismatch cases. Each case is independent --
+    /// no shared mutable state -- so a new row is the only edit needed to
+    /// extend coverage.
+    #[test]
+    fn destination_matches_public_and_private_ip_table() {
+        struct Case {
+            name: &'static str,
+            category: DestinationCategory,
+            granted: &'static str,
+            requested_host: &'static str,
+            requested_port: u16,
+            expected: bool,
+        }
+        let cases = [
+            Case {
+                name: "public_ip exact literal match",
+                category: DestinationCategory::PublicIp,
+                granted: "93.184.216.34",
+                requested_host: "93.184.216.34",
+                requested_port: 443,
+                expected: true,
+            },
+            Case {
+                name: "public_ip mismatched literal",
+                category: DestinationCategory::PublicIp,
+                granted: "93.184.216.34",
+                requested_host: "93.184.216.35",
+                requested_port: 443,
+                expected: false,
+            },
+            Case {
+                name: "public_ip grant is never CIDR-widened",
+                category: DestinationCategory::PublicIp,
+                granted: "93.184.216.0/24",
+                requested_host: "93.184.216.34",
+                requested_port: 443,
+                // `ipnet` fails to parse a bare-literal PublicIp grant as
+                // an IpAddr once it's actually a CIDR string, and
+                // `ip_matches_grant`'s PublicIp arm never falls back to
+                // IpNet containment -- an operator who mistakenly writes a
+                // CIDR under `public-ip` gets a hard deny, not a silent
+                // widen.
+                expected: false,
+            },
+            Case {
+                name: "private_ip exact literal match",
+                category: DestinationCategory::PrivateIp,
+                granted: "192.168.1.10",
+                requested_host: "192.168.1.10",
+                requested_port: 8080,
+                expected: true,
+            },
+            Case {
+                name: "private_ip CIDR containment -- the bug this fix closes",
+                category: DestinationCategory::PrivateIp,
+                granted: "192.168.1.0/24",
+                requested_host: "192.168.1.200",
+                requested_port: 8080,
+                expected: true,
+            },
+            Case {
+                name: "private_ip CIDR -- outside the block",
+                category: DestinationCategory::PrivateIp,
+                granted: "192.168.1.0/24",
+                requested_host: "192.168.2.1",
+                requested_port: 8080,
+                expected: false,
+            },
+            Case {
+                name: "private_ip IPv6 ULA CIDR containment",
+                category: DestinationCategory::PrivateIp,
+                granted: "fd00::/8",
+                requested_host: "fd12:3456::1",
+                requested_port: 8080,
+                expected: true,
+            },
+            Case {
+                name: "private_ip IPv4-mapped-IPv6 target normalizes against a plain v4 CIDR grant",
+                category: DestinationCategory::PrivateIp,
+                granted: "192.168.1.0/24",
+                requested_host: "::ffff:192.168.1.200",
+                requested_port: 8080,
+                expected: true,
+            },
+            Case {
+                name:
+                    "public_ip IPv4-mapped-IPv6 target normalizes against a plain v4 literal grant",
+                category: DestinationCategory::PublicIp,
+                granted: "93.184.216.34",
+                requested_host: "::ffff:93.184.216.34",
+                requested_port: 443,
+                expected: true,
+            },
+            Case {
+                name: "private_ip unparsable grant is rejected, not matched",
+                category: DestinationCategory::PrivateIp,
+                granted: "not-a-cidr",
+                requested_host: "192.168.1.10",
+                requested_port: 8080,
+                expected: false,
+            },
+            Case {
+                name: "public_ip unparsable requested host is rejected",
+                category: DestinationCategory::PublicIp,
+                granted: "93.184.216.34",
+                requested_host: "not-an-ip",
+                requested_port: 443,
+                expected: false,
+            },
+            Case {
+                name: "private_ip CIDR with abusive/invalid prefix length is rejected outright",
+                category: DestinationCategory::PrivateIp,
+                granted: "192.168.1.0/33",
+                requested_host: "192.168.1.10",
+                requested_port: 8080,
+                expected: false,
+            },
+        ];
+        for case in cases {
+            let assertion = ip_assertion(case.category, case.granted, case.requested_port);
+            let actual = destination_matches(&assertion, case.requested_host, case.requested_port);
+            assert_eq!(
+                actual, case.expected,
+                "case {:?}: expected {}, got {}",
+                case.name, case.expected, actual
+            );
+        }
+    }
+
+    /// The always-denied ranges (loopback, link-local/metadata) are
+    /// enforced separately from `destination_matches`
+    /// (`bundle_host_http::egress::is_forbidden_address` /
+    /// `egress_proxy::ip_policy::is_denied`), never inside it -- this
+    /// crate's job is only "does the requested address fall in the
+    /// granted range", not "is the granted range itself safe to reach".
+    /// This test documents that boundary: a maximally-wide `PrivateIp`
+    /// grant of `0.0.0.0/0` legitimately *matches* the cloud-metadata and
+    /// loopback addresses at this layer -- the separate always-deny check
+    /// is what actually blocks them, proven end-to-end in
+    /// `egress_proxy`'s `tests/e2e.rs`
+    /// (`metadata_and_cluster_cidrs_are_always_blocked_even_with_private_ip_grant`).
+    #[test]
+    fn destination_matches_wide_open_private_cidr_still_matches_metadata_and_loopback() {
+        let assertion = ip_assertion(DestinationCategory::PrivateIp, "0.0.0.0/0", 443);
+        assert!(destination_matches(&assertion, "169.254.169.254", 443));
+        assert!(destination_matches(&assertion, "127.0.0.1", 443));
     }
 }
