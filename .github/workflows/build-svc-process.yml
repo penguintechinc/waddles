@@ -2,7 +2,9 @@ name: Build svc-process
 
 # Publishes the Rust data-plane svc-process image (`svc-process-rust`) built
 # from `core/svc_process/Dockerfile.rust`. See build-svc-ingest.yml for the
-# full rationale (self-contained build, `-rust` naming, gated Trivy scan).
+# full rationale (self-contained build, `-rust` naming, gated Trivy scan,
+# and the PR-path job split so a build-context regression like gh-475 now
+# fails the PR).
 
 on:
   push:
@@ -79,8 +81,12 @@ jobs:
             echo "is_release=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # Push-path only -- pull_request/merge_group is handled entirely by
+  # build-pr below so packages:write is never granted to a job building an
+  # untrusted PR's Dockerfile.
   build-platform:
     name: Build (${{ matrix.platform }})
+    if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
     permissions:
       contents: read
       packages: write
@@ -107,7 +113,6 @@ jobs:
 
       - name: Log in to Container Registry
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
-        if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -118,12 +123,50 @@ jobs:
         with:
           context: ${{ env.BUILD_CONTEXT }}
           file: ${{ env.MODULE_PATH }}/Dockerfile.rust
-          push: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
-          load: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && matrix.platform == 'linux/amd64' }}
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ matrix.suffix }}
+          push: true
           platforms: ${{ matrix.platform }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ matrix.suffix }}
           cache-from: type=gha,scope=${{ env.MODULE_NAME }}-${{ matrix.suffix }}
           cache-to: type=gha,mode=max,scope=${{ env.MODULE_NAME }}-${{ matrix.suffix }}
+
+  # PR/merge_group path: single-arch build, no registry credentials, gated
+  # Trivy scan against the locally loaded (never pushed) image -- see
+  # build-svc-ingest.yml's header comment for the shared rationale.
+  build-pr:
+    name: Build & Scan (PR)
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    needs: determine-version
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
+
+      - name: Build image (amd64 only, not pushed)
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
+        with:
+          context: ${{ env.BUILD_CONTEXT }}
+          file: ${{ env.MODULE_PATH }}/Dockerfile.rust
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}:pr-${{ github.run_id }}
+          cache-from: type=gha,scope=${{ env.MODULE_NAME }}-amd64
+
+      - name: Trivy vulnerability scan (gated, local image)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}:pr-${{ github.run_id }}
+          format: 'table'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '1'
 
   merge:
     name: Merge Multi-Arch Manifest

@@ -529,6 +529,25 @@ jobs:
             MODULE_NAME=${{ matrix.module }}
             MODULE_PORT=${{ matrix.port }}
 
+      # Gated (non-masked) Trivy scan against the image this job just loaded
+      # locally -- PR/merge_group never reach merge-manifests (skipped, see
+      # that job's `if:`), so without this the push-path's informational-only
+      # security-scan job (continue-on-error: true) is the only scan these
+      # events would otherwise get, and it doesn't run on PR either. This
+      # step is what actually gates a PR on HIGH/CRITICAL findings.
+      - name: Trivy vulnerability scan (gated, local image)
+        if: >
+          (matrix.condition == 'true' || github.event_name == 'workflow_dispatch') &&
+          (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+          matrix.platform == 'linux/amd64'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-amd64
+          format: 'table'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          exit-code: '1'
+
       - name: Run container tests
         if: >
           (matrix.condition == 'true' || github.event_name == 'workflow_dispatch') &&
