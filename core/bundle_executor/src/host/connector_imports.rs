@@ -23,7 +23,7 @@
 //! tenant-scoped, cached (TTL + erasure/rename invalidation), rate-limited
 //! per connector digest, audited counts-only against
 //! `waddles_connector_pii_reader` (migration
-//! `0036_connector_pii_reader_role`) -- is implemented by whichever
+//! `0037_connector_pii_reader_role`) -- is implemented by whichever
 //! process's capability handler answers `CapabilityKind::Db`/`"identity.lookup"`
 //! (today a `not_implemented` seam for every `Db` call, e.g.
 //! `core/svc_process/src/capabilities.rs`); wiring that handler in

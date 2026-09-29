@@ -47,13 +47,13 @@ migration follows that same convention for the new role.
 (0029-0035 are queued on separate, not-yet-merged branches: 0033
 `feature/users-uuid-token` PR #434, 0034 `fix/seeder-stalled-upload-
 recovery` PR #435, 0035 `feature/tenant-dek-broker` PR #442). `down_revision`
-below is set to `0035_keystore_tenant_dek` per the intended merge order;
+below is set to `0036_keystore_tenant_dek` per the intended merge order;
 **this WILL need re-chaining if the actual merged order on
-`release/v3.0.X` differs** -- same caveat `0035_keystore_tenant_dek`'s own
+`release/v3.0.X` differs** -- same caveat `0036_keystore_tenant_dek`'s own
 docstring already carries for its own position in this same queue.
 
-Revision ID: 0036_connector_pii_reader_role
-Revises: 0035_keystore_tenant_dek
+Revision ID: 0037_connector_pii_reader_role
+Revises: 0036_keystore_tenant_dek
 Create Date: 2026-09-28
 """
 
@@ -61,8 +61,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0036_connector_pii_reader_role"
-down_revision = "0035_keystore_tenant_dek"
+revision = "0037_connector_pii_reader_role"
+down_revision = "0036_keystore_tenant_dek"
 branch_labels = None
 depends_on = None
 

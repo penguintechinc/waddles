@@ -1,4 +1,4 @@
-"""Real-Postgres regression tests for 0036_connector_pii_reader_role.
+"""Real-Postgres regression tests for 0037_connector_pii_reader_role.
 
 Column-level `GRANT`/`REVOKE` cannot be verified against mocked SQL text
 (a `GRANT SELECT (col) ON t TO role` statement executing without error
@@ -14,7 +14,7 @@ both an allowed and a forbidden `SELECT`.
 `0033_hub_users_identity_uuid`, this migration's `hub_users.uuid` source)
 live on separate, not-yet-merged branches and aren't present as files
 here (see this migration's own module docstring). Running the real
-alembic chain would fail with "can't locate revision 0035_keystore_tenant_dek".
+alembic chain would fail with "can't locate revision 0036_keystore_tenant_dek".
 Instead: spin an ephemeral Postgres container directly, hand-bootstrap the
 minimal schema state `0033_hub_users_identity_uuid` would have produced
 (`hub_users.uuid` populated, `hub_user_identities`, `community_members`),
@@ -46,7 +46,7 @@ requires_docker = pytest.mark.skipif(
 _MIGRATION_PATH = (
     Path(__file__).resolve().parent.parent
     / "versions"
-    / "0036_connector_pii_reader_role.py"
+    / "0037_connector_pii_reader_role.py"
 )
 _ROLE = "waddles_connector_pii_reader"
 
@@ -96,7 +96,7 @@ INSERT INTO community_members (community_id, platform, platform_user_id, display
 
 def _load_migration():  # type: ignore[no-untyped-def]
     spec = importlib.util.spec_from_file_location(
-        "migration_0036_connector_pii_reader_role", _MIGRATION_PATH
+        "migration_0037_connector_pii_reader_role", _MIGRATION_PATH
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -200,10 +200,10 @@ def reader_cur(seeded: PgTestDatabase) -> Iterator[psycopg2.extensions.cursor]:
 
 @requires_docker
 class TestMigrationMetadata:
-    def test_chains_off_0035_keystore_tenant_dek(self) -> None:
+    def test_chains_off_0036_keystore_tenant_dek(self) -> None:
         migration = _load_migration()
-        assert migration.revision == "0036_connector_pii_reader_role"
-        assert migration.down_revision == "0035_keystore_tenant_dek"
+        assert migration.revision == "0037_connector_pii_reader_role"
+        assert migration.down_revision == "0036_keystore_tenant_dek"
 
     def test_revision_id_fits_alembic_version_num_varchar32(self) -> None:
         migration = _load_migration()
