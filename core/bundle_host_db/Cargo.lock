@@ -282,6 +282,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 name = "bundle-host-db"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "opentelemetry",
  "sea-orm",
  "serde",
@@ -734,9 +735,9 @@ dependencies = [
 
 [[package]]
 name = "futures"
-version = "0.3.34"
+version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a31d2a3fbaaeb2af2368bbdd904aa8e812d3c04a1ee10d3171f52d556e5d0a3"
+checksum = "65bc07b1a8bc7c85c5f2e110c476c7389b4554ba72af57d8445ea63a576b0876"
 dependencies = [
  "futures-channel",
  "futures-core",

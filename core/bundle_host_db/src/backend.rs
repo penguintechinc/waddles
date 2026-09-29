@@ -40,7 +40,9 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
-use crate::limits::{MAX_JSONB_BYTES, MAX_ROWS_PER_APP, MAX_TEXT_BYTES, STATEMENT_TIMEOUT_MS};
+use crate::limits::{
+    MAX_JSONB_BYTES, MAX_QUERY_LIMIT, MAX_ROWS_PER_APP, MAX_TEXT_BYTES, STATEMENT_TIMEOUT_MS,
+};
 use crate::schema::{ColumnType, TableSchema, PLATFORM_COLUMNS};
 use crate::scope::{quote_ident, validate_identifier, DbScope};
 
@@ -239,6 +241,37 @@ async fn set_local_scope(txn: &impl ConnectionTrait, scope: &DbScope) -> Result<
     Ok(())
 }
 
+/// Serializes the quota check-then-insert critical section for one
+/// `(tenant, community, app_id)` scope without any new schema/counter
+/// table (this crate is DML-only -- see module doc). A
+/// `pg_advisory_xact_lock` keyed by a hash of the scope is a purely
+/// application-level (DML-reachable) primitive: two concurrent
+/// transactions racing the same scope's `COUNT(*)` + `INSERT` serialize on
+/// this lock, so the second transaction's `COUNT(*)` always observes the
+/// first's committed-or-not-yet-visible row only after the first has
+/// released the lock (commit or rollback) -- closing the classic
+/// check-then-act TOCTOU window a bare `COUNT(*)` guard has under
+/// READ COMMITTED. Different scopes hash to (almost certainly) different
+/// lock keys and never contend with each other. The lock is
+/// transaction-scoped (`_xact_`) -- released automatically at COMMIT/
+/// ROLLBACK, never leaked across a pooled connection's next checkout.
+async fn lock_quota_scope(txn: &impl ConnectionTrait, scope: &DbScope) -> Result<(), DbError> {
+    let key = format!(
+        "{}:{}:{}",
+        scope.tenant,
+        scope.community.as_deref().unwrap_or(""),
+        scope.app_id
+    );
+    txn.execute_raw(Statement::from_sql_and_values(
+        SeaDbBackend::Postgres,
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))".to_string(),
+        [Value::String(Some(key))],
+    ))
+    .await
+    .map_err(|e| DbError::Backend(e.to_string()))?;
+    Ok(())
+}
+
 /// The explicit, independent `tenant_id`/`community_id` predicate every
 /// generated statement below carries in addition to RLS (design doc
 /// SS6.2's "defense in depth" requirement) -- returns the SQL fragment and
@@ -297,6 +330,20 @@ pub trait DbBackend: Send + Sync {
         row_id: &'a str,
         expected_version: u64,
     ) -> BoxFuture<'a, Result<(), DbError>>;
+
+    /// Bounded list of a scope's rows, ordered by `row_id` for a stable
+    /// keyset-style page boundary. Host-enforced page size (never
+    /// guest-controlled beyond the [`MAX_QUERY_LIMIT`] ceiling) -- see
+    /// module doc "known simplifications": this is the host-side op ready
+    /// for the proposed `query` WIT shape (PR description), not yet wired
+    /// to a guest-reachable op in this landing's `stage.wit`.
+    fn query<'a>(
+        &'a self,
+        schema: &'a TableSchema,
+        scope: &'a DbScope,
+        limit: u32,
+        offset: u32,
+    ) -> BoxFuture<'a, Result<Vec<Row>, DbError>>;
 }
 
 /// The real [`DbBackend`]: SeaORM over the shared `waddles` Postgres
@@ -304,11 +351,30 @@ pub trait DbBackend: Send + Sync {
 /// `alembic/versions/0030_bundle_app_schemas.py`).
 pub struct PostgresBackend {
     conn: DatabaseConnection,
+    /// Per-app row cap applied by [`Self::insert_impl`]'s quota check.
+    /// Defaults to [`MAX_ROWS_PER_APP`]; overridable only under
+    /// `#[cfg(any(test, feature = "test-util"))]` so an integration test
+    /// can prove the quota boundary (and the race-safety of
+    /// [`lock_quota_scope`] around it) without actually inserting
+    /// [`MAX_ROWS_PER_APP`] rows.
+    row_cap: i64,
 }
 
 impl PostgresBackend {
     pub fn new(conn: DatabaseConnection) -> Self {
-        Self { conn }
+        Self {
+            conn,
+            row_cap: MAX_ROWS_PER_APP,
+        }
+    }
+
+    /// Test-only: overrides the per-app row cap so a quota/concurrency test
+    /// can exercise the boundary with a handful of rows instead of
+    /// [`MAX_ROWS_PER_APP`].
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn with_row_cap_for_test(mut self, cap: i64) -> Self {
+        self.row_cap = cap;
+        self
     }
 
     async fn insert_impl(
@@ -326,9 +392,13 @@ impl PostgresBackend {
             .map_err(|e| DbError::Backend(e.to_string()))?;
         set_local_scope(&txn, scope).await?;
 
-        // Quota: fail closed if this app is already at its row cap
-        // (design doc SS9 -- pre-write counter, see module doc for why
-        // this isn't yet the trigger-based mechanism).
+        // Race-safe quota: serialize this scope's check-then-insert
+        // against every other concurrent transaction touching the same
+        // (tenant, community, app_id) before reading the count (see
+        // `lock_quota_scope`'s doc) -- a bare `COUNT(*)` guard alone is a
+        // TOCTOU race under concurrency.
+        lock_quota_scope(&txn, scope).await?;
+
         let (pred_sql, pred_values) = tenant_predicate(scope, 1);
         let count_sql = format!(
             "SELECT COUNT(*) AS n FROM {} WHERE {}",
@@ -347,9 +417,10 @@ impl PostgresBackend {
         let row_count: i64 = count_row
             .try_get("", "n")
             .map_err(|e| DbError::Backend(e.to_string()))?;
-        if row_count >= MAX_ROWS_PER_APP {
+        if row_count >= self.row_cap {
             return Err(DbError::QuotaExceeded(format!(
-                "row count would exceed the per-app cap ({MAX_ROWS_PER_APP})"
+                "row count would exceed the per-app cap ({})",
+                self.row_cap
             )));
         }
 
@@ -634,6 +705,79 @@ impl PostgresBackend {
             .map_err(|e| DbError::Backend(e.to_string()))?;
         Ok(())
     }
+
+    /// Bounded list, ordered by `row_id`, both scoping mechanisms applied
+    /// exactly like every other op (RLS `SET LOCAL` + explicit predicate).
+    /// `limit` is clamped to [`MAX_QUERY_LIMIT`] host-side -- never trusts a
+    /// guest-requested page size past the ceiling.
+    async fn query_impl(
+        &self,
+        schema: &TableSchema,
+        scope: &DbScope,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Row>, DbError> {
+        let bounded_limit = limit.min(MAX_QUERY_LIMIT);
+
+        let txn = self
+            .conn
+            .begin()
+            .await
+            .map_err(|e| DbError::Backend(e.to_string()))?;
+        set_local_scope(&txn, scope).await?;
+
+        let declared: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+        let mut select_cols = vec!["row_id".to_string(), "version".to_string()];
+        select_cols.extend(declared.iter().cloned());
+        let quoted_select: Vec<String> = select_cols.iter().map(|c| quote_ident(c)).collect();
+
+        let (pred_sql, pred_values) = tenant_predicate(scope, 1);
+        let limit_param = pred_values.len() + 1;
+        let offset_param = limit_param + 1;
+        let mut bind_values = pred_values;
+        bind_values.push(Value::BigInt(Some(i64::from(bounded_limit))));
+        bind_values.push(Value::BigInt(Some(i64::from(offset))));
+
+        let sql = format!(
+            "SELECT {} FROM {} WHERE {} ORDER BY row_id LIMIT ${limit_param} OFFSET ${offset_param}",
+            quoted_select.join(", "),
+            schema.qualified_name(),
+            pred_sql,
+        );
+
+        let rows = txn
+            .query_all_raw(Statement::from_sql_and_values(
+                SeaDbBackend::Postgres,
+                sql,
+                bind_values,
+            ))
+            .await
+            .map_err(|e| DbError::Backend(e.to_string()))?;
+
+        txn.commit()
+            .await
+            .map_err(|e| DbError::Backend(e.to_string()))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for result_row in &rows {
+            let row_uuid: Uuid = result_row
+                .try_get("", "row_id")
+                .map_err(|e| DbError::Backend(e.to_string()))?;
+            let version: i64 = result_row
+                .try_get("", "version")
+                .map_err(|e| DbError::Backend(e.to_string()))?;
+            let mut columns = Vec::with_capacity(declared.len());
+            for col in &schema.columns {
+                columns.push((col.name.clone(), extract_value(result_row, col)?));
+            }
+            out.push(Row {
+                row_id: row_uuid.to_string(),
+                version: version as u64,
+                columns,
+            });
+        }
+        Ok(out)
+    }
 }
 
 fn extract_value(
@@ -708,6 +852,16 @@ impl DbBackend for PostgresBackend {
         expected_version: u64,
     ) -> BoxFuture<'a, Result<(), DbError>> {
         Box::pin(self.delete_impl(schema, scope, row_id, expected_version))
+    }
+
+    fn query<'a>(
+        &'a self,
+        schema: &'a TableSchema,
+        scope: &'a DbScope,
+        limit: u32,
+        offset: u32,
+    ) -> BoxFuture<'a, Result<Vec<Row>, DbError>> {
+        Box::pin(self.query_impl(schema, scope, limit, offset))
     }
 }
 

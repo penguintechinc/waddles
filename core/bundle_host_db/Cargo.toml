@@ -11,6 +11,16 @@ description = "Shared `db` bundle host-capability implementation (structured tab
 name = "bundle_host_db"
 path = "src/lib.rs"
 
+[features]
+# Exposes `PostgresBackend::with_row_cap_for_test` outside `cfg(test)` so
+# `tests/postgres_integration.rs` (a separate compilation unit, not the
+# unit-test binary) can override the per-app row cap to prove the quota
+# boundary/race-safety without inserting MAX_ROWS_PER_APP rows. Enabled via
+# `cargo test --features test-util` / `cargo llvm-cov --features test-util`
+# -- never enabled by svc_process/svc_action, which depend on this crate
+# without the feature.
+test-util = []
+
 # Exact-version pins only (no ^ / * ranges) -- rules/critical-rules.md
 # Dependency Pinning. Cargo.lock is committed in every crate that depends
 # on this one (svc_process, svc_action) alongside this file. Versions
@@ -45,3 +55,4 @@ tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }
 # (RustSec-patched `astral-tokio-tar` line via `testcontainers` >=0.28.0).
 testcontainers = "=0.28.0"
 sea-orm = { version = "=2.0.2", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid"] }
+futures = "=0.3.31"

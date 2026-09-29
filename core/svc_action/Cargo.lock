@@ -515,6 +515,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-host-db"
+version = "0.1.0"
+dependencies = [
+ "opentelemetry",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2707,6 +2721,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing",
  "url",
+ "uuid",
  "web-time",
 ]
 
@@ -2746,6 +2761,7 @@ dependencies = [
  "chrono",
  "ordered-float",
  "sea-query-derive",
+ "uuid",
 ]
 
 [[package]]
@@ -3061,6 +3077,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "uuid",
  "webpki-roots",
 ]
 
@@ -3127,6 +3144,7 @@ dependencies = [
  "sqlx-core",
  "thiserror 2.0.20",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3162,6 +3180,7 @@ dependencies = [
  "stringprep",
  "thiserror 2.0.20",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -3188,6 +3207,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -3233,6 +3253,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bundle-active-set",
+ "bundle-host-db",
  "chrono",
  "clap",
  "futures-util",

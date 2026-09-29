@@ -151,6 +151,33 @@ impl<B: DbBackend> DbHost<B> {
         outcome
     }
 
+    /// Bounded list of `scope`'s rows -- host-side op ready for the
+    /// proposed `query` WIT shape (see this crate's top-level doc and the
+    /// PR description); not yet reachable from a guest bundle in this
+    /// landing's `stage.wit`/`bundle_executor` (no WIT change in this
+    /// slice). `limit` is clamped to [`MAX_QUERY_LIMIT`] by the backend
+    /// regardless of what's requested here.
+    pub async fn query(
+        &self,
+        scope: &DbScope,
+        schemas: &SchemaCache,
+        snapshot: &CapabilitySnapshot,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Row>, DbError> {
+        let started = Instant::now();
+        let outcome = async {
+            let schema = self.resolve_and_authorize(scope, schemas, snapshot)?;
+            backend::with_call_deadline(self.backend.query(&schema, scope, limit, offset)).await
+        }
+        .await;
+        Self::finish("query", scope, started, &outcome.as_ref().map(|_| ()));
+        if let Ok(rows) = &outcome {
+            metrics::record_rows("query", rows.len() as u64);
+        }
+        outcome
+    }
+
     pub async fn update(
         &self,
         scope: &DbScope,
@@ -264,6 +291,17 @@ mod tests {
             _expected_version: u64,
         ) -> BoxFuture<'a, Result<(), DbError>> {
             Box::pin(async move { Ok(()) })
+        }
+
+        fn query<'a>(
+            &'a self,
+            _schema: &'a TableSchema,
+            _scope: &'a DbScope,
+            _limit: u32,
+            _offset: u32,
+        ) -> BoxFuture<'a, Result<Vec<Row>, DbError>> {
+            let row = self.row.clone();
+            Box::pin(async move { Ok(vec![row]) })
         }
     }
 
