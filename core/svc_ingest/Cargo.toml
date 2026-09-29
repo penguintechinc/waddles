@@ -108,27 +108,28 @@ penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", re
 penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f642e0695046386ca674e47eb9e6f7d6283ac531", package = "penguin-licensing", version = "=0.1.0" }
 # `penguin-connector-twitch`: IRC chat receive (`src/ingest/twitch.rs`) and
 # the outbound relay sender (`src/outbound.rs`, `TwitchIrcSender`) -- rev
-# fast-forwarded to penguin-libs PR #103 (typed Discord gateway close
-# codes, see the comment below) in lockstep with penguin-connector-discord's
-# rev rather than diverging the two same-repo git pins; PR #103 touches
-# only the discord crate's `error.rs`/`gateway.rs`, so this is a pure no-op
-# for twitch itself (verified via the GitHub compare: 2 commits ahead,
-# 0 behind, only discord files changed). EventSub webhook verification
-# remains a separate `// TODO(M5)` seam.
-penguin-connector-twitch = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "b65e93c08d7955e750e55e3c9621a94901c22962", package = "penguin-connector-twitch", version = "=0.1.0" }
+# fast-forwarded to penguin-libs PR #129 (real Discord `OP_RESUME`, see the
+# comment below) in lockstep with penguin-connector-discord's rev rather
+# than diverging the two same-repo git pins; PR #129 touches only the
+# discord crate's `gateway.rs`/`error.rs`/`lib.rs`, so this is a pure no-op
+# for twitch itself. `cargo update -p penguin-connector-discord --precise`
+# alone actually resolved this same-repo checkout's twitch entry to the
+# new commit too while leaving its `rev=` query string stale in
+# `Cargo.lock` -- pinning twitch's own `rev` here keeps the lockfile
+# internally consistent instead of relying on that resolver side effect.
+# EventSub webhook verification remains a separate `// TODO(M5)` seam.
+penguin-connector-twitch = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "79a32e9676dfa55e9561b7bf94cb7f69023b393c", package = "penguin-connector-twitch", version = "=0.1.0" }
 # `penguin-connector-discord`: Gateway chat receive (`src/ingest/discord.rs`).
-# rev carries penguin-libs PR #103: `DiscordError` gained a
-# `GatewayClosed { code, reason, class }` variant plus
-# `gateway::{CloseCodeClass, classify_close_code}` -- a WebSocket close
-# frame that carries an explicit Discord close code is now classified
-# (`Resumable`/`ReconnectFresh`/`Fatal`) instead of collapsing to the
-# generic `Ok(None)` "connection ended" signal every other clean close
-# produces. Before this rev a fatal close (e.g. `4004` revoked/invalid
-# bot token) was indistinguishable from an ordinary disconnect, so
-# `run_loop` retried it forever; `src/ingest/discord.rs` now branches on
-# `class` (see that module's doc comment). Still carries PR #102's
-# lenient `MESSAGE_CREATE` field parsing (unchanged by #103).
-penguin-connector-discord = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "b65e93c08d7955e750e55e3c9621a94901c22962", package = "penguin-connector-discord", version = "=0.1.0" }
+# rev carries penguin-libs PR #129 (`release/rust-connectors/v0.1.x`,
+# commit 79a32e9676dfa55e9561b7bf94cb7f69023b393c): real `OP_RESUME`,
+# correct opcode-9 `INVALID_SESSION` resumable-flag handling, the
+# `RESUMED` dispatch, `GatewaySession::session_info()`, and
+# `DiscordGatewayReceiver::resume()`. `ingest::discord_identify_budget`'s
+# `GatewayConnector::resume`/`GatewayChannel::session_snapshot` now wire
+# to these directly instead of defaulting to "not supported" (see that
+# module's doc comment). Still carries PR #103's `GatewayClosed`
+# classification and PR #102's lenient `MESSAGE_CREATE` field parsing.
+penguin-connector-discord = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "79a32e9676dfa55e9561b7bf94cb7f69023b393c", package = "penguin-connector-discord", version = "=0.1.0" }
 # Named directly (not just transitive via penguin-connector-discord) only
 # because `src/ingest/discord.rs`'s `GatewayConnector for
 # DiscordGatewayReceiver` impl names `tokio_tungstenite::MaybeTlsStream` in
@@ -185,6 +186,13 @@ subtle = "=2.6.1"
 
 [dev-dependencies]
 http-body-util = "=0.1.3"
+# Already resolved transitively (tokio-tungstenite's own dependency) at
+# this exact version -- promoted to a direct dev-dependency only so
+# `ingest::discord_identify_budget`'s real-`OP_RESUME` test can drive a
+# `tokio_tungstenite::WebSocketStream`'s `Sink`/`Stream` impls
+# (`.send()`/`.next()`) directly, mirroring `penguin-connector-discord`'s
+# own `resume_handshake_sends_resume_and_receives_resumed` test harness.
+futures-util = "=0.3.34"
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks
 # `#[tokio::test(start_paused = true)]`/`tokio::time::{pause,advance}` so
 # `ingest::discord`'s reconnect-backoff regression test can drive many

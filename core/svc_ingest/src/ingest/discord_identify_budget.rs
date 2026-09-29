@@ -16,21 +16,25 @@
 //! changes at all -- every reconnect it drives via `connector.connect()`
 //! transparently gets RESUME-first ordering and budget-gated IDENTIFY.
 //!
-//! **Known upstream gap (tracked, not fixed here):** the pinned
-//! `penguin-connector-discord` crate (external, `penguin-libs` git rev, see
-//! `core/svc_ingest/Cargo.toml`) does not implement the `OP_RESUME` wire
-//! frame yet, and its opcode-9 (`INVALID_SESSION`) handling collapses the
-//! `d` resumable/non-resumable flag to always non-resumable -- see
-//! [`penguin_connector_discord::gateway::DiscordError::SessionInvalidated`]'s
-//! own doc comment. [`super::discord::GatewayConnector::resume`]'s default
-//! impl therefore always reports the session non-resumable for the real
-//! production connector today, and [`super::discord::GatewayChannel::session_snapshot`]'s
-//! default returns `None` (nothing to persist yet). Every piece of
-//! orchestration in this module -- the budget, the store, RESUME-first
-//! ordering, jittered backoff -- is nonetheless fully implemented and
-//! exercised end-to-end in this module's tests against a fake connector
-//! that *does* support both, so wiring a real `penguin-libs` bump is a
-//! two-method override, not a design change.
+//! **Real `OP_RESUME` (penguin-libs PR #129,
+//! `79a32e9676dfa55e9561b7bf94cb7f69023b393c`):** the pinned
+//! `penguin-connector-discord` crate now implements the wire-level
+//! `OP_RESUME` handshake and correctly surfaces opcode 9
+//! (`INVALID_SESSION`)'s own `resumable` flag rather than collapsing it to
+//! always-false -- [`super::discord::GatewayConnector::resume`] and
+//! [`super::discord::GatewayChannel::session_snapshot`] are implemented
+//! for real against
+//! [`penguin_connector_discord::gateway::DiscordGatewayReceiver::resume`]
+//! and
+//! [`penguin_connector_discord::gateway::GatewaySession::session_info`]
+//! (see `crate::ingest::discord`). [`StoredSession`] converts losslessly
+//! to/from the crate's own
+//! [`penguin_connector_discord::gateway::GatewaySessionInfo`] at that
+//! boundary so this module's `SessionStore`/Valkey schema stays a
+//! svc-ingest-owned type rather than re-exporting the crate's.
+//! [`BudgetedResumingConnector::connect`] honors `resumable: true` by
+//! retrying `RESUME` once more (Discord's own documented short-delay
+//! recovery path) before falling back to a fresh, budgeted `IDENTIFY`.
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
@@ -52,6 +56,26 @@ pub struct StoredSession {
     /// The per-session resume URL Discord's `READY` provides -- `RESUME`
     /// must reconnect to this URL, not the original gateway URL.
     pub resume_gateway_url: String,
+}
+
+impl From<penguin_connector_discord::gateway::GatewaySessionInfo> for StoredSession {
+    fn from(info: penguin_connector_discord::gateway::GatewaySessionInfo) -> Self {
+        Self {
+            session_id: info.session_id,
+            seq: info.seq,
+            resume_gateway_url: info.resume_gateway_url,
+        }
+    }
+}
+
+impl From<StoredSession> for penguin_connector_discord::gateway::GatewaySessionInfo {
+    fn from(session: StoredSession) -> Self {
+        Self {
+            session_id: session.session_id,
+            seq: session.seq,
+            resume_gateway_url: session.resume_gateway_url,
+        }
+    }
 }
 
 /// Error from a [`SessionStore`] operation -- always retryable from the
@@ -460,37 +484,51 @@ where
         // tries RESUME before ever consulting the IDENTIFY budget --
         // Discord exempts RESUME from the IDENTIFY rate limit entirely,
         // so a healthy resume path never touches the budget below.
-        match self.session_store.load(&self.shard_key).await {
-            Ok(Some(session)) => match self.inner.resume(&session).await {
-                Ok(channel) => {
-                    self.metrics.receiver_reconnect("discord", "resume_success");
-                    self.persist_snapshot(&channel).await;
-                    return Ok(channel);
-                }
-                Err(DiscordError::ResumeRequested) => {
-                    // Opcode 7 during the resume attempt itself: still
-                    // possibly resumable, but don't hot-loop -- fall
-                    // through to a budgeted fresh IDENTIFY this cycle;
-                    // the stored session (left intact) gets another
-                    // RESUME attempt on the next reconnect.
-                    self.metrics
-                        .receiver_reconnect("discord", "resume_transient_retry");
-                }
-                Err(err) => {
-                    // Opcode 9 (`INVALID_SESSION`), non-resumable: clear
-                    // the stale session and fall back to a fresh,
-                    // budgeted IDENTIFY.
-                    tracing::warn!(platform = "discord", shard_key = %self.shard_key, error = %err, "RESUME failed (session not resumable), falling back to IDENTIFY");
-                    self.metrics
-                        .receiver_reconnect("discord", "resume_fallback_identify");
-                    if let Err(clear_err) = self.session_store.clear(&self.shard_key).await {
-                        tracing::warn!(platform = "discord", error = %clear_err, "failed to clear stale discord session");
+        //
+        // Opcode 9 (`INVALID_SESSION`) during the resume attempt itself
+        // carries Discord's own `resumable` flag: `true` means Discord's
+        // documented recovery is a short randomized delay followed by
+        // *another* `RESUME` attempt (not a fresh `IDENTIFY`), so this
+        // retries exactly once more (bounded -- never a hot loop) before
+        // giving up and falling back to a budgeted `IDENTIFY`.
+        if let Ok(Some(session)) = self.session_store.load(&self.shard_key).await {
+            for attempt in 0..2u8 {
+                match self.inner.resume(&session).await {
+                    Ok(channel) => {
+                        self.metrics.receiver_reconnect("discord", "resume_success");
+                        self.persist_snapshot(&channel).await;
+                        return Ok(channel);
+                    }
+                    Err(DiscordError::ResumeRequested) => {
+                        // Opcode 7 during the resume attempt itself: still
+                        // possibly resumable, but don't hot-loop -- fall
+                        // through to a budgeted fresh IDENTIFY this cycle;
+                        // the stored session (left intact) gets another
+                        // RESUME attempt on the next reconnect.
+                        self.metrics
+                            .receiver_reconnect("discord", "resume_transient_retry");
+                        break;
+                    }
+                    Err(DiscordError::SessionInvalidated { resumable: true }) if attempt == 0 => {
+                        self.metrics
+                            .receiver_reconnect("discord", "resume_retry_after_invalid_session");
+                        tokio::time::sleep(Duration::from_secs(1) + jitter(Duration::from_secs(4)))
+                            .await;
+                    }
+                    Err(err) => {
+                        // Non-resumable (opcode 9, `resumable: false`), or
+                        // the one extra resumable retry above also failed:
+                        // clear the stale session and fall back to a
+                        // fresh, budgeted IDENTIFY.
+                        tracing::warn!(platform = "discord", shard_key = %self.shard_key, error = %err, "RESUME failed, falling back to IDENTIFY");
+                        self.metrics
+                            .receiver_reconnect("discord", "resume_fallback_identify");
+                        if let Err(clear_err) = self.session_store.clear(&self.shard_key).await {
+                            tracing::warn!(platform = "discord", error = %clear_err, "failed to clear stale discord session");
+                        }
+                        break;
                     }
                 }
-            },
-            Ok(None) => {}
-            Err(err) => {
-                tracing::warn!(platform = "discord", error = %err, "session store load failed, proceeding straight to budgeted IDENTIFY");
             }
         }
 
@@ -773,7 +811,9 @@ mod tests {
             .await
             .unwrap();
 
-        let inner = FakeConnector::new(Some(|| DiscordError::SessionInvalidated));
+        let inner = FakeConnector::new(Some(|| DiscordError::SessionInvalidated {
+            resumable: false,
+        }));
         let budget = InMemoryBudget::new();
         let adapter = BudgetedResumingConnector::new(
             inner,
@@ -805,6 +845,54 @@ mod tests {
         assert!(adapter.metrics.events.lock().unwrap().contains(&(
             "discord".to_string(),
             "resume_fallback_identify".to_string()
+        )));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resumable_op9_retries_resume_exactly_once_before_falling_back() {
+        // Discord's own opcode-9 `resumable: true` means "try RESUME again
+        // after a short delay", not "re-IDENTIFY" -- this must attempt
+        // RESUME a second time (bounded, never a hot loop) before ever
+        // falling back to a fresh, budgeted IDENTIFY.
+        let sessions = InMemorySessionStore::default();
+        sessions
+            .save(
+                &shard_key(),
+                &StoredSession {
+                    session_id: "stale".to_string(),
+                    seq: Some(1),
+                    resume_gateway_url: "wss://resume.example".to_string(),
+                },
+                Duration::from_secs(600),
+            )
+            .await
+            .unwrap();
+
+        let inner = FakeConnector::new(Some(|| DiscordError::SessionInvalidated {
+            resumable: true,
+        }));
+        let adapter = BudgetedResumingConnector::new(
+            inner,
+            sessions,
+            InMemoryBudget::new(),
+            RecordingMetrics::default(),
+            "tokhash".to_string(),
+            shard_key(),
+            0,
+            1,
+            Duration::from_secs(600),
+        );
+
+        adapter.connect().await.expect("falls back to IDENTIFY");
+        assert_eq!(
+            adapter.inner.resume_calls.load(Ordering::SeqCst),
+            2,
+            "must retry RESUME exactly once (bounded) before giving up"
+        );
+        assert_eq!(adapter.inner.connect_calls.load(Ordering::SeqCst), 1);
+        assert!(adapter.metrics.events.lock().unwrap().contains(&(
+            "discord".to_string(),
+            "resume_retry_after_invalid_session".to_string()
         )));
     }
 
