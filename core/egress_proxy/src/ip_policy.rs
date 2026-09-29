@@ -11,21 +11,17 @@ use std::net::IpAddr;
 
 use bundle_host_http::egress::is_forbidden_address;
 use ipnet::IpNet;
-use serde::{Deserialize, Serialize};
 
-/// The three `net.http.*` permission families (connector spec). Category
-/// determines whether the shared SSRF check's `allow_private` escape
-/// hatch applies -- only `PrivateIp` ever lifts it, and even then loopback/
-/// link-local/metadata/CGNAT/cluster CIDRs are still always denied
-/// (`is_forbidden_address` denies those unconditionally regardless of the
-/// flag).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum DestinationCategory {
-    Fqdn,
-    PublicIp,
-    PrivateIp,
-}
+/// The three `net.http.*` permission families (connector spec) -- the
+/// canonical definition now lives in `egress_assertion` (shared with
+/// `core/bundle_host_http`'s signer); re-exported here so existing
+/// `crate::ip_policy::DestinationCategory` call sites keep working.
+/// Category determines whether the shared SSRF check's `allow_private`
+/// escape hatch applies -- only `PrivateIp` ever lifts it, and even then
+/// loopback/link-local/metadata/CGNAT/cluster CIDRs are still always
+/// denied (`is_forbidden_address` denies those unconditionally regardless
+/// of the flag).
+pub use egress_assertion::DestinationCategory;
 
 /// Denies `ip` if it falls in any deployment-configured cluster CIDR
 /// (pod/service/node -- `DENY_CLUSTER_CIDRS`) or an operator-configured

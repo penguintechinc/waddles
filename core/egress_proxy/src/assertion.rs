@@ -1,91 +1,49 @@
-//! The signed per-request allowlist assertion (design choice: a
-//! **separate, short-lived EdDSA JWT**, not a claim folded into the
-//! machine JWT `service_auth` already verifies).
+//! Server-side verification of the signed per-request allowlist assertion.
 //!
-//! **Why a second token, not a machine-JWT claim:** the machine JWT
-//! (`core/service_auth`) authenticates *which service* is calling and is
-//! deliberately long-lived-ish (up to `service_auth::MAX_TOKEN_TTL_SECONDS`
-//! = 1h, cached and reused for many requests -- see
-//! `service_auth::MachineJwtClient`). The allowlist assertion instead
-//! answers "is *this specific* tenant/community/app/destination call
-//! authorized *right now*" and needs a much shorter replay window (default
-//! 60s, `ASSERTION_MAX_TTL_SECONDS`) than the calling pod's own machine
-//! JWT lifetime. Folding a fast-expiring, per-request claim into a
-//! slow-rotating bearer token would force minting a fresh machine JWT per
-//! `http.send`/`CONNECT`, defeating `MachineJwtClient`'s whole cache
-//! rationale.
+//! The wire format itself (`EgressAssertion`, `DestinationCategory`, the
+//! header name, and the dependency-free `verify_with_key` primitive) now
+//! lives in `egress_assertion` -- a crate shared with `core/
+//! bundle_host_http`'s client-side signer (PR #468) so the two sides of
+//! this hop can never silently drift apart. This module keeps only what's
+//! specific to being the *verifying* side of that hop:
 //!
-//! **Security review redesign (post-initial-landing): no more single
-//! static hub-api signing key.** The *calling service itself* signs each
-//! assertion with the same per-service Ed25519 key it already uses to
-//! mint its own machine JWT (`core/service_auth`, PR #438's per-service
-//! JWKS) -- the assertion's `kid` header names that same key, and this
-//! module verifies it against the identical [`service_auth::TrustBundle`]
-//! `auth::authenticate` already used to verify the machine JWT, not a
-//! second, separately-mounted static key. This removes hub-api as an
-//! extra minting hop on every `http.send`/`CONNECT` (the calling pod signs
-//! locally) and ties the assertion's authenticity to the same identity
-//! (and the same key-rotation story) as the machine JWT itself. The
-//! `sub` claim carries the caller's SPIFFE ID and is checked by
-//! [`crate::proxy::validate`] against the authenticated machine JWT's own
-//! `sub` -- an assertion signed by service A can never be replayed by
-//! service B, even if B somehow obtained the token, because the signature
-//! itself is keyed to A's identity.
+//! - JWKS `kid` lookup: [`verify`] reads the assertion's `kid` header and
+//!   resolves it against the same [`TrustBundle`] `auth::authenticate`
+//!   already uses for the machine JWT -- the calling service signs both
+//!   tokens with its own per-service Ed25519 key (PR #438's per-service
+//!   JWKS), so there is no second, separately-mounted static key here.
+//! - Replay protection: [`ReplayCache`]/[`InMemoryReplayCache`], scoped to
+//!   this proxy instance (see that trait's doc for the accepted
+//!   multi-replica tradeoff).
+//! - [`destination_matches`]: unlike `egress_assertion::destination_matches`
+//!   (a plain string-equality check, all `bundle_host_http`'s single-host
+//!   guard ever needs), this proxy's `PrivateIp` grants are CIDRs
+//!   (`192.168.1.0/24`), not just literals -- the requested host must be
+//!   parsed as an IP and checked for CIDR containment. Kept as a local,
+//!   proxy-specific override rather than the shared crate's simpler
+//!   version.
+//! - [`resolved_matches`]: the DNS-rebinding re-check against the
+//!   *resolved* address, not just the requested host literal --
+//!   `egress_assertion` deliberately doesn't own this (it has no DNS
+//!   concept at all), so it stays here alongside `crate::proxy::validate`,
+//!   the only caller.
 //!
-//! Header: `X-Waddles-Egress-Assertion: <compact EdDSA JWT>`.
+//! Header: `X-Waddles-Egress-Assertion: <compact EdDSA JWT>` (re-exported
+//! from `egress_assertion` as [`ASSERTION_HEADER`]).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use jsonwebtoken::{Algorithm, Validation};
-use serde::{Deserialize, Serialize};
 use service_auth::TrustBundle;
 
-use crate::ip_policy::DestinationCategory;
-
-pub const ASSERTION_HEADER: &str = "x-waddles-egress-assertion";
-
-/// Clock-skew leeway applied to `exp`, mirroring
-/// `service_auth::CLOCK_SKEW_SECONDS` but kept small (this token's whole
-/// lifetime is itself only tens of seconds).
-const ASSERTION_CLOCK_SKEW_SECONDS: u64 = 5;
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct EgressAssertion {
-    /// The signing/calling service's own SPIFFE ID -- must equal the
-    /// authenticated machine JWT's `sub` (checked in
-    /// `crate::proxy::validate`), binding this assertion to the same
-    /// identity that authenticated the connection it rides on.
-    pub sub: String,
-    pub tenant: String,
-    pub community: String,
-    pub app: String,
-    pub category: DestinationCategory,
-    /// `Fqdn`: exact hostname (case-insensitive, no wildcard -- mirrors
-    /// `bundle_host_http`'s own exact-match-only `host_matches`
-    /// philosophy). `PublicIp`: exact IP literal. `PrivateIp`: an IP
-    /// literal or a CIDR the resolved address must fall within.
-    pub destination: String,
-    /// The exact destination port this grant authorizes -- checked in
-    /// [`destination_matches`] against the actually-requested port, not
-    /// just the operator-wide port allowlist.
-    pub port: u16,
-    /// Unique per-assertion ID, checked against [`ReplayCache`] so the
-    /// same short-lived grant can never authorize a second connection.
-    pub jti: String,
-    pub iat: u64,
-    pub exp: u64,
-}
+pub use egress_assertion::{DestinationCategory, EgressAssertion, ASSERTION_HEADER};
 
 #[derive(thiserror::Error, Debug)]
 pub enum AssertionError {
     #[error("missing assertion header")]
     Missing,
-    #[error("invalid assertion: {0}")]
-    Invalid(String),
-    #[error("assertion ttl {actual}s exceeds max {max}s")]
-    TtlTooLong { actual: u64, max: u64 },
+    #[error(transparent)]
+    Assertion(#[from] egress_assertion::AssertionError),
     #[error("unknown signing key {0:?}")]
     UnknownKeyId(Option<String>),
     #[error("assertion sub {assertion_sub:?} does not match authenticated caller {jwt_sub:?}")]
@@ -107,14 +65,15 @@ pub enum AssertionError {
 /// not an open one: (1) the assertion's own destination binding
 /// (`destination_matches`) means a replay can only ever reach the exact
 /// host/port it was already scoped to, never a different target; (2) the
-/// TTL ceiling (`ASSERTION_MAX_TTL_SECONDS`, default 60s) bounds the replay
-/// window to, at most, a handful of seconds per additional replica; (3) a
-/// legitimate caller never needs to replay -- it mints a fresh assertion
-/// per call. Closing this fully requires a shared store (Valkey `SET NX EX`
-/// keyed by `jti`, ttl = `exp - now`) -- deferred as a follow-up
-/// ([`ReplayCache`] is a trait specifically so that swap is a new impl, not
-/// a call-site rewrite) rather than blocking this landing on standing up a
-/// shared Valkey deployment for every environment this proxy runs in.
+/// TTL ceiling (`egress_assertion::ASSERTION_MAX_TTL_SECONDS`, default 60s)
+/// bounds the replay window to, at most, a handful of seconds per
+/// additional replica; (3) a legitimate caller never needs to replay -- it
+/// mints a fresh assertion per call. Closing this fully requires a shared
+/// store (Valkey `SET NX EX` keyed by `jti`, ttl = `exp - now`) -- deferred
+/// as a follow-up ([`ReplayCache`] is a trait specifically so that swap is
+/// a new impl, not a call-site rewrite) rather than blocking this landing
+/// on standing up a shared Valkey deployment for every environment this
+/// proxy runs in.
 pub trait ReplayCache: Send + Sync {
     /// Records `jti` (expiring at `exp`) and returns `Ok(())` the first
     /// time it's seen, or `Err(AssertionError::Replayed)` on any
@@ -137,7 +96,7 @@ impl InMemoryReplayCache {
 
 impl ReplayCache for InMemoryReplayCache {
     fn check_and_record(&self, jti: &str, exp: u64) -> Result<(), AssertionError> {
-        let now = now_secs();
+        let now = egress_assertion::now_secs();
         let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
         // Opportunistic prune on every call -- keeps this map bounded by
         // "assertions seen in the last max-TTL window", never unbounded.
@@ -154,7 +113,8 @@ impl ReplayCache for InMemoryReplayCache {
 /// `trust_bundle`, identified by the token's `kid` -- same trust bundle
 /// `auth::authenticate` uses for the machine JWT), `exp` (with leeway) and
 /// the max-TTL ceiling (defense in depth against a compromised/misconfigured
-/// caller minting a long-lived assertion). Does **not** check replay --
+/// caller minting a long-lived assertion) via
+/// `egress_assertion::verify_with_key`. Does **not** check replay --
 /// callers that need that property use [`verify_from_header`] instead; this
 /// bare form exists for the best-effort audit-context path in
 /// `crate::proxy::handle_inner`, which must never itself consume a replay
@@ -164,8 +124,11 @@ pub async fn verify(
     trust_bundle: &dyn TrustBundle,
     max_ttl_secs: u64,
 ) -> Result<EgressAssertion, AssertionError> {
-    let header = jsonwebtoken::decode_header(token)
-        .map_err(|e| AssertionError::Invalid(format!("malformed header: {e}")))?;
+    let header = jsonwebtoken::decode_header(token).map_err(|e| {
+        AssertionError::Assertion(egress_assertion::AssertionError::Invalid(format!(
+            "malformed header: {e}"
+        )))
+    })?;
     let kid = header.kid.clone();
     let Some(kid_value) = kid.as_deref() else {
         return Err(AssertionError::UnknownKeyId(None));
@@ -174,24 +137,7 @@ pub async fn verify(
         return Err(AssertionError::UnknownKeyId(kid));
     };
 
-    let mut validation = Validation::new(Algorithm::EdDSA);
-    validation.leeway = ASSERTION_CLOCK_SKEW_SECONDS;
-    validation.set_required_spec_claims(&["exp", "iat"]);
-    // No `aud`/`iss` check: this token has exactly one purpose and one
-    // verifier (this proxy), unlike the machine JWT.
-    validation.validate_aud = false;
-
-    let data = jsonwebtoken::decode::<EgressAssertion>(token, &key, &validation)
-        .map_err(|e| AssertionError::Invalid(e.to_string()))?;
-    let claims = data.claims;
-
-    let ttl = claims.exp.saturating_sub(claims.iat);
-    if ttl > max_ttl_secs {
-        return Err(AssertionError::TtlTooLong {
-            actual: ttl,
-            max: max_ttl_secs,
-        });
-    }
+    let claims = egress_assertion::verify_with_key(token, &key, max_ttl_secs)?;
     Ok(claims)
 }
 
@@ -219,7 +165,12 @@ pub async fn verify_from_header(
 /// port) match what the assertion actually grants, before any DNS
 /// resolution happens. The port check is exact -- a grant for `:443` never
 /// authorizes the same host on a different (even operator-allowlisted)
-/// port.
+/// port. Deliberately a local override of
+/// `egress_assertion::destination_matches`: this proxy's `PrivateIp`
+/// grants are CIDRs the requested (and, in [`resolved_matches`], resolved)
+/// address must fall within, not just an exact literal -- a distinction
+/// `bundle_host_http`'s own single-host guard has no use for, so the
+/// shared crate's version stays a plain string comparison.
 pub fn destination_matches(
     assertion: &EgressAssertion,
     requested_host: &str,
@@ -253,7 +204,9 @@ pub fn destination_matches(
 /// would already treat as public -- this check is a second, explicit
 /// belt-and-suspenders gate specifically for the private-ip CIDR case,
 /// where the *resolved* address, not just the requested literal, must
-/// fall in the granted range).
+/// fall in the granted range). Deliberately stays in this crate rather
+/// than `egress_assertion` -- the shared crate has no DNS-resolution
+/// concept at all, and this is the only caller.
 pub fn resolved_matches(assertion: &EgressAssertion, resolved: std::net::IpAddr) -> bool {
     match assertion.category {
         DestinationCategory::Fqdn => true, // enforced by ip_policy::is_denied instead
@@ -263,11 +216,4 @@ pub fn resolved_matches(assertion: &EgressAssertion, resolved: std::net::IpAddr)
             Err(_) => assertion.destination.parse::<std::net::IpAddr>() == Ok(resolved),
         },
     }
-}
-
-pub fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }

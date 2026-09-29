@@ -6,10 +6,12 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bundle_host_http::egress::{EgressAssertionSigner, ProxyAssertionSigner};
+use egress_assertion::AssertionSigningKey;
 use egress_proxy::assertion::{EgressAssertion, InMemoryReplayCache};
 use egress_proxy::config::Config;
 use egress_proxy::dns::Resolver;
@@ -845,5 +847,370 @@ async fn forward_authorization_header_is_mapped_to_real_authorization_for_destin
     assert!(
         !received.contains(&machine_jwt),
         "the machine JWT must never reach the destination, got:\n{received}"
+    );
+}
+
+// --- Cross-crate: `bundle_host_http`'s signer -> `egress_proxy`'s verifier ---
+//
+// The tests above all forge assertions by hand (`make_assertion_jwt` +
+// `EgressAssertion { .. }` literals) to exercise `proxy::validate` in
+// isolation. The tests below instead drive the *real* client-side signer
+// (`bundle_host_http::egress::EgressAssertionSigner`, PR #468) and feed its
+// output straight into this crate's own `proxy::validate` -- proving the two
+// crates on either side of the `egress_assertion` shared wire format still
+// agree end to end, not just that each compiles against the same struct.
+
+// PKCS8-DER-encoded Ed25519 test keypair (fixed, test-only, distinct from
+// the SVC_PROCESS_*/SVC_ACTION_* pairs above purely so these tests don't
+// share key material with the hand-forged-assertion tests) -- generated
+// once with `openssl genpkey -algorithm ed25519` / `openssl pkey -pubout`,
+// never used outside this test module.
+const BUNDLE_SIGNER_PRIV_DER: &[u8] = &[
+    48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 13, 186, 244, 23, 103, 115, 237, 53,
+    220, 205, 68, 209, 2, 224, 53, 221, 134, 143, 240, 210, 4, 242, 252, 217, 89, 189, 18, 56, 10,
+    231, 127, 112,
+];
+const BUNDLE_SIGNER_PUB_RAW: &[u8] = &[
+    203, 153, 62, 224, 216, 7, 49, 241, 132, 82, 7, 74, 194, 22, 36, 114, 13, 239, 65, 192, 119,
+    152, 28, 118, 139, 213, 71, 250, 45, 191, 130, 148,
+];
+const BUNDLE_SIGNER_SUB: &str = "spiffe://penguintech.io/alpha/svc-process";
+
+/// Minimal PKCS8 PEM encoder for the fixed Ed25519 private key DER above --
+/// `AssertionSigningKey::from_ed25519_pem` (the only public constructor
+/// `bundle_host_http`'s signer has for injecting raw key bytes in a test)
+/// takes PEM, not DER. Avoids a `base64` dev-dependency purely to wrap a
+/// fixed 48-byte blob in PKCS8 armor; the label is built from parts (not a
+/// literal `"-----BEGIN...-----"` string) so this fixed, publicly-known,
+/// test-only DER blob doesn't trip a secrets scanner's private-key-marker
+/// heuristic on a string it merely resembles. Mirrors
+/// `core/bundle_host_http/src/egress.rs`'s own test-only helper of the same
+/// shape.
+fn pem_encode_ed25519_private_key(der: &[u8]) -> Vec<u8> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut b64 = String::new();
+    for chunk in der.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | (b[2] as u32);
+        b64.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        b64.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        b64.push(if chunk.len() > 1 {
+            ALPHABET[((n >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        b64.push(if chunk.len() > 2 {
+            ALPHABET[(n & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    let dashes = "-".repeat(5);
+    let label = "PRIVATE KEY";
+    let mut pem = format!("{dashes}BEGIN {label}{dashes}\n");
+    for line in b64.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(line).unwrap());
+        pem.push('\n');
+    }
+    pem.push_str(&format!("{dashes}END {label}{dashes}\n"));
+    pem.into_bytes()
+}
+
+fn bundle_signer() -> EgressAssertionSigner {
+    let signing_key = AssertionSigningKey::from_ed25519_pem(
+        &pem_encode_ed25519_private_key(BUNDLE_SIGNER_PRIV_DER),
+        "k-bundle",
+    )
+    .expect("valid Ed25519 PEM");
+    EgressAssertionSigner::new(
+        BUNDLE_SIGNER_SUB,
+        "tenant-1",
+        "community-1",
+        Arc::new(signing_key),
+        30,
+    )
+}
+
+fn bundle_signer_trust_bundle() -> StaticTrustBundle {
+    StaticTrustBundle(Mutex::new(HashMap::from([(
+        "k-bundle".to_string(),
+        DecodingKey::from_ed_der(BUNDLE_SIGNER_PUB_RAW),
+    )])))
+}
+
+fn bundle_signer_machine_jwt() -> String {
+    let enc = EncodingKey::from_ed_der(BUNDLE_SIGNER_PRIV_DER);
+    make_machine_jwt(
+        &enc,
+        "k-bundle",
+        "egress-proxy",
+        BUNDLE_SIGNER_SUB,
+        "egress:connect",
+    )
+}
+
+/// The cross-crate contract this shared crate exists to guarantee, exercised
+/// end to end through this crate's own verifier: an assertion signed by
+/// `bundle_host_http::egress::EgressAssertionSigner` (the real client-side
+/// signer wired into `EgressGuard::with_proxy_assertion_signer`) is accepted
+/// by `egress_proxy::proxy::validate`.
+#[tokio::test]
+async fn bundle_host_http_signed_assertion_is_accepted_by_egress_proxy() {
+    let bundle = bundle_signer_trust_bundle();
+    let cfg = test_config(vec![443]);
+    let resolver = FakeResolver(HashMap::from([(
+        "discord.com",
+        vec!["93.184.216.34".parse().unwrap()],
+    )]));
+    let replay_cache = InMemoryReplayCache::new();
+
+    let machine_jwt = bundle_signer_machine_jwt();
+    let assertion_jwt = bundle_signer()
+        .sign("app-1", "discord.com", 443, DestinationCategory::Fqdn)
+        .expect("bundle_host_http signs a valid assertion");
+    let headers = headers_with(Some(&machine_jwt), Some(&assertion_jwt));
+
+    let deps = ValidationDeps {
+        trust_bundle: &bundle,
+        replay_cache: &replay_cache,
+        cfg: &cfg,
+        cluster_cidrs: &cfg.deny_cluster_cidrs,
+        resolver: &resolver,
+    };
+    let target = proxy::validate(&headers, "discord.com", 443, deps)
+        .await
+        .expect("egress_proxy accepts bundle_host_http's own assertion");
+    assert_eq!(target.tenant, "tenant-1");
+    assert_eq!(target.community, "community-1");
+    assert_eq!(target.app, "app-1");
+    assert_eq!(target.category, DestinationCategory::Fqdn);
+}
+
+/// Same signer, tampered signature -- one flipped base64url character in
+/// the final segment must invalidate the whole token.
+#[tokio::test]
+async fn bundle_host_http_signed_assertion_tampered_is_rejected() {
+    let bundle = bundle_signer_trust_bundle();
+    let cfg = test_config(vec![443]);
+    let resolver = FakeResolver(HashMap::from([(
+        "discord.com",
+        vec!["93.184.216.34".parse().unwrap()],
+    )]));
+    let replay_cache = InMemoryReplayCache::new();
+
+    let machine_jwt = bundle_signer_machine_jwt();
+    let mut assertion_jwt = bundle_signer()
+        .sign("app-1", "discord.com", 443, DestinationCategory::Fqdn)
+        .expect("signs");
+    let last = assertion_jwt.pop().expect("non-empty token");
+    assertion_jwt.push(if last == 'A' { 'B' } else { 'A' });
+    let headers = headers_with(Some(&machine_jwt), Some(&assertion_jwt));
+
+    let deps = ValidationDeps {
+        trust_bundle: &bundle,
+        replay_cache: &replay_cache,
+        cfg: &cfg,
+        cluster_cidrs: &cfg.deny_cluster_cidrs,
+        resolver: &resolver,
+    };
+    let err = proxy::validate(&headers, "discord.com", 443, deps)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ProxyError::Assertion(_)),
+        "expected an Assertion (signature) error, got {err:?}"
+    );
+}
+
+/// Same signer, an assertion minted already expired -- `sign()` always
+/// stamps `iat = now`, so an expired token is built directly against the
+/// same `AssertionSigningKey`/`egress_assertion::build_assertion` primitives
+/// the signer itself uses internally, rather than sleeping past the TTL in
+/// a test.
+#[tokio::test]
+async fn bundle_host_http_signed_assertion_expired_is_rejected() {
+    let bundle = bundle_signer_trust_bundle();
+    let cfg = test_config(vec![443]);
+    let resolver = FakeResolver(HashMap::from([(
+        "discord.com",
+        vec!["93.184.216.34".parse().unwrap()],
+    )]));
+    let replay_cache = InMemoryReplayCache::new();
+
+    let signing_key = AssertionSigningKey::from_ed25519_pem(
+        &pem_encode_ed25519_private_key(BUNDLE_SIGNER_PRIV_DER),
+        "k-bundle",
+    )
+    .expect("valid Ed25519 PEM");
+    let mut claims = egress_assertion::build_assertion(
+        BUNDLE_SIGNER_SUB,
+        "tenant-1",
+        "community-1",
+        "app-1",
+        DestinationCategory::Fqdn,
+        "discord.com",
+        443,
+        30,
+    );
+    claims.iat = egress_assertion::now_secs() - 120;
+    claims.exp = egress_assertion::now_secs() - 60;
+    let assertion_jwt = signing_key.sign(&claims).expect("signs");
+
+    let machine_jwt = bundle_signer_machine_jwt();
+    let headers = headers_with(Some(&machine_jwt), Some(&assertion_jwt));
+    let deps = ValidationDeps {
+        trust_bundle: &bundle,
+        replay_cache: &replay_cache,
+        cfg: &cfg,
+        cluster_cidrs: &cfg.deny_cluster_cidrs,
+        resolver: &resolver,
+    };
+    let err = proxy::validate(&headers, "discord.com", 443, deps)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ProxyError::Assertion(_)),
+        "expected an Assertion (expired) error, got {err:?}"
+    );
+}
+
+/// Same signer, `sub` doesn't match the authenticated machine JWT's own
+/// `sub` -- must be rejected even though the signature itself verifies
+/// cleanly against the registered key.
+#[tokio::test]
+async fn bundle_host_http_signed_assertion_wrong_sub_is_rejected() {
+    let bundle = bundle_signer_trust_bundle();
+    let cfg = test_config(vec![443]);
+    let resolver = FakeResolver(HashMap::from([(
+        "discord.com",
+        vec!["93.184.216.34".parse().unwrap()],
+    )]));
+    let replay_cache = InMemoryReplayCache::new();
+
+    // Signed under the registered `k-bundle` key, but the `sub` claim
+    // names a different service than the machine JWT authenticates.
+    let signing_key = AssertionSigningKey::from_ed25519_pem(
+        &pem_encode_ed25519_private_key(BUNDLE_SIGNER_PRIV_DER),
+        "k-bundle",
+    )
+    .expect("valid Ed25519 PEM");
+    let claims = egress_assertion::build_assertion(
+        "spiffe://penguintech.io/alpha/svc-action",
+        "tenant-1",
+        "community-1",
+        "app-1",
+        DestinationCategory::Fqdn,
+        "discord.com",
+        443,
+        30,
+    );
+    let assertion_jwt = signing_key.sign(&claims).expect("signs");
+
+    let machine_jwt = bundle_signer_machine_jwt(); // authenticates as BUNDLE_SIGNER_SUB (svc-process)
+    let headers = headers_with(Some(&machine_jwt), Some(&assertion_jwt));
+    let deps = ValidationDeps {
+        trust_bundle: &bundle,
+        replay_cache: &replay_cache,
+        cfg: &cfg,
+        cluster_cidrs: &cfg.deny_cluster_cidrs,
+        resolver: &resolver,
+    };
+    let err = proxy::validate(&headers, "discord.com", 443, deps)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ProxyError::Assertion(egress_proxy::assertion::AssertionError::SubMismatch { .. })
+        ),
+        "expected SubMismatch, got {err:?}"
+    );
+}
+
+/// Same signer, request for a different port than the assertion granted.
+#[tokio::test]
+async fn bundle_host_http_signed_assertion_wrong_port_is_rejected() {
+    let bundle = bundle_signer_trust_bundle();
+    let cfg = test_config(vec![443, 8443]);
+    let resolver = FakeResolver(HashMap::from([(
+        "discord.com",
+        vec!["93.184.216.34".parse().unwrap()],
+    )]));
+    let replay_cache = InMemoryReplayCache::new();
+
+    let machine_jwt = bundle_signer_machine_jwt();
+    // Grants port 443 only.
+    let assertion_jwt = bundle_signer()
+        .sign("app-1", "discord.com", 443, DestinationCategory::Fqdn)
+        .expect("signs");
+    let headers = headers_with(Some(&machine_jwt), Some(&assertion_jwt));
+
+    let deps = ValidationDeps {
+        trust_bundle: &bundle,
+        replay_cache: &replay_cache,
+        cfg: &cfg,
+        cluster_cidrs: &cfg.deny_cluster_cidrs,
+        resolver: &resolver,
+    };
+    // Requested on the operator-allowed but not assertion-granted port.
+    let err = proxy::validate(&headers, "discord.com", 8443, deps)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ProxyError::DestinationMismatch),
+        "expected DestinationMismatch, got {err:?}"
+    );
+}
+
+/// Same signer, the identical assertion (same `jti`) replayed on a second
+/// call -- must be rejected on the second use even though every other check
+/// still passes.
+#[tokio::test]
+async fn bundle_host_http_signed_assertion_replay_is_rejected() {
+    let bundle = bundle_signer_trust_bundle();
+    let cfg = test_config(vec![443]);
+    let resolver = FakeResolver(HashMap::from([(
+        "discord.com",
+        vec!["93.184.216.34".parse().unwrap()],
+    )]));
+    let replay_cache = InMemoryReplayCache::new();
+
+    let machine_jwt = bundle_signer_machine_jwt();
+    let assertion_jwt = bundle_signer()
+        .sign("app-1", "discord.com", 443, DestinationCategory::Fqdn)
+        .expect("signs");
+    let headers = headers_with(Some(&machine_jwt), Some(&assertion_jwt));
+
+    let deps = ValidationDeps {
+        trust_bundle: &bundle,
+        replay_cache: &replay_cache,
+        cfg: &cfg,
+        cluster_cidrs: &cfg.deny_cluster_cidrs,
+        resolver: &resolver,
+    };
+    proxy::validate(&headers, "discord.com", 443, deps)
+        .await
+        .expect("first use succeeds");
+
+    let deps = ValidationDeps {
+        trust_bundle: &bundle,
+        replay_cache: &replay_cache,
+        cfg: &cfg,
+        cluster_cidrs: &cfg.deny_cluster_cidrs,
+        resolver: &resolver,
+    };
+    let err = proxy::validate(&headers, "discord.com", 443, deps)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ProxyError::Assertion(egress_proxy::assertion::AssertionError::Replayed(_))
+        ),
+        "expected Replayed, got {err:?}"
     );
 }

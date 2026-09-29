@@ -195,6 +195,7 @@ name = "bundle-host-http"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "egress-assertion",
  "futures-util",
  "penguin-bundle-host",
  "prometheus",
@@ -350,6 +351,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
+name = "egress-assertion"
+version = "0.1.0"
+dependencies = [
+ "jsonwebtoken",
+ "serde",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
 name = "egress-proxy"
 version = "0.1.0"
 dependencies = [
@@ -359,6 +370,7 @@ dependencies = [
  "bundle-host-http",
  "bytes",
  "clap",
+ "egress-assertion",
  "http",
  "http-body-util",
  "hyper",
@@ -2298,6 +2310,7 @@ version = "1.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
+ "getrandom 0.4.3",
  "js-sys",
  "wasm-bindgen",
 ]

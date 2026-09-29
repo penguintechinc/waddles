@@ -29,6 +29,8 @@ use tokio::net::TcpStream;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use egress_assertion::FORWARD_AUTHORIZATION_HEADER;
+
 use crate::config::Config;
 use crate::dns::Resolver;
 use crate::ip_policy::DestinationCategory;
@@ -595,16 +597,17 @@ async fn handle_forward(
     }
 }
 
-/// The inbound header this proxy accepts as an explicit, deliberate
-/// end-to-end credential the calling bundle wants delivered to the
-/// destination's own `Authorization` header (e.g. a third-party API key
-/// substituted by `bundle_host_http`'s secret-handle broker). Kept
-/// distinct from `Authorization` itself specifically so the blanket
-/// proxy-hop-credential strip in [`build_outbound_headers`] can never
-/// accidentally let a caller-supplied `Authorization` (which, on the
-/// inbound side, is *this proxy's own* machine-JWT bearer credential --
-/// see `auth::authenticate`) leak straight through under its own name.
-const FORWARD_AUTHORIZATION_HEADER: &str = "x-waddles-forward-authorization";
+// FORWARD_AUTHORIZATION_HEADER: the inbound header this proxy accepts as
+// an explicit, deliberate end-to-end credential the calling bundle wants
+// delivered to the destination's own `Authorization` header (e.g. a
+// third-party API key substituted by `bundle_host_http`'s secret-handle
+// broker). Kept distinct from `Authorization` itself specifically so the
+// blanket proxy-hop-credential strip in `build_outbound_headers` can never
+// accidentally let a caller-supplied `Authorization` (which, on the
+// inbound side, is *this proxy's own* machine-JWT bearer credential --
+// see `auth::authenticate`) leak straight through under its own name.
+// Canonical definition (shared with `core/bundle_host_http`'s signer) now
+// lives in `egress_assertion`, imported at the top of this file.
 
 /// Builds the outbound request headers from an explicit allowlist of the
 /// inbound headers, rather than relaying `inbound` verbatim (CRITICAL

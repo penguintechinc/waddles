@@ -59,17 +59,14 @@ prometheus = "=0.14.0"
 ipnet = "=2.11.0"
 # Same `aws_lc_rs` backend rationale as core/service_auth's Cargo.toml (no
 # `rsa` crate in the graph -- RUSTSEC-2023-0071 Marvin timing sidechannel,
-# see that crate's Cargo.toml comment). Used here to verify the signed
-# net.http allowlist assertion (EdDSA, single static public key mounted
-# from ALLOWLIST_SIGNING_KEY_PATH -- see src/assertion.rs), independently
-# of the inbound machine JWT that `service_auth::verify` already checks.
-# "use_pem" (on top of service_auth's default feature set) -- this crate's
-# assertion verifier loads a raw SPKI PEM public key file
-# (`ALLOWLIST_SIGNING_KEY_PATH`) via `DecodingKey::from_ed_pem`, which is
-# gated behind `use_pem` (a default feature upstream, but service_auth's
-# own `default-features = false` + `aws_lc_rs` pattern this crate mirrors
-# turns it off unless re-added explicitly).
-jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+# see that crate's Cargo.toml comment). `src/assertion.rs` only needs
+# `jsonwebtoken::decode_header` directly (to read the assertion's `kid`
+# before looking its public key up in `service_auth::TrustBundle`, the
+# same JWKS trust bundle already used for the machine JWT); the actual
+# signature/claims verification is `egress_assertion::verify_with_key`
+# (see that path dependency below), so no `use_pem` feature is needed here
+# -- this crate never loads key material from a PEM file itself.
+jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs"] }
 async-trait = "=0.1.89"
 
 # hub-api-issued per-service EdDSA machine JWT verifier (PR #438,
@@ -88,6 +85,19 @@ service_auth = { path = "../service_auth", version = "=0.1.0" }
 # check and the deployment's cluster pod/service/node CIDR denylist (see
 # src/ip_policy.rs).
 bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
+# The shared wire format for the signed per-request allowlist assertion
+# (`EgressAssertion`, `DestinationCategory`, header names, `verify_with_key`)
+# -- single source of truth with `core/bundle_host_http`'s signer (PR
+# #468) so the two crates on either side of this hop can never silently
+# drift apart. This crate keeps only what's specific to being the
+# verifying side: JWKS `kid` lookup via `service_auth::TrustBundle`, the
+# replay cache, the CIDR-aware `PrivateIp` destination match this proxy's
+# grants need (the shared crate's own `destination_matches` is a plain
+# string comparison -- sufficient for `bundle_host_http`'s single-host
+# guard, not for this proxy's CIDR grants), and DNS-rebinding
+# re-validation against the *resolved* address (`assertion::
+# resolved_matches`) -- see src/assertion.rs.
+egress-assertion = { path = "../egress_assertion", version = "=0.1.0" }
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }
