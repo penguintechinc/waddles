@@ -1,11 +1,13 @@
 """Unit tests for scripts/ci/check-no-placeholder-credentials.py.
 
 Regression coverage for CodeQL py/clear-text-logging-sensitive-data (alerts
-15790/15791): a placeholder-credential finding must never include the
-plaintext credential value itself -- only structural metadata (object kind/
-name, container, key or env NAME) and the truncated regex match text that
-triggered it. Also re-proves the zero-denominator gate and that the original
-alpha-incident placeholder render still fails the check.
+15790/15791): a placeholder-credential finding must never include anything
+derived from the plaintext credential value -- not the value, not a
+substring/slice of it, not its length. Findings carry only structural
+metadata (object kind/name, container, key or env NAME) and a static label
+naming which placeholder pattern matched. Also re-proves the zero-
+denominator gate and that the original alpha-incident placeholder render
+still fails the check.
 """
 from __future__ import annotations
 
@@ -73,6 +75,12 @@ class TestNoPlaintextLeak:
         assert "placeholder" in combined.lower()
         assert secret_value not in combined
         assert _b64(secret_value) not in combined
+        # Not just the full value -- no substring of it either. The value
+        # contains "EXAMPLE" (uppercase); that exact substring must never
+        # reach output, even though the lowercase static label "example"
+        # legitimately does (asserted next).
+        assert "EXAMPLE" not in combined
+        assert "'example'" in combined
 
 
 class TestFindingsOmitValue:
@@ -92,9 +100,10 @@ class TestFindingsOmitValue:
         assert examined == 1
         assert len(findings) == 1
         assert secret_value not in findings[0]
+        assert "EXAMPLE" not in findings[0]
         assert "waddlebot-secrets" in findings[0]
         assert "discord_bot_token" in findings[0]
-        assert "EXAMPLE" in findings[0]
+        assert "'example'" in findings[0]
 
     def test_check_workload_env_finding_omits_value(self) -> None:
         findings: list[str] = []
@@ -128,7 +137,7 @@ class TestFindingsOmitValue:
         assert placeholder_value not in findings[0]
         assert "waddlebot-core" in findings[0]
         assert "DISCORD_BOT_TOKEN" in findings[0]
-        assert "REPLACE_ME" in findings[0]
+        assert "'REPLACE_ME-style'" in findings[0]
 
 
 class TestUndecodableSecretFailsClosed:

@@ -25,7 +25,27 @@ from typing import Any
 
 import yaml
 
-PLACEHOLDER_RE = re.compile(r"(REPLACE_ME|CHANGE_ME|changeme|example)", re.IGNORECASE)
+# Each pattern is checked in order; a finding records ONLY the static label
+# of the first match, never any text derived from the value itself (not the
+# match text, not its length, not a slice) -- a substring of a real
+# credential that happens to match (e.g. containing "example") must never
+# reach a finding string or CI's log output (CodeQL py/clear-text-logging-
+# sensitive-data).
+PLACEHOLDER_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("REPLACE_ME-style", re.compile(r"REPLACE_ME", re.IGNORECASE)),
+    ("CHANGE_ME-style", re.compile(r"CHANGE_ME", re.IGNORECASE)),
+    ("changeme", re.compile(r"changeme", re.IGNORECASE)),
+    ("example", re.compile(r"example", re.IGNORECASE)),
+]
+
+
+def _matching_placeholder_label(value: str) -> str | None:
+    """Returns the static label of the first placeholder pattern matching
+    `value`, or None. Never returns anything derived from `value` itself."""
+    for label, pattern in PLACEHOLDER_PATTERNS:
+        if pattern.search(value):
+            return label
+    return None
 
 # Workload env vars are checked ONLY when their NAME looks credential-shaped --
 # unlike a Secret's data/stringData (inherently sensitive by definition), a
@@ -74,11 +94,11 @@ def check_secret(doc: dict[str, Any], findings: list[str]) -> int:
                 )
                 continue
             if plaintext:
-                match = PLACEHOLDER_RE.search(plaintext)
-                if match:
+                label = _matching_placeholder_label(plaintext)
+                if label:
                     findings.append(
                         f"Secret/{name} {field}.{key}: matched placeholder "
-                        f"pattern {match.group(0)[:20]!r}"
+                        f"pattern '{label}'"
                     )
     return examined
 
@@ -113,12 +133,12 @@ def check_workload_env(doc: dict[str, Any], findings: list[str]) -> int:
                 examined += 1
                 value = env.get("value")
                 if isinstance(value, str):
-                    match = PLACEHOLDER_RE.search(value)
-                    if match:
+                    label = _matching_placeholder_label(value)
+                    if label:
                         findings.append(
                             f"{kind}/{name} container {container.get('name')} "
                             f"env {env.get('name')}: matched placeholder "
-                            f"pattern {match.group(0)[:20]!r}"
+                            f"pattern '{label}'"
                         )
     return examined
 
