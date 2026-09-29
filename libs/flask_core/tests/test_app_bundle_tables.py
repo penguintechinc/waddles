@@ -143,7 +143,15 @@ def db_via_module():
             platform_compatibility TEXT NOT NULL,
             status TEXT DEFAULT 'active',
             stages TEXT DEFAULT '{}',
-            installed_at TIMESTAMP
+            installed_at TIMESTAMP,
+            author TEXT,
+            license TEXT,
+            license_review_required BOOLEAN DEFAULT 0,
+            source_url TEXT,
+            alternative_to TEXT DEFAULT '[]',
+            homepage_url TEXT,
+            notice TEXT,
+            category TEXT
         );
         """
     )

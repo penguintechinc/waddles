@@ -52,6 +52,28 @@ impl ProcessGuest for Component {
                 }
                 format!("allocated {} bytes without tripping the cap", hog.len())
             }
+            "busy-loop" => {
+                // Negative sandbox test (gh security review HIGH finding:
+                // "confirm every invoke has CPU bounds"): a real, unbounded
+                // guest CPU loop with no host import involved at all -- an
+                // `i32` counter that never terminates on its own, matching
+                // `memory-hog`'s own "no WIT import needed" shape for the
+                // memory cap. Proves the epoch-deadline mechanism
+                // (`Store::set_epoch_deadline`/`epoch_deadline_trap`, spec
+                // SS7.2/SS7.3) actually bounds guest CPU time -- without it
+                // this call would hang the executor task forever, never
+                // returning a `result`/`error` frame at all.
+                let mut counter: u64 = 0;
+                loop {
+                    counter = counter.wrapping_add(1);
+                    // `std::hint::black_box` defeats the optimizer folding
+                    // this loop away entirely at compile time; it does NOT
+                    // (and must not) yield to the host -- the only thing
+                    // that can interrupt this loop is the engine's own
+                    // epoch-based interrupt, exactly what this test proves.
+                    std::hint::black_box(counter);
+                }
+            }
             "socket-probe" => {
                 // Negative sandbox test #1 (spec Sec14.6): the guest attempts
                 // a real TCP connect. Under wasm32-wasip2 this routes through

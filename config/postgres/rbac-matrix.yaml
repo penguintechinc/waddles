@@ -34,6 +34,8 @@ tables:
   - workstreams
   - workstream_usage_hourly
   - app_source_bindings
+  - app_global_installs
+  - bundle_tenant_availability
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -353,4 +355,57 @@ grants:
     privileges: []
   - role: migration_runner
     table: app_source_bindings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # --- migration 0027 (App Bundle 3-tier split, services/bundle_approval_service.py) ---
+  # app_global_installs: GLOBAL tier -- hub-api-owned, same "one writer" shape as app_active_versions.
+  - role: hub_api
+    table: app_global_installs
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: app_global_installs
+    privileges: []
+  - role: svc_ingest
+    table: app_global_installs
+    privileges: []
+  - role: svc_process
+    table: app_global_installs
+    privileges: []
+  - role: svc_action
+    table: app_global_installs
+    privileges: []
+  - role: svc_streaming
+    table: app_global_installs
+    privileges: []
+  - role: webui
+    table: app_global_installs
+    privileges: []
+  - role: migration_runner
+    table: app_global_installs
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # bundle_tenant_availability: TENANT tier -- hub-api-owned.
+  - role: hub_api
+    table: bundle_tenant_availability
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: bundle_tenant_availability
+    privileges: []
+  - role: svc_ingest
+    table: bundle_tenant_availability
+    privileges: []
+  - role: svc_process
+    table: bundle_tenant_availability
+    privileges: []
+  - role: svc_action
+    table: bundle_tenant_availability
+    privileges: []
+  - role: svc_streaming
+    table: bundle_tenant_availability
+    privileges: []
+  - role: webui
+    table: bundle_tenant_availability
+    privileges: []
+  - role: migration_runner
+    table: bundle_tenant_availability
     privileges: [SELECT, INSERT, UPDATE, DELETE]

@@ -148,6 +148,13 @@ class InstallBundleRequest:
     platformCompatibility: PlatformCompatibilityInput = field(
         default_factory=PlatformCompatibilityInput
     )
+    author: str | None = None
+    license: str | None = None
+    sourceUrl: str | None = None
+    alternativeTo: list[str] = field(default_factory=list)
+    homepageUrl: str | None = None
+    notice: str | None = None
+    category: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -166,6 +173,14 @@ class BundleDTO:
     incompatibleWith: list[str]
     status: str
     installedAt: str | None
+    author: str | None
+    license: str | None
+    licenseReviewRequired: bool
+    sourceUrl: str | None
+    alternativeTo: list[str]
+    homepageUrl: str | None
+    notice: str | None
+    category: str | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -289,6 +304,13 @@ def _manifest_payload(data: InstallBundleRequest) -> dict[str, Any]:
             "min_version": data.platformCompatibility.minVersion,
             "max_version": data.platformCompatibility.maxVersion,
         },
+        "author": data.author,
+        "license": data.license,
+        "source_url": data.sourceUrl,
+        "alternative_to": list(data.alternativeTo),
+        "homepage_url": data.homepageUrl,
+        "notice": data.notice,
+        "category": data.category,
     }
 
 
@@ -306,6 +328,14 @@ def _bundle_dto(row: Any) -> BundleDTO:
         incompatibleWith=list(row.incompatible_with or []),
         status=row.status,
         installedAt=_iso(row.installed_at),
+        author=row.author,
+        license=row.license,
+        licenseReviewRequired=bool(row.license_review_required),
+        sourceUrl=row.source_url,
+        alternativeTo=list(row.alternative_to or []),
+        homepageUrl=row.homepage_url,
+        notice=row.notice,
+        category=row.category,
     )
 
 
@@ -355,8 +385,16 @@ async def list_bundles() -> BundleListResponse:
     feat = request.args.get("feature")
     provider = request.args.get("provider")
     status = request.args.get("status")
+    category = request.args.get("category")
     rows, total, total_pages = await svc.list_installed(
-        dal, module=module, feature=feat, provider=provider, status=status, page=page, limit=limit
+        dal,
+        module=module,
+        feature=feat,
+        provider=provider,
+        status=status,
+        category=category,
+        page=page,
+        limit=limit,
     )
     return BundleListResponse(
         success=True,

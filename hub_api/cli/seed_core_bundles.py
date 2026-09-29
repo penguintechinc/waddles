@@ -68,13 +68,14 @@ from penguin_dal import AsyncDB
 
 from config import HubAPIConfig
 from services import vendor_bundle_authz
-from services.bundle_approval_service import TENANT_WIDE_COMMUNITY_SENTINEL, approve_version
+from services.bundle_approval_service import activate_for_community, install_version_globally
 from services.bundle_install_dal import build_install_dal, raw_sql_write
 from services.bundle_manifest_v2 import BundleManifestV2, parse_bundle_manifest_v2
 from services.bundle_telemetry import get_meter
 from services.bundle_version_service import create_version, process_prebuilt_component
 from services.errors import ApiError
 from services.ingest_source_service import ensure_ingest_source
+from services.tenant_app_availability_service import set_available
 
 logger = logging.getLogger("waddles.hub_api.core_bundle_seeder")
 
@@ -107,7 +108,12 @@ _APP_ID_CHARSET_RE = re.compile(r"^[a-z0-9]+(\.[a-z0-9-]+)+$")
 
 @dataclass(slots=True, frozen=True)
 class ActivationTarget:
-    """One `(tenant, community)` pair to activate for -- `community_id=None` means tenant-wide."""
+    """One `(tenant, community)` pair to seed.
+
+    `community_id=None` means TENANT-tier availability only (no
+    COMMUNITY-tier activation for this target; see the 3-tier split,
+    `services/bundle_approval_service.py`'s own module docstring).
+    """
 
     tenant_slug: str
     community_id: int | None = None
@@ -334,18 +340,40 @@ async def _resolve_tenant_id(install_dal: AsyncDB, tenant_slug: str) -> int:
     return int(row.id)
 
 
+async def _already_installed_globally(
+    install_dal: AsyncDB, *, app_id: str, version_id: int
+) -> bool:
+    """Whether `app_id`'s CURRENT `app_global_installs` row already points at `version_id`."""
+    rows = await install_dal(
+        (install_dal.app_global_installs.app_id == app_id)
+        & (install_dal.app_global_installs.superseded_by == None)  # noqa: E711
+        & (install_dal.app_global_installs.revoked_at == None)  # noqa: E711
+    ).select()
+    row = rows.first()
+    return row is not None and int(row.version_id) == int(version_id)
+
+
+async def _already_available(install_dal: AsyncDB, *, tenant_id: int, app_id: str) -> bool:
+    """Whether `app_id` is already enabled in `tenant_id`'s marketplace."""
+    rows = await install_dal(
+        (install_dal.bundle_tenant_availability.tenant_id == tenant_id)
+        & (install_dal.bundle_tenant_availability.app_id == app_id)
+        & (install_dal.bundle_tenant_availability.available == True)  # noqa: E712
+    ).select()
+    return bool(rows.first())
+
+
 async def _already_active(
-    install_dal: AsyncDB, *, app_id: str, tenant_id: int, community_id: int | None, version_id: int
+    install_dal: AsyncDB, *, app_id: str, tenant_id: int, community_id: int, version_id: int
 ) -> bool:
     """Whether `(app_id, tenant_id, community_id)` already points at `version_id`.
 
-    True is the no-op case -- the caller skips re-approving.
+    True is the no-op case -- the caller skips re-activating.
     """
-    active_community_id = TENANT_WIDE_COMMUNITY_SENTINEL if community_id is None else community_id
     rows = await install_dal(
         (install_dal.app_active_versions.app_id == app_id)
         & (install_dal.app_active_versions.tenant_id == tenant_id)
-        & (install_dal.app_active_versions.community_id == active_community_id)
+        & (install_dal.app_active_versions.community_id == community_id)
     ).select()
     row = rows.first()
     return row is not None and int(row.version_id) == int(version_id)
@@ -534,9 +562,37 @@ async def seed_one(
         valkey_client=valkey_client,
     )
 
+    already_installed = await _already_installed_globally(
+        install_dal, app_id=entry.app_id, version_id=version_id
+    )
+    if not already_installed:
+        await install_version_globally(
+            install_dal,
+            app_id=entry.app_id,
+            version=entry.version,
+            installed_by=None,
+            install_source=SYSTEM_ACTOR,
+        )
+
     results: list[SeedResult] = []
     for target in targets:
         tenant_id = await _resolve_tenant_id(install_dal, target.tenant_slug)
+
+        if not await _already_available(install_dal, tenant_id=tenant_id, app_id=entry.app_id):
+            await set_available(
+                install_dal, tenant_id=tenant_id, app_id=entry.app_id, updated_by=None
+            )
+            results.append(
+                SeedResult(
+                    entry.app_id, entry.version, "made_available", f"tenant={target.tenant_slug!r}"
+                )
+            )
+
+        if target.community_id is None:
+            # TIER-2 only for this target -- catalog config declares no
+            # community to activate in (see `ActivationTarget`'s own docstring).
+            continue
+
         if await _already_active(
             install_dal,
             app_id=entry.app_id,
@@ -549,18 +605,18 @@ async def seed_one(
                     entry.app_id,
                     entry.version,
                     "no_op",
-                    f"already active for tenant={target.tenant_slug!r}",
+                    f"already active for tenant={target.tenant_slug!r} "
+                    f"community_id={target.community_id!r}",
                 )
             )
             continue
 
-        await approve_version(
+        await activate_for_community(
             install_dal,
-            app_id=entry.app_id,
-            version=entry.version,
             tenant_id=tenant_id,
             community_id=target.community_id,
-            approved_by=None,
+            app_id=entry.app_id,
+            activated_by=None,
             approval_source=SYSTEM_ACTOR,
             valkey_client=valkey_client,
         )
