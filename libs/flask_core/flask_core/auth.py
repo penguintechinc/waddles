@@ -529,9 +529,27 @@ def verify_service_key(provided_key: str, expected_key: Optional[str]) -> bool:
 #: scopes only -- never the role/bundle name.
 SCOPE_BUNDLES: Dict[str, Dict[str, List[str]]] = {
     'global': {
-        'admin': ['*:read', '*:write', '*:admin', '*:delete', 'settings:write', 'users:admin'],
-        'maintainer': ['*:read', '*:write', 'teams:read', 'reports:read', 'analytics:read'],
-        'viewer': ['*:read'],
+        # 'guild.authority:read'/'guild.authority:write' (#500/#501, hub_api's
+        # blueprints/v1/guild_pairing.py) gate the cross-tenant Discord
+        # guild-authority surface (approve an adopted role, revoke a pairing,
+        # the member-data-free guild overview). Already implied by this
+        # bundle's own '*:read'/'*:write' wildcards (_scope_covers only
+        # matches the action half against a '*' resource) -- listed
+        # explicitly anyway for discoverability/testability, not because the
+        # wildcard needed help. The REAL admission decision for these routes
+        # is `GuildAuthorityVerifier` (a live Discord permission check), not
+        # this scope -- the scope is defense-in-depth ("is this caller even
+        # a legitimately authenticated platform user"), never a substitute
+        # for the verifier.
+        'admin': [
+            '*:read', '*:write', '*:admin', '*:delete', 'settings:write', 'users:admin',
+            'guild.authority:read', 'guild.authority:write',
+        ],
+        'maintainer': [
+            '*:read', '*:write', 'teams:read', 'reports:read', 'analytics:read',
+            'guild.authority:read',
+        ],
+        'viewer': ['*:read', 'guild.authority:read'],
     },
     'tenant': {
         # SECURITY (C3, A01/BOLA fix): this bundle must NEVER include
