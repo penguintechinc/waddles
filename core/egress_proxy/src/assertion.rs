@@ -15,18 +15,22 @@
 //! - Replay protection: [`ReplayCache`]/[`InMemoryReplayCache`], scoped to
 //!   this proxy instance (see that trait's doc for the accepted
 //!   multi-replica tradeoff).
-//! - [`destination_matches`]: unlike `egress_assertion::destination_matches`
-//!   (a plain string-equality check, all `bundle_host_http`'s single-host
-//!   guard ever needs), this proxy's `PrivateIp` grants are CIDRs
-//!   (`192.168.1.0/24`), not just literals -- the requested host must be
-//!   parsed as an IP and checked for CIDR containment. Kept as a local,
-//!   proxy-specific override rather than the shared crate's simpler
-//!   version.
+//! - [`destination_matches`]: re-exported directly from `egress_assertion`
+//!   -- that crate's own version is now CIDR-aware (a `PrivateIp` grant may
+//!   be a literal or a `192.168.1.0/24`-shaped CIDR, per the connector
+//!   spec's `net.http.private-ip:<ip|cidr>` syntax), so this crate no
+//!   longer needs a local override. Previously duplicated here because the
+//!   shared crate's original version was plain string equality (couldn't
+//!   match an IP dial target against a CIDR grant at all); now there is
+//!   exactly one implementation, shared by both sides of the hop.
 //! - [`resolved_matches`]: the DNS-rebinding re-check against the
 //!   *resolved* address, not just the requested host literal --
-//!   `egress_assertion` deliberately doesn't own this (it has no DNS
-//!   concept at all), so it stays here alongside `crate::proxy::validate`,
-//!   the only caller.
+//!   `egress_assertion` deliberately doesn't own DNS-resolution concepts,
+//!   so this check stays here alongside `crate::proxy::validate`, the only
+//!   caller. Delegates its own IP/CIDR containment logic to
+//!   `egress_assertion::ip_matches_grant` -- the same primitive
+//!   `destination_matches` uses -- so the two checks can never drift apart
+//!   on what counts as "inside the grant".
 //!
 //! Header: `X-Waddles-Egress-Assertion: <compact EdDSA JWT>` (re-exported
 //! from `egress_assertion` as [`ASSERTION_HEADER`]).
@@ -36,7 +40,9 @@ use std::sync::Mutex;
 
 use service_auth::TrustBundle;
 
-pub use egress_assertion::{DestinationCategory, EgressAssertion, ASSERTION_HEADER};
+pub use egress_assertion::{
+    destination_matches, DestinationCategory, EgressAssertion, ASSERTION_HEADER,
+};
 
 #[derive(thiserror::Error, Debug)]
 pub enum AssertionError {
@@ -160,44 +166,6 @@ pub async fn verify_from_header(
     Ok(claims)
 }
 
-/// Step 4 of the pipeline (spec-equivalent to `bundle_host_http`'s
-/// declared-host check): does the *requested* destination (host **and**
-/// port) match what the assertion actually grants, before any DNS
-/// resolution happens. The port check is exact -- a grant for `:443` never
-/// authorizes the same host on a different (even operator-allowlisted)
-/// port. Deliberately a local override of
-/// `egress_assertion::destination_matches`: this proxy's `PrivateIp`
-/// grants are CIDRs the requested (and, in [`resolved_matches`], resolved)
-/// address must fall within, not just an exact literal -- a distinction
-/// `bundle_host_http`'s own single-host guard has no use for, so the
-/// shared crate's version stays a plain string comparison.
-pub fn destination_matches(
-    assertion: &EgressAssertion,
-    requested_host: &str,
-    requested_port: u16,
-) -> bool {
-    if assertion.port != requested_port {
-        return false;
-    }
-    match assertion.category {
-        DestinationCategory::Fqdn => {
-            // Exact match only -- an IP literal request never satisfies an
-            // Fqdn-category grant, and vice versa (category-crossing is a
-            // separate grant, connector-spec explicit-deferral note).
-            requested_host.parse::<std::net::IpAddr>().is_err()
-                && requested_host.eq_ignore_ascii_case(&assertion.destination)
-        }
-        DestinationCategory::PublicIp => requested_host == assertion.destination,
-        DestinationCategory::PrivateIp => match requested_host.parse::<std::net::IpAddr>() {
-            Ok(ip) => match assertion.destination.parse::<ipnet::IpNet>() {
-                Ok(net) => net.contains(&ip),
-                Err(_) => requested_host == assertion.destination,
-            },
-            Err(_) => false,
-        },
-    }
-}
-
 /// Whether the resolved address itself still satisfies the assertion's
 /// category (guards against DNS rebinding: an `Fqdn` grant only ever
 /// authorizes the address `is_forbidden_address`/`ip_policy::is_denied`
@@ -206,14 +174,16 @@ pub fn destination_matches(
 /// where the *resolved* address, not just the requested literal, must
 /// fall in the granted range). Deliberately stays in this crate rather
 /// than `egress_assertion` -- the shared crate has no DNS-resolution
-/// concept at all, and this is the only caller.
+/// concept at all, and this is the only caller. The actual IP/CIDR
+/// containment check delegates to `egress_assertion::ip_matches_grant` --
+/// the same primitive [`destination_matches`] uses for the *requested*
+/// literal -- so the requested-vs-resolved checks can never diverge on
+/// what counts as "inside the grant".
 pub fn resolved_matches(assertion: &EgressAssertion, resolved: std::net::IpAddr) -> bool {
     match assertion.category {
         DestinationCategory::Fqdn => true, // enforced by ip_policy::is_denied instead
-        DestinationCategory::PublicIp => resolved.to_string() == assertion.destination,
-        DestinationCategory::PrivateIp => match assertion.destination.parse::<ipnet::IpNet>() {
-            Ok(net) => net.contains(&resolved),
-            Err(_) => assertion.destination.parse::<std::net::IpAddr>() == Ok(resolved),
-        },
+        DestinationCategory::PublicIp | DestinationCategory::PrivateIp => {
+            egress_assertion::ip_matches_grant(assertion.category, &assertion.destination, resolved)
+        }
     }
 }

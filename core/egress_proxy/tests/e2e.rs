@@ -570,6 +570,42 @@ async fn metadata_and_cluster_cidrs_are_always_blocked_even_with_private_ip_gran
     );
 }
 
+/// A maximally-wide `PrivateIp` grant (`0.0.0.0/0` -- now matchable at all
+/// post-CIDR-fix, since `assertion::destination_matches`/`resolved_matches`
+/// both delegate to `egress_assertion::ip_matches_grant`) still can't reach
+/// cloud metadata or loopback: `ip_policy::is_denied`'s always-forbidden
+/// checks run independently of, and after, the grant match, and are never
+/// liftable by any grant regardless of how wide.
+#[tokio::test]
+async fn wide_open_private_cidr_grant_still_cannot_reach_metadata_or_loopback() {
+    let (enc, dec) = svc_process_keypair();
+    let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
+    let cfg = test_config(vec![443]);
+    let resolver = FakeResolver(HashMap::new());
+    let machine_jwt = valid_machine_jwt(&enc);
+    let replay_cache = InMemoryReplayCache::new();
+
+    for target in ["169.254.169.254", "127.0.0.1"] {
+        let grant = assertion(DestinationCategory::PrivateIp, "0.0.0.0/0");
+        let jwt = make_assertion_jwt(&enc, "k1", &grant);
+        let headers = headers_with(Some(&machine_jwt), Some(&jwt));
+        let deps = ValidationDeps {
+            trust_bundle: &bundle,
+            replay_cache: &replay_cache,
+            cfg: &cfg,
+            cluster_cidrs: &cfg.deny_cluster_cidrs,
+            resolver: &resolver,
+        };
+        let err = proxy::validate(&headers, target, 443, deps)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ProxyError::Denied(_)),
+            "expected {target} denied even under 0.0.0.0/0, got {err:?}"
+        );
+    }
+}
+
 /// Finds a real, non-loopback local IPv4 address to bind the fake
 /// upstream server on -- CONNECT tunnels must dial a non-loopback address
 /// (loopback is unconditionally denied by design), so the target for this
