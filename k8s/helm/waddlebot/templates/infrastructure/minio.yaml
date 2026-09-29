@@ -1,4 +1,11 @@
 {{- if .Values.infrastructure.minio.enabled }}
+{{- if .Values.infrastructure.minio.kms.enabled }}
+{{- if not .Values.infrastructure.minio.kms.secretName }}
+{{- if ne .Values.global.deploymentTier "alpha" }}
+{{- fail "infrastructure.minio.enabled=true requires infrastructure.minio.kms.secretName outside alpha (beta/gamma/production) -- at-rest encryption is mandatory (security.md Encryption), never disable infrastructure.minio.kms.enabled to work around this. Pre-create the Secret via `make generate-minio-kms-key` / scripts/generate-minio-kms-key.sh (default name minio-kms, key MINIO_KMS_SECRET_KEY), then set infrastructure.minio.kms.secretName via --set or an out-of-git values override / ExternalSecret. Only alpha may leave this unset (values-alpha.yaml documents its own default)." }}
+{{- end }}
+{{- end }}
+{{- end }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -22,6 +29,20 @@ spec:
 ---
 # MinIO bucket initialization Job (creates bucketName if it doesn't exist)
 # MinIO License: AGPL-3.0 — self-hosted object store, not linked into our code
+#
+# fix/helm-apply-errors -- was previously a plain (non-hook) Job, which made every
+# `helm upgrade` fail with "field is immutable" once the Job existed from an earlier
+# release (Job.spec.template is immutable in-place). post-install/post-upgrade hook +
+# before-hook-creation delete policy makes this idempotent across installs/upgrades:
+# Helm deletes the prior run's Job (delete has no immutability restriction, unlike
+# update) before creating the fresh one. post- (not pre-) hook because this Job talks
+# to the MinIO Service over the network (`mc alias set`/`mc mb`) -- it needs the
+# regular MinIO Deployment/Service/PVC above already created, which post-install/
+# post-upgrade guarantees (Helm finishes creating every regular resource before the
+# post-* hook phase starts); backoffLimit below covers the transient case where the
+# MinIO pod is created but not yet Ready. Weight "1" runs it before
+# core-bundle-seeder-job.yaml's weight "5" in case seeded bundles ever need the
+# buckets to exist first.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -32,6 +53,10 @@ metadata:
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: storage-init
     app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 3
   template:
@@ -52,6 +77,13 @@ spec:
           /usr/bin/mc mb --ignore-existing minio/{{ .Values.infrastructure.minio.bucketName }}
           # svc-streaming recordings (RECORDINGS_BUCKET) live in their own bucket.
           /usr/bin/mc mb --ignore-existing minio/recordings
+          {{- if and .Values.infrastructure.minio.kms.enabled .Values.infrastructure.minio.kms.autoEncryptBucket .Values.infrastructure.minio.kms.secretName }}
+          # Default bucket auto-encryption (SSE-S3) -- objects written without an
+          # explicit ServerSideEncryption header are still encrypted at rest,
+          # requires MINIO_KMS_SECRET_KEY to already be configured on the server.
+          /usr/bin/mc encrypt set sse-s3 minio/{{ .Values.infrastructure.minio.bucketName }}
+          /usr/bin/mc encrypt set sse-s3 minio/recordings
+          {{- end }}
           /usr/bin/mc ls minio/
           echo "Buckets {{ .Values.infrastructure.minio.bucketName }}, recordings initialized successfully"
         env:
@@ -126,6 +158,13 @@ spec:
               key: MINIO_ROOT_PASSWORD
         - name: MINIO_DOMAIN
           value: {{ .Values.infrastructure.minio.domain | quote }}
+        {{- if and .Values.infrastructure.minio.kms.enabled .Values.infrastructure.minio.kms.secretName }}
+        - name: MINIO_KMS_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.infrastructure.minio.kms.secretName }}
+              key: {{ .Values.infrastructure.minio.kms.secretKey }}
+        {{- end }}
         volumeMounts:
         - name: minio-data
           mountPath: /data
