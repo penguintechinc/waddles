@@ -29,16 +29,24 @@ pattern) -- a follow-up, tracked alongside this table's own rollout,
 should add per-role grants there instead of the blanket `hub_api` grant
 below.
 
-Revision ID: 0033_instance_permission_policies
+Revision ID: 0033_instance_perm_policies
 Revises: 0032_bundle_permission_grants
 Create Date: 2026-09-28
+
+Note: revision id is intentionally abbreviated to `instance_perm_policies`
+(27 chars incl. `0033_` prefix) rather than the fuller
+`instance_permission_policies` (33 chars) -- alembic's default
+`alembic_version.version_num` column is `VARCHAR(32)`, and the longer id
+overflowed it (`psycopg2.errors.StringDataRightTruncation`), breaking
+`alembic upgrade head`/`downgrade` for every real-Postgres test in this
+suite from this migration onward.
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "0033_instance_permission_policies"
+revision = "0033_instance_perm_policies"
 down_revision = "0032_bundle_permission_grants"
 branch_labels = None
 depends_on = None
