@@ -29,6 +29,7 @@ pub mod ip_policy;
 pub mod limits;
 pub mod metrics;
 pub mod proxy;
+pub mod telemetry;
 
 use std::sync::Arc;
 
@@ -45,7 +46,10 @@ use proxy::ProxyState;
 /// loads the assertion-verification public key and constructs the
 /// hub-api JWKS-backed machine-JWT trust bundle. Fails closed: a missing
 /// or unparseable signing key never falls back to "accept anything".
-pub async fn build_state() -> anyhow::Result<Arc<ProxyState>> {
+/// `registry` is the shared Prometheus registry `telemetry::init` hands
+/// back, so this service's own metrics and the OTel meter provider's
+/// `target_info` series render from the same `/metrics` surface.
+pub async fn build_state(registry: &prometheus::Registry) -> anyhow::Result<Arc<ProxyState>> {
     let cfg = Config::from_env().map_err(anyhow::Error::from)?;
     let assertion_key = assertion::load_signing_key(&cfg.allowlist_signing_key_path)
         .map_err(anyhow::Error::from)?;
@@ -57,7 +61,7 @@ pub async fn build_state() -> anyhow::Result<Arc<ProxyState>> {
         cfg.per_tenant_max_connections,
         cfg.per_tenant_bandwidth_bytes_per_sec,
     );
-    let metrics = metrics::Metrics::new();
+    let metrics = metrics::Metrics::new(registry);
 
     Ok(Arc::new(ProxyState {
         cfg: Arc::new(cfg),
@@ -74,14 +78,13 @@ pub async fn build_state() -> anyhow::Result<Arc<ProxyState>> {
 /// and the metrics/health listener (`METRICS_PORT`) concurrently. Returns
 /// only on a fatal bind error.
 pub async fn run() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .json()
-        .init();
+    let (telemetry_guard, registry) = telemetry::init("egress-proxy");
+    // Held for the process lifetime: dropping it flushes buffered OTel
+    // spans/logs/metrics. Never held across `?` early-returns below in a
+    // way that would drop it prematurely -- it outlives both servers.
+    let _telemetry_guard = telemetry_guard;
 
-    let state = build_state().await?;
+    let state = build_state(&registry).await?;
     let proxy_addr = (std::net::Ipv4Addr::UNSPECIFIED, state.cfg.listen_port);
     let metrics_addr = (std::net::Ipv4Addr::UNSPECIFIED, state.cfg.metrics_port);
 

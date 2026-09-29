@@ -25,6 +25,8 @@ use ipnet::IpNet;
 use jsonwebtoken::DecodingKey;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::config::Config;
 use crate::dns::Resolver;
@@ -245,10 +247,13 @@ fn error_response(err: &ProxyError) -> Response<RespBody> {
         .expect("building an error response never fails")
 }
 
-/// Top-level `service_fn` entry point: dispatches `CONNECT` (TLS tunnel --
-/// wss/Discord gateway, IRC-over-TLS on 6697, any other TLS destination)
-/// to [`handle_connect`] and everything else to [`handle_forward`] (plain
-/// forward HTTP).
+/// Top-level `service_fn` entry point: extracts any W3C `traceparent` the
+/// calling service sent, opens this request's own span as its child (one
+/// trace spanning the service boundary, per `critical-rules.md`
+/// Observability -- "propagate trace context across every service
+/// boundary"), and instruments the whole request lifecycle
+/// ([`handle_inner`]) with it before dispatching to [`handle_connect`]/
+/// [`handle_forward`].
 pub async fn handle(
     state: Arc<ProxyState>,
     req: Request<Incoming>,
@@ -258,6 +263,22 @@ pub async fn handle(
     } else {
         "forward"
     };
+    let parent_cx = crate::telemetry::extract_parent_context(req.headers());
+    let span = tracing::info_span!("egress_proxy.request", mode, otel.kind = "server");
+    let _ = span.set_parent(parent_cx);
+    handle_inner(state, req, mode).instrument(span).await
+}
+
+/// Dispatches `CONNECT` (TLS tunnel -- wss/Discord gateway, IRC-over-TLS
+/// on 6697, any other TLS destination) to [`handle_connect`] and
+/// everything else to [`handle_forward`] (plain forward HTTP). Split out
+/// of [`handle`] purely so the request span wraps this entire function,
+/// including the validation pipeline below.
+async fn handle_inner(
+    state: Arc<ProxyState>,
+    req: Request<Incoming>,
+    mode: &'static str,
+) -> Result<Response<RespBody>, Infallible> {
     let (host, port) = match target_host_port(&req) {
         Ok(v) => v,
         Err(e) => return Ok(error_response(&e)),
@@ -274,7 +295,7 @@ pub async fn handle(
     let result = validate(req.headers(), &host, port, deps).await;
     state
         .metrics
-        .connect_duration_seconds
+        .request_duration_seconds
         .with_label_values(&[mode])
         .observe(started.elapsed().as_secs_f64());
 
@@ -391,6 +412,7 @@ async fn run_tunnel(
     limiter: Arc<TenantLimiter>,
     metrics: Arc<Metrics>,
 ) -> std::io::Result<()> {
+    let started = Instant::now();
     let server = tokio::time::timeout(connect_timeout, TcpStream::connect(addr))
         .await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timed out"))??;
@@ -406,8 +428,29 @@ async fn run_tunnel(
         metrics.clone(),
         "egress",
     );
-    let ingress = copy_with_throttle(server_r, client_w, limiter, tenant, metrics, "ingress");
-    let _ = tokio::join!(egress, ingress);
+    let ingress = copy_with_throttle(
+        server_r,
+        client_w,
+        limiter,
+        tenant.clone(),
+        metrics.clone(),
+        "ingress",
+    );
+    let (egress_bytes, ingress_bytes) = tokio::join!(egress, ingress);
+
+    // Observed once per tunnel, on close -- the "connection-duration" and
+    // "bytes-transferred" histograms `critical-rules.md` Observability
+    // requires, distinct from `request_duration_seconds`'s validate+dial
+    // latency observed before the tunnel even opens.
+    metrics
+        .connection_duration_seconds
+        .with_label_values(&["connect"])
+        .observe(started.elapsed().as_secs_f64());
+    let total_bytes = egress_bytes.unwrap_or(0) + ingress_bytes.unwrap_or(0);
+    metrics
+        .connection_bytes
+        .with_label_values(&[&tenant])
+        .observe(total_bytes as f64);
     Ok(())
 }
 
@@ -468,6 +511,7 @@ async fn forward_inner(
     req: Request<Incoming>,
     target: &ValidatedTarget,
 ) -> Result<Response<RespBody>, BoxError> {
+    let started = Instant::now();
     let stream =
         tokio::time::timeout(state.cfg.connect_timeout, TcpStream::connect(target.addr)).await??;
     let io = TokioIo::new(stream);
@@ -491,6 +535,32 @@ async fn forward_inner(
 
     let resp = sender.send_request(req).await?;
     let (parts, body) = resp.into_parts();
+
+    // Observed here rather than after the body finishes streaming (the
+    // response body is intentionally never buffered -- module doc): total
+    // round-trip time and, where the upstream declares one, `Content-
+    // Length` as an approximate size. A chunked/unknown-length response
+    // simply skips the bytes observation; `bytes_transferred_total` (the
+    // CONNECT tunnel's exact running counter) remains the authoritative
+    // byte-accounting signal for this proxy overall.
+    state
+        .metrics
+        .connection_duration_seconds
+        .with_label_values(&["forward"])
+        .observe(started.elapsed().as_secs_f64());
+    if let Some(len) = parts
+        .headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<f64>().ok())
+    {
+        state
+            .metrics
+            .connection_bytes
+            .with_label_values(&[&target.tenant])
+            .observe(len);
+    }
+
     let body = body.map_err(|e| Box::new(e) as BoxError).boxed();
     Ok(Response::from_parts(parts, body))
 }

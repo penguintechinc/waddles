@@ -419,7 +419,7 @@ async fn connect_tunnel_relays_bytes_end_to_end() {
         cluster_cidrs: vec![],
         resolver: std::sync::Arc::new(egress_proxy::dns::TokioResolver),
         limiter: TenantLimiter::new(50, 100_000_000),
-        metrics: Metrics::new(),
+        metrics: Metrics::new(&prometheus::Registry::new()),
     });
 
     let proxy_listener = TcpListener::bind(("127.0.0.1", 0))
