@@ -8,7 +8,11 @@
 #
 # Build (context = this directory, not the repo root -- no shared libs to
 # pull in for a Rust crate):
-#   docker build -f Dockerfile.rust -t localhost:32000/waddles/svc-ingest:alpha-<epoch> .
+#   docker build -f Dockerfile.rust -t localhost:32000/waddlebot/svc-ingest-rust:alpha-<epoch> .
+# ("svc-ingest-rust", not "svc-ingest" -- fix/helm-alpha-self-provisioning gives the Rust
+# build its own repository so it never collides with the Python Deployment's tag while
+# both coexist in alpha; the Helm chart's rustDataPlane.svcIngest.imageRepository default
+# matches this exactly.)
 #
 # No SeaORM/database, so unlike svc_streaming's builder stage this one
 # needs no cmake/build-essential -- the M5 skeleton's `reqwest` (rustls-tls)
@@ -22,7 +26,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
 
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
 
 # ca-certificates for rustls (webpki/native roots) on outbound TLS
 # (reqwest, OTLP) -- required once the hub-api distribution poll and
