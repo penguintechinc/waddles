@@ -66,6 +66,10 @@ run_suite() {
 run_suite "legacy tests/unit + identity_core_module" \
     "$PYTHON_BIN" -m pytest tests/unit core/identity_core_module/services/test_grpc_handler.py
 
+# --- workflow_core_module (own tests/ dir, own conftest.py) ---
+run_suite "core/workflow_core_module" \
+    env -C "$REPO_ROOT/core/workflow_core_module" "$PYTHON_BIN" -m pytest
+
 # --- community_module (own tests/ dir, own conftest.py) ---
 run_suite "core/community_module" \
     env -C "$REPO_ROOT/core/community_module" "$PYTHON_BIN" -m pytest

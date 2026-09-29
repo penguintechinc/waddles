@@ -66,6 +66,17 @@ def init_app_bundle_tables(dal: Any) -> None:
         # default={} so a pre-071 row reads back as an empty dict, never None.
         dal.Field("stages", "json", default={}),
         dal.Field("installed_at", "datetime", default=datetime.utcnow),
+        # migration 0026 -- attribution/marketplace metadata, kept in
+        # lockstep with `hub_api/services/schema.py`'s own two `app_catalog`
+        # bindings (see that module's own comment above these fields).
+        dal.Field("author", "string"),
+        dal.Field("license", "string"),
+        dal.Field("license_review_required", "boolean", default=False),
+        dal.Field("source_url", "string"),
+        dal.Field("alternative_to", "list:string", default=[]),
+        dal.Field("homepage_url", "string"),
+        dal.Field("notice", "string"),
+        dal.Field("category", "string"),
         primarykey=["app_id"],
         migrate=False,
     )
