@@ -1,4 +1,4 @@
-"""Tests for 0033_hub_users_identity_uuid.
+"""Tests for 0034_hub_users_identity_uuid.
 
 Two layers, same split `test_0012_schema_drift_columns.py` establishes:
 
@@ -35,7 +35,7 @@ from unittest.mock import patch
 import pytest
 
 _MIGRATION_PATH = (
-    Path(__file__).resolve().parent.parent / "versions" / "0033_hub_users_identity_uuid.py"
+    Path(__file__).resolve().parent.parent / "versions" / "0034_hub_users_identity_uuid.py"
 )
 
 _DB_URL_ENV = "WADDLES_TEST_DATABASE_URL"
@@ -43,7 +43,7 @@ _DB_URL_ENV = "WADDLES_TEST_DATABASE_URL"
 
 def _load_migration() -> Any:
     spec = importlib.util.spec_from_file_location(
-        "migration_0033_hub_users_identity_uuid", _MIGRATION_PATH
+        "migration_0034_hub_users_identity_uuid", _MIGRATION_PATH
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -63,9 +63,9 @@ def _executed_sql(migration: Any, direction: str) -> str:
 
 
 class TestMigrationMetadata:
-    def test_chains_directly_off_0032_bundle_permission_grants(self, migration: Any) -> None:
-        assert migration.revision == "0033_hub_users_identity_uuid"
-        assert migration.down_revision == "0032_bundle_permission_grants"
+    def test_chains_directly_off_0033_instance_perm_policies(self, migration: Any) -> None:
+        assert migration.revision == "0034_hub_users_identity_uuid"
+        assert migration.down_revision == "0033_instance_perm_policies"
 
     def test_revision_id_fits_alembic_version_num_varchar32(self, migration: Any) -> None:
         assert len(migration.revision) <= 32

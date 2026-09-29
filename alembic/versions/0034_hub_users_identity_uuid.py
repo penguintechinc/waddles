@@ -60,15 +60,15 @@ Downgrade is the exact inverse, in reverse order: revoke both grants,
 drop the view, drop the unique constraint, drop the column.
 
 **Numbering note:** originally authored as `0027_hub_users_identity_uuid`
-against a `0026` head; renumbered to `0033` (`down_revision =
-0032_bundle_permission_grants`) once the real chain -- 0026 seeder ->
+against a `0026` head; renumbered to `0034` (`down_revision =
+0033_instance_perm_policies`) once the real chain -- 0026 seeder ->
 0027 lifecycle -> 0028 changelog -> 0029 attribution -> 0030 app schemas
--> 0031 signing -> 0032 grants (#407) -- was known. May need further
-renumbering at actual merge time if more migrations land on
-`release/v3.0.X` ahead of this one in the meantime.
+-> 0031 signing -> 0032 grants -> 0033 instance perm policies (#432) --
+was known. May need further renumbering at actual merge time if more
+migrations land on `release/v3.0.X` ahead of this one in the meantime.
 
-Revision ID: 0033_hub_users_identity_uuid
-Revises: 0032_bundle_permission_grants
+Revision ID: 0034_hub_users_identity_uuid
+Revises: 0033_instance_perm_policies
 Create Date: 2026-09-28
 """
 
@@ -76,8 +76,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0033_hub_users_identity_uuid"
-down_revision = "0032_bundle_permission_grants"
+revision = "0034_hub_users_identity_uuid"
+down_revision = "0033_instance_perm_policies"
 branch_labels = None
 depends_on = None
 
