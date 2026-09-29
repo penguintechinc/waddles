@@ -62,6 +62,23 @@ wasm-tools component wit <bundle>.wasm | grep '^  export waddle:bundle'
 # export waddle:bundle/action-stage@1.0.0;
 ```
 
+## Outbound HTTP permissions
+
+`dispatch()`'s `http_client` (and any other outbound call your bundle makes)
+is gated by the manifest's `permissions:` block
+(`docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+§1.1). Declare a **stable public hostname** with `net.http.fqdn:<host>` —
+this is the preferred, lowest-risk form and the one you should reach for
+first. `net.http.public-ip:<ip>` (a bare IP, no FQDN) is high risk.
+**Bundles should never see or target private IP addresses** —
+`net.http.private-ip:<ip|cidr>` exists only for the exceptional self-hosted/
+on-prem case, requires its own separate explicit approval, is flagged high
+risk on every consent screen, and is never available for the platform's own
+cluster networks (loopback, link-local, metadata, and this cluster's own
+pod/service/node CIDRs are always denied, regardless of grant). Reviewers
+and admins should treat any `net.http.private-ip` request in your manifest
+as a red flag, so avoid it unless there is genuinely no alternative.
+
 ## Testing
 
 ```bash
