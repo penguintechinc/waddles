@@ -79,6 +79,10 @@ Waddles uses a sophisticated multi-workflow CI/CD pipeline that automates:
 ├── build-spotify-interaction.yml
 ├── build-loyalty-interaction.yml
 │
+├── build-svc-ingest.yml               # Rust data-plane (3 files, `-rust` images)
+├── build-svc-process.yml
+├── build-svc-action.yml
+│
 ├── android.yml                        # Android validation
 └── pr-validation.yml                  # Pull request and merge-queue tests
 ```
@@ -261,6 +265,16 @@ inputs:
 - Build arguments (MODULE_NAME, MODULE_PORT)
 - Automatic tagging based on version and branch
 
+**PR/merge_group path (`build-pr` job)**: `pull_request` and `merge_group`
+events never run `build-platform` (needs `packages: write` to push) --
+instead a dedicated `build-pr` job runs with `permissions: contents: read`
+only, no registry login, single amd64 build (`push: false`, `load: true`),
+followed by a gated Trivy scan (`exit-code: 1`, HIGH/CRITICAL) against the
+locally loaded image. This means a broken build context (e.g. a Dockerfile
+`COPY` of a path that doesn't exist under the declared context -- the bug
+gh-475 fixed for `svc-process`/`svc-action`) now fails the PR outright
+instead of only surfacing on a push to a release branch.
+
 **Example Output**:
 ```
 Image: ghcr.io/owner/waddlebot/router
@@ -390,6 +404,18 @@ security-scan:
   - Run Trivy scanner on each image
   - Upload SARIF results to GitHub Security
 ```
+This `security-scan` job is informational only (`continue-on-error: true`)
+and needs `merge-manifests`, which is skipped on `pull_request`/`merge_group`
+-- so it never runs on a PR. The actual PR gate is a separate step inside
+`build-platform` itself ("Trivy vulnerability scan (gated, local image)"),
+conditioned on `matrix.platform == 'linux/amd64'` and the PR/merge_group
+events, scanning the image that step's own `load: true` build just produced
+(`exit-code: 1`, HIGH/CRITICAL, `ignore-unfixed: true`). Known limitation:
+because it shares `build-platform` with the push path, the job's token
+still nominally carries `packages: write` during a PR run even though the
+login step is skipped and nothing is pushed -- unlike `build-container.yml`
+and the `build-svc-*.yml` files, which route PR/merge_group to a fully
+separate `contents: read`-only job.
 
 ---
 
@@ -465,6 +491,16 @@ jobs:
 - `build-youtube-music-interaction.yml` - YouTube Music (port 8015)
 - `build-spotify-interaction.yml` - Spotify integration (port 8016)
 - `build-loyalty-interaction.yml` - Loyalty points (port 8017)
+
+**Rust Data-Plane Modules** (3) — `-rust`-suffixed images published alongside
+the still-deployed Python alpha builds; see `core/<module>/Dockerfile.rust`.
+Self-contained (don't call `build-container.yml`) but share its PR-gate
+pattern: push-path `build-platform` builds/pushes multi-arch, PR/merge_group
+route to a separate `build-pr` job (`permissions: contents: read`, no
+login, single amd64 build, gated Trivy scan on the local image):
+- `build-svc-ingest.yml` - `svc-ingest-rust` (port 8200)
+- `build-svc-process.yml` - `svc-process-rust` (port 8201, context `core/`)
+- `build-svc-action.yml` - `svc-action-rust` (port 8202, context `core/`)
 
 ---
 
