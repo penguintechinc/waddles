@@ -9,9 +9,10 @@ import asyncio
 import pytest
 from datetime import datetime
 from typing import Dict, Any
+from unittest.mock import AsyncMock, patch
 
-from .node_executor import NodeExecutor, NodeExecutionResult
-from ..models.nodes import (
+from services.node_executor import NodeExecutor, NodeExecutionResult
+from models.nodes import (
     ConditionIfConfig,
     ConditionSwitchConfig,
     ConditionFilterConfig,
@@ -27,7 +28,7 @@ from ..models.nodes import (
     PortType,
     DataType,
 )
-from ..models.execution import ExecutionContext
+from models.execution import ExecutionContext
 
 
 @pytest.fixture
@@ -305,7 +306,11 @@ async def test_action_delay_variable(executor, context):
 
 @pytest.mark.asyncio
 async def test_action_delay_max_limit(executor, context):
-    """Test ACTION_DELAY enforces max limit"""
+    """Test ACTION_DELAY enforces max limit.
+
+    Patches asyncio.sleep so this assertion doesn't actually block the
+    suite for the real 300s (5 minute) cap being asserted.
+    """
     node = ActionDelayConfig(
         node_id="delay3",
         label="Test Delay Max",
@@ -313,11 +318,13 @@ async def test_action_delay_max_limit(executor, context):
         delay_ms=999999999  # Way too long
     )
 
-    state = await executor.execute_node(node, context)
+    with patch("services.node_executor.asyncio.sleep", new=AsyncMock()) as mock_sleep:
+        state = await executor.execute_node(node, context)
 
     assert state.status.value == "completed"
     # Should be capped at 300000ms (5 minutes)
     assert state.get_output("delayed_ms") == 300000
+    mock_sleep.assert_awaited_once_with(300.0)
 
 
 # ============================================================================

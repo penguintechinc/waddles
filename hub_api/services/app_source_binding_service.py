@@ -216,3 +216,35 @@ async def provision_source_stream_groups(
                     "stream_key": stream_key,
                 },
             )
+
+
+async def clear_bindings(
+    conn: Any,
+    *,
+    tenant_id: int,
+    community_id: int,
+    app_id: str,
+    bindings_table: Any,
+) -> None:
+    """Delete every `app_source_bindings` row for `(tenant_id, community_id, app_id)`.
+
+    The teardown half of `sync_bindings()` -- called from
+    `bundle_approval_service.deactivate_for_community()` inside the SAME
+    transaction as the `app_active_versions` row removal, so a
+    rolled-back deactivation never leaves a dangling unbind (or vice
+    versa). Unlike `sync_bindings()`, `community_id` here is always a
+    real community id (never the tenant-wide sentinel) -- COMMUNITY-tier
+    activation no longer writes that sentinel for new rows (see
+    `bundle_approval_service.py`'s own module docstring).
+    """
+    await conn.execute(
+        delete(bindings_table).where(
+            (bindings_table.c.tenant_id == tenant_id)
+            & (bindings_table.c.community_id == community_id)
+            & (bindings_table.c.app_id == app_id)
+        )
+    )
+    logger.info(
+        "app source binding: cleared",
+        extra={"app_id": app_id, "tenant_id": tenant_id, "community_id": community_id},
+    )

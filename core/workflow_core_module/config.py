@@ -61,6 +61,15 @@ class Config:
     RELEASE_MODE = os.getenv('RELEASE_MODE', 'false').lower() == 'true'
     FEATURE_WORKFLOWS_ENABLED = os.getenv('FEATURE_WORKFLOWS_ENABLED', 'true').lower() == 'true'
 
+    # services/module_executor.py's GrpcModuleClientManager/ModuleExecutor
+    # read this directly (not via getattr/hasattr like the per-module
+    # *_GRPC_HOST settings below) -- it was previously undefined entirely,
+    # so instantiating ModuleExecutor() raised AttributeError on every use
+    # (undetected because that file had 0% test coverage). Defaults to
+    # False: HTTP is always a safe fallback transport, while gRPC requires
+    # the per-module *_GRPC_HOST settings to actually be configured.
+    GRPC_ENABLED = os.getenv('GRPC_ENABLED', 'false').lower() == 'true'
+
     # Logging Configuration
     LOG_DIR = os.getenv('LOG_DIR', '/var/log/waddlebotlog')
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
