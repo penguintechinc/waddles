@@ -87,6 +87,18 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcAction.metricsPort | quote }}
         - name: HOST_API_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcAction.hostApiPort | quote }}
+        # Security review fix (PR #468, MEDIUM): the bundle `http` egress guard's
+        # cluster-CIDR denylist and instance-wide private-IP policy
+        # (bundle_host_http::egress::{ClusterCidrDenylist,InstanceEgressPolicy}) -- shared
+        # across every Rust data-plane stage so pod/Service/node ranges are declared once.
+        # DEPLOYMENT_TIER itself comes from the shared ConfigMap (envFrom above,
+        # global.deploymentTier) -- CliConfig::validate hard-fails startup if this list is
+        # empty outside alpha/local. See values.yaml's own comment on this key for the
+        # "OVERRIDE REQUIRED in beta/gamma/production" note.
+        - name: EGRESS_CLUSTER_CIDR_DENYLIST
+          value: {{ .Values.pipeline.rustDataPlane.egressClusterCidrDenylist | join "," | quote }}
+        - name: INSTANCE_EGRESS_ALLOW_PRIVATE_IP
+          value: {{ .Values.pipeline.rustDataPlane.instanceEgressAllowPrivateIp | quote }}
         - name: DB_PASSWORD
           valueFrom:
             secretKeyRef:
