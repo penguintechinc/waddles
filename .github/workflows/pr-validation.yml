@@ -445,3 +445,10 @@ jobs:
             --kube-version 1.30.0 \
             --set global.deploymentTier=alpha \
           | python3 scripts/ci/check-helm-rendered-manifest-invariants.py
+
+      # fix/alpha-deploy-context-allowlist -- KUBE_CONTEXT=dal2-beta (or any
+      # context outside local-alpha/microk8s) must be rejected by
+      # scripts/alpha-deploy.sh before docker/helm/kubectl are ever invoked,
+      # since values-alpha.yaml auto-generates secrets on upgrade.
+      - name: alpha-deploy.sh KUBE_CONTEXT allowlist regression test
+        run: bash scripts/ci/tests/test_alpha_deploy_context_allowlist.sh
