@@ -31,6 +31,35 @@ use penguin_licensing::{LicenseClient, LicenseConfig, LicenseError};
 /// Feature Flags & License Tiers) -- product is `waddles`.
 pub const RUST_DATA_PLANE_FLAG: &str = "waddles.core.rust-data-plane";
 
+/// Gates the bundle `http` host capability (`crate::capabilities::
+/// StageCapabilities`'s `egress` field,
+/// `bundle_host_http::egress::EgressGuard`) -- same flag key
+/// `svc_action::flags::BUNDLE_EGRESS_FLAG` gates, since both stages'
+/// bundles share one `net.http:<host>` capability concept. OFF ⇒ every
+/// `http.send` call is denied `feature_disabled`, checked before the
+/// allowlist/SSRF pipeline runs at all.
+pub const BUNDLE_EGRESS_FLAG: &str = "waddles.core.bundle-egress";
+
+/// Adapts a live [`LicenseClient`] to
+/// [`bundle_host_http::egress::FeatureFlag`] for [`BUNDLE_EGRESS_FLAG`] --
+/// this crate's own [`FeatureGate`] trait is a distinct type (object-safe
+/// but crate-local), so `EgressGuard::new`'s `Arc<dyn bundle_host_http::
+/// egress::FeatureFlag>` parameter needs its own thin implementor rather
+/// than reusing [`LicenseFeatureGate`] directly.
+pub struct BundleEgressFlag(Arc<LicenseClient>);
+
+impl BundleEgressFlag {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl bundle_host_http::egress::FeatureFlag for BundleEgressFlag {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { self.0.flag_enabled(BUNDLE_EGRESS_FLAG).await })
+    }
+}
+
 /// Answers "should the drain loop run right now?". Object-safe (a
 /// manually-boxed future rather than `async fn` in a trait), mirroring
 /// `crate::capabilities::CapabilityHandler`'s identical rationale.

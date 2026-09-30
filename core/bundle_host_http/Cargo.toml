@@ -1,0 +1,41 @@
+[package]
+name = "bundle-host-http"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Shared bundle `http` host-capability egress guard (SSRF-hardened allowlist/DNS-pinning/redirect-recheck/rate-limit pipeline, connector spec SS8.2) extracted from core/svc_action so core/svc_process's process-stage bundles can enforce the identical policy for their own http capability, with zero behavior change to svc_action. A same-repo path dependency, not a penguin-libs crate: this pipeline is specific to this repo's own bundle-host wire shapes (`penguin_bundle_host::wire::HostResultError`), not a general-purpose library."
+
+[lib]
+name = "bundle_host_http"
+path = "src/lib.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- rules/critical-rules.md
+# Dependency Pinning. Cargo.lock is committed alongside this file. Every
+# pin below is copied verbatim from core/svc_action/Cargo.toml (the crate
+# this pipeline was extracted from) so no dependent crate resolves a
+# second version of the same package.
+[dependencies]
+tokio = { version = "=1.53.1", features = ["net", "time", "rt"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+tracing = "=0.1.44"
+prometheus = "=0.14.0"
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "stream"] }
+futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
+base64 = "=0.22.1"
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69f25b007e397bcf22c20bee368495f61f0a1b8a", package = "penguin-bundle-host", version = "=0.2.0" }
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+# Test-only real HTTP server for `ReqwestTransport`'s connect/size-cap
+# tests (moved verbatim from svc_action) -- never linked into any release
+# binary of either consuming crate.
+axum = "=0.8.9"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
