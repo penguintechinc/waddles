@@ -452,3 +452,11 @@ jobs:
       # since values-alpha.yaml auto-generates secrets on upgrade.
       - name: alpha-deploy.sh KUBE_CONTEXT allowlist regression test
         run: bash scripts/ci/tests/test_alpha_deploy_context_allowlist.sh
+
+      # fix/alpha-deploy-hub-webui -- SERVICES omitted hub-webui (and the
+      # plain-name Python svc-ingest/svc-process/svc-action images deployed
+      # alongside their *-rust counterparts), causing ImagePullBackOff on a
+      # fresh alpha build. check_images_in_registry now HEAD-checks every
+      # chart-referenced image against the registry before helm ever runs.
+      - name: alpha-deploy.sh missing-image preflight regression test
+        run: bash scripts/ci/tests/test_alpha_deploy_image_preflight.sh
