@@ -1341,7 +1341,7 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("badge", String(100)),
         Column("approval_id", BigInteger),
         Column("created_at", DateTime),
-        # migration 0024 -- the staged MinIO object keys (storage_service.
+        # migration 0024 -- the staged S3 object keys (storage_service.
         # bundle_component_key()/bundle_sidecar_key()), written by
         # bundle_version_service.py::_publish_prebuilt_version().
         Column("component_key", Text),

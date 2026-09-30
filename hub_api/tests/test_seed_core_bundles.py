@@ -80,7 +80,7 @@ def _write_bundle(
 
 
 def _patch_validator_and_storage(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Same monkeypatch shape `test_bundle_version_service.py` uses -- no real wasm-tools/MinIO."""
+    """Same monkeypatch shape `test_bundle_version_service.py` uses -- no real wasm-tools/S3."""
     from services import bundle_version_service as bvs
 
     monkeypatch.setattr(

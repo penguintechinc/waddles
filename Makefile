@@ -110,9 +110,10 @@ verify-ping-bundle-reproducible:
 generate-service-jwt-key:
 	@bash scripts/generate-service-jwt-key.sh
 
-# Generates a MinIO static KMS key and applies it as a Secret so at-rest
-# encryption (security.md Encryption: Storage) works outside alpha -- see
-# k8s/helm/waddlebot's infrastructure.minio.kms.secretName fail guard.
+# Generates a SeaweedFS SSE-S3 key-encryption-key and applies it as a Secret
+# so at-rest encryption (security.md Encryption: Storage) works outside alpha
+# -- see k8s/helm/waddlebot's infrastructure.seaweedfs.encryption.secretName
+# fail guard.
 # Usage: make generate-seaweedfs-sse-key KUBE_CONTEXT=dal2-beta [NAMESPACE=waddlebot]
 generate-seaweedfs-sse-key:
 	@test -n "$(KUBE_CONTEXT)" || { echo "ERROR: KUBE_CONTEXT is required, e.g. make generate-seaweedfs-sse-key KUBE_CONTEXT=dal2-beta" >&2; exit 1; }

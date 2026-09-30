@@ -2,7 +2,8 @@
 Video Proxy Module Configuration
 
 Handles all configuration for the video proxy service including
-database, gRPC, HTTP ports, MinIO, JWT settings, and license validation.
+database, gRPC, HTTP ports, S3-compatible object storage, JWT settings,
+and license validation.
 """
 
 import logging
@@ -83,12 +84,18 @@ class Config:
         'JWT_SECRET_KEY', 'jwt-secret-change-in-production'
     )
 
-    # MinIO Configuration
-    MINIO_ENDPOINT: str = os.getenv('MINIO_ENDPOINT', 'localhost:9000')
-    MINIO_ACCESS_KEY: str = os.getenv('MINIO_ACCESS_KEY', 'minioadmin')
-    MINIO_SECRET_KEY: str = os.getenv('MINIO_SECRET_KEY', 'minioadmin')
-    MINIO_BUCKET: str = os.getenv('MINIO_BUCKET', 'video-proxy')
-    MINIO_USE_SSL: bool = os.getenv('MINIO_USE_SSL', 'false').lower() == 'true'
+    # S3-compatible object storage (SeaweedFS in dev/beta, per this repo's
+    # infra conventions; real S3 in prod) -- generic S3_* names consistent
+    # with hub_api/services/storage_service.py, not MinIO-specific.
+    # SSL is carried by S3_ENDPOINT_URL's scheme, not a separate flag.
+    S3_ENDPOINT_URL: str = os.getenv('S3_ENDPOINT_URL', 'http://localhost:9000')
+    S3_ACCESS_KEY_ID: str = os.getenv('S3_ACCESS_KEY_ID', '')
+    S3_SECRET_ACCESS_KEY: str = os.getenv('S3_SECRET_ACCESS_KEY', '')
+    S3_BUCKET_NAME: str = os.getenv('S3_BUCKET_NAME', 'video-proxy')
+    S3_REGION: str = os.getenv('S3_REGION', 'us-east-1')
+    # SeaweedFS's S3 gateway requires path-style addressing (no wildcard
+    # virtual-host DNS) -- forced on by default, matches its bucket layout.
+    S3_FORCE_PATH_STYLE: bool = os.getenv('S3_FORCE_PATH_STYLE', 'true').lower() == 'true'
 
     # License Server Configuration
     LICENSE_SERVER_URL: str = os.getenv(
@@ -219,13 +226,13 @@ class Config:
         if not self.JWT_SECRET_KEY:
             raise ValueError('JWT_SECRET_KEY must be set')
 
-        # Validate MinIO settings
-        if not self.MINIO_ENDPOINT:
-            raise ValueError('MINIO_ENDPOINT must be set')
-        if not self.MINIO_ACCESS_KEY:
-            raise ValueError('MINIO_ACCESS_KEY must be set')
-        if not self.MINIO_SECRET_KEY:
-            raise ValueError('MINIO_SECRET_KEY must be set')
+        # Validate S3 settings
+        if not self.S3_ENDPOINT_URL:
+            raise ValueError('S3_ENDPOINT_URL must be set')
+        if not self.S3_ACCESS_KEY_ID:
+            raise ValueError('S3_ACCESS_KEY_ID must be set')
+        if not self.S3_SECRET_ACCESS_KEY:
+            raise ValueError('S3_SECRET_ACCESS_KEY must be set')
 
         # Validate feature limits
         if self.FREE_MAX_DESTINATIONS < 1:
