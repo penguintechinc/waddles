@@ -287,25 +287,80 @@ infrastructure:
       accessMode: ReadWriteOnce
       storageClass: ""
 
-  # MinIO Object Storage
-  minio:
+  # SeaweedFS Object Storage (replaces MinIO -- quay.io/minio/{minio,mc} started
+  # returning 401 on anonymous pulls and Docker Hub never carried them; see
+  # feature/seaweedfs-object-storage PR description for the full rationale).
+  # PVC/Secret key names below intentionally still say "minio"/"MINIO_ROOT_*" in
+  # a few spots for backward compatibility with existing alpha installs -- see
+  # inline notes.
+  seaweedfs:
     enabled: true
-    # MinIO API server — moved from Docker Hub (deprecated) to quay.io/minio/minio
-    # License: AGPL-3.0 (self-hosted object store, not linked into our code)
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-    # MinIO client (mc) used for bucket initialization — same license
-    initImage: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
-    apiPort: 9000
-    consolePort: 9001
+    # chrislusf/seaweedfs (Apache-2.0), official multi-arch image (linux/amd64,
+    # linux/arm64, linux/arm/v7, linux/386), digest verified against an
+    # anonymous `docker manifest inspect` pull on 2026-09-29.
+    image: docker.io/chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    # amazon/aws-cli (Apache-2.0) used for idempotent bucket + default-encryption
+    # initialization -- SeaweedFS's S3 API is AWS-S3-compatible so the stock
+    # aws-cli works unmodified (no SeaweedFS-specific client needed).
+    bucketInitImage: docker.io/amazon/aws-cli:2.37.6@sha256:82905aa8fdab6e2403b40dceec12dc33aea2535a4c2a6f13d596d98501951105
+    s3Port: 8333
+    masterPort: 9333
     bucketName: "waddlebot-assets"
-    # Default credentials (matches docker-compose.yml)
-    rootUser: "REPLACE_ME"
-    rootPassword: "REPLACE_ME"
+    # Least-privilege S3 identities (one per workload, each its own
+    # accessKey/secretKey pair), rendered into SeaweedFS's `weed server
+    # -s3.config` identities.json at container start (templates/infrastructure/
+    # seaweedfs.yaml). The former unscoped "waddlebot" admin identity
+    # (Read/Write/List/Tagging/Admin across every bucket, fed by rootUser/
+    # rootPassword/MINIO_ROOT_* below) has been REMOVED -- every consumer,
+    # including svc-streaming's recordings path, now has its own
+    # bucket-scoped identity. Same lookup(KEEP)-then-generate(alpha/local)-
+    # or-require(else) provisioning policy for every identity below (see
+    # templates/secrets.yaml waddlebot.autoSecretValue and _helpers.tpl):
+    # "REPLACE_ME" here means "unset" -- alpha/local auto-generate and persist
+    # via `lookup`+`resource-policy: keep`, beta/gamma/production MUST set a
+    # real value (or pre-populate the waddlebot-secrets Secret out-of-band) or
+    # the render fails.
+    identities:
+      # hub_api/services/storage_service.py -- reads/writes bundle components,
+      # avatars, community logos. Read/Write/List/Tagging, scoped to
+      # bucketName ("waddlebot-assets") only -- see templates/infrastructure/
+      # seaweedfs.yaml's s3-identities.json rendering.
+      hubApi:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
+      # core/bundle_executor (templates/bundle-executor.yaml,
+      # bundle-executor-action.yaml) -- the Rust data-plane's one credentialed
+      # egress path (bucket.rs), a single unsigned-body GET of a compiled
+      # component + its JSON sidecar. Read/List ONLY, scoped to
+      # pipeline.rustDataPlane.bundleExecutor.bucketName ("waddles-bundles") --
+      # this identity must NOT be able to PUT.
+      dataPlane:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
+      # templates/infrastructure/seaweedfs.yaml's seaweedfs-bucket-init Job
+      # ONLY -- Admin (bucket create/head + PutBucketEncryption), unscoped
+      # since it must be able to create buckets that don't exist yet. Never
+      # mounted by a long-running Deployment.
+      bucketInit:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
+      # core/svc_streaming (templates/svc-streaming.yaml) -- egress::record's
+      # only S3 calls are `put_opts`/`put_multipart_opts` against the
+      # "recordings" bucket (finished HLS/recording segments); Read is also
+      # granted for parity with the standard object_store Put-then-verify
+      # path. Read/Write ONLY, scoped to the literal "recordings" bucket --
+      # this identity must NOT reach "waddlebot-assets" or
+      # pipeline.rustDataPlane.bundleExecutor.bucketName ("waddles-bundles").
+      # Replaces the former "waddlebot" full-admin back-compat identity this
+      # was the last consumer of.
+      streaming:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
     service:
-      name: "infra-minio"
+      name: "infra-seaweedfs"
       type: ClusterIP
-      apiPort: 9000
-      consolePort: 9001
+      s3Port: 8333
+      masterPort: 9333
     replicas: 1
     resources:
       requests:
@@ -314,36 +369,38 @@ infrastructure:
       limits:
         cpu: "1000m"
         memory: "1Gi"
-    # name/accessMode/storageClass added alongside the Issue #287 alpha bring-up (missing
-    # here previously -- templates/infrastructure/minio.yaml's PVC needs all three and
-    # every environment that flips infrastructure.minio.enabled=true render-fails the PVC
-    # without them; postgresql/redis above already carry the equivalent keys).
+    # PVC name kept as "minio-data" on purpose -- existing alpha installs already
+    # have this PVC bound; reusing the name lets the chart reattach to it without
+    # a manual migration. Fresh installs get a PVC literally named "minio-data"
+    # too, which is cosmetic only (see README.md Migration Notes for the
+    # documented rename-and-copy path if a clean name is ever wanted).
     persistence:
       enabled: true
       name: "minio-data"
       accessMode: ReadWriteOnce
       storageClass: ""
       size: 50Gi
-    env:
-      MINIO_BROWSER: "on"
-    # At-rest encryption (security.md Encryption: Storage — mandatory baseline, no
-    # opt-out) requires MinIO to have a KMS configured; without one, hub-api's
-    # put_object(..., ServerSideEncryption="AES256") fails with "Server side
-    # encryption specified but KMS is not configured". Static single-key KMS via
-    # MINIO_KMS_SECRET_KEY sourced from a pre-created Secret (never a literal key
-    # in git, never chart-managed) -- generate with `make generate-minio-kms-key`
-    # / scripts/generate-minio-kms-key.sh. secretName is empty here (fail-closed
-    # baseline for beta/gamma/production, see templates/infrastructure/minio.yaml's
-    # fail guard); alpha documents its own default in values-alpha.yaml. For
-    # production, a real external KMS (KES/Vault) is recommended over this static
-    # key -- see README.md MinIO KMS section and security.md Encryption tiering.
-    kms:
+    # At-rest encryption (security.md Encryption: Storage -- mandatory baseline,
+    # no opt-out). SeaweedFS's S3 gateway implements SSE-S3 with envelope
+    # encryption: a KEK (key-encryption-key) wraps a per-object DEK. Without an
+    # explicit KEK, SeaweedFS auto-generates one and persists it on the filer --
+    # fine for throwaway alpha, not acceptable for beta/gamma/production where
+    # losing the filer volume must not silently rotate the encryption key.
+    # secretName sources WEED_S3_SSE_KEK (hex-encoded 256-bit key) from a
+    # pre-created Secret (never a literal key in git, never chart-managed) --
+    # generate with `make generate-seaweedfs-sse-key` /
+    # scripts/generate-seaweedfs-sse-key.sh. This replaces the former MinIO
+    # KMS/minio-kms Secret -- see autoProvisionedKeys.seaweedfsSseKek below.
+    # secretName is empty here (fail-closed baseline for beta/gamma/production,
+    # see templates/infrastructure/seaweedfs.yaml's fail guard); alpha documents
+    # its own default in values-alpha.yaml.
+    encryption:
       enabled: true
       secretName: ""
-      secretKey: "MINIO_KMS_SECRET_KEY"
-      # SSE-S3 auto-encryption applied to chart-created buckets via `mc encrypt set`
-      # in the minio-init Job, so objects written without explicit SSE headers are
-      # still encrypted at rest.
+      secretKey: "WEED_S3_SSE_KEK"
+      # Default bucket encryption (SSE-S3) applied via the S3 PutBucketEncryption
+      # API in the bucket-init Job, so objects written without explicit SSE
+      # headers are still encrypted at rest.
       autoEncryptBucket: true
 
   # Ollama AI Backend
@@ -426,9 +483,10 @@ posthog:
   # hosted default (https://license.penguintech.io).
   host: ""
 
-  # POSTHOG_API_KEY — personal/project API key (feature_flag:read scope).
-  # NEVER commit a literal value; set via --set or an out-of-git values file.
-  apiKey: ""
+  # POSTHOG_API_KEY (personal/project API key, feature_flag:read scope) moved
+  # to the `waddlebot-platform-credentials` Secret -- see `platformCredentials`
+  # above -- so an untouched/placeholder value here can never overwrite a
+  # real key on `helm upgrade` (fix/helm-platform-credentials).
 
   # PostHog's OWN secrets (SECRET_KEY / POSTGRES_PASSWORD / CLICKHOUSE_PASSWORD)
   # — distinct from apiKey above. NEVER commit literals. Provide ONE of:
@@ -988,10 +1046,13 @@ pipeline:
       # executor's one sanctioned credentialed egress path (spec SS7.6/SS12.7), now that
       # BucketComponentSource replaces UnimplementedBucketSource in production (crate::run).
       # bucketName/bucketRegion are static across environments; the endpoint is derived in
-      # the template from infrastructure.minio.service.name/apiPort (alpha: in-cluster MinIO,
-      # plain http:// -- no BUNDLE_BUCKET_CA_FILE needed) and the access key/secret come from
-      # the shared MINIO_ROOT_USER/MINIO_ROOT_PASSWORD secret keys, individually referenced
-      # (not envFrom) to keep this pod's credential surface to exactly what bucket.rs needs.
+      # the template from infrastructure.seaweedfs.service.name/s3Port (alpha: in-cluster
+      # SeaweedFS, plain http:// -- no BUNDLE_BUCKET_CA_FILE needed) and the access
+      # key/secret come from the dedicated "bundle-executor" (data-plane) S3 identity
+      # (DATAPLANE_S3_ACCESS_KEY_ID/_SECRET_ACCESS_KEY, Read/List only -- see
+      # infrastructure.seaweedfs.identities.dataPlane above and templates/secrets.yaml),
+      # individually referenced (not envFrom) to keep this pod's credential surface to
+      # exactly what bucket.rs needs.
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
       resources:
@@ -1894,69 +1955,49 @@ ingress:
       hosts:
         - waddlebot.local
 
-# OAuth Configuration (set via secrets and environment variables)
+# fix/helm-platform-credentials -- externally-issued platform/third-party
+# CREDENTIALS (client secrets, bot/OAuth/access/refresh tokens, webhook &
+# signing secrets, service-account keys) are no longer set here. This chart
+# never rendered a safe way to update them in place: an untouched values.yaml
+# default (or a dev-only placeholder like `oauth.discord.botToken` used to be)
+# was written into `waddlebot-secrets` on every `helm upgrade`, silently
+# overwriting a real credential an operator had set out-of-band -- the alpha
+# Discord-bot-token incident this branch fixes. They now live ONLY in the
+# `waddlebot-platform-credentials` Secret (see `platformCredentials` below
+# and docs/PLATFORM_CREDENTIALS.md), which this chart never writes.
+#
+# Non-secret companion config for the same platforms (URLs, tenant/project
+# IDs, IRC nick/channels) stays below -- it isn't a credential.
+platformCredentials:
+  # Name of a pre-existing Secret holding externally-issued platform
+  # credentials. Leave blank to use the default name
+  # "<release-fullname>-platform-credentials". See docs/PLATFORM_CREDENTIALS.md
+  # for the operator setup command (alpha/local) and the External
+  # Secrets/Sealed Secrets pattern (beta/gamma/prod).
+  existingSecret: ""
+
 oauth:
-  discord:
-    clientId: ""
-    clientSecret: ""
-    botToken: ""
-    applicationId: ""
   twitch:
-    clientId: ""
-    clientSecret: ""
-    webhookSecret: ""
-    # T10 (v3 demo) -- IRC bot account credentials for svc-ingest's held-socket
-    # twitch_irc.py receiver / CANON-LIB relay outbound (waddle_transports/irc_relay.py).
-    # oauthToken is an IRC OAuth token ("oauth:...", NOT the OAuth2 clientSecret above).
-    # NEVER a real value in git -- see values-alpha.yaml for the dev-only placeholder.
-    oauthToken: ""
     nick: ""
     channels: ""
-  slack:
-    clientId: ""
-    clientSecret: ""
-    botToken: ""
-    signingSecret: ""
-    appToken: ""
   youtube:
-    apiKey: ""
-    clientId: ""
-    clientSecret: ""
-    # OAuth refresh token from the one-time consent flow; YouTube Data API v3 search works with either apiKey or clientId+clientSecret+refreshToken
-    refreshToken: ""
     webhookCallbackUrl: ""
-  spotify:
-    clientId: ""
-    clientSecret: ""
-  kick:
-    clientId: ""
-    clientSecret: ""
-    webhookSecret: ""
-    accessToken: ""
   teams:
-    appId: ""
-    appPassword: ""
     tenantId: ""
   mattermost:
     url: ""
-    botToken: ""
-    webhookSecret: ""
   googlechat:
-    serviceAccountKey: ""
     projectId: ""
 
-# Cloud Provider Configuration (AWS Lambda, GCP Functions, etc.)
+# Cloud Provider Configuration (AWS Lambda, GCP Functions, etc.) -- non-secret
+# region/project config only; access keys/service-account keys live in
+# platformCredentials above.
 aws:
-  accessKeyId: ""
-  secretAccessKey: ""
   region: "us-east-1"
-  lambdaRoleArn: ""
 
 gcp:
   projectId: ""
   region: "us-central1"
-  serviceAccountKey: ""
-  serviceAccountEmail: ""
 
 openwhisk:
   apiHost: "http://openwhisk-service:3233"
@@ -1966,7 +2007,6 @@ openwhisk:
 
 waddleai:
   baseUrl: ""
-  apiKey: ""
 
 # Connector Configuration (svc-ingest channels and overrides)
 config:
@@ -2009,8 +2049,8 @@ sharedEnv:
   REDIS_DB: "0"
   # REDIS_PASSWORD should be set via secrets
 
-  # MinIO Configuration
-  MINIO_ENDPOINT: "minio:9000"
+  # SeaweedFS S3 gateway configuration (was MinIO)
+  MINIO_ENDPOINT: "seaweedfs:8333"
   MINIO_SECURE: "false"
   # MINIO_ACCESS_KEY and MINIO_SECRET_KEY should be set via secrets
 
@@ -2106,6 +2146,122 @@ networkPolicy:
   enabled: false
   ingressNamespace: ingress-nginx
 
+# OTel collector — not yet deployed by this chart (tracked separately);
+# stub so egressPolicy can conditionally allow data-plane egress to it once
+# it exists, without another chart-wide feature landing first.
+otel:
+  collector:
+    enabled: false
+
+# Egress lockdown (CiliumNetworkPolicy) — feature/bundle-egress-gateway.
+# All bundle network access (app bundles' net.http via the in-process guard
+# core/bundle_host_http, feature/svc-process-http-capability, PLUS connector
+# bundles' platform traffic run by svc-ingest/svc-action) goes through the
+# host's egress proxy below. Data-plane pods (svc-ingest/svc-process/
+# svc-action, Rust AND legacy per-module Deployments performing the same
+# role) are default-deny for egress to the internet; the only path out is
+# the egress-proxy Service. Disabled == the CNPs below aren't rendered at
+# all, which is a real security regression outside alpha/local — enforced
+# by a `fail` guard in templates/infrastructure/egress-proxy.yaml.
+egressPolicy:
+  enabled: true
+  # Components (app.kubernetes.io/component label values) subject to the
+  # egress default-deny. Extend as more Rust dataplane Deployments land.
+  dataPlaneComponents:
+    - svc-ingest
+    - svc-ingest-rust
+    - svc-process
+    - svc-process-rust
+    - svc-action
+    - svc-action-rust
+    - discord-collector
+    - twitch-collector
+    - slack-collector
+    - teams-collector
+    - kick-collector
+    - mattermost-collector
+    - googlechat-collector
+    - youtube-live-collector
+    - trigger-webhooks
+    - trigger-streaming
+    - action-platforms
+    - action-serverless
+  # In-cluster destinations the data plane is still allowed to reach
+  # directly (everything else in-cluster is same-namespace-only via
+  # network-policies.yaml; these are the specific service ports needed).
+  # postgresReplicaPort currently points at the same primary Postgres
+  # (infrastructure.postgresql) — no read replica is provisioned yet (see
+  # pipeline.rustDataPlane.svcProcess.dbReaderHost's own comment); this
+  # becomes a distinct endpoint once one exists, no CNP change needed.
+  # NOTE: values.yaml is raw YAML, not template-evaluated — these mirror
+  # infrastructure.redis.service.port / infrastructure.postgresql.service.port
+  # / pipeline.hubApi.grpcPort / infrastructure.seaweedfs.service.s3Port above;
+  # keep in sync if those change.
+  inCluster:
+    dnsPort: 53
+    valkeyPort: 6379
+    postgresReplicaPort: 5432
+    hubApiGrpcPort: 50204
+    seaweedfsPort: 8333
+    otelGrpcPort: 4317
+  # CIDRs that must NEVER be reachable via the egress proxy's "world" allow,
+  # even though the proxy needs broad internet + customer-private-range
+  # reach for net.http.private-ip grants. Set podCidr/serviceCidr/nodeCidr
+  # per-cluster in each env's values file — these vary per install.
+  denyCidrs:
+    - "127.0.0.0/8"      # loopback
+    - "::1/128"          # loopback v6
+    - "169.254.0.0/16"   # link-local incl. cloud metadata (169.254.169.254)
+    - "fe80::/10"        # link-local v6
+  clusterCidrs:
+    podCidr: "10.244.0.0/16"
+    serviceCidr: "10.96.0.0/12"
+    nodeCidr: "10.0.0.0/8"
+
+# Egress proxy — the ONLY data-plane component allowed to reach external
+# addresses (net.http.fqdn / .public-ip / .private-ip grants). Design:
+# dedicated rootless Rust CONNECT/forward proxy (crates/egress-proxy, new
+# crate — in-line-of-traffic mandates Rust per critical-rules.md Data
+# Plane); not Squid/etc — none of the org's already-pinned forward proxies
+# support the per-request signed-allowlist re-check this needs, and a bare
+# Cilium egress-gateway/FQDN policy can't express per-tenant/app identity
+# either (see templates/network-policies-egress.yaml header for the full
+# design write-up). SKELETON: no Dockerfile/CI image yet, pinned to the
+# same debian:bookworm-slim digest already used as pipeline.goRuntimeImage
+# as a placeholder — replace once the crate has its own CI-built image.
+egressProxy:
+  enabled: true
+  environment: "alpha"
+  image: "debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a"
+  port: 8443
+  metricsPort: 9090
+  replicas: 1
+  # Ports the proxy itself is allowed to reach externally.
+  allowedPorts:
+    - 80    # plain HTTP (net.http.fqdn / .public-ip)
+    - 443   # HTTPS + Discord gateway (wss over 443)
+    - 6697  # Twitch IRC (TLS)
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+  # Signed allowlist header: hub-api signs a per-tenant/app grant set
+  # (net.http.fqdn / .public-ip / .private-ip) that the in-process guard
+  # (core/bundle_host_http, feature/svc-process-http-capability) attaches
+  # to every proxied request; the proxy verifies the signature and
+  # re-checks the destination against it — including which private-ip
+  # ranges were actually granted — before opening the upstream connection.
+  # So a compromised data-plane pod can reach the proxy but nothing beyond
+  # what was actually granted to that tenant/app; a compromised proxy host
+  # still can't reach loopback/link-local/metadata/cluster CIDRs (egressPolicy
+  # .denyCidrs/.clusterCidrs, enforced at the network layer as a backstop).
+  allowlistSigning:
+    secretName: "waddlebot-egress-proxy-signing-key"
+    secretKey: "public-key.pem"
+
 # SPIFFE/SPIRE workload identity (subchart: charts/spire). Off by default
 # (opt-in per environment via values-alpha.yaml/values-beta.yaml/
 # values-local.yaml). Only the values that differ from the subchart's own
@@ -2181,14 +2337,17 @@ serviceJwt:
 # has no Ed25519-pubkey-from-privkey primitive) + chart README "Self-provisioned
 # platform keys" section.
 autoProvisionedKeys:
-  # fix/minio-kms-sse (PR #439) -- MinIO static-KMS symmetric key
-  # (infrastructure.minio.kms.secretName should point at this same name once that
-  # chart wiring lands). Value format is MinIO's own requirement:
-  # "<key-label>:<base64 32 random bytes>".
-  minioKms:
-    secretName: "minio-kms"
-    secretKey: "MINIO_KMS_SECRET_KEY"
-    keyLabel: "waddlebot-minio"
+  # feature/seaweedfs-object-storage -- SeaweedFS S3 gateway SSE-S3 KEK (replaces
+  # the former MinIO static-KMS key from PR #439; renamed off "minio" since the
+  # backing store changed, secretName kept distinct from the old "minio-kms" so
+  # existing alpha installs get a fresh key rather than silently reusing one in
+  # a format MinIO required (label:base64) that SeaweedFS does not accept).
+  # infrastructure.seaweedfs.encryption.secretName should point at this same
+  # name. Value format: 64 lowercase hex chars (256-bit key), per SeaweedFS's
+  # WEED_S3_SSE_KEK requirement.
+  seaweedfsSseKek:
+    secretName: "seaweedfs-sse-kek"
+    secretKey: "WEED_S3_SSE_KEK"
     externalSecret: false
   # feature/tenant-dek-broker (PR #442) -- platform-baseline root KEK wrapping every
   # tenant's DEK (hub_api/services/tenant_keystore.py::K8sSecretKekProvider,

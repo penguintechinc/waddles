@@ -101,6 +101,28 @@ else
 fi
 readonly KUBE_CONTEXT
 
+# ---------------------------------------------------------------------------
+# fix/helm-platform-credentials preflight -- externally-issued platform
+# credentials (Discord bot token, Twitch OAuth token, etc.) live ONLY in
+# waddlebot-platform-credentials, a Secret this chart never renders or
+# writes (see k8s/helm/waddlebot/docs/PLATFORM_CREDENTIALS.md). Existence
+# check only -- never reads its data -- so a missing Secret fails loudly
+# BEFORE any image is built, instead of pods silently starting with those
+# platforms disabled after a full build+push+deploy cycle.
+# ---------------------------------------------------------------------------
+if ! kubectl --context "${KUBE_CONTEXT}" get secret waddlebot-platform-credentials \
+        -n "${NAMESPACE}" >/dev/null 2>&1; then
+    err "Secret 'waddlebot-platform-credentials' not found in namespace ${NAMESPACE}."
+    err "Create it once (values read from files, never argv/history), e.g.:"
+    err "  kubectl create secret generic waddlebot-platform-credentials \\"
+    err "    --namespace ${NAMESPACE} \\"
+    err "    --from-file=DISCORD_BOT_TOKEN=./discord-bot-token.txt \\"
+    err "    --from-file=TWITCH_OAUTH_TOKEN=./twitch-oauth-token.txt"
+    err "See k8s/helm/waddlebot/docs/PLATFORM_CREDENTIALS.md for the full key list."
+    exit 1
+fi
+info "waddlebot-platform-credentials Secret present in namespace ${NAMESPACE}"
+
 cd "${PROJECT_ROOT}"
 
 SHA="$(git rev-parse HEAD)"

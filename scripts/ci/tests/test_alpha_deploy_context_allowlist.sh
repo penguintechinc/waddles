@@ -95,6 +95,17 @@ run_case() {
             echo "  x never reached helm step"
             cases_failed=$((cases_failed + 1))
         fi
+        # fix/helm-platform-credentials -- the secret-existence preflight's
+        # kubectl call must carry the validated --context, never the
+        # ambient/default context, once the allowlist check has passed.
+        if grep -q "STUB-CALLED kubectl --context $ctx get secret waddlebot-platform-credentials" "$LOG_FILE"; then
+            echo "  - platform-credentials preflight used --context $ctx"
+            cases_passed=$((cases_passed + 1))
+        else
+            echo "  x platform-credentials preflight did not use --context $ctx"
+            cases_failed=$((cases_failed + 1))
+            cat "$LOG_FILE"
+        fi
     else
         if [ "$exit_code" -ne 0 ]; then
             echo "  - exit code $exit_code (non-zero, expected)"
