@@ -19,6 +19,14 @@ global:
   imageTag: "ci"
   imagePullPolicy: Never      # forces use of the kind-loaded image; a cache-miss must fail loudly, never fall back to a network pull
 
+# The workflow pre-creates the namespace via `kubectl create namespace` (before
+# `helm install`) so it can seed waddlebot-platform-credentials ahead of time --
+# exactly how a real operator provisions a Secret before first install (gh-478).
+# values.yaml's namespaceCreate:true default would then have the chart's own
+# templates/namespace.yaml try to adopt that already-existing, non-Helm-owned
+# Namespace and fail install with "cannot be imported into the current release".
+namespaceCreate: false
+
 # Dummy, obviously-fake platform credentials -- CI never talks to real Discord/Twitch.
 # waddlebot-platform-credentials is created out-of-band by the workflow (kubectl create
 # secret) BEFORE `helm install`, exactly like a real operator would before first install,
@@ -47,6 +55,14 @@ pipeline:
       replicas: 1
     svcActionRust:
       replicas: 1
+    # No Dockerfile exists for bundle-executor yet (values.yaml's own KNOWN GAPS
+    # comment) and it isn't in the workflow's kind-load image list -- disabling
+    # both here isn't a scope-cut, it's the only image reference that can't be
+    # satisfied at all right now.
+    bundleExecutor:
+      enabled: false
+    bundleExecutorAction:
+      enabled: false
   migrationsJob:
     enabled: true
   coreBundleSeeder:
@@ -57,26 +73,47 @@ pipeline:
     enabled: false
   svcAction:
     enabled: false
+  # Not in the workflow's 6-image kind-load list -- correct keys are
+  # pipeline.svcPresentation/svcStreaming/hubWebui, NOT the top-level
+  # "presentation:"/"streaming:" this file previously set (those paths don't
+  # match any `{{- if }}` in the chart, so they silently disabled nothing and
+  # both services sat in ImagePullBackOff for their alpha localhost:32000
+  # image references every run).
+  svcPresentation:
+    enabled: false
+  svcStreaming:
+    enabled: false
+  hubWebui:
+    enabled: false   # webui image isn't built by this workflow either
 
 modules:
+  # Pre-existing, PR-480-independent drift: modules.hub is the legacy admin-panel
+  # Deployment (values.yaml modules.hub.port: 8060, PORT=8060 env), but its image
+  # field ("waddlebot-hub-api") now resolves to the NEW hub_api Dockerfile/app,
+  # which hardcodes port 8204 and ignores $PORT entirely -- so modules.hub's
+  # readiness/liveness probes (port 8060) can never succeed against that image,
+  # crash-looping regardless of this PR's changes. templates/hub-api.yaml's own
+  # header comment ("Coexists with those 2 legacy Deployments; cutover is a later
+  # task") confirms this is a known, unreconciled migration-in-progress gap, not
+  # something introduced here -- disabling for this workflow's scope rather than
+  # guessing at the intended cutover.
   hub:
-    enabled: true
-    replicas: 1
+    enabled: false
   router:
     enabled: false     # not required for install/upgrade correctness; cuts one image build
 
-presentation:
-  enabled: false
-streaming:
-  enabled: false
+reputation:
+  enabled: false   # own image (docker.io/waddlebot/reputation-module), not in the kind-load list
+egressProxy:
+  enabled: false   # values.yaml's own "SKELETON: no Dockerfile/CI image yet" -- allowlistSigning.secretName has no auto-provisioning wired up yet either (not in autoProvisionedKeys), so the pod can never reach Ready regardless of image availability
 posthog:
   enabled: false
 spire:
   enabled: false
 
 infrastructure:
-  minio:
-    enabled: true       # exercises the #479 immutable minio-init Job fix
+  seaweedfs:
+    enabled: true       # exercises the #479 immutable bucket-init Job fix (now aws-cli/SeaweedFS, gh-508)
   ollama:
     enabled: false
   qdrant:
