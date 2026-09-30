@@ -2,7 +2,7 @@
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-csharp-bundle-compile verify-ping-bundle-reproducible \
-        generate-minio-kms-key alpha-deploy
+        generate-seaweedfs-sse-key alpha-deploy
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -118,13 +118,14 @@ verify-ping-bundle-reproducible:
 generate-service-jwt-key:
 	@bash scripts/generate-service-jwt-key.sh
 
-# Generates a MinIO static KMS key and applies it as a Secret so at-rest
-# encryption (security.md Encryption: Storage) works outside alpha -- see
-# k8s/helm/waddlebot's infrastructure.minio.kms.secretName fail guard.
-# Usage: make generate-minio-kms-key KUBE_CONTEXT=dal2-beta [NAMESPACE=waddlebot]
-generate-minio-kms-key:
-	@test -n "$(KUBE_CONTEXT)" || { echo "ERROR: KUBE_CONTEXT is required, e.g. make generate-minio-kms-key KUBE_CONTEXT=dal2-beta" >&2; exit 1; }
-	@bash scripts/generate-minio-kms-key.sh --context "$(KUBE_CONTEXT)" $(if $(NAMESPACE),--namespace "$(NAMESPACE)",)
+# Generates a SeaweedFS SSE-S3 key-encryption-key and applies it as a Secret
+# so at-rest encryption (security.md Encryption: Storage) works outside alpha
+# -- see k8s/helm/waddlebot's infrastructure.seaweedfs.encryption.secretName
+# fail guard.
+# Usage: make generate-seaweedfs-sse-key KUBE_CONTEXT=dal2-beta [NAMESPACE=waddlebot]
+generate-seaweedfs-sse-key:
+	@test -n "$(KUBE_CONTEXT)" || { echo "ERROR: KUBE_CONTEXT is required, e.g. make generate-seaweedfs-sse-key KUBE_CONTEXT=dal2-beta" >&2; exit 1; }
+	@bash scripts/generate-seaweedfs-sse-key.sh --context "$(KUBE_CONTEXT)" $(if $(NAMESPACE),--namespace "$(NAMESPACE)",)
 
 # Builds+pushes images at HEAD's SHA (Rust svc-ingest/svc-process/svc-action into their
 # own "*-rust" repositories), then `helm upgrade --install` with only the image tag set --

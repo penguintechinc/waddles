@@ -1310,7 +1310,7 @@ dependencies = [
 [[package]]
 name = "penguin-connector-discord"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=b65e93c08d7955e750e55e3c9621a94901c22962#b65e93c08d7955e750e55e3c9621a94901c22962"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=79a32e9676dfa55e9561b7bf94cb7f69023b393c#79a32e9676dfa55e9561b7bf94cb7f69023b393c"
 dependencies = [
  "futures-util",
  "reqwest 0.13.4",
@@ -1325,7 +1325,7 @@ dependencies = [
 [[package]]
 name = "penguin-connector-twitch"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=b65e93c08d7955e750e55e3c9621a94901c22962#b65e93c08d7955e750e55e3c9621a94901c22962"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=79a32e9676dfa55e9561b7bf94cb7f69023b393c#79a32e9676dfa55e9561b7bf94cb7f69023b393c"
 dependencies = [
  "hex",
  "hmac",
@@ -1695,6 +1695,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "ryu",
+ "sha1_smol",
  "socket2",
  "tokio",
  "tokio-rustls",
@@ -2173,6 +2174,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "futures-util",
  "hmac",
  "http-body-util",
  "libc",

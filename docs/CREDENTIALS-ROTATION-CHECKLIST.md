@@ -86,22 +86,22 @@
 
 ## Storage Credentials
 
-### MinIO (S3-Compatible)
+### SeaweedFS (S3-Compatible)
 - **Environment Variables**:
-  - `MINIO_ROOT_USER` (default was: `waddlebot`)
-  - `MINIO_ROOT_PASSWORD` (default was: `waddlebot123`)
-- **Used By**: minio service, hub_module (S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY)
+  - `S3_ACCESS_KEY_ID` (default was: `waddlebot`)
+  - `S3_SECRET_ACCESS_KEY` (default was: `waddlebot-dev-secret`)
+- **Used By**: seaweedfs service, hub_module, video_proxy_module (S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY)
 - **Locations to Update**:
   - `.env` file
   - `docker-compose.yml`
   - K8s Secrets
   - Helm values.yaml
-- **Console Access**: MinIO web console at localhost:9001 (or configured domain)
+- **Master UI Access**: SeaweedFS master UI at localhost:9333 (or configured domain)
 - **Rotation Procedure**:
   1. Generate new secure credentials
-  2. Update .env or K8s secrets
-  3. Restart minio and hub services
-  4. Access MinIO console to verify
+  2. Update .env or K8s secrets (regenerates the `s3-identities.json` config on restart)
+  3. Restart seaweedfs and hub services
+  4. Verify via the SeaweedFS master UI
   5. Create new access keys if integrating with external systems
   6. Document rotation date in AUDIT log
 

@@ -36,8 +36,8 @@
 #     WADDLEBOT_ALPHA_MODULE_SECRET_KEY
 #     WADDLEBOT_ALPHA_SERVICE_API_KEY
 #     WADDLEBOT_ALPHA_ADMIN_PASSWORD
-#     WADDLEBOT_ALPHA_MINIO_ROOT_USER
-#     WADDLEBOT_ALPHA_MINIO_ROOT_PASSWORD
+#     WADDLEBOT_ALPHA_SEAWEEDFS_ROOT_USER
+#     WADDLEBOT_ALPHA_SEAWEEDFS_ROOT_PASSWORD
 #
 # =============================================================================
 
@@ -122,8 +122,8 @@ readonly REQUIRED_SECRET_VARS=(
     "WADDLEBOT_ALPHA_MODULE_SECRET_KEY"
     "WADDLEBOT_ALPHA_SERVICE_API_KEY"
     "WADDLEBOT_ALPHA_ADMIN_PASSWORD"
-    "WADDLEBOT_ALPHA_MINIO_ROOT_USER"
-    "WADDLEBOT_ALPHA_MINIO_ROOT_PASSWORD"
+    "WADDLEBOT_ALPHA_SEAWEEDFS_ROOT_USER"
+    "WADDLEBOT_ALPHA_SEAWEEDFS_ROOT_PASSWORD"
 )
 
 # Defaults
@@ -255,8 +255,8 @@ These are never defaulted and never committed. Set them before deploying, e.g.:
     export WADDLEBOT_ALPHA_MODULE_SECRET_KEY="$(openssl rand -hex 32)"
     export WADDLEBOT_ALPHA_SERVICE_API_KEY="$(openssl rand -hex 32)"
     export WADDLEBOT_ALPHA_ADMIN_PASSWORD="$(openssl rand -base64 24)"
-    export WADDLEBOT_ALPHA_MINIO_ROOT_USER="waddlebot-alpha"
-    export WADDLEBOT_ALPHA_MINIO_ROOT_PASSWORD="$(openssl rand -hex 16)"
+    export WADDLEBOT_ALPHA_SEAWEEDFS_ROOT_USER="waddlebot-alpha"
+    export WADDLEBOT_ALPHA_SEAWEEDFS_ROOT_PASSWORD="$(openssl rand -hex 16)"
 
 See docs/SECRETS_SETUP.md.
 EOF
@@ -276,9 +276,9 @@ global:
   initialAdmin:
     password: "${WADDLEBOT_ALPHA_ADMIN_PASSWORD}"
 infrastructure:
-  minio:
-    rootUser: "${WADDLEBOT_ALPHA_MINIO_ROOT_USER}"
-    rootPassword: "${WADDLEBOT_ALPHA_MINIO_ROOT_PASSWORD}"
+  seaweedfs:
+    rootUser: "${WADDLEBOT_ALPHA_SEAWEEDFS_ROOT_USER}"
+    rootPassword: "${WADDLEBOT_ALPHA_SEAWEEDFS_ROOT_PASSWORD}"
 EOF
 
     print_success "Required secrets present"
@@ -483,8 +483,8 @@ REQUIRED SECRETS (env vars, never defaulted/committed — see docs/SECRETS_SETUP
     WADDLEBOT_ALPHA_MODULE_SECRET_KEY
     WADDLEBOT_ALPHA_SERVICE_API_KEY
     WADDLEBOT_ALPHA_ADMIN_PASSWORD
-    WADDLEBOT_ALPHA_MINIO_ROOT_USER
-    WADDLEBOT_ALPHA_MINIO_ROOT_PASSWORD
+    WADDLEBOT_ALPHA_SEAWEEDFS_ROOT_USER
+    WADDLEBOT_ALPHA_SEAWEEDFS_ROOT_PASSWORD
 
 SERVICES (built/pushed as ${REGISTRY}/<service>:<tag>):
     hub-api                (hub_api/Dockerfile)

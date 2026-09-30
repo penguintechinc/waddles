@@ -1,0 +1,357 @@
+{{- if .Values.infrastructure.seaweedfs.enabled }}
+{{- if .Values.infrastructure.seaweedfs.encryption.enabled }}
+{{- if not .Values.infrastructure.seaweedfs.encryption.secretName }}
+{{- if ne .Values.global.deploymentTier "alpha" }}
+{{- fail "infrastructure.seaweedfs.enabled=true requires infrastructure.seaweedfs.encryption.secretName outside alpha (beta/gamma/production) -- at-rest encryption is mandatory (security.md Encryption), never disable infrastructure.seaweedfs.encryption.enabled to work around this. Pre-create the Secret via `make generate-seaweedfs-sse-key` / scripts/generate-seaweedfs-sse-key.sh (default name seaweedfs-sse-kek, key WEED_S3_SSE_KEK), then set infrastructure.seaweedfs.encryption.secretName via --set or an out-of-git values override / ExternalSecret. Only alpha may leave this unset (values-alpha.yaml documents its own default)." }}
+{{- end }}
+{{- end }}
+{{- end }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.infrastructure.seaweedfs.persistence.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: seaweedfs
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  accessModes:
+    - {{ .Values.infrastructure.seaweedfs.persistence.accessMode }}
+  {{- if .Values.infrastructure.seaweedfs.persistence.storageClass }}
+  storageClassName: {{ .Values.infrastructure.seaweedfs.persistence.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.infrastructure.seaweedfs.persistence.size }}
+---
+# SeaweedFS bucket initialization Job (creates bucketName + recordings if they
+# don't exist, then sets default SSE-S3 bucket encryption) -- replaces the
+# former MinIO `mc`-based minio-init Job (chrislusf/seaweedfs is Apache-2.0;
+# the SeaweedFS S3 gateway is AWS-S3-API-compatible so the stock aws-cli works
+# unmodified, no vendor-specific client needed).
+#
+# post-install/post-upgrade hook + before-hook-creation delete policy for the
+# same reason as before: Job.spec.template is immutable in-place, so a plain
+# Job would break every `helm upgrade` once it exists from an earlier release.
+# post- (not pre-) hook because this Job talks to the SeaweedFS Service over
+# the network -- it needs the Deployment/Service/PVC above already created,
+# which post-install/post-upgrade guarantees. backoffLimit covers the
+# transient case where the SeaweedFS pod is created but not yet Ready. Weight
+# "1" runs it before core-bundle-seeder-job.yaml's weight "5" in case seeded
+# bundles ever need the buckets to exist first.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seaweedfs-bucket-init
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: seaweedfs
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: storage-init
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: seaweedfs-bucket-init
+        image: {{ .Values.infrastructure.seaweedfs.bucketInitImage }}
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          export AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID}"
+          export AWS_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY}"
+          export AWS_DEFAULT_REGION="us-east-1"
+          ENDPOINT="http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
+          # "recordings" (svc-streaming egress) and bundleExecutor.bucketName
+          # ("waddles-bundles", core/bundle_executor's BUNDLE_BUCKET_NAME) --
+          # both consumers expect their bucket to already exist; previously
+          # only bucketName + "recordings" were created here, leaving
+          # "waddles-bundles" as a pre-existing gap.
+          for bucket in "{{ .Values.infrastructure.seaweedfs.bucketName }}" "recordings" "{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}"; do
+            aws --endpoint-url "$ENDPOINT" s3 mb "s3://${bucket}" --region us-east-1 2>&1 | grep -qi "already" && true || true
+            aws --endpoint-url "$ENDPOINT" s3api head-bucket --bucket "${bucket}" 2>/dev/null \
+              || aws --endpoint-url "$ENDPOINT" s3api create-bucket --bucket "${bucket}" --region us-east-1
+          {{- if and .Values.infrastructure.seaweedfs.encryption.enabled .Values.infrastructure.seaweedfs.encryption.autoEncryptBucket .Values.infrastructure.seaweedfs.encryption.secretName }}
+            # Default bucket encryption (SSE-S3) -- objects written without an
+            # explicit ServerSideEncryption header are still encrypted at rest,
+            # requires WEED_S3_SSE_KEK to already be configured on the server.
+            aws --endpoint-url "$ENDPOINT" s3api put-bucket-encryption --bucket "${bucket}" \
+              --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+          {{- end }}
+          done
+          aws --endpoint-url "$ENDPOINT" s3 ls
+          echo "Buckets {{ .Values.infrastructure.seaweedfs.bucketName }}, recordings, {{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }} initialized successfully"
+        env:
+        # Dedicated hook-scoped "bucket-init" identity (Admin) -- never the
+        # shared rootUser/rootPassword admin credential, and never mounted by
+        # any long-running Deployment. See values.yaml
+        # infrastructure.seaweedfs.identities.bucketInit.
+        - name: S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: BUCKET_INIT_S3_ACCESS_KEY_ID
+        - name: S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: BUCKET_INIT_S3_SECRET_ACCESS_KEY
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: seaweedfs
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: seaweedfs
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: seaweedfs
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: seaweedfs
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: storage
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: seaweedfs
+        image: {{ .Values.infrastructure.seaweedfs.image }}
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          mkdir -p /etc/seaweedfs
+          # Least-privilege S3 identities, one per workload (feature/seaweedfs-object-storage),
+          # replacing the former single "waddlebot" identity that granted every consumer full
+          # Read/Write/List/Tagging/Admin across every bucket -- that identity has been
+          # REMOVED entirely (no unscoped/full-access identity remains except the
+          # hook-scoped, never-Deployment-mounted "bucket-init" below). Bucket-scoped actions
+          # ("Action:bucket") restrict an identity's Read/Write/List/Tagging grant to exactly
+          # the bucket it owns -- see SeaweedFS's s3.config IAM docs.
+          cat > /etc/seaweedfs/s3-identities.json <<EOF
+          {
+            "identities": [
+              {
+                "name": "hub-api",
+                "credentials": [
+                  {"accessKey": "${HUB_API_S3_ACCESS_KEY_ID}", "secretKey": "${HUB_API_S3_SECRET_ACCESS_KEY}"}
+                ],
+                "actions": [
+                  "Read:{{ .Values.infrastructure.seaweedfs.bucketName }}",
+                  "Write:{{ .Values.infrastructure.seaweedfs.bucketName }}",
+                  "List:{{ .Values.infrastructure.seaweedfs.bucketName }}",
+                  "Tagging:{{ .Values.infrastructure.seaweedfs.bucketName }}"
+                ]
+              },
+              {
+                "name": "bundle-executor",
+                "credentials": [
+                  {"accessKey": "${DATAPLANE_S3_ACCESS_KEY_ID}", "secretKey": "${DATAPLANE_S3_SECRET_ACCESS_KEY}"}
+                ],
+                "actions": [
+                  "Read:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}",
+                  "List:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}"
+                ]
+              },
+              {
+                "name": "bucket-init",
+                "credentials": [
+                  {"accessKey": "${BUCKET_INIT_S3_ACCESS_KEY_ID}", "secretKey": "${BUCKET_INIT_S3_SECRET_ACCESS_KEY}"}
+                ],
+                "actions": ["Admin"]
+              },
+              {
+                "name": "svc-streaming",
+                "credentials": [
+                  {"accessKey": "${STREAMING_S3_ACCESS_KEY_ID}", "secretKey": "${STREAMING_S3_SECRET_ACCESS_KEY}"}
+                ],
+                "actions": ["Read:recordings", "Write:recordings"]
+              }
+            ]
+          }
+          EOF
+          exec weed server \
+            -dir=/data \
+            -s3 \
+            -s3.port={{ .Values.infrastructure.seaweedfs.s3Port }} \
+            -s3.config=/etc/seaweedfs/s3-identities.json \
+            -master.port={{ .Values.infrastructure.seaweedfs.masterPort }} \
+            -volume.port=8080 \
+            -filer=true \
+            -filer.port=8888 \
+            -ip=0.0.0.0
+        ports:
+        - name: s3
+          containerPort: {{ .Values.infrastructure.seaweedfs.s3Port }}
+          protocol: TCP
+        - name: master
+          containerPort: {{ .Values.infrastructure.seaweedfs.masterPort }}
+          protocol: TCP
+        env:
+        - name: HUB_API_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: HUB_API_S3_ACCESS_KEY_ID
+        - name: HUB_API_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: HUB_API_S3_SECRET_ACCESS_KEY
+        - name: DATAPLANE_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: DATAPLANE_S3_ACCESS_KEY_ID
+        - name: DATAPLANE_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: DATAPLANE_S3_SECRET_ACCESS_KEY
+        - name: BUCKET_INIT_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: BUCKET_INIT_S3_ACCESS_KEY_ID
+        - name: BUCKET_INIT_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: BUCKET_INIT_S3_SECRET_ACCESS_KEY
+        - name: STREAMING_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: STREAMING_S3_ACCESS_KEY_ID
+        - name: STREAMING_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: STREAMING_S3_SECRET_ACCESS_KEY
+        {{- if and .Values.infrastructure.seaweedfs.encryption.enabled .Values.infrastructure.seaweedfs.encryption.secretName }}
+        - name: WEED_S3_SSE_KEK
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.infrastructure.seaweedfs.encryption.secretName }}
+              key: {{ .Values.infrastructure.seaweedfs.encryption.secretKey }}
+        {{- end }}
+        volumeMounts:
+        - name: seaweedfs-data
+          mountPath: /data
+        - name: seaweedfs-etc
+          mountPath: /etc/seaweedfs
+        - name: tmp
+          mountPath: /tmp
+        resources:
+          requests:
+            memory: {{ .Values.infrastructure.seaweedfs.resources.requests.memory }}
+            cpu: {{ .Values.infrastructure.seaweedfs.resources.requests.cpu }}
+          limits:
+            memory: {{ .Values.infrastructure.seaweedfs.resources.limits.memory }}
+            cpu: {{ .Values.infrastructure.seaweedfs.resources.limits.cpu }}
+        livenessProbe:
+          tcpSocket:
+            port: s3
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 20
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: s3
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 20
+          failureThreshold: 3
+      volumes:
+      - name: seaweedfs-data
+        persistentVolumeClaim:
+          claimName: {{ .Values.infrastructure.seaweedfs.persistence.name }}
+      - name: seaweedfs-etc
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.infrastructure.seaweedfs.service.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: seaweedfs
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: storage
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  type: {{ .Values.infrastructure.seaweedfs.service.type }}
+  ports:
+  - port: {{ .Values.infrastructure.seaweedfs.service.s3Port }}
+    targetPort: s3
+    protocol: TCP
+    name: s3
+    {{- if and (eq .Values.infrastructure.seaweedfs.service.type "NodePort") .Values.infrastructure.seaweedfs.service.nodePortS3 }}
+    nodePort: {{ .Values.infrastructure.seaweedfs.service.nodePortS3 }}
+    {{- end }}
+  - port: {{ .Values.infrastructure.seaweedfs.service.masterPort }}
+    targetPort: master
+    protocol: TCP
+    name: master
+    {{- if and (eq .Values.infrastructure.seaweedfs.service.type "NodePort") .Values.infrastructure.seaweedfs.service.nodePortMaster }}
+    nodePort: {{ .Values.infrastructure.seaweedfs.service.nodePortMaster }}
+    {{- end }}
+  selector:
+    app.kubernetes.io/name: seaweedfs
+    app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}

@@ -37,6 +37,16 @@ use crate::telemetry::ReceiverHealthMetrics;
 pub trait GatewayChannel: Send {
     /// Reads the next chat message, `Ok(None)` on a clean close.
     async fn next_chat_message(&mut self) -> Result<Option<ChatMessage>, DiscordError>;
+
+    /// A snapshot of this session's `session_id`/`seq`/`resume_gateway_url`
+    /// for [`crate::ingest::discord_identify_budget::SessionStore`] to
+    /// persist, enabling a future `RESUME` instead of a fresh `IDENTIFY`.
+    /// Default `None` (nothing to persist) -- the real `GatewaySession<S>`
+    /// impl below overrides this with
+    /// [`GatewaySession::session_info`][penguin_connector_discord::gateway::GatewaySession::session_info].
+    fn session_snapshot(&self) -> Option<crate::ingest::discord_identify_budget::StoredSession> {
+        None
+    }
 }
 
 impl<S> GatewayChannel for GatewaySession<S>
@@ -45,6 +55,10 @@ where
 {
     async fn next_chat_message(&mut self) -> Result<Option<ChatMessage>, DiscordError> {
         GatewaySession::next_chat_message(self).await
+    }
+
+    fn session_snapshot(&self) -> Option<crate::ingest::discord_identify_budget::StoredSession> {
+        GatewaySession::session_info(self).map(Into::into)
     }
 }
 
@@ -58,12 +72,37 @@ pub trait GatewayConnector: Send + Sync {
     type Channel: GatewayChannel;
     /// Establishes one new connection (connect + `HELLO`/`IDENTIFY`).
     async fn connect(&self) -> Result<Self::Channel, DiscordError>;
+
+    /// Attempts to resume a prior session via `OP_RESUME` instead of a
+    /// fresh `HELLO`/`IDENTIFY` handshake -- see
+    /// `crate::ingest::discord_identify_budget::BudgetedResumingConnector`,
+    /// which always tries this before ever consulting the distributed
+    /// IDENTIFY budget (spec §2.5, RESUME is exempt from Discord's
+    /// IDENTIFY rate limit entirely). Default impl always reports the
+    /// session non-resumable: the real [`DiscordGatewayReceiver`] impl
+    /// below overrides this with a real
+    /// [`DiscordGatewayReceiver::resume`][penguin_connector_discord::gateway::DiscordGatewayReceiver::resume]
+    /// call; this default only serves hypothetical future transports that
+    /// have no resume support at all.
+    async fn resume(
+        &self,
+        _session: &crate::ingest::discord_identify_budget::StoredSession,
+    ) -> Result<Self::Channel, DiscordError> {
+        Err(DiscordError::SessionInvalidated { resumable: false })
+    }
 }
 
 impl GatewayConnector for DiscordGatewayReceiver {
     type Channel = GatewaySession<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
     async fn connect(&self) -> Result<Self::Channel, DiscordError> {
         DiscordGatewayReceiver::connect(self).await
+    }
+
+    async fn resume(
+        &self,
+        session: &crate::ingest::discord_identify_budget::StoredSession,
+    ) -> Result<Self::Channel, DiscordError> {
+        DiscordGatewayReceiver::resume(self, &session.clone().into()).await
     }
 }
 
@@ -95,13 +134,17 @@ pub fn source_id(guild_id: Option<&str>) -> String {
 ///   the gateway is never going to un-surprise us on, e.g. `UnexpectedOpcode`/
 ///   `Decode` during the handshake) stops this loop entirely instead of
 ///   backing off forever against a connection that can never succeed. The
-///   crate's own `ResumeRequested` (opcode 7, session resumable) vs
-///   `SessionInvalidated` (opcode 9, must re-`IDENTIFY`) distinction is
-///   surfaced via distinct log lines below; both still fall through to a
-///   fresh `connector.connect()` because this crate does not yet implement
-///   `OP_RESUME` (see [`penguin_connector_discord::gateway::DiscordError::ResumeRequested`]'s
-///   own doc comment) -- there is no different *action* to take yet, only
-///   a different thing to tell the operator.
+///   crate's own `ResumeRequested` (opcode 7) vs `SessionInvalidated`
+///   (opcode 9, carrying Discord's own `resumable` flag) distinction is
+///   surfaced via distinct log lines below; both still reconnect through
+///   `connector.connect()` here -- the RESUME-vs-IDENTIFY decision itself
+///   belongs one layer down, inside
+///   `ingest::discord_identify_budget::BudgetedResumingConnector::connect`,
+///   a decorator any `C: GatewayConnector` (including the real
+///   [`DiscordGatewayReceiver`]) can be wrapped in without this loop
+///   changing at all -- wiring that decorator into this module's own
+///   production `connector` construction is tracked separately, not done
+///   in this commit.
 /// - A [`DiscordError::GatewayClosed`] (a WebSocket close frame that carried
 ///   an explicit Discord close code) branches on its
 ///   [`CloseCodeClass`]: `Resumable` and `ReconnectFresh` both reconnect via
@@ -212,8 +255,8 @@ async fn run_loop<C, A, M>(
                                 tracing::warn!(platform = "discord", "gateway requested reconnect (resumable session), reconnecting");
                                 metrics.receiver_reconnect("discord", "session_resume_requested");
                             }
-                            DiscordError::SessionInvalidated => {
-                                tracing::warn!(platform = "discord", "gateway invalidated the session, re-identifying");
+                            DiscordError::SessionInvalidated { resumable } => {
+                                tracing::warn!(platform = "discord", resumable, "gateway invalidated the session");
                                 metrics.receiver_reconnect("discord", "session_invalidated");
                             }
                             DiscordError::GatewayClosed {
@@ -1084,5 +1127,83 @@ mod tests {
             metrics.reconnects.lock().unwrap().is_empty(),
             "a fatal close must never be recorded as a reconnect attempt"
         );
+    }
+
+    /// Exercises the real `OP_RESUME` wire handshake (penguin-libs PR #129)
+    /// end-to-end against an in-memory mock gateway -- a `tokio::io::duplex`
+    /// pipe driven the same way `penguin-connector-discord`'s own
+    /// `resume_handshake_sends_resume_and_receives_resumed` test drives it
+    /// (that crate has no separately-exported "mock gateway" module; this
+    /// is the same public-API technique, not a stub). Proves this crate's
+    /// real `GatewaySession::resume_handshake` sends `RESUME` (not
+    /// `IDENTIFY`) with the stored session id/seq, and that this module's
+    /// own [`GatewayChannel::session_snapshot`] impl (`GatewaySession::
+    /// session_info`) correctly reports the resumed session afterward --
+    /// the exact glue [`crate::ingest::discord_identify_budget`]'s
+    /// `BudgetedResumingConnector` depends on.
+    #[tokio::test]
+    async fn real_resume_handshake_against_a_mock_gateway_sends_resume_not_identify() {
+        use futures_util::{SinkExt, StreamExt};
+        use penguin_connector_discord::gateway::GatewaySessionInfo;
+        use tokio_tungstenite::tungstenite::{protocol::Role, Message};
+
+        let (client_io, server_io) = tokio::io::duplex(16384);
+        let mut server_ws =
+            tokio_tungstenite::WebSocketStream::from_raw_socket(server_io, Role::Server, None)
+                .await;
+        let client_ws =
+            tokio_tungstenite::WebSocketStream::from_raw_socket(client_io, Role::Client, None)
+                .await;
+
+        let stored_session = crate::ingest::discord_identify_budget::StoredSession {
+            session_id: "sess-abc".to_string(),
+            seq: Some(7),
+            resume_gateway_url: "wss://resume.example".to_string(),
+        };
+
+        let send_hello = server_ws.send(Message::text(
+            r#"{"op":10,"d":{"heartbeat_interval":60000}}"#,
+        ));
+        let session_info = GatewaySessionInfo::from(stored_session.clone());
+        let handshake = GatewaySession::resume_handshake(client_ws, "test-token", &session_info);
+        let (send_result, handshake_result) = tokio::join!(send_hello, handshake);
+        send_result.expect("send hello");
+        let mut resumed_channel = handshake_result.expect("resume handshake succeeds");
+
+        // The mock gateway received `RESUME` (opcode 6), never `IDENTIFY`.
+        let resume_frame = server_ws
+            .next()
+            .await
+            .expect("resume frame")
+            .expect("ok frame");
+        let payload: serde_json::Value =
+            serde_json::from_str(&resume_frame.into_text().expect("text frame"))
+                .expect("decode resume frame");
+        assert_eq!(payload["op"], 6, "must send OP_RESUME, not OP_IDENTIFY");
+        assert_eq!(payload["d"]["session_id"], "sess-abc");
+        assert_eq!(payload["d"]["seq"], 7);
+
+        // Our own `GatewayChannel::session_snapshot` glue must surface the
+        // real resumed session (not the default `None`).
+        let snapshot = GatewayChannel::session_snapshot(&resumed_channel)
+            .expect("resumed session has a snapshot");
+        assert_eq!(snapshot, stored_session);
+
+        // A dispatch after RESUME (no fresh READY -- Discord replays
+        // missed dispatches then RESUMED) still flows through
+        // `next_chat_message` normally.
+        server_ws
+            .send(Message::text(
+                r#"{"op":0,"s":8,"t":"MESSAGE_CREATE","d":{"id":"1","channel_id":"2",
+                   "author":{"id":"3","username":"zed","bot":false},"content":"post-resume"}}"#,
+            ))
+            .await
+            .expect("send message_create");
+        let msg = resumed_channel
+            .next_chat_message()
+            .await
+            .expect("no transport error")
+            .expect("message present");
+        assert_eq!(msg.content, "post-resume");
     }
 }
