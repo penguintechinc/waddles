@@ -58,6 +58,14 @@ spec:
             name: {{ include "waddlebot.fullname" . }}-config
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
+        # fix/helm-platform-credentials -- OAuth app client IDs/secrets, AWS/GCP,
+        # WaddleAI, and PostHog API key (hub_api/services/platform_integrations_crypto.py
+        # and Connections OAuth-flow initiation) come from the operator-managed
+        # platform-credentials Secret, never the chart-rendered `-secrets` Secret.
+        # `optional: true`: hub-api starts fine with zero platforms configured.
+        - secretRef:
+            name: {{ include "waddlebot.platformCredentialsSecretName" . }}
+            optional: true
         # Per-service EdDSA machine JWT signing key (feature/eddsa-machine-jwt,
         # security review HIGH finding) -- SERVICE_JWT_ACTIVE_KID and
         # SERVICE_JWT_PRIVATE_KEY_<kid> land directly as env vars from the
@@ -108,6 +116,23 @@ spec:
         # added here.
         - name: CONNECTIONS_STATE_TTL_S
           value: {{ .Values.pipeline.hubApi.connectionsStateTtlS | quote }}
+        # feature/seaweedfs-object-storage -- least-privilege "hub-api" S3 identity
+        # (Read/Write/List/Tagging, scoped to bucketName only -- see
+        # templates/infrastructure/seaweedfs.yaml's s3-identities.json), overriding the
+        # admin-identity S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY that would otherwise reach
+        # this container via the envFrom.secretRef block above (Kubernetes resolves `env`
+        # after `envFrom`, so an explicit entry here always wins on a name collision).
+        # hub_api/services/storage_service.py reads exactly these two var names.
+        - name: S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: HUB_API_S3_ACCESS_KEY_ID
+        - name: S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: HUB_API_S3_SECRET_ACCESS_KEY
         - name: CREDENTIAL_ENCRYPTION_KEY
           valueFrom:
             secretKeyRef:
