@@ -1,0 +1,54 @@
+name: Core bundles (reproducible build gate)
+
+# Regression gate for the core-bundle-seeder's 409 digest_conflict incident: the seeder's
+# app_versions table is immutable per (app_id, version), so a non-reproducible build of
+# waddles.core.example.ping/pyping permanently burns a version slot the moment two different
+# environments compute two different digests for it. scripts/verify-core-bundles-reproducible.sh
+# builds bundles/Dockerfile.core-bundles TWICE, --no-cache, and asserts both ping.wasm and
+# pyping.wasm hash identically across the two builds -- a check that must prove it actually ran
+# on every change under the paths below (critical-rules.md Verification Integrity).
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'bundles/Dockerfile.core-bundles'
+      - 'bundles/core-bundles.yaml'
+      - 'bundles/rust/ping/**'
+      - 'bundles/python/pyping/**'
+      - 'sdk/waddle-sdk-rs/**'
+      - 'sdk/waddle-sdk/src/**'
+      - 'wit/waddle-bundle/**'
+      - 'scripts/verify-core-bundles-reproducible.sh'
+      - '.github/workflows/core-bundles-reproducible.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'bundles/Dockerfile.core-bundles'
+      - 'bundles/core-bundles.yaml'
+      - 'bundles/rust/ping/**'
+      - 'bundles/python/pyping/**'
+      - 'sdk/waddle-sdk-rs/**'
+      - 'sdk/waddle-sdk/src/**'
+      - 'wit/waddle-bundle/**'
+      - 'scripts/verify-core-bundles-reproducible.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reproducible-build:
+    name: two independent --no-cache builds must be byte-identical
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      # Docker Engine + buildx ship preinstalled on ubuntu-latest runners -- no setup-buildx
+      # action needed for a plain `docker build` (no multi-platform/cache-export requirement
+      # here; the whole point is a from-scratch, uncached build).
+      - name: Verify core bundles are byte-reproducible (ping + pyping)
+        run: bash scripts/verify-core-bundles-reproducible.sh

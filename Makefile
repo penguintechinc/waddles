@@ -3,7 +3,7 @@
         seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll \
         build-superpenguin-roll-bundle test-csharp-bundle-compile \
-        verify-ping-bundle-reproducible generate-seaweedfs-sse-key alpha-deploy
+        verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -126,11 +126,12 @@ build-superpenguin-roll-bundle:
 test-csharp-bundle-compile:
 	@cd core/bundle_compiler && cargo test --locked builds_csping_via_docker -- --ignored --nocapture
 
-# Proves bundles/rust/ping's WASI 0.2 component build (bundles/Dockerfile.core-bundles's
-# rust-bundle-builder stage) is byte-reproducible -- two independent --no-cache builds must
-# produce an identical sha256. See scripts/verify-ping-bundle-reproducible.sh for why.
-verify-ping-bundle-reproducible:
-	@bash scripts/verify-ping-bundle-reproducible.sh
+# Proves bundles/Dockerfile.core-bundles's two example-bundle artifacts (ping.wasm from the
+# rust-bundle-builder stage, pyping.wasm from the python-bundle-builder stage) are both
+# byte-reproducible -- two independent --no-cache builds of the full image must produce
+# identical sha256 for each. See scripts/verify-core-bundles-reproducible.sh for why.
+verify-core-bundles-reproducible:
+	@bash scripts/verify-core-bundles-reproducible.sh
 
 # Generates the Ed25519 signing keypair for hub-api's per-service machine
 # JWTs (feature/eddsa-machine-jwt) and applies the resulting k8s Secret --

@@ -1,9 +1,9 @@
 schema_version: 2
 app_id: waddles.core.example.ping
 name: Ping Example Bundle (Rust)
-# See hub-manifest.yaml's own comment -- 1.0.0 is permanently retired
-# (fix/core-bundle-reproducible-ping), keep these two files' version fields in lockstep.
-version: 1.0.1
+# See hub-manifest.yaml's own comment -- 1.0.0 AND 1.0.1 are permanently retired
+# (fix/reproducible-core-bundles), keep these two files' version fields in lockstep.
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -43,6 +43,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.1"
-  min_version: "1.0.1"
+  tested_with: "1.0.2"
+  min_version: "1.0.2"
   max_version: null
