@@ -37,8 +37,9 @@ APScheduler>=3.10.4
 # Caching & Session
 redis>=5.0.1
 
-# Storage
-minio>=7.2.5
+# Storage (S3-compatible: SeaweedFS in dev/beta, real S3 in prod --
+# bundled video_proxy_module's client, see core/video_proxy_module/config.py)
+boto3>=1.35.0,<2.0.0
 
 # Utilities
 python-dotenv>=1.0.0

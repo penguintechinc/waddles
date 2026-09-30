@@ -39,7 +39,7 @@ Initial comprehensive documentation package for the video_proxy_module:
 - v0.1.0 is documentation-focused; code implementation underway
 - Transcoding pipeline design documented but not yet implemented
 - MarchProxy integration pattern defined but not yet integrated
-- MinIO storage for thumbnails designed but not yet implemented
+- SeaweedFS storage for thumbnails designed but not yet implemented
 - Credential refresh via Redis PubSub planned for next iteration
 
 ### Future Roadmap
@@ -47,14 +47,14 @@ Initial comprehensive documentation package for the video_proxy_module:
 **v0.2.0** (Planned):
 - Transcoding pipeline implementation (x264, x265, AV1)
 - MarchProxy gRPC integration for upstream RTMP handling
-- MinIO thumbnail storage and preview generation
+- SeaweedFS thumbnail storage and preview generation
 - Redis credential listener for OAuth token refresh
 - Performance optimizations (connection pooling tuning)
 
 **v0.3.0** (Planned):
 - Multi-bitrate adaptive streaming (ABR)
 - Custom webhook notifications for stream events
-- Stream recording and archival to MinIO
+- Stream recording and archival to SeaweedFS
 - Advanced analytics and metrics dashboard
 - WebRTC fallback for WebRTC-only platforms
 
