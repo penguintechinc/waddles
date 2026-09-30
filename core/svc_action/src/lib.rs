@@ -408,23 +408,42 @@ async fn build_stage_capabilities(
             return None;
         }
     };
-    let egress = Arc::new(egress::EgressGuard::new(
-        Arc::new(egress::ReqwestTransport::new()),
-        egress::EgressLimits {
-            allow_private_hosts: cli.egress_allow_private_hosts,
-            rate_limit_rps: cli.egress_rate_limit_rps,
-            rate_limit_burst: cli.egress_rate_limit_burst,
-            timeout: std::time::Duration::from_millis(cli.egress_timeout_ms),
-            max_redirects: cli.egress_max_redirects,
-            max_response_bytes: cli.egress_max_response_bytes,
-            // Not yet CLI-tunable -- see `EgressLimits::allowed_ports` doc.
-            allowed_ports: vec![443],
-            proxy_url: None,
-        },
-        catalog,
-        egress_denied_total,
-        flag_or_closed(&license, flags::BUNDLE_EGRESS_FLAG),
-    ));
+    // `CliConfig::validate` (run at `Config::load` time, before this
+    // function is ever reached) already parsed this successfully and
+    // enforced the alpha/local-only empty-denylist exception -- a parse
+    // failure here would mean startup validation was bypassed entirely, the
+    // same class of "should be impossible" case `spine_cfg`/`relay_conn`
+    // above handle by disabling capabilities rather than panicking.
+    let cluster_denylist = match cli.cluster_cidr_denylist() {
+        Ok(denylist) => denylist,
+        Err(err) => {
+            tracing::warn!(error = %err, "cluster CIDR denylist re-parse failed after startup validation passed; capabilities disabled (DenyAllCapabilities)");
+            return None;
+        }
+    };
+    let egress = Arc::new(
+        egress::EgressGuard::new(
+            Arc::new(egress::ReqwestTransport::new()),
+            egress::EgressLimits {
+                allow_private_hosts: false,
+                rate_limit_rps: cli.egress_rate_limit_rps,
+                rate_limit_burst: cli.egress_rate_limit_burst,
+                timeout: std::time::Duration::from_millis(cli.egress_timeout_ms),
+                max_redirects: cli.egress_max_redirects,
+                max_response_bytes: cli.egress_max_response_bytes,
+                // Not yet CLI-tunable -- see `EgressLimits::allowed_ports` doc.
+                allowed_ports: vec![443],
+                proxy_url: None,
+            },
+            catalog,
+            egress_denied_total,
+            flag_or_closed(&license, flags::BUNDLE_EGRESS_FLAG),
+        )
+        .with_instance_policy(Arc::new(std::sync::RwLock::new(
+            cli.instance_egress_policy(),
+        )))
+        .with_cluster_denylist(cluster_denylist),
+    );
     // `kv` reuses this same direct Valkey connection (cloned -- a cheap
     // handle clone over one shared TCP connection, not a second socket)
     // rather than opening a dedicated one (`crate::capabilities::

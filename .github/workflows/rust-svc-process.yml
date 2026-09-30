@@ -5,14 +5,12 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/svc_process/**'
-      - 'core/bundle_host_kv/**'
       - '.github/workflows/rust-svc-process.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
     branches: [main, 'release/**']
     paths:
       - 'core/svc_process/**'
-      - 'core/bundle_host_kv/**'
   workflow_dispatch:
 
 permissions:

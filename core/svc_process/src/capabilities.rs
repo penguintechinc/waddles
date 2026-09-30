@@ -241,6 +241,7 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// the caller's already-resolved numeric scope (`crate::spine::
     /// ProcessDeps::tenant_id`'s doc) -- never guessed here, and never
     /// defaulted to `0` internally the way this constructor used to.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         tenant: String,
         community: Option<String>,
@@ -830,19 +831,23 @@ mod tests {
 
     /// A [`StageCapabilities`] whose `egress` catalog declares exactly one
     /// `(host, methods)` entry for `waddles.bot.commands.default`, gated by
-    /// [`permissive_gate`] (same rationale as [`caps`]).
-    fn caps_with_egress_rule(host: &str, methods: &[&str]) -> StageCapabilities {
+    /// `gate`.
+    fn caps_with_egress_rule_and_gate(
+        host: &str,
+        methods: &[&str],
+        gate: Arc<CapabilityGate>,
+    ) -> StageCapabilities {
         let catalog = HttpEgressCatalog::new();
         catalog.update(
             "waddles.bot.commands.default",
-            EgressRuleRow {
-                egress: vec![(
+            EgressRuleRow::from_legacy_patterns(
+                vec![(
                     host.to_string(),
                     methods.iter().map(|m| m.to_string()).collect(),
                 )],
-                egress_rps: None,
-                granted_secret_refs: HashMap::new(),
-            },
+                None,
+                HashMap::new(),
+            ),
         );
         let egress = Arc::new(EgressGuard::new(
             Arc::new(ReqwestTransport::new()),
@@ -859,8 +864,55 @@ mod tests {
             0,
             0,
             egress,
-            permissive_gate(),
+            gate,
         )
+    }
+
+    /// A [`StageCapabilities`] whose `egress` catalog declares exactly one
+    /// `(host, methods)` entry for `waddles.bot.commands.default`, gated by
+    /// [`permissive_gate`] (same rationale as [`caps`]).
+    fn caps_with_egress_rule(host: &str, methods: &[&str]) -> StageCapabilities {
+        caps_with_egress_rule_and_gate(host, methods, permissive_gate())
+    }
+
+    /// [`permissive_gate`] plus an explicit instance-policy override
+    /// allowing `net.http.private-ip` (deny-by-default instance-wide, see
+    /// `bundle_capability_gate::instance_policy`'s module doc) -- isolates
+    /// the `http_denies_a_declared_host_that_is_actually_a_private_ip` test
+    /// to proving [`EgressGuard`]'s own SSRF address check, not the gate's
+    /// separate (and separately tested, `bundle_capability_gate::gate`'s
+    /// own suite) instance-policy denial.
+    fn permissive_gate_with_private_ip_allowed() -> Arc<CapabilityGate> {
+        let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+        snapshot.set(
+            bundle_capability_gate::GrantScopeKey {
+                tenant_id: 0,
+                community_id: 0,
+                app_id: "waddles.bot.commands.default".to_string(),
+                app_version: 0,
+            },
+            bundle_capability_gate::GrantSet {
+                permission_snapshot_hash: "test".to_string(),
+                grants: std::collections::HashMap::from([(
+                    "net.http.private-ip:10.0.0.5".to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: "net.http.private-ip:10.0.0.5".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                )]),
+            },
+        );
+        let instance_policy = bundle_capability_gate::InMemoryInstancePolicySnapshot::new();
+        instance_policy.set(
+            bundle_capability_gate::PermissionFamily::NetHttpPrivateIp,
+            bundle_capability_gate::InstanceAction::Allow,
+        );
+        Arc::new(CapabilityGate::new(
+            Arc::new(snapshot),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(instance_policy),
+        ))
     }
 
     fn caps_denied() -> StageCapabilities {
@@ -1224,10 +1276,7 @@ mod tests {
         // below for its fully-wired behavior, and the `http_*` tests below
         // for `http`'s gate-then-egress-guard behavior.
         let c = caps();
-        for capability in [
-            CapabilityKind::Db,
-            CapabilityKind::Flags,
-        ] {
+        for capability in [CapabilityKind::Db, CapabilityKind::Flags] {
             let err = c
                 .handle(call(capability, "anything", serde_json::json!({})))
                 .await
@@ -1277,14 +1326,18 @@ mod tests {
     /// is_forbidden_address`'s doc).
     #[tokio::test]
     async fn http_denies_a_declared_host_that_is_actually_a_private_ip() {
-        let err = caps_with_egress_rule("10.0.0.5", &["GET"])
-            .handle(call(
-                CapabilityKind::Http,
-                "send",
-                serde_json::json!({"method": "GET", "url": "https://10.0.0.5/"}),
-            ))
-            .await
-            .unwrap_err();
+        let err = caps_with_egress_rule_and_gate(
+            "10.0.0.5",
+            &["GET"],
+            permissive_gate_with_private_ip_allowed(),
+        )
+        .handle(call(
+            CapabilityKind::Http,
+            "send",
+            serde_json::json!({"method": "GET", "url": "https://10.0.0.5/"}),
+        ))
+        .await
+        .unwrap_err();
         assert_eq!(err.code, "ssrf_blocked_address");
     }
 
@@ -1339,11 +1392,11 @@ mod tests {
         let catalog = HttpEgressCatalog::new();
         catalog.update(
             "waddles.bot.commands.default",
-            EgressRuleRow {
-                egress: vec![("93.184.216.34".to_string(), vec!["GET".to_string()])],
-                egress_rps: None,
-                granted_secret_refs: HashMap::new(),
-            },
+            EgressRuleRow::from_legacy_patterns(
+                vec![("93.184.216.34".to_string(), vec!["GET".to_string()])],
+                None,
+                HashMap::new(),
+            ),
         );
         let egress = Arc::new(EgressGuard::new(
             Arc::new(FakeTransport(Arc::clone(&seen))),
@@ -1352,7 +1405,7 @@ mod tests {
             test_egress_metrics(),
             bundle_host_http::egress::boxed(StaticFlag(true)),
         ));
-        let caps = StageCapabilities::new(
+        let caps: StageCapabilities = StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
@@ -1420,14 +1473,14 @@ mod tests {
         let catalog = HttpEgressCatalog::new();
         catalog.update(
             "waddles.bot.commands.default",
-            EgressRuleRow {
-                egress: vec![("93.184.216.34".to_string(), vec!["POST".to_string()])],
-                egress_rps: None,
-                granted_secret_refs: HashMap::from([(
+            EgressRuleRow::from_legacy_patterns(
+                vec![("93.184.216.34".to_string(), vec!["POST".to_string()])],
+                None,
+                HashMap::from([(
                     "TOKEN_REF".to_string(),
                     "SVC_PROCESS_EGRESS_TEST_TOKEN".to_string(),
                 )]),
-            },
+            ),
         );
         let egress = Arc::new(EgressGuard::new(
             Arc::new(FakeTransport(Arc::clone(&seen))),
@@ -1436,7 +1489,7 @@ mod tests {
             test_egress_metrics(),
             bundle_host_http::egress::boxed(StaticFlag(true)),
         ));
-        let caps = StageCapabilities::new(
+        let caps: StageCapabilities = StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
@@ -1649,13 +1702,19 @@ mod tests {
 
     #[tokio::test]
     async fn gate_denies_http_db_flags_without_a_grant() {
-        for capability in [
-            CapabilityKind::Http,
-            CapabilityKind::Db,
-            CapabilityKind::Flags,
+        // `Http` needs a well-formed `url` arg to even reach the gate
+        // (`extract_http_host` denies `invalid_args` first otherwise, module
+        // doc) -- `Db`/`Flags` don't parse their args before the gate call.
+        for (capability, args) in [
+            (
+                CapabilityKind::Http,
+                serde_json::json!({"method": "GET", "url": "https://api.example.com/"}),
+            ),
+            (CapabilityKind::Db, serde_json::json!({})),
+            (CapabilityKind::Flags, serde_json::json!({})),
         ] {
             let err = caps_denied()
-                .handle(call(capability, "anything", serde_json::json!({})))
+                .handle(call(capability, "anything", args))
                 .await
                 .unwrap_err();
             assert_eq!(err.code, "not_granted");
