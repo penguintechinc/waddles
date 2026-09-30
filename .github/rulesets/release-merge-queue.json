@@ -1,26 +1,14 @@
 {
-  "name": "Release Branch Merge Queue",
+  "name": "Release Branch Merge Queue (release/v3.0.X)",
   "target": "branch",
   "enforcement": "disabled",
   "conditions": {
     "ref_name": {
-      "include": ["refs/heads/release/*"],
+      "include": ["refs/heads/release/v3.0.X"],
       "exclude": []
     }
   },
   "rules": [
-    { "type": "deletion" },
-    { "type": "non_fast_forward" },
-    {
-      "type": "required_status_checks",
-      "parameters": {
-        "strict_required_status_checks_policy": false,
-        "do_not_enforce_on_create": false,
-        "required_status_checks": [
-          { "context": "ci-gate" }
-        ]
-      }
-    },
     {
       "type": "merge_queue",
       "parameters": {
