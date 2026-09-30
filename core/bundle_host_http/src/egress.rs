@@ -878,7 +878,13 @@ const CLOUD_METADATA_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0,
 /// [`is_forbidden_address`] falls through to its ordinary v6-specific
 /// checks -- an embedded address is judged by the *same* rules as the v4
 /// address it carries, never by the (differently-shaped) native-v6 rules.
-fn embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+///
+/// `pub`: reused by `egress_proxy::ip_policy` (security review follow-up,
+/// item 3) so its `cluster_cidrs`/`deny_cidrs` checks canonicalize the
+/// exact same way this crate's own `ClusterCidrDenylist`/`is_forbidden_
+/// address` do -- one canonicalization implementation for every deny-list
+/// comparison in the org, never a second copy that can silently drift.
+pub fn embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
     let seg = v6.segments();
     let o = v6.octets();
     let last_32 = || Ipv4Addr::new(o[12], o[13], o[14], o[15]);
@@ -952,8 +958,10 @@ fn is_teredo_v6(ip: Ipv6Addr) -> bool {
 /// form) so this stays consistent with [`is_forbidden_address`]'s and
 /// [`is_private_range`]'s existing canonicalization.
 ///
+/// `pub`, same cross-crate-reuse rationale as [`embedded_ipv4`].
+///
 /// // regression: mapped-v6 cluster bypass
-fn canonicalize_ip(ip: IpAddr) -> IpAddr {
+pub fn canonicalize_ip(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(v6) => embedded_ipv4(v6).map(IpAddr::V4).unwrap_or(ip),
         IpAddr::V4(_) => ip,
