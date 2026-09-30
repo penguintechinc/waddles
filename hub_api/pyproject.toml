@@ -9,6 +9,11 @@ select = ["E", "W", "F", "I", "N", "D", "UP", "B", "ASYNC", "S"]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
+# grpc_tools.protoc-generated stubs (proto/waddles/hub/internal/v1/*.proto
+# -> scripts/compile_protos_v1.sh) -- never hand-edited, so ruff's D/N/E
+# rules on generated PascalCase RPC method names and missing docstrings
+# don't apply. Regenerate, don't reformat, on a proto change.
+"grpc_internal/pb/**" = ["D", "N802", "E501", "I001", "UP", "B"]
 # Test names are self-documenting (pytest convention); S105/S106/S107 flag
 # fixed test-only passwords/JWT secrets (e.g. mirroring flask_core's own
 # `os.getenv("SECRET_KEY", "change-me-in-production")` default, or seed-user

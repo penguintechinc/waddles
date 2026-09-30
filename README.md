@@ -71,7 +71,7 @@ For full bundle creation guidelines, see the [`App Bundle SDK Specification`](do
 - **Web UI (`hub-webui`)**: ExpressScript + ReactJS (React 18), Vite, TailwindCSS v4
 - **App Bundle Runtime**: Sandboxed WASI 0.2 WASM components in gVisor (`runsc`)
 - **Pipeline Spine**: Valkey Streams (TLS + ACL authenticated)
-- **Storage & Infrastructure**: PostgreSQL, Valkey, MinIO (S3), Qdrant, Docker, Kubernetes (Helm v3)
+- **Storage & Infrastructure**: PostgreSQL, Valkey, SeaweedFS (S3), Qdrant, Docker, Kubernetes (Helm v3)
 
 ## Quick Start
 

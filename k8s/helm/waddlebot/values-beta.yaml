@@ -37,7 +37,7 @@ infrastructure:
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "384Mi" }
-  minio:
+  seaweedfs:
     enabled: false
   ollama:
     enabled: false
@@ -416,7 +416,7 @@ modules:
 sharedEnv:
   DB_HOST: "infra-postgres"
   REDIS_HOST: "infra-redis"
-  MINIO_ENDPOINT: "infra-minio:9000"
+  MINIO_ENDPOINT: "infra-seaweedfs:8333"
   QDRANT_HOST: "infra-qdrant"
   ROUTER_URL: "http://waddlebot-router:8000"
   HUB_URL: "http://waddlebot-hub-api:8060"
@@ -767,6 +767,22 @@ httproute:
 # Network Policies — enabled in beta for namespace isolation
 networkPolicy:
   enabled: true
+
+# Egress lockdown — MANDATORY from beta on (the fail guard in
+# infrastructure/egress-proxy.yaml blocks a render with this off).
+egressProxy:
+  enabled: true
+  environment: "beta"
+  replicas: 1
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits: { cpu: "250m", memory: "256Mi" }
+egressPolicy:
+  enabled: true
+  clusterCidrs:
+    podCidr: "10.244.0.0/16"      # dal2 — confirm against cluster CNI config before deploy
+    serviceCidr: "10.96.0.0/12"
+    nodeCidr: "10.0.0.0/8"
 
 presentation:
   image:

@@ -1,0 +1,78 @@
+// IdentityService: internal gRPC contract for the PII boundary hub-api
+// owns (security.md PII Tokenization). Called only by svc-ingest,
+// svc-process and svc-action over the mTLS-ready internal gRPC port --
+// see k8s/helm/waddlebot NetworkPolicy scoping and
+// hub_api/grpc_internal/interceptors.py's per-RPC scope enforcement.
+//
+// Every RPC requires a hub-api-issued EdDSA machine JWT (feature/eddsa-
+// machine-jwt, libs/flask_core/flask_core/service_jwt.py) in the
+// `authorization` gRPC metadata key, scoped per method below.
+syntax = "proto3";
+
+package waddles.hub.internal.v1;
+
+option go_package = "github.com/penguintechinc/waddles/gen/go/waddles/hub/internal/v1;hubinternalv1";
+
+// Mints and resolves ephemeral, per-tenant pseudonyms so svc-ingest/
+// svc-process/svc-action never handle raw platform identifiers or hub
+// user PII directly (security.md PII Tokenization: "the API server is
+// the PII boundary").
+service IdentityService {
+  // Batch-mints (or returns the existing) ephemeral pseudonym for each
+  // (tenant_id, platform, platform_user_id) tuple. Required scope:
+  // "identity:ephemeral:mint".
+  rpc MintEphemeralPseudonyms(MintEphemeralPseudonymsRequest) returns (MintEphemeralPseudonymsResponse);
+
+  // Resolves up to 100 UUIDs (hub_users.uuid OR ephemeral pseudonyms) to
+  // display names in one call, so callers batch instead of N+1. Required
+  // scope: "identity:displayname:read".
+  rpc ResolveDisplayNames(ResolveDisplayNamesRequest) returns (ResolveDisplayNamesResponse);
+}
+
+message MintEphemeralPseudonymRequest {
+  string tenant_id = 1;
+  string platform = 2;
+  string platform_user_id = 3;
+  // Display handle at time of mint -- stored only inside the hub-api PII
+  // boundary, never returned to the caller in this response.
+  string handle = 4;
+}
+
+message MintEphemeralPseudonymsRequest {
+  // Bounded the same as ResolveDisplayNames (<=100) so one abusive batch
+  // can't force an unbounded transaction inside the PII boundary.
+  repeated MintEphemeralPseudonymRequest items = 1;
+}
+
+message EphemeralPseudonym {
+  string platform_user_id = 1;
+  string pseudonym = 2;
+}
+
+message MintEphemeralPseudonymsResponse {
+  repeated EphemeralPseudonym pseudonyms = 1;
+}
+
+message ResolveDisplayNamesRequest {
+  string tenant_id = 1;
+  // Max 100 per call (security.md PII Tokenization / batch-not-N+1)
+  // -- enforced server-side; a larger batch fails with INVALID_ARGUMENT.
+  repeated string uuids = 2;
+}
+
+message ResolvedDisplayName {
+  string uuid = 1;
+  string display_name = 2;
+  // True if `uuid` resolved against hub_users.uuid; false if it resolved
+  // against an ephemeral pseudonym instead. Lets callers distinguish
+  // without a second lookup.
+  bool is_hub_user = 3;
+}
+
+message ResolveDisplayNamesResponse {
+  repeated ResolvedDisplayName names = 1;
+  // uuids from the request that resolved to neither a hub user nor a
+  // known pseudonym -- never an error, since a stale/evicted pseudonym
+  // is an expected condition, not a caller bug.
+  repeated string unresolved_uuids = 2;
+}

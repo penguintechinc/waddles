@@ -1,9 +1,10 @@
 ## Waddlebot - Production Environment Overrides
 #
-# feature/bundle-artifact-signing -- production has no full values-production.yaml yet (DO
-# prod cluster not built, see admin/.claude/rules/penguintech.md); this file exists ONLY to
-# carry the bundle-signing overrides the security review required per environment. Extend
-# in place once production's full topology lands, mirroring values-beta.yaml's shape.
+# feature/bundle-artifact-signing + feature/bundle-egress-gateway -- production has no full
+# values-production.yaml yet (DO prod cluster not built, see
+# admin/.claude/rules/penguintech.md); this file exists ONLY to carry the bundle-signing and
+# egress-proxy overrides those two PRs required per environment. Extend in place once
+# production's full topology lands, mirroring values-beta.yaml's shape.
 global:
   deploymentTier: "production"
   # PenguinTech images require a SHA256-digest pin in production (critical-rules.md
@@ -28,3 +29,23 @@ pipeline:
     #   bundleSigningPublicKeys:
     #     2026-09-prod-key1: "<base64 32-byte Ed25519 public key>"
     bundleSigningPublicKeys: {}
+
+# Egress lockdown — MANDATORY (fail guard blocks a render with this off).
+# PenguinTech prod resource tier (500m/1000m cpu, 512Mi/1Gi mem, replicas 3+) for the proxy.
+egressProxy:
+  enabled: true
+  environment: "production"
+  replicas: 3
+  resources:
+    requests: { cpu: "500m", memory: "512Mi" }
+    limits: { cpu: "1000m", memory: "1Gi" }
+
+egressPolicy:
+  enabled: true
+  clusterCidrs:
+    podCidr: "10.244.0.0/16"    # DigitalOcean DOKS default — confirm against cluster before deploy
+    serviceCidr: "10.96.0.0/12"
+    nodeCidr: "10.0.0.0/8"
+
+spire:
+  environment: "production"

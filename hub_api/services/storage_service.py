@@ -1,10 +1,10 @@
-"""Object storage for user-uploaded assets (avatars) -- S3/MinIO only.
+"""Object storage for user-uploaded assets (avatars) -- S3-compatible only.
 
 `app.py`'s own docstring states hub-api's rootless contract explicitly:
 "no filesystem writes outside LOG_DIR" -- so unlike Node's
 `storageService.js` (which defaults to local-disk storage in dev), this
 port has no local-filesystem backend at all; every environment writes to
-an S3-compatible bucket (MinIO in dev/beta, per this repo's existing
+an S3-compatible bucket (SeaweedFS in dev/beta, per this repo's existing
 infra conventions, real S3 in prod). Scoped to exactly what
 `profileController.js`'s avatar endpoints need (`uploadFile`/`deleteFile`/
 `isAllowedImageType`/`MAX_FILE_SIZES.avatar`) -- Node's full
@@ -44,7 +44,7 @@ def is_allowed_image_type(content_type: str) -> bool:
 def _client() -> Any:
     return boto3.client(
         "s3",
-        endpoint_url=os.getenv("S3_ENDPOINT_URL", "http://minio:9000"),
+        endpoint_url=os.getenv("S3_ENDPOINT_URL", "http://infra-seaweedfs:8333"),
         aws_access_key_id=os.getenv("S3_ACCESS_KEY_ID", ""),
         aws_secret_access_key=os.getenv("S3_SECRET_ACCESS_KEY", ""),
         region_name=os.getenv("S3_REGION", "us-east-1"),
