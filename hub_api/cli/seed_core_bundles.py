@@ -323,7 +323,18 @@ async def _ensure_app_catalog_row(install_dal: AsyncDB, manifest: BundleManifest
     )
     logger.info(
         "core-bundle-seeder: app_catalog row created",
-        extra={"app_id": manifest.app_id, "module": manifest.module},
+        # "module" collides with logging.LogRecord's own reserved `module` attribute
+        # (the calling module's name, always present on every record) -- passing it
+        # via `extra` unconditionally raises `KeyError: "Attempt to overwrite 'module'
+        # in LogRecord"` from Logger.makeRecord(), regardless of handler/formatter.
+        # This crashed EVERY first-time seed of a catalog entry (the only time this
+        # branch's log call fires -- a pre-existing app_catalog row skips it entirely),
+        # surfacing as a generic "bundle failed" ApiError-shaped failure on a genuinely
+        # fresh install. Renamed to bundle_module -- never reuse a LogRecord reserved
+        # name (message/asctime/name/msg/args/levelname/levelno/pathname/filename/
+        # module/exc_info/exc_text/stack_info/lineno/funcName/created/msecs/
+        # relativeCreated/thread/threadName/processName/process) in any `extra` dict.
+        extra={"app_id": manifest.app_id, "bundle_module": manifest.module},
     )
 
 
