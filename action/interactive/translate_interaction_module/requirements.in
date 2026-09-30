@@ -9,7 +9,7 @@ grpcio==1.83.0
 grpcio-tools==1.83.0
 protobuf==7.36.0
 cryptography==50.0.1
-pyjwt==2.13.0
+pyjwt==2.14.0
 pydantic==2.13.4
 deep-translator==1.11.4
 langdetect==1.0.9
@@ -17,6 +17,6 @@ lingua-language-detector==2.1.1
 numpy==1.26.4
 fasttext-wheel==0.9.2
 soupsieve==2.9.2
-urllib3==2.7.0
+urllib3==2.8.0
 # Optional: google-cloud-translate>=3.0.0
 setuptools==84.0.0
