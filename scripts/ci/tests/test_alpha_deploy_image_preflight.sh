@@ -12,7 +12,13 @@
 #      guard -- critical-rules.md Verification Integrity: zero examined is a
 #      FAIL, never a silent pass);
 #   4. passes through to helm upgrade/install when every referenced image is
-#      present.
+#      present;
+#   5. sends a single combined Accept header listing every valid manifest
+#      media type (OCI image index, OCI image manifest, docker manifest
+#      list, docker v2 manifest) -- buildx pushes OCI image indexes, so a
+#      docker-v2-only Accept header 404s a real, present image;
+#   6. treats an image that exists ONLY as an OCI image index (no legacy
+#      docker v2 manifest) as present.
 #
 # docker/helm/kubectl/curl are all stubbed -- no real registry, cluster, or
 # build ever runs.
@@ -73,27 +79,75 @@ fi
 exit 0
 EOS
 
-# --- curl stub: registry v2 HEAD-manifest requests. The last argument is
-#     the URL; MOCK_MISSING_REPO (if set) makes that one repo 404, all others
-#     200. MOCK_ZERO_IMAGES is handled by the helm stub above (n/a here). --
+# --- curl stub: registry v2 manifest requests. The last argument is the
+#     URL; MOCK_MISSING_REPO (if set) makes that one repo 404, all others
+#     200. MOCK_ZERO_IMAGES is handled by the helm stub above (n/a here).
+#     MOCK_OCI_INDEX_ONLY_REPO models a registry image pushed by buildx as
+#     an OCI image index ONLY (no legacy docker v2 manifest entry) -- it
+#     must still 200 when queried with a combined Accept header.
+#
+#     Regression guard: buildx pushes OCI image indexes, so a single
+#     docker-v2-only Accept header 404s a real, present image (the bug
+#     this test protects against). Any request missing one of the four
+#     required manifest media types in its Accept header is treated as
+#     malformed and gets "000" -- it must never reach a real registry.
 cat > "$STUB_DIR/curl" <<'EOS'
 #!/usr/bin/env bash
 echo "STUB-CALLED curl $*" >> "$LOG_FILE"
 url=""
-for a in "$@"; do url="$a"; done
+accept=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-H" ]; then
+        accept="$a"
+    fi
+    prev="$a"
+    url="$a"
+done
+
+for m in \
+    "application/vnd.oci.image.index.v1+json" \
+    "application/vnd.oci.image.manifest.v1+json" \
+    "application/vnd.docker.distribution.manifest.list.v2+json" \
+    "application/vnd.docker.distribution.manifest.v2+json"
+do
+    case "$accept" in
+        *"$m"*) ;;
+        *) echo "000"; exit 0 ;;
+    esac
+done
+
 if [ -n "${MOCK_MISSING_REPO:-}" ]; then
     case "$url" in
         */"${MOCK_MISSING_REPO}"/manifests/*) echo "404"; exit 0 ;;
     esac
 fi
+
+if [ -n "${MOCK_OCI_INDEX_ONLY_REPO:-}" ]; then
+    case "$url" in
+        */"${MOCK_OCI_INDEX_ONLY_REPO}"/manifests/*)
+            case "$accept" in
+                *"application/vnd.oci.image.index.v1+json"*) echo "200"; exit 0 ;;
+                *) echo "404"; exit 0 ;;
+            esac
+            ;;
+    esac
+fi
+
 echo "200"
 EOS
 
 chmod +x "$STUB_DIR"/kubectl "$STUB_DIR"/docker "$STUB_DIR"/helm "$STUB_DIR"/curl
 
+# Preserve the real (two-image) helm stub content so it can be restored
+# after the "zero images" case below replaces $STUB_DIR/helm with a symlink
+# -- without this, every case run after the zero-images case would silently
+# inherit the empty-image stub instead of the real one.
+cp "$STUB_DIR/helm" "$STUB_DIR/helm-real"
+
 run_case() {
-    # run_case <label> <MOCK_MISSING_REPO_or_empty> <MOCK_ZERO_IMAGES_or_empty> <expect_exit_zero:0|1>
-    local label="$1" missing_repo="$2" zero_images="$3" expect_success="$4"
+    # run_case <label> <MOCK_MISSING_REPO_or_empty> <MOCK_ZERO_IMAGES_or_empty> <expect_exit_zero:0|1> [<MOCK_OCI_INDEX_ONLY_REPO_or_empty>]
+    local label="$1" missing_repo="$2" zero_images="$3" expect_success="$4" oci_index_only_repo="${5:-}"
     : > "$LOG_FILE"
     : > "$OUT_FILE"
     echo ""
@@ -117,11 +171,18 @@ EOS
         chmod +x "$helm_bin"
         ln -sf "$helm_bin" "$STUB_DIR/helm"
     else
-        cp "$STUB_DIR/helm" "$STUB_DIR/helm" 2>/dev/null || true
+        # Restore the real two-image helm stub -- a prior case may have left
+        # $STUB_DIR/helm symlinked to helm-empty (see zero-images branch
+        # above); without this restore, every subsequent case would silently
+        # render zero images too.
+        rm -f "$STUB_DIR/helm"
+        cp "$STUB_DIR/helm-real" "$STUB_DIR/helm"
+        chmod +x "$STUB_DIR/helm"
     fi
 
     local exit_code=0
-    MOCK_MISSING_REPO="$missing_repo" PATH="$STUB_DIR:$PATH" \
+    MOCK_MISSING_REPO="$missing_repo" MOCK_OCI_INDEX_ONLY_REPO="$oci_index_only_repo" \
+        PATH="$STUB_DIR:$PATH" \
         bash "$SCRIPT_UNDER_TEST" --skip-build > "$OUT_FILE" 2>&1 || exit_code=$?
 
     if [ "$expect_success" -eq 1 ]; then
@@ -169,6 +230,7 @@ EOS
 run_case "all chart images present -> preflight passes through to helm upgrade" "" "" 1
 run_case "hub-webui missing from registry -> preflight fails before helm upgrade" "hub-webui" "" 0
 run_case "zero chart images rendered -> denominator guard fails" "" "1" 0
+run_case "hub-webui present only as OCI image index -> treated as present" "" "" 1 "hub-webui"
 
 echo ""
 total_cases=$((cases_passed + cases_failed))

@@ -151,7 +151,14 @@ info "Deploying release SHA ${SHA} (tag ${SHA8}) to context ${KUBE_CONTEXT}, nam
 # values-alpha.yaml deploys alongside svc-ingest/svc-process/svc-action's
 # *-rust counterparts (fix/alpha-deploy-hub-webui) -- see the header comment.
 # ---------------------------------------------------------------------------
-readonly SERVICES="hub-api hub-webui waddlebot-migrations svc-ingest svc-process svc-action svc-ingest-py svc-process-py svc-action-py core-bundle-seeder"
+# resolve-433 -- reputation-module, svc-presentation, and svc-streaming are
+# chart-referenced (values-alpha.yaml's reputation/presentation/streaming
+# sections) but were never in SERVICES, so the image preflight always found
+# them missing. values-alpha.yaml pins each to a static "alpha" tag rather
+# than the per-commit SHA8 (same pattern as bundleExecutor's own comment:
+# "built locally + pushed to the local registry ... same as every other
+# alpha-only module image") -- see service_image_tag below.
+readonly SERVICES="hub-api hub-webui waddlebot-migrations svc-ingest svc-process svc-action svc-ingest-py svc-process-py svc-action-py core-bundle-seeder reputation-module svc-presentation svc-streaming"
 
 service_dockerfile() {
     case "$1" in
@@ -165,15 +172,19 @@ service_dockerfile() {
         svc-ingest-py) echo "core/svc_ingest/Dockerfile" ;;
         svc-process-py) echo "core/svc_process/Dockerfile" ;;
         svc-action-py) echo "core/svc_action/Dockerfile" ;;
+        reputation-module) echo "core/reputation_module/Dockerfile" ;;
+        svc-presentation) echo "core/svc_presentation/Dockerfile" ;;
+        svc-streaming) echo "core/svc_streaming/Dockerfile.rust" ;;
         *) err "unknown service: $1"; exit 1 ;;
     esac
 }
 
 service_context() {
     case "$1" in
-        hub-api|hub-webui|waddlebot-migrations|core-bundle-seeder|svc-ingest-py|svc-process-py|svc-action-py) echo "." ;;
+        hub-api|hub-webui|waddlebot-migrations|core-bundle-seeder|svc-ingest-py|svc-process-py|svc-action-py|reputation-module|svc-presentation) echo "." ;;
         svc-ingest) echo "core/svc_ingest" ;;
         svc-process|svc-action) echo "core" ;;
+        svc-streaming) echo "core/svc_streaming" ;;
         *) err "unknown service: $1"; exit 1 ;;
     esac
 }
@@ -193,10 +204,22 @@ service_image_repo() {
     esac
 }
 
+# Image tag: every service tags with this run's commit SHA8 except the
+# alpha-only local modules values-alpha.yaml pins to a static "alpha" tag
+# (reputation-module, svc-presentation, svc-streaming, and bundleExecutor --
+# bundle-executor has no build step here yet, see scripts/deploy-alpha.sh).
+service_image_tag() {
+    case "$1" in
+        reputation-module|svc-presentation|svc-streaming) echo "alpha" ;;
+        *) echo "${SHA8}" ;;
+    esac
+}
+
 if [[ "${SKIP_BUILD}" != "true" ]]; then
     for svc in ${SERVICES}; do
         repo="$(service_image_repo "${svc}")"
-        img="${REGISTRY}/${repo}:${SHA8}"
+        tag="$(service_image_tag "${svc}")"
+        img="${REGISTRY}/${repo}:${tag}"
         dockerfile="$(service_dockerfile "${svc}")"
         context="$(service_context "${svc}")"
         info "Building ${img} (${dockerfile})"
@@ -247,8 +270,12 @@ image_exists_in_registry() {
     repo_and_tag="${image#*/}"
     tag="${repo_and_tag##*:}"
     repo="${repo_and_tag%:*}"
+    # buildx pushes OCI image indexes (or manifest lists) rather than plain
+    # docker v2 manifests, so a single-media-type Accept header causes the
+    # registry to 404 an image that is actually present. Send one request
+    # advertising every valid manifest media type -- a 200 means present.
     code="$(curl -s -o /dev/null -w '%{http_code}' \
-        -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+        -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json" \
         "http://${host}/v2/${repo}/manifests/${tag}" 2>/dev/null || echo "000")"
     [[ "${code}" == "200" ]]
 }
