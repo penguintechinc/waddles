@@ -33,7 +33,7 @@ path = "src/main.rs"
 # wasmtime: component model + WASI 0.2 host, epoch interruption, pooling
 # allocator, `-C collector=drc` (spec SS7.2 -- must match componentize-py's
 # GC collector or a precompiled artifact fails to load).
-wasmtime = { version = "=49.0.0", default-features = false, features = ["component-model", "async", "runtime", "cranelift", "gc", "gc-drc", "pooling-allocator"] }
+wasmtime = { version = "=49.0.1", default-features = false, features = ["component-model", "async", "runtime", "cranelift", "gc", "gc-drc", "pooling-allocator"] }
 # wasmtime-wasi: the permitted-for-Rust-components WASI surface (wasi:cli
 # with empty args/env, wasi:filesystem single read-only /scratch preopen,
 # wasi:random/random, wasi:clocks, wasi:io -- spec SS6.5's per-language
@@ -44,7 +44,7 @@ wasmtime = { version = "=49.0.0", default-features = false, features = ["compone
 # `error-code::access-denied` before any OS syscall -- native to this
 # binary, not a hand-authored stub component (round 2 of the compiler-
 # sandbox spike found those impractical). See `src/host/mod.rs`.
-wasmtime-wasi = { version = "=49.0.0", default-features = false, features = ["p2"] }
+wasmtime-wasi = { version = "=49.0.1", default-features = false, features = ["p2"] }
 tokio = { version = "=1.53.1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync", "signal"] }
 tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
 rustls = { version = "=0.23.45", default-features = false, features = ["ring", "tls12"] }

@@ -45,6 +45,16 @@ httpx>=0.27.0,<0.28.0
 # floor was raised.
 cryptography>=44.0.1,<51.0.0
 
+# feature/hub-api-internal-grpc: grpc.aio server for svc-ingest/svc-process/
+# svc-action's internal PII+key RPCs (proto/waddles/hub/internal/v1/*.proto,
+# hub_api/grpc_internal/). Already a transitive flask_core dependency
+# (libs/flask_core/requirements.in pins grpcio>=1.83.0,<1.84.0); pinned
+# directly here too now that hub_api's own app code (grpc_internal/)
+# imports it, not just flask_core's, matching this file's own header
+# convention for httpx/redis/cryptography above.
+grpcio>=1.83.0,<1.84.0
+opentelemetry-instrumentation-grpc==0.60b1
+
 # M2b workstreams/usage-metering group (spec Sec5.11/Sec5.12, D30/D31):
 # penguin-dal (R52 coordinator ruling, "we aren't using pydal anymore for
 # new tables... instead we are running penguin-dal") is the runtime

@@ -76,7 +76,7 @@ pub const EPOCH_TICK: Duration = Duration::from_millis(50);
 /// as a public constant, so this is a literal that must be bumped
 /// alongside Cargo.toml's `wasmtime`/`wasmtime-wasi` version pins --
 /// `tests` below assert it matches `Cargo.toml`.
-pub const WASMTIME_VERSION: &str = "49.0.0";
+pub const WASMTIME_VERSION: &str = "49.0.1";
 
 /// Converts a wall-clock deadline in milliseconds into the number of
 /// epoch ticks [`wasmtime::Store::set_epoch_deadline`] should be armed
