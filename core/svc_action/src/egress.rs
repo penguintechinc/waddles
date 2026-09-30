@@ -20,17 +20,15 @@
 //! wiring (`crate::senders`/`crate::distribution::BundleCatalog`).
 
 pub use bundle_host_http::egress::{
-    boxed, is_forbidden_address, CredentialBroker, EgressGuard, EgressLimits, EgressRuleRow,
-    EgressRuleSource, EnvCredentialBroker, FeatureFlag, HttpTransport, ReqwestTransport,
-    SecretHandle, TransportRequest, TransportResponse,
+    boxed, is_forbidden_address, ClusterCidrDenylist, CredentialBroker, EgressGuard, EgressLimits,
+    EgressRuleRow, EgressRuleSource, EnvCredentialBroker, FeatureFlag, HttpTransport,
+    InstanceEgressPolicy, ReqwestTransport, SecretHandle, TransportRequest, TransportResponse,
 };
 
 impl EgressRuleSource for crate::distribution::BundleCatalog {
     fn resolve(&self, app_id: &str) -> Option<EgressRuleRow> {
-        self.get(app_id).map(|row| EgressRuleRow {
-            egress: row.egress,
-            egress_rps: row.egress_rps,
-            granted_secret_refs: row.granted_secret_refs,
+        self.get(app_id).map(|row| {
+            EgressRuleRow::from_legacy_patterns(row.egress, row.egress_rps, row.granted_secret_refs)
         })
     }
 }

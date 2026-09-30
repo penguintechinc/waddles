@@ -554,14 +554,14 @@ mod tests {
         let catalog = HttpEgressCatalog::new();
         catalog.update(
             "waddles.bot.commands.default",
-            EgressRuleRow {
-                egress: vec![(
+            EgressRuleRow::from_legacy_patterns(
+                vec![(
                     host.to_string(),
                     methods.iter().map(|m| m.to_string()).collect(),
                 )],
-                egress_rps: None,
-                granted_secret_refs: HashMap::new(),
-            },
+                None,
+                HashMap::new(),
+            ),
         );
         let egress = Arc::new(EgressGuard::new(
             Arc::new(ReqwestTransport::new()),
@@ -967,11 +967,11 @@ mod tests {
         let catalog = HttpEgressCatalog::new();
         catalog.update(
             "waddles.bot.commands.default",
-            EgressRuleRow {
-                egress: vec![("93.184.216.34".to_string(), vec!["GET".to_string()])],
-                egress_rps: None,
-                granted_secret_refs: HashMap::new(),
-            },
+            EgressRuleRow::from_legacy_patterns(
+                vec![("93.184.216.34".to_string(), vec!["GET".to_string()])],
+                None,
+                HashMap::new(),
+            ),
         );
         let egress = Arc::new(EgressGuard::new(
             Arc::new(FakeTransport(Arc::clone(&seen))),
@@ -1044,14 +1044,14 @@ mod tests {
         let catalog = HttpEgressCatalog::new();
         catalog.update(
             "waddles.bot.commands.default",
-            EgressRuleRow {
-                egress: vec![("93.184.216.34".to_string(), vec!["POST".to_string()])],
-                egress_rps: None,
-                granted_secret_refs: HashMap::from([(
+            EgressRuleRow::from_legacy_patterns(
+                vec![("93.184.216.34".to_string(), vec!["POST".to_string()])],
+                None,
+                HashMap::from([(
                     "TOKEN_REF".to_string(),
                     "SVC_PROCESS_EGRESS_TEST_TOKEN".to_string(),
                 )]),
-            },
+            ),
         );
         let egress = Arc::new(EgressGuard::new(
             Arc::new(FakeTransport(Arc::clone(&seen))),

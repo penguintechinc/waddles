@@ -78,18 +78,89 @@ pub fn boxed(flag: impl FeatureFlag + 'static) -> Arc<dyn FeatureFlag> {
 }
 
 /// One bundle's egress-relevant state that [`EgressGuard`] consults per
-/// `http.send` call: the manifest `egress` allowlist (`(host_pattern,
-/// methods)`, byte-identical shape to
-/// `penguin_bundle_host::manifest::Manifest::egress`), its per-bundle rate
-/// override, and its granted secret-reference map (spec §8.3). Each
-/// consuming crate's own bundle-snapshot type implements
+/// `http.send`/[`EgressGuard::validate_dial`] call: three **separate**
+/// permission-family grant lists (Justin's decision, superseding this
+/// crate's original single-family `egress` list -- each matched only by
+/// its own grants, never cross-matched):
+///
+/// - `fqdn_grants` (`net.http.fqdn:<host>`): a public FQDN. The resolved
+///   address must itself be public *unless* it is separately covered by a
+///   `private_ip_grants` entry (an FQDN rebinding into a private IP is
+///   otherwise denied, even though the FQDN itself is granted).
+/// - `public_ip_grants` (`net.http.public-ip:<ip>`, optional `:port`): an
+///   exact public IP literal. Denied if the literal is actually a private-
+///   range address -- a private IP is never reachable via this list.
+/// - `private_ip_grants` (`net.http.private-ip:<ip|cidr>`, optional
+///   `:port`): an exact private-range IP or CIDR block (RFC1918/ULA/CGNAT).
+///   Also gated by the instance-wide [`InstanceEgressPolicy`] regardless of
+///   whether a grant matches -- see [`EgressGuard::with_instance_policy`].
+///
+/// Each tuple is `(pattern, methods)`, the same shape this crate has always
+/// used. Each consuming crate's own bundle-snapshot type implements
 /// [`EgressRuleSource`] over its existing storage rather than this crate
-/// owning a second copy of that state.
+/// owning a second copy of that state; [`EgressRuleRow::from_legacy_patterns`]
+/// is the migration helper for a crate whose own manifest storage still
+/// carries the pre-three-category single list.
 #[derive(Debug, Clone, Default)]
 pub struct EgressRuleRow {
-    pub egress: Vec<(String, Vec<String>)>,
+    pub fqdn_grants: Vec<(String, Vec<String>)>,
+    pub public_ip_grants: Vec<(String, Vec<String>)>,
+    pub private_ip_grants: Vec<(String, Vec<String>)>,
     pub egress_rps: Option<u32>,
     pub granted_secret_refs: HashMap<String, String>,
+    /// Exact hosts (lowercase, spec §8.2's declared-host comparison -- same
+    /// as every other host check in this module) a resolved `secret_refs`
+    /// header may be forwarded to, *beyond* the host the bundle's own
+    /// request originally targeted. Empty (the `Default`, and what
+    /// [`EgressRuleRow::from_legacy_patterns`] produces today -- no caller
+    /// wires this field yet) is the strict, backward-compatible posture:
+    /// a secret-derived header is attached only on the hop whose host
+    /// equals the *original* request's host, dropped on every redirect to
+    /// a different one, and re-attached if a later hop redirects back.
+    /// Security review finding (PR #468, HIGH): `send`'s redirect loop
+    /// previously cloned one `headers` vec -- secret headers included --
+    /// unconditionally on every hop, forwarding e.g. a Discord bot token to
+    /// whatever host a 3xx `Location` named. This field is the seam a
+    /// future host-scoped secret grant (hub-api/manifest) can populate to
+    /// deliberately widen that beyond the single originating host.
+    pub secret_granted_hosts: HashSet<String>,
+}
+
+impl EgressRuleRow {
+    /// Builds a row from the pre-three-category single-list shape
+    /// (connector spec's original `net.http:<host>` model: a hostname or
+    /// IP literal, optionally `:port`, in one flat list) by auto-
+    /// classifying each pattern into its new permission family: an IP
+    /// literal becomes a `public_ip_grants` or `private_ip_grants` entry
+    /// depending on whether the literal address itself is a private range
+    /// ([`is_private_range`]); anything else (a hostname) becomes an
+    /// `fqdn_grants` entry. Lets `svc_action`'s and `svc_process`'s
+    /// existing manifest-egress adapters adopt the three-category model
+    /// here without the manifest/hub-api wire format itself changing --
+    /// a genuine three-permission-id manifest format
+    /// (`net.http.fqdn:`/`net.http.public-ip:`/`net.http.private-ip:`) is
+    /// tracked as follow-up manifest/hub-api work, out of scope for this
+    /// crate.
+    pub fn from_legacy_patterns(
+        patterns: Vec<(String, Vec<String>)>,
+        egress_rps: Option<u32>,
+        granted_secret_refs: HashMap<String, String>,
+    ) -> Self {
+        let mut row = Self {
+            egress_rps,
+            granted_secret_refs,
+            ..Self::default()
+        };
+        for (pattern, methods) in patterns {
+            let (addr_part, _) = parse_pattern(&pattern);
+            match addr_part.parse::<IpAddr>() {
+                Ok(ip) if is_private_range(ip) => row.private_ip_grants.push((pattern, methods)),
+                Ok(_) => row.public_ip_grants.push((pattern, methods)),
+                Err(_) => row.fqdn_grants.push((pattern, methods)),
+            }
+        }
+        row
+    }
 }
 
 /// Resolves one `app_id`'s current [`EgressRuleRow`]. `None` -- an
@@ -192,6 +263,28 @@ pub struct EgressGuard {
     /// disabled). `min_tier: free`, so [`FeatureFlag::enabled`] alone gates
     /// it -- no license-tier `check_feature` needed.
     bundle_egress: Arc<dyn FeatureFlag>,
+    /// Instance-wide gate on every `private_ip_grants` match (Justin's
+    /// decision: "private-ip is also subject to the INSTANCE policy --
+    /// default deny, global-admin opt-in"). `Arc<RwLock<_>>` so the
+    /// consuming crate's own grant-snapshot refresh loop (the same
+    /// PR #428/#432 shape backing `core/bundle_capability_gate`'s platform
+    /// grants) can update it live without rebuilding the guard; defaults to
+    /// [`InstanceEgressPolicy::default`] (deny) via [`EgressGuard::new`]
+    /// until a caller opts in with [`EgressGuard::with_instance_policy`].
+    instance_policy: Arc<RwLock<InstanceEgressPolicy>>,
+    /// Operator-configured cluster pod/service/node CIDRs (Justin's
+    /// decision: "a CONFIGURED denylist of the cluster's own pod, service
+    /// and node CIDRs" -- never liftable by any grant or by
+    /// [`InstanceEgressPolicy`]). Empty by default via [`EgressGuard::new`];
+    /// the consuming crate's own config loader is responsible for the
+    /// "required to be non-empty in beta/gamma/production" enforcement --
+    /// this crate has no notion of deployment tier.
+    cluster_denylist: ClusterCidrDenylist,
+    /// Upstream egress-proxy signed-assertion signer (PR #463/#466's
+    /// design). `None` (the default via [`EgressGuard::new`]) adds no
+    /// header and preserves this guard's pre-existing behavior exactly;
+    /// only meaningful once [`EgressLimits::proxy_url`] is also configured.
+    proxy_assertion_signer: Option<Arc<dyn ProxyAssertionSigner>>,
 }
 
 impl EgressGuard {
@@ -212,7 +305,36 @@ impl EgressGuard {
             credential_broker: Arc::new(EnvCredentialBroker),
             denied_total,
             bundle_egress,
+            instance_policy: Arc::new(RwLock::new(InstanceEgressPolicy::default())),
+            cluster_denylist: ClusterCidrDenylist::default(),
+            proxy_assertion_signer: None,
         }
+    }
+
+    /// Wires the live instance-policy seam (see the field's doc) --
+    /// defaults to deny-all-private-ip-egress ([`InstanceEgressPolicy::
+    /// default`]) until a caller opts in. The `Arc<RwLock<_>>` is shared
+    /// with (owned by) the caller's own grant-snapshot refresh loop, never
+    /// constructed fresh per call.
+    pub fn with_instance_policy(mut self, policy: Arc<RwLock<InstanceEgressPolicy>>) -> Self {
+        self.instance_policy = policy;
+        self
+    }
+
+    /// Wires the operator-configured cluster pod/service/node CIDR
+    /// denylist (see the field's doc) -- empty (no additional denial) until
+    /// a caller supplies one.
+    pub fn with_cluster_denylist(mut self, denylist: ClusterCidrDenylist) -> Self {
+        self.cluster_denylist = denylist;
+        self
+    }
+
+    /// Wires the upstream egress-proxy signed-assertion signer (see the
+    /// field's doc) -- `None` (no header added) until a caller supplies
+    /// one; only meaningful alongside [`EgressLimits::proxy_url`].
+    pub fn with_proxy_assertion_signer(mut self, signer: Arc<dyn ProxyAssertionSigner>) -> Self {
+        self.proxy_assertion_signer = Some(signer);
+        self
     }
 
     /// Test-only override of the DNS resolution seam -- production always
@@ -290,7 +412,12 @@ impl EgressGuard {
         // resolution below is allowed to consult.
         let row = self.catalog.resolve(app_id);
 
-        let mut headers: Vec<(String, String)> =
+        // Bundle-declared headers only -- kept separate from the resolved
+        // secret-ref headers below (`secret_headers`) so the redirect loop
+        // can scope the latter to the host they were granted for (security
+        // review finding, PR #468, HIGH) instead of forwarding both
+        // indiscriminately to every hop.
+        let base_headers: Vec<(String, String)> =
             req.headers.drain(..).map(|h| (h.name, h.value)).collect();
         // Security review finding (post-M3-capabilities landing): a bundle
         // names a *symbolic* secret reference per call (spec §6.5's
@@ -307,6 +434,7 @@ impl EgressGuard {
         // granted set is refused before any environment lookup happens at
         // all.
         let granted = row.as_ref().map(|r| &r.granted_secret_refs);
+        let mut secret_headers: Vec<(String, String)> = Vec::with_capacity(req.secret_refs.len());
         for (header_name, secret_ref) in &req.secret_refs {
             let env_var_name = granted
                 .and_then(|g| g.get(secret_ref))
@@ -326,9 +454,14 @@ impl EgressGuard {
             // any guest-visible state.
             let handle = SecretHandle::from_granted_env_var(env_var_name);
             let value = self.credential_broker.resolve(&handle)?;
-            headers.push((header_name.clone(), value));
+            secret_headers.push((header_name.clone(), value));
         }
 
+        // The host `secret_headers` is bound to -- captured once, at hop 0,
+        // from the bundle's own originally-requested URL (the host it
+        // presumably holds the credential for). `None` until the first
+        // iteration below sets it.
+        let mut secret_bound_host: Option<String> = None;
         let mut hop: u8 = 0;
         loop {
             let url = reqwest::Url::parse(&req.url)
@@ -354,18 +487,24 @@ impl EgressGuard {
                 .trim_start_matches('[')
                 .trim_end_matches(']')
                 .to_ascii_lowercase();
+            if hop == 0 {
+                secret_bound_host = Some(host.clone());
+            }
 
-            let egress_rules = row.as_ref().map(|r| r.egress.as_slice()).unwrap_or(&[]);
-            let rule = egress_rules
-                .iter()
-                .find(|(pattern, _)| host_matches(pattern, &host));
-            let Some((matched_pattern, methods)) = rule else {
+            let empty_row = EgressRuleRow::default();
+            let row_ref = row.as_ref().unwrap_or(&empty_row);
+            let Some(matched) = match_grant(&host, row_ref) else {
                 return Err(denied(
                     "host_not_declared",
                     format!("{host} is not on the manifest egress allowlist"),
                 ));
             };
-            if !methods.iter().any(|m| m.eq_ignore_ascii_case(&method)) {
+            let matched_pattern = matched.pattern.to_string();
+            if !matched
+                .methods
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(&method))
+            {
                 return Err(denied(
                     "method_not_declared",
                     format!("{method} is not declared for {host}"),
@@ -394,7 +533,7 @@ impl EgressGuard {
             // on top of (not instead of) the port allowlist check above.
             // An entry with no declared port (the pre-existing shape)
             // matches any allowlisted port, unchanged.
-            if let Some(required_port) = parse_pattern(matched_pattern).1 {
+            if let Some(required_port) = matched.declared_port {
                 if required_port != port {
                     return Err(denied(
                         "host_not_declared",
@@ -402,6 +541,7 @@ impl EgressGuard {
                     ));
                 }
             }
+            let category = matched.category;
             let addrs = self
                 .resolver
                 .lookup(host.clone(), port)
@@ -412,10 +552,20 @@ impl EgressGuard {
                         format!("dns resolution failed: {e}"),
                     )
                 })?;
+            let instance_policy = *self
+                .instance_policy
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             let mut chosen: Option<SocketAddr> = None;
             let mut last_reason = "no addresses returned";
             for addr in addrs {
-                match is_forbidden_address(addr.ip(), self.limits.allow_private_hosts) {
+                match classify_dial_address(
+                    addr.ip(),
+                    category,
+                    row_ref,
+                    &self.cluster_denylist,
+                    instance_policy,
+                ) {
                     None => {
                         chosen = Some(addr);
                         break;
@@ -447,11 +597,43 @@ impl EgressGuard {
                 }
             }
 
+            // Secret-scoped-to-host re-check (security review finding, PR
+            // #468, HIGH): a resolved secret header (Authorization etc.)
+            // rides along only when this hop's host is the one it was
+            // resolved for, or the manifest row explicitly widens that via
+            // `secret_granted_hosts` ("B has its own grant" -- the host
+            // itself, not just the originating one, is authorized to
+            // receive it). Every other hop drops it outright rather than
+            // re-resolving a value the bundle never asked to send here.
+            let is_secret_bound_host = secret_bound_host.as_deref() == Some(host.as_str());
+            let secret_reattach_allowed =
+                is_secret_bound_host || row_ref.secret_granted_hosts.contains(&host);
+            let mut req_headers = base_headers.clone();
+            if !is_secret_bound_host {
+                // Cross-host hop (even one the manifest still allowlists):
+                // never forward a Cookie or Proxy-Authorization the bundle
+                // set for the *original* host -- both are ambient
+                // credentials, not scoped to a declared `secret_ref`, so
+                // `secret_granted_hosts` doesn't apply to them.
+                req_headers.retain(|(name, _)| {
+                    !name.eq_ignore_ascii_case("cookie")
+                        && !name.eq_ignore_ascii_case("proxy-authorization")
+                });
+            }
+            if secret_reattach_allowed {
+                req_headers.extend(secret_headers.iter().cloned());
+            }
+            if let Some(signer) = &self.proxy_assertion_signer {
+                req_headers.push((
+                    PROXY_ASSERTION_HEADER.to_string(),
+                    signer.sign(app_id, &host, pinned_addr),
+                ));
+            }
             let transport_req = TransportRequest {
                 method: method.clone(),
                 url: req.url.clone(),
                 pinned_addr,
-                headers: headers.clone(),
+                headers: req_headers,
                 body: body.clone(),
             };
             let response = self
@@ -494,6 +676,134 @@ impl EgressGuard {
                 "truncated": response.truncated,
             }));
         }
+    }
+
+    /// Validates one non-HTTP dial target (a connector host transport
+    /// establishing a WebSocket-over-TLS (`wss`) or IRC-over-TLS
+    /// connection) through the same declared-host/category-match/SSRF/
+    /// DNS-pin pipeline `send` runs for `http.send` (spec §8.2 steps 1-2,
+    /// 5-7 -- there is no HTTP method/scheme/redirect/response-size step
+    /// for a bare connection establishment). `target` is `host:port`
+    /// ([`split_host_port`]'s doc) -- the caller has already decided the
+    /// connection will be TLS; this call only proves the *address* is safe
+    /// to dial. Every rejection is counted in the same
+    /// `waddles_egress_denied_total{app_id,reason}` metric `send` uses,
+    /// including the spec §13.5 flag check.
+    ///
+    /// **`svc_ingest` adoption:** this is the "second, narrower entry
+    /// point" this crate's module doc flagged as a following landing --
+    /// `svc_ingest`'s Discord (wss) and Twitch (IRC-over-TLS) dial paths
+    /// are the intended first callers. Wiring those two call sites is
+    /// `svc_ingest`'s own follow-up (implements [`EgressRuleSource`] over
+    /// its connector manifest state, same shape as this landing's
+    /// `svc_process` wiring, then calls this method before connecting) --
+    /// not implemented in this PR; the pipeline itself is complete and
+    /// covered by this crate's own hermetic tests.
+    pub async fn validate_dial(
+        &self,
+        app_id: &str,
+        target: &str,
+    ) -> Result<ValidatedTarget, HostResultError> {
+        if !self.bundle_egress.enabled().await {
+            let err = denied("feature_disabled", "waddles.core.bundle-egress is disabled");
+            self.denied_total
+                .with_label_values(&[app_id, &err.code])
+                .inc();
+            return Err(err);
+        }
+        match self.validate_dial_checked(app_id, target).await {
+            Ok(v) => Ok(v),
+            Err(err) => {
+                self.denied_total
+                    .with_label_values(&[app_id, &err.code])
+                    .inc();
+                Err(err)
+            }
+        }
+    }
+
+    async fn validate_dial_checked(
+        &self,
+        app_id: &str,
+        target: &str,
+    ) -> Result<ValidatedTarget, HostResultError> {
+        let (host, port) = split_host_port(target)
+            .ok_or_else(|| denied("malformed_url", "dial target must be host:port"))?;
+        let host = host.to_ascii_lowercase();
+
+        let row = self.catalog.resolve(app_id);
+        let empty_row = EgressRuleRow::default();
+        let row_ref = row.as_ref().unwrap_or(&empty_row);
+        let Some(matched) = match_grant(&host, row_ref) else {
+            return Err(denied(
+                "host_not_declared",
+                format!("{host} is not on the manifest egress allowlist"),
+            ));
+        };
+        if self
+            .denylist
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&host)
+        {
+            return Err(denied("host_denylisted", format!("{host} is denylisted")));
+        }
+        if let Some(required_port) = matched.declared_port {
+            if required_port != port {
+                return Err(denied(
+                    "host_not_declared",
+                    format!(
+                        "{host}:{port} does not match the declared {}",
+                        matched.pattern
+                    ),
+                ));
+            }
+        }
+        let category = matched.category;
+
+        let addrs = self
+            .resolver
+            .lookup(host.clone(), port)
+            .await
+            .map_err(|e| {
+                denied(
+                    "ssrf_blocked_address",
+                    format!("dns resolution failed: {e}"),
+                )
+            })?;
+        let instance_policy = *self
+            .instance_policy
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut chosen: Option<SocketAddr> = None;
+        let mut last_reason = "no addresses returned";
+        for addr in addrs {
+            match classify_dial_address(
+                addr.ip(),
+                category,
+                row_ref,
+                &self.cluster_denylist,
+                instance_policy,
+            ) {
+                None => {
+                    chosen = Some(addr);
+                    break;
+                }
+                Some(reason) => last_reason = reason,
+            }
+        }
+        let pinned_addr = chosen.ok_or_else(|| {
+            denied(
+                "ssrf_blocked_address",
+                format!("no permitted address for {host} ({last_reason})"),
+            )
+        })?;
+
+        Ok(ValidatedTarget {
+            host,
+            port,
+            pinned_addr,
+        })
     }
 }
 
@@ -646,7 +956,18 @@ pub fn is_forbidden_address(ip: IpAddr, allow_private: bool) -> Option<&'static 
             if is_link_local_v4(v4) {
                 return Some("link_local");
             }
-            if is_cgnat_v4(v4) {
+            // Justin's decision (three-permission-family model): CGNAT
+            // (`100.64.0.0/10`) is grouped with RFC1918/ULA as a "private
+            // range" grantable via `net.http.private-ip:`/lifted by
+            // `allow_private`, not a separate never-liftable tier --
+            // superseding this function's original "never lifted by any
+            // setting" comment. Every existing caller of this function
+            // that must keep CGNAT unconditionally forbidden already
+            // passes `allow_private: false` unconditionally (this crate's
+            // `is_always_forbidden`, and both consuming crates' own
+            // built-in host-initiated dials), so this is not a behavior
+            // change for any of them.
+            if !allow_private && is_cgnat_v4(v4) {
                 return Some("cgnat");
             }
             if !allow_private && is_private_v4(v4) {
@@ -685,6 +1006,360 @@ pub fn is_forbidden_address(ip: IpAddr, allow_private: bool) -> Option<&'static 
         }
     }
 }
+
+/// Classifies `ip` as belonging to the "private range" bucket the
+/// three-permission-family model reserves for `net.http.private-ip:`
+/// grants (Justin's decision: "private ranges: RFC1918, ULA, CGNAT") --
+/// used only to *route* a pattern/address to the right grant list
+/// ([`match_grant`], [`EgressRuleRow::from_legacy_patterns`]) and to decide
+/// which category an FQDN's resolved address falls into
+/// ([`classify_dial_address`]). Distinct from [`is_forbidden_address`]'s
+/// always-forbidden set (loopback/link-local/metadata/multicast/broadcast/
+/// unspecified) -- those are never "private range", they are never
+/// reachable via any grant at all.
+fn is_private_range(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_private_v4(v4) || is_cgnat_v4(v4),
+        IpAddr::V6(v6) => match embedded_ipv4(v6) {
+            Some(v4) => is_private_range(IpAddr::V4(v4)),
+            None => is_unique_local_v6(v6),
+        },
+    }
+}
+
+/// One CIDR block (`ip` or `ip/prefix`), hand-rolled rather than pulling in
+/// a CIDR crate -- this crate takes no dependency it doesn't already pin,
+/// and the arithmetic is a handful of lines for both address families.
+#[derive(Debug, Clone, Copy)]
+struct CidrBlock {
+    network: IpAddr,
+    prefix: u8,
+}
+
+impl CidrBlock {
+    fn parse(s: &str) -> Option<Self> {
+        let (addr_str, prefix) = match s.split_once('/') {
+            Some((addr_str, prefix_str)) => (addr_str, prefix_str.parse::<u8>().ok()?),
+            None => {
+                let addr: IpAddr = s.parse().ok()?;
+                let max = if addr.is_ipv4() { 32 } else { 128 };
+                return Some(Self {
+                    network: addr,
+                    prefix: max,
+                });
+            }
+        };
+        let network: IpAddr = addr_str.parse().ok()?;
+        let max = if network.is_ipv4() { 32 } else { 128 };
+        if prefix > max {
+            return None;
+        }
+        Some(Self { network, prefix })
+    }
+
+    fn contains(&self, ip: IpAddr) -> bool {
+        match (self.network, ip) {
+            (IpAddr::V4(net), IpAddr::V4(target)) => {
+                let mask = mask_u32(self.prefix);
+                (u32::from(net) & mask) == (u32::from(target) & mask)
+            }
+            (IpAddr::V6(net), IpAddr::V6(target)) => {
+                let mask = mask_u128(self.prefix);
+                (u128::from(net) & mask) == (u128::from(target) & mask)
+            }
+            _ => false,
+        }
+    }
+}
+
+fn mask_u32(prefix: u8) -> u32 {
+    if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix as u32)
+    }
+}
+
+fn mask_u128(prefix: u8) -> u128 {
+    if prefix == 0 {
+        0
+    } else {
+        u128::MAX << (128 - prefix as u32)
+    }
+}
+
+/// Checks whether `pattern` (an exact IP, optionally `:port`-suffixed, or a
+/// CIDR block for the private-ip family) covers `ip` -- the resolved/
+/// literal address a request is actually targeting. An unparseable pattern
+/// never matches anything (fail closed).
+fn ip_pattern_contains(pattern: &str, ip: IpAddr) -> bool {
+    let (addr_part, _) = parse_pattern(pattern);
+    CidrBlock::parse(addr_part)
+        .map(|c| c.contains(ip))
+        .unwrap_or(false)
+}
+
+/// Operator-configured cluster pod/service/node CIDR denylist (Justin's
+/// decision, item 2): never liftable by any grant, checked in
+/// [`is_always_forbidden`] alongside the hard-coded always-forbidden
+/// ranges. Loaded once at [`EgressGuard`] construction
+/// ([`EgressGuard::with_cluster_denylist`]) from the consuming crate's own
+/// config/env -- **that crate's config loader, not this one, is
+/// responsible for requiring this to be non-empty in beta/gamma/
+/// production** (this crate has no notion of deployment tier).
+#[derive(Debug, Clone, Default)]
+pub struct ClusterCidrDenylist(Vec<CidrBlock>);
+
+impl ClusterCidrDenylist {
+    /// Parses a list of CIDR/IP strings (typically split from a config/env
+    /// value such as a comma-separated `EGRESS_CLUSTER_CIDR_DENYLIST`).
+    /// Fails closed: a single unparseable entry rejects the whole list
+    /// rather than silently dropping it, since a dropped entry here is a
+    /// silently-widened SSRF surface.
+    pub fn parse(cidrs: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Self, String> {
+        let mut blocks = Vec::new();
+        for raw in cidrs {
+            let raw = raw.as_ref();
+            let block = CidrBlock::parse(raw)
+                .ok_or_else(|| format!("invalid cluster CIDR denylist entry: {raw:?}"))?;
+            blocks.push(block);
+        }
+        Ok(Self(blocks))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn contains(&self, ip: IpAddr) -> bool {
+        self.0.iter().any(|c| c.contains(ip))
+    }
+}
+
+/// Instance-wide policy gate on every `net.http.private-ip:` grant
+/// (Justin's decision, item 1: "private-ip is also subject to the
+/// INSTANCE policy -- default deny, global-admin opt-in"). Sourced from
+/// the same grant-snapshot shape PR #428/#432 introduced for the platform
+/// grant trio -- the consuming crate's own snapshot-refresh loop owns the
+/// `Arc<RwLock<InstanceEgressPolicy>>` wired via
+/// [`EgressGuard::with_instance_policy`] and updates it the same way it
+/// updates any other live-refreshed grant state; this type itself is a
+/// plain data snapshot, not a live seam.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InstanceEgressPolicy {
+    /// `false` (the default): every `net.http.private-ip:` grant is denied
+    /// regardless of whether it matches, and an FQDN resolving into a
+    /// private address is denied regardless of a covering private-ip
+    /// grant. `true`: a global-admin has opted this instance in, so a
+    /// matching private-ip grant (or FQDN-plus-covering-private-ip-grant
+    /// pair) is permitted -- subject to every other check
+    /// ([`is_always_forbidden`]) still passing.
+    pub allow_private_ip_egress: bool,
+}
+
+/// Which of the three permission families ([`EgressRuleRow`]'s doc)
+/// satisfied [`match_grant`] for one request/dial -- threaded through to
+/// [`classify_dial_address`] so the resolved-address check applies the
+/// right cross-category rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EgressCategory {
+    Fqdn,
+    PublicIp,
+    PrivateIp,
+}
+
+/// The grant [`match_grant`] found, borrowed from the [`EgressRuleRow`]
+/// it matched against.
+struct MatchedGrant<'a> {
+    category: EgressCategory,
+    pattern: &'a str,
+    declared_port: Option<u16>,
+    methods: &'a [String],
+}
+
+/// Matches `host` against exactly one of [`EgressRuleRow`]'s three grant
+/// lists -- **never more than one, and never the "wrong" one for `host`'s
+/// own shape** (Justin's decision: "each matched only by its own grants").
+/// A bare hostname can only ever match `fqdn_grants`. An IP literal is
+/// routed by its *own* address class -- a private-range literal only ever
+/// searches `private_ip_grants`, a public-looking literal only ever
+/// searches `public_ip_grants` -- so a private IP declared (in error, or by
+/// a confused bundle) under `public_ip_grants` is never found here at all,
+/// and vice versa; there is no fallback between the two IP lists.
+fn match_grant<'a>(host: &str, row: &'a EgressRuleRow) -> Option<MatchedGrant<'a>> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        let grants = if is_private_range(ip) {
+            &row.private_ip_grants
+        } else {
+            &row.public_ip_grants
+        };
+        let (pattern, methods) = grants
+            .iter()
+            .find(|(pattern, _)| ip_pattern_contains(pattern, ip))?;
+        Some(MatchedGrant {
+            category: if is_private_range(ip) {
+                EgressCategory::PrivateIp
+            } else {
+                EgressCategory::PublicIp
+            },
+            pattern: pattern.as_str(),
+            declared_port: parse_pattern(pattern).1,
+            methods: methods.as_slice(),
+        })
+    } else {
+        let (pattern, methods) = row
+            .fqdn_grants
+            .iter()
+            .find(|(pattern, _)| host_matches(pattern, host))?;
+        Some(MatchedGrant {
+            category: EgressCategory::Fqdn,
+            pattern: pattern.as_str(),
+            declared_port: parse_pattern(pattern).1,
+            methods: methods.as_slice(),
+        })
+    }
+}
+
+/// Finds a `private_ip_grants` entry covering `ip` -- used only for the
+/// FQDN-resolves-into-private-IP cross-category check
+/// ([`classify_dial_address`]'s `Fqdn` arm), where the grant search is by
+/// resolved *address*, not by the originally-requested hostname.
+fn find_private_ip_grant(row: &EgressRuleRow, ip: IpAddr) -> bool {
+    row.private_ip_grants
+        .iter()
+        .any(|(pattern, _)| ip_pattern_contains(pattern, ip))
+}
+
+/// Classifies `ip` against every always-deny range (spec's original SSRF
+/// set, via [`is_forbidden_address`] with private ranges *not* liftable --
+/// `allow_private: true` skips straight past them) plus the operator's
+/// [`ClusterCidrDenylist`] (Justin's decision, item 2: cluster pod/service/
+/// node CIDRs, "regardless of grants"). Neither of these is ever liftable
+/// by a grant or by [`InstanceEgressPolicy`] -- this check always runs
+/// first in [`classify_dial_address`], before any category-specific logic.
+fn is_always_forbidden(ip: IpAddr, cluster_denylist: &ClusterCidrDenylist) -> Option<&'static str> {
+    if let Some(reason) = is_forbidden_address(ip, true) {
+        return Some(reason);
+    }
+    if cluster_denylist.contains(ip) {
+        return Some("cluster_cidr_denied");
+    }
+    None
+}
+
+/// The full per-resolved-address decision (spec §8.2 step 6, extended by
+/// Justin's three-permission-family decisions): given the category
+/// [`match_grant`] already established for the *requested* host, decides
+/// whether `ip` -- one of that host's resolved addresses -- may actually be
+/// dialed.
+///
+/// Order matters and mirrors the task's enumerated rules exactly: (1) the
+/// always-forbidden/cluster-CIDR check runs first and is never bypassed by
+/// any category or policy; (2) only then does the category-specific
+/// cross-check run (`PublicIp`/`PrivateIp` grants must match the address's
+/// *actual* class, an `Fqdn` grant resolving into a private address needs
+/// its own separate `private_ip_grants` cover); (3) any `PrivateIp`-
+/// classified address -- whether reached via a direct `private_ip_grants`
+/// match or via an `Fqdn`'s covering grant -- additionally requires
+/// [`InstanceEgressPolicy::allow_private_ip_egress`].
+fn classify_dial_address(
+    ip: IpAddr,
+    category: EgressCategory,
+    row: &EgressRuleRow,
+    cluster_denylist: &ClusterCidrDenylist,
+    instance_policy: InstanceEgressPolicy,
+) -> Option<&'static str> {
+    if let Some(reason) = is_always_forbidden(ip, cluster_denylist) {
+        return Some(reason);
+    }
+    let private = is_private_range(ip);
+    match category {
+        EgressCategory::Fqdn => {
+            if !private {
+                return None;
+            }
+            if !instance_policy.allow_private_ip_egress {
+                return Some("instance_private_ip_denied");
+            }
+            if find_private_ip_grant(row, ip) {
+                None
+            } else {
+                Some("fqdn_resolved_private_not_granted")
+            }
+        }
+        EgressCategory::PublicIp => {
+            if private {
+                Some("public_ip_grant_targets_private_address")
+            } else {
+                None
+            }
+        }
+        EgressCategory::PrivateIp => {
+            if !private {
+                Some("private_ip_grant_targets_public_address")
+            } else if !instance_policy.allow_private_ip_egress {
+                Some("instance_private_ip_denied")
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Splits a `host:port` dial target (connector host transports dialing
+/// wss/IRC-over-TLS, never an HTTP URL -- see
+/// [`EgressGuard::validate_dial`]) into its host and port. Mirrors
+/// [`parse_pattern`]'s bracket convention for an IPv6 literal
+/// (`[::1]:6697`); an unbracketed host with more than one `:` (a bare IPv6
+/// literal with no port) is rejected as malformed rather than guessed at --
+/// a dial target must always declare its port explicitly.
+fn split_host_port(target: &str) -> Option<(String, u16)> {
+    if let Some(rest) = target.strip_prefix('[') {
+        let (addr, tail) = rest.split_once(']')?;
+        let port_str = tail.strip_prefix(':')?;
+        let port: u16 = port_str.parse().ok()?;
+        return Some((addr.to_string(), port));
+    }
+    if target.matches(':').count() != 1 {
+        return None;
+    }
+    let (host, port_str) = target.rsplit_once(':')?;
+    let port: u16 = port_str.parse().ok()?;
+    Some((host.to_string(), port))
+}
+
+/// One already-fully-validated non-HTTP dial target -- returned by
+/// [`EgressGuard::validate_dial`]. The caller (a connector host transport
+/// dialing wss/IRC-over-TLS) must connect to `pinned_addr` verbatim for
+/// `host`, exactly like [`TransportRequest::pinned_addr`] for `http.send`
+/// -- never re-resolving `host` itself.
+#[derive(Debug, Clone)]
+pub struct ValidatedTarget {
+    pub host: String,
+    pub port: u16,
+    pub pinned_addr: SocketAddr,
+}
+
+/// Signs an "upstream egress proxy" assertion (PR #463/#466's design: this
+/// guard optionally forwards an already-validated request through a
+/// network-level egress proxy instead of connecting directly, with a
+/// signed assertion the proxy can verify without re-running the
+/// allowlist/SSRF pipeline itself). Object-safe, mirrors this crate's other
+/// dependency-seam traits. Wired via
+/// [`EgressGuard::with_proxy_assertion_signer`] -- `None` (the default) is
+/// what every caller constructs today and adds no header at all, an exact
+/// behavior-preserving no-op. The claim/encoding shape a real signer
+/// produces is owned by PR #463/#466's proxy-side verifier, not this crate;
+/// this trait only defines the seam.
+pub trait ProxyAssertionSigner: Send + Sync {
+    /// Returns the header value asserting that `app_id`'s request to `host`
+    /// was validated by this guard and pinned to `pinned_addr`.
+    fn sign(&self, app_id: &str, host: &str, pinned_addr: SocketAddr) -> String;
+}
+
+/// Header carrying the [`ProxyAssertionSigner`] output, added to the
+/// outbound request only when a signer is configured.
+const PROXY_ASSERTION_HEADER: &str = "X-Waddles-Egress-Assertion";
 
 /// An opaque reference to a bundle's granted secret (connector spec
 /// condition 8: "opaque handles in the guest request, tokens never in guest
@@ -1047,11 +1722,7 @@ mod tests {
         let catalog = TestCatalog::new();
         catalog.insert(
             app_id,
-            EgressRuleRow {
-                egress,
-                egress_rps: None,
-                granted_secret_refs,
-            },
+            EgressRuleRow::from_legacy_patterns(egress, None, granted_secret_refs),
         );
         catalog
     }
@@ -1365,10 +2036,18 @@ mod tests {
         assert_eq!(is_forbidden_address(ip, true), Some("link_local"));
     }
 
+    /// CGNAT is forbidden by default (`allow_private: false`), same as
+    /// RFC1918/ULA -- but, per Justin's decision grouping CGNAT with those
+    /// as a "private range" rather than a never-liftable tier, it *is*
+    /// lifted by `allow_private: true`. `is_always_forbidden` (used by the
+    /// three-category pipeline) never passes `allow_private: true` through
+    /// to this check for CGNAT, so the guard's own SSRF property is
+    /// unaffected -- see `cgnat_is_reachable_only_via_a_granted_private_ip_range_under_instance_policy`.
     #[test]
-    fn cgnat_v4_is_always_forbidden_even_with_allow_private() {
+    fn cgnat_v4_is_forbidden_by_default_but_liftable_via_allow_private() {
         let ip = IpAddr::V4(Ipv4Addr::new(100, 100, 100, 200));
-        assert_eq!(is_forbidden_address(ip, true), Some("cgnat"));
+        assert_eq!(is_forbidden_address(ip, false), Some("cgnat"));
+        assert_eq!(is_forbidden_address(ip, true), None);
     }
 
     #[test]
@@ -1624,20 +2303,42 @@ mod tests {
         assert_eq!(err.code, "ssrf_blocked_address");
     }
 
+    /// Under the three-category model a direct private-ip grant is no
+    /// longer gated by `EgressLimits::allow_private_hosts` at all -- it's
+    /// gated by [`InstanceEgressPolicy::allow_private_ip_egress`]
+    /// (Justin's decision, item 1: "default deny, global-admin opt-in").
     #[tokio::test]
-    async fn private_ip_is_permitted_once_allow_private_hosts_is_set() {
-        let mut limits = default_limits();
-        limits.allow_private_hosts = true;
+    async fn private_ip_grant_is_denied_by_default_instance_policy() {
+        let guard = guard_with(
+            "waddles.a.b.c",
+            vec![("10.0.0.5".to_string(), vec!["GET".to_string()])],
+            FakeTransport::default(),
+        );
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://10.0.0.5/"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "ssrf_blocked_address");
+    }
+
+    #[tokio::test]
+    async fn private_ip_grant_is_permitted_once_instance_policy_opts_in() {
         let guard = EgressGuard::new(
             Arc::new(FakeTransport::default().queue(Ok(ok_response()))),
-            limits,
+            default_limits(),
             catalog_with_row(
                 "waddles.a.b.c",
                 vec![("10.0.0.5".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
             boxed(StaticFlag(true)),
-        );
+        )
+        .with_instance_policy(Arc::new(RwLock::new(InstanceEgressPolicy {
+            allow_private_ip_egress: true,
+        })));
         let result = guard
             .send(
                 "waddles.a.b.c",
@@ -1645,6 +2346,480 @@ mod tests {
             )
             .await;
         assert!(result.is_ok(), "expected success, got {result:?}");
+    }
+
+    /// A private IP declared under `public_ip_grants` -- never possible
+    /// through `catalog_with_row`'s auto-classifying helper, so built by
+    /// hand -- is never found at all: [`match_grant`] only ever searches
+    /// `private_ip_grants` for a private-classified literal (Justin's
+    /// decision: "each matched only by its own grants").
+    #[tokio::test]
+    async fn private_ip_via_public_ip_grant_is_denied() {
+        let catalog = TestCatalog::new();
+        catalog.insert(
+            "waddles.a.b.c",
+            EgressRuleRow {
+                public_ip_grants: vec![("10.0.0.5".to_string(), vec!["GET".to_string()])],
+                ..EgressRuleRow::default()
+            },
+        );
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default()),
+            default_limits(),
+            catalog,
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_instance_policy(Arc::new(RwLock::new(InstanceEgressPolicy {
+            allow_private_ip_egress: true,
+        })));
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://10.0.0.5/"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "host_not_declared");
+    }
+
+    /// A public IP literal declared (in error) under `private_ip_grants` is
+    /// symmetrically never found either -- routing is by the literal's own
+    /// address class, not by which list happens to contain the string.
+    #[tokio::test]
+    async fn public_ip_via_private_ip_grant_is_denied() {
+        let catalog = TestCatalog::new();
+        catalog.insert(
+            "waddles.a.b.c",
+            EgressRuleRow {
+                private_ip_grants: vec![("93.184.216.34".to_string(), vec!["GET".to_string()])],
+                ..EgressRuleRow::default()
+            },
+        );
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default()),
+            default_limits(),
+            catalog,
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_instance_policy(Arc::new(RwLock::new(InstanceEgressPolicy {
+            allow_private_ip_egress: true,
+        })));
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://93.184.216.34/"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "host_not_declared");
+    }
+
+    /// A public IP requested via an `fqdn_grants` entry for a *different*
+    /// host is denied on the ordinary `host_not_declared` path -- category
+    /// membership never changes what "declared" means; only an exact
+    /// hostname match ever satisfies an `fqdn_grants` entry.
+    #[tokio::test]
+    async fn public_ip_via_fqdn_grant_for_a_different_host_is_denied() {
+        let guard = guard_with(
+            "waddles.a.b.c",
+            vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
+            FakeTransport::default(),
+        );
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://93.184.216.34/"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "host_not_declared");
+    }
+
+    /// An `fqdn_grants` host that rebinds to a private address is denied
+    /// even when the instance policy allows private-ip egress in general --
+    /// the FQDN grant alone never covers a private resolved address; a
+    /// *separate* `private_ip_grants` entry covering that exact resolved
+    /// address is required too.
+    #[tokio::test]
+    async fn fqdn_rebinding_to_private_is_denied_without_a_covering_private_ip_grant() {
+        let resolver = Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            addr: "10.0.0.9:443".parse().unwrap(),
+        });
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default()),
+            default_limits(),
+            catalog_with_row(
+                "waddles.a.b.c",
+                vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
+            ),
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_instance_policy(Arc::new(RwLock::new(InstanceEgressPolicy {
+            allow_private_ip_egress: true,
+        })))
+        .with_resolver(resolver as Arc<dyn Resolver>);
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://api.spotify.com/"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "ssrf_blocked_address");
+    }
+
+    /// Same rebinding scenario, but this bundle's manifest *also* grants
+    /// `net.http.private-ip:10.0.0.9` -- the FQDN's rebind is now covered
+    /// by that separate grant, and (with the instance policy opted in) the
+    /// request succeeds.
+    #[tokio::test]
+    async fn fqdn_rebinding_to_private_is_permitted_with_a_covering_private_ip_grant() {
+        let resolver = Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            addr: "10.0.0.9:443".parse().unwrap(),
+        });
+        let catalog = TestCatalog::new();
+        catalog.insert(
+            "waddles.a.b.c",
+            EgressRuleRow {
+                fqdn_grants: vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
+                private_ip_grants: vec![("10.0.0.9".to_string(), vec!["GET".to_string()])],
+                ..EgressRuleRow::default()
+            },
+        );
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default().queue(Ok(ok_response()))),
+            default_limits(),
+            catalog,
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_instance_policy(Arc::new(RwLock::new(InstanceEgressPolicy {
+            allow_private_ip_egress: true,
+        })))
+        .with_resolver(resolver as Arc<dyn Resolver>);
+        let result = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://api.spotify.com/"}),
+            )
+            .await;
+        assert!(result.is_ok(), "expected success, got {result:?}");
+    }
+
+    /// A `net.http.private-ip:10.0.0.0/8` CIDR grant covers any address in
+    /// range, once the instance policy allows it -- proving CIDR (not just
+    /// exact-IP) matching for the private-ip family.
+    #[tokio::test]
+    async fn private_ip_cidr_grant_covers_any_address_in_range() {
+        let catalog = TestCatalog::new();
+        catalog.insert(
+            "waddles.a.b.c",
+            EgressRuleRow {
+                private_ip_grants: vec![("10.0.0.0/8".to_string(), vec!["GET".to_string()])],
+                ..EgressRuleRow::default()
+            },
+        );
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default().queue(Ok(ok_response()))),
+            default_limits(),
+            catalog,
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_instance_policy(Arc::new(RwLock::new(InstanceEgressPolicy {
+            allow_private_ip_egress: true,
+        })));
+        let result = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://10.55.66.77/"}),
+            )
+            .await;
+        assert!(result.is_ok(), "expected success, got {result:?}");
+    }
+
+    /// The cluster CIDR denylist beats a private-ip grant -- even with a
+    /// matching grant and instance-policy opt-in, a resolved address inside
+    /// an operator-configured cluster CIDR is always denied
+    /// (`cluster_cidr_denied`), never merely `ssrf_blocked_address`'s
+    /// generic private-range reason.
+    #[tokio::test]
+    async fn cluster_cidr_denylist_beats_a_matching_private_ip_grant() {
+        let catalog = TestCatalog::new();
+        catalog.insert(
+            "waddles.a.b.c",
+            EgressRuleRow {
+                private_ip_grants: vec![("10.0.0.0/8".to_string(), vec!["GET".to_string()])],
+                ..EgressRuleRow::default()
+            },
+        );
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default()),
+            default_limits(),
+            catalog,
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_instance_policy(Arc::new(RwLock::new(InstanceEgressPolicy {
+            allow_private_ip_egress: true,
+        })))
+        .with_cluster_denylist(ClusterCidrDenylist::parse(["10.244.0.0/16"]).unwrap());
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://10.244.5.6/"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "ssrf_blocked_address");
+        // Confirm it's specifically the cluster-CIDR reason, not merely a
+        // generic private-range rejection -- observability requirement.
+        let err2 = classify_dial_address(
+            "10.244.5.6".parse().unwrap(),
+            EgressCategory::PrivateIp,
+            &EgressRuleRow {
+                private_ip_grants: vec![("10.0.0.0/8".to_string(), vec!["GET".to_string()])],
+                ..EgressRuleRow::default()
+            },
+            &ClusterCidrDenylist::parse(["10.244.0.0/16"]).unwrap(),
+            InstanceEgressPolicy {
+                allow_private_ip_egress: true,
+            },
+        );
+        assert_eq!(err2, Some("cluster_cidr_denied"));
+    }
+
+    /// Metadata is always denied regardless of any grant or instance
+    /// policy -- covers both a direct `public_ip_grants`-shaped literal
+    /// (never actually reachable, since a metadata address classifies as
+    /// public-looking but is still hard-forbidden) and the private-ip path
+    /// with the policy fully opted in.
+    #[tokio::test]
+    async fn cloud_metadata_is_always_denied_even_with_a_matching_grant_and_policy_opt_in() {
+        let catalog = TestCatalog::new();
+        catalog.insert(
+            "waddles.a.b.c",
+            EgressRuleRow {
+                public_ip_grants: vec![("169.254.169.254".to_string(), vec!["GET".to_string()])],
+                ..EgressRuleRow::default()
+            },
+        );
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default()),
+            default_limits(),
+            catalog,
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_instance_policy(Arc::new(RwLock::new(InstanceEgressPolicy {
+            allow_private_ip_egress: true,
+        })));
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://169.254.169.254/"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "ssrf_blocked_address");
+    }
+
+    // -- validate_dial (wss/IRC-over-TLS connector host transport dials) --
+
+    #[tokio::test]
+    async fn validate_dial_permits_a_declared_fqdn_and_pins_the_resolved_address() {
+        let resolver = Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            addr: "93.184.216.34:443".parse().unwrap(),
+        });
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default()),
+            default_limits(),
+            catalog_with_row(
+                "waddles.a.b.c",
+                vec![("gateway.discord.gg".to_string(), vec!["GET".to_string()])],
+            ),
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_resolver(Arc::clone(&resolver) as Arc<dyn Resolver>);
+        let target = guard
+            .validate_dial("waddles.a.b.c", "gateway.discord.gg:443")
+            .await
+            .expect("wss dial to a declared fqdn is validated");
+        assert_eq!(target.host, "gateway.discord.gg");
+        assert_eq!(target.port, 443);
+        assert_eq!(target.pinned_addr, "93.184.216.34:443".parse().unwrap());
+        assert_eq!(resolver.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// IRC-over-TLS's conventional port (6697), not 443 -- proves
+    /// `validate_dial` does not apply `EgressLimits::allowed_ports`
+    /// (an HTTP-capability-specific limit), only the declared-port-on-the-
+    /// grant check when one is present.
+    #[tokio::test]
+    async fn validate_dial_permits_irc_over_tls_on_its_conventional_port() {
+        let resolver = Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            addr: "93.184.216.34:6697".parse().unwrap(),
+        });
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default()),
+            default_limits(),
+            catalog_with_row(
+                "waddles.a.b.c",
+                vec![("irc.twitch.tv".to_string(), vec!["GET".to_string()])],
+            ),
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_resolver(resolver as Arc<dyn Resolver>);
+        let target = guard
+            .validate_dial("waddles.a.b.c", "irc.twitch.tv:6697")
+            .await
+            .expect("irc-over-tls dial on 6697 is validated");
+        assert_eq!(target.port, 6697);
+    }
+
+    #[tokio::test]
+    async fn validate_dial_denies_an_undeclared_host() {
+        let guard = guard_with("waddles.a.b.c", vec![], FakeTransport::default());
+        let err = guard
+            .validate_dial("waddles.a.b.c", "evil.example.com:443")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "host_not_declared");
+    }
+
+    #[tokio::test]
+    async fn validate_dial_denies_ssrf_to_metadata_even_when_declared() {
+        let guard = guard_with(
+            "waddles.a.b.c",
+            vec![("169.254.169.254".to_string(), vec!["GET".to_string()])],
+            FakeTransport::default(),
+        );
+        let err = guard
+            .validate_dial("waddles.a.b.c", "169.254.169.254:443")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "ssrf_blocked_address");
+    }
+
+    #[tokio::test]
+    async fn validate_dial_denies_a_private_ip_dial_by_default_instance_policy() {
+        let guard = guard_with(
+            "waddles.a.b.c",
+            vec![("10.0.0.5".to_string(), vec!["GET".to_string()])],
+            FakeTransport::default(),
+        );
+        let err = guard
+            .validate_dial("waddles.a.b.c", "10.0.0.5:6697")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "ssrf_blocked_address");
+    }
+
+    #[tokio::test]
+    async fn validate_dial_respects_the_flag_gate() {
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default()),
+            default_limits(),
+            catalog_with_row(
+                "waddles.a.b.c",
+                vec![("gateway.discord.gg".to_string(), vec!["GET".to_string()])],
+            ),
+            test_metrics(),
+            boxed(StaticFlag(false)),
+        );
+        let err = guard
+            .validate_dial("waddles.a.b.c", "gateway.discord.gg:443")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "feature_disabled");
+    }
+
+    #[test]
+    fn split_host_port_rejects_a_bare_ipv6_literal_with_no_brackets() {
+        assert_eq!(split_host_port("::1:443"), None);
+    }
+
+    #[test]
+    fn split_host_port_parses_a_bracketed_ipv6_literal_with_port() {
+        assert_eq!(
+            split_host_port("[::1]:6697"),
+            Some(("::1".to_string(), 6697))
+        );
+    }
+
+    // -- Upstream egress-proxy signed assertion (PR #463/#466), off by default --
+
+    struct StaticSigner;
+    impl ProxyAssertionSigner for StaticSigner {
+        fn sign(&self, app_id: &str, host: &str, pinned_addr: SocketAddr) -> String {
+            format!("{app_id}|{host}|{pinned_addr}")
+        }
+    }
+
+    #[tokio::test]
+    async fn no_proxy_assertion_header_is_added_when_no_signer_is_configured() {
+        let transport = Arc::new(FakeTransport::default().queue(Ok(ok_response())));
+        let guard = EgressGuard::new(
+            Arc::clone(&transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog_with_row(
+                "waddles.a.b.c",
+                vec![("discord.com".to_string(), vec!["GET".to_string()])],
+            ),
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        );
+        guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://discord.com/"}),
+            )
+            .await
+            .expect("send succeeds");
+        let sent = transport.requests.lock().unwrap();
+        assert!(!sent[0]
+            .headers
+            .iter()
+            .any(|(k, _)| k == PROXY_ASSERTION_HEADER));
+    }
+
+    #[tokio::test]
+    async fn proxy_assertion_header_is_added_when_a_signer_is_configured() {
+        let transport = Arc::new(FakeTransport::default().queue(Ok(ok_response())));
+        let guard = EgressGuard::new(
+            Arc::clone(&transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog_with_row(
+                "waddles.a.b.c",
+                vec![("discord.com".to_string(), vec!["GET".to_string()])],
+            ),
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_proxy_assertion_signer(Arc::new(StaticSigner));
+        guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://discord.com/"}),
+            )
+            .await
+            .expect("send succeeds");
+        let sent = transport.requests.lock().unwrap();
+        let header = sent[0]
+            .headers
+            .iter()
+            .find(|(k, _)| k == PROXY_ASSERTION_HEADER)
+            .expect("assertion header present");
+        assert!(header.1.starts_with("waddles.a.b.c|discord.com|"));
     }
 
     #[tokio::test]
@@ -2045,6 +3220,250 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "host_not_declared");
+    }
+
+    // -- Secret headers scoped to the host they were granted for (security
+    // review finding, PR #468, HIGH): a redirect must never carry a
+    // resolved `secret_refs` header, Cookie, or Proxy-Authorization to a
+    // different host than the one the bundle's request originally
+    // targeted, even when that new host is itself on the allowlist. --
+
+    /// A redirect to a *different* allowlisted host drops the secret header
+    /// that was resolved for the original host -- the core HIGH finding:
+    /// `send`'s redirect loop used to clone one `headers` vec, secret
+    /// headers included, unconditionally on every hop.
+    #[tokio::test]
+    async fn a_redirect_to_a_different_host_drops_the_originating_hosts_secret_header() {
+        let broker = Arc::new(FakeCredentialBroker {
+            value: "host-a-token".to_string(),
+            resolved_handles: Mutex::new(Vec::new()),
+        });
+        let transport = Arc::new(FakeTransport::default().queue(Ok(ok_response())).queue(Ok(
+            TransportResponse {
+                status: 302,
+                headers: vec![(
+                    "location".to_string(),
+                    "https://host-b.example.com/next".to_string(),
+                )],
+                body: vec![],
+                truncated: false,
+            },
+        )));
+        let guard = EgressGuard::new(
+            Arc::clone(&transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog_with_row_and_secrets(
+                "waddles.a.b.c",
+                vec![
+                    ("host-a.example.com".to_string(), vec!["GET".to_string()]),
+                    ("host-b.example.com".to_string(), vec!["GET".to_string()]),
+                ],
+                HashMap::from([("TOKEN_REF".to_string(), "EGRESS_TEST_HOST_A".to_string())]),
+            ),
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_credential_broker(Arc::clone(&broker) as Arc<dyn CredentialBroker>)
+        .with_resolver(Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            addr: "93.184.216.34:443".parse().unwrap(),
+        }) as Arc<dyn Resolver>);
+
+        guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({
+                    "method": "GET",
+                    "url": "https://host-a.example.com/start",
+                    "headers": [{"name": "Cookie", "value": "session=host-a-only"}],
+                    "secret_refs": {"Authorization": "TOKEN_REF"}
+                }),
+            )
+            .await
+            .expect("redirect followed to a successful terminal response");
+
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0]
+                .headers
+                .iter()
+                .any(|(k, v)| k == "Authorization" && v == "host-a-token"),
+            "the first hop, to the bound host, keeps the secret header"
+        );
+        assert!(
+            !requests[1]
+                .headers
+                .iter()
+                .any(|(k, _)| k == "Authorization"),
+            "the second hop, redirected to a different host, must not carry host-a's secret"
+        );
+        assert!(
+            !requests[1].headers.iter().any(|(k, _)| k == "Cookie"),
+            "Cookie is never forwarded across a host change either"
+        );
+    }
+
+    /// A redirect that stays on the *same* host the secret was resolved for
+    /// keeps carrying it -- confirms the fix scopes by host, not "never
+    /// reattach after any redirect at all".
+    #[tokio::test]
+    async fn a_redirect_to_the_same_host_keeps_the_secret_header() {
+        let broker = Arc::new(FakeCredentialBroker {
+            value: "host-a-token".to_string(),
+            resolved_handles: Mutex::new(Vec::new()),
+        });
+        let transport = Arc::new(FakeTransport::default().queue(Ok(ok_response())).queue(Ok(
+            TransportResponse {
+                status: 302,
+                headers: vec![(
+                    "location".to_string(),
+                    "https://host-a.example.com/next".to_string(),
+                )],
+                body: vec![],
+                truncated: false,
+            },
+        )));
+        let guard = EgressGuard::new(
+            Arc::clone(&transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog_with_row_and_secrets(
+                "waddles.a.b.c",
+                vec![("host-a.example.com".to_string(), vec!["GET".to_string()])],
+                HashMap::from([("TOKEN_REF".to_string(), "EGRESS_TEST_HOST_A".to_string())]),
+            ),
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_credential_broker(Arc::clone(&broker) as Arc<dyn CredentialBroker>)
+        .with_resolver(Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            addr: "93.184.216.34:443".parse().unwrap(),
+        }) as Arc<dyn Resolver>);
+
+        guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({
+                    "method": "GET",
+                    "url": "https://host-a.example.com/start",
+                    "secret_refs": {"Authorization": "TOKEN_REF"}
+                }),
+            )
+            .await
+            .expect("redirect to the same host is followed to a successful terminal response");
+
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for (hop, req) in requests.iter().enumerate() {
+            assert!(
+                req.headers
+                    .iter()
+                    .any(|(k, v)| k == "Authorization" && v == "host-a-token"),
+                "hop {hop} (same host throughout) should keep the secret header"
+            );
+        }
+    }
+
+    /// A redirect to a different host that the manifest row explicitly
+    /// widens via `secret_granted_hosts` ("B has its own grant") does
+    /// receive the resolved secret -- proves the drop above is a host
+    /// scoping check, not a blanket "never on hop > 0" rule, and that
+    /// widening it is an explicit, auditable manifest opt-in rather than
+    /// the previous unconditional behavior.
+    #[tokio::test]
+    async fn a_redirect_to_a_host_explicitly_granted_the_secret_keeps_it() {
+        let broker = Arc::new(FakeCredentialBroker {
+            value: "shared-token".to_string(),
+            resolved_handles: Mutex::new(Vec::new()),
+        });
+        let transport = Arc::new(FakeTransport::default().queue(Ok(ok_response())).queue(Ok(
+            TransportResponse {
+                status: 302,
+                headers: vec![(
+                    "location".to_string(),
+                    "https://host-b.example.com/next".to_string(),
+                )],
+                body: vec![],
+                truncated: false,
+            },
+        )));
+        let mut row = EgressRuleRow::from_legacy_patterns(
+            vec![
+                ("host-a.example.com".to_string(), vec!["GET".to_string()]),
+                ("host-b.example.com".to_string(), vec!["GET".to_string()]),
+            ],
+            None,
+            HashMap::from([("TOKEN_REF".to_string(), "EGRESS_TEST_HOST_A".to_string())]),
+        );
+        row.secret_granted_hosts = HashSet::from(["host-b.example.com".to_string()]);
+        let catalog = TestCatalog::new();
+        catalog.insert("waddles.a.b.c", row);
+        let guard = EgressGuard::new(
+            Arc::clone(&transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog,
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_credential_broker(Arc::clone(&broker) as Arc<dyn CredentialBroker>)
+        .with_resolver(Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            addr: "93.184.216.34:443".parse().unwrap(),
+        }) as Arc<dyn Resolver>);
+
+        guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({
+                    "method": "GET",
+                    "url": "https://host-a.example.com/start",
+                    "secret_refs": {"Authorization": "TOKEN_REF"}
+                }),
+            )
+            .await
+            .expect("redirect to the explicitly-granted host succeeds");
+
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[1]
+                .headers
+                .iter()
+                .any(|(k, v)| k == "Authorization" && v == "shared-token"),
+            "host-b was explicitly granted this secret via secret_granted_hosts"
+        );
+    }
+
+    /// A redirect `Location` naming a plain `http://` URL is denied, never
+    /// dialed -- the same per-hop scheme check `send` already runs on
+    /// `req.url` at the top of the loop applies again once `req.url` is
+    /// rewritten to the redirect target, so a downgrade is structurally
+    /// impossible, not just discouraged.
+    #[tokio::test]
+    async fn a_redirect_to_a_plain_http_url_is_denied_never_downgraded() {
+        let transport = FakeTransport::default().queue(Ok(TransportResponse {
+            status: 302,
+            headers: vec![(
+                "location".to_string(),
+                "http://discord.com/downgraded".to_string(),
+            )],
+            body: vec![],
+            truncated: false,
+        }));
+        let guard = guard_with(
+            "waddles.a.b.c",
+            vec![("discord.com".to_string(), vec!["GET".to_string()])],
+            transport,
+        );
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://discord.com/start"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "scheme_not_https");
     }
 
     #[tokio::test]

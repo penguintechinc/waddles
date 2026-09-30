@@ -405,22 +405,38 @@ fn try_start_process_loop(
             // this function already takes.
             Err(_) => bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(false)),
         };
-    let egress = Arc::new(bundle_host_http::egress::EgressGuard::new(
-        Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
-        bundle_host_http::egress::EgressLimits {
-            allow_private_hosts: false,
-            rate_limit_rps: 10,
-            rate_limit_burst: 20,
-            timeout: std::time::Duration::from_secs(10),
-            max_redirects: 3,
-            max_response_bytes: 1_048_576,
-            allowed_ports: vec![443],
-            proxy_url: None,
-        },
-        capabilities::HttpEgressCatalog::new(),
-        egress_denied_metric,
-        bundle_egress_flag,
-    ));
+    // `CliConfig::validate` (run at `Config::load` time, before this
+    // function is ever reached) already parsed this successfully and
+    // enforced the alpha/local-only empty-denylist exception.
+    let cluster_denylist = match config.cli.cluster_cidr_denylist() {
+        Ok(denylist) => denylist,
+        Err(err) => {
+            tracing::warn!(error = %err, "cluster CIDR denylist re-parse failed after startup validation passed; process loop disabled");
+            return;
+        }
+    };
+    let egress = Arc::new(
+        bundle_host_http::egress::EgressGuard::new(
+            Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
+            bundle_host_http::egress::EgressLimits {
+                allow_private_hosts: false,
+                rate_limit_rps: 10,
+                rate_limit_burst: 20,
+                timeout: std::time::Duration::from_secs(10),
+                max_redirects: 3,
+                max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
+                proxy_url: None,
+            },
+            capabilities::HttpEgressCatalog::new(),
+            egress_denied_metric,
+            bundle_egress_flag,
+        )
+        .with_instance_policy(Arc::new(std::sync::RwLock::new(
+            config.cli.instance_egress_policy(),
+        )))
+        .with_cluster_denylist(cluster_denylist),
+    );
 
     let cli = config.cli.clone();
     let app_id = cli.process_app_id.clone();
@@ -622,22 +638,35 @@ fn try_start_changelog_consumer(
     // `try_start_process_loop` (this crate's other, mutually-exclusive
     // startup path) -- see that function's own doc for the deny-by-default
     // `HttpEgressCatalog` seam.
-    let egress = Arc::new(bundle_host_http::egress::EgressGuard::new(
-        Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
-        bundle_host_http::egress::EgressLimits {
-            allow_private_hosts: false,
-            rate_limit_rps: 10,
-            rate_limit_burst: 20,
-            timeout: std::time::Duration::from_secs(10),
-            max_redirects: 3,
-            max_response_bytes: 1_048_576,
-            allowed_ports: vec![443],
-            proxy_url: None,
-        },
-        capabilities::HttpEgressCatalog::new(),
-        egress_denied_metric,
-        bundle_host_http::egress::boxed(license::BundleEgressFlag::new(license_client)),
-    ));
+    let cluster_denylist = match config.cli.cluster_cidr_denylist() {
+        Ok(denylist) => denylist,
+        Err(err) => {
+            tracing::warn!(error = %err, "cluster CIDR denylist re-parse failed after startup validation passed; DB-driven bundle loader/source-binding supervisor not started");
+            return;
+        }
+    };
+    let egress = Arc::new(
+        bundle_host_http::egress::EgressGuard::new(
+            Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
+            bundle_host_http::egress::EgressLimits {
+                allow_private_hosts: false,
+                rate_limit_rps: 10,
+                rate_limit_burst: 20,
+                timeout: std::time::Duration::from_secs(10),
+                max_redirects: 3,
+                max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
+                proxy_url: None,
+            },
+            capabilities::HttpEgressCatalog::new(),
+            egress_denied_metric,
+            bundle_host_http::egress::boxed(license::BundleEgressFlag::new(license_client)),
+        )
+        .with_instance_policy(Arc::new(std::sync::RwLock::new(
+            config.cli.instance_egress_policy(),
+        )))
+        .with_cluster_denylist(cluster_denylist),
+    );
 
     let reader_cfg = bundle_active_set::ReaderConfig {
         host: config.cli.db_reader_host.clone(),

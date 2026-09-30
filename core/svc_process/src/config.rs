@@ -233,6 +233,35 @@ pub struct CliConfig {
         default_value_t = 15
     )]
     pub bundle_config_full_reconcile_minutes: i64,
+
+    // regression: #425 dropped cluster denylist
+    /// Interim, config-sourced instance-wide private-IP egress policy
+    /// (`bundle_host_http::egress::InstanceEgressPolicy`, Justin's
+    /// decision: "private-ip is also subject to the INSTANCE policy --
+    /// default deny, global-admin opt-in"). PR #428/#432's capability-gate
+    /// grant snapshot is the eventual live source this field is a stopgap
+    /// for. Field-for-field mirror of `core/svc_action::config::CliConfig`'s
+    /// identical addition (security review finding, PR #468, MEDIUM).
+    #[arg(
+        long,
+        env = "INSTANCE_EGRESS_ALLOW_PRIVATE_IP",
+        default_value_t = false
+    )]
+    pub instance_egress_allow_private_ip: bool,
+    /// Comma-separated CIDR blocks (IPv4/IPv6, `bundle_host_http::egress::
+    /// ClusterCidrDenylist`) covering this deployment's own pod, Service,
+    /// and node ranges -- never liftable by any egress grant or by
+    /// `instance_egress_allow_private_ip`. Empty (the default) is tolerated
+    /// only when [`Self::deployment_tier`] is `alpha`/`local` --
+    /// [`CliConfig::validate`] hard-fails startup otherwise.
+    #[arg(long, env = "EGRESS_CLUSTER_CIDR_DENYLIST", default_value = "")]
+    pub egress_cluster_cidr_denylist: String,
+    /// Deployment tier -- already set chart-wide via the shared ConfigMap's
+    /// `DEPLOYMENT_TIER` key. Defaults to `"alpha"` here (CLI/test default,
+    /// dev-permissive) -- every non-alpha/local Helm deployment sets
+    /// `DEPLOYMENT_TIER` explicitly via the ConfigMap regardless.
+    #[arg(long, env = "DEPLOYMENT_TIER", default_value = "alpha")]
+    pub deployment_tier: String,
 }
 
 impl CliConfig {
@@ -263,7 +292,46 @@ impl CliConfig {
                 reason: "must be set together".to_string(),
             });
         }
+        let denylist = self.cluster_cidr_denylist()?;
+        if denylist.is_empty() && !matches!(self.deployment_tier.as_str(), "alpha" | "local") {
+            return Err(ConfigError::InvalidValue {
+                field: "egress_cluster_cidr_denylist",
+                reason: format!(
+                    "EGRESS_CLUSTER_CIDR_DENYLIST must be set (non-empty) when \
+                     DEPLOYMENT_TIER={:?} -- only alpha/local tolerate an empty \
+                     cluster CIDR denylist",
+                    self.deployment_tier
+                ),
+            });
+        }
         Ok(())
+    }
+
+    /// Parses [`Self::egress_cluster_cidr_denylist`] into the guard's own
+    /// type. Fails closed on a malformed entry.
+    pub fn cluster_cidr_denylist(
+        &self,
+    ) -> Result<bundle_host_http::egress::ClusterCidrDenylist, ConfigError> {
+        let entries: Vec<&str> = self
+            .egress_cluster_cidr_denylist
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        bundle_host_http::egress::ClusterCidrDenylist::parse(entries).map_err(|reason| {
+            ConfigError::InvalidValue {
+                field: "egress_cluster_cidr_denylist",
+                reason,
+            }
+        })
+    }
+
+    /// The interim, config-sourced [`bundle_host_http::egress::
+    /// InstanceEgressPolicy`] snapshot.
+    pub fn instance_egress_policy(&self) -> bundle_host_http::egress::InstanceEgressPolicy {
+        bundle_host_http::egress::InstanceEgressPolicy {
+            allow_private_ip_egress: self.instance_egress_allow_private_ip,
+        }
     }
 
     /// [`Self::bundle_config_poll_seconds`] clamped to a 5s floor -- a
@@ -471,6 +539,75 @@ mod tests {
     fn host_api_port_default_is_8301() {
         let cli = CliConfig::parse_from(["svc-process"]);
         assert_eq!(cli.host_api_port, 8301);
+    }
+
+    /// Security review fix (PR #468, MEDIUM): an empty cluster CIDR
+    /// denylist is a hard startup error outside alpha/local -- the default
+    /// `deployment_tier` in tests/CLI defaults is `"alpha"`, so this must be
+    /// set explicitly to prove the gate actually fires.
+    #[test]
+    fn empty_cluster_cidr_denylist_is_rejected_outside_alpha_local() {
+        let cli = CliConfig::parse_from(["svc-process", "--deployment-tier", "beta"]);
+        let err = cli.validate().unwrap_err();
+        assert_eq!(
+            err,
+            ConfigError::InvalidValue {
+                field: "egress_cluster_cidr_denylist",
+                reason: "EGRESS_CLUSTER_CIDR_DENYLIST must be set (non-empty) when \
+                     DEPLOYMENT_TIER=\"beta\" -- only alpha/local tolerate an empty \
+                     cluster CIDR denylist"
+                    .to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn empty_cluster_cidr_denylist_is_tolerated_in_alpha_and_local() {
+        for tier in ["alpha", "local"] {
+            let cli = CliConfig::parse_from(["svc-process", "--deployment-tier", tier]);
+            cli.validate()
+                .unwrap_or_else(|e| panic!("tier {tier:?} should tolerate an empty denylist: {e}"));
+        }
+    }
+
+    #[test]
+    fn cluster_cidr_denylist_is_required_and_parsed_outside_alpha_local() {
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--deployment-tier",
+            "production",
+            "--egress-cluster-cidr-denylist",
+            "10.42.0.0/16, 10.43.0.0/16 ,192.168.0.0/16",
+        ]);
+        cli.validate().expect("a populated denylist passes");
+        let denylist = cli.cluster_cidr_denylist().unwrap();
+        assert!(!denylist.is_empty());
+    }
+
+    #[test]
+    fn malformed_cluster_cidr_denylist_entry_is_rejected() {
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--deployment-tier",
+            "alpha",
+            "--egress-cluster-cidr-denylist",
+            "not-a-cidr",
+        ]);
+        let err = cli.cluster_cidr_denylist().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidValue {
+                field: "egress_cluster_cidr_denylist",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn instance_egress_allow_private_ip_flag_override_is_honored() {
+        let cli = CliConfig::parse_from(["svc-process", "--instance-egress-allow-private-ip"]);
+        assert!(cli.instance_egress_allow_private_ip);
+        assert!(cli.instance_egress_policy().allow_private_ip_egress);
     }
 
     #[test]
