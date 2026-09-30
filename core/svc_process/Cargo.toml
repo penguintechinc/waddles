@@ -150,6 +150,12 @@ bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
 # dependency so the capability is written and tested exactly once. See
 # `core/bundle_host_kv/Cargo.toml`.
 bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0" }
+# The shared `db` bundle host-capability implementation (insert/get/update/
+# delete against a bundle's own `app_core`/`app_community` table) -- a
+# same-repo path dependency, same rationale as `bundle-active-set` above:
+# this crate's identifier-safety/tenant-isolation rules are owned by this
+# repo's own bundle-db-capability design doc, not penguin-libs.
+bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
 # `kv` host capability (`src/lib.rs`'s `connect_kv`, `src/capabilities.rs`):
 # a direct Valkey connection, same crate/feature pins `core/svc_action`
 # uses for its own direct `relay`/usage connection, and the same version

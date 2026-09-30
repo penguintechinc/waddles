@@ -32,6 +32,13 @@ pub const RUST_DATA_PLANE_FLAG: &str = "waddles.core.rust-data-plane";
 /// OFF ⇒ every egress call is denied `feature_disabled`.
 pub const BUNDLE_EGRESS_FLAG: &str = "waddles.core.bundle-egress";
 
+/// Gates the bundle `db` host capability (`crate::capabilities::
+/// StageCapabilities::handle_db`) -- same key and same plain opt-in shape
+/// (unseen/OFF denies `feature_disabled`) as `core/svc_process/src/
+/// license.rs::BUNDLE_DB_CAPABILITY_FLAG`; both stages gate on the
+/// identical flag so enabling `db` is one PostHog toggle, not two.
+pub const BUNDLE_DB_CAPABILITY_FLAG: &str = "waddles.bundle-db-capability";
+
 /// Opt-out kill-switch for the DB-driven active-bundle loader
 /// (`crate::bundle_loader`) -- **inverted from the retired
 /// `waddles.core.db-bundle-config` flag it replaces** (user decision,
