@@ -44,7 +44,7 @@ All Docker containers, Kubernetes resources, and internal DNS references MUST fo
 | `action` | Modules that push actions to external platforms | `action-twitch`, `action-discord`, `action-slack` |
 | `core` | Core platform services (router, identity, etc.) | `core-router`, `core-identity`, `core-labels` |
 | `hub` | Admin/management portal components | `hub-api`, `hub-webui` |
-| `infra` | Infrastructure services (databases, caches) | `infra-postgres`, `infra-redis`, `infra-minio` |
+| `infra` | Infrastructure services (databases, caches) | `infra-postgres`, `infra-redis`, `infra-seaweedfs` |
 | `ai` | AI-related services | `ai-ollama`, `ai-researcher` |
 
 ### Examples

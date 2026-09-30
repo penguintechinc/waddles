@@ -111,7 +111,7 @@ section "Core Infrastructure"
 
 test_docker_health "PostgreSQL" "waddlebot-postgres"
 test_docker_health "Redis" "waddlebot-redis"
-test_health "MinIO" "http://localhost:9001"
+test_health "SeaweedFS" "http://localhost:9333/cluster/status"
 
 # ============================================
 # PROCESSING MODULE
