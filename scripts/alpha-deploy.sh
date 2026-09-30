@@ -38,17 +38,34 @@
 # --skip-secrets-style step is ever needed again, it belongs in the chart,
 # not here.
 #
+# resolve-433 -- the dev box runs `docker system prune -a` HOURLY, wiping the
+# local BuildKit cache, so every build here used to be a full cold build
+# (~25min). Builds now go through a dedicated `docker-container` buildx
+# builder (see ensure_cache_builder below) with --cache-from/--cache-to
+# pointed at localhost:32000/waddlebot/buildcache/<image> -- the MicroK8s
+# registry (a pod+PVC in namespace container-registry) lives outside
+# docker's image/build-cache store, so it survives the hourly prune. The
+# docker-container driver is required: the classic `docker` driver only
+# supports `--cache-to type=inline` (baked into the final image, no separate
+# cache manifest) and cannot push a standalone `type=registry` cache blob at
+# all -- verified locally (`docker buildx build --cache-to type=registry...`
+# on the default docker-driver builder errors with "docker exporter does not
+# support cache export"). One cache tag per image, overwritten every build
+# (mode=max, image-manifest=true, oci-mediatypes=true) -- see
+# `make alpha-registry-gc` below for bounding registry disk growth (it was
+# evicted once under DiskPressure).
+#
 # Usage:
 #   scripts/alpha-deploy.sh [--skip-build]
 #
 # --skip-build   Reuse whatever is already pushed under the current HEAD's
 #                sha8 tag (skips the build+push step).
 #
-# Requires: docker, kubectl, helm. Kube context must be local-alpha or
-# microk8s (validated below; KUBE_CONTEXT set to anything else is rejected
-# before any build/push/helm step). bash 3.2 compatible (no associative
-# arrays, no `mapfile`, no `&>>`) -- macOS ships bash 3.2 as /bin/bash and
-# this script must run there unmodified.
+# Requires: docker (with buildx), kubectl, helm. Kube context must be
+# local-alpha or microk8s (validated below; KUBE_CONTEXT set to anything
+# else is rejected before any build/push/helm step). bash 3.2 compatible (no
+# associative arrays, no `mapfile`, no `&>>`) -- macOS ships bash 3.2 as
+# /bin/bash and this script must run there unmodified.
 
 set -euo pipefail
 
@@ -60,7 +77,8 @@ NAMESPACE="${NAMESPACE:-waddlebot}"
 RELEASE="${RELEASE:-waddlebot}"
 HELM_CHART="${HELM_CHART:-k8s/helm/waddlebot}"
 REGISTRY="${REGISTRY:-localhost:32000/waddlebot}"
-readonly NAMESPACE RELEASE HELM_CHART REGISTRY
+CACHE_BUILDER="${CACHE_BUILDER:-alpha-registry-cache}"
+readonly NAMESPACE RELEASE HELM_CHART REGISTRY CACHE_BUILDER
 
 SKIP_BUILD=false
 for arg in "$@"; do
@@ -215,15 +233,66 @@ service_image_tag() {
     esac
 }
 
+# ---------------------------------------------------------------------------
+# resolve-433 -- idempotent buildx builder for the registry-backed cache.
+#
+# Requires the `docker-container` driver: it's the only driver that can
+# export `--cache-to type=registry` as a standalone cache manifest (the
+# default `docker` driver only supports `type=inline`, and refuses
+# `type=registry` outright -- "docker exporter does not support cache
+# export"). `--driver-opt network=host` puts the buildkitd container on the
+# host network namespace so it can actually reach localhost:32000 (the
+# MicroK8s registry NodePort) -- without it the builder container has no
+# route to the host's localhost. The registry has no TLS, so buildkitd needs
+# an explicit insecure/http registry entry in its own config (buildx has no
+# CLI flag for this -- it's buildkitd.toml only), written to a scratch temp
+# file and passed via --buildkitd-config.
+# ---------------------------------------------------------------------------
+ensure_cache_builder() {
+    if docker buildx inspect "${CACHE_BUILDER}" >/dev/null 2>&1; then
+        info "buildx builder '${CACHE_BUILDER}' already exists"
+    else
+        info "Creating buildx builder '${CACHE_BUILDER}' (docker-container driver, insecure registry ${REGISTRY_HOST})"
+        local buildkitd_config
+        buildkitd_config="$(mktemp /tmp/alpha-cache-buildkitd-XXXXXX.toml)"
+        cat > "${buildkitd_config}" <<EOF
+[registry."${REGISTRY_HOST}"]
+  http = true
+  insecure = true
+EOF
+        if ! docker buildx create --name "${CACHE_BUILDER}" \
+            --driver docker-container \
+            --driver-opt network=host \
+            --buildkitd-config "${buildkitd_config}" \
+            --bootstrap; then
+            rm -f "${buildkitd_config}"
+            err "Failed to create buildx builder '${CACHE_BUILDER}'"
+            exit 1
+        fi
+        rm -f "${buildkitd_config}"
+    fi
+}
+
+# Host[:port] portion of REGISTRY (e.g. "localhost:32000") -- used both for
+# the buildkitd insecure-registry config above and to build each image's
+# buildcache ref below.
+REGISTRY_HOST="${REGISTRY%%/*}"
+readonly REGISTRY_HOST
+
 if [[ "${SKIP_BUILD}" != "true" ]]; then
+    ensure_cache_builder
     for svc in ${SERVICES}; do
         repo="$(service_image_repo "${svc}")"
         tag="$(service_image_tag "${svc}")"
         img="${REGISTRY}/${repo}:${tag}"
         dockerfile="$(service_dockerfile "${svc}")"
         context="$(service_context "${svc}")"
-        info "Building ${img} (${dockerfile})"
-        docker build --pull=false \
+        cache_ref="${REGISTRY}/buildcache/${repo}"
+        info "Building ${img} (${dockerfile}), cache ${cache_ref}"
+        docker buildx build --builder "${CACHE_BUILDER}" --pull=false \
+            --cache-from "type=registry,ref=${cache_ref}" \
+            --cache-to "type=registry,ref=${cache_ref},mode=max,image-manifest=true,oci-mediatypes=true" \
+            --load \
             -f "${dockerfile}" \
             -t "${img}" \
             --label "org.opencontainers.image.revision=${SHA}" \
