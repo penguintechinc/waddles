@@ -1,6 +1,6 @@
 """Tests for `storage_service.bundle_component_key()`/`upload_bundle_component()`.
 
-`boto3`'s `_client()` is mocked -- no real S3/MinIO connection.
+`boto3`'s `_client()` is mocked -- no real S3 connection.
 """
 
 from __future__ import annotations

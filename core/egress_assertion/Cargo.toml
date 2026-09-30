@@ -1,0 +1,38 @@
+[package]
+name = "egress-assertion"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Shared signed egress-allowlist assertion (EgressAssertion struct, EdDSA sign + verify, header names) used on both sides of the bundle-host -> egress-proxy hop -- core/bundle_host_http's client-side signer (PR #468) and core/egress_proxy's server-side verifier (PR #463/#469) -- so the wire format the two crates agree on can never drift apart."
+
+[lib]
+name = "egress_assertion"
+path = "src/lib.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- rules/critical-rules.md
+# Dependency Pinning. Pins are copied verbatim from core/service_auth's and
+# core/egress_proxy's own Cargo.toml wherever the same crate is already
+# pinned there, so no dependent crate resolves a second version.
+[dependencies]
+# "use_pem" (on top of service_auth's aws_lc_rs-only feature set) -- this
+# crate is the one place that loads a *private* Ed25519 signing key
+# (`AssertionSigningKey::from_ed25519_pem`), not just decodes public JWKS
+# entries, so it needs `EncodingKey::from_ed_pem` in addition to
+# `DecodingKey::from_ed_pem`. Same "aws_lc_rs" backend rationale as
+# core/service_auth's Cargo.toml: no `rsa` crate anywhere in the graph
+# (RUSTSEC-2023-0071 Marvin timing sidechannel) even though EdDSA is the
+# only algorithm ever used here.
+jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+# CIDR/IP-literal parsing for `PublicIp`/`PrivateIp` grant matching
+# (`destination_matches`/`ip_matches_grant`) -- same pin as
+# `core/egress_proxy`'s own `ipnet` dependency so no dependent crate
+# resolves a second version.
+ipnet = "=2.11.0"
+serde = { version = "=1.0.229", features = ["derive"] }
+thiserror = "=2.0.20"
+uuid = { version = "=1.26.1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["full", "test-util"] }
