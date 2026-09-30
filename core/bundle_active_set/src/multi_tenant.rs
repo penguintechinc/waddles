@@ -288,6 +288,7 @@ mod tests {
             app_id: app_id.to_string(),
             version: version.to_string(),
             superseded_by: None,
+            summary_json: sea_orm::JsonValue::Null,
         }
     }
 
@@ -481,6 +482,7 @@ mod tests {
             digest: digest.to_string(),
             component_key: format!("bundles/{digest}/component.wasm"),
             sidecar_key: format!("bundles/{digest}/sidecar.json"),
+            declared_capabilities: Vec::new(),
         }
     }
 

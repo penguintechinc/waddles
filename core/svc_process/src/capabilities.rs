@@ -19,21 +19,25 @@
 //!
 //! This landing wires `context`/`clock`/`log` fully (the three
 //! capabilities every bundle needs regardless of manifest declarations,
-//! spec §6.5's capability table: "Always granted"), plus `http` -- see
+//! spec §6.5's capability table: "Always granted"), plus `kv` -- backed by
+//! `bundle_host_kv::KvHost` (the crate shared with `core/svc_action` --
+//! see that crate's own module doc for the key-derivation/isolation/quota
+//! design) over a direct Valkey connection opened once at startup
+//! (`crate::lib::connect_kv`) and cloned into every per-invoke
+//! [`StageCapabilities`] this loop constructs (`crate::spine::
+//! ProcessDeps::kv_conn`'s doc) -- and `http`, backed by
 //! [`StageCapabilities::egress`]/[`HttpEgressCatalog`]'s docs for the
 //! shared `bundle_host_http::egress::EgressGuard` pipeline (extracted from
-//! `core/svc_action`, PR #459 follow-up) and the interim
-//! capability-gate seam this stage's own catalog stands in for ahead of
-//! PR #433's standard `core/bundle_capability_gate::authorize` landing.
-//! `db`/`kv`/`flags` remain documented seams -- see
-//! [`StageCapabilities::handle`]'s match arms -- since a real `db` wiring
-//! needs the manifest's `data.tables` allowlist plus per-bundle-role RLS
-//! (`SET LOCAL waddles.tenant`/`waddles.community`, spec §7.4/§11.10) and
-//! `kv` needs a live Valkey connection keyed by `Scope::state_key`,
-//! neither of which this landing's scope covers. `relay` is never granted
-//! to a process-stage bundle at all (spec §6.5: "Capability: granted only
-//! to action-stage bundles") and is denied unconditionally, not merely
-//! unimplemented.
+//! `core/svc_action`, PR #459 follow-up) and the interim capability-gate
+//! seam this stage's own catalog stands in for ahead of PR #433's standard
+//! `core/bundle_capability_gate::authorize` landing. `db`/`flags` remain
+//! documented seams -- see [`StageCapabilities::handle`]'s match arms --
+//! since a real `db` wiring needs the manifest's `data.tables` allowlist
+//! plus per-bundle-role RLS (`SET LOCAL waddles.tenant`/`waddles.community`,
+//! spec §7.4/§11.10), tracked as a separate design in progress (PR #498).
+//! `relay` is never granted to a process-stage bundle at all (spec §6.5:
+//! "Capability: granted only to action-stage bundles") and is denied
+//! unconditionally, not merely unimplemented.
 //!
 //! A bundle never holds a platform credential or a tenant/community
 //! argument (spec §4.3, §5.11): every capability here resolves its own
@@ -49,6 +53,7 @@ use bundle_host_db::{
     SchemaCache,
 };
 use bundle_host_http::egress::{EgressGuard, EgressRuleRow, EgressRuleSource};
+use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
 use crate::license::FeatureGate;
@@ -183,15 +188,7 @@ impl EgressRuleSource for HttpEgressCatalog {
     }
 }
 
-/// The real capability implementation this stage wires today, scoped to
-/// exactly one invocation's `(tenant, community, app_id)` -- see the
-/// module doc for why this is constructed per-invoke, never per-connection.
-/// [`egress`] is the one exception to "everything scope-implicit, nothing
-/// shared" -- it is a per-*process* singleton (owns rate-limit token
-/// buckets keyed by `app_id` across every invoke, spec §8.2 step 8), built
-/// once by this stage's own startup wiring and cloned (cheap, `Arc`) into
-/// every per-invoke `StageCapabilities`.
-pub struct StageCapabilities {
+pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     tenant: String,
     community: Option<String>,
     app_id: String,
@@ -201,13 +198,18 @@ pub struct StageCapabilities {
     /// unimplemented-seam capability's fail-closed default in
     /// [`Self::handle`]).
     db: Option<DbWiring>,
+    /// See [`Self::with_kv`]'s doc; `None` until it is called (a bundle
+    /// sees `not_implemented` rather than this loop failing to start if
+    /// the Valkey connection for `kv` was never configured).
+    kv: Option<KvHost<K>>,
     egress: Arc<EgressGuard>,
 }
 
-impl StageCapabilities {
+impl<K: KvBackend> StageCapabilities<K> {
     /// Builds the capability set for exactly one `invoke` -- `context` and
     /// every other capability are scope-implicit (spec §5.11: "No bundle
-    /// host call accepts a tenant or community argument at all"). `egress`
+    /// host call accepts a tenant or community argument at all"). `db`/`kv`
+    /// start unconfigured; see [`Self::with_db`]/[`Self::with_kv`]. `egress`
     /// is the shared, per-process [`EgressGuard`] -- see the struct doc.
     pub fn new(
         tenant: String,
@@ -220,6 +222,7 @@ impl StageCapabilities {
             community,
             app_id,
             db: None,
+            kv: None,
             egress,
         }
     }
@@ -230,6 +233,27 @@ impl StageCapabilities {
     /// call sites (including every current test) are unaffected.
     pub fn with_db(mut self, db: DbWiring) -> Self {
         self.db = Some(db);
+        self
+    }
+
+    /// Enables the `kv` capability over `backend` (production:
+    /// `redis::aio::MultiplexedConnection`, cloned from
+    /// `crate::spine::ProcessDeps::kv_conn` on every invoke -- a cheap
+    /// handle clone over one shared connection, not a new socket).
+    /// Builder-style so a deployment where the Valkey connection failed to
+    /// open at startup can still construct every other capability and
+    /// simply skip this call.
+    ///
+    /// `capabilities` is the manifest-declared-capability snapshot
+    /// `bundle_host_kv::authorize::authorize_kv` checks -- the same
+    /// `Arc<CapabilitySnapshot>` `crate::bundle_loader`'s DB-driven poll
+    /// loop updates every tick.
+    pub fn with_kv(
+        mut self,
+        backend: K,
+        capabilities: std::sync::Arc<bundle_host_kv::CapabilitySnapshot>,
+    ) -> Self {
+        self.kv = Some(KvHost::new(backend, capabilities));
         self
     }
 
@@ -441,6 +465,79 @@ impl StageCapabilities {
 
         result.map(row_to_json).map_err(db_error_to_host_error)
     }
+
+    /// `kv.get`/`kv.set`/`kv.delete`/`kv.increment` (`wit/waddle-bundle/
+    /// stage.wit` `interface kv`). Argument shapes match exactly what
+    /// `core/bundle_executor::host::imports`'s `kv::Host` impl sends/
+    /// expects -- see `core/svc_action::capabilities::StageCapabilities::
+    /// handle_kv`'s identical doc for the wire contract this must not
+    /// drift from (byte-for-byte the same parsing/mapping, duplicated
+    /// rather than shared only because the two stages' `handle` methods
+    /// take `scope` differently -- `self` here vs. a separate parameter
+    /// there -- module doc). Tenant/community/app_id come from `self`
+    /// (never `call.app_id`).
+    async fn handle_kv(&self, call: &HostCallBody) -> Result<serde_json::Value, HostResultError> {
+        let Some(kv) = &self.kv else {
+            return Err(denied(
+                "not_implemented",
+                "kv capability is not configured on this stage (no Valkey connection)",
+            ));
+        };
+        let kv_scope = KvScope::new(
+            self.tenant.clone(),
+            self.community.clone(),
+            self.app_id.clone(),
+        );
+
+        match call.op.as_str() {
+            "get" => {
+                let args: KvKeyArgs = parse_kv_args(&call.args)?;
+                let value = kv
+                    .get(&kv_scope, call.call_id, &args.key)
+                    .await
+                    .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({ "value": value }))
+            }
+            "set" => {
+                let args: KvSetArgs = parse_kv_args(&call.args)?;
+                kv.set(
+                    &kv_scope,
+                    call.call_id,
+                    &args.key,
+                    &args.value,
+                    args.ttl_seconds,
+                )
+                .await
+                .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({}))
+            }
+            "delete" => {
+                let args: KvKeyArgs = parse_kv_args(&call.args)?;
+                kv.delete(&kv_scope, call.call_id, &args.key)
+                    .await
+                    .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({}))
+            }
+            "increment" => {
+                let args: KvIncrementArgs = parse_kv_args(&call.args)?;
+                let value = kv
+                    .increment(
+                        &kv_scope,
+                        call.call_id,
+                        &args.key,
+                        args.delta,
+                        args.ttl_seconds,
+                    )
+                    .await
+                    .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({ "value": value }))
+            }
+            other => Err(denied(
+                "unknown_op",
+                format!("kv op {other:?} not supported"),
+            )),
+        }
+    }
 }
 
 fn json_to_db_value(v: &serde_json::Value) -> Result<DbValue, HostResultError> {
@@ -498,7 +595,43 @@ fn db_error_to_host_error(err: DbError) -> HostResultError {
     denied(err.code(), err.to_string())
 }
 
-impl CapabilityHandler for StageCapabilities {
+/// `{"key": String}` -- `kv.get`/`kv.delete`'s args.
+#[derive(serde::Deserialize)]
+struct KvKeyArgs {
+    key: String,
+}
+
+/// `{"key": String, "value": Vec<u8>, "ttl_seconds": u32}` -- `kv.set`'s args.
+#[derive(serde::Deserialize)]
+struct KvSetArgs {
+    key: String,
+    value: Vec<u8>,
+    ttl_seconds: u32,
+}
+
+/// `{"key": String, "delta": i64, "ttl_seconds": u32}` -- `kv.increment`'s args.
+#[derive(serde::Deserialize)]
+struct KvIncrementArgs {
+    key: String,
+    delta: i64,
+    ttl_seconds: u32,
+}
+
+fn parse_kv_args<T: serde::de::DeserializeOwned>(
+    args: &serde_json::Value,
+) -> Result<T, HostResultError> {
+    serde_json::from_value(args.clone())
+        .map_err(|e| denied("invalid_args", format!("malformed kv host-call args: {e}")))
+}
+
+/// Maps [`KvError`] onto the `{code, message}` shape every `host-call`
+/// error reply carries -- see `core/svc_action::capabilities::
+/// kv_err_to_host`'s identical doc.
+fn kv_err_to_host(err: KvError) -> HostResultError {
+    denied(err.wire_code(), err.wire_message())
+}
+
+impl<K: KvBackend> CapabilityHandler for StageCapabilities<K> {
     fn handle<'a>(
         &'a self,
         call: HostCallBody,
@@ -509,22 +642,12 @@ impl CapabilityHandler for StageCapabilities {
                 CapabilityKind::Context => self.handle_context(),
                 CapabilityKind::Log => self.handle_log(&call.args),
                 // `http` is wired to the shared `bundle_host_http::egress::
-                // EgressGuard` (`self.egress`, see the struct doc) --
-                // `db` (SS7.4's SQL-parser-gated statement execution
-                // against the manifest's `data.tables` allowlist,
-                // RLS-scoped via `SET LOCAL waddles.tenant`/
-                // `waddles.community`) and `kv` (the bundle's own
-                // `…:state` hash, `penguin_spine::Scope::state_key`) remain
-                // documented seams -- denying (never silently succeeding)
-                // is the correct behavior for an unimplemented capability:
-                // a bundle calling it sees `access-denied`, not a
-                // fabricated success.
+                // EgressGuard` (`self.egress`, see the struct doc) -- `kv`
+                // is wired to `bundle_host_kv::KvHost` above (`self.kv`,
+                // see `Self::with_kv`'s doc).
                 CapabilityKind::Http => self.handle_http(&call.args).await,
+                CapabilityKind::Kv => self.handle_kv(&call).await,
                 CapabilityKind::Db => self.handle_db(&call).await,
-                CapabilityKind::Kv => Err(denied(
-                    "not_implemented",
-                    "kv capability is not wired in this build -- TODO(M4+)",
-                )),
                 CapabilityKind::Flags => Err(denied(
                     "not_implemented",
                     "flags capability is not wired in this build -- TODO(M4+)",
@@ -603,19 +726,25 @@ mod tests {
     /// `host_not_declared` (this stage's deny-by-default posture, see
     /// [`HttpEgressCatalog`]'s doc). Tests exercising a granted call build
     /// their own guard via [`egress_guard_with`] instead.
-    fn caps() -> StageCapabilities {
-        let egress = Arc::new(EgressGuard::new(
+    /// The default fixture's egress guard: an empty [`HttpEgressCatalog`]
+    /// (every `app_id` undeclared, `host_not_declared` on every call) --
+    /// shared by every helper below that doesn't need a declared host.
+    fn test_egress_guard() -> Arc<EgressGuard> {
+        Arc::new(EgressGuard::new(
             Arc::new(ReqwestTransport::new()),
             test_egress_limits(),
             HttpEgressCatalog::new(),
             test_egress_metrics(),
             bundle_host_http::egress::boxed(StaticFlag(true)),
-        ));
+        ))
+    }
+
+    fn caps() -> StageCapabilities {
         StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
-            egress,
+            test_egress_guard(),
         )
     }
 
@@ -649,6 +778,155 @@ mod tests {
             "waddles.bot.commands.default".to_string(),
             egress,
         )
+    }
+
+    /// Grants `storage.kv` to `"waddles.bot.commands.default"` -- the
+    /// `app_id` every `caps()`/`call()` helper in this module uses -- so
+    /// every existing `kv_*` test below (testing `handle_kv`'s argument
+    /// parsing/error mapping, not the gate itself) is unaffected by the
+    /// "undeclared means denied" default.
+    /// `kv_call_is_denied_when_storage_kv_is_undeclared` below is the one
+    /// test exercising an ungranted app.
+    fn caps_with_kv() -> StageCapabilities<FakeKvBackend> {
+        caps_with_kv_and_capabilities(&["waddles.bot.commands.default"])
+    }
+
+    fn caps_with_kv_and_capabilities(granted_app_ids: &[&str]) -> StageCapabilities<FakeKvBackend> {
+        let snapshot = bundle_host_kv::CapabilitySnapshot::new();
+        for app_id in granted_app_ids {
+            snapshot.update(
+                *app_id,
+                [bundle_host_kv::authorize::KV_PERMISSION_ID.to_string()],
+            );
+        }
+        StageCapabilities::new(
+            "acme".to_string(),
+            Some("main".to_string()),
+            "waddles.bot.commands.default".to_string(),
+            test_egress_guard(),
+        )
+        .with_kv(FakeKvBackend::default(), std::sync::Arc::new(snapshot))
+    }
+
+    /// A minimal in-memory [`KvBackend`] fake, mirroring
+    /// `bundle_host_kv::backend::fake::FakeBackend`'s semantics (that one
+    /// is crate-private to `bundle_host_kv`, so `handle_kv`'s own
+    /// argument-parsing/error-mapping is exercised here against a fresh,
+    /// independent implementation of the public `KvBackend` trait -- no
+    /// live Valkey server needed for this module's own tests). Identical
+    /// to `core/svc_action::capabilities::tests::FakeKvBackend`.
+    #[derive(Default)]
+    struct FakeKvBackend {
+        data: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+        counts: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    }
+
+    impl KvBackend for FakeKvBackend {
+        fn get<'a>(
+            &'a self,
+            data_key: &'a str,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+            let value = self.data.lock().unwrap().get(data_key).cloned();
+            Box::pin(async move { Ok(value) })
+        }
+
+        fn set_with_quota<'a>(
+            &'a self,
+            data_key: &'a str,
+            count_key: &'a str,
+            value: &'a [u8],
+            _ttl_seconds: u32,
+            max_keys: u64,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<bundle_host_kv::QuotaOutcome<()>, String>>
+        {
+            let mut data = self.data.lock().unwrap();
+            let existed = data.contains_key(data_key);
+            if !existed {
+                let mut counts = self.counts.lock().unwrap();
+                let count = *counts.get(count_key).unwrap_or(&0);
+                if count >= max_keys {
+                    return Box::pin(
+                        async move { Ok(bundle_host_kv::QuotaOutcome::QuotaExceeded) },
+                    );
+                }
+                counts.insert(count_key.to_string(), count + 1);
+            }
+            data.insert(data_key.to_string(), value.to_vec());
+            Box::pin(async move { Ok(bundle_host_kv::QuotaOutcome::Admitted(())) })
+        }
+
+        fn delete<'a>(
+            &'a self,
+            data_key: &'a str,
+            count_key: &'a str,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<bool, String>> {
+            let existed = self.data.lock().unwrap().remove(data_key).is_some();
+            if existed {
+                let mut counts = self.counts.lock().unwrap();
+                let count = *counts.get(count_key).unwrap_or(&0);
+                counts.insert(count_key.to_string(), count.saturating_sub(1));
+            }
+            Box::pin(async move { Ok(existed) })
+        }
+
+        fn increment_with_quota<'a>(
+            &'a self,
+            data_key: &'a str,
+            count_key: &'a str,
+            delta: i64,
+            _ttl_seconds: u32,
+            max_keys: u64,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<bundle_host_kv::QuotaOutcome<i64>, String>>
+        {
+            let mut data = self.data.lock().unwrap();
+            let existed = data.contains_key(data_key);
+            if !existed {
+                let mut counts = self.counts.lock().unwrap();
+                let count = *counts.get(count_key).unwrap_or(&0);
+                if count >= max_keys {
+                    return Box::pin(
+                        async move { Ok(bundle_host_kv::QuotaOutcome::QuotaExceeded) },
+                    );
+                }
+                counts.insert(count_key.to_string(), count + 1);
+            }
+            let current = data
+                .get(data_key)
+                .and_then(|v| std::str::from_utf8(v).ok())
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0);
+            let new_value = current + delta;
+            data.insert(data_key.to_string(), new_value.to_string().into_bytes());
+            Box::pin(async move { Ok(bundle_host_kv::QuotaOutcome::Admitted(new_value)) })
+        }
+
+        fn increment_rate<'a>(
+            &'a self,
+            _rate_key: &'a str,
+            _window_seconds: u64,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<u64, String>> {
+            // Unbounded in this fake -- `handle_kv`'s own rate limit is
+            // `bundle_host_kv::KvHost`'s responsibility, already covered by
+            // that crate's own tests; this module only needs to prove its
+            // argument parsing/error mapping, not re-prove the limiter.
+            Box::pin(async move { Ok(1) })
+        }
+
+        fn reconcile_count_if_missing<'a>(
+            &'a self,
+            _count_key: &'a str,
+            _data_scan_pattern: &'a str,
+            _lock_key: &'a str,
+            _lock_ttl_ms: u64,
+            _scan_limit: u64,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<bundle_host_kv::ReconcileOutcome, String>>
+        {
+            // Always "already present" -- the eviction self-heal path is
+            // `bundle_host_kv`'s own responsibility, covered by that
+            // crate's tests; this module only needs argument parsing/error
+            // mapping.
+            Box::pin(async move { Ok(bundle_host_kv::ReconcileOutcome::AlreadyPresent) })
+        }
     }
 
     fn call(capability: CapabilityKind, op: &str, args: serde_json::Value) -> HostCallBody {
@@ -887,13 +1165,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kv_db_flags_capabilities_are_documented_seams() {
+    async fn db_flags_capabilities_are_documented_seams() {
+        // Neither `kv` nor `http` is an unconditional seam any more -- see
+        // `kv_is_not_implemented_when_no_backend_was_configured` for `kv`'s
+        // own (backend-unconfigured) not_implemented case, and the `kv_*`/
+        // `http_*` tests elsewhere in this module for their fully-wired
+        // behavior.
         let c = caps();
-        for capability in [
-            CapabilityKind::Db,
-            CapabilityKind::Kv,
-            CapabilityKind::Flags,
-        ] {
+        for capability in [CapabilityKind::Db, CapabilityKind::Flags] {
             let err = c
                 .handle(call(capability, "anything", serde_json::json!({})))
                 .await
@@ -1018,7 +1297,7 @@ mod tests {
             test_egress_metrics(),
             bundle_host_http::egress::boxed(StaticFlag(true)),
         ));
-        let caps = StageCapabilities::new(
+        let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
@@ -1098,7 +1377,7 @@ mod tests {
             test_egress_metrics(),
             bundle_host_http::egress::boxed(StaticFlag(true)),
         ));
-        let caps = StageCapabilities::new(
+        let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
@@ -1123,6 +1402,179 @@ mod tests {
             .headers
             .iter()
             .any(|(k, v)| k == "Authorization" && v == "s3cr3t"));
+    }
+
+    #[tokio::test]
+    async fn kv_is_not_implemented_when_no_backend_was_configured() {
+        let err = caps()
+            .handle(call(
+                CapabilityKind::Kv,
+                "get",
+                serde_json::json!({"key": "k"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_implemented");
+    }
+
+    #[tokio::test]
+    async fn kv_call_is_denied_when_storage_kv_is_undeclared() {
+        // A configured `kv` backend, but the app's `CapabilitySnapshot`
+        // grants nothing -- "undeclared means denied", distinct from
+        // `kv_is_not_implemented_when_no_backend_was_configured`'s
+        // "backend never configured at all" case.
+        let c = caps_with_kv_and_capabilities(&[]);
+        let err = c
+            .handle(call(
+                CapabilityKind::Kv,
+                "get",
+                serde_json::json!({"key": "k"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "backend"); // KvError::wire_code() collapse
+    }
+
+    #[tokio::test]
+    async fn kv_call_succeeds_when_storage_kv_is_declared() {
+        let c = caps_with_kv_and_capabilities(&["waddles.bot.commands.default"]);
+        c.handle(call(
+            CapabilityKind::Kv,
+            "set",
+            serde_json::json!({"key": "k", "value": [1], "ttl_seconds": 0}),
+        ))
+        .await
+        .expect("set succeeds when storage.kv is declared");
+    }
+
+    #[tokio::test]
+    async fn kv_set_then_get_round_trips_through_the_handler() {
+        let c = caps_with_kv();
+        c.handle(call(
+            CapabilityKind::Kv,
+            "set",
+            serde_json::json!({"key": "counter", "value": [1, 2, 3], "ttl_seconds": 0}),
+        ))
+        .await
+        .expect("set succeeds");
+
+        let result = c
+            .handle(call(
+                CapabilityKind::Kv,
+                "get",
+                serde_json::json!({"key": "counter"}),
+            ))
+            .await
+            .expect("get succeeds");
+        assert_eq!(result["value"], serde_json::json!([1, 2, 3]));
+    }
+
+    #[tokio::test]
+    async fn kv_get_of_an_absent_key_returns_a_null_value_not_an_error() {
+        let c = caps_with_kv();
+        let result = c
+            .handle(call(
+                CapabilityKind::Kv,
+                "get",
+                serde_json::json!({"key": "absent"}),
+            ))
+            .await
+            .expect("get succeeds");
+        assert_eq!(result["value"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn kv_delete_then_get_returns_null() {
+        let c = caps_with_kv();
+        c.handle(call(
+            CapabilityKind::Kv,
+            "set",
+            serde_json::json!({"key": "k", "value": [9], "ttl_seconds": 0}),
+        ))
+        .await
+        .unwrap();
+        c.handle(call(
+            CapabilityKind::Kv,
+            "delete",
+            serde_json::json!({"key": "k"}),
+        ))
+        .await
+        .expect("delete succeeds");
+        let result = c
+            .handle(call(
+                CapabilityKind::Kv,
+                "get",
+                serde_json::json!({"key": "k"}),
+            ))
+            .await
+            .expect("get succeeds");
+        assert_eq!(result["value"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn kv_increment_accumulates_across_calls() {
+        let c = caps_with_kv();
+        let first = c
+            .handle(call(
+                CapabilityKind::Kv,
+                "increment",
+                serde_json::json!({"key": "hits", "delta": 5, "ttl_seconds": 0}),
+            ))
+            .await
+            .expect("increment succeeds");
+        assert_eq!(first["value"], serde_json::json!(5));
+
+        let second = c
+            .handle(call(
+                CapabilityKind::Kv,
+                "increment",
+                serde_json::json!({"key": "hits", "delta": 3, "ttl_seconds": 0}),
+            ))
+            .await
+            .expect("increment succeeds");
+        assert_eq!(second["value"], serde_json::json!(8));
+    }
+
+    #[tokio::test]
+    async fn kv_set_with_malformed_args_is_rejected_as_invalid_args() {
+        let c = caps_with_kv();
+        let err = c
+            .handle(call(
+                CapabilityKind::Kv,
+                "set",
+                serde_json::json!({"key": "k"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn kv_unknown_op_is_rejected() {
+        let c = caps_with_kv();
+        let err = c
+            .handle(call(CapabilityKind::Kv, "bogus", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "unknown_op");
+    }
+
+    #[tokio::test]
+    async fn kv_rejects_a_guest_key_that_attempts_a_namespace_escape() {
+        let c = caps_with_kv();
+        let err = c
+            .handle(call(
+                CapabilityKind::Kv,
+                "set",
+                serde_json::json!({"key": "other:app:data:secret", "value": [1], "ttl_seconds": 0}),
+            ))
+            .await
+            .unwrap_err();
+        // `KvError::wire_code` collapses every non-`too_large` reason to
+        // `"backend"` at the host-call boundary (module doc) -- the
+        // finer-grained `invalid_key` reason is what `bundle_host_kv`'s own
+        // tests assert against `KvError::code()` directly.
+        assert_eq!(err.code, "backend");
     }
 
     #[tokio::test]

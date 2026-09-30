@@ -459,6 +459,27 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `reader.read()` at all (drains nothing; `/health`/`/metrics` are
     /// unaffected, since they run on entirely separate tasks).
     pub license: Arc<dyn FeatureGate>,
+    /// The direct Valkey connection the `kv` host capability is backed by
+    /// (`crate::capabilities::StageCapabilities::with_kv`), opened once at
+    /// startup (`crate::lib::connect_kv`) and cloned -- a cheap handle
+    /// clone over one shared connection, not a new socket -- into every
+    /// per-invoke [`StageCapabilities`] this loop constructs. `None` when
+    /// that connection could not be opened (spine config missing/Valkey
+    /// unreachable at startup): every `kv` host-call then sees
+    /// `not_implemented` rather than this loop failing to start, the same
+    /// graceful-degradation posture `core/svc_action::capabilities::
+    /// StageCapabilities::with_kv`'s doc describes.
+    pub kv_conn: Option<redis::aio::MultiplexedConnection>,
+    /// The manifest-declared-capability snapshot
+    /// `bundle_host_kv::authorize::authorize_kv` checks before granting
+    /// `kv` (coordinator fix on PR #425: "undeclared means denied").
+    /// Populated once per active `app_id` per poll tick by
+    /// `crate::bundle_loader::run_tick`/`crate::source_supervisor`'s own
+    /// equivalent, from `bundle_active_set::ActiveBundleRow::
+    /// declared_capabilities` -- shared (not copied) with every per-invoke
+    /// [`StageCapabilities`] this loop constructs, so a capability change
+    /// is visible to the very next `kv` host-call.
+    pub kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     /// The per-process `bundle_host_http::egress::EgressGuard` cloned into
     /// every per-invoke [`crate::capabilities::StageCapabilities`]'s
     /// `http` capability (see that struct's doc for why this is a
@@ -581,13 +602,22 @@ async fn handle_delivered<S: SpineOps>(
     // Per-invoke capability scope (see `crate::host_api`/`crate::
     // capabilities`'s per-invoke-scoping design): built fresh from THIS
     // envelope's own (tenant, community, app_id), never a fixed
-    // connection-lifetime default.
-    let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
-        d.env.tenant.clone(),
-        d.env.community.clone(),
-        deps.app_id.clone(),
-        Arc::clone(&deps.egress),
-    ));
+    // connection-lifetime default. `kv` reuses `deps.kv_conn` (a cheap
+    // handle clone, see that field's doc) rather than opening a new
+    // connection on every invoke.
+    let capabilities: Arc<dyn CapabilityHandler> = {
+        let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+            d.env.tenant.clone(),
+            d.env.community.clone(),
+            deps.app_id.clone(),
+            Arc::clone(&deps.egress),
+        );
+        let caps = match &deps.kv_conn {
+            Some(conn) => caps.with_kv(conn.clone(), Arc::clone(&deps.kv_capabilities)),
+            None => caps,
+        };
+        Arc::new(caps)
+    };
     let trace = d.env.trace.as_ref().map(|t| TraceContext {
         traceparent: t.traceparent.clone(),
         tracestate: t.tracestate.clone(),
@@ -1051,6 +1081,12 @@ mod tests {
             // unaffected -- the gate's own OFF/ON behavior is exercised
             // directly by the `license_gate_*` tests below.
             license: Arc::new(crate::license::test_support::FixedGate(true)),
+            // No live Valkey server in this module's unit tests -- every
+            // `kv` host-call a fixture invokes sees `not_implemented`,
+            // exercised directly by `capabilities`'s own test suite
+            // instead of here.
+            kv_conn: None,
+            kv_capabilities: Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
             // Deny-by-default fixture (empty catalog, see
             // `crate::capabilities::HttpEgressCatalog`'s doc) -- no test in
             // this module exercises `http` through `ProcessDeps` itself

@@ -255,6 +255,30 @@ infrastructure:
       discord: "REPLACE_ME"
       slack: "REPLACE_ME"
     maxMemory: "256mb"
+    # SECURITY REVIEW FINDING (PR #425, low severity): this default,
+    # `allkeys-lru`, is an eviction policy that CAN evict the Rust
+    # data-plane's `bundlekv:...:count` keys (the per-app `storage.kv`
+    # live-key-count quota counter -- `core/bundle_host_kv::scope::
+    # KvScope::count_key`). Those counter keys are deliberately set with
+    # NO TTL (non-volatile), so only an `allkeys-*` policy can evict them --
+    # a `volatile-*` policy never touches a non-volatile key, and
+    # `noeviction` never evicts anything. An evicted counter silently
+    # resets an app's kv quota to what a background `SCAN`-based
+    # reconciliation (`core/bundle_host_kv::backend::KvBackend::
+    # reconcile_count_if_missing`) recomputes on the next write -- a
+    # self-heal, not a substitute for the right policy. Both
+    # `svc-process-rust`/`svc-action-rust` runtime-check this setting at
+    # startup (`CONFIG GET maxmemory-policy`) and log `ERROR` + emit
+    # `waddles_bundle_kv_maxmemory_policy_violation_total` if it is still
+    # `allkeys-*` when they connect. **Recommended for any deployment
+    # actually using `storage.kv`:** `noeviction` (refuses new writes at
+    # capacity rather than evicting) or a `volatile-*` policy (safe for
+    # `storage.kv` specifically, since its own keys never carry a TTL) --
+    # left as `allkeys-lru` here only because other consumers of this same
+    # instance (spine streams, usage-metering, relay queues) may
+    # legitimately want size-bounded eviction; changing the cluster-wide
+    # default is a capacity-planning decision, not something this fix
+    # makes unilaterally.
     maxMemoryPolicy: "allkeys-lru"
     # fix/valkey-tls-alpha -- adds a `tls-port` listener ALONGSIDE the existing plaintext
     # `port` above (dual-listener: `redis-server --port 6379 --tls-port <this>` runs both),

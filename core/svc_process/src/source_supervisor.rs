@@ -131,6 +131,17 @@ pub struct SupervisorDeps {
     pub approved_targets: HashMap<String, String>,
     pub metrics: Arc<dyn SpineMetrics>,
     pub license: Arc<dyn FeatureGate>,
+    /// See `spine::ProcessDeps::kv_conn`'s doc -- opened once by
+    /// `crate::lib::try_start_changelog_consumer` (inside its spawned task,
+    /// since opening it is async) and cloned into every binding consumer's
+    /// own `ProcessDeps` in [`run_binding_consumer`] below, rather than
+    /// reopened per consumer or per reconnect attempt.
+    pub kv_conn: Option<redis::aio::MultiplexedConnection>,
+    /// See `spine::ProcessDeps::kv_capabilities`'s doc -- the same shared
+    /// snapshot `crate::lib::try_start_changelog_consumer`'s
+    /// `changelog_consumer::run` poll writes to, cloned (the `Arc`, not the
+    /// snapshot) into every binding consumer's own `ProcessDeps`.
+    pub kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::egress`'s doc.
     pub egress: Arc<bundle_host_http::egress::EgressGuard>,
@@ -258,6 +269,8 @@ async fn run_binding_consumer(
             spine: spine_client,
             metrics: deps.metrics.clone(),
             license: Arc::clone(&deps.license),
+            kv_conn: deps.kv_conn.clone(),
+            kv_capabilities: Arc::clone(&deps.kv_capabilities),
             egress: Arc::clone(&deps.egress),
         };
 

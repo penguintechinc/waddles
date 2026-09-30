@@ -122,6 +122,16 @@ where
     // capability set's `EgressGuard` (reader, spec §7.4's `http` egress
     // allowlist) -- see `crate::distribution`'s module doc.
     let catalog = Arc::new(distribution::BundleCatalog::new());
+    // Shared between `bundle_loader`'s DB-driven poll (writer -- every
+    // tick's `ActiveBundleRow::declared_capabilities`, `bundle_loader`'s
+    // own doc) and the host-API capability set's `kv` capability (reader,
+    // `bundle_host_kv::authorize::authorize_kv`) -- same "one snapshot,
+    // shared Arc, one writer, one reader" pattern as `catalog` above. The
+    // legacy `ACTION_BUNDLE_*` env path never writes to this snapshot at
+    // all (`try_start_env_bundle_loader` has no active-set row to derive
+    // capabilities from), so `kv` denies by default under that path --
+    // `bundle_host_kv::authorize`'s own module doc.
+    let kv_capabilities = Arc::new(bundle_host_kv::CapabilitySnapshot::new());
     let egress_denied_total = telemetry::register_egress_metrics(&prom_registry);
 
     // Spec §13.5's two-gate check for this service's flags
@@ -165,15 +175,24 @@ where
         config.discord_bot_token.clone(),
         Arc::clone(&usage),
         catalog,
+        Arc::clone(&kv_capabilities),
         egress_denied_total,
         license.clone(),
     );
+    // Both bundle-selection sources run unconditionally, gated
+    // independently (this module's top doc, dataplane scale design rev 4):
+    // the legacy `ACTION_BUNDLE_*` env override never gates on the
+    // multi-tenant DB path's own state. `resolve_db_path_active`/
+    // `try_start_db_bundle_loader` (single-tenant, mutual-exclusion) are
+    // retired -- superseded by `try_start_changelog_consumer`'s multi-tenant
+    // discovery of every `(tenant_id, community_id)` scope in the database.
     try_start_env_bundle_loader(&config.cli, Arc::clone(&connections));
     try_start_changelog_consumer(
         &config,
         Arc::clone(&connections),
         license.clone(),
         bundle_loader_excluded_metric,
+        Arc::clone(&kv_capabilities),
         changelog_consumer_metrics,
     );
     try_start_dispatch(&config, connections, usage, license);
@@ -315,6 +334,7 @@ async fn build_stage_capabilities(
     discord_bot_token: Option<config::Secret>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
     catalog: Arc<distribution::BundleCatalog>,
+    kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     egress_denied_total: prometheus::IntCounterVec,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
 ) -> Option<Arc<dyn capabilities::CapabilityHandler>> {
@@ -368,7 +388,24 @@ async fn build_stage_capabilities(
         )))
         .with_cluster_denylist(cluster_denylist),
     );
-    let caps = capabilities::StageCapabilities::new(relay_conn, egress, usage);
+    // `kv` reuses this same direct Valkey connection (cloned -- a cheap
+    // handle clone over one shared TCP connection, not a second socket)
+    // rather than opening a dedicated one: `relay_conn` already IS the
+    // "second, direct redis connection" `usage.rs`'s module doc describes,
+    // and `kv`'s isolation/quota model needs nothing about the connection
+    // itself that `relay`/usage don't already require (`crate::capabilities`'
+    // `StageCapabilities::with_kv`'s doc).
+    let mut kv_conn = relay_conn.clone();
+    // Low-severity fix, security review of PR #425: `count_key` has no
+    // TTL, so an `allkeys-*` `maxmemory-policy` can evict it under memory
+    // pressure, silently resetting the kv quota -- checked once here,
+    // never on the per-op hot path (`bundle_host_kv::policy`'s doc).
+    let policy_check = bundle_host_kv::policy::check_maxmemory_policy(&mut kv_conn).await;
+    bundle_host_kv::policy::log_and_record(&policy_check);
+    let caps = capabilities::StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
+        relay_conn, egress, usage,
+    )
+    .with_kv(kv_conn, kv_capabilities);
     // Discord relay send (spec: relay providers, `discord`) -- graceful
     // degradation, not a startup requirement: a deployment that never sets
     // `DISCORD_BOT_TOKEN` simply never enables this provider, and a bundle
@@ -402,6 +439,7 @@ fn try_start_host_api(
     discord_bot_token: Option<config::Secret>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
     catalog: Arc<distribution::BundleCatalog>,
+    kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     egress_denied_total: prometheus::IntCounterVec,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
 ) -> Arc<host_api::ConnectionRegistry> {
@@ -419,6 +457,7 @@ fn try_start_host_api(
             discord_bot_token,
             usage,
             catalog,
+            kv_capabilities,
             egress_denied_total,
             license,
         )
@@ -596,6 +635,7 @@ fn try_start_changelog_consumer(
     connections: Arc<host_api::ConnectionRegistry>,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
     excluded_metric: prometheus::IntCounterVec,
+    kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     changelog_consumer_metrics: telemetry::ChangelogConsumerMetrics,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
@@ -649,6 +689,7 @@ fn try_start_changelog_consumer(
             connections,
             excluded_metric,
             changelog_consumer_metrics,
+            kv_capabilities,
             shutdown_rx,
         )
         .await;
@@ -1211,6 +1252,7 @@ mod tests {
             connections,
             None,
             test_excluded_metric(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
             test_changelog_consumer_metrics(),
         );
     }

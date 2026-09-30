@@ -55,10 +55,26 @@ so no second, pydal `dal` parameter is needed anywhere in this module.
 **Scope note.** Capability derivation (`_derive_capabilities`) is based
 on the manifest's declared shape (egress non-empty => `http`,
 `data_tables` non-empty => `db`, an `action` stage => `relay`;
-`context`/`kv`/`flags`/`log`/`clock` always) -- spec Sec9.7.1's stronger
+`context`/`flags`/`log`/`clock` always) -- spec Sec9.7.1's stronger
 claim (cross-checked against the component's actual imports) requires
 the M2 compiler to report an imports list on its artifact callback,
 which is a documented follow-on once that milestone ships the field.
+Per-bundle Postgres role provisioning (spec Sec11.10, a separate
+follow-on) is likewise out of this milestone's scope -- approval here
+records the consent record only, it does not grant DB privileges.
+
+**`kv` (coordinator fix on PR #425, `docs/superpowers/specs/
+2026-09-28-bundle-permissions-and-capability-gate.md` PR #419's
+`storage.kv` permission id): no longer in the "always" set above.** `kv`
+is only added when the manifest's own `permissions:` list declares
+`"storage.kv"` -- the same shape-derived pattern `http`/`db` already
+use (a manifest signal, not an implicit default), reversing this
+module's prior "always granted" stance for `kv` specifically. The data
+plane's `bundle_host_kv::authorize::authorize_kv` reads this exact
+`capabilities` list (via `app_install_approvals.summary_json`,
+`bundle_active_set::ActiveBundleRow::declared_capabilities`) and denies
+`kv` for any bundle that omitted the permission -- undeclared means
+denied.
 """
 
 from __future__ import annotations
@@ -140,15 +156,28 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
     )
 
 
+#: The `kv` permission's stable id in the approved permission catalog
+#: (`docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+#: PR #419 SS1). Both **required in the manifest's own `permissions:` list**
+#: to grant the capability at all, AND the exact string added to this
+#: function's `capabilities` output (rather than the bare `"kv"` every
+#: other entry here uses) -- `bundle_host_kv::authorize::KV_PERMISSION_ID`
+#: (Rust) checks the data plane's `CapabilitySnapshot` for this literal
+#: string, so hub-api and the data plane must agree on it byte-for-byte.
+KV_PERMISSION_ID = "storage.kv"
+
+
 def _derive_capabilities(manifest: BundleManifestV2) -> frozenset[str]:
     """The host capabilities a manifest's declared shape implies -- see this module's scope note."""
-    caps = {"context", "kv", "flags", "log", "clock"}
+    caps = {"context", "flags", "log", "clock"}
     if manifest.egress:
         caps.add("http")
     if manifest.data_tables:
         caps.add("db")
     if "action" in manifest.stages:
         caps.add("relay")
+    if KV_PERMISSION_ID in manifest.permissions:
+        caps.add(KV_PERMISSION_ID)
     return frozenset(caps)
 
 

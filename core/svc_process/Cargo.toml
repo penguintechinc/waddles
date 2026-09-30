@@ -148,6 +148,19 @@ bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
 # this crate's identifier-safety/tenant-isolation rules are owned by this
 # repo's own bundle-db-capability design doc, not penguin-libs.
 bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
+# The `kv` bundle host capability's shared key-derivation/isolation/quota
+# logic (`src/capabilities.rs`'s `handle_kv`) -- a same-repo `path`
+# dependency, NOT a `penguin-libs` git dependency, for the same reason
+# `bundle-active-set` above is: this repo's own security boundary for
+# `stage.wit`'s `interface kv`. `core/svc_action` declares the identical
+# dependency so the capability is written and tested exactly once. See
+# `core/bundle_host_kv/Cargo.toml`.
+bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0" }
+# `kv` host capability (`src/lib.rs`'s `connect_kv`, `src/capabilities.rs`):
+# a direct Valkey connection, same crate/feature pins `core/svc_action`
+# uses for its own direct `relay`/usage connection, and the same version
+# already pulled in transitively via `penguin-spine`.
+redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp"] }
 # The bundle `http` host capability's shared, SSRF-hardened egress guard
 # (`src/capabilities.rs`'s `StageCapabilities::egress`) -- extracted from
 # `core/svc_action` (PR #459 follow-up) so this stage enforces the
@@ -158,14 +171,6 @@ bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"
-# Test-only: `redis::make_extension_error` builds a real `RedisError` with
-# a server-reported error code (e.g. `"NOGROUP"`) for
-# `src/source_supervisor.rs`'s NOGROUP-detection unit tests, without a live
-# Valkey connection. `default-features = false` -- only the base error
-# types are needed, none of `aio`/`cluster`/etc. Already a transitive
-# dependency (via `penguin-spine`) at this exact version; declared
-# directly here only because it's now referenced by name in test code.
-redis = { version = "=1.7.0", default-features = false }
 # Test-only: throwaway self-signed CA/client cert+key pairs generated at
 # test run time (`src/host_api.rs`'s TLS tests) -- same rationale as
 # `core/svc_action`'s identical dev-dependency: no private key material,
