@@ -35,7 +35,7 @@ is_healthy() {
     docker compose ps "$1" 2>/dev/null | grep -q "(healthy)"
 }
 
-# hub-webui depends_on hub-api (which depends_on postgres/redis/minio/
+# hub-webui depends_on hub-api (which depends_on postgres/redis/seaweedfs/
 # db-migrations), so bringing up hub-webui alone is enough to start the
 # whole dependency chain needed for the frontend to serve.
 if ! is_healthy hub-webui || ! is_healthy hub-api; then

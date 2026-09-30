@@ -1,5 +1,17 @@
 """Shared fixtures for hub-api's own tests.
 
+`bundle_data_pg_url`/`bundle_data_pg_conn` (`tests/test_bundle_data_ddl.py`)
+are this repo's first real-Postgres test fixtures -- `bundle_data_ddl.py`'s
+`psycopg2.sql.Composable.as_string()` golden-DDL rendering has no offline
+path (psycopg2's C extension requires a real connection/cursor to apply
+identifier/value quoting), and the RLS cross-tenant isolation test needs a
+real Postgres to prove RLS policies actually isolate rows. Session-scoped
+container (`postgres:17-bookworm`, matching `config/postgres`'s own pin),
+function-scoped throwaway database per test for isolation. Skips (not
+fails) when Docker is unavailable, same "environment-dependent, don't
+block the rest of the suite" posture as any other optional integration
+fixture.
+
 `tenant_db` mirrors `libs/flask_core/tests/test_tenancy.py` and
 `test_mcp_routes.py`'s own fixture exactly (in-memory pydal `tenants`
 table, `migrate=True`) -- ephemeral, test-only schema. Production never
@@ -48,6 +60,7 @@ take any `AsyncDAL`-like fixture with a `.dal` attribute, not just
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 import pytest
@@ -96,6 +109,51 @@ TENANT_SLUG = "acme-corp"
 
 #: Second tenant slug -- `lifecycle_db`'s cross-tenant IDOR fixture data.
 OTHER_TENANT_SLUG = "other-corp"
+
+#: Test-only Ed25519 signing seed (NEVER a real platform key) -- see
+#: `bundle_signing_test_env` below.
+_TEST_SIGNING_PRIVATE_KEY_B64 = base64.b64encode(b"t" * 32).decode("ascii")
+_TEST_SIGNING_KEY_ID = "test-key-1"
+
+
+@pytest.fixture(autouse=True)
+def bundle_signing_test_env(monkeypatch: Any) -> None:
+    """Every test gets a valid (test-only) Ed25519 artifact-signing key configured.
+
+    `bundle_approval_service.approve_version()` (spec SS5.6, artifact
+    signing) fails closed without `BUNDLE_SIGNING_PRIVATE_KEY`/
+    `BUNDLE_SIGNING_KEY_ID` set -- rather than mock signing away across
+    the ~30 existing `approve_version()`/`seed_one()` call sites in this
+    suite, this autouse fixture makes REAL Ed25519 signing happen on every
+    approval, matching this codebase's own "prove the wiring, don't fake
+    it" standard for security-sensitive code. A test specifically
+    exercising the "no key configured" failure path removes these with
+    `monkeypatch.delenv(...)` itself.
+    """
+    monkeypatch.setenv("BUNDLE_SIGNING_PRIVATE_KEY", _TEST_SIGNING_PRIVATE_KEY_B64)
+    monkeypatch.setenv("BUNDLE_SIGNING_KEY_ID", _TEST_SIGNING_KEY_ID)
+
+
+@pytest.fixture(autouse=True)
+def bundle_signing_sidecar_upload_mock(monkeypatch: Any) -> Any:
+    """Stubs `storage_service.write_bundle_sidecar()` so no test hits a real MinIO/S3 endpoint.
+
+    `approve_version()`'s new post-commit signed-sidecar upload
+    (`bundle_signing_service.upload_signed_sidecar()`) would otherwise
+    reach out for real -- mirrors `test_bundle_version_service.py`'s own
+    `monkeypatch.setattr(svc.storage_service, "upload_bundle_component",
+    ...)` pattern for the same reason. Returns the `AsyncMock` so a test
+    that specifically wants to assert the upload happened (call count/
+    args) can import this fixture and inspect it, or override it again
+    with its own `monkeypatch.setattr` for a real-upload/failure-path test.
+    """
+    from unittest.mock import AsyncMock
+
+    from services import storage_service
+
+    mock = AsyncMock(return_value="bundles/mock/1/mock.json")
+    monkeypatch.setattr(storage_service, "write_bundle_sidecar", mock)
+    return mock
 
 
 @pytest.fixture
@@ -1329,7 +1387,7 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("badge", String(100)),
         Column("approval_id", BigInteger),
         Column("created_at", DateTime),
-        # migration 0024 -- the staged MinIO object keys (storage_service.
+        # migration 0024 -- the staged S3 object keys (storage_service.
         # bundle_component_key()/bundle_sidecar_key()), written by
         # bundle_version_service.py::_publish_prebuilt_version().
         Column("component_key", Text),
@@ -1340,6 +1398,13 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("license", String(50)),
         Column("license_review_required", Boolean, server_default="0"),
         Column("source_url", Text),
+        # migration 0031 -- artifact signing (spec SS5.6/Gemini review
+        # condition 9), written by bundle_signing_service.py at approval
+        # time (bundle_approval_service._write_approval_and_activate()).
+        Column("artifact_signature", Text),
+        Column("artifact_signature_key_id", String(100)),
+        Column("artifact_signed_approval_id", BigInteger),
+        Column("artifact_signed_at", DateTime),
     )
     Table(
         "app_active_versions",
@@ -1470,6 +1535,98 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("updated_by", Integer),
         Column("updated_at", DateTime),
     )
+    # app_permission_requests / app_tenant_permission_restrictions /
+    # community_permission_grants / app_permission_grant_versions /
+    # bundle_reputation_adjustments (migration 0032) -- sqlite-compatible
+    # mirror of the Bundle Permissions & Capability Gate grant-storage
+    # tables (services/bundle_permission_service.py).
+    Table(
+        "app_permission_requests",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("app_id", String(255), nullable=False),
+        Column("version", String(50), nullable=False),
+        Column("permission_id", String(255), nullable=False),
+        Column("risk", String(20), nullable=False),
+        Column("params_json", JSON, server_default="{}"),
+        Column("justification", Text, nullable=False),
+        Column("approved_by", Integer),
+        Column("approval_source", String(50), server_default="human"),
+        Column("approved_at", DateTime),
+    )
+    Table(
+        "app_tenant_permission_restrictions",
+        metadata,
+        Column("tenant_id", Integer, nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("permission_id", String(255), nullable=False),
+        Column("restricted_by", Integer),
+        Column("restricted_at", DateTime),
+    )
+    Table(
+        "community_permission_grants",
+        metadata,
+        Column("community_id", Integer, nullable=False),
+        Column("tenant_id", Integer, nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("permission_id", String(255), nullable=False),
+        Column("params_json", JSON, server_default="{}"),
+        Column("granted_by", Integer),
+        Column("granted_at", DateTime),
+        Column("revoked_by", Integer),
+        Column("revoked_at", DateTime),
+    )
+    Table(
+        "app_permission_grant_versions",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer, nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("version", String(50), nullable=False),
+        Column("grant_version", Integer, nullable=False),
+        Column("permission_snapshot_hash", String(71), nullable=False),
+        Column("effective_at", DateTime),
+    )
+    Table(
+        "bundle_reputation_adjustments",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("app_id", String(255), nullable=False),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer),
+        Column("target_user_uuid", String(36), nullable=False),
+        Column("scope", String(20), nullable=False),
+        Column("delta", Integer, nullable=False),
+        Column("reason_code", String(100), nullable=False),
+        Column("occurred_at", DateTime),
+        Column("reversal_of", BigInteger),
+    )
+    # instance_permission_policies / instance_permission_policy_audit
+    # (migration 0033) -- sqlite-compatible mirror of the instance policy
+    # layer (services/bundle_instance_policy_service.py).
+    Table(
+        "instance_permission_policies",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("permission_key", String(255), nullable=False),
+        Column("param_scope", String(255)),
+        Column("action", String(10), nullable=False),
+        Column("set_by", Integer),
+        Column("set_at", DateTime),
+    )
+    Table(
+        "instance_permission_policy_audit",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("permission_key", String(255), nullable=False),
+        Column("param_scope", String(255)),
+        Column("previous_action", String(10)),
+        Column("new_action", String(10), nullable=False),
+        Column("cascaded_revocations", Integer, server_default="0"),
+        Column("set_by", Integer),
+        Column("set_at", DateTime),
+    )
     # `audit_log` is a pre-existing production table (services/schema.py's
     # `bind_admin_tables()`), reflected here as its sqlite-compatible
     # mirror because this fixture has no full pydal schema bootstrap --
@@ -1509,3 +1666,97 @@ async def install_dal(bundle_install_db: Any) -> Any:
     await install_dal.reflect()
     yield install_dal
     await install_dal.close()
+
+
+@pytest.fixture(scope="session")
+def bundle_data_pg_url() -> Any:
+    """Session-scoped real-Postgres container URL for `test_bundle_data_ddl.py`.
+
+    See this module's own docstring for why a live Postgres is required at
+    all. Imports `testcontainers` lazily so a Docker-less environment only
+    skips these specific tests, not collection of this whole file.
+    """
+    try:
+        from testcontainers.community.postgres import PostgresContainer
+    except Exception as exc:  # pragma: no cover - environment-dependent
+        pytest.skip(f"testcontainers unavailable: {exc}")
+
+    try:
+        container = PostgresContainer("postgres:17-bookworm")
+        container.start()
+    except Exception as exc:  # pragma: no cover - environment-dependent
+        pytest.skip(f"docker unavailable for bundle_data_pg tests: {exc}")
+
+    url = container.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
+
+    # Roles are cluster-wide (not per-database) in Postgres -- created once
+    # here, not in the per-test `bundle_data_pg_conn` fixture below, or the
+    # second test's `CREATE ROLE` would fail with `DuplicateObject`.
+    import psycopg2
+
+    role_conn = psycopg2.connect(url)
+    role_conn.autocommit = True
+    with role_conn.cursor() as cur:
+        cur.execute("CREATE ROLE waddles_bundle_runtime")
+        # A real, non-superuser table-owner role -- needed by test_force_
+        # rls_binds_the_owning_role_too: Postgres superusers always bypass
+        # RLS regardless of FORCE (per Postgres's own RLS docs), so
+        # confirming FORCE actually binds the *owner* requires the owner to
+        # not be a superuser in the first place. NOLOGIN since tests always
+        # reach it via `SET ROLE`, never a direct connection.
+        cur.execute("CREATE ROLE waddles_bundle_migrator NOLOGIN")
+    role_conn.close()
+
+    try:
+        yield url
+    finally:
+        container.stop()
+
+
+@pytest.fixture
+def bundle_data_pg_conn(bundle_data_pg_url: str) -> Any:
+    """A fresh, empty Postgres database per test -- full isolation without recreating the container.
+
+    Also creates the `app_core`/`app_community` schemas, the `pgcrypto`
+    extension (`gen_random_uuid()`, used by the platform-owned `row_id`
+    column default), and the schema-level `USAGE`/`CREATE` grants Phase
+    0's separate role/schema-provisioning step is responsible for in
+    production (not this module's concern -- `bundle_data_ddl` only issues
+    the explicit *per-table* `GRANT` on top of that baseline).
+    `waddles_bundle_runtime`/`waddles_bundle_migrator` themselves are
+    created once, cluster-wide, by `bundle_data_pg_url` above.
+    """
+    import uuid
+
+    import psycopg2
+    from psycopg2 import sql as pg_sql
+
+    admin_conn = psycopg2.connect(bundle_data_pg_url)
+    admin_conn.autocommit = True
+    db_name = f"bundle_ddl_test_{uuid.uuid4().hex[:12]}"
+    with admin_conn.cursor() as cur:
+        cur.execute(pg_sql.SQL("CREATE DATABASE {}").format(pg_sql.Identifier(db_name)))
+    admin_conn.close()
+
+    test_url = bundle_data_pg_url.rsplit("/", 1)[0] + f"/{db_name}"
+    conn = psycopg2.connect(test_url)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+        cur.execute("CREATE SCHEMA IF NOT EXISTS app_core")
+        cur.execute("CREATE SCHEMA IF NOT EXISTS app_community")
+        cur.execute("GRANT USAGE ON SCHEMA app_core, app_community TO waddles_bundle_runtime")
+        cur.execute(
+            "GRANT USAGE, CREATE ON SCHEMA app_core, app_community TO waddles_bundle_migrator"
+        )
+
+    yield conn
+
+    conn.close()
+    cleanup_conn = psycopg2.connect(bundle_data_pg_url)
+    cleanup_conn.autocommit = True
+    with cleanup_conn.cursor() as cur:
+        cur.execute(
+            pg_sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(pg_sql.Identifier(db_name))
+        )
+    cleanup_conn.close()

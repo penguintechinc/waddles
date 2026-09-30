@@ -19,13 +19,15 @@
 //!   `crate::invoke::UnimplementedBucketSource` this production path used
 //!   before this pass -- that stub now backs only the tests exercising its
 //!   own fail-closed behavior; see `crate::bucket`'s doc for why not
-//!   `object_store`).
+//!   `object_store`); the sidecar's Ed25519 signature verification against
+//!   `BUNDLE_SIGNING_PUBLIC_KEYS` (`crate::signing`, spec SS5.6/Gemini
+//!   review condition 9) -- `BucketComponentSource` now fetches the
+//!   sidecar alongside the component, and `Executor::on_load` refuses to
+//!   instantiate a component whose sidecar signature doesn't verify.
 //! - **Scaffolded with a `TODO`**: precompiled `.cwasm`
 //!   caching under `EXECUTOR_PRECOMPILE_DIR` (every `load` JIT-compiles
 //!   fresh); the mTLS peer-identity (SPIFFE ID / pinned CN) check on top
-//!   of the base rustls handshake in `crate::tls`; the sidecar's Ed25519
-//!   signature verification (spec SS7.6 step 4), which
-//!   `BucketComponentSource` does not itself fetch or check.
+//!   of the base rustls handshake in `crate::tls`.
 
 pub mod bucket;
 pub mod config;
@@ -33,6 +35,8 @@ pub mod engine;
 pub mod error;
 pub mod host;
 pub mod invoke;
+pub mod manifest;
+pub mod signing;
 pub mod tls;
 pub mod wire;
 
@@ -57,6 +61,12 @@ pub const SERVICE_NAME: &str = "bundle-executor";
 pub async fn run() -> Result<(), ExecutorError> {
     let cfg = <CliConfig as clap::Parser>::parse();
     cfg.validate()?;
+    // Fails closed at startup if no platform signing key is configured --
+    // spec SS5.6 has no supported "verification off" mode in production;
+    // `Executor::new`'s own (lenient) derivation from the same field is
+    // only ever reached with an empty key set in a test that never called
+    // this function. See `crate::signing::PlatformPublicKeys::from_cli_required`.
+    crate::signing::PlatformPublicKeys::from_cli_required(&cfg)?;
     cfg.validate_host_api_tls()?;
 
     init_telemetry();

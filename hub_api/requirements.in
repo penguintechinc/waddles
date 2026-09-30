@@ -15,7 +15,7 @@ pyjwt>=2.13.0,<3.0.0
 
 # M1 Core Identity/Auth group (bcrypt, httpx come transitively via flask_core):
 webauthn>=3.0.0,<4.0.0  # passkey_service.py -- WebAuthn/FIDO2 registration+auth
-boto3>=1.35.0,<2.0.0  # storage_service.py -- S3/MinIO avatar storage only, no local-disk fallback
+boto3>=1.35.0,<2.0.0  # storage_service.py -- S3-compatible avatar storage only, no local-disk fallback
 # Async HTTP client -- blueprints/v1/event.py's EventCalendarProxyClient
 # forwards to the calendar-interaction service; pin matches
 # action/interactive/calendar_interaction_module/requirements.in's own
@@ -53,6 +53,16 @@ cryptography>=44.0.1,<51.0.0
 # exactly rather than left unpinned, since this branch targets a beta+
 # release (release/v3.0.X), not alpha-only.
 penguin-security[crypto]==0.1.1
+
+# feature/hub-api-internal-grpc: grpc.aio server for svc-ingest/svc-process/
+# svc-action's internal PII+key RPCs (proto/waddles/hub/internal/v1/*.proto,
+# hub_api/grpc_internal/). Already a transitive flask_core dependency
+# (libs/flask_core/requirements.in pins grpcio>=1.83.0,<1.84.0); pinned
+# directly here too now that hub_api's own app code (grpc_internal/)
+# imports it, not just flask_core's, matching this file's own header
+# convention for httpx/redis/cryptography above.
+grpcio>=1.83.0,<1.84.0
+opentelemetry-instrumentation-grpc==0.60b1
 
 # M2b workstreams/usage-metering group (spec Sec5.11/Sec5.12, D30/D31):
 # penguin-dal (R52 coordinator ruling, "we aren't using pydal anymore for

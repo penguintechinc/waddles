@@ -37,6 +37,11 @@ tables:
   - app_source_bindings
   - app_global_installs
   - bundle_tenant_availability
+  - app_permission_requests
+  - app_tenant_permission_restrictions
+  - community_permission_grants
+  - app_permission_grant_versions
+  - bundle_reputation_adjustments
   - keystore.tenant_encryption_keys
   - keystore.key_tombstones
 grants:
@@ -434,6 +439,9 @@ grants:
   - role: migration_runner
     table: app_global_installs
     privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: hub_api_keystore
+    table: app_global_installs
+    privileges: []
 
   # bundle_tenant_availability: TENANT tier -- hub-api-owned.
   - role: hub_api
@@ -460,6 +468,9 @@ grants:
   - role: migration_runner
     table: bundle_tenant_availability
     privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: hub_api_keystore
+    table: bundle_tenant_availability
+    privileges: []
 
   # keystore.tenant_encryption_keys / keystore.key_tombstones (migration
   # 0035, tenant-envelope-encryption-design.md Sec4/Sec5a). Accessible
@@ -529,4 +540,150 @@ grants:
     privileges: []
   - role: migration_runner
     table: keystore.key_tombstones
+    privileges: []
+
+  # --- migration 0032 (Bundle Permissions & Capability Gate grant storage,
+  #     services/bundle_permission_service.py) --- hub-api is the only RW
+  # path for all five tables (spec Sec4); the data plane's own read-only
+  # access is `waddles_bundle_reader`, granted separately in the migration
+  # itself (not part of this matrix, same precedent as migrations
+  # 0025/0028's own `_BUNDLE_READER_ROLE` guarded grants).
+  - role: hub_api
+    table: app_permission_requests
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: app_permission_requests
+    privileges: []
+  - role: svc_ingest
+    table: app_permission_requests
+    privileges: []
+  - role: svc_process
+    table: app_permission_requests
+    privileges: []
+  - role: svc_action
+    table: app_permission_requests
+    privileges: []
+  - role: svc_streaming
+    table: app_permission_requests
+    privileges: []
+  - role: webui
+    table: app_permission_requests
+    privileges: []
+  - role: migration_runner
+    table: app_permission_requests
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: hub_api_keystore
+    table: app_permission_requests
+    privileges: []
+
+  - role: hub_api
+    table: app_tenant_permission_restrictions
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: app_tenant_permission_restrictions
+    privileges: []
+  - role: svc_ingest
+    table: app_tenant_permission_restrictions
+    privileges: []
+  - role: svc_process
+    table: app_tenant_permission_restrictions
+    privileges: []
+  - role: svc_action
+    table: app_tenant_permission_restrictions
+    privileges: []
+  - role: svc_streaming
+    table: app_tenant_permission_restrictions
+    privileges: []
+  - role: webui
+    table: app_tenant_permission_restrictions
+    privileges: []
+  - role: migration_runner
+    table: app_tenant_permission_restrictions
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: hub_api_keystore
+    table: app_tenant_permission_restrictions
+    privileges: []
+
+  - role: hub_api
+    table: community_permission_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: community_permission_grants
+    privileges: []
+  - role: svc_ingest
+    table: community_permission_grants
+    privileges: []
+  - role: svc_process
+    table: community_permission_grants
+    privileges: []
+  - role: svc_action
+    table: community_permission_grants
+    privileges: []
+  - role: svc_streaming
+    table: community_permission_grants
+    privileges: []
+  - role: webui
+    table: community_permission_grants
+    privileges: []
+  - role: migration_runner
+    table: community_permission_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: hub_api_keystore
+    table: community_permission_grants
+    privileges: []
+
+  - role: hub_api
+    table: app_permission_grant_versions
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: app_permission_grant_versions
+    privileges: []
+  - role: svc_ingest
+    table: app_permission_grant_versions
+    privileges: []
+  - role: svc_process
+    table: app_permission_grant_versions
+    privileges: []
+  - role: svc_action
+    table: app_permission_grant_versions
+    privileges: []
+  - role: svc_streaming
+    table: app_permission_grant_versions
+    privileges: []
+  - role: webui
+    table: app_permission_grant_versions
+    privileges: []
+  - role: migration_runner
+    table: app_permission_grant_versions
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: hub_api_keystore
+    table: app_permission_grant_versions
+    privileges: []
+
+  - role: hub_api
+    table: bundle_reputation_adjustments
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: bundle_reputation_adjustments
+    privileges: []
+  - role: svc_ingest
+    table: bundle_reputation_adjustments
+    privileges: []
+  - role: svc_process
+    table: bundle_reputation_adjustments
+    privileges: []
+  - role: svc_action
+    table: bundle_reputation_adjustments
+    privileges: []
+  - role: svc_streaming
+    table: bundle_reputation_adjustments
+    privileges: []
+  - role: webui
+    table: bundle_reputation_adjustments
+    privileges: []
+  - role: migration_runner
+    table: bundle_reputation_adjustments
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: hub_api_keystore
+    table: bundle_reputation_adjustments
     privileges: []

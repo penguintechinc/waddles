@@ -114,24 +114,26 @@ spec:
         - name: PUBLIC_BASE_URL
           value: {{ .Values.pipeline.svcStreaming.publicBaseUrl | quote }}
         {{- end }}
-        # Recordings land in MinIO (S3-compatible) instead of pod-lifetime emptyDir storage
-        # -- see infrastructure.minio and templates/infrastructure/minio.yaml. Creds reuse
-        # the existing minio Secret keys (MINIO_ROOT_USER/MINIO_ROOT_PASSWORD) rather than
-        # minting new ones.
+        # Recordings land in SeaweedFS (S3-compatible, was MinIO) instead of pod-lifetime
+        # emptyDir storage -- see infrastructure.seaweedfs and
+        # templates/infrastructure/seaweedfs.yaml. Dedicated "svc-streaming" identity
+        # (Read/Write, scoped to the "recordings" bucket only -- see
+        # infrastructure.seaweedfs.identities.streaming), replacing the former
+        # unscoped "waddlebot"/MINIO_ROOT_* admin credential.
         - name: RECORDINGS_BUCKET
           value: "recordings"
         - name: S3_ENDPOINT
-          value: {{ printf "http://%s:%v" .Values.infrastructure.minio.service.name .Values.infrastructure.minio.service.apiPort | quote }}
+          value: {{ printf "http://%s:%v" .Values.infrastructure.seaweedfs.service.name .Values.infrastructure.seaweedfs.service.s3Port | quote }}
         - name: S3_ACCESS_KEY
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: MINIO_ROOT_USER
+              key: STREAMING_S3_ACCESS_KEY_ID
         - name: S3_SECRET_KEY
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: MINIO_ROOT_PASSWORD
+              key: STREAMING_S3_SECRET_ACCESS_KEY
         livenessProbe:
           httpGet:
             path: /health

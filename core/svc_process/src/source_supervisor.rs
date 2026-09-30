@@ -131,6 +131,9 @@ pub struct SupervisorDeps {
     pub approved_targets: HashMap<String, String>,
     pub metrics: Arc<dyn SpineMetrics>,
     pub license: Arc<dyn FeatureGate>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::egress`'s doc.
+    pub egress: Arc<bundle_host_http::egress::EgressGuard>,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -255,6 +258,7 @@ async fn run_binding_consumer(
             spine: spine_client,
             metrics: deps.metrics.clone(),
             license: Arc::clone(&deps.license),
+            egress: Arc::clone(&deps.egress),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();

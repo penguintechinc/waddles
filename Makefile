@@ -1,7 +1,8 @@
 .PHONY: dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
-        verify-csping-fixture verify-ping-bundle-reproducible generate-minio-kms-key alpha-deploy
+        verify-csping-fixture generate-bundle-signing-key verify-ping-bundle-reproducible \
+        generate-seaweedfs-sse-key alpha-deploy
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -79,6 +80,16 @@ deploy-dev:
 deploy-prod:
 	$(error deploy-prod requires CI — tag a release to trigger the production pipeline)
 
+# Generates a fresh Ed25519 platform bundle-signing keypair and creates/updates the
+# BUNDLE_SIGNING_PRIVATE_KEY/BUNDLE_SIGNING_KEY_ID Secret hub-api reads -- see
+# scripts/generate-bundle-signing-key.sh and the chart README's rollout-order section.
+# Usage: make generate-bundle-signing-key KEY_ID=2026-09-key1 KUBE_CONTEXT=dal2-beta NAMESPACE=waddlebot
+generate-bundle-signing-key:
+	@test -n "$(KEY_ID)" || { echo "KEY_ID is required" >&2; exit 1; }
+	@test -n "$(KUBE_CONTEXT)" || { echo "KUBE_CONTEXT is required" >&2; exit 1; }
+	@test -n "$(NAMESPACE)" || { echo "NAMESPACE is required" >&2; exit 1; }
+	@bash scripts/generate-bundle-signing-key.sh "$(KEY_ID)" "$(KUBE_CONTEXT)" "$(NAMESPACE)" $(SECRET_NAME)
+
 run-ai-local: ## Run ai_interaction_module container locally (standalone, 1 worker)
 	docker build -f action/interactive/ai_interaction_module/Dockerfile -t waddlebot/ai-interaction:local . && \
 	docker run --rm \
@@ -103,13 +114,21 @@ verify-csping-fixture:
 verify-ping-bundle-reproducible:
 	@bash scripts/verify-ping-bundle-reproducible.sh
 
-# Generates a MinIO static KMS key and applies it as a Secret so at-rest
-# encryption (security.md Encryption: Storage) works outside alpha -- see
-# k8s/helm/waddlebot's infrastructure.minio.kms.secretName fail guard.
-# Usage: make generate-minio-kms-key KUBE_CONTEXT=dal2-beta [NAMESPACE=waddlebot]
-generate-minio-kms-key:
-	@test -n "$(KUBE_CONTEXT)" || { echo "ERROR: KUBE_CONTEXT is required, e.g. make generate-minio-kms-key KUBE_CONTEXT=dal2-beta" >&2; exit 1; }
-	@bash scripts/generate-minio-kms-key.sh --context "$(KUBE_CONTEXT)" $(if $(NAMESPACE),--namespace "$(NAMESPACE)",)
+# Generates the Ed25519 signing keypair for hub-api's per-service machine
+# JWTs (feature/eddsa-machine-jwt) and applies the resulting k8s Secret --
+# private key never printed/argv'd/persisted. Usage:
+#   KID=2026-09-28 NAMESPACE=waddlebot make generate-service-jwt-key
+generate-service-jwt-key:
+	@bash scripts/generate-service-jwt-key.sh
+
+# Generates a SeaweedFS SSE-S3 key-encryption-key and applies it as a Secret
+# so at-rest encryption (security.md Encryption: Storage) works outside alpha
+# -- see k8s/helm/waddlebot's infrastructure.seaweedfs.encryption.secretName
+# fail guard.
+# Usage: make generate-seaweedfs-sse-key KUBE_CONTEXT=dal2-beta [NAMESPACE=waddlebot]
+generate-seaweedfs-sse-key:
+	@test -n "$(KUBE_CONTEXT)" || { echo "ERROR: KUBE_CONTEXT is required, e.g. make generate-seaweedfs-sse-key KUBE_CONTEXT=dal2-beta" >&2; exit 1; }
+	@bash scripts/generate-seaweedfs-sse-key.sh --context "$(KUBE_CONTEXT)" $(if $(NAMESPACE),--namespace "$(NAMESPACE)",)
 
 # Builds+pushes images at HEAD's SHA (Rust svc-ingest/svc-process/svc-action into their
 # own "*-rust" repositories), then `helm upgrade --install` with only the image tag set --

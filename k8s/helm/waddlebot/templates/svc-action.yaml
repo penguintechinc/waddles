@@ -27,7 +27,11 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-action
     spec:
-      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      # Dedicated identity (feature/eddsa-machine-jwt, security review HIGH
+      # finding) -- distinguishes this deployment's pods from every other
+      # workload in the namespace for `flask_core.service_jwt`'s TokenReview
+      # bootstrap; see templates/service-jwt-rbac.yaml.
+      serviceAccountName: svc-action
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -91,11 +95,16 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: DATABASE_URL
+        # fix/helm-platform-credentials -- sourced from the operator-managed
+        # platform-credentials Secret, never the chart-rendered `-secrets`
+        # Secret; optional so a community with no Discord bot configured
+        # simply starts without this var rather than failing to schedule.
         - name: DISCORD_BOT_TOKEN
           valueFrom:
             secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
+              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
               key: DISCORD_BOT_TOKEN
+              optional: true
         {{- if .Values.modules.bot.enabled }}
         - name: MODULE_LOAD_BOT
           value: "true"
@@ -135,11 +144,13 @@ spec:
           mountPath: /var/log/waddlebotlog
         - name: tmp
           mountPath: /tmp
+        {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
       volumes:
       - name: logs
         emptyDir: {}
       - name: tmp
         emptyDir: {}
+      {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
 ---
 apiVersion: v1
 kind: Service

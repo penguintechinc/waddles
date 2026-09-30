@@ -12,6 +12,9 @@
 # pipeline.rustDataPlane.enabled flag (default false) plus this module's own .enabled
 # sub-flag.
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.bundleExecutorAction.enabled }}
+{{- if not .Values.pipeline.rustDataPlane.bundleSigningPublicKeys }}
+{{- fail "pipeline.rustDataPlane.bundleSigningPublicKeys is empty: run make generate-bundle-signing-key and set values; see README rollout order" }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -75,22 +78,30 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.wasmCollector | quote }}
         - name: WADDLES_SANDBOX_GVISOR
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.sandboxGvisor | quote }}
+        # feature/bundle-artifact-signing -- shared platform key set, see values.yaml's
+        # pipeline.rustDataPlane.bundleSigningPublicKeys comment (not secret; public keys).
+        - name: BUNDLE_SIGNING_PUBLIC_KEYS
+          value: {{ .Values.pipeline.rustDataPlane.bundleSigningPublicKeys | toJson | quote }}
         - name: BUNDLE_BUCKET_ENDPOINT
-          value: "http://{{ .Values.infrastructure.minio.service.name }}:{{ .Values.infrastructure.minio.service.apiPort }}"
+          value: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
         - name: BUNDLE_BUCKET_NAME
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.bucketName | quote }}
         - name: BUNDLE_BUCKET_REGION
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.bucketRegion | quote }}
+        # feature/seaweedfs-object-storage -- least-privilege "bundle-executor"
+        # (data-plane) S3 identity: Read/List ONLY, scoped to this bucket -- see
+        # templates/infrastructure/seaweedfs.yaml's s3-identities.json. Replaces the
+        # former MINIO_ROOT_USER/MINIO_ROOT_PASSWORD admin credential, which could PUT.
         - name: BUNDLE_BUCKET_ACCESS_KEY_ID
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: MINIO_ROOT_USER
+              key: DATAPLANE_S3_ACCESS_KEY_ID
         - name: BUNDLE_BUCKET_SECRET_ACCESS_KEY
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: MINIO_ROOT_PASSWORD
+              key: DATAPLANE_S3_SECRET_ACCESS_KEY
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsClientEnv" . | nindent 8 }}
         {{- end }}

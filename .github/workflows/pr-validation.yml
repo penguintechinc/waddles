@@ -400,6 +400,18 @@ jobs:
             --kube-version 1.30.0 \
           | python3 scripts/ci/check-helm-hook-dependency-ordering.py
 
+      # fix/helm-platform-credentials -- regression gate for the alpha incident where
+      # a routine `helm upgrade` overwrote the REAL Discord bot token with the
+      # values-alpha.yaml dev placeholder. Asserts no rendered Secret or workload env
+      # carries a REPLACE_ME/CHANGE_ME/changeme/example-shaped credential value.
+      - name: helm template + placeholder credential check (alpha)
+        run: |
+          set -euo pipefail
+          helm template waddlebot k8s/helm/waddlebot \
+            --values k8s/helm/waddlebot/values-alpha.yaml \
+            --kube-version 1.30.0 \
+          | python3 scripts/ci/check-no-placeholder-credentials.py
+
       # fix/helm-apply-errors -- neither helm lint nor helm template runs the rendered
       # YAML through API validation, so a duplicate Service port name or a container
       # env entry setting both `value` and `valueFrom` (both rejected only at apply
@@ -437,6 +449,15 @@ jobs:
             --set global.deploymentTier=alpha \
           | python3 scripts/ci/check-helm-hook-dependency-ordering.py
 
+      - name: helm template + placeholder credential check (beta topology)
+        run: |
+          set -euo pipefail
+          helm template waddlebot k8s/helm/waddlebot \
+            --values k8s/helm/waddlebot/values-beta.yaml \
+            --kube-version 1.30.0 \
+            --set global.deploymentTier=alpha \
+          | python3 scripts/ci/check-no-placeholder-credentials.py
+
       - name: helm template + rendered-manifest invariants (beta topology)
         run: |
           set -euo pipefail
@@ -452,3 +473,11 @@ jobs:
       # since values-alpha.yaml auto-generates secrets on upgrade.
       - name: alpha-deploy.sh KUBE_CONTEXT allowlist regression test
         run: bash scripts/ci/tests/test_alpha_deploy_context_allowlist.sh
+
+      # fix/alpha-deploy-hub-webui -- SERVICES omitted hub-webui (and the
+      # plain-name Python svc-ingest/svc-process/svc-action images deployed
+      # alongside their *-rust counterparts), causing ImagePullBackOff on a
+      # fresh alpha build. check_images_in_registry now HEAD-checks every
+      # chart-referenced image against the registry before helm ever runs.
+      - name: alpha-deploy.sh missing-image preflight regression test
+        run: bash scripts/ci/tests/test_alpha_deploy_image_preflight.sh

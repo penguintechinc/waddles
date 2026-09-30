@@ -9,6 +9,11 @@ select = ["E", "W", "F", "I", "N", "D", "UP", "B", "ASYNC", "S"]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
+# grpc_tools.protoc-generated stubs (proto/waddles/hub/internal/v1/*.proto
+# -> scripts/compile_protos_v1.sh) -- never hand-edited, so ruff's D/N/E
+# rules on generated PascalCase RPC method names and missing docstrings
+# don't apply. Regenerate, don't reformat, on a proto change.
+"grpc_internal/pb/**" = ["D", "N802", "E501", "I001", "UP", "B"]
 # Test names are self-documenting (pytest convention); S105/S106/S107 flag
 # fixed test-only passwords/JWT secrets (e.g. mirroring flask_core's own
 # `os.getenv("SECRET_KEY", "change-me-in-production")` default, or seed-user
@@ -214,6 +219,12 @@ convention = "google"
 # bundle_approvals.py above.
 "blueprints/v1/bundle_tenant_availability.py" = ["N815", "S101"]
 "blueprints/v1/bundle_activation.py" = ["N815", "S101"]
+# Bundle Permissions & Capability Gate consent flow -- same camelCase DTO
+# wire contract + tenant_middleware postcondition assert rationale.
+"blueprints/v1/bundle_permissions.py" = ["N815", "S101"]
+# `assert risk is not None` after `_require(risk is not None, ...)` already
+# raised otherwise -- a narrowing assert for mypy, not a runtime guard.
+"services/bundle_manifest_v2.py" = ["S101"]
 # Tenant ingest_sources registry (spec Sec5.2, Sec10.3) -- camelCase DTO
 # fields (sourceId, communityId, nextCursor, ...) match the wire contract
 # every other v1 blueprint's DTOs already use; S101 is the same

@@ -257,7 +257,7 @@ Read this before assuming a container is production-ready:
 **Control Plane (`hub-api`):** Python 3.13, Quart (async)
 **Web UI (`hub-webui`):** ExpressScript + ReactJS (React 18), Vite, TailwindCSS v4
 **Infrastructure:** Docker, Kubernetes (Helm v3), GitHub Actions
-**Data & Caching:** PostgreSQL, Valkey, MinIO (S3), Qdrant (vectors)
+**Data & Caching:** PostgreSQL, Valkey, SeaweedFS (S3), Qdrant (vectors)
 
 ## See also
 

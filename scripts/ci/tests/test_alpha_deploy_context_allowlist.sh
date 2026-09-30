@@ -22,7 +22,13 @@ trap cleanup EXIT
 # Stub docker/helm/kubectl on PATH -- each just logs its invocation and exits
 # 0 (`kubectl ... config current-context` additionally prints local-alpha, so
 # the "unset KUBE_CONTEXT" default path has something to validate).
-for tool in docker helm kubectl; do
+#
+# `helm template` additionally renders one fake image so alpha-deploy.sh's
+# check_images_in_registry preflight (fix/alpha-deploy-hub-webui) has a
+# non-empty image list to find -- this test is about context allowlisting,
+# not the preflight itself (see test_alpha_deploy_image_preflight.sh), so it
+# must not trip the "zero images rendered" denominator guard.
+for tool in docker kubectl; do
     stub="$STUB_DIR/$tool"
     {
         echo '#!/usr/bin/env bash'
@@ -33,6 +39,29 @@ for tool in docker helm kubectl; do
     } > "$stub"
     chmod +x "$stub"
 done
+
+cat > "$STUB_DIR/helm" <<EOS
+#!/usr/bin/env bash
+echo "STUB-CALLED helm \$*" >> "$LOG_FILE"
+if [ "\$1" = "template" ]; then
+    cat <<'YAML'
+---
+# Source: waddlebot/templates/hub-api.yaml
+    containers:
+      - name: hub-api
+        image: "localhost:32000/waddlebot/hub-api:faketag"
+YAML
+    exit 0
+fi
+exit 0
+EOS
+
+cat > "$STUB_DIR/curl" <<'EOS'
+#!/usr/bin/env bash
+echo "200"
+EOS
+
+chmod +x "$STUB_DIR/helm" "$STUB_DIR/curl"
 
 run_case() {
     # run_case <label> <kube_context_or_empty> <expected_exit_zero:0|1>
@@ -65,6 +94,17 @@ run_case() {
         else
             echo "  x never reached helm step"
             cases_failed=$((cases_failed + 1))
+        fi
+        # fix/helm-platform-credentials -- the secret-existence preflight's
+        # kubectl call must carry the validated --context, never the
+        # ambient/default context, once the allowlist check has passed.
+        if grep -q "STUB-CALLED kubectl --context $ctx get secret waddlebot-platform-credentials" "$LOG_FILE"; then
+            echo "  - platform-credentials preflight used --context $ctx"
+            cases_passed=$((cases_passed + 1))
+        else
+            echo "  x platform-credentials preflight did not use --context $ctx"
+            cases_failed=$((cases_failed + 1))
+            cat "$LOG_FILE"
         fi
     else
         if [ "$exit_code" -ne 0 ]; then
