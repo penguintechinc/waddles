@@ -571,16 +571,20 @@ hatch -- see global.hostApiTls's values.yaml comment.
 */}}
 
 {{/*
-True only when real cert material will exist in the {{ fullname }}-host-api-tls Secret at
-deploy time -- either cert-manager mints it or a full CA+cert/key was supplied via values.
-Callers gate rendering the volume/env blocks on this so a missing Secret produces the
-Rust side's own clear "HOST_API_SERVER_CERT_FILE and HOST_API_SERVER_KEY_FILE must both be
-set" config error at startup (host-api listener disabled, rest of the pod keeps serving --
-see host_api.rs's graceful-degradation comment) instead of a mounted-but-empty file
-producing an opaque low-level TLS parse error.
+fix/alpha-host-api-tls -- True only when real cert material will exist in the
+{{ fullname }}-host-api-tls Secret at deploy time. Mirrors waddlebot.valkeyTlsMaterialAvailable's
+gate-on-the-enabling-flag-not-raw-crt-material fix: templates/host-api-tls-secret.yaml now
+guarantees the Secret exists (kept, explicitly supplied, cert-manager-owned, delegated to an
+ExternalSecret, generated alpha/local, or the whole release fails to render) whenever
+pipeline.rustDataPlane.enabled is true, so gating on .Values.global.hostApiTls.*.crt being
+non-empty (the old check) wrongly stayed false on the generate path -- this is exactly what
+left alpha's svc-process-rust/svc-action-rust host-api listeners permanently disabled even
+though a Secret existed live (see host-api-tls-secret.yaml's KEEP branch). Gate on the
+enabling flag alone; callers still get the Rust side's own clear config-error/graceful-
+degradation behavior if this is somehow false while the Secret is genuinely missing.
 */}}
 {{- define "waddlebot.hostApiTlsMaterialAvailable" -}}
-{{- if or .Values.global.hostApiTls.certManager.enabled (and .Values.global.hostApiTls.ca.crt .Values.global.hostApiTls.tls.crt .Values.global.hostApiTls.tls.key) -}}
+{{- if .Values.pipeline.rustDataPlane.enabled -}}
 true
 {{- end -}}
 {{- end }}

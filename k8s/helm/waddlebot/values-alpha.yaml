@@ -196,9 +196,12 @@ pipeline:
   # Deployments above stay enabled too (coexistence, not cutover) -- matches the live
   # cluster's actual pod list. Still requires, via --reuse-values or an ephemeral
   # secrets file (never committed, critical-rules.md Token & Secret Hygiene):
-  #   1. global.hostApiTls real mTLS material (--set-file; no insecureDev escape hatch
-  #      exists, unlike global.grpcTls);
-  #   2. global.envelopeBindingKeys (kid e2e1) -- HMAC key material, secret, never committed.
+  #   1. global.envelopeBindingKeys (kid e2e1) -- HMAC key material, secret, never committed.
+  # global.hostApiTls real mTLS material is NO LONGER a manual --set-file requirement here
+  # (fix/alpha-host-api-tls) -- templates/host-api-tls-secret.yaml self-provisions it on
+  # alpha/local (lookup-then-generate, same policy as global.valkeyTls), so
+  # waddlebot.hostApiTlsMaterialAvailable is true whenever this enabled flag is, with no
+  # insecureDev escape hatch needed (unlike global.grpcTls).
   rustDataPlane:
     enabled: true
     svcIngest:
