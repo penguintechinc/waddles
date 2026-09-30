@@ -14,6 +14,9 @@ on:
     paths:
       - 'core/security_core_module/**'
       - 'libs/flask_core/**'
+  merge_group:
+    types: [checks_requested]
+    branches: ['release/**']
   workflow_dispatch:
 
 
