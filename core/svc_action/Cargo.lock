@@ -515,6 +515,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-host-http"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "futures-util",
+ "penguin-bundle-host",
+ "prometheus",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3233,6 +3248,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bundle-active-set",
+ "bundle-host-http",
  "chrono",
  "clap",
  "futures-util",
