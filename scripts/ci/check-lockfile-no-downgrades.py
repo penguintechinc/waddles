@@ -29,8 +29,9 @@ import json
 import re
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 LOCKFILE_PATTERNS = ("Cargo.lock", "package-lock.json", "requirements.txt")
 BUMP_RE = re.compile(
@@ -41,7 +42,7 @@ REQUIREMENTS_PIN_RE = re.compile(r"^([A-Za-z0-9_.\-]+)==([A-Za-z0-9_.\-]+)\s*\\?
 
 def run_git(args: list[str], cwd: Path) -> str:
     """Runs a fixed-argv git command (no shell) in `cwd` and returns stdout."""
-    return subprocess.run(  # noqa: S603 -- fixed argv, CI-only
+    return subprocess.run(
         ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
     ).stdout
 
