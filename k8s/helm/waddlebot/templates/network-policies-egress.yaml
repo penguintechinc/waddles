@@ -1,0 +1,160 @@
+# Bundle egress gateway — CiliumNetworkPolicy layer (feature/bundle-egress-gateway).
+# Same convention as templates/bundle-executor-networkpolicy.yaml (devops-kubernetes.md
+# Cluster Security Baseline / security.md Kubernetes Network Security — CiliumNetworkPolicy,
+# never plain NetworkPolicy). Additive on top of templates/network-policies.yaml's namespace-
+# wide plain-NetworkPolicy pair.
+#
+# Data-plane pods (svc-ingest/svc-process/svc-action, Rust and legacy per-module Deployments
+# performing the same role — see egressPolicy.dataPlaneComponents) are default-deny for
+# egress to the internet. Their only way out is in-cluster dependencies (DNS, Valkey,
+# Postgres, hub-api gRPC, SeaweedFS, OTel collector) plus the egress-proxy Service. The egress
+# proxy is the ONLY component in this chart allowed a broad "world" egress rule, and even
+# that is capped to 80/443/6697 with loopback/link-local/metadata/cluster-CIDR carve-outs
+# (egressPolicy.denyCidrs/clusterCidrs).
+#
+# Per-tenant/app FQDN and private-IP grants (net.http.fqdn/.public-ip/.private-ip) are NOT
+# enforced here — Cilium CNPs are cluster-wide L3/L4/DNS policy and can't see which bundle/
+# tenant a proxied request belongs to. That check lives in the egress-proxy's signed-
+# allowlist re-check (templates/infrastructure/egress-proxy.yaml). This file is the network-
+# level backstop: even a fully compromised data-plane pod cannot open a socket to the
+# internet, loopback, link-local/metadata, or another pod/node's cluster-internal address
+# directly — and even a fully compromised egress-proxy host cannot reach those same deny
+# ranges, regardless of what a forged/replayed allowlist header claims.
+{{- if .Values.egressPolicy.enabled }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-dataplane-egress-deny
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          {{- toYaml .Values.egressPolicy.dataPlaneComponents | nindent 10 }}
+  egress:
+    # DNS — required to resolve in-cluster Service names.
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
+              protocol: UDP
+            - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
+              protocol: TCP
+    # In-namespace infra: Valkey, Postgres, SeaweedFS. These infra Deployments
+    # label pods with app.kubernetes.io/name: redis|postgres|seaweedfs directly
+    # (NOT the chart-wide selectorLabels name — see
+    # templates/infrastructure/{redis,postgres,seaweedfs}.yaml's own pod
+    # template labels), so match on instance + name + component, not the
+    # shared selector helper.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: redis
+            app.kubernetes.io/component: cache
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.valkeyPort | quote }}
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: postgres
+            app.kubernetes.io/component: database
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.postgresReplicaPort | quote }}
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: seaweedfs
+            app.kubernetes.io/component: storage
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.seaweedfsPort | quote }}
+              protocol: TCP
+    # hub-api gRPC.
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: hub-api
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.hubApiGrpcPort | quote }}
+              protocol: TCP
+    # OTel collector (logs/metrics/traces — mandatory emission, never the
+    # public internet). Not yet deployed by this chart (otel.collector.enabled
+    # stub); pre-allowed so no further CNP change is needed once it lands.
+    {{- if .Values.otel.collector.enabled }}
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: otel-collector
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.otelGrpcPort | quote }}
+              protocol: TCP
+    {{- end }}
+    # The egress proxy — the only path to the outside world.
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: egress-proxy
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressProxy.port | quote }}
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-egress-proxy-egress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: egress-proxy
+  egress:
+    # DNS to resolve the external hostnames it's proxying to.
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
+              protocol: UDP
+            - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
+              protocol: TCP
+    # The world — minus loopback/link-local/metadata and this cluster's own
+    # pod/service/node CIDRs. Customer private ranges (net.http.private-ip
+    # grants) are intentionally reachable at the network level; the
+    # per-tenant/app check that a given private IP was actually granted
+    # happens in the proxy's signed-allowlist re-check, not here — this CNP
+    # only guarantees the proxy can NEVER reach loopback/link-local/metadata/
+    # this cluster's own CIDRs, no matter what a request claims.
+    - toCIDRSet:
+        - cidr: "0.0.0.0/0"
+          except:
+            {{- toYaml .Values.egressPolicy.denyCidrs | nindent 12 }}
+            - {{ .Values.egressPolicy.clusterCidrs.podCidr | quote }}
+            - {{ .Values.egressPolicy.clusterCidrs.serviceCidr | quote }}
+            - {{ .Values.egressPolicy.clusterCidrs.nodeCidr | quote }}
+      toPorts:
+        - ports:
+            {{- range .Values.egressProxy.allowedPorts }}
+            - port: {{ . | quote }}
+              protocol: TCP
+            {{- end }}
+{{- end }}
