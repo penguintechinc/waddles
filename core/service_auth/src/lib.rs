@@ -162,8 +162,9 @@ impl JwksTrustBundle {
         let mut cache = self.cache.write().await;
         cache.clear();
         for entry in jwks.keys {
-            let key = DecodingKey::from_ed_components(&entry.x)
-                .map_err(|e| ServiceAuthError::InvalidToken(format!("bad JWKS entry {}: {e}", entry.kid)))?;
+            let key = DecodingKey::from_ed_components(&entry.x).map_err(|e| {
+                ServiceAuthError::InvalidToken(format!("bad JWKS entry {}: {e}", entry.kid))
+            })?;
             cache.insert(entry.kid, key);
         }
         debug!(count = cache.len(), "service_auth.jwks_refreshed");
@@ -211,7 +212,11 @@ struct TokenResponse {
 }
 
 impl MachineJwtClient {
-    pub fn new(token_endpoint: impl Into<String>, sa_token_path: impl Into<String>, scope: impl Into<String>) -> Self {
+    pub fn new(
+        token_endpoint: impl Into<String>,
+        sa_token_path: impl Into<String>,
+        scope: impl Into<String>,
+    ) -> Self {
         Self {
             token_endpoint: token_endpoint.into(),
             sa_token_path: sa_token_path.into(),
@@ -252,13 +257,19 @@ impl MachineJwtClient {
         let body: TokenResponse = response.json().await?;
         let expires_at = now + body.expires_in.min(MAX_TOKEN_TTL_SECONDS);
         let token: Arc<str> = Arc::from(body.token.as_str());
-        *self.cached.write().await = Some(CachedToken { token: token.clone(), expires_at });
+        *self.cached.write().await = Some(CachedToken {
+            token: token.clone(),
+            expires_at,
+        });
         Ok(token)
     }
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -280,24 +291,29 @@ mod tests {
     // generated once with `openssl genpkey -algorithm ed25519` /
     // `openssl pkey -pubout`; never used outside this test module.
     const KEY_A_PRIV_DER: &[u8] = &[
-        48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 1, 204, 5, 142, 35, 153, 231, 38, 150, 122, 1, 218,
-        34, 237, 70, 125, 233, 62, 126, 103, 151, 16, 11, 238, 95, 122, 209, 74, 183, 9, 171, 161,
+        48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 1, 204, 5, 142, 35, 153, 231, 38,
+        150, 122, 1, 218, 34, 237, 70, 125, 233, 62, 126, 103, 151, 16, 11, 238, 95, 122, 209, 74,
+        183, 9, 171, 161,
     ];
     // Raw 32-byte Ed25519 public key (the last 32 bytes of the SPKI-DER
     // `openssl pkey -pubout` produced) -- `DecodingKey::from_ed_der` in
     // jsonwebtoken's rust_crypto backend reads only the raw key bytes, not
     // the full ASN.1 SPKI wrapper.
     const KEY_A_PUB_RAW: &[u8] = &[
-        169, 90, 255, 23, 51, 151, 156, 147, 56, 247, 214, 168, 76, 160, 67, 99, 211, 238, 208, 5, 69, 236, 245, 115,
-        4, 81, 1, 42, 23, 107, 4, 187,
+        169, 90, 255, 23, 51, 151, 156, 147, 56, 247, 214, 168, 76, 160, 67, 99, 211, 238, 208, 5,
+        69, 236, 245, 115, 4, 81, 1, 42, 23, 107, 4, 187,
     ];
     const KEY_B_PRIV_DER: &[u8] = &[
-        48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 145, 56, 92, 35, 32, 192, 103, 161, 66, 249, 233, 0,
-        174, 22, 45, 100, 136, 104, 59, 129, 251, 81, 20, 214, 221, 250, 219, 227, 139, 109, 70, 185,
+        48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 145, 56, 92, 35, 32, 192, 103,
+        161, 66, 249, 233, 0, 174, 22, 45, 100, 136, 104, 59, 129, 251, 81, 20, 214, 221, 250, 219,
+        227, 139, 109, 70, 185,
     ];
 
     fn ed25519_keypair() -> (EncodingKey, DecodingKey) {
-        (EncodingKey::from_ed_der(KEY_A_PRIV_DER), DecodingKey::from_ed_der(KEY_A_PUB_RAW))
+        (
+            EncodingKey::from_ed_der(KEY_A_PRIV_DER),
+            DecodingKey::from_ed_der(KEY_A_PUB_RAW),
+        )
     }
 
     fn make_token(encoding_key: &EncodingKey, kid: &str, claims: &ServiceClaims) -> String {
@@ -325,9 +341,15 @@ mod tests {
         let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
         let now = now_secs();
         let token = make_token(&enc, "k1", &base_claims(now));
-        let claims = verify(&token, &bundle, "waddlebot-internal", &["hub-api"], "identity:ephemeral:mint")
-            .await
-            .expect("valid token verifies");
+        let claims = verify(
+            &token,
+            &bundle,
+            "waddlebot-internal",
+            &["hub-api"],
+            "identity:ephemeral:mint",
+        )
+        .await
+        .expect("valid token verifies");
         assert_eq!(claims.sub, "spiffe://penguintech.io/alpha/svc-process");
     }
 
@@ -337,9 +359,15 @@ mod tests {
         let bundle = StaticTrustBundle(Mutex::new(HashMap::new()));
         let now = now_secs();
         let token = make_token(&enc, "missing-kid", &base_claims(now));
-        let err = verify(&token, &bundle, "waddlebot-internal", &["hub-api"], "identity:ephemeral:mint")
-            .await
-            .unwrap_err();
+        let err = verify(
+            &token,
+            &bundle,
+            "waddlebot-internal",
+            &["hub-api"],
+            "identity:ephemeral:mint",
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ServiceAuthError::UnknownKeyId(_)));
     }
 
@@ -351,9 +379,15 @@ mod tests {
         let mut claims = base_claims(now - 3600);
         claims.exp = now - 1800;
         let token = make_token(&enc, "k1", &claims);
-        let err = verify(&token, &bundle, "waddlebot-internal", &["hub-api"], "identity:ephemeral:mint")
-            .await
-            .unwrap_err();
+        let err = verify(
+            &token,
+            &bundle,
+            "waddlebot-internal",
+            &["hub-api"],
+            "identity:ephemeral:mint",
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ServiceAuthError::InvalidToken(_)));
     }
 
@@ -365,9 +399,15 @@ mod tests {
         let mut claims = base_claims(now);
         claims.aud = "some-other-audience".into();
         let token = make_token(&enc, "k1", &claims);
-        let err = verify(&token, &bundle, "waddlebot-internal", &["hub-api"], "identity:ephemeral:mint")
-            .await
-            .unwrap_err();
+        let err = verify(
+            &token,
+            &bundle,
+            "waddlebot-internal",
+            &["hub-api"],
+            "identity:ephemeral:mint",
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ServiceAuthError::InvalidToken(_)));
     }
 
@@ -377,9 +417,15 @@ mod tests {
         let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
         let now = now_secs();
         let token = make_token(&enc, "k1", &base_claims(now));
-        let err = verify(&token, &bundle, "waddlebot-internal", &["hub-api"], "some:other:scope")
-            .await
-            .unwrap_err();
+        let err = verify(
+            &token,
+            &bundle,
+            "waddlebot-internal",
+            &["hub-api"],
+            "some:other:scope",
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ServiceAuthError::InvalidToken(_)));
     }
 
@@ -394,9 +440,15 @@ mod tests {
         // accepted because `exp` alone still passes.
         claims.nbf = now + CLOCK_SKEW_SECONDS + 300;
         let token = make_token(&enc, "k1", &claims);
-        let err = verify(&token, &bundle, "waddlebot-internal", &["hub-api"], "identity:ephemeral:mint")
-            .await
-            .unwrap_err();
+        let err = verify(
+            &token,
+            &bundle,
+            "waddlebot-internal",
+            &["hub-api"],
+            "identity:ephemeral:mint",
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ServiceAuthError::InvalidToken(_)));
     }
 
@@ -411,9 +463,15 @@ mod tests {
         // any real clock drift between issuer and verifier).
         claims.nbf = now + CLOCK_SKEW_SECONDS - 5;
         let token = make_token(&enc, "k1", &claims);
-        verify(&token, &bundle, "waddlebot-internal", &["hub-api"], "identity:ephemeral:mint")
-            .await
-            .expect("token within clock skew leeway verifies");
+        verify(
+            &token,
+            &bundle,
+            "waddlebot-internal",
+            &["hub-api"],
+            "identity:ephemeral:mint",
+        )
+        .await
+        .expect("token within clock skew leeway verifies");
     }
 
     #[tokio::test]
@@ -427,9 +485,15 @@ mod tests {
         let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
         let now = now_secs();
         let forged = make_token(&forged_enc, "k1", &base_claims(now));
-        let err = verify(&forged, &bundle, "waddlebot-internal", &["hub-api"], "identity:ephemeral:mint")
-            .await
-            .unwrap_err();
+        let err = verify(
+            &forged,
+            &bundle,
+            "waddlebot-internal",
+            &["hub-api"],
+            "identity:ephemeral:mint",
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ServiceAuthError::InvalidToken(_)));
     }
 }
