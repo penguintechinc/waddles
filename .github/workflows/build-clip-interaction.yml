@@ -14,6 +14,9 @@ on:
     paths:
       - 'action/interactive/clip_interaction_module/**'
       - 'libs/flask_core/**'
+  merge_group:
+    types: [checks_requested]
+    branches: ['release/**']
   workflow_dispatch:
 
 
