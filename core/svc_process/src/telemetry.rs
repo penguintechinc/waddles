@@ -132,6 +132,27 @@ pub fn register_bundle_loader_excluded_metrics(
     excluded_total
 }
 
+/// Registers `svc_process_egress_denied_total{app_id,reason}` (spec §8.2)
+/// for this stage's `http` bundle capability (`crate::capabilities::
+/// StageCapabilities`'s `egress` field) -- same shape as
+/// `svc_action::telemetry::register_egress_metrics`'s
+/// `svc_action_egress_denied_total`, per-service-prefixed following this
+/// crate's own metric-naming convention.
+pub fn register_egress_metrics(registry: &prometheus::Registry) -> prometheus::IntCounterVec {
+    let denied_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_egress_denied_total",
+            "Bundle http.send calls denied by the egress guard, by app_id/reason",
+        ),
+        &["app_id", "reason"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(denied_total.clone()))
+        .expect("register svc_process_egress_denied_total");
+    denied_total
+}
+
 /// Prometheus handles for `crate::source_supervisor`: a gauge tracking how
 /// many per-`(app_id, platform, source_id)` binding consumer tasks are
 /// currently running, and a counter (labeled `action` = `"spawn"`/`"stop"`)

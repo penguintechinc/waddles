@@ -1,0 +1,60 @@
+# feature/eddsa-machine-jwt -- security review HIGH finding: every Deployment
+# in this chart shared the one `waddlebot.serviceAccountName` identity, so the
+# k8s TokenReview API had no way to distinguish "the real svc-process pod"
+# from any other pod in the namespace holding that same ServiceAccount's
+# token. Dedicated identities for the two current machine-JWT callers close
+# that gap; `flask_core.service_jwt.ServiceIdentity.matches_service_account`
+# (values.yaml `serviceJwt.identities.*.serviceAccount`) is what actually
+# pins hub-api's allow-list to these names -- keep them in sync if renamed.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: svc-process
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-process
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: svc-action
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-action
+---
+# Least-privilege grant for hub-api's own ServiceAccount to call the
+# TokenReview API (`verify_service_account_token` in
+# `libs/flask_core/flask_core/service_jwt.py`) -- `create` only, on
+# `tokenreviews` only. TokenReview is inherently cluster-scoped (there is
+# no namespaced equivalent), so this must be a ClusterRole/ClusterRoleBinding
+# even though every other permission this chart grants is namespace-local.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-hub-api-tokenreview
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub-api
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-hub-api-tokenreview
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub-api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "waddlebot.fullname" . }}-hub-api-tokenreview
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "waddlebot.serviceAccountName" . }}
+    namespace: {{ .Values.namespace }}
