@@ -707,6 +707,97 @@ async fn connect_tunnel_relays_bytes_end_to_end() {
     assert_eq!(&echoed[..n], b"hello through the tunnel");
 }
 
+/// Sends `request_bytes` to a freshly-started real proxy server and reads
+/// back the HTTP/1.1 response headers (up to the blank line). Used by the
+/// `handle_inner` deny-path tests below, which -- unlike most of this
+/// file's tests -- must go through the actual hyper server (`serve_proxy`)
+/// rather than calling `proxy::validate` directly, since the audit-context
+/// fallback and deny-metrics branches under test live in `handle_inner`,
+/// not `validate`.
+async fn send_raw_and_read_response_head(state: Arc<ProxyState>, request_bytes: &[u8]) -> String {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind proxy");
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(egress_proxy::serve_proxy(listener, state));
+
+    let mut client = TcpStream::connect(addr).await.expect("connect to proxy");
+    client.write_all(request_bytes).await.unwrap();
+
+    let mut resp = Vec::new();
+    let mut buf = [0u8; 256];
+    loop {
+        let n = client.read(&mut buf).await.unwrap();
+        assert!(n > 0, "connection closed before a full response head");
+        resp.extend_from_slice(&buf[..n]);
+        if resp.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&resp).into_owned()
+}
+
+/// regression: an unauthenticated `CONNECT` sent to the real server (not
+/// `proxy::validate` directly) must be denied by `handle_inner` itself --
+/// exercises the deny-metrics increment and the audit-context fallback
+/// path for a request with no assertion header at all (`None` arm).
+#[tokio::test]
+async fn real_server_denies_an_unauthenticated_connect_request() {
+    let (_enc, dec) = svc_process_keypair();
+    let bundle: Arc<dyn TrustBundle> = Arc::new(StaticTrustBundle(Mutex::new(HashMap::from([(
+        "k1".to_string(),
+        dec,
+    )]))));
+    let cfg = test_config(vec![443]);
+    let state = test_proxy_state(cfg, bundle);
+
+    let resp = send_raw_and_read_response_head(
+        state,
+        b"CONNECT discord.com:443 HTTP/1.1\r\nHost: discord.com:443\r\n\r\n",
+    )
+    .await;
+
+    assert!(
+        resp.starts_with("HTTP/1.1 401"),
+        "expected 401 for an unauthenticated CONNECT, got: {resp}"
+    );
+    assert!(
+        resp.contains("x-egress-proxy-reason: unauthenticated"),
+        "expected the unauthenticated reason header, got: {resp}"
+    );
+}
+
+/// regression: a request that authenticates fine but carries a garbage
+/// (unparseable/unverifiable) assertion header must still be denied by
+/// `handle_inner`, and the audit-context fallback's `Some(token) => ...
+/// Err(_)` arm (a present-but-invalid assertion) must not panic.
+#[tokio::test]
+async fn real_server_denies_a_connect_with_an_unverifiable_assertion_header() {
+    let (enc, dec) = svc_process_keypair();
+    let bundle: Arc<dyn TrustBundle> = Arc::new(StaticTrustBundle(Mutex::new(HashMap::from([(
+        "k1".to_string(),
+        dec,
+    )]))));
+    let cfg = test_config(vec![443]);
+    let state = test_proxy_state(cfg, bundle);
+
+    let machine_jwt = valid_machine_jwt(&enc);
+    let request = format!(
+        "CONNECT discord.com:443 HTTP/1.1\r\nHost: discord.com:443\r\nAuthorization: Bearer {machine_jwt}\r\nX-Waddles-Egress-Assertion: not-a-real-jwt\r\n\r\n"
+    );
+
+    let resp = send_raw_and_read_response_head(state, request.as_bytes()).await;
+
+    assert!(
+        resp.starts_with("HTTP/1.1 401"),
+        "expected 401 for an unverifiable assertion, got: {resp}"
+    );
+    assert!(
+        resp.contains("x-egress-proxy-reason: invalid_assertion"),
+        "expected the invalid_assertion reason header, got: {resp}"
+    );
+}
+
 /// CRITICAL security-review regression: the forward-HTTP path must never
 /// relay this proxy's own inbound credential headers (`Authorization` --
 /// the caller's machine JWT -- and `X-Waddles-Egress-Assertion`) to the

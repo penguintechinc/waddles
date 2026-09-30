@@ -35,6 +35,17 @@ pub mod telemetry;
 
 use std::sync::Arc;
 
+// `std::env` is process-global; every `#[cfg(test)]` module in this crate
+// that reads/writes `Config::from_env`'s variables (this module's own
+// tests plus `config::tests`) serializes on this single lock so parallel
+// `cargo test` threads never race on the same variables. `tokio::sync::
+// Mutex` (not `std::sync::Mutex`) -- this module's tests hold the guard
+// across an `.await` (`build_state`/`run_healthcheck` are async), which a
+// std mutex guard may not do (`clippy::await_holding_lock`); `config.rs`'s
+// own (synchronous) tests take it via `blocking_lock()` instead.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
@@ -151,4 +162,114 @@ pub async fn run_healthcheck() -> anyhow::Result<()> {
     drop(stream);
     tracing::debug!(url, "egress_proxy.healthcheck_ok");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every env var `Config::from_env` reads -- cleared before/after each
+    /// test in this module so one test's leftover value can never leak
+    /// into another (this module's tests all hold `ENV_LOCK`, but the same
+    /// variables are also touched by `config::tests`, which acquires the
+    /// same lock).
+    const CONFIG_ENV_VARS: &[&str] = &[
+        "PROXY_LISTEN_PORT",
+        "METRICS_PORT",
+        "ALLOWED_PORTS",
+        "DENY_CIDRS",
+        "DENY_CLUSTER_CIDRS",
+        "MACHINE_JWT_JWKS_URL",
+        "MACHINE_JWT_AUDIENCE",
+        "MACHINE_JWT_TRUSTED_ISSUERS",
+        "MACHINE_JWT_REQUIRED_SCOPE",
+        "ALLOWED_CALLER_SERVICES",
+        "PER_TENANT_MAX_CONNECTIONS",
+        "PER_TENANT_BANDWIDTH_BYTES_PER_SEC",
+        "CONNECT_TIMEOUT_SECONDS",
+        "ASSERTION_MAX_TTL_SECONDS",
+        "HEADER_READ_TIMEOUT_SECONDS",
+        "TUNNEL_IDLE_TIMEOUT_SECONDS",
+        "TUNNEL_MAX_DURATION_SECONDS",
+        "EGRESS_PROXY_ALLOW_PRIVATE_IP",
+    ];
+
+    fn clear_config_env() {
+        for var in CONFIG_ENV_VARS {
+            // SAFETY: serialized by ENV_LOCK, held by every caller of this
+            // helper.
+            unsafe { std::env::remove_var(var) };
+        }
+    }
+
+    fn set_required_config_env() {
+        // SAFETY: serialized by ENV_LOCK, held by every caller of this
+        // helper.
+        unsafe {
+            std::env::set_var("MACHINE_JWT_JWKS_URL", "https://hub-api.example/jwks.json");
+            std::env::set_var("MACHINE_JWT_AUDIENCE", "egress-proxy");
+        }
+    }
+
+    #[tokio::test]
+    async fn build_state_populates_config_and_metrics_from_env_defaults() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_config_env();
+        set_required_config_env();
+
+        let registry = prometheus::Registry::new();
+        let state = build_state(&registry)
+            .await
+            .expect("required env vars are set");
+
+        assert_eq!(state.cfg.listen_port, 8443);
+        assert_eq!(state.cfg.metrics_port, 9090);
+        assert_eq!(state.cfg.allowed_ports, vec![80, 443, 6697]);
+        assert_eq!(state.cfg.per_tenant_max_connections, 50);
+        assert_eq!(
+            state.cfg.machine_jwt_jwks_url,
+            "https://hub-api.example/jwks.json"
+        );
+        assert!(state.cluster_cidrs.is_empty());
+
+        clear_config_env();
+    }
+
+    #[tokio::test]
+    async fn build_state_fails_closed_when_jwks_url_is_missing() {
+        let _guard = ENV_LOCK.lock().await;
+        clear_config_env();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::set_var("MACHINE_JWT_AUDIENCE", "egress-proxy") };
+
+        let registry = prometheus::Registry::new();
+        let err = match build_state(&registry).await {
+            Ok(_) => panic!("expected MACHINE_JWT_JWKS_URL to be required"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("MACHINE_JWT_JWKS_URL"),
+            "expected a clear missing-var message, got: {err}"
+        );
+
+        clear_config_env();
+    }
+
+    #[tokio::test]
+    async fn run_healthcheck_succeeds_against_a_bound_metrics_port() {
+        let _guard = ENV_LOCK.lock().await;
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().unwrap().port();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::set_var("METRICS_PORT", port.to_string()) };
+
+        let result = run_healthcheck().await;
+
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::remove_var("METRICS_PORT") };
+        drop(listener);
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
 }

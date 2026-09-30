@@ -177,4 +177,58 @@ mod tests {
         assert!(rendered.contains("egress_proxy_bytes_transferred_total"));
         assert!(rendered.contains("egress_proxy_connection_bytes"));
     }
+
+    /// Exercises the actual `/health`/`/ready`/`/metrics` HTTP surface the
+    /// Helm Deployment's probes and Prometheus scrape target, via
+    /// `tower::ServiceExt::oneshot` rather than a real listener -- no
+    /// networking mode / behavior beyond stdout JSON logs and this
+    /// registry is under test here.
+    #[tokio::test]
+    async fn router_serves_health_ready_and_metrics_endpoints() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let registry = Registry::new();
+        let metrics = Metrics::new(&registry);
+        metrics
+            .requests_total
+            .with_label_values(&["connect", "allow", "-"])
+            .inc();
+        let app = router(metrics);
+
+        for (path, expect_metric_name) in
+            [("/health", false), ("/ready", false), ("/metrics", true)]
+        {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .expect("router must not fail to serve");
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::OK,
+                "unexpected status for {path}"
+            );
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body must be readable")
+                .to_bytes();
+            let body = String::from_utf8(body.to_vec()).expect("body must be utf8");
+            if expect_metric_name {
+                assert!(
+                    body.contains("egress_proxy_requests_total"),
+                    "expected rendered metrics body, got: {body}"
+                );
+            } else {
+                assert_eq!(body, "ok");
+            }
+        }
+    }
 }

@@ -231,7 +231,12 @@ pub struct ProxyState {
     pub metrics: Arc<Metrics>,
 }
 
-fn target_host_port(req: &Request<Incoming>) -> Result<(String, u16), ProxyError> {
+// Generic over the body type (only `method()`/`uri()`/`headers()` are
+// used, never the body itself) purely so `#[cfg(test)]` can exercise this
+// with a lightweight `Request<()>` instead of a real hyper connection's
+// `Incoming` body -- no behavior change for the `Request<Incoming>` caller
+// below.
+fn target_host_port<B>(req: &Request<B>) -> Result<(String, u16), ProxyError> {
     if req.method() == Method::CONNECT {
         let authority = req
             .uri()
@@ -731,4 +736,155 @@ async fn forward_inner(
 
     let body = body.map_err(|e| Box::new(e) as BoxError).boxed();
     Ok(Response::from_parts(parts, body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn every_variant() -> Vec<ProxyError> {
+        vec![
+            ProxyError::Auth(auth::AuthError::MissingToken),
+            ProxyError::Assertion(assertion::AssertionError::Missing),
+            ProxyError::DestinationMismatch,
+            ProxyError::PortNotAllowed(9999),
+            ProxyError::ResolveFailed("nxdomain".into()),
+            ProxyError::Denied("loopback"),
+            ProxyError::ConnectFailed("refused".into()),
+            ProxyError::RateLimited(crate::limits::LimitError::TooManyConnections(
+                "tenant-a".into(),
+                50,
+            )),
+            ProxyError::BadRequest("no host".into()),
+        ]
+    }
+
+    #[test]
+    fn status_and_reason_are_defined_for_every_variant() {
+        let expected: Vec<(StatusCode, &str)> = vec![
+            (StatusCode::UNAUTHORIZED, "unauthenticated"),
+            (StatusCode::UNAUTHORIZED, "invalid_assertion"),
+            (StatusCode::FORBIDDEN, "destination_mismatch"),
+            (StatusCode::FORBIDDEN, "port_not_allowed"),
+            (StatusCode::BAD_GATEWAY, "resolve_failed"),
+            (StatusCode::FORBIDDEN, "loopback"),
+            (StatusCode::BAD_GATEWAY, "connect_failed"),
+            (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+            (StatusCode::BAD_REQUEST, "bad_request"),
+        ];
+        for (err, (status, reason)) in every_variant().into_iter().zip(expected) {
+            assert_eq!(err.status(), status, "status for {err:?}");
+            assert_eq!(err.reason(), reason, "reason for {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn error_response_sets_status_reason_header_and_body() {
+        use http_body_util::BodyExt;
+
+        let err = ProxyError::PortNotAllowed(31337);
+        let resp = error_response(&err);
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            resp.headers().get("x-egress-proxy-reason").unwrap(),
+            "port_not_allowed"
+        );
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"port_not_allowed");
+    }
+
+    fn connect_request(uri: &str) -> Request<()> {
+        Request::builder()
+            .method(Method::CONNECT)
+            .uri(uri)
+            .body(())
+            .unwrap()
+    }
+
+    #[test]
+    fn target_host_port_from_connect_authority() {
+        let req = connect_request("discord.com:443");
+        let (host, port) = target_host_port(&req).unwrap();
+        assert_eq!(host, "discord.com");
+        assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn target_host_port_rejects_connect_missing_port() {
+        // A bare host with no `:port` parses as a `Uri` with an authority
+        // that has no port component.
+        let req = connect_request("discord.com");
+        let err = target_host_port(&req).unwrap_err();
+        assert!(matches!(err, ProxyError::BadRequest(_)));
+    }
+
+    #[test]
+    fn target_host_port_from_absolute_form_uri_defaults_to_port_80() {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/path")
+            .body(())
+            .unwrap();
+        let (host, port) = target_host_port(&req).unwrap();
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 80);
+    }
+
+    /// regression: IPv6-aware Host-header fallback -- an origin-form
+    /// request (no absolute URI, e.g. a plain forward proxy hop) with a
+    /// bracketed IPv6 `Host` header must not be misparsed by a naive
+    /// colon-split.
+    #[test]
+    fn target_host_port_falls_back_to_bracketed_ipv6_host_header() {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/path")
+            .header(http::header::HOST, "[::1]:9999")
+            .body(())
+            .unwrap();
+        let (host, port) = target_host_port(&req).unwrap();
+        // `http::uri::Authority::host()` returns the bracketed form for an
+        // IPv6 literal -- this is what gets passed through to `validate`'s
+        // own `host.parse::<IpAddr>()` fallback below, so asserting the
+        // bracketed form here pins the actual contract, not a stripped one.
+        assert_eq!(host, "[::1]");
+        assert_eq!(port, 9999);
+    }
+
+    #[test]
+    fn target_host_port_falls_back_to_host_header_default_port() {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/path")
+            .header(http::header::HOST, "example.com")
+            .body(())
+            .unwrap();
+        let (host, port) = target_host_port(&req).unwrap();
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 80);
+    }
+
+    #[test]
+    fn target_host_port_rejects_origin_form_without_host_header() {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/path")
+            .body(())
+            .unwrap();
+        let err = target_host_port(&req).unwrap_err();
+        assert!(matches!(err, ProxyError::BadRequest(_)));
+    }
+
+    #[test]
+    fn target_host_port_rejects_an_unparseable_host_header() {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/path")
+            // An empty Host header is not a valid `http::uri::Authority`.
+            .header(http::header::HOST, "")
+            .body(())
+            .unwrap();
+        let err = target_host_port(&req).unwrap_err();
+        assert!(matches!(err, ProxyError::BadRequest(_)));
+    }
 }

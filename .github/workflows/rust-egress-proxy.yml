@@ -28,3 +28,7 @@ jobs:
       # rust-svc-action.yml.
       extra_apt_packages: cmake build-essential
       extra_apt_reason: 'for aws-lc-sys (cmake, C/C++ toolchain)'
+      # main.rs is a thin binary entrypoint (all logic lives in src/lib.rs,
+      # see its own module doc) -- same coverage_ignore_regex convention as
+      # rust-svc-process.yml.
+      coverage_ignore_regex: 'main\.rs'

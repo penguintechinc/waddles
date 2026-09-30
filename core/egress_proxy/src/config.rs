@@ -244,4 +244,223 @@ mod tests {
         let parsed = parse_cidrs("fd00::/8", "DENY_CIDRS").unwrap();
         assert_eq!(parsed.len(), 1);
     }
+
+    #[test]
+    fn parse_ports_accepts_a_comma_separated_list_with_whitespace() {
+        let parsed = parse_ports("80, 443,6697").unwrap();
+        assert_eq!(parsed, vec![80, 443, 6697]);
+    }
+
+    #[test]
+    fn parse_ports_ignores_empty_segments() {
+        let parsed = parse_ports("80,,443,").unwrap();
+        assert_eq!(parsed, vec![80, 443]);
+    }
+
+    #[test]
+    fn parse_ports_rejects_a_non_numeric_entry() {
+        let err = parse_ports("80,not-a-port").unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid("ALLOWED_PORTS", _)));
+    }
+
+    #[test]
+    fn parse_list_trims_and_drops_empty_entries() {
+        let parsed = parse_list(" svc-ingest ,svc-process,,svc-action ");
+        assert_eq!(parsed, vec!["svc-ingest", "svc-process", "svc-action"]);
+    }
+
+    #[test]
+    fn config_error_display_messages() {
+        assert_eq!(
+            ConfigError::Missing("MACHINE_JWT_JWKS_URL").to_string(),
+            "missing required env var MACHINE_JWT_JWKS_URL"
+        );
+        assert_eq!(
+            ConfigError::Invalid("PROXY_LISTEN_PORT", "abc".into()).to_string(),
+            "invalid value for PROXY_LISTEN_PORT: abc"
+        );
+    }
+
+    /// Every env var `Config::from_env` reads. Shared with
+    /// `crate::tests::CONFIG_ENV_VARS` (`lib.rs`) -- both modules serialize
+    /// on the single crate-wide `crate::ENV_LOCK` so these tests and
+    /// `lib.rs`'s `build_state` tests (which also drive `from_env`
+    /// indirectly) never race on the same process-global variables.
+    const CONFIG_ENV_VARS: &[&str] = &[
+        "PROXY_LISTEN_PORT",
+        "METRICS_PORT",
+        "ALLOWED_PORTS",
+        "DENY_CIDRS",
+        "DENY_CLUSTER_CIDRS",
+        "MACHINE_JWT_JWKS_URL",
+        "MACHINE_JWT_AUDIENCE",
+        "MACHINE_JWT_TRUSTED_ISSUERS",
+        "MACHINE_JWT_REQUIRED_SCOPE",
+        "ALLOWED_CALLER_SERVICES",
+        "PER_TENANT_MAX_CONNECTIONS",
+        "PER_TENANT_BANDWIDTH_BYTES_PER_SEC",
+        "CONNECT_TIMEOUT_SECONDS",
+        "ASSERTION_MAX_TTL_SECONDS",
+        "HEADER_READ_TIMEOUT_SECONDS",
+        "TUNNEL_IDLE_TIMEOUT_SECONDS",
+        "TUNNEL_MAX_DURATION_SECONDS",
+        "EGRESS_PROXY_ALLOW_PRIVATE_IP",
+    ];
+
+    fn clear_env() {
+        for var in CONFIG_ENV_VARS {
+            // SAFETY: serialized by ENV_LOCK, held by every caller.
+            unsafe { std::env::remove_var(var) };
+        }
+    }
+
+    #[test]
+    fn from_env_uses_documented_defaults_when_only_required_vars_are_set() {
+        let _guard = crate::ENV_LOCK.blocking_lock();
+        clear_env();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::set_var("MACHINE_JWT_JWKS_URL", "https://hub-api.example/jwks.json");
+            std::env::set_var("MACHINE_JWT_AUDIENCE", "egress-proxy");
+        }
+
+        let cfg = Config::from_env().expect("required vars are set");
+        assert_eq!(cfg.listen_port, 8443);
+        assert_eq!(cfg.metrics_port, 9090);
+        assert_eq!(cfg.allowed_ports, vec![80, 443, 6697]);
+        assert!(cfg.deny_cidrs.is_empty());
+        assert!(cfg.deny_cluster_cidrs.is_empty());
+        assert_eq!(
+            cfg.machine_jwt_trusted_issuers,
+            vec!["spiffe://penguintech.io".to_string()]
+        );
+        assert_eq!(cfg.machine_jwt_required_scope, "egress:connect");
+        assert_eq!(
+            cfg.allowed_caller_services,
+            vec!["svc-ingest", "svc-process", "svc-action"]
+        );
+        assert_eq!(cfg.per_tenant_max_connections, 50);
+        assert_eq!(cfg.per_tenant_bandwidth_bytes_per_sec, 10_485_760);
+        assert_eq!(cfg.connect_timeout, Duration::from_secs(10));
+        assert_eq!(cfg.assertion_max_ttl, Duration::from_secs(60));
+        assert_eq!(cfg.header_read_timeout, Duration::from_secs(10));
+        assert_eq!(cfg.tunnel_idle_timeout, Duration::from_secs(300));
+        assert_eq!(cfg.tunnel_max_duration, Duration::from_secs(3600));
+        assert!(!cfg.allow_private_ip);
+
+        clear_env();
+    }
+
+    #[test]
+    fn from_env_overrides_every_tunable_when_all_vars_are_set() {
+        let _guard = crate::ENV_LOCK.blocking_lock();
+        clear_env();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::set_var("PROXY_LISTEN_PORT", "9443");
+            std::env::set_var("METRICS_PORT", "9091");
+            std::env::set_var("ALLOWED_PORTS", "22");
+            std::env::set_var("DENY_CIDRS", "10.0.0.0/8");
+            std::env::set_var("DENY_CLUSTER_CIDRS", "10.244.0.0/16");
+            std::env::set_var("MACHINE_JWT_JWKS_URL", "https://hub-api.example/jwks.json");
+            std::env::set_var("MACHINE_JWT_AUDIENCE", "egress-proxy");
+            std::env::set_var("MACHINE_JWT_TRUSTED_ISSUERS", "hub-api,hub-api-2");
+            std::env::set_var("MACHINE_JWT_REQUIRED_SCOPE", "egress:custom");
+            std::env::set_var("ALLOWED_CALLER_SERVICES", "svc-ingest");
+            std::env::set_var("PER_TENANT_MAX_CONNECTIONS", "5");
+            std::env::set_var("PER_TENANT_BANDWIDTH_BYTES_PER_SEC", "1024");
+            std::env::set_var("CONNECT_TIMEOUT_SECONDS", "1");
+            std::env::set_var("ASSERTION_MAX_TTL_SECONDS", "30");
+            std::env::set_var("HEADER_READ_TIMEOUT_SECONDS", "2");
+            std::env::set_var("TUNNEL_IDLE_TIMEOUT_SECONDS", "60");
+            std::env::set_var("TUNNEL_MAX_DURATION_SECONDS", "120");
+            std::env::set_var("EGRESS_PROXY_ALLOW_PRIVATE_IP", "true");
+        }
+
+        let cfg = Config::from_env().expect("all vars are valid");
+        assert_eq!(cfg.listen_port, 9443);
+        assert_eq!(cfg.metrics_port, 9091);
+        assert_eq!(cfg.allowed_ports, vec![22]);
+        assert_eq!(cfg.deny_cidrs.len(), 1);
+        assert_eq!(cfg.deny_cluster_cidrs.len(), 1);
+        assert_eq!(
+            cfg.machine_jwt_trusted_issuers,
+            vec!["hub-api".to_string(), "hub-api-2".to_string()]
+        );
+        assert_eq!(cfg.machine_jwt_required_scope, "egress:custom");
+        assert_eq!(cfg.allowed_caller_services, vec!["svc-ingest"]);
+        assert_eq!(cfg.per_tenant_max_connections, 5);
+        assert_eq!(cfg.per_tenant_bandwidth_bytes_per_sec, 1024);
+        assert_eq!(cfg.connect_timeout, Duration::from_secs(1));
+        assert_eq!(cfg.assertion_max_ttl, Duration::from_secs(30));
+        assert_eq!(cfg.header_read_timeout, Duration::from_secs(2));
+        assert_eq!(cfg.tunnel_idle_timeout, Duration::from_secs(60));
+        assert_eq!(cfg.tunnel_max_duration, Duration::from_secs(120));
+        assert!(cfg.allow_private_ip);
+
+        clear_env();
+    }
+
+    #[test]
+    fn from_env_fails_closed_when_jwks_url_is_missing() {
+        let _guard = crate::ENV_LOCK.blocking_lock();
+        clear_env();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::set_var("MACHINE_JWT_AUDIENCE", "egress-proxy") };
+
+        let err = Config::from_env().unwrap_err();
+        assert!(matches!(err, ConfigError::Missing("MACHINE_JWT_JWKS_URL")));
+
+        clear_env();
+    }
+
+    #[test]
+    fn from_env_fails_closed_when_audience_is_missing() {
+        let _guard = crate::ENV_LOCK.blocking_lock();
+        clear_env();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::set_var("MACHINE_JWT_JWKS_URL", "https://hub-api.example/jwks.json") };
+
+        let err = Config::from_env().unwrap_err();
+        assert!(matches!(err, ConfigError::Missing("MACHINE_JWT_AUDIENCE")));
+
+        clear_env();
+    }
+
+    #[test]
+    fn from_env_rejects_an_invalid_listen_port() {
+        let _guard = crate::ENV_LOCK.blocking_lock();
+        clear_env();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::set_var("PROXY_LISTEN_PORT", "not-a-port");
+            std::env::set_var("MACHINE_JWT_JWKS_URL", "https://hub-api.example/jwks.json");
+            std::env::set_var("MACHINE_JWT_AUDIENCE", "egress-proxy");
+        }
+
+        let err = Config::from_env().unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid("PROXY_LISTEN_PORT", _)));
+
+        clear_env();
+    }
+
+    #[test]
+    fn from_env_rejects_a_non_bool_private_ip_flag() {
+        let _guard = crate::ENV_LOCK.blocking_lock();
+        clear_env();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::set_var("MACHINE_JWT_JWKS_URL", "https://hub-api.example/jwks.json");
+            std::env::set_var("MACHINE_JWT_AUDIENCE", "egress-proxy");
+            std::env::set_var("EGRESS_PROXY_ALLOW_PRIVATE_IP", "not-a-bool");
+        }
+
+        let err = Config::from_env().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::Invalid("EGRESS_PROXY_ALLOW_PRIVATE_IP", _)
+        ));
+
+        clear_env();
+    }
 }
