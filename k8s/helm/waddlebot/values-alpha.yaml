@@ -116,17 +116,29 @@ infrastructure:
 # skeleton) and svcRtc is additionally gated on modules.social.enabled; neither
 # is part of this fix's scope.
 pipeline:
+  # fix/alpha-clean-deploy -- the legacy Python svc-ingest/svc-process/svc-action
+  # Deployments crash-loop in this cluster (`No module named 'waddle'` loading
+  # ping's WASM entrypoint) and are no longer the live path here: the Rust data
+  # plane (pipeline.rustDataPlane below, enabled: true) is. Previously kept
+  # enabled alongside the Rust stack on purpose ("coexistence, not cutover") --
+  # that coexistence is now producing pure crash-loop noise with no working
+  # legacy consumer left in this cluster, so disabling here (alpha/local only;
+  # left enabled in base values.yaml + beta/gamma/production, which still run
+  # the Python pipeline for real).
   svcIngest:
+    enabled: false
     replicas: 1
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "500m", memory: "512Mi" }
   svcProcess:
+    enabled: false
     replicas: 1
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "500m", memory: "512Mi" }
   svcAction:
+    enabled: false
     replicas: 1
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
@@ -148,9 +160,16 @@ pipeline:
   # pyping + the Discord guild connection below) targets first.
   coreBundleSeeder:
     enabled: true
+    # fix/seeder-memory (not yet merged as of this branch's base): 64Mi/128Mi was
+    # the real OOMKilled cause in CI's kind install (gh PR #480), overriding the
+    # base chart's 512Mi limit -- Helm merges this file over the chart default,
+    # so this override was what actually applied. Measured real peak (cgroup
+    # memory.peak) seeding both ping.wasm/pyping.wasm sequentially: ~218Mi.
+    # Raised to 256Mi/512Mi (~1.5x peak headroom). Reconcile/drop this block if
+    # fix/seeder-memory (PR #515) lands first.
     resources:
-      requests: { cpu: "50m", memory: "64Mi" }
-      limits: { cpu: "200m", memory: "128Mi" }
+      requests: { cpu: "50m", memory: "256Mi" }
+      limits: { cpu: "200m", memory: "512Mi" }
   hubWebui:
     enabled: true
     replicas: 1
@@ -192,9 +211,11 @@ pipeline:
   # committed to git (tribal knowledge, at risk of being lost between sessions). This alpha
   # cluster's real, proven purpose today IS the Rust data-plane e2e proof (ping/pong bundle,
   # spec `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md`), so `enabled: true`
-  # now reflects that honestly. The Python pipeline.svcIngest/svcProcess/svcAction
-  # Deployments above stay enabled too (coexistence, not cutover) -- matches the live
-  # cluster's actual pod list. Still requires, via --reuse-values or an ephemeral
+  # now reflects that honestly. fix/alpha-clean-deploy: the Python
+  # pipeline.svcIngest/svcProcess/svcAction Deployments above are now disabled
+  # (`enabled: false`) instead of coexisting -- they had no working legacy
+  # consumer left in this cluster and were pure crash-loop noise alongside the
+  # Rust stack below. Still requires, via --reuse-values or an ephemeral
   # secrets file (never committed, critical-rules.md Token & Secret Hygiene):
   #   1. global.hostApiTls real mTLS material (--set-file; no insecureDev escape hatch
   #      exists, unlike global.grpcTls);

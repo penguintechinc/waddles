@@ -70,46 +70,55 @@ readonly REGISTRY="localhost:32000/waddlebot"
 # services actually enabled in values-alpha.yaml are listed here; svc-core
 # and svc-rtc have no Dockerfile yet and are left on the chart's shared
 # base-image skeleton (disabled in alpha).
+#
+# fix/alpha-clean-deploy -- the legacy Python svc-ingest/svc-process/svc-action
+# were removed from this list: values-alpha.yaml now sets
+# pipeline.{svcIngest,svcProcess,svcAction}.enabled=false (crash-looped with
+# "No module named 'waddle'", superseded by the Rust data plane), so their
+# chart Deployments no longer render in alpha and building/pushing those
+# images is wasted work. waddlebot-egress-proxy was added: the chart's
+# egress-proxy Deployment (templates/infrastructure/egress-proxy.yaml,
+# egressProxy.image="waddlebot-egress-proxy") was never in this build list,
+# so alpha always pulled a nonexistent tag for it until now.
 readonly SERVICE_ORDER=(
     "hub-api"
     "hub-webui"
-    "svc-ingest"
-    "svc-process"
-    "svc-action"
     "svc-presentation"
     "svc-streaming"
+    "waddlebot-egress-proxy"
     "reputation-module"
     "waddlebot-migrations"
 )
 
 # Build context, relative to PROJECT_ROOT. Every service except svc-streaming
-# builds from the repo root because its Dockerfile COPYs shared libs/*
-# (flask_core, waddle_transports, moderation_module). svc-streaming is a
-# self-contained Rust crate (core/svc_streaming/Cargo.toml) with no shared
-# libs to pull in -- see core/svc_streaming/Dockerfile.rust's own header.
+# and waddlebot-egress-proxy builds from the repo root because its Dockerfile
+# COPYs shared libs/* (flask_core, waddle_transports, moderation_module).
+# svc-streaming is a self-contained Rust crate (core/svc_streaming/Cargo.toml)
+# with no shared libs to pull in -- see core/svc_streaming/Dockerfile.rust's
+# own header. waddlebot-egress-proxy's Dockerfile.rust needs the "core"
+# context (not just core/egress_proxy) because it has same-repo path
+# dependencies on sibling crates service_auth/bundle_host_http/
+# egress_assertion -- see core/egress_proxy/Dockerfile.rust's own header.
 declare -A SERVICE_CONTEXT=(
     ["hub-api"]="."
     ["hub-webui"]="."
-    ["svc-ingest"]="."
-    ["svc-process"]="."
-    ["svc-action"]="."
     ["svc-presentation"]="."
     ["svc-streaming"]="core/svc_streaming"
+    ["waddlebot-egress-proxy"]="core"
     ["reputation-module"]="."
     ["waddlebot-migrations"]="."
 )
 
 # Dockerfile path, relative to PROJECT_ROOT (or relative to the context above
-# for svc-streaming, which docker build handles identically either way here
-# since -f accepts a path relative to CWD, not the context).
+# for svc-streaming/waddlebot-egress-proxy, which docker build handles
+# identically either way here since -f accepts a path relative to CWD, not
+# the context).
 declare -A SERVICE_DOCKERFILE=(
     ["hub-api"]="hub_api/Dockerfile"
     ["hub-webui"]="admin/hub_module/Dockerfile.webui"
-    ["svc-ingest"]="core/svc_ingest/Dockerfile"
-    ["svc-process"]="core/svc_process/Dockerfile"
-    ["svc-action"]="core/svc_action/Dockerfile"
     ["svc-presentation"]="core/svc_presentation/Dockerfile"
     ["svc-streaming"]="core/svc_streaming/Dockerfile.rust"
+    ["waddlebot-egress-proxy"]="core/egress_proxy/Dockerfile.rust"
     ["reputation-module"]="core/reputation_module/Dockerfile"
     ["waddlebot-migrations"]="migrations/Dockerfile"
 )
@@ -489,11 +498,9 @@ REQUIRED SECRETS (env vars, never defaulted/committed — see docs/SECRETS_SETUP
 SERVICES (built/pushed as ${REGISTRY}/<service>:<tag>):
     hub-api                (hub_api/Dockerfile)
     hub-webui              (admin/hub_module/Dockerfile.webui)
-    svc-ingest              (core/svc_ingest/Dockerfile)
-    svc-process             (core/svc_process/Dockerfile)
-    svc-action              (core/svc_action/Dockerfile)
     svc-presentation        (core/svc_presentation/Dockerfile)
     svc-streaming           (core/svc_streaming/Dockerfile.rust)
+    waddlebot-egress-proxy  (core/egress_proxy/Dockerfile.rust)
     reputation-module       (core/reputation_module/Dockerfile)
     waddlebot-migrations    (migrations/Dockerfile)
 
