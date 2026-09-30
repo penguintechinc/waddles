@@ -35,7 +35,14 @@ spec:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-action-rust
     spec:
-      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      # Dedicated identity (feature/eddsa-machine-jwt, security review HIGH
+      # finding) -- distinguishes this deployment's pods from every other
+      # workload in the namespace for `flask_core.service_jwt`'s TokenReview
+      # bootstrap; see templates/service-jwt-rbac.yaml. Shared with the
+      # Python svc-action Deployment above -- both are the same logical
+      # caller identity, never both running against hub-api at once in a
+      # given environment.
+      serviceAccountName: svc-action
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -85,6 +92,19 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: DB_PASSWORD
+        # fix/helm-platform-credentials -- core/svc_action/src/config.rs reads
+        # this directly (`std::env::var("DISCORD_BOT_TOKEN").ok()`) and already
+        # degrades gracefully (relay provider disabled, clear log line) when
+        # absent -- see capabilities.rs/lib.rs. Sourced from the
+        # operator-managed platform-credentials Secret, never the
+        # chart-rendered `-secrets` Secret; `optional: true` so an
+        # unconfigured community starts without this var.
+        - name: DISCORD_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
+              key: DISCORD_BOT_TOKEN
+              optional: true
         - name: WADDLES_SANDBOX_GVISOR
           value: {{ .Values.pipeline.rustDataPlane.svcAction.sandboxGvisor | quote }}
         # Per-call wall-clock budget handed to the executor on every `invoke` -- kept in
@@ -202,9 +222,11 @@ spec:
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
+        {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
       {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
       {{- end }}

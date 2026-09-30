@@ -13,11 +13,13 @@
 # alone. svc-process's Cargo.toml declares same-repo path dependencies on
 # the sibling crates `bundle-active-set` (`bundle-active-set = { path =
 # "../bundle_active_set" }`, the DB-driven active-bundle loader's shared
-# query/diff logic) and `bundle-host-kv` (`bundle-host-kv = { path =
+# query/diff logic), `bundle-host-kv` (`bundle-host-kv = { path =
 # "../bundle_host_kv" }`, the `kv` host capability's shared key-derivation/
-# isolation/quota logic), so the build context must include both
-# core/bundle_active_set and core/bundle_host_kv or `cargo build` fails
-# closed with "unable to update /bundle_active_set" / "/bundle_host_kv"
+# isolation/quota logic) and `bundle-host-http` (the bundle `http` host
+# capability's shared, SSRF-hardened egress guard), so the build context
+# must include core/bundle_active_set, core/bundle_host_kv, and
+# core/bundle_host_http too, or `cargo build` fails closed with "unable to
+# update /bundle_active_set" (or "/bundle_host_kv" / "/bundle_host_http")
 # (no such file). Run from core/:
 #   docker build -f svc_process/Dockerfile.rust -t localhost:32000/waddlebot/svc-process-rust:alpha-<epoch> .
 # ("svc-process-rust", not "svc-process" -- fix/helm-alpha-self-provisioning, see
@@ -30,6 +32,7 @@ COPY svc_process/Cargo.toml svc_process/Cargo.lock ./svc_process/
 COPY svc_process/src ./svc_process/src
 COPY bundle_active_set ./bundle_active_set
 COPY bundle_host_kv ./bundle_host_kv
+COPY bundle_host_http ./bundle_host_http
 WORKDIR /build/svc_process
 RUN cargo build --release --locked
 

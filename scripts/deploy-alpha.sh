@@ -276,7 +276,7 @@ global:
   initialAdmin:
     password: "${WADDLEBOT_ALPHA_ADMIN_PASSWORD}"
 infrastructure:
-  minio:
+  seaweedfs:
     rootUser: "${WADDLEBOT_ALPHA_MINIO_ROOT_USER}"
     rootPassword: "${WADDLEBOT_ALPHA_MINIO_ROOT_PASSWORD}"
 EOF

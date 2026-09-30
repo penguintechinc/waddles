@@ -753,7 +753,7 @@ mod tests {
 
         let (stage_io, executor_io) = tokio::io::duplex(64 * 1024);
         let egress = Arc::new(crate::egress::EgressGuard::new(
-            Arc::new(crate::egress::ReqwestTransport),
+            Arc::new(crate::egress::ReqwestTransport::new()),
             crate::egress::EgressLimits {
                 allow_private_hosts: false,
                 rate_limit_rps: 10,
@@ -761,6 +761,8 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_redirects: 3,
                 max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
+                proxy_url: None,
             },
             Arc::new(crate::distribution::BundleCatalog::new()),
             prometheus::IntCounterVec::new(
@@ -962,7 +964,7 @@ mod tests {
         let (stage_io, executor_io) = tokio::io::duplex(64 * 1024);
         let relay_queue = Arc::new(RecordingRelayQueue::default());
         let egress = Arc::new(crate::egress::EgressGuard::new(
-            Arc::new(crate::egress::ReqwestTransport),
+            Arc::new(crate::egress::ReqwestTransport::new()),
             crate::egress::EgressLimits {
                 allow_private_hosts: false,
                 rate_limit_rps: 10,
@@ -970,6 +972,8 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_redirects: 3,
                 max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
+                proxy_url: None,
             },
             Arc::new(crate::distribution::BundleCatalog::new()),
             prometheus::IntCounterVec::new(
@@ -1172,7 +1176,7 @@ mod tests {
 
         let (stage_io, executor_io) = tokio::io::duplex(64 * 1024);
         let egress = Arc::new(crate::egress::EgressGuard::new(
-            Arc::new(crate::egress::ReqwestTransport),
+            Arc::new(crate::egress::ReqwestTransport::new()),
             crate::egress::EgressLimits {
                 allow_private_hosts: false,
                 rate_limit_rps: 10,
@@ -1180,6 +1184,8 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_redirects: 3,
                 max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
+                proxy_url: None,
             },
             Arc::new(crate::distribution::BundleCatalog::new()),
             prometheus::IntCounterVec::new(
@@ -1279,7 +1285,7 @@ mod tests {
 
         let (stage_io, executor_io) = tokio::io::duplex(64 * 1024);
         let egress = Arc::new(crate::egress::EgressGuard::new(
-            Arc::new(crate::egress::ReqwestTransport),
+            Arc::new(crate::egress::ReqwestTransport::new()),
             crate::egress::EgressLimits {
                 allow_private_hosts: false,
                 rate_limit_rps: 10,
@@ -1287,6 +1293,8 @@ mod tests {
                 timeout: std::time::Duration::from_secs(5),
                 max_redirects: 3,
                 max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
+                proxy_url: None,
             },
             Arc::new(crate::distribution::BundleCatalog::new()),
             prometheus::IntCounterVec::new(

@@ -142,6 +142,9 @@ pub struct SupervisorDeps {
     /// `changelog_consumer::run` poll writes to, cloned (the `Arc`, not the
     /// snapshot) into every binding consumer's own `ProcessDeps`.
     pub kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::egress`'s doc.
+    pub egress: Arc<bundle_host_http::egress::EgressGuard>,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -268,6 +271,7 @@ async fn run_binding_consumer(
             license: Arc::clone(&deps.license),
             kv_conn: deps.kv_conn.clone(),
             kv_capabilities: Arc::clone(&deps.kv_capabilities),
+            egress: Arc::clone(&deps.egress),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();

@@ -17,31 +17,38 @@
 //! argument at all" -- every one is scope-implicit, taken from the
 //! invocation in flight, never from a connection-lifetime default).
 //!
-//! This M4 landing wires `context`/`clock`/`log` fully (the three
+//! This landing wires `context`/`clock`/`log` fully (the three
 //! capabilities every bundle needs regardless of manifest declarations,
-//! spec §6.5's capability table: "Always granted") and `kv`, backed by
+//! spec §6.5's capability table: "Always granted"), plus `kv` -- backed by
 //! `bundle_host_kv::KvHost` (the crate shared with `core/svc_action` --
 //! see that crate's own module doc for the key-derivation/isolation/quota
 //! design) over a direct Valkey connection opened once at startup
 //! (`crate::lib::connect_kv`) and cloned into every per-invoke
 //! [`StageCapabilities`] this loop constructs (`crate::spine::
-//! ProcessDeps::kv_conn`'s doc). `http`/`db`/`flags` remain documented
-//! seams -- see [`StageCapabilities::handle`]'s match arms -- since a real
-//! `db` wiring needs the manifest's `data.tables` allowlist plus
-//! per-bundle-role RLS (`SET LOCAL waddles.tenant`/`waddles.community`,
-//! spec §7.4/§11.10), tracked as a separate design in progress. `relay` is
-//! never granted to a process-stage bundle at all (spec §6.5: "Capability:
-//! granted only to action-stage bundles") and is denied unconditionally,
-//! not merely unimplemented.
+//! ProcessDeps::kv_conn`'s doc) -- and `http`, backed by
+//! [`StageCapabilities::egress`]/[`HttpEgressCatalog`]'s docs for the
+//! shared `bundle_host_http::egress::EgressGuard` pipeline (extracted from
+//! `core/svc_action`, PR #459 follow-up) and the interim capability-gate
+//! seam this stage's own catalog stands in for ahead of PR #433's standard
+//! `core/bundle_capability_gate::authorize` landing. `db`/`flags` remain
+//! documented seams -- see [`StageCapabilities::handle`]'s match arms --
+//! since a real `db` wiring needs the manifest's `data.tables` allowlist
+//! plus per-bundle-role RLS (`SET LOCAL waddles.tenant`/`waddles.community`,
+//! spec §7.4/§11.10), tracked as a separate design in progress (PR #498).
+//! `relay` is never granted to a process-stage bundle at all (spec §6.5:
+//! "Capability: granted only to action-stage bundles") and is denied
+//! unconditionally, not merely unimplemented.
 //!
 //! A bundle never holds a platform credential or a tenant/community
 //! argument (spec §4.3, §5.11): every capability here resolves its own
 //! scope from `self`, never from the `args`/`op` the guest supplied.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
+use bundle_host_http::egress::{EgressGuard, EgressRuleRow, EgressRuleSource};
 use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
@@ -111,6 +118,52 @@ fn sanitize_bundle_log_message(raw_message: &str) -> String {
     message
 }
 
+/// Per-`app_id` egress-allowlist source for this stage's `http` capability
+/// -- the interim capability-gate seam (`docs/superpowers/specs/
+/// 2026-09-28-bundle-permissions-and-capability-gate.md`, PR #419/#433).
+/// `core/bundle_capability_gate::authorize(scope, permission, resource)`
+/// (PR #433) is the standard, install-time permission gate this will be
+/// replaced by once it lands; until then, this snapshot is this stage's
+/// own copy of the same interim pattern PR #425 (`core/bundle_host_kv`)
+/// used ahead of the standard gate: **undeclared means denied**. An
+/// `app_id` this snapshot has never been told about (every app, today --
+/// no writer populates it yet, same honest gap `crate::capabilities`'s own
+/// module doc already documents for `db`/`kv`/`flags`) resolves to `None`,
+/// which [`EgressGuard`] treats identically to a declared-but-empty
+/// `egress` list: every `http.send` call is refused `host_not_declared`.
+/// [`HttpEgressCatalog::update`] is the write side a future DB-driven
+/// active-set loader (mirroring `svc_action::bundle_loader`) will call
+/// once this stage grows one -- not wired to any real data source in this
+/// landing.
+#[derive(Default)]
+pub struct HttpEgressCatalog(RwLock<HashMap<String, EgressRuleRow>>);
+
+impl HttpEgressCatalog {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Replaces `app_id`'s declared `net.http:<host>` egress allowlist
+    /// wholesale (never merges) -- see the type doc for the future writer
+    /// this is built for.
+    pub fn update(&self, app_id: impl Into<String>, row: EgressRuleRow) {
+        self.0
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(app_id.into(), row);
+    }
+}
+
+impl EgressRuleSource for HttpEgressCatalog {
+    fn resolve(&self, app_id: &str) -> Option<EgressRuleRow> {
+        self.0
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(app_id)
+            .cloned()
+    }
+}
+
 /// The real capability implementation this stage wires today, scoped to
 /// exactly one invocation's `(tenant, community, app_id)` -- see the
 /// module doc for why this is constructed per-invoke, never per-connection.
@@ -119,7 +172,12 @@ fn sanitize_bundle_log_message(raw_message: &str) -> String {
 /// StageCapabilities` is: `handle_kv`'s argument-parsing/error-mapping is
 /// unit-testable against a fake implementing the public
 /// `bundle_host_kv::KvBackend` trait, with no live Valkey server -- see
-/// this module's `tests::FakeKvBackend`.
+/// this module's `tests::FakeKvBackend`. [`egress`] is the one exception
+/// to "everything scope-implicit, nothing shared" -- it is a
+/// per-*process* singleton (owns rate-limit token buckets keyed by
+/// `app_id` across every invoke, spec §8.2 step 8), built once by this
+/// stage's own startup wiring and cloned (cheap, `Arc`) into every
+/// per-invoke `StageCapabilities`.
 pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     tenant: String,
     community: Option<String>,
@@ -128,19 +186,27 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// sees `not_implemented` rather than this loop failing to start if
     /// the Valkey connection for `kv` was never configured).
     kv: Option<KvHost<K>>,
+    egress: Arc<EgressGuard>,
 }
 
 impl<K: KvBackend> StageCapabilities<K> {
     /// Builds the capability set for exactly one `invoke` -- `context` and
     /// every other capability are scope-implicit (spec §5.11: "No bundle
     /// host call accepts a tenant or community argument at all"). `kv`
-    /// starts unconfigured; see [`Self::with_kv`].
-    pub fn new(tenant: String, community: Option<String>, app_id: String) -> Self {
+    /// starts unconfigured; see [`Self::with_kv`]. `egress` is the shared,
+    /// per-process [`EgressGuard`] -- see the struct doc.
+    pub fn new(
+        tenant: String,
+        community: Option<String>,
+        app_id: String,
+        egress: Arc<EgressGuard>,
+    ) -> Self {
         Self {
             tenant,
             community,
             app_id,
             kv: None,
+            egress,
         }
     }
 
@@ -163,6 +229,13 @@ impl<K: KvBackend> StageCapabilities<K> {
     ) -> Self {
         self.kv = Some(KvHost::new(backend, capabilities));
         self
+    }
+
+    async fn handle_http(
+        &self,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, HostResultError> {
+        self.egress.send(&self.app_id, args).await
     }
 
     fn handle_clock(&self, op: &str) -> Result<serde_json::Value, HostResultError> {
@@ -351,15 +424,11 @@ impl<K: KvBackend> CapabilityHandler for StageCapabilities<K> {
                 CapabilityKind::Context => self.handle_context(),
                 CapabilityKind::Log => self.handle_log(&call.args),
                 CapabilityKind::Kv => self.handle_kv(&call).await,
-                // TODO(M4+): `http` (guarded egress per manifest `egress`
-                // allowlist) is not wired in this landing -- denying
-                // (never silently succeeding) is the correct behavior for
-                // an unimplemented capability: a bundle calling it sees
-                // `access-denied`, not a fabricated success.
-                CapabilityKind::Http => Err(denied(
-                    "not_implemented",
-                    "http capability is not wired in this build -- TODO(M4+)",
-                )),
+                // `http` is wired to the shared `bundle_host_http::egress::
+                // EgressGuard` (`self.egress`, see the struct doc) -- `kv`
+                // is wired to `bundle_host_kv::KvHost` above (`self.kv`,
+                // see `Self::with_kv`'s doc).
+                CapabilityKind::Http => self.handle_http(&call.args).await,
                 // `db` needs per-app Postgres schema provisioning
                 // (`app_core.<app_id>`/`app_community.<app_id>`), a
                 // schema-scoped runtime role, and RLS -- designed in
@@ -369,9 +438,10 @@ impl<K: KvBackend> CapabilityHandler for StageCapabilities<K> {
                 // permission) gated by the standard permission-catalog
                 // design in `docs/superpowers/specs/
                 // 2026-09-28-bundle-permissions-and-capability-gate.md`
-                // (PR #419) -- both in progress, neither landed here yet.
-                // Denying (never silently succeeding) is the correct
-                // behavior for an unimplemented capability until they do.
+                // (PR #419) -- both in progress, neither landed here yet
+                // (PR #498 wires this next). Denying (never silently
+                // succeeding) is the correct behavior for an unimplemented
+                // capability until it does.
                 CapabilityKind::Db => Err(denied(
                     "not_implemented",
                     "db capability is not wired in this build",
@@ -425,12 +495,86 @@ pub fn boxed(handler: impl CapabilityHandler + 'static) -> Arc<dyn CapabilityHan
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bundle_host_http::egress::{ReqwestTransport, StaticFlag};
+    use std::time::Duration;
+
+    fn test_egress_metrics() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_svc_process_egress_denied_total", "test"),
+            &["app_id", "reason"],
+        )
+        .unwrap()
+    }
+
+    fn test_egress_limits() -> bundle_host_http::egress::EgressLimits {
+        bundle_host_http::egress::EgressLimits {
+            allow_private_hosts: false,
+            rate_limit_rps: 10,
+            rate_limit_burst: 20,
+            timeout: Duration::from_secs(5),
+            max_redirects: 3,
+            max_response_bytes: 1_048_576,
+            allowed_ports: vec![443],
+            proxy_url: None,
+        }
+    }
+
+    /// The default fixture: an empty [`HttpEgressCatalog`] -- every
+    /// `app_id` is undeclared, so `http` denies every call
+    /// `host_not_declared` (this stage's deny-by-default posture, see
+    /// [`HttpEgressCatalog`]'s doc). Tests exercising a granted call build
+    /// their own guard via [`egress_guard_with`] instead.
+    /// The default fixture's egress guard: an empty [`HttpEgressCatalog`]
+    /// (every `app_id` undeclared, `host_not_declared` on every call) --
+    /// shared by every helper below that doesn't need a declared host.
+    fn test_egress_guard() -> Arc<EgressGuard> {
+        Arc::new(EgressGuard::new(
+            Arc::new(ReqwestTransport::new()),
+            test_egress_limits(),
+            HttpEgressCatalog::new(),
+            test_egress_metrics(),
+            bundle_host_http::egress::boxed(StaticFlag(true)),
+        ))
+    }
 
     fn caps() -> StageCapabilities {
         StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
+            test_egress_guard(),
+        )
+    }
+
+    /// A [`StageCapabilities`] whose `egress` catalog declares exactly one
+    /// `(host, methods)` entry for `waddles.bot.commands.default` -- the
+    /// interim capability-gate "declared" case ([`HttpEgressCatalog`]'s
+    /// doc).
+    fn caps_with_egress_rule(host: &str, methods: &[&str]) -> StageCapabilities {
+        let catalog = HttpEgressCatalog::new();
+        catalog.update(
+            "waddles.bot.commands.default",
+            EgressRuleRow {
+                egress: vec![(
+                    host.to_string(),
+                    methods.iter().map(|m| m.to_string()).collect(),
+                )],
+                egress_rps: None,
+                granted_secret_refs: HashMap::new(),
+            },
+        );
+        let egress = Arc::new(EgressGuard::new(
+            Arc::new(ReqwestTransport::new()),
+            test_egress_limits(),
+            catalog,
+            test_egress_metrics(),
+            bundle_host_http::egress::boxed(StaticFlag(true)),
+        ));
+        StageCapabilities::new(
+            "acme".to_string(),
+            Some("main".to_string()),
+            "waddles.bot.commands.default".to_string(),
+            egress,
         )
     }
 
@@ -457,6 +601,7 @@ mod tests {
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
+            test_egress_guard(),
         )
         .with_kv(FakeKvBackend::default(), std::sync::Arc::new(snapshot))
     }
@@ -703,23 +848,243 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_db_flags_capabilities_are_documented_seams() {
-        // `kv` is no longer an unconditional seam -- see
-        // `kv_is_not_implemented_when_no_backend_was_configured` for its
-        // own (backend-unconfigured) not_implemented case, and the `kv_*`
-        // tests below for the fully-wired behavior.
+    async fn db_flags_capabilities_are_documented_seams() {
+        // Neither `kv` nor `http` is an unconditional seam any more -- see
+        // `kv_is_not_implemented_when_no_backend_was_configured` for `kv`'s
+        // own (backend-unconfigured) not_implemented case, and the `kv_*`/
+        // `http_*` tests elsewhere in this module for their fully-wired
+        // behavior.
         let c = caps();
-        for capability in [
-            CapabilityKind::Http,
-            CapabilityKind::Db,
-            CapabilityKind::Flags,
-        ] {
+        for capability in [CapabilityKind::Db, CapabilityKind::Flags] {
             let err = c
                 .handle(call(capability, "anything", serde_json::json!({})))
                 .await
                 .unwrap_err();
             assert_eq!(err.code, "not_implemented");
         }
+    }
+
+    // -- `http` capability (interim capability-gate: undeclared means
+    // denied, `HttpEgressCatalog`'s doc) --
+
+    /// The default fixture's catalog is empty -- every `app_id` is
+    /// undeclared, so `http` denies exactly like an explicit
+    /// manifest-egress miss in `svc_action`.
+    #[tokio::test]
+    async fn http_denies_an_undeclared_app_as_host_not_declared() {
+        let err = caps()
+            .handle(call(
+                CapabilityKind::Http,
+                "send",
+                serde_json::json!({"method": "GET", "url": "https://api.example.com/"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "host_not_declared");
+    }
+
+    /// A host the app's manifest never declared is denied even when the
+    /// same app *does* have other declared hosts -- declaring one host
+    /// buys access to nothing else.
+    #[tokio::test]
+    async fn http_denies_a_non_allowlisted_host_for_a_declared_app() {
+        let err = caps_with_egress_rule("api.example.com", &["GET"])
+            .handle(call(
+                CapabilityKind::Http,
+                "send",
+                serde_json::json!({"method": "GET", "url": "https://evil.example.com/"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "host_not_declared");
+    }
+
+    /// A declared host resolving to a private IP is still blocked by the
+    /// guard's always-enforced SSRF address check -- declaring a host
+    /// never bypasses step 6 (`bundle_host_http::egress::
+    /// is_forbidden_address`'s doc).
+    #[tokio::test]
+    async fn http_denies_a_declared_host_that_is_actually_a_private_ip() {
+        let err = caps_with_egress_rule("10.0.0.5", &["GET"])
+            .handle(call(
+                CapabilityKind::Http,
+                "send",
+                serde_json::json!({"method": "GET", "url": "https://10.0.0.5/"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "ssrf_blocked_address");
+    }
+
+    /// The allow path: a declared public host, reached through the real
+    /// `EgressGuard` pipeline via a live local server standing in for
+    /// `api.example.com` (the guard's own DNS-pinning connects to whatever
+    /// `Resolver` returns -- `ReqwestTransport` here resolves the
+    /// loopback listener through the OS resolver override below).
+    #[tokio::test]
+    async fn http_send_reaches_the_transport_for_a_declared_allowlisted_host() {
+        // `EgressGuard`'s production `Resolver` is `tokio::net::
+        // lookup_host`, not swappable outside this crate -- so the
+        // end-to-end allow path is proven the same way
+        // `bundle_host_http::egress`'s own moved test suite proves it
+        // (`FakeTransport`/`TestCatalog`-equivalent), via a fresh
+        // `EgressGuard` built directly rather than through `caps_with_
+        // egress_rule` (which pins `ReqwestTransport`, a *real* TLS
+        // client this test must not depend on network access).
+        struct FakeTransport(
+            Arc<std::sync::Mutex<Vec<bundle_host_http::egress::TransportRequest>>>,
+        );
+        impl bundle_host_http::egress::HttpTransport for FakeTransport {
+            fn send<'a>(
+                &'a self,
+                req: bundle_host_http::egress::TransportRequest,
+                _timeout: Duration,
+                _max_response_bytes: usize,
+            ) -> Pin<
+                Box<
+                    dyn Future<
+                            Output = Result<
+                                bundle_host_http::egress::TransportResponse,
+                                HostResultError,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                self.0.lock().unwrap().push(req);
+                Box::pin(async move {
+                    Ok(bundle_host_http::egress::TransportResponse {
+                        status: 200,
+                        headers: vec![],
+                        body: b"{}".to_vec(),
+                        truncated: false,
+                    })
+                })
+            }
+        }
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let catalog = HttpEgressCatalog::new();
+        catalog.update(
+            "waddles.bot.commands.default",
+            EgressRuleRow {
+                egress: vec![("93.184.216.34".to_string(), vec!["GET".to_string()])],
+                egress_rps: None,
+                granted_secret_refs: HashMap::new(),
+            },
+        );
+        let egress = Arc::new(EgressGuard::new(
+            Arc::new(FakeTransport(Arc::clone(&seen))),
+            test_egress_limits(),
+            catalog,
+            test_egress_metrics(),
+            bundle_host_http::egress::boxed(StaticFlag(true)),
+        ));
+        let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+            "acme".to_string(),
+            Some("main".to_string()),
+            "waddles.bot.commands.default".to_string(),
+            egress,
+        );
+
+        let result = caps
+            .handle(call(
+                CapabilityKind::Http,
+                "send",
+                serde_json::json!({"method": "GET", "url": "https://93.184.216.34/"}),
+            ))
+            .await
+            .expect("declared public IP is permitted");
+        assert_eq!(result["status"], 200);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    /// Secret-handle substitution (connector spec condition 8) works
+    /// identically through this stage's `http` capability -- the guest's
+    /// own `secret_refs` name is resolved against this bundle's granted
+    /// map, never handed a raw env-var name.
+    #[tokio::test]
+    async fn http_send_substitutes_a_granted_secret_ref_as_a_header() {
+        struct FakeTransport(
+            Arc<std::sync::Mutex<Vec<bundle_host_http::egress::TransportRequest>>>,
+        );
+        impl bundle_host_http::egress::HttpTransport for FakeTransport {
+            fn send<'a>(
+                &'a self,
+                req: bundle_host_http::egress::TransportRequest,
+                _timeout: Duration,
+                _max_response_bytes: usize,
+            ) -> Pin<
+                Box<
+                    dyn Future<
+                            Output = Result<
+                                bundle_host_http::egress::TransportResponse,
+                                HostResultError,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                self.0.lock().unwrap().push(req);
+                Box::pin(async move {
+                    Ok(bundle_host_http::egress::TransportResponse {
+                        status: 200,
+                        headers: vec![],
+                        body: b"{}".to_vec(),
+                        truncated: false,
+                    })
+                })
+            }
+        }
+
+        // SAFETY: test-process-local env var, unique name avoids
+        // cross-test collisions under parallel `cargo test` execution.
+        unsafe { std::env::set_var("SVC_PROCESS_EGRESS_TEST_TOKEN", "s3cr3t") };
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let catalog = HttpEgressCatalog::new();
+        catalog.update(
+            "waddles.bot.commands.default",
+            EgressRuleRow {
+                egress: vec![("93.184.216.34".to_string(), vec!["POST".to_string()])],
+                egress_rps: None,
+                granted_secret_refs: HashMap::from([(
+                    "TOKEN_REF".to_string(),
+                    "SVC_PROCESS_EGRESS_TEST_TOKEN".to_string(),
+                )]),
+            },
+        );
+        let egress = Arc::new(EgressGuard::new(
+            Arc::new(FakeTransport(Arc::clone(&seen))),
+            test_egress_limits(),
+            catalog,
+            test_egress_metrics(),
+            bundle_host_http::egress::boxed(StaticFlag(true)),
+        ));
+        let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+            "acme".to_string(),
+            Some("main".to_string()),
+            "waddles.bot.commands.default".to_string(),
+            egress,
+        );
+
+        caps.handle(call(
+            CapabilityKind::Http,
+            "send",
+            serde_json::json!({
+                "method": "POST",
+                "url": "https://93.184.216.34/",
+                "secret_refs": {"Authorization": "TOKEN_REF"}
+            }),
+        ))
+        .await
+        .expect("send succeeds");
+        unsafe { std::env::remove_var("SVC_PROCESS_EGRESS_TEST_TOKEN") };
+
+        let requests = seen.lock().unwrap();
+        assert!(requests[0]
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == "s3cr3t"));
     }
 
     #[tokio::test]

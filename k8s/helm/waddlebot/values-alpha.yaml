@@ -33,15 +33,18 @@ global:
   initialAdmin:
     email: "admin@waddlebot.localhost.local"
 
-# T10 (v3 Discord+Twitch demo) -- dev-only placeholder credentials, NEVER real tokens.
-# Templated into the waddlebot-secrets K8s Secret (templates/secrets.yaml), not committed
-# as literals anywhere else. Replace with real bot tokens via --set or an out-of-git values
-# override before pointing this at a real Discord guild / Twitch channel.
+# fix/helm-platform-credentials -- the Discord bot token / Twitch IRC OAuth
+# token placeholders that used to live here are REMOVED, not just blanked:
+# this is exactly the field (`oauth.discord.botToken`) whose
+# "REPLACE_ME_discord_bot_token_dev_only" default got templated into
+# waddlebot-secrets on a routine `helm upgrade` and overwrote the real alpha
+# Discord bot token, killing the live gateway session (4004). Real values now
+# come ONLY from the operator-managed `waddlebot-platform-credentials` Secret
+# (see values.yaml platformCredentials, docs/PLATFORM_CREDENTIALS.md) --
+# this chart never renders or overwrites it. Non-secret IRC config
+# (nick/channels) stays here since it isn't a credential.
 oauth:
-  discord:
-    botToken: "REPLACE_ME_discord_bot_token_dev_only"
   twitch:
-    oauthToken: "oauth:REPLACE_ME_twitch_irc_token_dev_only"
     nick: "waddlebot_demo"
     channels: "#waddlebot_demo_channel"
 
@@ -70,24 +73,25 @@ infrastructure:
       requests: { cpu: "50m", memory: "64Mi" }
       limits: { cpu: "250m", memory: "256Mi" }
   # Issue #287 -- svc-streaming (Rust) recordings target. Min-spec'd for a single-node
-  # laptop; service.name overridden to "waddlebot-minio" so the literal S3_ENDPOINT wired
-  # into svc-streaming's env (templates/svc-streaming.yaml) resolves correctly.
-  minio:
+  # laptop; service.name overridden to "waddlebot-seaweedfs" so the literal S3_ENDPOINT
+  # wired into svc-streaming's env (templates/svc-streaming.yaml) resolves correctly.
+  seaweedfs:
     enabled: true
     service:
-      name: "waddlebot-minio"
+      name: "waddlebot-seaweedfs"
       type: ClusterIP
     persistence:
       size: 2Gi
     resources:
       requests: { cpu: "50m", memory: "128Mi" }
       limits: { cpu: "300m", memory: "512Mi" }
-    # fix/minio-kms-sse -- alpha is exempt from the beta/gamma/production fail guard
-    # (templates/infrastructure/minio.yaml) and may reference this well-known secret
-    # name; the Secret itself is never committed -- provision it once per cluster via
-    # `make generate-minio-kms-key` / scripts/generate-minio-kms-key.sh before deploy.
-    kms:
-      secretName: "minio-kms"
+    # feature/seaweedfs-object-storage -- alpha is exempt from the beta/gamma/production
+    # fail guard (templates/infrastructure/seaweedfs.yaml) and may reference this
+    # well-known secret name; the Secret itself is never committed -- provision it once
+    # per cluster via `make generate-seaweedfs-sse-key` /
+    # scripts/generate-seaweedfs-sse-key.sh before deploy.
+    encryption:
+      secretName: "seaweedfs-sse-kek"
   ollama:
     enabled: false
   qdrant:
@@ -352,6 +356,23 @@ reputation:
 
 ingress:
   enabled: false
+
+# Egress lockdown stays on even in alpha so the CNP + proxy path gets
+# exercised before beta — resource-trimmed only.
+egressProxy:
+  enabled: true
+  environment: "alpha"
+  replicas: 1
+  resources:
+    requests: { cpu: "50m", memory: "64Mi" }
+    limits: { cpu: "150m", memory: "128Mi" }
+egressPolicy:
+  enabled: true
+  clusterCidrs:
+    podCidr: "10.1.0.0/16"      # MicroK8s default — confirm against cluster before deploy
+    serviceCidr: "10.152.183.0/24"
+    nodeCidr: "10.0.0.0/8"
+
 # spire.enabled defaults to false at the chart level (values.yaml) pending
 # https://github.com/penguintechinc/waddles/issues/437 (SPIRE server/agent
 # crash-loop -- the waddlebot-spire-auto-enroll post-upgrade hook Job fails
