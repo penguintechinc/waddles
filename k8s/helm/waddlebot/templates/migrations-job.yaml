@@ -23,7 +23,15 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: db-migrate
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
+    # feature/ci-chart-kind-e2e -- post-install/post-upgrade, NOT pre-install: this
+    # Job's DATABASE_URL points at templates/infrastructure/postgres.yaml's Deployment,
+    # which is a plain (non-hook) resource Helm only creates in the main-resource
+    # phase, AFTER every pre-install hook already ran. A pre-install db-migrate Job
+    # therefore deadlocks forever on a genuinely first-ever install (nothing for it to
+    # connect to yet) -- exactly the class of bug this chart's kind e2e workflow exists
+    # to catch. Post-install guarantees Postgres already exists; the Job's own
+    # wait-for-database retry loop below absorbs the remaining "pod not Ready yet" gap.
+    "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "-5"
     # fix/helm-hook-rbac-ordering -- serviceAccountName below is now the dedicated
     # {{ include "waddlebot.fullname" . }}-db-migrate hook SA (migrations-job-rbac.yaml,
