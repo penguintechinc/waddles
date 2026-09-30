@@ -103,6 +103,13 @@ verify-csping-fixture:
 verify-ping-bundle-reproducible:
 	@bash scripts/verify-ping-bundle-reproducible.sh
 
+# Generates the Ed25519 signing keypair for hub-api's per-service machine
+# JWTs (feature/eddsa-machine-jwt) and applies the resulting k8s Secret --
+# private key never printed/argv'd/persisted. Usage:
+#   KID=2026-09-28 NAMESPACE=waddlebot make generate-service-jwt-key
+generate-service-jwt-key:
+	@bash scripts/generate-service-jwt-key.sh
+
 # Generates a MinIO static KMS key and applies it as a Secret so at-rest
 # encryption (security.md Encryption: Storage) works outside alpha -- see
 # k8s/helm/waddlebot's infrastructure.minio.kms.secretName fail guard.

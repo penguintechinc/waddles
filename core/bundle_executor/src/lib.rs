@@ -33,6 +33,7 @@ pub mod engine;
 pub mod error;
 pub mod host;
 pub mod invoke;
+pub mod manifest;
 pub mod tls;
 pub mod wire;
 
