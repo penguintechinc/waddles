@@ -50,7 +50,7 @@ postgres:
   enabled: false
   replicas: 1
 
-minio:
+seaweedfs:
   enabled: false
   replicas: 1
 
@@ -126,8 +126,8 @@ infrastructure:
     enabled: false
     replicas: 1
 
-  # MinIO - Single instance for local
-  minio:
+  # SeaweedFS - Single instance for local
+  seaweedfs:
     enabled: false
     replicas: 1
 
@@ -351,8 +351,8 @@ postgres:
 redis:
   password: "redis-password"
 
-# MinIO credentials
-minio:
+# SeaweedFS S3 credentials
+seaweedfs:
   rootUser: "REPLACE_ME"
   rootPassword: "REPLACE_ME"
 
@@ -424,8 +424,8 @@ sharedEnv:
   REDIS_PORT: "6379"
   REDIS_DB: "0"
 
-  # MinIO Configuration
-  MINIO_ENDPOINT: "minio:9000"
+  # SeaweedFS S3 gateway configuration (was MinIO)
+  MINIO_ENDPOINT: "seaweedfs:8333"
   MINIO_SECURE: "false"
 
   # Ollama Configuration

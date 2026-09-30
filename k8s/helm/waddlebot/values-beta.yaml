@@ -37,7 +37,7 @@ infrastructure:
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "384Mi" }
-  minio:
+  seaweedfs:
     enabled: false
   ollama:
     enabled: false
@@ -410,7 +410,7 @@ modules:
 sharedEnv:
   DB_HOST: "infra-postgres"
   REDIS_HOST: "infra-redis"
-  MINIO_ENDPOINT: "infra-minio:9000"
+  MINIO_ENDPOINT: "infra-seaweedfs:8333"
   QDRANT_HOST: "infra-qdrant"
   ROUTER_URL: "http://waddlebot-router:8000"
   HUB_URL: "http://waddlebot-hub-api:8060"

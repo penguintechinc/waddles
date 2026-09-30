@@ -76,7 +76,7 @@ spec:
         - name: WADDLES_SANDBOX_GVISOR
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.sandboxGvisor | quote }}
         - name: BUNDLE_BUCKET_ENDPOINT
-          value: "http://{{ .Values.infrastructure.minio.service.name }}:{{ .Values.infrastructure.minio.service.apiPort }}"
+          value: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
         - name: BUNDLE_BUCKET_NAME
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.bucketName | quote }}
         - name: BUNDLE_BUCKET_REGION
