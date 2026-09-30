@@ -306,11 +306,56 @@ infrastructure:
     s3Port: 8333
     masterPort: 9333
     bucketName: "waddlebot-assets"
-    # S3 identity (SeaweedFS `weed server -s3.config` identities.json), rendered
-    # from this Secret at container start -- same "REPLACE_ME" dev-default
-    # pattern as the former MinIO rootUser/rootPassword.
-    rootUser: "REPLACE_ME"
-    rootPassword: "REPLACE_ME"
+    # Least-privilege S3 identities (one per workload, each its own
+    # accessKey/secretKey pair), rendered into SeaweedFS's `weed server
+    # -s3.config` identities.json at container start (templates/infrastructure/
+    # seaweedfs.yaml). The former unscoped "waddlebot" admin identity
+    # (Read/Write/List/Tagging/Admin across every bucket, fed by rootUser/
+    # rootPassword/MINIO_ROOT_* below) has been REMOVED -- every consumer,
+    # including svc-streaming's recordings path, now has its own
+    # bucket-scoped identity. Same lookup(KEEP)-then-generate(alpha/local)-
+    # or-require(else) provisioning policy for every identity below (see
+    # templates/secrets.yaml waddlebot.autoSecretValue and _helpers.tpl):
+    # "REPLACE_ME" here means "unset" -- alpha/local auto-generate and persist
+    # via `lookup`+`resource-policy: keep`, beta/gamma/production MUST set a
+    # real value (or pre-populate the waddlebot-secrets Secret out-of-band) or
+    # the render fails.
+    identities:
+      # hub_api/services/storage_service.py -- reads/writes bundle components,
+      # avatars, community logos. Read/Write/List/Tagging, scoped to
+      # bucketName ("waddlebot-assets") only -- see templates/infrastructure/
+      # seaweedfs.yaml's s3-identities.json rendering.
+      hubApi:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
+      # core/bundle_executor (templates/bundle-executor.yaml,
+      # bundle-executor-action.yaml) -- the Rust data-plane's one credentialed
+      # egress path (bucket.rs), a single unsigned-body GET of a compiled
+      # component + its JSON sidecar. Read/List ONLY, scoped to
+      # pipeline.rustDataPlane.bundleExecutor.bucketName ("waddles-bundles") --
+      # this identity must NOT be able to PUT.
+      dataPlane:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
+      # templates/infrastructure/seaweedfs.yaml's seaweedfs-bucket-init Job
+      # ONLY -- Admin (bucket create/head + PutBucketEncryption), unscoped
+      # since it must be able to create buckets that don't exist yet. Never
+      # mounted by a long-running Deployment.
+      bucketInit:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
+      # core/svc_streaming (templates/svc-streaming.yaml) -- egress::record's
+      # only S3 calls are `put_opts`/`put_multipart_opts` against the
+      # "recordings" bucket (finished HLS/recording segments); Read is also
+      # granted for parity with the standard object_store Put-then-verify
+      # path. Read/Write ONLY, scoped to the literal "recordings" bucket --
+      # this identity must NOT reach "waddlebot-assets" or
+      # pipeline.rustDataPlane.bundleExecutor.bucketName ("waddles-bundles").
+      # Replaces the former "waddlebot" full-admin back-compat identity this
+      # was the last consumer of.
+      streaming:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
     service:
       name: "infra-seaweedfs"
       type: ClusterIP
@@ -438,9 +483,10 @@ posthog:
   # hosted default (https://license.penguintech.io).
   host: ""
 
-  # POSTHOG_API_KEY — personal/project API key (feature_flag:read scope).
-  # NEVER commit a literal value; set via --set or an out-of-git values file.
-  apiKey: ""
+  # POSTHOG_API_KEY (personal/project API key, feature_flag:read scope) moved
+  # to the `waddlebot-platform-credentials` Secret -- see `platformCredentials`
+  # above -- so an untouched/placeholder value here can never overwrite a
+  # real key on `helm upgrade` (fix/helm-platform-credentials).
 
   # PostHog's OWN secrets (SECRET_KEY / POSTGRES_PASSWORD / CLICKHOUSE_PASSWORD)
   # — distinct from apiKey above. NEVER commit literals. Provide ONE of:
@@ -816,6 +862,25 @@ pipeline:
   rustDataPlane:
     enabled: false
 
+    # Security review fix (PR #468, MEDIUM): bundle_host_http::egress::EgressGuard's
+    # operator-configured cluster pod/Service/node CIDR denylist, shared by every Rust
+    # data-plane stage (svcAction/svcProcess -- templates/svc-action-rust.yaml,
+    # templates/svc-process-rust.yaml -- EGRESS_CLUSTER_CIDR_DENYLIST env). Never liftable
+    # by any bundle egress grant or by instanceEgressAllowPrivateIp below -- this is the
+    # hard SSRF backstop against a bundle reaching this cluster's own control plane/other
+    # pods via the `http` capability. Empty (this default) is accepted only when
+    # global.deploymentTier is alpha/local -- CliConfig::validate hard-fails startup
+    # otherwise. OVERRIDE REQUIRED in beta/gamma/production: set to this cluster's actual
+    # pod CIDR, Service CIDR, and node CIDR/subnet (e.g. dal2's `kubectl cluster-info
+    # dump | grep -m3 -E 'cluster-cidr|service-cluster-ip-range'` output, plus the node
+    # subnet) -- values-alpha.yaml is exempt via deploymentTier: "alpha".
+    egressClusterCidrDenylist: []
+    # Interim, config-sourced bundle_host_http::egress::InstanceEgressPolicy (Justin's
+    # decision: "private-ip is also subject to the INSTANCE policy -- default deny,
+    # global-admin opt-in"). PR #428/#432's capability-gate grant snapshot is the eventual
+    # live source; `false` (deny, the default) until an operator opts in at the pod level.
+    instanceEgressAllowPrivateIp: false
+
     svcIngest:
       enabled: true
       # fix/helm-alpha-self-provisioning -- distinct image repository from
@@ -1002,9 +1067,11 @@ pipeline:
       # bucketName/bucketRegion are static across environments; the endpoint is derived in
       # the template from infrastructure.seaweedfs.service.name/s3Port (alpha: in-cluster
       # SeaweedFS, plain http:// -- no BUNDLE_BUCKET_CA_FILE needed) and the access
-      # key/secret come from the shared MINIO_ROOT_USER/MINIO_ROOT_PASSWORD secret keys
-      # (kept for compatibility, see templates/secrets.yaml), individually referenced
-      # (not envFrom) to keep this pod's credential surface to exactly what bucket.rs needs.
+      # key/secret come from the dedicated "bundle-executor" (data-plane) S3 identity
+      # (DATAPLANE_S3_ACCESS_KEY_ID/_SECRET_ACCESS_KEY, Read/List only -- see
+      # infrastructure.seaweedfs.identities.dataPlane above and templates/secrets.yaml),
+      # individually referenced (not envFrom) to keep this pod's credential surface to
+      # exactly what bucket.rs needs.
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
       resources:
@@ -1907,69 +1974,49 @@ ingress:
       hosts:
         - waddlebot.local
 
-# OAuth Configuration (set via secrets and environment variables)
+# fix/helm-platform-credentials -- externally-issued platform/third-party
+# CREDENTIALS (client secrets, bot/OAuth/access/refresh tokens, webhook &
+# signing secrets, service-account keys) are no longer set here. This chart
+# never rendered a safe way to update them in place: an untouched values.yaml
+# default (or a dev-only placeholder like `oauth.discord.botToken` used to be)
+# was written into `waddlebot-secrets` on every `helm upgrade`, silently
+# overwriting a real credential an operator had set out-of-band -- the alpha
+# Discord-bot-token incident this branch fixes. They now live ONLY in the
+# `waddlebot-platform-credentials` Secret (see `platformCredentials` below
+# and docs/PLATFORM_CREDENTIALS.md), which this chart never writes.
+#
+# Non-secret companion config for the same platforms (URLs, tenant/project
+# IDs, IRC nick/channels) stays below -- it isn't a credential.
+platformCredentials:
+  # Name of a pre-existing Secret holding externally-issued platform
+  # credentials. Leave blank to use the default name
+  # "<release-fullname>-platform-credentials". See docs/PLATFORM_CREDENTIALS.md
+  # for the operator setup command (alpha/local) and the External
+  # Secrets/Sealed Secrets pattern (beta/gamma/prod).
+  existingSecret: ""
+
 oauth:
-  discord:
-    clientId: ""
-    clientSecret: ""
-    botToken: ""
-    applicationId: ""
   twitch:
-    clientId: ""
-    clientSecret: ""
-    webhookSecret: ""
-    # T10 (v3 demo) -- IRC bot account credentials for svc-ingest's held-socket
-    # twitch_irc.py receiver / CANON-LIB relay outbound (waddle_transports/irc_relay.py).
-    # oauthToken is an IRC OAuth token ("oauth:...", NOT the OAuth2 clientSecret above).
-    # NEVER a real value in git -- see values-alpha.yaml for the dev-only placeholder.
-    oauthToken: ""
     nick: ""
     channels: ""
-  slack:
-    clientId: ""
-    clientSecret: ""
-    botToken: ""
-    signingSecret: ""
-    appToken: ""
   youtube:
-    apiKey: ""
-    clientId: ""
-    clientSecret: ""
-    # OAuth refresh token from the one-time consent flow; YouTube Data API v3 search works with either apiKey or clientId+clientSecret+refreshToken
-    refreshToken: ""
     webhookCallbackUrl: ""
-  spotify:
-    clientId: ""
-    clientSecret: ""
-  kick:
-    clientId: ""
-    clientSecret: ""
-    webhookSecret: ""
-    accessToken: ""
   teams:
-    appId: ""
-    appPassword: ""
     tenantId: ""
   mattermost:
     url: ""
-    botToken: ""
-    webhookSecret: ""
   googlechat:
-    serviceAccountKey: ""
     projectId: ""
 
-# Cloud Provider Configuration (AWS Lambda, GCP Functions, etc.)
+# Cloud Provider Configuration (AWS Lambda, GCP Functions, etc.) -- non-secret
+# region/project config only; access keys/service-account keys live in
+# platformCredentials above.
 aws:
-  accessKeyId: ""
-  secretAccessKey: ""
   region: "us-east-1"
-  lambdaRoleArn: ""
 
 gcp:
   projectId: ""
   region: "us-central1"
-  serviceAccountKey: ""
-  serviceAccountEmail: ""
 
 openwhisk:
   apiHost: "http://openwhisk-service:3233"
@@ -1979,7 +2026,6 @@ openwhisk:
 
 waddleai:
   baseUrl: ""
-  apiKey: ""
 
 # Connector Configuration (svc-ingest channels and overrides)
 config:

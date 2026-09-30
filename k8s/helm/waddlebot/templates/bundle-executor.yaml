@@ -113,16 +113,20 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName | quote }}
         - name: BUNDLE_BUCKET_REGION
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketRegion | quote }}
+        # feature/seaweedfs-object-storage -- least-privilege "bundle-executor"
+        # (data-plane) S3 identity: Read/List ONLY, scoped to this bucket -- see
+        # templates/infrastructure/seaweedfs.yaml's s3-identities.json. Replaces the
+        # former MINIO_ROOT_USER/MINIO_ROOT_PASSWORD admin credential, which could PUT.
         - name: BUNDLE_BUCKET_ACCESS_KEY_ID
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: MINIO_ROOT_USER
+              key: DATAPLANE_S3_ACCESS_KEY_ID
         - name: BUNDLE_BUCKET_SECRET_ACCESS_KEY
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: MINIO_ROOT_PASSWORD
+              key: DATAPLANE_S3_SECRET_ACCESS_KEY
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsClientEnv" . | nindent 8 }}
         {{- end }}

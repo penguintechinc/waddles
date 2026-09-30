@@ -356,58 +356,30 @@ seaweedfs:
   rootUser: "REPLACE_ME"
   rootPassword: "REPLACE_ME"
 
-# AWS credentials (for Lambda)
+# fix/helm-platform-credentials -- AWS/GCP/OpenWhisk/WaddleAI/OAuth
+# CREDENTIALS removed from here; they belong only in the operator-managed
+# `waddlebot-platform-credentials` Secret (values.yaml platformCredentials,
+# docs/PLATFORM_CREDENTIALS.md), never in a chart-rendered values file.
 aws:
-  accessKeyId: ""
-  secretAccessKey: ""
   region: "us-east-1"
-  lambdaRoleArn: ""
 
-# GCP credentials (for Cloud Functions)
-gcp:
-  projectId: ""
-  serviceAccount: ""
+gcp: {}
 
-# OpenWhisk credentials (for OpenWhisk functions)
+# OpenWhisk (self-hosted/local, not an externally-issued credential -- out of
+# scope for this change; left as-is)
 openwhisk:
   apiHost: ""
   authKey: ""
   namespace: ""
   insecure: "true"
 
-# WaddleAI Integration
 waddleai:
   baseUrl: ""
-  apiKey: ""
 
-# OAuth Configuration - Placeholders for local development
+# OAuth non-secret config only (local development)
 oauth:
-  discord:
-    clientId: ""
-    clientSecret: ""
-    botToken: ""
-    applicationId: ""
-  twitch:
-    clientId: ""
-    clientSecret: ""
-    webhookSecret: ""
-  slack:
-    clientId: ""
-    clientSecret: ""
-    botToken: ""
-    signingSecret: ""
   youtube:
-    apiKey: ""
-    clientId: ""
-    clientSecret: ""
     webhookCallbackUrl: ""
-  spotify:
-    clientId: ""
-    clientSecret: ""
-  kick:
-    clientId: ""
-    clientSecret: ""
-    webhookSecret: ""
 
 # Shared Environment Variables - Local Overrides
 sharedEnv:

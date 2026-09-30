@@ -116,9 +116,10 @@ spec:
         {{- end }}
         # Recordings land in SeaweedFS (S3-compatible, was MinIO) instead of pod-lifetime
         # emptyDir storage -- see infrastructure.seaweedfs and
-        # templates/infrastructure/seaweedfs.yaml. Creds reuse the existing Secret keys
-        # (MINIO_ROOT_USER/MINIO_ROOT_PASSWORD, kept for compatibility) rather than
-        # minting new ones.
+        # templates/infrastructure/seaweedfs.yaml. Dedicated "svc-streaming" identity
+        # (Read/Write, scoped to the "recordings" bucket only -- see
+        # infrastructure.seaweedfs.identities.streaming), replacing the former
+        # unscoped "waddlebot"/MINIO_ROOT_* admin credential.
         - name: RECORDINGS_BUCKET
           value: "recordings"
         - name: S3_ENDPOINT
@@ -127,12 +128,12 @@ spec:
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: MINIO_ROOT_USER
+              key: STREAMING_S3_ACCESS_KEY_ID
         - name: S3_SECRET_KEY
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: MINIO_ROOT_PASSWORD
+              key: STREAMING_S3_SECRET_ACCESS_KEY
         livenessProbe:
           httpGet:
             path: /health
