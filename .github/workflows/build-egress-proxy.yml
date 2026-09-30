@@ -30,6 +30,15 @@ on:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
   workflow_dispatch:
 
+# push and pull_request both fire for the same commit on a branch with an
+# open PR, racing two Trivy SARIF uploads for the same commit SHA +
+# category -- one upload wins, the other silently fails processing
+# (observed on PR #469, run 36713350789 vs 36713357636). Cancel the
+# older duplicate so only one upload happens per commit.
+concurrency:
+  group: build-egress-proxy-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
