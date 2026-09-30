@@ -7,7 +7,7 @@
 # Data-plane pods (svc-ingest/svc-process/svc-action, Rust and legacy per-module Deployments
 # performing the same role — see egressPolicy.dataPlaneComponents) are default-deny for
 # egress to the internet. Their only way out is in-cluster dependencies (DNS, Valkey,
-# Postgres, hub-api gRPC, MinIO, OTel collector) plus the egress-proxy Service. The egress
+# Postgres, hub-api gRPC, SeaweedFS, OTel collector) plus the egress-proxy Service. The egress
 # proxy is the ONLY component in this chart allowed a broad "world" egress rule, and even
 # that is capped to 80/443/6697 with loopback/link-local/metadata/cluster-CIDR carve-outs
 # (egressPolicy.denyCidrs/clusterCidrs).
@@ -48,10 +48,10 @@ spec:
               protocol: UDP
             - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
               protocol: TCP
-    # In-namespace infra: Valkey, Postgres, MinIO. These infra Deployments
-    # label pods with app.kubernetes.io/name: redis|postgres|minio directly
+    # In-namespace infra: Valkey, Postgres, SeaweedFS. These infra Deployments
+    # label pods with app.kubernetes.io/name: redis|postgres|seaweedfs directly
     # (NOT the chart-wide selectorLabels name — see
-    # templates/infrastructure/{redis,postgres,minio}.yaml's own pod
+    # templates/infrastructure/{redis,postgres,seaweedfs}.yaml's own pod
     # template labels), so match on instance + name + component, not the
     # shared selector helper.
     - toEndpoints:
@@ -75,11 +75,11 @@ spec:
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/instance: {{ .Release.Name }}
-            app.kubernetes.io/name: minio
+            app.kubernetes.io/name: seaweedfs
             app.kubernetes.io/component: storage
       toPorts:
         - ports:
-            - port: {{ .Values.egressPolicy.inCluster.minioPort | quote }}
+            - port: {{ .Values.egressPolicy.inCluster.seaweedfsPort | quote }}
               protocol: TCP
     # hub-api gRPC.
     - toEndpoints:

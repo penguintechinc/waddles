@@ -103,26 +103,30 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.sandboxGvisor | quote }}
         # BUNDLE_BUCKET_* (core/bundle_executor/src/bucket.rs) -- the executor's one
         # sanctioned credentialed egress path, alongside the mTLS stage dial above. In-cluster
-        # MinIO is plain http:// here, so no BUNDLE_BUCKET_CA_FILE is required (bucket.rs only
+        # SeaweedFS is plain http:// here, so no BUNDLE_BUCKET_CA_FILE is required (bucket.rs only
         # demands one when the endpoint is https://). Access key/secret are individually
         # secretKeyRef'd from the shared secret (not envFrom) -- see values.yaml's comment on
         # this block for why.
         - name: BUNDLE_BUCKET_ENDPOINT
-          value: "http://{{ .Values.infrastructure.minio.service.name }}:{{ .Values.infrastructure.minio.service.apiPort }}"
+          value: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
         - name: BUNDLE_BUCKET_NAME
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName | quote }}
         - name: BUNDLE_BUCKET_REGION
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketRegion | quote }}
+        # feature/seaweedfs-object-storage -- least-privilege "bundle-executor"
+        # (data-plane) S3 identity: Read/List ONLY, scoped to this bucket -- see
+        # templates/infrastructure/seaweedfs.yaml's s3-identities.json. Replaces the
+        # former MINIO_ROOT_USER/MINIO_ROOT_PASSWORD admin credential, which could PUT.
         - name: BUNDLE_BUCKET_ACCESS_KEY_ID
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: MINIO_ROOT_USER
+              key: DATAPLANE_S3_ACCESS_KEY_ID
         - name: BUNDLE_BUCKET_SECRET_ACCESS_KEY
           valueFrom:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
-              key: MINIO_ROOT_PASSWORD
+              key: DATAPLANE_S3_SECRET_ACCESS_KEY
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsClientEnv" . | nindent 8 }}
         {{- end }}
