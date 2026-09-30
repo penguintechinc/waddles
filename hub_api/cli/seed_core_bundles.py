@@ -6,7 +6,7 @@ onto `sys.path` so `services.*`/`blueprints.*` import as top-level packages, not
 `hub_api.services.*`; this CLI's own `cli/` package sits alongside them the same way, rather
 than under a `hub_api.` namespace nothing else in this codebase uses). In-cluster only, via a
 Helm post-install/post-upgrade hook Job (`k8s/helm/waddlebot/templates/core-bundle-seeder-
-job.yaml`) -- no HTTP endpoint, no JWT, hub-api's own DB/MinIO/Valkey env (`HubAPIConfig.
+job.yaml`) -- no HTTP endpoint, no JWT, hub-api's own DB/S3/Valkey env (`HubAPIConfig.
 from_env()`).
 
 **Why this exists.** `services/bundle_approval_service.py::approve_version()` is otherwise

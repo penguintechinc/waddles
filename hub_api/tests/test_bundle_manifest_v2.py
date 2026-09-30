@@ -249,6 +249,18 @@ def test_missing_required_field_rejected() -> None:
     assert exc.value.reason == "missing_field"
 
 
+def test_csharp_language_accepted() -> None:
+    """`language: csharp` (bundles/csharp/csping, PR #404) must onboard like any Tier 1 language."""
+    manifest = _parse({"language": "csharp"})
+    assert manifest.language == "csharp"  # type: ignore[attr-defined]
+
+
+def test_unsupported_language_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"language": "cobol"})
+    assert exc.value.reason == "unsupported_language"
+
+
 # ---------------------------------------------------------------------------
 # Attribution/marketplace metadata (migration 0026): author/license/
 # source_url/alternative_to/homepage_url/notice/category.

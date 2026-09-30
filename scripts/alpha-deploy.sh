@@ -14,10 +14,21 @@
 # shared/non-alpha context (e.g. dal2-beta) would silently provision throwaway
 # secrets there. See the validation block below.
 #
+# fix/alpha-deploy-hub-webui -- SERVICES previously omitted hub-webui and the
+# plain-name Python svc-ingest/svc-process/svc-action images that values-alpha.yaml
+# deploys alongside their *-rust counterparts (coexistence, not cutover -- see
+# k8s/helm/waddlebot/values-alpha.yaml pipeline.rustDataPlane comment), so those
+# Deployments hit ImagePullBackOff on a fresh alpha build. All four are now built
+# and pushed. A generic preflight (check_images_in_registry, below) renders the
+# chart with the same values used by the live `helm upgrade` and HEAD-checks
+# every localhost:32000/waddlebot/* image:tag it references against the registry
+# BEFORE helm ever runs, so any future chart image SERVICES forgets to build
+# fails loudly here instead of as an in-cluster ImagePullBackOff.
+#
 # fix/helm-alpha-self-provisioning -- this script NEVER generates or rotates
 # any secret material. `helm upgrade -f values-alpha.yaml` is self-sufficient
-# on its own now: every platform Secret (minio-kms, tenant-kek, bundle-signing,
-# service-jwt, waddlebot-valkey-tls, and the DB/Redis/MinIO-root/JWT/module/
+# on its own now: every platform Secret (seaweedfs-sse-kek, tenant-kek, bundle-signing,
+# service-jwt, waddlebot-valkey-tls, and the DB/Redis/S3-root/JWT/module/
 # service-api-key/credential-encryption/envelope-binding fields inside
 # waddlebot-secrets) is provisioned by the chart itself via lookup(KEEP)-then-
 # generate(alpha/local)-or-require(else) Helm template logic -- see
@@ -90,6 +101,28 @@ else
 fi
 readonly KUBE_CONTEXT
 
+# ---------------------------------------------------------------------------
+# fix/helm-platform-credentials preflight -- externally-issued platform
+# credentials (Discord bot token, Twitch OAuth token, etc.) live ONLY in
+# waddlebot-platform-credentials, a Secret this chart never renders or
+# writes (see k8s/helm/waddlebot/docs/PLATFORM_CREDENTIALS.md). Existence
+# check only -- never reads its data -- so a missing Secret fails loudly
+# BEFORE any image is built, instead of pods silently starting with those
+# platforms disabled after a full build+push+deploy cycle.
+# ---------------------------------------------------------------------------
+if ! kubectl --context "${KUBE_CONTEXT}" get secret waddlebot-platform-credentials \
+        -n "${NAMESPACE}" >/dev/null 2>&1; then
+    err "Secret 'waddlebot-platform-credentials' not found in namespace ${NAMESPACE}."
+    err "Create it once (values read from files, never argv/history), e.g.:"
+    err "  kubectl create secret generic waddlebot-platform-credentials \\"
+    err "    --namespace ${NAMESPACE} \\"
+    err "    --from-file=DISCORD_BOT_TOKEN=./discord-bot-token.txt \\"
+    err "    --from-file=TWITCH_OAUTH_TOKEN=./twitch-oauth-token.txt"
+    err "See k8s/helm/waddlebot/docs/PLATFORM_CREDENTIALS.md for the full key list."
+    exit 1
+fi
+info "waddlebot-platform-credentials Secret present in namespace ${NAMESPACE}"
+
 cd "${PROJECT_ROOT}"
 
 SHA="$(git rev-parse HEAD)"
@@ -113,45 +146,80 @@ info "Deploying release SHA ${SHA} (tag ${SHA8}) to context ${KUBE_CONTEXT}, nam
 # Bash 3.2 has no associative arrays (`declare -A`) -- SERVICES below is a
 # plain list; per-service Dockerfile/context/image-name come from the
 # service_dockerfile/service_context/service_image case functions.
+#
+# hub-webui and the svc-*-py entries are the plain-name Python images
+# values-alpha.yaml deploys alongside svc-ingest/svc-process/svc-action's
+# *-rust counterparts (fix/alpha-deploy-hub-webui) -- see the header comment.
 # ---------------------------------------------------------------------------
-readonly SERVICES="hub-api waddlebot-migrations svc-ingest svc-process svc-action core-bundle-seeder"
+# resolve-433 -- reputation-module, svc-presentation, and svc-streaming are
+# chart-referenced (values-alpha.yaml's reputation/presentation/streaming
+# sections) but were never in SERVICES, so the image preflight always found
+# them missing. values-alpha.yaml pins each to a static "alpha" tag rather
+# than the per-commit SHA8 (same pattern as bundleExecutor's own comment:
+# "built locally + pushed to the local registry ... same as every other
+# alpha-only module image") -- see service_image_tag below.
+readonly SERVICES="hub-api hub-webui waddlebot-migrations svc-ingest svc-process svc-action svc-ingest-py svc-process-py svc-action-py core-bundle-seeder reputation-module svc-presentation svc-streaming"
 
 service_dockerfile() {
     case "$1" in
         hub-api) echo "hub_api/Dockerfile" ;;
+        hub-webui) echo "admin/hub_module/Dockerfile.webui" ;;
         waddlebot-migrations) echo "migrations/Dockerfile" ;;
         core-bundle-seeder) echo "bundles/Dockerfile.core-bundles" ;;
         svc-ingest) echo "core/svc_ingest/Dockerfile.rust" ;;
         svc-process) echo "core/svc_process/Dockerfile.rust" ;;
         svc-action) echo "core/svc_action/Dockerfile.rust" ;;
+        svc-ingest-py) echo "core/svc_ingest/Dockerfile" ;;
+        svc-process-py) echo "core/svc_process/Dockerfile" ;;
+        svc-action-py) echo "core/svc_action/Dockerfile" ;;
+        reputation-module) echo "core/reputation_module/Dockerfile" ;;
+        svc-presentation) echo "core/svc_presentation/Dockerfile" ;;
+        svc-streaming) echo "core/svc_streaming/Dockerfile.rust" ;;
         *) err "unknown service: $1"; exit 1 ;;
     esac
 }
 
 service_context() {
     case "$1" in
-        hub-api|waddlebot-migrations|core-bundle-seeder) echo "." ;;
+        hub-api|hub-webui|waddlebot-migrations|core-bundle-seeder|svc-ingest-py|svc-process-py|svc-action-py|reputation-module|svc-presentation) echo "." ;;
         svc-ingest) echo "core/svc_ingest" ;;
         svc-process|svc-action) echo "core" ;;
+        svc-streaming) echo "core/svc_streaming" ;;
         *) err "unknown service: $1"; exit 1 ;;
     esac
 }
 
 # Image repository name (differs from the service name for the 3 Rust
-# stages -- see the comment above).
+# stages, and for the svc-*-py entries which push under the chart's plain
+# service-name repo -- see the comment above).
 service_image_repo() {
     case "$1" in
         svc-ingest) echo "svc-ingest-rust" ;;
         svc-process) echo "svc-process-rust" ;;
         svc-action) echo "svc-action-rust" ;;
+        svc-ingest-py) echo "svc-ingest" ;;
+        svc-process-py) echo "svc-process" ;;
+        svc-action-py) echo "svc-action" ;;
         *) echo "$1" ;;
+    esac
+}
+
+# Image tag: every service tags with this run's commit SHA8 except the
+# alpha-only local modules values-alpha.yaml pins to a static "alpha" tag
+# (reputation-module, svc-presentation, svc-streaming, and bundleExecutor --
+# bundle-executor has no build step here yet, see scripts/deploy-alpha.sh).
+service_image_tag() {
+    case "$1" in
+        reputation-module|svc-presentation|svc-streaming) echo "alpha" ;;
+        *) echo "${SHA8}" ;;
     esac
 }
 
 if [[ "${SKIP_BUILD}" != "true" ]]; then
     for svc in ${SERVICES}; do
         repo="$(service_image_repo "${svc}")"
-        img="${REGISTRY}/${repo}:${SHA8}"
+        tag="$(service_image_tag "${svc}")"
+        img="${REGISTRY}/${repo}:${tag}"
         dockerfile="$(service_dockerfile "${svc}")"
         context="$(service_context "${svc}")"
         info "Building ${img} (${dockerfile})"
@@ -179,26 +247,97 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# fix/helm-platform-credentials preflight -- externally-issued platform
-# credentials (Discord bot token, Twitch OAuth token, etc.) live ONLY in
-# waddlebot-platform-credentials, a Secret this chart never renders or
-# writes (see k8s/helm/waddlebot/docs/PLATFORM_CREDENTIALS.md). Existence
-# check only -- never reads its data -- so a missing Secret fails loudly
-# BEFORE `helm upgrade`, instead of pods silently starting with those
-# platforms disabled.
+# Step 1.5: preflight -- every chart-referenced local image:tag must already
+# be in the registry BEFORE helm ever runs (fix/alpha-deploy-hub-webui).
+#
+# Renders the chart with the exact same values-alpha.yaml + global.imageTag
+# used by the real `helm upgrade` below, extracts every localhost:32000/
+# waddlebot/* image:tag it references, and does a registry v2 HEAD manifest
+# request for each. This catches a chart image SERVICES forgot to build
+# (like hub-webui was) as a clear preflight failure instead of an in-cluster
+# ImagePullBackOff discovered only after `helm upgrade` already applied.
+#
+# Runs unconditionally (even with --skip-build) -- the point is to verify
+# what's actually in the registry right now, not just what this run built.
 # ---------------------------------------------------------------------------
-if ! kubectl --context "${KUBE_CONTEXT}" get secret waddlebot-platform-credentials \
-        -n "${NAMESPACE}" >/dev/null 2>&1; then
-    err "Secret 'waddlebot-platform-credentials' not found in namespace ${NAMESPACE}."
-    err "Create it once (values read from files, never argv/history), e.g.:"
-    err "  kubectl create secret generic waddlebot-platform-credentials \\"
-    err "    --namespace ${NAMESPACE} \\"
-    err "    --from-file=DISCORD_BOT_TOKEN=./discord-bot-token.txt \\"
-    err "    --from-file=TWITCH_OAUTH_TOKEN=./twitch-oauth-token.txt"
-    err "See k8s/helm/waddlebot/docs/PLATFORM_CREDENTIALS.md for the full key list."
-    exit 1
-fi
-info "waddlebot-platform-credentials Secret present in namespace ${NAMESPACE}"
+image_exists_in_registry() {
+    # image_exists_in_registry <host[:port]>/<repo>:<tag> -- registry v2 HEAD
+    # manifest request. Split on the FIRST "/" for host, LAST ":" for tag, so
+    # a repo with no nested path (e.g. "waddlebot/hub-webui") still parses.
+    local image="$1"
+    local host repo_and_tag tag repo code
+    host="${image%%/*}"
+    repo_and_tag="${image#*/}"
+    tag="${repo_and_tag##*:}"
+    repo="${repo_and_tag%:*}"
+    # buildx pushes OCI image indexes (or manifest lists) rather than plain
+    # docker v2 manifests, so a single-media-type Accept header causes the
+    # registry to 404 an image that is actually present. Send one request
+    # advertising every valid manifest media type -- a 200 means present.
+    code="$(curl -s -o /dev/null -w '%{http_code}' \
+        -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json" \
+        "http://${host}/v2/${repo}/manifests/${tag}" 2>/dev/null || echo "000")"
+    [[ "${code}" == "200" ]]
+}
+
+check_images_in_registry() {
+    info "Preflight: rendering chart to collect every ${REGISTRY}/* image:tag"
+
+    local rendered
+    if ! rendered="$(helm template "${RELEASE}" "${HELM_CHART}" \
+        --kube-version 1.30.0 \
+        --values "${HELM_CHART}/values-alpha.yaml" \
+        --set "global.imageTag=${SHA8}" 2>&1)"; then
+        err "helm template failed while collecting the preflight image list:"
+        echo "${rendered}" >&2
+        exit 1
+    fi
+
+    local images
+    images="$(printf '%s\n' "${rendered}" \
+        | grep -E '^[[:space:]]*image:[[:space:]]*"?'"${REGISTRY}"'/' \
+        | sed -E 's/^[[:space:]]*image:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/' \
+        | sort -u)"
+
+    if [[ -z "${images}" ]]; then
+        err "Preflight found zero ${REGISTRY}/* images in the rendered chart -- registry prefix mismatch or empty render. Treating as failure."
+        exit 1
+    fi
+
+    local checked=0
+    local missing=""
+    local image
+    while IFS= read -r image; do
+        [[ -z "${image}" ]] && continue
+        checked=$((checked + 1))
+        if ! image_exists_in_registry "${image}"; then
+            missing="${missing}${image}
+"
+        fi
+    done <<EOF
+${images}
+EOF
+
+    info "Preflight checked ${checked} chart-referenced image(s) against ${REGISTRY}"
+
+    if [[ "${checked}" -eq 0 ]]; then
+        err "Preflight examined zero images -- treating as failure"
+        exit 1
+    fi
+
+    if [[ -n "${missing}" ]]; then
+        err "The following chart-referenced image(s) are missing from ${REGISTRY}:"
+        printf '%s' "${missing}" | while IFS= read -r m; do
+            [[ -n "${m}" ]] && err "  - ${m}"
+        done
+        err "Add the missing service(s) to alpha-deploy.sh's SERVICES/service_dockerfile/service_context/service_image_repo above, then re-run."
+        exit 1
+    fi
+
+    info "All ${checked} chart-referenced image(s) present in ${REGISTRY}"
+}
+
+check_images_in_registry
 
 # ---------------------------------------------------------------------------
 # Step 2: helm lint + dry-run + upgrade.

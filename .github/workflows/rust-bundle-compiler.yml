@@ -31,3 +31,15 @@ jobs:
       # crate alone needs cargo-audit/gitleaks/pip-audit installed for
       # local dev/production parity.
       extra_security_scanners: true
+      # CSharpBuilder::build (and its wasm-tools-dependent validate_component
+      # helper) shells out to a real `docker build`/`docker run` against a
+      # containerized .NET 10 SDK + NativeAOT-LLVM toolchain (multi-minute
+      # NuGet restore, real network access) -- see `build/csharp.rs`'s own
+      # module doc comment. That is exactly the docker+network dependency
+      # its `builds_csping_via_docker` test is `#[ignore]`d for (runnable via
+      # `make test-csharp-bundle-compile`, never in this crate's own
+      # unit-test CI job), so it cannot be covered here the same way
+      # `main.rs`'s CLI wiring is excluded in rust-svc-process.yml. Every
+      # other function in the file (`run_docker`, `copy_dir_recursive`,
+      # `run_id_arg`, `current_uid_gid`) IS unit-tested without docker.
+      coverage_ignore_regex: 'build/csharp\.rs'

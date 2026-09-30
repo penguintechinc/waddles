@@ -12,7 +12,7 @@ Complete reference for all environment variables, required settings, optional co
 4. [gRPC Configuration](#grpc-configuration)
 5. [Upstream Services](#upstream-services)
 6. [Authentication & Security](#authentication--security)
-7. [MinIO Configuration](#minio-configuration)
+7. [S3-Compatible Object Storage Configuration](#s3-compatible-object-storage-configuration)
 8. [License & Feature Gating](#license--feature-gating)
 9. [Logging](#logging)
 10. [Connection Pools & Timeouts](#connection-pools--timeouts)
@@ -301,10 +301,10 @@ openssl rand -base64 32
 **Examples**:
 ```bash
 # 32-byte random key
-JWT_SECRET_KEY=R-yK9_vN4mL5pX2wQ8jB7cF3sH6dE1aT0uO4iU
+JWT_SECRET_KEY=<32-byte-random-string-from-openssl-rand>
 
 # Base64 encoded
-JWT_SECRET_KEY=b'KL9m0pX5yZ3wB7cN2qT6rF8sH1aD4eG9jK'
+JWT_SECRET_KEY=<base64-encoded-32-byte-random-string>
 
 # In .env file (recommended)
 JWT_SECRET_KEY=$(openssl rand -base64 32)
@@ -333,98 +333,98 @@ MODULE_SECRET_KEY=your-secure-secret-key-here
 
 ---
 
-## MinIO Configuration
+## S3-Compatible Object Storage Configuration
 
-### MINIO_ENDPOINT
+### S3_ENDPOINT_URL
 
 **Type**: String (hostname:port)
 **Required**: No
-**Default**: `localhost:9000`
+**Default**: `http://localhost:8333`
 
-MinIO (S3-compatible) object storage endpoint.
+S3-compatible (SeaweedFS) object storage endpoint.
 
 ```bash
 # Local development
-MINIO_ENDPOINT=localhost:9000
+S3_ENDPOINT_URL=localhost:8333
 
 # Docker Compose
-MINIO_ENDPOINT=minio:9000
+S3_ENDPOINT_URL=infra-seaweedfs:8333
 
 # Kubernetes service
-MINIO_ENDPOINT=minio-service:9000
+S3_ENDPOINT_URL=infra-seaweedfs:8333
 
 # AWS S3
-MINIO_ENDPOINT=s3.amazonaws.com
+S3_ENDPOINT_URL=s3.amazonaws.com
 
 # DigitalOcean Spaces
-MINIO_ENDPOINT=nyc3.digitaloceanspaces.com
+S3_ENDPOINT_URL=nyc3.digitaloceanspaces.com
 ```
 
 ---
 
-### MINIO_ACCESS_KEY
+### S3_ACCESS_KEY_ID
 
 **Type**: String (access key ID)
 **Required**: No
-**Default**: `minioadmin`
+**Default**: `waddlebot`
 
-MinIO/S3 access key.
+S3 access key.
 
 ```bash
-MINIO_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE
+S3_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
 ```
 
 ---
 
-### MINIO_SECRET_KEY
+### S3_SECRET_ACCESS_KEY
 
 **Type**: String (secret access key)
 **Required**: No
-**Default**: `minioadmin`
+**Default**: `waddlebot`
 
-MinIO/S3 secret access key. **Should be kept secure.**
+S3 secret access key. **Should be kept secure.**
 
 ```bash
-MINIO_SECRET_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+S3_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 ```
 
 ---
 
-### MINIO_BUCKET
+### S3_BUCKET_NAME
 
 **Type**: String (bucket name)
 **Required**: No
 **Default**: `video-proxy`
 
-MinIO bucket for video thumbnails and metadata.
+S3 bucket for video thumbnails and metadata.
 
 ```bash
 # Standard bucket
-MINIO_BUCKET=video-proxy
+S3_BUCKET_NAME=video-proxy
 
 # Community-specific bucket
-MINIO_BUCKET=waddlebot-videos-prod
+S3_BUCKET_NAME=waddlebot-videos-prod
 
 # Environment-specific
-MINIO_BUCKET=waddlebot-videos-staging
+S3_BUCKET_NAME=waddlebot-videos-staging
 ```
 
 ---
 
-### MINIO_USE_SSL
+### S3_FORCE_PATH_STYLE
 
 **Type**: Boolean (`true` or `false`)
 **Required**: No
-**Default**: `false`
+**Default**: `true`
 
-Use HTTPS/SSL for MinIO connection.
+Force path-style addressing (required by SeaweedFS).
 
 ```bash
 # Local development (no SSL)
-MINIO_USE_SSL=false
+S3_FORCE_PATH_STYLE=true
 
 # Production (use SSL)
-MINIO_USE_SSL=true
+S3_FORCE_PATH_STYLE=true
 ```
 
 ---
@@ -731,12 +731,12 @@ MARCHPROXY_GRPC_PORT=50050
 # JWT
 JWT_SECRET_KEY=dev-secret-key-change-me
 
-# MinIO
-MINIO_ENDPOINT=localhost:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-MINIO_BUCKET=video-proxy-dev
-MINIO_USE_SSL=false
+# S3-Compatible Object Storage (SeaweedFS)
+S3_ENDPOINT_URL=localhost:8333
+S3_ACCESS_KEY_ID=waddlebot
+S3_SECRET_ACCESS_KEY=waddlebot
+S3_BUCKET_NAME=video-proxy-dev
+S3_FORCE_PATH_STYLE=true
 
 # License (development, no license required)
 RELEASE_MODE=false
@@ -788,12 +788,12 @@ MARCHPROXY_GRPC_PORT=50050
 # JWT (from secrets manager)
 JWT_SECRET_KEY=<generated-secure-key-from-secrets>
 
-# MinIO (Docker service)
-MINIO_ENDPOINT=minio:9000
-MINIO_ACCESS_KEY=<from-secrets>
-MINIO_SECRET_KEY=<from-secrets>
-MINIO_BUCKET=video-proxy-staging
-MINIO_USE_SSL=false
+# S3-Compatible Object Storage (SeaweedFS, Docker service)
+S3_ENDPOINT_URL=infra-seaweedfs:8333
+S3_ACCESS_KEY_ID=<from-secrets>
+S3_SECRET_ACCESS_KEY=<from-secrets>
+S3_BUCKET_NAME=video-proxy-staging
+S3_FORCE_PATH_STYLE=true
 
 # License (staging, no license enforced)
 RELEASE_MODE=false
@@ -845,8 +845,8 @@ data:
   LOG_FORMAT: "json"
   GRPC_TIMEOUT: "30"
   HTTP_TIMEOUT: "30"
-  MINIO_BUCKET: "video-proxy-prod"
-  MINIO_USE_SSL: "true"
+  S3_BUCKET_NAME: "video-proxy-prod"
+  S3_FORCE_PATH_STYLE: "true"
 ```
 
 **File**: `k8s/video-proxy-secrets.yaml`
@@ -860,8 +860,8 @@ type: Opaque
 stringData:
   DATABASE_URL: postgresql://waddlebot:$(DB_PASSWORD)@postgres-ha:5432/waddlebot
   JWT_SECRET_KEY: $(JWT_SECRET_FROM_VAULT)
-  MINIO_ACCESS_KEY: $(MINIO_KEY_FROM_VAULT)
-  MINIO_SECRET_KEY: $(MINIO_SECRET_FROM_VAULT)
+  S3_ACCESS_KEY_ID: $(S3_ACCESS_KEY_FROM_VAULT)
+  S3_SECRET_ACCESS_KEY: $(S3_SECRET_KEY_FROM_VAULT)
   LICENSE_KEY: $(LICENSE_KEY_FROM_VAULT)
 ```
 

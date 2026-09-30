@@ -32,7 +32,13 @@ serde_json = "=1.0.151"
 # implements EdDSA (and every other alg jsonwebtoken supports) against
 # AWS-LC directly, with no `rsa` crate anywhere in the dependency graph.
 jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs"] }
-thiserror = "=2.0.21"
+# =2.0.20 (not =2.0.21) -- core/egress_proxy (feature/egress-proxy-service)
+# depends on this crate AND on bundle-host-http in the same build, and
+# bundle-host-http's `penguin-bundle-host` git dependency pins thiserror
+# =2.0.20 exactly. Aligning here (a semver-patch-only downgrade) avoids an
+# unresolvable two-exact-versions conflict; matches core/bundle_host_http
+# and core/svc_action's own thiserror pin too.
+thiserror = "=2.0.20"
 tracing = "=0.1.44"
 async-trait = "=0.1.89"
 

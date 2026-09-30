@@ -122,7 +122,7 @@ curl http://localhost:8092/health
 
 - **MarchProxy** (gRPC): Upstream RTMP stream handling
 - **PostgreSQL/MySQL**: Stream metadata and configuration
-- **MinIO**: Video preview/thumbnail storage
+- **SeaweedFS**: Video preview/thumbnail storage
 - **License Server**: Feature validation and tracking
 
 ---
