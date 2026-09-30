@@ -67,6 +67,7 @@ pub mod multi_tenant;
 pub mod query;
 pub mod reader;
 pub mod scope;
+pub mod snapshot;
 
 pub use bindings::{read_source_bindings, SourceBinding};
 pub use changelog::{
@@ -84,3 +85,4 @@ pub use query::{
 };
 pub use reader::ReaderConfig;
 pub use scope::{resolve_scope, ResolvedScope};
+pub use snapshot::ActiveVersionSnapshot;

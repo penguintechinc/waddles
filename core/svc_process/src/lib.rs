@@ -41,6 +41,7 @@ pub mod capabilities;
 pub mod changelog_consumer;
 pub mod config;
 pub mod error;
+pub mod grant_gate;
 pub mod hop;
 pub mod host_api;
 pub mod http;
@@ -135,6 +136,10 @@ where
     let state = http::AppState::new(config.clone(), prom_registry);
 
     let connections = try_start_host_api(&config.cli);
+    // Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
+    // shared regardless of which bundle-selection path below is active --
+    // see `core/svc_action::run_with_shutdown`'s identical field.
+    let app_version_snapshot = bundle_active_set::ActiveVersionSnapshot::new();
     // Mutual exclusion, resolved ONCE at startup -- see
     // `resolve_multi_tenant_path_active`'s own doc for why this is not
     // re-evaluated per-tick for this specific dispatch decision (a live
@@ -157,6 +162,7 @@ where
             egress_denied_metric,
             changelog_consumer_metrics,
             circuit_breaker_metrics,
+            app_version_snapshot,
         );
     } else {
         tracing::info!(
@@ -168,6 +174,7 @@ where
             &config,
             connections,
             circuit_breaker_metrics,
+            app_version_snapshot,
             egress_denied_metric,
         );
     }
@@ -226,6 +233,74 @@ fn try_start_host_api(cli: &config::CliConfig) -> Arc<host_api::ConnectionRegist
     registry
 }
 
+/// Builds (never connects) a [`redis::Client`] from `cfg`'s `VALKEY_URL`/
+/// username/password/TLS/CA-file settings -- shared by [`connect_kv`] (which
+/// opens a connection over it for the `kv` host capability) and
+/// `crate::grant_gate::build_production_gate`'s callers (which need the
+/// `redis::Client` itself, to hand to `run_grant_gate_refresh_loop`, not a
+/// pre-opened connection). `None` (logged) on a malformed `VALKEY_URL` or a
+/// TLS client-build failure -- never fatal to the caller.
+fn build_redis_client(cfg: &penguin_spine::SpineConfig) -> Option<redis::Client> {
+    use redis::IntoConnectionInfo;
+
+    let info: redis::ConnectionInfo = match cfg.valkey_url.as_str().into_connection_info() {
+        Ok(info) => info,
+        Err(err) => {
+            tracing::warn!(error = %err, "invalid VALKEY_URL; Valkey-backed features disabled");
+            return None;
+        }
+    };
+    let mut settings = info.redis_settings().clone();
+    if let Some(username) = &cfg.valkey_username {
+        settings = settings.set_username(username);
+    }
+    if let Some(password) = &cfg.valkey_password {
+        settings = settings.set_password(password);
+    }
+    let info = info.set_redis_settings(settings);
+
+    if cfg.security_transport_tls {
+        host_api::ensure_crypto_provider_installed();
+        let root_cert = std::fs::read(&cfg.valkey_ca_file).ok();
+        match redis::Client::build_with_tls(
+            info,
+            redis::TlsCertificates {
+                client_tls: None,
+                root_cert,
+            },
+        ) {
+            Ok(client) => Some(client),
+            Err(err) => {
+                tracing::warn!(error = %err, "TLS Valkey client build failed; Valkey-backed features disabled");
+                None
+            }
+        }
+    } else {
+        match redis::Client::open(info) {
+            Ok(client) => Some(client),
+            Err(err) => {
+                tracing::warn!(error = %err, "Valkey client build failed; Valkey-backed features disabled");
+                None
+            }
+        }
+    }
+}
+
+/// Opens the direct Valkey connection the `kv` host capability is backed
+/// by (`spine::ProcessDeps::kv_conn`'s doc). Never fatal on failure --
+/// returns `None` (logged) so the caller can start every other capability
+/// regardless.
+async fn connect_kv(cfg: &penguin_spine::SpineConfig) -> Option<redis::aio::MultiplexedConnection> {
+    let client = build_redis_client(cfg)?;
+    match client.get_multiplexed_async_connection().await {
+        Ok(conn) => Some(conn),
+        Err(err) => {
+            tracing::warn!(error = %err, "kv capability: Valkey connection failed; kv disabled (not_implemented on every kv host-call)");
+            None
+        }
+    }
+}
+
 /// Attempts to start the **legacy, single-consumer** process-stage drain
 /// loop (`crate::spine::run`) as its own background task, mirroring
 /// `core/svc_action::try_start_dispatch`'s shape: three independent reasons
@@ -278,6 +353,7 @@ fn try_start_process_loop(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
     breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
+    app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
     egress_denied_metric: prometheus::IntCounterVec,
 ) {
     if config.cli.process_app_id.is_empty() {
@@ -378,6 +454,7 @@ fn try_start_process_loop(
     let cli = config.cli.clone();
     let app_id = cli.process_app_id.clone();
     let approved_targets = builtins::parse_approved_targets(&cli.process_routes_to_approved);
+    let db_reader_password = config.db_reader_password.clone();
 
     tokio::spawn(async move {
         // TODO(M4+): tenant/community scope hardcoded to the tenant-wide
@@ -401,6 +478,59 @@ fn try_start_process_loop(
         };
 
         let metrics: Arc<dyn penguin_spine::SpineMetrics> = Arc::new(penguin_spine::NoopMetrics);
+        // Env-only mode has no `BUNDLE_SCOPE_TENANT_ID`/DB reader to resolve
+        // a real tenant from (that CLI flag was removed with the
+        // multi-tenant redesign, `crate::source_supervisor`'s module doc) --
+        // `(0, 0)` fails closed (denies every non-platform permission)
+        // rather than matching a real tenant's grants (`ProcessDeps::
+        // tenant_id`'s doc).
+        // When the DB-driven changelog consumer path is unconfigured
+        // (`DB_READER_PASSWORD` unset), no poller ever populates
+        // `app_version_snapshot` for this `app_id` -- seed it ONCE with a
+        // `0` sentinel here, mirroring `core/svc_action::try_start_dispatch`'s
+        // identical unconfigured-mode fallback.
+        if db_reader_password.is_none() {
+            app_version_snapshot.update(&[bundle_active_set::ActiveBundleRow {
+                app_id: app_id.clone(),
+                version: String::new(),
+                version_id: 0,
+                digest: cli.process_bundle_digest.clone(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+            }]);
+        }
+        let kv_conn = connect_kv(&spine_cfg).await;
+        let redis_client = build_redis_client(&spine_cfg);
+        let gate = match &db_reader_password {
+            Some(password) => {
+                let reader_cfg = bundle_active_set::ReaderConfig {
+                    host: cli.db_reader_host.clone(),
+                    port: cli.db_reader_port,
+                    name: cli.db_reader_name.clone(),
+                    user: cli.db_reader_user.clone(),
+                };
+                match bundle_active_set::reader::connect(&reader_cfg, password.expose()).await {
+                    Ok(db) => grant_gate::build_production_gate(
+                        grant_gate::PgGrantLoader::new(db),
+                        redis_client,
+                        cli.bundle_config_poll_interval(),
+                    ),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "grant-gate db-reader connection failed; every non-platform permission denies until the next connection attempt");
+                        grant_gate::build_production_gate(
+                            bundle_capability_gate::InMemoryGrantLoader::new(),
+                            redis_client,
+                            cli.bundle_config_poll_interval(),
+                        )
+                    }
+                }
+            }
+            None => grant_gate::build_production_gate(
+                bundle_capability_gate::InMemoryGrantLoader::new(),
+                redis_client,
+                cli.bundle_config_poll_interval(),
+            ),
+        };
         let deps = spine::ProcessDeps {
             app_id: app_id.clone(),
             digest: cli.process_bundle_digest.clone(),
@@ -425,6 +555,11 @@ fn try_start_process_loop(
             metrics,
             license: license_gate,
             breaker: Arc::new(circuit_breaker::CircuitBreaker::new(breaker_metrics)),
+            kv_conn,
+            gate,
+            tenant_id: 0,
+            community_id: 0,
+            app_version_snapshot,
             egress,
         };
 
@@ -539,6 +674,7 @@ fn try_start_changelog_consumer(
     egress_denied_metric: prometheus::IntCounterVec,
     changelog_consumer_metrics: telemetry::ChangelogConsumerMetrics,
     breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
+    app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
@@ -606,30 +742,7 @@ fn try_start_changelog_consumer(
     let poll_interval = config.cli.bundle_config_poll_interval();
     let full_reconcile_interval = config.cli.full_reconcile_interval();
     let call_timeout_ms = config.cli.executor_call_timeout_ms;
-
-    // The source-binding supervisor's own optional dependencies -- built
-    // eagerly (no network I/O) so a missing/invalid one only disables the
-    // supervisor half, never the bundle load/unload half. Shares the SAME
-    // `connections` registry as `bundle_loader::run`/the host-api listener
-    // (`try_start_host_api`'s own registry, threaded through this
-    // function's `connections` parameter) -- a per-consumer registry of its
-    // own would never see the executor connection the listener actually
-    // accepts. Unlike the pre-multi-tenant version, tenant/community scope
-    // is no longer part of this dependency set (resolved per-scope, inside
-    // `changelog_consumer`, not once per whole supervisor instance).
-    let spawner: Option<Arc<dyn source_supervisor::ConsumerSupervisor>> =
-        build_source_supervisor_deps(
-            config,
-            Arc::clone(&connections),
-            Arc::clone(&gate),
-            breaker_metrics,
-            Arc::clone(&egress),
-        )
-        .map(|deps| {
-            Arc::new(source_supervisor::SpineConsumerSupervisor {
-                deps: Arc::new(deps),
-            }) as Arc<dyn source_supervisor::ConsumerSupervisor>
-        });
+    let config = config.clone();
 
     tokio::spawn(async move {
         let db = match bundle_active_set::reader::connect(&reader_cfg, &password).await {
@@ -639,6 +752,32 @@ fn try_start_changelog_consumer(
                 return;
             }
         };
+
+        // The source-binding supervisor's own optional dependencies --
+        // built once the reader `db` connection (reused for
+        // `grant_gate::PgGrantLoader`, a read-only path exactly like the
+        // changelog reads this same connection already performs) is
+        // available, so a missing/invalid one only disables the supervisor
+        // half, never the bundle load/unload half. Unlike the
+        // pre-multi-tenant version, tenant/community scope is no longer
+        // part of this prereq (resolved per-scope, inside
+        // `changelog_consumer`, not once per whole supervisor instance).
+        let spawner: Option<Arc<dyn source_supervisor::ConsumerSupervisor>> =
+            build_source_supervisor_deps(
+                &config,
+                Arc::clone(&connections),
+                Arc::clone(&gate),
+                db.clone(),
+                app_version_snapshot.clone(),
+                Arc::clone(&egress),
+                Arc::clone(&breaker_metrics),
+            )
+            .await
+            .map(|deps| {
+                Arc::new(source_supervisor::SpineConsumerSupervisor {
+                    deps: Arc::new(deps),
+                }) as Arc<dyn source_supervisor::ConsumerSupervisor>
+            });
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
@@ -656,6 +795,7 @@ fn try_start_changelog_consumer(
             excluded_metric,
             source_supervisor_metrics,
             changelog_consumer_metrics,
+            app_version_snapshot,
             shutdown_rx,
         )
         .await;
@@ -672,12 +812,15 @@ fn try_start_changelog_consumer(
 /// `crate::changelog_consumer`). `egress` is cloned into every spawned
 /// binding consumer's own `ProcessDeps` -- see `crate::spine::
 /// ProcessDeps::egress`'s doc.
-fn build_source_supervisor_deps(
+#[allow(clippy::too_many_arguments)]
+async fn build_source_supervisor_deps(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
     gate: Arc<dyn license::FeatureGate>,
-    breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
+    db: sea_orm::DatabaseConnection,
+    app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
     egress: Arc<bundle_host_http::egress::EgressGuard>,
+    breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
 ) -> Option<source_supervisor::SupervisorDeps> {
     let Some(keys_raw) = config.envelope_binding_keys.as_ref() else {
         tracing::warn!(
@@ -702,6 +845,16 @@ fn build_source_supervisor_deps(
 
     let approved_targets = builtins::parse_approved_targets(&config.cli.process_routes_to_approved);
     let metrics: Arc<dyn penguin_spine::SpineMetrics> = Arc::new(penguin_spine::NoopMetrics);
+    // Reuses the SAME reader `db` connection `crate::changelog_consumer`
+    // already opened (a read-only pool handle, cheap to clone) rather than
+    // opening a second one -- see this function's own doc.
+    let redis_client = build_redis_client(&spine_cfg);
+    let capability_gate = grant_gate::build_production_gate(
+        grant_gate::PgGrantLoader::new(db),
+        redis_client,
+        config.cli.bundle_config_poll_interval(),
+    );
+    let kv_conn = connect_kv(&spine_cfg).await;
 
     Some(source_supervisor::SupervisorDeps {
         spine_cfg,
@@ -712,6 +865,9 @@ fn build_source_supervisor_deps(
         metrics,
         license: gate,
         breaker: Arc::new(circuit_breaker::CircuitBreaker::new(breaker_metrics)),
+        kv_conn,
+        gate: capability_gate,
+        app_version_snapshot,
         egress,
     })
 }
@@ -847,42 +1003,57 @@ mod tests {
     /// fail-closed branch: hop verification must never silently fail open,
     /// so a missing keyring disables ONLY the supervisor half (`None`),
     /// never the bundle-loader half.
-    #[test]
-    fn build_source_supervisor_deps_is_none_without_envelope_binding_keys() {
+    #[tokio::test]
+    async fn build_source_supervisor_deps_is_none_without_envelope_binding_keys() {
         let cli = CliConfig::parse_from(["svc-process"]);
         let mut config = test_config(cli);
         config.envelope_binding_keys = None;
         let gate: Arc<dyn license::FeatureGate> = Arc::new(license::test_support::FixedGate(true));
+        let db = sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection();
         assert!(build_source_supervisor_deps(
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             gate,
-            Arc::new(()),
+            db,
+            bundle_active_set::ActiveVersionSnapshot::new(),
             test_egress_guard(),
+            Arc::new(()),
         )
+        .await
         .is_none());
     }
 
     /// The happy path: valid `ENVELOPE_BINDING_KEYS` + reachable spine
     /// config produces `Some(SupervisorDeps)`.
-    #[test]
-    fn build_source_supervisor_deps_is_some_with_valid_config() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // SAFETY: serialized by ENV_LOCK above.
-        unsafe {
-            std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
-            std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
+    #[tokio::test]
+    async fn build_source_supervisor_deps_is_some_with_valid_config() {
+        // Guard is dropped before the `.await` below (clippy
+        // `await_holding_lock`) -- `penguin_spine::SpineConfig::from_env`
+        // reads these env vars synchronously inside
+        // `build_source_supervisor_deps` before its first await, so they
+        // only need to be set for that one non-async read.
+        {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
+                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
+            }
         }
         let cli = CliConfig::parse_from(["svc-process"]);
         let config = test_config(cli);
         let gate: Arc<dyn license::FeatureGate> = Arc::new(license::test_support::FixedGate(true));
+        let db = sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection();
         let deps = build_source_supervisor_deps(
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             gate,
-            Arc::new(()),
+            db,
+            bundle_active_set::ActiveVersionSnapshot::new(),
             test_egress_guard(),
-        );
+            Arc::new(()),
+        )
+        .await;
         // SAFETY: serialized by ENV_LOCK above.
         unsafe {
             std::env::remove_var("VALKEY_URL");
@@ -997,6 +1168,7 @@ mod tests {
             test_egress_denied_metric(),
             test_changelog_consumer_metrics(),
             Arc::new(()),
+            bundle_active_set::ActiveVersionSnapshot::new(),
         );
     }
 
@@ -1061,6 +1233,7 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             Arc::new(()),
+            bundle_active_set::ActiveVersionSnapshot::new(),
             test_egress_denied_metric(),
         );
     }
@@ -1078,6 +1251,7 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             Arc::new(()),
+            bundle_active_set::ActiveVersionSnapshot::new(),
             test_egress_denied_metric(),
         );
     }
@@ -1095,6 +1269,7 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             Arc::new(()),
+            bundle_active_set::ActiveVersionSnapshot::new(),
             test_egress_denied_metric(),
         );
     }
@@ -1122,6 +1297,7 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             Arc::new(()),
+            bundle_active_set::ActiveVersionSnapshot::new(),
             test_egress_denied_metric(),
         );
     }
@@ -1156,6 +1332,7 @@ mod tests {
                 &config,
                 Arc::new(host_api::ConnectionRegistry::new()),
                 Arc::new(()),
+                bundle_active_set::ActiveVersionSnapshot::new(),
                 test_egress_denied_metric(),
             );
             unsafe {
@@ -1197,6 +1374,7 @@ mod tests {
                 &config,
                 Arc::new(host_api::ConnectionRegistry::new()),
                 Arc::new(()),
+                bundle_active_set::ActiveVersionSnapshot::new(),
                 test_egress_denied_metric(),
             );
             unsafe {

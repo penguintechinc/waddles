@@ -137,6 +137,26 @@ pub struct SupervisorDeps {
     /// keyed independently per `(platform, source_id)` -- see
     /// `crate::spine::ProcessDeps::breaker`'s doc for the full rationale.
     pub breaker: Arc<circuit_breaker::CircuitBreaker>,
+    /// See `spine::ProcessDeps::kv_conn`'s doc -- opened once by
+    /// `crate::lib::build_source_supervisor_deps` and cloned into every
+    /// binding consumer's own `ProcessDeps` in [`run_binding_consumer`]
+    /// below, rather than reopened per consumer or per reconnect attempt.
+    pub kv_conn: Option<redis::aio::MultiplexedConnection>,
+    /// See `spine::ProcessDeps::gate`'s doc -- cloned into every binding
+    /// consumer's own `ProcessDeps` in [`run_binding_consumer`] below.
+    pub gate: Arc<bundle_capability_gate::CapabilityGate>,
+    /// The live, poll-refreshed `app_id -> (digest, app_versions.id)`
+    /// snapshot -- cloned into every binding consumer's own `ProcessDeps`
+    /// in [`run_binding_consumer`] below. `spine::handle_delivered`
+    /// resolves this PER DELIVERY, never once per connect: a bundle hot
+    /// swap must be reflected on the very next delivery (spec SS4/SS5.1),
+    /// not just the next reconnect. Fed by `crate::changelog_consumer`'s
+    /// own apply step (mirrors `core/svc_action::changelog_consumer`'s
+    /// identical `app_version_snapshot` feed) -- unlike `tenant`/
+    /// `community`, this is NOT per-binding: `bundle_active_set::
+    /// ActiveVersionSnapshot` is keyed by `app_id` alone across every
+    /// scope this supervisor's tenant serves.
+    pub app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::egress`'s doc.
     pub egress: Arc<bundle_host_http::egress::EgressGuard>,
@@ -265,6 +285,14 @@ async fn run_binding_consumer(
             metrics: deps.metrics.clone(),
             license: Arc::clone(&deps.license),
             breaker: Arc::clone(&deps.breaker),
+            kv_conn: deps.kv_conn.clone(),
+            gate: Arc::clone(&deps.gate),
+            tenant_id: binding.tenant_id,
+            community_id: binding.community_id,
+            // Shared, poll-refreshed handle -- `spine::handle_delivered`
+            // resolves this PER DELIVERY (`SupervisorDeps::
+            // app_version_snapshot`'s doc), never once here at connect time.
+            app_version_snapshot: deps.app_version_snapshot.clone(),
             egress: Arc::clone(&deps.egress),
         };
 
