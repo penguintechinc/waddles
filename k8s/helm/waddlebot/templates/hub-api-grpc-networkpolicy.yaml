@@ -1,0 +1,53 @@
+# feature/hub-api-internal-grpc -- CiliumNetworkPolicy restricting ingress
+# to hub-api's internal gRPC port (waddles.hub.internal.v1: IdentityService,
+# KeyService) to svc-ingest/svc-process/svc-action (Python AND Rust
+# variants -- both are live during the Rust data-plane migration, see
+# critical-rules.md Data Plane) ONLY.
+#
+# KNOWN GAP (documented, not silently claimed as a hard boundary):
+# templates/network-policies.yaml's `allow-same-namespace-and-ingress`
+# plain NetworkPolicy already allows ALL same-namespace pod-to-pod traffic
+# on every port, including this one. Kubernetes NetworkPolicy (and Cilium's
+# own policy model) computes the UNION of every applicable policy's allow
+# rules -- a second, narrower policy on the same pod can ADD allowed
+# traffic but can never SUBTRACT what a broader existing policy already
+# permits. So today, in isolation, this CiliumNetworkPolicy does not yet
+# provide a hard network-layer boundary; scoping down the namespace-wide
+# policy to exclude this port is tracked as follow-up work, out of scope
+# for this PR. The actual enforcement boundary today is
+# `hub_api/grpc_internal/interceptors.py::AuthInterceptor` -- every RPC
+# fails closed (UNAUTHENTICATED) without a valid, correctly-scoped
+# hub-api-issued machine JWT, regardless of which pod the connection comes
+# from. This policy is still added now as the correct target-state
+# allowlist and as defense-in-depth once the broader policy is scoped down.
+{{- if .Values.pipeline.hubApi.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-hub-api-grpc
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub-api
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: hub-api
+  ingress:
+    - fromEndpoints:
+        - matchExpressions:
+            - key: app.kubernetes.io/component
+              operator: In
+              values:
+                - svc-ingest
+                - svc-ingest-rust
+                - svc-process
+                - svc-process-rust
+                - svc-action
+                - svc-action-rust
+      toPorts:
+        - ports:
+            - port: {{ .Values.pipeline.hubApi.grpcPort | quote }}
+              protocol: TCP
+{{- end }}
