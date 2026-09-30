@@ -262,6 +262,112 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
+    /// `run_docker` on a command that exits 0 -- the happy path every
+    /// caller (`docker build`/`docker run`) relies on.
+    #[test]
+    fn run_docker_success() {
+        run_docker(&mut Command::new("true"), "test-success").unwrap();
+    }
+
+    /// `run_docker` on a command that spawns fine but exits non-zero --
+    /// mirrors a real `docker build`/`docker run` failure (bad Dockerfile,
+    /// failed NuGet restore, etc.).
+    #[test]
+    fn run_docker_nonzero_exit_fails() {
+        let err = run_docker(&mut Command::new("false"), "test-nonzero").unwrap_err();
+        match err {
+            CompilerError::CompileFailed { language, message } => {
+                assert_eq!(language, "csharp");
+                assert!(message.contains("test-nonzero exited with"));
+            }
+            other => panic!("expected CompileFailed, got {other:?}"),
+        }
+    }
+
+    /// `run_docker` on a binary that cannot be spawned at all -- mirrors
+    /// `docker` not being installed/reachable in the build container.
+    #[test]
+    fn run_docker_spawn_failure() {
+        let err = run_docker(
+            &mut Command::new("definitely-not-a-real-binary-xyz"),
+            "test-spawn",
+        )
+        .unwrap_err();
+        match err {
+            CompilerError::CompileFailed { language, message } => {
+                assert_eq!(language, "csharp");
+                assert!(message.contains("not runnable"));
+            }
+            other => panic!("expected CompileFailed, got {other:?}"),
+        }
+    }
+
+    /// Recursively copies a nested source tree, preserving relative
+    /// structure and file contents -- the exact operation `build` uses to
+    /// place the untrusted bundle source into the Docker build context.
+    #[test]
+    fn copy_dir_recursive_copies_nested_files_and_dirs() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("top.txt"), b"top-level").unwrap();
+        std::fs::create_dir_all(src.path().join("nested/deeper")).unwrap();
+        std::fs::write(src.path().join("nested/mid.txt"), b"mid-level").unwrap();
+        std::fs::write(src.path().join("nested/deeper/leaf.txt"), b"deep-level").unwrap();
+
+        let dst = tempfile::tempdir().unwrap();
+        copy_dir_recursive(src.path(), dst.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read(dst.path().join("top.txt")).unwrap(),
+            b"top-level"
+        );
+        assert_eq!(
+            std::fs::read(dst.path().join("nested/mid.txt")).unwrap(),
+            b"mid-level"
+        );
+        assert_eq!(
+            std::fs::read(dst.path().join("nested/deeper/leaf.txt")).unwrap(),
+            b"deep-level"
+        );
+    }
+
+    /// `run_id_arg` against the real `id` binary -- always present on
+    /// every Linux CI runner and dev container this crate builds in
+    /// (bash 3.2/POSIX baseline, same assumption `alpha-deploy.sh`
+    /// documents for its own toolset).
+    #[test]
+    fn run_id_arg_returns_a_parseable_uid() {
+        let uid = run_id_arg("-u").unwrap();
+        assert!(
+            uid.parse::<u32>().is_ok(),
+            "expected a numeric uid, got {uid:?}"
+        );
+    }
+
+    /// An unrecognized `id` flag exits non-zero -- `run_id_arg` must
+    /// surface that as `CompileFailed`, not panic or silently return
+    /// empty output.
+    #[test]
+    fn run_id_arg_invalid_flag_fails() {
+        let err = run_id_arg("--definitely-not-a-real-flag-xyz").unwrap_err();
+        match err {
+            CompilerError::CompileFailed { language, message } => {
+                assert_eq!(language, "csharp");
+                assert!(message.contains("exited with"));
+            }
+            other => panic!("expected CompileFailed, got {other:?}"),
+        }
+    }
+
+    /// `current_uid_gid` combines `id -u`/`id -g` into the
+    /// `docker run --user` value -- asserts the `uid:gid` shape.
+    #[test]
+    fn current_uid_gid_is_colon_separated_numeric_pair() {
+        let value = current_uid_gid().unwrap();
+        let (uid, gid) = value.split_once(':').expect("expected a uid:gid pair");
+        assert!(uid.parse::<u32>().is_ok(), "uid half not numeric: {uid:?}");
+        assert!(gid.parse::<u32>().is_ok(), "gid half not numeric: {gid:?}");
+    }
+
     /// End-to-end: builds the real `bundles/csharp/csping` spike bundle
     /// through `CSharpBuilder::build` -- the "new arm" `builder_for`
     /// (`build/mod.rs`) now returns for `"csharp"` -- via the same pinned,
