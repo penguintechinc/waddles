@@ -561,6 +561,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-host-db"
+version = "0.1.0"
+dependencies = [
+ "opentelemetry",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "bundle-host-http"
 version = "0.1.0"
 dependencies = [
@@ -2971,6 +2985,7 @@ dependencies = [
  "ordered-float",
  "sea-query-derive",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -3313,6 +3328,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "uuid",
  "webpki-roots",
 ]
 
@@ -3379,6 +3395,7 @@ dependencies = [
  "sqlx-core",
  "thiserror 2.0.20",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3414,6 +3431,7 @@ dependencies = [
  "stringprep",
  "thiserror 2.0.20",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -3440,6 +3458,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -3485,6 +3504,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bundle-active-set",
+ "bundle-host-db",
  "bundle-host-http",
  "bundle-host-kv",
  "chrono",

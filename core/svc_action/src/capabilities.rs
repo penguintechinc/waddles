@@ -677,7 +677,6 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             scope.app_id.clone(),
         );
 
-
         match call.op.as_str() {
             "get" => {
                 let args: KvKeyArgs = parse_kv_args(&call.args)?;
