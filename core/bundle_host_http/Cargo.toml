@@ -26,6 +26,10 @@ reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-
 futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
 base64 = "=0.22.1"
 penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69f25b007e397bcf22c20bee368495f61f0a1b8a", package = "penguin-bundle-host", version = "=0.2.0" }
+# Same-repo path dependency (not a penguin-libs crate) -- the shared signed
+# egress-allowlist assertion wire format (PR #468), also depended on by
+# core/egress_proxy's verifier so the two crates can never drift apart.
+egress-assertion = { path = "../egress_assertion", version = "=0.1.0" }
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }
@@ -33,6 +37,12 @@ tokio = { version = "=1.53.1", features = ["full", "test-util"] }
 # tests (moved verbatim from svc_action) -- never linked into any release
 # binary of either consuming crate.
 axum = "=0.8.9"
+# Test-only: builds a fixed Ed25519 test keypair to verify
+# `EgressAssertionSigner`'s output with `egress_assertion::verify_with_key`
+# directly (the round-trip `EgressAssertionSigner` -- the actual signer
+# wired here -- and the verify primitive core/egress_proxy's own verifier
+# wraps). Same pin as egress-assertion's own Cargo.toml.
+jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 
 [profile.release]
 opt-level = 3
