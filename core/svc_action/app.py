@@ -9,6 +9,22 @@ docstring for the one real difference from ingest/process (retry-with-
 backoff + an audit-log DB connection, since action dispatches to a real
 external system). `/health`/`/healthz`/`/metrics` come from `flask_core`'s
 standard health blueprint, same as every other pipeline-stage container.
+
+DEPRECATED (chore/retire-python-dataplane, 2026-09-28): PenguinTech is
+retiring Python from all live-traffic (data-plane) services in favor of
+`core/svc_action`'s Rust build (`src/`, `Cargo.toml`) -- see
+`critical-rules.md` Data Plane (In-Line of Traffic). This Python service
+remains the ONLY functioning action stage today: `src/senders.rs`'s own
+`sender_status()` marks Discord/Slack/YouTube/Kick sends as
+`PendingSeam` (TODO M3+), leaving only Twitch chat sends `Implemented`;
+none of this module's 18 real `bundles/*_action.py` bundles (discord_send,
+slack_send, youtube_send, kick_send, moderation_enforce,
+integrations_waddleai, community_*, social_*, streaming_stream,
+marketing_engagement, twitch_shoutout) have a Rust/WASM equivalent yet
+(`bundles/rust/` has only `example`/`ping` test bundles). Do not remove
+this module or its Helm Deployment
+(`k8s/helm/waddlebot/templates/svc-action.yaml`) until the Rust build
+reaches full parity -- tracked as Rust follow-up work, not scheduled here.
 """
 
 from __future__ import annotations

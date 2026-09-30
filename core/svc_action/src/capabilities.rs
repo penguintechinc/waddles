@@ -654,7 +654,7 @@ mod tests {
 
     fn test_egress() -> Arc<EgressGuard> {
         Arc::new(EgressGuard::new(
-            Arc::new(crate::egress::ReqwestTransport),
+            Arc::new(crate::egress::ReqwestTransport::new()),
             crate::egress::EgressLimits {
                 allow_private_hosts: false,
                 rate_limit_rps: 10,
@@ -663,6 +663,7 @@ mod tests {
                 max_redirects: 3,
                 max_response_bytes: 1_048_576,
                 allowed_ports: vec![443],
+                proxy_url: None,
             },
             Arc::new(BundleCatalog::new()),
             prometheus::IntCounterVec::new(

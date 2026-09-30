@@ -333,7 +333,7 @@ async fn build_stage_capabilities(
         }
     };
     let egress = Arc::new(egress::EgressGuard::new(
-        Arc::new(egress::ReqwestTransport),
+        Arc::new(egress::ReqwestTransport::new()),
         egress::EgressLimits {
             allow_private_hosts: cli.egress_allow_private_hosts,
             rate_limit_rps: cli.egress_rate_limit_rps,
@@ -343,6 +343,7 @@ async fn build_stage_capabilities(
             max_response_bytes: cli.egress_max_response_bytes,
             // Not yet CLI-tunable -- see `EgressLimits::allowed_ports` doc.
             allowed_ports: vec![443],
+            proxy_url: None,
         },
         catalog,
         egress_denied_total,
@@ -356,7 +357,7 @@ async fn build_stage_capabilities(
     // than this process failing to start (`config::Config::
     // discord_bot_token`'s doc).
     let caps = match discord_bot_token {
-        Some(token) => caps.with_discord(Arc::new(egress::ReqwestTransport), token),
+        Some(token) => caps.with_discord(Arc::new(egress::ReqwestTransport::new()), token),
         None => {
             tracing::warn!(
                 "DISCORD_BOT_TOKEN not set; discord relay provider disabled \
