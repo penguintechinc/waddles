@@ -483,9 +483,10 @@ posthog:
   # hosted default (https://license.penguintech.io).
   host: ""
 
-  # POSTHOG_API_KEY — personal/project API key (feature_flag:read scope).
-  # NEVER commit a literal value; set via --set or an out-of-git values file.
-  apiKey: ""
+  # POSTHOG_API_KEY (personal/project API key, feature_flag:read scope) moved
+  # to the `waddlebot-platform-credentials` Secret -- see `platformCredentials`
+  # above -- so an untouched/placeholder value here can never overwrite a
+  # real key on `helm upgrade` (fix/helm-platform-credentials).
 
   # PostHog's OWN secrets (SECRET_KEY / POSTGRES_PASSWORD / CLICKHOUSE_PASSWORD)
   # — distinct from apiKey above. NEVER commit literals. Provide ONE of:
@@ -1954,69 +1955,49 @@ ingress:
       hosts:
         - waddlebot.local
 
-# OAuth Configuration (set via secrets and environment variables)
+# fix/helm-platform-credentials -- externally-issued platform/third-party
+# CREDENTIALS (client secrets, bot/OAuth/access/refresh tokens, webhook &
+# signing secrets, service-account keys) are no longer set here. This chart
+# never rendered a safe way to update them in place: an untouched values.yaml
+# default (or a dev-only placeholder like `oauth.discord.botToken` used to be)
+# was written into `waddlebot-secrets` on every `helm upgrade`, silently
+# overwriting a real credential an operator had set out-of-band -- the alpha
+# Discord-bot-token incident this branch fixes. They now live ONLY in the
+# `waddlebot-platform-credentials` Secret (see `platformCredentials` below
+# and docs/PLATFORM_CREDENTIALS.md), which this chart never writes.
+#
+# Non-secret companion config for the same platforms (URLs, tenant/project
+# IDs, IRC nick/channels) stays below -- it isn't a credential.
+platformCredentials:
+  # Name of a pre-existing Secret holding externally-issued platform
+  # credentials. Leave blank to use the default name
+  # "<release-fullname>-platform-credentials". See docs/PLATFORM_CREDENTIALS.md
+  # for the operator setup command (alpha/local) and the External
+  # Secrets/Sealed Secrets pattern (beta/gamma/prod).
+  existingSecret: ""
+
 oauth:
-  discord:
-    clientId: ""
-    clientSecret: ""
-    botToken: ""
-    applicationId: ""
   twitch:
-    clientId: ""
-    clientSecret: ""
-    webhookSecret: ""
-    # T10 (v3 demo) -- IRC bot account credentials for svc-ingest's held-socket
-    # twitch_irc.py receiver / CANON-LIB relay outbound (waddle_transports/irc_relay.py).
-    # oauthToken is an IRC OAuth token ("oauth:...", NOT the OAuth2 clientSecret above).
-    # NEVER a real value in git -- see values-alpha.yaml for the dev-only placeholder.
-    oauthToken: ""
     nick: ""
     channels: ""
-  slack:
-    clientId: ""
-    clientSecret: ""
-    botToken: ""
-    signingSecret: ""
-    appToken: ""
   youtube:
-    apiKey: ""
-    clientId: ""
-    clientSecret: ""
-    # OAuth refresh token from the one-time consent flow; YouTube Data API v3 search works with either apiKey or clientId+clientSecret+refreshToken
-    refreshToken: ""
     webhookCallbackUrl: ""
-  spotify:
-    clientId: ""
-    clientSecret: ""
-  kick:
-    clientId: ""
-    clientSecret: ""
-    webhookSecret: ""
-    accessToken: ""
   teams:
-    appId: ""
-    appPassword: ""
     tenantId: ""
   mattermost:
     url: ""
-    botToken: ""
-    webhookSecret: ""
   googlechat:
-    serviceAccountKey: ""
     projectId: ""
 
-# Cloud Provider Configuration (AWS Lambda, GCP Functions, etc.)
+# Cloud Provider Configuration (AWS Lambda, GCP Functions, etc.) -- non-secret
+# region/project config only; access keys/service-account keys live in
+# platformCredentials above.
 aws:
-  accessKeyId: ""
-  secretAccessKey: ""
   region: "us-east-1"
-  lambdaRoleArn: ""
 
 gcp:
   projectId: ""
   region: "us-central1"
-  serviceAccountKey: ""
-  serviceAccountEmail: ""
 
 openwhisk:
   apiHost: "http://openwhisk-service:3233"
@@ -2026,7 +2007,6 @@ openwhisk:
 
 waddleai:
   baseUrl: ""
-  apiKey: ""
 
 # Connector Configuration (svc-ingest channels and overrides)
 config:
