@@ -2287,17 +2287,6 @@ egressProxy:
   # what was actually granted to that tenant/app; a compromised proxy host
   # still can't reach loopback/link-local/metadata/cluster CIDRs (egressPolicy
   # .denyCidrs/.clusterCidrs, enforced at the network layer as a backstop).
-  # fix/alpha-clean-deploy -- secretName is now auto-provisioned in
-  # alpha/local by templates/auto-provisioned-keys-job.yaml (see
-  # autoProvisionedKeys.egressAssertion below); required externally
-  # (fail closed) in beta/gamma/production, same posture as every other
-  # key that Job provisions. NOTE: ALLOWLIST_SIGNING_KEY_PATH/secretKey
-  # below is currently NOT read by core/egress_proxy (verification goes
-  # through the MACHINE_JWT_JWKS_URL trust bundle instead) -- this
-  # Secret only needs to exist for the volume mount to succeed today.
-  allowlistSigning:
-    secretName: "waddlebot-egress-proxy-signing-key"
-    secretKey: "public-key.pem"
   # Machine-JWT auth (core/service_auth) -- callers additionally need
   # `egress:connect` granted in serviceJwt.identities[*].allowedScopes
   # (see that block's own comment) on top of hub-api's existing
@@ -2442,25 +2431,5 @@ autoProvisionedKeys:
   serviceJwt:
     secretName: "service-jwt-signing-key"
     publicKeyConfigMapName: ""  # default: "<fullname>-service-jwt-public" when empty
-    keyId: "waddlebot-1"
-    externalSecret: false
-  # fix/alpha-clean-deploy -- egress assertion Ed25519 keypair (core/
-  # egress_assertion::AssertionSigningKey, PR #468), the per-request signed
-  # allowlist hop between bundle_host_http's EgressAssertionSigner (svc-process/
-  # svc-action, the signer -- NOT YET wired into either service's production
-  # startup path, tracked separately) and core/egress_proxy's verifier. Private
-  # half (EGRESS_ASSERTION_PRIVATE_KEY/EGRESS_ASSERTION_KEY_ID) in secretName is
-  # for the signer side once wired; egress_proxy today actually verifies via the
-  # shared per-service JWKS trust bundle (MACHINE_JWT_JWKS_URL, same as machine-
-  # JWT auth), not a value read from this Secret. secretName defaults to the
-  # exact name egressProxy.allowlistSigning.secretName already references so the
-  # existing (currently unconsumed) Secret volume in templates/infrastructure/
-  # egress-proxy.yaml resolves instead of leaving that pod stuck
-  # ContainerCreating on a missing Secret (alpha rev 28 incident). Public half
-  # published to publicKeyConfigMapName for parity with bundleSigning/serviceJwt
-  # above and for whichever consumer needs it once the signer side lands.
-  egressAssertion:
-    secretName: "waddlebot-egress-proxy-signing-key"
-    publicKeyConfigMapName: ""  # default: "<fullname>-egress-assertion-public" when empty
     keyId: "waddlebot-1"
     externalSecret: false

@@ -47,9 +47,6 @@
 {{- $bsCmName := $bs.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" $fullname) }}
 {{- $sj := .Values.autoProvisionedKeys.serviceJwt }}
 {{- $sjCmName := $sj.publicKeyConfigMapName | default (printf "%s-service-jwt-public" $fullname) }}
-{{- $ea := .Values.autoProvisionedKeys.egressAssertion }}
-{{- $eaSecretName := $ea.secretName | default (printf "%s-egress-assertion" $fullname) }}
-{{- $eaCmName := $ea.publicKeyConfigMapName | default (printf "%s-egress-assertion-public" $fullname) }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -132,14 +129,6 @@ spec:
               value: {{ $sj.keyId | quote }}
             - name: SERVICE_JWT_EXTERNAL
               value: {{ $sj.externalSecret | quote }}
-            - name: EGRESS_ASSERTION_SECRET
-              value: {{ $eaSecretName | quote }}
-            - name: EGRESS_ASSERTION_CM
-              value: {{ $eaCmName | quote }}
-            - name: EGRESS_ASSERTION_KEY_ID
-              value: {{ $ea.keyId | quote }}
-            - name: EGRESS_ASSERTION_EXTERNAL
-              value: {{ $ea.externalSecret | quote }}
           command: ["/bin/bash", "-c"]
           args:
             - |
@@ -221,16 +210,6 @@ spec:
 
               provision_ed25519 "${SERVICE_JWT_SECRET}" "${SERVICE_JWT_CM}" "${SERVICE_JWT_KEY_ID}" "${SERVICE_JWT_EXTERNAL}" \
                 SERVICE_JWT_PRIVATE_KEY SERVICE_JWT_ACTIVE_KID SERVICE_JWT_PUBLIC_KEY
-
-              # fix/alpha-clean-deploy -- egress assertion Ed25519 keypair
-              # (core/egress_assertion). Private half for bundle_host_http's
-              # EgressAssertionSigner (svc-process/svc-action) once wired;
-              # public half published for parity/future consumers. Fixes the
-              # alpha rev-28 incident: egress-proxy's Deployment mounts this
-              # exact Secret name unconditionally and was stuck
-              # ContainerCreating with no provisioner ever creating it.
-              provision_ed25519 "${EGRESS_ASSERTION_SECRET}" "${EGRESS_ASSERTION_CM}" "${EGRESS_ASSERTION_KEY_ID}" "${EGRESS_ASSERTION_EXTERNAL}" \
-                EGRESS_ASSERTION_PRIVATE_KEY EGRESS_ASSERTION_KEY_ID EGRESS_ASSERTION_PUBLIC_KEY
 
               echo "auto-provision-keys: done"
           resources:

@@ -55,14 +55,12 @@ rules:
     resourceNames:
       - {{ .Values.autoProvisionedKeys.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
       - {{ .Values.autoProvisionedKeys.serviceJwt.secretName }}
-      - {{ .Values.autoProvisionedKeys.egressAssertion.secretName | default (printf "%s-egress-assertion" (include "waddlebot.fullname" .)) }}
     verbs: ["get", "patch"]
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames:
       - {{ .Values.autoProvisionedKeys.bundleSigning.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" (include "waddlebot.fullname" .)) }}
       - {{ .Values.autoProvisionedKeys.serviceJwt.publicKeyConfigMapName | default (printf "%s-service-jwt-public" (include "waddlebot.fullname" .)) }}
-      - {{ .Values.autoProvisionedKeys.egressAssertion.publicKeyConfigMapName | default (printf "%s-egress-assertion-public" (include "waddlebot.fullname" .)) }}
     verbs: ["get", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
