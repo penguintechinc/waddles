@@ -11,8 +11,9 @@
 # this same Deployment ALSO runs svc-ingest's socket-owning receivers (Discord gateway
 # today, `core/svc_ingest/receivers/discord_gateway.py`) as `supervisor.ReceiverSupervisor`-
 # supervised tasks alongside the poll-drain loop. No new env var wiring needed here --
-# `DISCORD_BOT_TOKEN` is already in the shared `-secrets` Secret (`secrets.yaml`) and
-# already reaches this container via the `envFrom: secretRef` below; the receiver/
+# `DISCORD_BOT_TOKEN` reaches this container via the explicit `secretKeyRef`
+# below (fix/helm-platform-credentials: `waddlebot-platform-credentials`
+# Secret, not the shared `-secrets` Secret); the receiver/
 # socket-lease tuning knobs (`RECEIVER_BASE_BACKOFF_S`/`SOCKET_LEASE_TTL_S`/etc.) fall back
 # to `config.py`'s own sane defaults the same way `POLL_INTERVAL_S`/`BASE_BACKOFF_S` already
 # do for the poll-drain loop -- not Helm-overridden today. Each replica races to CLAIM the
@@ -100,19 +101,23 @@ spec:
         - name: WADDLES_AI_ENABLED
           value: {{ .Values.pipeline.hubApi.aiEnabled | quote }}
         # Discord gateway + Twitch IRC receiver credentials (svc-ingest/receivers/
-        # {discord_gateway,twitch_irc}.py). Empty defaults mean the receiver stays idle
-        # rather than crash-looping without a token -- see values-alpha.yaml for the
-        # dev-only placeholders used in the demo.
+        # {discord_gateway,twitch_irc}.py). Empty/absent means the receiver stays idle
+        # rather than crash-looping without a token. fix/helm-platform-credentials --
+        # sourced from the operator-managed platform-credentials Secret, never the
+        # chart-rendered `-secrets` Secret (see docs/PLATFORM_CREDENTIALS.md);
+        # `optional: true` so an unconfigured platform doesn't block scheduling.
         - name: DISCORD_BOT_TOKEN
           valueFrom:
             secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
+              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
               key: DISCORD_BOT_TOKEN
+              optional: true
         - name: TWITCH_OAUTH_TOKEN
           valueFrom:
             secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
+              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
               key: TWITCH_OAUTH_TOKEN
+              optional: true
         - name: TWITCH_NICK
           value: {{ .Values.oauth.twitch.nick | default "" | quote }}
         - name: TWITCH_CHANNELS
