@@ -502,6 +502,11 @@ pub struct ProcessDeps<S: SpineOps> {
     /// longer be resolved must fail closed rather than run under a stale
     /// one.
     pub app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    /// The per-process `bundle_host_http::egress::EgressGuard` cloned into
+    /// every per-invoke [`crate::capabilities::StageCapabilities`]'s
+    /// `http` capability (see that struct's doc for why this is a
+    /// singleton, not scope-implicit like every other capability).
+    pub egress: Arc<bundle_host_http::egress::EgressGuard>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -670,7 +675,10 @@ async fn handle_delivered<S: SpineOps>(
     // envelope's own (tenant, community, app_id), never a fixed
     // connection-lifetime default. `kv` reuses `deps.kv_conn` (a cheap
     // handle clone, see that field's doc) rather than opening a new
-    // connection on every invoke.
+    // connection on every invoke. `egress` is the shared, per-process
+    // singleton (`ProcessDeps::egress`'s doc). `gate` authorizes every
+    // capability call, `http` included, before the egress guard ever runs
+    // (module doc, `crate::capabilities`'s own module doc).
     let capabilities: Arc<dyn CapabilityHandler> = {
         let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
             d.env.tenant.clone(),
@@ -679,6 +687,7 @@ async fn handle_delivered<S: SpineOps>(
             deps.tenant_id,
             deps.community_id,
             app_version,
+            Arc::clone(&deps.egress),
             Arc::clone(&deps.gate),
         );
         let caps = match &deps.kv_conn {
@@ -1188,6 +1197,31 @@ mod tests {
             tenant_id: 0,
             community_id: 0,
             app_version_snapshot,
+            // Deny-by-default fixture (empty catalog, see
+            // `crate::capabilities::HttpEgressCatalog`'s doc) -- no test in
+            // this module exercises `http` through `ProcessDeps` itself
+            // (that's `crate::capabilities`'s own test module's job); this
+            // only needs to satisfy the field.
+            egress: Arc::new(bundle_host_http::egress::EgressGuard::new(
+                Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
+                bundle_host_http::egress::EgressLimits {
+                    allow_private_hosts: false,
+                    rate_limit_rps: 10,
+                    rate_limit_burst: 20,
+                    timeout: std::time::Duration::from_secs(5),
+                    max_redirects: 3,
+                    max_response_bytes: 1_048_576,
+                    allowed_ports: vec![443],
+                    proxy_url: None,
+                },
+                crate::capabilities::HttpEgressCatalog::new(),
+                prometheus::IntCounterVec::new(
+                    prometheus::Opts::new("test_spine_egress_denied_total", "test"),
+                    &["app_id", "reason"],
+                )
+                .unwrap(),
+                bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(true)),
+            )),
         };
         (deps, metrics)
     }

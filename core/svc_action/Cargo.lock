@@ -515,27 +515,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "bundle-capability-gate"
+name = "bundle-host-http"
 version = "0.1.0"
 dependencies = [
- "metrics",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.20",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "bundle-host-kv"
-version = "0.1.0"
-dependencies = [
- "opentelemetry",
- "redis",
+ "base64 0.22.1",
+ "futures-util",
+ "penguin-bundle-host",
+ "prometheus",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.20",
+ "tokio",
  "tracing",
 ]
 
@@ -1778,16 +1768,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
-name = "metrics"
-version = "0.24.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89550ee9f79e88fef3119de263694973a8adb26c21d75322164fb8c493039fe2"
-dependencies = [
- "portable-atomic",
- "rapidhash",
-]
-
-[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2398,15 +2378,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rapidhash"
-version = "4.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5da7e78a036ce858e8d55b7e7dc8ba3a88b78350fd2155d3591bbd966b58589e"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "rcgen"
 version = "0.14.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2438,7 +2409,6 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "ryu",
- "sha1_smol",
  "socket2",
  "tokio",
  "tokio-rustls",
@@ -2963,12 +2933,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sha1_smol"
-version = "1.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
-
-[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3284,8 +3248,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bundle-active-set",
- "bundle-capability-gate",
- "bundle-host-kv",
+ "bundle-host-http",
  "chrono",
  "clap",
  "futures-util",
@@ -3828,8 +3791,6 @@ checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
- "serde_core",
- "sha1_smol",
  "wasm-bindgen",
 ]
 

@@ -151,6 +151,9 @@ pub struct SupervisorDeps {
     /// ActiveVersionSnapshot` is keyed by `app_id` alone across every
     /// scope this supervisor's tenant serves.
     pub app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::egress`'s doc.
+    pub egress: Arc<bundle_host_http::egress::EgressGuard>,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -283,6 +286,7 @@ async fn run_binding_consumer(
             // resolves this PER DELIVERY (`SupervisorDeps::
             // app_version_snapshot`'s doc), never once here at connect time.
             app_version_snapshot: deps.app_version_snapshot.clone(),
+            egress: Arc::clone(&deps.egress),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();

@@ -21,9 +21,10 @@
 //! - The content-moderation gate itself (`crate::builtins::
 //!   run_moderation_gate`) -- needs a Rust Ollama classifier client and
 //!   PostHog flag client, neither of which exists in this crate yet
-//! - The `db`/`kv`/`http`/`flags` host capabilities
+//! - The `db`/`kv`/`flags` host capabilities
 //!   (`crate::capabilities::StageCapabilities`) -- `context`/`clock`/`log`
-//!   are fully wired
+//!   and `http` (shared `bundle_host_http::egress::EgressGuard`, PR #459
+//!   follow-up) are fully wired
 //! - The `GET /api/v1/distribution/bundles?stage=process` activation poll
 //!   (spec §6.7) that would resolve `PROCESS_APP_ID`'s real granted-stream
 //!   list, bundle digest, and approved `routes_to` set -- see
@@ -118,6 +119,13 @@ where
         telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
     let source_supervisor_metrics =
         telemetry::register_source_binding_supervisor_metrics(&prom_registry);
+    // `crate::capabilities::StageCapabilities::egress`'s
+    // `svc_process_egress_denied_total{app_id,reason}` -- registered here,
+    // same "before `prom_registry` moves into `AppState::new`" constraint
+    // as the two metrics above, then threaded into whichever of
+    // `try_start_process_loop`/`try_start_changelog_consumer` actually
+    // starts.
+    let egress_denied_metric = telemetry::register_egress_metrics(&prom_registry);
     let changelog_consumer_metrics = telemetry::register_changelog_consumer_metrics(&prom_registry);
 
     let state = http::AppState::new(config.clone(), prom_registry);
@@ -146,6 +154,7 @@ where
             connections,
             bundle_loader_excluded_metric,
             source_supervisor_metrics,
+            egress_denied_metric,
             changelog_consumer_metrics,
             app_version_snapshot,
         );
@@ -155,7 +164,12 @@ where
              DB_READER_PASSWORD not configured); using legacy \
              PROCESS_APP_ID/PROCESS_INGEST_* env selection"
         );
-        try_start_process_loop(&config, connections, app_version_snapshot);
+        try_start_process_loop(
+            &config,
+            connections,
+            app_version_snapshot,
+            egress_denied_metric,
+        );
     }
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
@@ -332,6 +346,7 @@ fn try_start_process_loop(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    egress_denied_metric: prometheus::IntCounterVec,
 ) {
     if config.cli.process_app_id.is_empty() {
         tracing::info!(
@@ -375,6 +390,42 @@ fn try_start_process_loop(
     };
     let license_gate: Arc<dyn license::FeatureGate> =
         Arc::new(license::LicenseFeatureGate::new(license_client));
+
+    // The `http` bundle capability's shared egress guard (`crate::
+    // capabilities::StageCapabilities::egress`) -- one per process, built
+    // once here and cloned into every per-invoke `StageCapabilities` (see
+    // that struct's doc). `HttpEgressCatalog::new()` starts empty: no
+    // writer populates it yet (`crate::capabilities::HttpEgressCatalog`'s
+    // doc, the same honest gap this module's own doc already documents
+    // for `db`/`kv`/`flags`), so every `app_id` is undeclared and `http`
+    // denies `host_not_declared` until a future DB-driven loader wires
+    // real manifest data in. Reuses this same `license_client`-derived
+    // gate for `waddles.core.bundle-egress` -- see `license::
+    // BundleEgressFlag`.
+    let bundle_egress_flag: Arc<dyn bundle_host_http::egress::FeatureFlag> =
+        match license::build_license_client("waddles") {
+            Ok(c) => bundle_host_http::egress::boxed(license::BundleEgressFlag::new(c)),
+            // Fail-closed: no client at all is the same "disable, don't
+            // start unverified" posture every other startup-config gate in
+            // this function already takes.
+            Err(_) => bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(false)),
+        };
+    let egress = Arc::new(bundle_host_http::egress::EgressGuard::new(
+        Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
+        bundle_host_http::egress::EgressLimits {
+            allow_private_hosts: false,
+            rate_limit_rps: 10,
+            rate_limit_burst: 20,
+            timeout: std::time::Duration::from_secs(10),
+            max_redirects: 3,
+            max_response_bytes: 1_048_576,
+            allowed_ports: vec![443],
+            proxy_url: None,
+        },
+        capabilities::HttpEgressCatalog::new(),
+        egress_denied_metric,
+        bundle_egress_flag,
+    ));
 
     let cli = config.cli.clone();
     let app_id = cli.process_app_id.clone();
@@ -484,6 +535,7 @@ fn try_start_process_loop(
             tenant_id: 0,
             community_id: 0,
             app_version_snapshot,
+            egress,
         };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -594,6 +646,7 @@ fn try_start_changelog_consumer(
     connections: Arc<host_api::ConnectionRegistry>,
     excluded_metric: prometheus::IntCounterVec,
     source_supervisor_metrics: telemetry::SourceBindingSupervisorMetrics,
+    egress_denied_metric: prometheus::IntCounterVec,
     changelog_consumer_metrics: telemetry::ChangelogConsumerMetrics,
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
 ) {
@@ -615,8 +668,30 @@ fn try_start_changelog_consumer(
         Arc::new(license::DbBundleConfigGate::new(Arc::clone(
             &license_client,
         ))),
-        Arc::new(license::MultiTenantWatermarkGate::new(license_client)),
+        Arc::new(license::MultiTenantWatermarkGate::new(Arc::clone(
+            &license_client,
+        ))),
     ]));
+    // Same `bundle_host_http::egress::EgressGuard` wiring as
+    // `try_start_process_loop` (this crate's other, mutually-exclusive
+    // startup path) -- see that function's own doc for the deny-by-default
+    // `HttpEgressCatalog` seam.
+    let egress = Arc::new(bundle_host_http::egress::EgressGuard::new(
+        Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
+        bundle_host_http::egress::EgressLimits {
+            allow_private_hosts: false,
+            rate_limit_rps: 10,
+            rate_limit_burst: 20,
+            timeout: std::time::Duration::from_secs(10),
+            max_redirects: 3,
+            max_response_bytes: 1_048_576,
+            allowed_ports: vec![443],
+            proxy_url: None,
+        },
+        capabilities::HttpEgressCatalog::new(),
+        egress_denied_metric,
+        bundle_host_http::egress::boxed(license::BundleEgressFlag::new(license_client)),
+    ));
 
     let reader_cfg = bundle_active_set::ReaderConfig {
         host: config.cli.db_reader_host.clone(),
@@ -655,6 +730,7 @@ fn try_start_changelog_consumer(
                 Arc::clone(&gate),
                 db.clone(),
                 app_version_snapshot.clone(),
+                Arc::clone(&egress),
             )
             .await
             .map(|deps| {
@@ -693,13 +769,16 @@ fn try_start_changelog_consumer(
 /// `source_supervisor::SupervisorDeps` already (no tenant/community field
 /// left to resolve afterward -- see `crate::source_supervisor`'s own
 /// module doc for why that moved to per-scope resolution inside
-/// `crate::changelog_consumer`).
+/// `crate::changelog_consumer`). `egress` is cloned into every spawned
+/// binding consumer's own `ProcessDeps` -- see `crate::spine::
+/// ProcessDeps::egress`'s doc.
 async fn build_source_supervisor_deps(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
     gate: Arc<dyn license::FeatureGate>,
     db: sea_orm::DatabaseConnection,
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    egress: Arc<bundle_host_http::egress::EgressGuard>,
 ) -> Option<source_supervisor::SupervisorDeps> {
     let Some(keys_raw) = config.envelope_binding_keys.as_ref() else {
         tracing::warn!(
@@ -746,6 +825,7 @@ async fn build_source_supervisor_deps(
         kv_conn,
         gate: capability_gate,
         app_version_snapshot,
+        egress,
     })
 }
 
@@ -893,6 +973,7 @@ mod tests {
             gate,
             db,
             bundle_active_set::ActiveVersionSnapshot::new(),
+            test_egress_guard(),
         )
         .await
         .is_none());
@@ -925,13 +1006,39 @@ mod tests {
             gate,
             db,
             bundle_active_set::ActiveVersionSnapshot::new(),
+            test_egress_guard(),
         )
         .await;
+        // SAFETY: serialized by ENV_LOCK above.
         unsafe {
             std::env::remove_var("VALKEY_URL");
             std::env::remove_var("VALKEY_PASSWORD");
         }
         assert!(deps.is_some());
+    }
+
+    /// A minimal, syntactically valid [`bundle_host_http::egress::
+    /// EgressGuard`] for [`build_source_supervisor_deps`] tests -- same
+    /// shape as `try_start_process_loop`'s own internally-built guard, just
+    /// pre-built here since `build_source_supervisor_deps` takes it as a
+    /// parameter rather than constructing its own.
+    fn test_egress_guard() -> Arc<bundle_host_http::egress::EgressGuard> {
+        Arc::new(bundle_host_http::egress::EgressGuard::new(
+            Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
+            bundle_host_http::egress::EgressLimits {
+                allow_private_hosts: false,
+                rate_limit_rps: 10,
+                rate_limit_burst: 20,
+                timeout: std::time::Duration::from_secs(5),
+                max_redirects: 3,
+                max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
+                proxy_url: None,
+            },
+            capabilities::HttpEgressCatalog::new(),
+            test_egress_denied_metric(),
+            bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(true)),
+        ))
     }
 
     #[test]
@@ -1013,6 +1120,7 @@ mod tests {
             Arc::new(host_api::ConnectionRegistry::new()),
             test_excluded_metric(),
             test_source_supervisor_metrics(),
+            test_egress_denied_metric(),
             test_changelog_consumer_metrics(),
             bundle_active_set::ActiveVersionSnapshot::new(),
         );
@@ -1031,6 +1139,17 @@ mod tests {
     fn test_excluded_metric() -> prometheus::IntCounterVec {
         prometheus::IntCounterVec::new(
             prometheus::Opts::new("test_bundle_active_set_excluded_total", "test"),
+            &["app_id", "reason"],
+        )
+        .expect("valid metric definition")
+    }
+
+    /// A standalone, unregistered `IntCounterVec` for `try_start_process_loop`/
+    /// `try_start_db_bundle_loader` tests -- same rationale as
+    /// [`test_excluded_metric`].
+    fn test_egress_denied_metric() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_svc_process_egress_denied_total", "test"),
             &["app_id", "reason"],
         )
         .expect("valid metric definition")
@@ -1068,6 +1187,7 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             bundle_active_set::ActiveVersionSnapshot::new(),
+            test_egress_denied_metric(),
         );
     }
 
@@ -1084,6 +1204,7 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             bundle_active_set::ActiveVersionSnapshot::new(),
+            test_egress_denied_metric(),
         );
     }
 
@@ -1100,6 +1221,7 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             bundle_active_set::ActiveVersionSnapshot::new(),
+            test_egress_denied_metric(),
         );
     }
 
@@ -1126,6 +1248,7 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             bundle_active_set::ActiveVersionSnapshot::new(),
+            test_egress_denied_metric(),
         );
     }
 
@@ -1159,6 +1282,7 @@ mod tests {
                 &config,
                 Arc::new(host_api::ConnectionRegistry::new()),
                 bundle_active_set::ActiveVersionSnapshot::new(),
+                test_egress_denied_metric(),
             );
             unsafe {
                 std::env::remove_var("VALKEY_URL");
@@ -1199,6 +1323,7 @@ mod tests {
                 &config,
                 Arc::new(host_api::ConnectionRegistry::new()),
                 bundle_active_set::ActiveVersionSnapshot::new(),
+                test_egress_denied_metric(),
             );
             unsafe {
                 std::env::remove_var("VALKEY_URL");
