@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net8.0": {
+      "Newtonsoft.Json": {
+        "type": "Direct",
+        "requested": "[13.0.3, )",
+        "resolved": "13.0.3",
+        "contentHash": "HrC5BUmnfW2fF6yxr58KJqOWvz3ItPki6dsl0d3jkTQyLM5S9y1v9NAZndrbBcNMU5Y6/ktY87r5DE1riQCVXQ=="
+      }
+    }
+  }
+}
