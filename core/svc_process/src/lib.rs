@@ -290,6 +290,57 @@ async fn connect_kv(cfg: &penguin_spine::SpineConfig) -> Option<redis::aio::Mult
     }
 }
 
+/// Builds the `http` bundle capability's shared
+/// [`bundle_host_http::egress::EgressGuard`], wired with the cluster CIDR
+/// denylist and instance-wide private-IP egress policy
+/// (`cli.cluster_cidr_denylist()`/`cli.instance_egress_policy()`) -- shared
+/// by [`try_start_process_loop`] and [`try_start_changelog_consumer`] (this
+/// crate's two mutually-exclusive startup paths), pulled out so both can be
+/// exercised directly in tests without a live Valkey/Postgres connection.
+/// See `mod tests`'s `process_egress_guard_denies_cluster_cidr_even_with_grant_and_policy_allow`
+/// regression test for #425's dropped-denylist bug this guards against.
+///
+/// `None` mirrors both callers' own fail-closed posture: a denylist
+/// re-parse failure (should be impossible, since `CliConfig::validate`
+/// already parsed it successfully at `Config::load` time) disables the
+/// caller rather than starting with a silently-empty denylist.
+fn build_process_egress_guard(
+    cli: &config::CliConfig,
+    catalog: Arc<capabilities::HttpEgressCatalog>,
+    egress_denied_metric: prometheus::IntCounterVec,
+    bundle_egress_flag: Arc<dyn bundle_host_http::egress::FeatureFlag>,
+) -> Option<Arc<bundle_host_http::egress::EgressGuard>> {
+    let cluster_denylist = match cli.cluster_cidr_denylist() {
+        Ok(denylist) => denylist,
+        Err(err) => {
+            tracing::warn!(error = %err, "cluster CIDR denylist re-parse failed after startup validation passed; egress guard not built");
+            return None;
+        }
+    };
+    Some(Arc::new(
+        bundle_host_http::egress::EgressGuard::new(
+            Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
+            bundle_host_http::egress::EgressLimits {
+                allow_private_hosts: false,
+                rate_limit_rps: 10,
+                rate_limit_burst: 20,
+                timeout: std::time::Duration::from_secs(10),
+                max_redirects: 3,
+                max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
+                proxy_url: None,
+            },
+            catalog,
+            egress_denied_metric,
+            bundle_egress_flag,
+        )
+        .with_instance_policy(Arc::new(std::sync::RwLock::new(
+            cli.instance_egress_policy(),
+        )))
+        .with_cluster_denylist(cluster_denylist),
+    ))
+}
+
 /// Attempts to start the **legacy, single-consumer** process-stage drain
 /// loop (`crate::spine::run`) as its own background task, mirroring
 /// `core/svc_action::try_start_dispatch`'s shape: three independent reasons
@@ -405,38 +456,15 @@ fn try_start_process_loop(
             // this function already takes.
             Err(_) => bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(false)),
         };
-    // `CliConfig::validate` (run at `Config::load` time, before this
-    // function is ever reached) already parsed this successfully and
-    // enforced the alpha/local-only empty-denylist exception.
-    let cluster_denylist = match config.cli.cluster_cidr_denylist() {
-        Ok(denylist) => denylist,
-        Err(err) => {
-            tracing::warn!(error = %err, "cluster CIDR denylist re-parse failed after startup validation passed; process loop disabled");
-            return;
-        }
+    let Some(egress) = build_process_egress_guard(
+        &config.cli,
+        capabilities::HttpEgressCatalog::new(),
+        egress_denied_metric,
+        bundle_egress_flag,
+    ) else {
+        tracing::warn!("cluster CIDR denylist re-parse failed after startup validation passed; process loop disabled");
+        return;
     };
-    let egress = Arc::new(
-        bundle_host_http::egress::EgressGuard::new(
-            Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
-            bundle_host_http::egress::EgressLimits {
-                allow_private_hosts: false,
-                rate_limit_rps: 10,
-                rate_limit_burst: 20,
-                timeout: std::time::Duration::from_secs(10),
-                max_redirects: 3,
-                max_response_bytes: 1_048_576,
-                allowed_ports: vec![443],
-                proxy_url: None,
-            },
-            capabilities::HttpEgressCatalog::new(),
-            egress_denied_metric,
-            bundle_egress_flag,
-        )
-        .with_instance_policy(Arc::new(std::sync::RwLock::new(
-            config.cli.instance_egress_policy(),
-        )))
-        .with_cluster_denylist(cluster_denylist),
-    );
 
     let cli = config.cli.clone();
     let app_id = cli.process_app_id.clone();
@@ -638,35 +666,15 @@ fn try_start_changelog_consumer(
     // `try_start_process_loop` (this crate's other, mutually-exclusive
     // startup path) -- see that function's own doc for the deny-by-default
     // `HttpEgressCatalog` seam.
-    let cluster_denylist = match config.cli.cluster_cidr_denylist() {
-        Ok(denylist) => denylist,
-        Err(err) => {
-            tracing::warn!(error = %err, "cluster CIDR denylist re-parse failed after startup validation passed; DB-driven bundle loader/source-binding supervisor not started");
-            return;
-        }
+    let Some(egress) = build_process_egress_guard(
+        &config.cli,
+        capabilities::HttpEgressCatalog::new(),
+        egress_denied_metric,
+        bundle_host_http::egress::boxed(license::BundleEgressFlag::new(license_client)),
+    ) else {
+        tracing::warn!("cluster CIDR denylist re-parse failed after startup validation passed; DB-driven bundle loader/source-binding supervisor not started");
+        return;
     };
-    let egress = Arc::new(
-        bundle_host_http::egress::EgressGuard::new(
-            Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
-            bundle_host_http::egress::EgressLimits {
-                allow_private_hosts: false,
-                rate_limit_rps: 10,
-                rate_limit_burst: 20,
-                timeout: std::time::Duration::from_secs(10),
-                max_redirects: 3,
-                max_response_bytes: 1_048_576,
-                allowed_ports: vec![443],
-                proxy_url: None,
-            },
-            capabilities::HttpEgressCatalog::new(),
-            egress_denied_metric,
-            bundle_host_http::egress::boxed(license::BundleEgressFlag::new(license_client)),
-        )
-        .with_instance_policy(Arc::new(std::sync::RwLock::new(
-            config.cli.instance_egress_policy(),
-        )))
-        .with_cluster_denylist(cluster_denylist),
-    );
 
     let reader_cfg = bundle_active_set::ReaderConfig {
         host: config.cli.db_reader_host.clone(),
@@ -1011,6 +1019,102 @@ mod tests {
             test_egress_denied_metric(),
             bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(true)),
         ))
+    }
+
+    // regression: #425 dropped cluster denylist -- both tests below go
+    // through `build_process_egress_guard`, the exact function both
+    // `try_start_process_loop` and `try_start_changelog_consumer` (the
+    // production wiring) call, so a future merge that silently drops the
+    // `.with_cluster_denylist()`/`.with_instance_policy()` calls fails
+    // these tests, not just the shared `bundle_host_http::egress` crate's
+    // own generic guard suite (which would keep passing even if this crate
+    // stopped wiring the guard up at all).
+
+    /// The cluster CIDR denylist must win even when a `PrivateIp` grant
+    /// covers the address AND the instance policy has opted into private-IP
+    /// egress -- proves `build_process_egress_guard` actually threads
+    /// `cli.cluster_cidr_denylist()` into the guard via
+    /// `.with_cluster_denylist()`, not just that the shared crate supports
+    /// it.
+    #[tokio::test]
+    async fn process_egress_guard_denies_cluster_cidr_even_with_grant_and_policy_allow() {
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--deployment-tier",
+            "production",
+            "--egress-cluster-cidr-denylist",
+            "10.244.0.0/16",
+            "--instance-egress-allow-private-ip",
+        ]);
+        cli.validate().expect("populated denylist passes");
+        let catalog = capabilities::HttpEgressCatalog::new();
+        catalog.update(
+            "waddles.a.b.c",
+            bundle_host_http::egress::EgressRuleRow {
+                private_ip_grants: vec![("10.244.5.6".to_string(), vec!["GET".to_string()])],
+                ..Default::default()
+            },
+        );
+        let guard = build_process_egress_guard(
+            &cli,
+            catalog,
+            test_egress_denied_metric(),
+            bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(true)),
+        )
+        .expect("valid config produces a guard");
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://10.244.5.6/"}),
+            )
+            .await
+            .expect_err("cluster CIDR denylist must deny despite grant + policy allow");
+        assert_eq!(err.code, "ssrf_blocked_address");
+    }
+
+    /// The instance-wide private-IP policy denies a `PrivateIp` grant by
+    /// default (no cluster CIDR involved) -- proves `build_process_egress_
+    /// guard` actually threads `cli.instance_egress_policy()` into the
+    /// guard via `.with_instance_policy()`.
+    #[tokio::test]
+    async fn process_egress_guard_denies_private_ip_grant_when_instance_policy_is_default_deny() {
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--deployment-tier",
+            "production",
+            "--egress-cluster-cidr-denylist",
+            "10.99.0.0/16",
+        ]);
+        cli.validate().expect("populated denylist passes");
+        assert!(
+            !cli.instance_egress_policy().allow_private_ip_egress,
+            "default instance policy must deny private-ip egress"
+        );
+        let catalog = capabilities::HttpEgressCatalog::new();
+        catalog.update(
+            "waddles.a.b.c",
+            bundle_host_http::egress::EgressRuleRow {
+                // 10.0.0.9 is outside the cluster denylist above, so only
+                // the instance policy is under test here.
+                private_ip_grants: vec![("10.0.0.9".to_string(), vec!["GET".to_string()])],
+                ..Default::default()
+            },
+        );
+        let guard = build_process_egress_guard(
+            &cli,
+            catalog,
+            test_egress_denied_metric(),
+            bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(true)),
+        )
+        .expect("valid config produces a guard");
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://10.0.0.9/"}),
+            )
+            .await
+            .expect_err("default-deny instance policy must deny an otherwise-granted private IP");
+        assert_eq!(err.code, "ssrf_blocked_address");
     }
 
     #[test]
