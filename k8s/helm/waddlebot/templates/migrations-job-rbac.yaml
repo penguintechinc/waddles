@@ -25,14 +25,18 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: db-migrate
   annotations:
-    # post-install/post-upgrade, NOT pre-install -- templates/infrastructure/postgres.yaml
+    # resolve-433 -- post-install, NOT pre-install -- templates/infrastructure/postgres.yaml
     # is a plain (non-hook) resource, only created in Helm's main-resource phase, which
     # runs AFTER all pre-install hooks. A pre-install db-migrate Job would try to
     # connect to a Postgres that Helm hasn't created yet on a first-ever install
-    # (deadlock, caught by this very e2e workflow). Moving to post-install means
-    # Postgres + waddlebot-secrets/waddlebot-config (also main resources) already
-    # exist by the time this hook fires.
-    "helm.sh/hook": post-install,post-upgrade
+    # (deadlock, caught by this very e2e workflow). Post-install means Postgres +
+    # waddlebot-secrets/waddlebot-config (also main resources) already exist by the
+    # time this hook fires.
+    #
+    # PRE-upgrade, NOT post-upgrade -- matches migrations-job.yaml's identical move:
+    # this SA must exist before the migrations Job runs pre-upgrade (weight -5), so it
+    # stays at the lower weight -10 in the SAME phase.
+    "helm.sh/hook": post-install,pre-upgrade
     "helm.sh/hook-weight": "-10"
     "helm.sh/hook-delete-policy": before-hook-creation
 automountServiceAccountToken: false
