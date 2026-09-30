@@ -1,0 +1,28 @@
+# Waddles Helm Chart - Production Values (DigitalOcean, not built yet)
+#
+# NOTE: this file is scoped to the feature/bundle-egress-gateway PR only.
+# The chart has no existing values-production.yaml — full production
+# parity is tracked separately (prod cluster isn't built yet) and NOT part
+# of this change. This file only carries the egress-proxy / egress-policy
+# overrides required so a production render doesn't hit the `fail` guard,
+# plus PenguinTech prod resource tier (500m/1000m cpu, 512Mi/1Gi mem,
+# replicas 3+) for the proxy itself.
+
+# Egress lockdown — MANDATORY (fail guard blocks a render with this off).
+egressProxy:
+  enabled: true
+  environment: "production"
+  replicas: 3
+  resources:
+    requests: { cpu: "500m", memory: "512Mi" }
+    limits: { cpu: "1000m", memory: "1Gi" }
+
+egressPolicy:
+  enabled: true
+  clusterCidrs:
+    podCidr: "10.244.0.0/16"    # DigitalOcean DOKS default — confirm against cluster before deploy
+    serviceCidr: "10.96.0.0/12"
+    nodeCidr: "10.0.0.0/8"
+
+spire:
+  environment: "production"
