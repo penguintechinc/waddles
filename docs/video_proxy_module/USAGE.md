@@ -49,7 +49,7 @@ Dependencies include:
 - `pydal==20241111.1` — Database abstraction layer
 - `pyjwt==2.8.0` — JWT authentication
 - `grpcio==1.63.0` — gRPC support
-- `minio==7.2.5` — Object storage client
+- `boto3` — Object storage client (S3-compatible: SeaweedFS)
 - `psycopg2-binary==2.9.9` — PostgreSQL adapter
 
 ### Step 4: Configure Environment
@@ -84,10 +84,10 @@ MARCHPROXY_GRPC_PORT=50050
 # JWT Configuration
 JWT_SECRET_KEY=your-secret-key-change-in-production
 
-# MinIO Configuration
-MINIO_ENDPOINT=localhost:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
+# S3-Compatible Object Storage Configuration
+S3_ENDPOINT_URL=localhost:8333
+S3_ACCESS_KEY_ID=waddlebot
+S3_SECRET_ACCESS_KEY=waddlebot
 
 # Feature Limits
 FREE_MAX_DESTINATIONS=3
@@ -145,13 +145,13 @@ services:
       GRPC_PORT: 50065
       MODULE_PORT: 8092
       JWT_SECRET_KEY: your-secret-key
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
+      S3_ENDPOINT_URL: infra-seaweedfs:8333
+      S3_ACCESS_KEY_ID: waddlebot
+      S3_SECRET_ACCESS_KEY: waddlebot
       LOG_LEVEL: INFO
     depends_on:
       - postgres
-      - minio
+      - seaweedfs
     networks:
       - waddlebot-network
 ```
@@ -165,7 +165,7 @@ docker run -d \
   -p 50065:50065 \
   -e DATABASE_URL=postgresql://waddlebot:password@postgres:5432/waddlebot \
   -e JWT_SECRET_KEY=your-secret-key \
-  -e MINIO_ENDPOINT=minio:9000 \
+  -e S3_ENDPOINT_URL=infra-seaweedfs:8333 \
   waddlebot/video-proxy:latest
 ```
 

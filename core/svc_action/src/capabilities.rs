@@ -23,19 +23,18 @@
 //! persistent IRC connection; Discord outbound via a direct, stateless bot
 //! REST send -- see [`StageCapabilities::handle_discord_relay`]'s doc for
 //! why Discord takes a different path than Twitch), `clock`, `context`,
-//! `log`, `kv`, and `db` are fully wired. `http` is wired to
+//! `log`, and `kv` are fully wired. `http` is wired to
 //! `crate::egress::EgressGuard` (spec §8's full SSRF guard). `kv` is wired
 //! to `bundle_host_kv::KvHost` (the crate shared with `core/svc_process` --
 //! see that crate's own module doc for the key-derivation/isolation/quota
 //! design) over the same direct Valkey connection this stage already opens
 //! for `relay`/usage metering (see [`Self::with_kv`]'s doc for why that
 //! connection is reused rather than a second one opened). `db` is wired to
-//! `bundle_host_db::DbHost` (mirrors
-//! `core/svc_process::capabilities::StageCapabilities::handle_db`
-//! byte-for-byte, rescoped per-call to this connection's [`InvokeScope`]
-//! instead of svc_process's fixed per-invocation `StageCapabilities`).
-//! `flags` remains a documented `TODO(M3+)` seam -- see
-//! [`StageCapabilities::handle`]'s match arms.
+//! `bundle_host_db::DbHost` (mirrors `core/svc_process::capabilities::
+//! StageCapabilities::handle_db` byte-for-byte, rescoped per-call to this
+//! connection's [`InvokeScope`] instead of svc_process's fixed
+//! per-invocation `StageCapabilities`). `flags` remains a documented
+//! `TODO(M3+)` seam -- see [`StageCapabilities::handle`]'s match arm.
 //!
 //! A bundle never holds a platform credential (spec §4.3): every
 //! capability here resolves any credential itself, from this process's own
@@ -259,6 +258,7 @@ struct DiscordRelay {
 /// see this module's `tests::FakeKvBackend`. Holds no per-connection
 /// tenant/community/app_id (see the module doc -- that scope now arrives
 /// per call via [`InvokeScope`]).
+///
 /// Everything `handle_db` needs, shared across every invocation this
 /// process serves -- constructed once at startup and cloned cheaply into
 /// each connection's [`StageCapabilities`] via `Arc`. Byte-for-byte the
@@ -296,17 +296,17 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Multiplex
     /// See [`DiscordRelay`]'s doc; `None` until [`Self::with_discord`] is
     /// called.
     discord: Option<DiscordRelay>,
+    /// See [`Self::with_kv`]'s doc; `None` until it is called (mirrors
+    /// [`Self::discord`]'s graceful-degradation shape: a bundle sees
+    /// `not_implemented` rather than this process failing to start if a
+    /// live Valkey connection for `kv` was never configured).
+    kv: Option<KvHost<K>>,
     /// `None` until `crate::lib`'s startup wiring provisions a live
     /// Postgres pool + flag client -- every `db` call denies
     /// `feature_disabled` in that state, never panics (mirrors every
     /// other unimplemented-seam capability's fail-closed default in
     /// [`Self::handle`]).
     db: Option<DbWiring>,
-    /// See [`Self::with_kv`]'s doc; `None` until it is called (mirrors
-    /// [`Self::discord`]'s graceful-degradation shape: a bundle sees
-    /// `not_implemented` rather than this process failing to start if a
-    /// live Valkey connection for `kv` was never configured).
-    kv: Option<KvHost<K>>,
 }
 
 impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
@@ -325,19 +325,9 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             egress,
             usage,
             discord: None,
-            db: None,
             kv: None,
+            db: None,
         }
-    }
-
-    /// Attaches the `db` capability's live wiring -- called once at
-    /// startup (`crate::lib`) with the shared, process-wide [`DbWiring`],
-    /// never per-connection. Builder-style so existing `StageCapabilities::new`
-    /// call sites (including every current test) are unaffected. Mirrors
-    /// `core/svc_process::capabilities::StageCapabilities::with_db`.
-    pub fn with_db(mut self, db: DbWiring) -> Self {
-        self.db = Some(db);
-        self
     }
 
     /// Enables the `kv` capability over `backend` (production:
@@ -362,6 +352,16 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     ) -> Self {
         self.kv = Some(KvHost::new(backend, capabilities));
+        self
+    }
+
+    /// Attaches the `db` capability's live wiring -- called once at
+    /// startup (`crate::lib`) with the shared, process-wide [`DbWiring`],
+    /// never per-connection. Builder-style so existing `StageCapabilities::new`
+    /// call sites (including every current test) are unaffected. Mirrors
+    /// `core/svc_process::capabilities::StageCapabilities::with_db`.
+    pub fn with_db(mut self, db: DbWiring) -> Self {
+        self.db = Some(db);
         self
     }
 
@@ -650,6 +650,83 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         Ok(serde_json::json!({}))
     }
 
+    /// `kv.get`/`kv.set`/`kv.delete`/`kv.increment` (`wit/waddle-bundle/
+    /// stage.wit` `interface kv`). Every argument shape here matches
+    /// exactly what `core/bundle_executor::host::imports`'s `kv::Host`
+    /// impl sends (`{"key"}`, `{"key","value","ttl_seconds"}`,
+    /// `{"key","delta","ttl_seconds"}`) and expects back
+    /// (`{"value": ...}`) -- see that module's doc for the wire contract
+    /// this must not drift from. Tenant/community/app_id come from `scope`
+    /// (never `call.app_id`, which is executor-set metadata, not a trust
+    /// boundary this capability re-derives its own scope from -- module
+    /// doc: "every capability here resolves its own scope from `self`").
+    async fn handle_kv(
+        &self,
+        scope: &InvokeScope,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        let Some(kv) = &self.kv else {
+            return Err(denied(
+                "not_implemented",
+                "kv capability is not configured on this stage (no Valkey connection)",
+            ));
+        };
+        let kv_scope = KvScope::new(
+            scope.tenant.clone(),
+            scope.community.clone(),
+            scope.app_id.clone(),
+        );
+
+        match call.op.as_str() {
+            "get" => {
+                let args: KvKeyArgs = parse_kv_args(&call.args)?;
+                let value = kv
+                    .get(&kv_scope, call.call_id, &args.key)
+                    .await
+                    .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({ "value": value }))
+            }
+            "set" => {
+                let args: KvSetArgs = parse_kv_args(&call.args)?;
+                kv.set(
+                    &kv_scope,
+                    call.call_id,
+                    &args.key,
+                    &args.value,
+                    args.ttl_seconds,
+                )
+                .await
+                .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({}))
+            }
+            "delete" => {
+                let args: KvKeyArgs = parse_kv_args(&call.args)?;
+                kv.delete(&kv_scope, call.call_id, &args.key)
+                    .await
+                    .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({}))
+            }
+            "increment" => {
+                let args: KvIncrementArgs = parse_kv_args(&call.args)?;
+                let value = kv
+                    .increment(
+                        &kv_scope,
+                        call.call_id,
+                        &args.key,
+                        args.delta,
+                        args.ttl_seconds,
+                    )
+                    .await
+                    .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({ "value": value }))
+            }
+            other => Err(denied(
+                "unknown_op",
+                format!("kv op {other:?} not supported"),
+            )),
+        }
+    }
+
     /// Structured insert/get/update/delete/query against this app's own
     /// `app_core`/`app_community` table -- byte-for-byte mirror of
     /// `core/svc_process::capabilities::StageCapabilities::handle_db`
@@ -788,83 +865,6 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
 
         result.map(row_to_json).map_err(db_error_to_host_error)
     }
-
-    /// `kv.get`/`kv.set`/`kv.delete`/`kv.increment` (`wit/waddle-bundle/
-    /// stage.wit` `interface kv`). Every argument shape here matches
-    /// exactly what `core/bundle_executor::host::imports`'s `kv::Host`
-    /// impl sends (`{"key"}`, `{"key","value","ttl_seconds"}`,
-    /// `{"key","delta","ttl_seconds"}`) and expects back
-    /// (`{"value": ...}`) -- see that module's doc for the wire contract
-    /// this must not drift from. Tenant/community/app_id come from `scope`
-    /// (never `call.app_id`, which is executor-set metadata, not a trust
-    /// boundary this capability re-derives its own scope from -- module
-    /// doc: "every capability here resolves its own scope from `self`").
-    async fn handle_kv(
-        &self,
-        scope: &InvokeScope,
-        call: &HostCallBody,
-    ) -> Result<serde_json::Value, HostResultError> {
-        let Some(kv) = &self.kv else {
-            return Err(denied(
-                "not_implemented",
-                "kv capability is not configured on this stage (no Valkey connection)",
-            ));
-        };
-        let kv_scope = KvScope::new(
-            scope.tenant.clone(),
-            scope.community.clone(),
-            scope.app_id.clone(),
-        );
-
-        match call.op.as_str() {
-            "get" => {
-                let args: KvKeyArgs = parse_kv_args(&call.args)?;
-                let value = kv
-                    .get(&kv_scope, call.call_id, &args.key)
-                    .await
-                    .map_err(kv_err_to_host)?;
-                Ok(serde_json::json!({ "value": value }))
-            }
-            "set" => {
-                let args: KvSetArgs = parse_kv_args(&call.args)?;
-                kv.set(
-                    &kv_scope,
-                    call.call_id,
-                    &args.key,
-                    &args.value,
-                    args.ttl_seconds,
-                )
-                .await
-                .map_err(kv_err_to_host)?;
-                Ok(serde_json::json!({}))
-            }
-            "delete" => {
-                let args: KvKeyArgs = parse_kv_args(&call.args)?;
-                kv.delete(&kv_scope, call.call_id, &args.key)
-                    .await
-                    .map_err(kv_err_to_host)?;
-                Ok(serde_json::json!({}))
-            }
-            "increment" => {
-                let args: KvIncrementArgs = parse_kv_args(&call.args)?;
-                let value = kv
-                    .increment(
-                        &kv_scope,
-                        call.call_id,
-                        &args.key,
-                        args.delta,
-                        args.ttl_seconds,
-                    )
-                    .await
-                    .map_err(kv_err_to_host)?;
-                Ok(serde_json::json!({ "value": value }))
-            }
-            other => Err(denied(
-                "unknown_op",
-                format!("kv op {other:?} not supported"),
-            )),
-        }
-    }
 }
 
 fn json_to_db_value(v: &serde_json::Value) -> Result<DbValue, HostResultError> {
@@ -972,8 +972,9 @@ impl<Q: RelayQueue, K: KvBackend> CapabilityHandler for StageCapabilities<Q, K> 
                 CapabilityKind::Context => self.handle_context(scope),
                 CapabilityKind::Log => self.handle_log(scope, &call.args),
                 CapabilityKind::Http => self.egress.send(&scope.app_id, &call.args).await,
-                CapabilityKind::Db => self.handle_db(scope, &call).await,
                 CapabilityKind::Kv => self.handle_kv(scope, &call).await,
+                // `db` is wired below (mirrors svc_process).
+                CapabilityKind::Db => self.handle_db(scope, &call).await,
                 CapabilityKind::Flags => Err(denied(
                     "not_implemented",
                     "flags capability is not wired in this build -- TODO(M3+)",
@@ -1295,127 +1296,6 @@ mod tests {
         }
     }
 
-    /// Mirrors `core/svc_process::capabilities::tests::mock_db_wiring` --
-    /// same `MockDatabase`-backed `PostgresBackend`, over this crate's own
-    /// `FeatureFlag`/`StaticFlag` instead of svc_process's `FeatureGate`.
-    fn mock_db_wiring(flag_on: bool) -> DbWiring {
-        let conn = sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection();
-        DbWiring {
-            host: Arc::new(DbHost::new(bundle_host_db::PostgresBackend::new(conn))),
-            schemas: Arc::new(SchemaCache::new()),
-            capabilities: Arc::new(DbCapabilitySnapshot::new()),
-            flag: crate::flags::boxed(crate::flags::StaticFlag(flag_on)),
-        }
-    }
-
-    #[tokio::test]
-    async fn db_capability_denies_not_implemented_when_never_wired() {
-        let capabilities = caps(FakeRelayQueue::default());
-        let err = capabilities
-            .handle_db(
-                &scope(),
-                &call(
-                    CapabilityKind::Db,
-                    "get",
-                    serde_json::json!({"row_id": "x"}),
-                ),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, "not_implemented");
-    }
-
-    #[tokio::test]
-    async fn db_capability_denies_feature_disabled_when_flag_is_off() {
-        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(false));
-        let err = capabilities
-            .handle_db(
-                &scope(),
-                &call(
-                    CapabilityKind::Db,
-                    "get",
-                    serde_json::json!({"row_id": "x"}),
-                ),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, "feature_disabled");
-    }
-
-    #[tokio::test]
-    async fn db_capability_denies_no_table_when_flag_on_but_unprovisioned() {
-        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
-        capabilities.db.as_ref().unwrap().capabilities.update(
-            "waddles.bot.commands.default",
-            ["storage.tables".to_string()],
-        );
-        let err = capabilities
-            .handle_db(
-                &scope(),
-                &call(
-                    CapabilityKind::Db,
-                    "get",
-                    serde_json::json!({"row_id": "00000000-0000-0000-0000-000000000000"}),
-                ),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, "no_table");
-    }
-
-    #[tokio::test]
-    async fn db_capability_query_op_denies_no_table_when_unprovisioned() {
-        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
-        capabilities.db.as_ref().unwrap().capabilities.update(
-            "waddles.bot.commands.default",
-            ["storage.tables".to_string()],
-        );
-        let err = capabilities
-            .handle_db(
-                &scope(),
-                &call(
-                    CapabilityKind::Db,
-                    "query",
-                    serde_json::json!({"limit": 10, "offset": 0}),
-                ),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, "no_table");
-    }
-
-    #[tokio::test]
-    async fn db_capability_rejects_an_unknown_op() {
-        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
-        let err = capabilities
-            .handle_db(
-                &scope(),
-                &call(CapabilityKind::Db, "truncate", serde_json::json!({})),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, "unknown_op");
-    }
-
-    #[tokio::test]
-    async fn db_capability_dispatches_through_the_handle_match_arm() {
-        // Proves `CapabilityKind::Db` in `StageCapabilities::handle` itself
-        // reaches `handle_db` (not just the direct-call unit tests above).
-        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(false));
-        let err = CapabilityHandler::handle(
-            &capabilities,
-            &scope(),
-            call(
-                CapabilityKind::Db,
-                "get",
-                serde_json::json!({"row_id": "x"}),
-            ),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.code, "feature_disabled");
-    }
-
     #[tokio::test]
     async fn kv_is_not_implemented_when_no_backend_was_configured() {
         let caps = caps(FakeRelayQueue::default());
@@ -1598,6 +1478,108 @@ mod tests {
         assert_eq!(err.code, "unknown_op");
     }
 
+    /// Mirrors `core/svc_process::capabilities::tests::mock_db_wiring` --
+    /// same `MockDatabase`-backed `PostgresBackend`, over this crate's own
+    /// `FeatureFlag`/`StaticFlag` instead of svc_process's `FeatureGate`.
+    fn mock_db_wiring(flag_on: bool) -> DbWiring {
+        let conn = sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection();
+        DbWiring {
+            host: Arc::new(DbHost::new(bundle_host_db::PostgresBackend::new(conn))),
+            schemas: Arc::new(SchemaCache::new()),
+            capabilities: Arc::new(DbCapabilitySnapshot::new()),
+            flag: crate::flags::boxed(crate::flags::StaticFlag(flag_on)),
+        }
+    }
+
+    #[tokio::test]
+    async fn db_capability_denies_not_implemented_when_never_wired() {
+        let capabilities = caps(FakeRelayQueue::default());
+        let err = capabilities
+            .handle_db(
+                &scope(),
+                &call(
+                    CapabilityKind::Db,
+                    "get",
+                    serde_json::json!({"row_id": "x"}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_implemented");
+    }
+
+    #[tokio::test]
+    async fn db_capability_denies_feature_disabled_when_flag_is_off() {
+        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(false));
+        let err = capabilities
+            .handle_db(
+                &scope(),
+                &call(
+                    CapabilityKind::Db,
+                    "get",
+                    serde_json::json!({"row_id": "x"}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "feature_disabled");
+    }
+
+    #[tokio::test]
+    async fn db_capability_denies_no_table_when_flag_on_but_unprovisioned() {
+        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
+        capabilities.db.as_ref().unwrap().capabilities.update(
+            "waddles.bot.commands.default",
+            ["storage.tables".to_string()],
+        );
+        let err = capabilities
+            .handle_db(
+                &scope(),
+                &call(
+                    CapabilityKind::Db,
+                    "get",
+                    serde_json::json!({"row_id": "00000000-0000-0000-0000-000000000000"}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "no_table");
+    }
+
+    #[tokio::test]
+    async fn db_capability_query_op_denies_no_table_when_unprovisioned() {
+        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
+        capabilities.db.as_ref().unwrap().capabilities.update(
+            "waddles.bot.commands.default",
+            ["storage.tables".to_string()],
+        );
+        let err = capabilities
+            .handle_db(
+                &scope(),
+                &call(
+                    CapabilityKind::Db,
+                    "query",
+                    serde_json::json!({"limit": 10, "offset": 0}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "no_table");
+    }
+
+    #[tokio::test]
+    async fn db_capability_rejects_an_unknown_op() {
+        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
+        let err = capabilities
+            .handle_db(
+                &scope(),
+                &call(CapabilityKind::Db, "truncate", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "unknown_op");
+    }
+
     #[tokio::test]
     async fn kv_rejects_a_guest_key_that_attempts_a_namespace_escape() {
         let caps = caps_with_kv(FakeRelayQueue::default());
@@ -1656,6 +1638,25 @@ mod tests {
             serde_json::Value::Null,
             "a different app_id must never see this app's value"
         );
+    }
+
+    #[tokio::test]
+    async fn db_capability_dispatches_through_the_handle_match_arm() {
+        // Proves `CapabilityKind::Db` in `StageCapabilities::handle` itself
+        // reaches `handle_db` (not just the direct-call unit tests above).
+        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(false));
+        let err = CapabilityHandler::handle(
+            &capabilities,
+            &scope(),
+            call(
+                CapabilityKind::Db,
+                "get",
+                serde_json::json!({"row_id": "x"}),
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "feature_disabled");
     }
 
     #[test]

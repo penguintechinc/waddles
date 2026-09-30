@@ -107,7 +107,7 @@ Environment above -- no new ones for this wiring.
 ```
 RTMP:1935 ┐                                    ┌ HlsSink   -> /live/{cid}/...
 SRT:9000  ┼-> ingest_tx -> Orchestrator -> FfmpegSupervisor ┼ RelaySink -> RtmpPush/SrtPush
-WHIP POST ┘   (streaming_configs lookup   (spawn ffmpeg /   └ RecordSink -> MinIO/S3 (if S3_*)
+WHIP POST ┘   (streaming_configs lookup   (spawn ffmpeg /   └ RecordSink -> SeaweedFS/S3 (if S3_*)
  /whip/{tok}   by source_url == key)       start_with_whip_sdp)
 ```
 

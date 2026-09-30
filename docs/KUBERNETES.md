@@ -26,7 +26,7 @@ Complete technical reference for deploying, managing, and operating Waddles on K
 Waddles is a microservices-based application designed for Kubernetes deployment. The platform consists of:
 
 - **32 Services**: 24+ application modules + 6 infrastructure services
-- **5 Infrastructure Services**: PostgreSQL, Redis, MinIO, Qdrant, Ollama
+- **5 Infrastructure Services**: PostgreSQL, Redis, SeaweedFS, Qdrant, Ollama
 - **8 Core Modules**: Router, Hub, Identity, Labels, Browser Source, Reputation, Community, AI Researcher
 - **5 Collector Modules**: Twitch, Discord, Slack, YouTube Live, Kick
 - **9 Interactive Modules**: AI, Alias, Shoutout, Inventory, Calendar, Memories, YouTube Music, Spotify, Loyalty
@@ -231,7 +231,7 @@ kubectl get pods -n waddlebot
 NAME                              READY   STATUS    RESTARTS   AGE
 postgres-xxxxx                    1/1     Running   0          5m
 redis-xxxxx                       1/1     Running   0          5m
-minio-xxxxx                       1/1     Running   0          5m
+seaweedfs-xxxxx                   1/1     Running   0          5m
 qdrant-xxxxx                      1/1     Running   0          5m
 ollama-xxxxx                      1/1     Running   0          5m
 router-xxxxx                      2/2     Running   0          3m
@@ -438,9 +438,9 @@ sharedEnv:
   REDIS_PORT: "6379"
   REDIS_DB: "0"
 
-  # MinIO
-  MINIO_ENDPOINT: "minio:9000"
-  MINIO_SECURE: "false"
+  # SeaweedFS S3 gateway
+  S3_ENDPOINT_URL: "http://infra-seaweedfs:8333"
+  S3_FORCE_PATH_STYLE: "true"
 
   # Ollama
   OLLAMA_HOST: "http://ollama:11434"

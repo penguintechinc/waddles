@@ -119,11 +119,6 @@ redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp"
 # declares the identical dependency so the query/diff logic is written and
 # tested exactly once. See `core/bundle_active_set/Cargo.toml`.
 bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
-# `db` bundle host capability (`src/capabilities.rs::handle_db`) -- same
-# same-repo path dependency as `core/svc_process`'s identical line: this
-# crate's identifier-safety/tenant-isolation rules are owned by this
-# repo's own bundle-db-capability design doc, not penguin-libs.
-bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
 # The `kv` bundle host capability's shared key-derivation/isolation/quota
 # logic (`src/capabilities.rs`'s `handle_kv`) -- a same-repo `path`
 # dependency, NOT a `penguin-libs` git dependency: like `bundle-active-set`
@@ -133,6 +128,11 @@ bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
 # capability is written and tested exactly once. See
 # `core/bundle_host_kv/Cargo.toml`.
 bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0" }
+# `db` bundle host capability (`src/capabilities.rs::handle_db`) -- same
+# same-repo path dependency as `core/svc_process`'s identical line: this
+# crate's identifier-safety/tenant-isolation rules are owned by this
+# repo's own bundle-db-capability design doc, not penguin-libs.
+bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
 # The bundle `http` host capability's shared, SSRF-hardened egress guard
 # (`src/egress.rs`, now a thin re-export shim) -- extracted here (PR #459
 # follow-up) so `core/svc_process` can enforce the identical pipeline for

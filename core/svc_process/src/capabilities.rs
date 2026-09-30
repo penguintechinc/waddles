@@ -30,11 +30,13 @@
 //! shared `bundle_host_http::egress::EgressGuard` pipeline (extracted from
 //! `core/svc_action`, PR #459 follow-up) and the interim capability-gate
 //! seam this stage's own catalog stands in for ahead of PR #433's standard
-//! `core/bundle_capability_gate::authorize` landing. `db`/`flags` remain
-//! documented seams -- see [`StageCapabilities::handle`]'s match arms --
-//! since a real `db` wiring needs the manifest's `data.tables` allowlist
-//! plus per-bundle-role RLS (`SET LOCAL waddles.tenant`/`waddles.community`,
-//! spec §7.4/§11.10), tracked as a separate design in progress (PR #498).
+//! `core/bundle_capability_gate::authorize` landing. `db` is wired too
+//! (PR #498) -- structured insert/get/update/delete against a bundle's own
+//! `app_core`/`app_community` table via [`DbWiring`], gated by
+//! `crate::license::BUNDLE_DB_CAPABILITY_FLAG` (unseen/OFF denies
+//! `feature_disabled`); `query` remains unimplemented (see
+//! `bundle_host_db`'s crate doc). `flags` remains a documented seam -- see
+//! [`StageCapabilities::handle`]'s match arms.
 //! `relay` is never granted to a process-stage bundle at all (spec §6.5:
 //! "Capability: granted only to action-stage bundles") and is denied
 //! unconditionally, not merely unimplemented.
@@ -124,24 +126,6 @@ fn sanitize_bundle_log_message(raw_message: &str) -> String {
     message
 }
 
-/// Everything `handle_db` needs, shared across every invocation this
-/// process serves -- constructed once at startup (never per-invoke, unlike
-/// [`StageCapabilities`] itself) and cloned cheaply into each one via
-/// `Arc` (`crate::spine`'s call site). `schemas`/`capabilities` are
-/// refreshed by this service's own `bundle_loader` poll (not wired in this
-/// landing -- see `bundle_host_db`'s crate doc "remaining work"); an
-/// `app_id` neither has ever heard of fails closed by construction
-/// ([`DbHost`]'s own resolve-then-authorize order).
-#[derive(Clone)]
-pub struct DbWiring {
-    pub host: Arc<DbHost<PostgresBackend>>,
-    pub schemas: Arc<SchemaCache>,
-    pub capabilities: Arc<DbCapabilitySnapshot>,
-    /// `crate::license::BUNDLE_DB_CAPABILITY_FLAG` gate -- OFF denies every
-    /// `db` call `feature_disabled` before any schema/authorize lookup.
-    pub flag: Arc<dyn FeatureGate>,
-}
-
 /// Per-`app_id` egress-allowlist source for this stage's `http` capability
 /// -- the interim capability-gate seam (`docs/superpowers/specs/
 /// 2026-09-28-bundle-permissions-and-capability-gate.md`, PR #419/#433).
@@ -188,29 +172,61 @@ impl EgressRuleSource for HttpEgressCatalog {
     }
 }
 
+/// Everything `handle_db` needs, shared across every invocation this
+/// process serves -- constructed once at startup (never per-invoke, unlike
+/// [`StageCapabilities`] itself) and cloned cheaply into each one via
+/// `Arc` (`crate::spine`'s call site). `schemas`/`capabilities` are
+/// refreshed by this service's own `bundle_loader` poll (not wired in this
+/// landing -- see `bundle_host_db`'s crate doc "remaining work"); an
+/// `app_id` neither has ever heard of fails closed by construction
+/// ([`DbHost`]'s own resolve-then-authorize order).
+#[derive(Clone)]
+pub struct DbWiring {
+    pub host: Arc<DbHost<PostgresBackend>>,
+    pub schemas: Arc<SchemaCache>,
+    pub capabilities: Arc<DbCapabilitySnapshot>,
+    /// `crate::license::BUNDLE_DB_CAPABILITY_FLAG` gate -- OFF denies every
+    /// `db` call `feature_disabled` before any schema/authorize lookup.
+    pub flag: Arc<dyn FeatureGate>,
+}
+
+/// The real capability implementation this stage wires today, scoped to
+/// exactly one invocation's `(tenant, community, app_id)` -- see the
+/// module doc for why this is constructed per-invoke, never per-connection.
+/// Generic over [`KvBackend`] (defaulted to the production connection
+/// type) for the same reason `core/svc_action::capabilities::
+/// StageCapabilities` is: `handle_kv`'s argument-parsing/error-mapping is
+/// unit-testable against a fake implementing the public
+/// `bundle_host_kv::KvBackend` trait, with no live Valkey server -- see
+/// this module's `tests::FakeKvBackend`. [`egress`] is the one exception
+/// to "everything scope-implicit, nothing shared" -- it is a
+/// per-*process* singleton (owns rate-limit token buckets keyed by
+/// `app_id` across every invoke, spec §8.2 step 8), built once by this
+/// stage's own startup wiring and cloned (cheap, `Arc`) into every
+/// per-invoke `StageCapabilities`.
 pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     tenant: String,
     community: Option<String>,
     app_id: String,
+    /// See [`Self::with_kv`]'s doc; `None` until it is called (a bundle
+    /// sees `not_implemented` rather than this loop failing to start if
+    /// the Valkey connection for `kv` was never configured).
+    kv: Option<KvHost<K>>,
+    egress: Arc<EgressGuard>,
     /// `None` until `crate::lib`'s startup wiring provisions a live
     /// Postgres pool + flag client -- every `db` call denies
     /// `feature_disabled` in that state, never panics (mirrors every other
     /// unimplemented-seam capability's fail-closed default in
     /// [`Self::handle`]).
     db: Option<DbWiring>,
-    /// See [`Self::with_kv`]'s doc; `None` until it is called (a bundle
-    /// sees `not_implemented` rather than this loop failing to start if
-    /// the Valkey connection for `kv` was never configured).
-    kv: Option<KvHost<K>>,
-    egress: Arc<EgressGuard>,
 }
 
 impl<K: KvBackend> StageCapabilities<K> {
     /// Builds the capability set for exactly one `invoke` -- `context` and
     /// every other capability are scope-implicit (spec §5.11: "No bundle
-    /// host call accepts a tenant or community argument at all"). `db`/`kv`
-    /// start unconfigured; see [`Self::with_db`]/[`Self::with_kv`]. `egress`
-    /// is the shared, per-process [`EgressGuard`] -- see the struct doc.
+    /// host call accepts a tenant or community argument at all"). `kv`
+    /// starts unconfigured; see [`Self::with_kv`]. `egress` is the shared,
+    /// per-process [`EgressGuard`] -- see the struct doc.
     pub fn new(
         tenant: String,
         community: Option<String>,
@@ -221,19 +237,10 @@ impl<K: KvBackend> StageCapabilities<K> {
             tenant,
             community,
             app_id,
-            db: None,
             kv: None,
             egress,
+            db: None,
         }
-    }
-
-    /// Attaches the `db` capability's live wiring -- called once at
-    /// startup (`crate::lib`) with the shared, process-wide [`DbWiring`],
-    /// never per-invoke. Builder-style so existing `StageCapabilities::new`
-    /// call sites (including every current test) are unaffected.
-    pub fn with_db(mut self, db: DbWiring) -> Self {
-        self.db = Some(db);
-        self
     }
 
     /// Enables the `kv` capability over `backend` (production:
@@ -254,6 +261,15 @@ impl<K: KvBackend> StageCapabilities<K> {
         capabilities: std::sync::Arc<bundle_host_kv::CapabilitySnapshot>,
     ) -> Self {
         self.kv = Some(KvHost::new(backend, capabilities));
+        self
+    }
+
+    /// Attaches the `db` capability's live wiring -- called once at
+    /// startup (`crate::lib`) with the shared, process-wide [`DbWiring`],
+    /// never per-invoke. Builder-style so existing `StageCapabilities::new`
+    /// call sites (including every current test) are unaffected.
+    pub fn with_db(mut self, db: DbWiring) -> Self {
+        self.db = Some(db);
         self
     }
 
@@ -327,6 +343,79 @@ impl<K: KvBackend> StageCapabilities<K> {
             }
         }
         Ok(serde_json::json!({}))
+    }
+
+    /// `kv.get`/`kv.set`/`kv.delete`/`kv.increment` (`wit/waddle-bundle/
+    /// stage.wit` `interface kv`). Argument shapes match exactly what
+    /// `core/bundle_executor::host::imports`'s `kv::Host` impl sends/
+    /// expects -- see `core/svc_action::capabilities::StageCapabilities::
+    /// handle_kv`'s identical doc for the wire contract this must not
+    /// drift from (byte-for-byte the same parsing/mapping, duplicated
+    /// rather than shared only because the two stages' `handle` methods
+    /// take `scope` differently -- `self` here vs. a separate parameter
+    /// there -- module doc). Tenant/community/app_id come from `self`
+    /// (never `call.app_id`).
+    async fn handle_kv(&self, call: &HostCallBody) -> Result<serde_json::Value, HostResultError> {
+        let Some(kv) = &self.kv else {
+            return Err(denied(
+                "not_implemented",
+                "kv capability is not configured on this stage (no Valkey connection)",
+            ));
+        };
+        let kv_scope = KvScope::new(
+            self.tenant.clone(),
+            self.community.clone(),
+            self.app_id.clone(),
+        );
+
+        match call.op.as_str() {
+            "get" => {
+                let args: KvKeyArgs = parse_kv_args(&call.args)?;
+                let value = kv
+                    .get(&kv_scope, call.call_id, &args.key)
+                    .await
+                    .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({ "value": value }))
+            }
+            "set" => {
+                let args: KvSetArgs = parse_kv_args(&call.args)?;
+                kv.set(
+                    &kv_scope,
+                    call.call_id,
+                    &args.key,
+                    &args.value,
+                    args.ttl_seconds,
+                )
+                .await
+                .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({}))
+            }
+            "delete" => {
+                let args: KvKeyArgs = parse_kv_args(&call.args)?;
+                kv.delete(&kv_scope, call.call_id, &args.key)
+                    .await
+                    .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({}))
+            }
+            "increment" => {
+                let args: KvIncrementArgs = parse_kv_args(&call.args)?;
+                let value = kv
+                    .increment(
+                        &kv_scope,
+                        call.call_id,
+                        &args.key,
+                        args.delta,
+                        args.ttl_seconds,
+                    )
+                    .await
+                    .map_err(kv_err_to_host)?;
+                Ok(serde_json::json!({ "value": value }))
+            }
+            other => Err(denied(
+                "unknown_op",
+                format!("kv op {other:?} not supported"),
+            )),
+        }
     }
 
     /// Structured insert/get/update/delete against this app's own
@@ -465,79 +554,6 @@ impl<K: KvBackend> StageCapabilities<K> {
 
         result.map(row_to_json).map_err(db_error_to_host_error)
     }
-
-    /// `kv.get`/`kv.set`/`kv.delete`/`kv.increment` (`wit/waddle-bundle/
-    /// stage.wit` `interface kv`). Argument shapes match exactly what
-    /// `core/bundle_executor::host::imports`'s `kv::Host` impl sends/
-    /// expects -- see `core/svc_action::capabilities::StageCapabilities::
-    /// handle_kv`'s identical doc for the wire contract this must not
-    /// drift from (byte-for-byte the same parsing/mapping, duplicated
-    /// rather than shared only because the two stages' `handle` methods
-    /// take `scope` differently -- `self` here vs. a separate parameter
-    /// there -- module doc). Tenant/community/app_id come from `self`
-    /// (never `call.app_id`).
-    async fn handle_kv(&self, call: &HostCallBody) -> Result<serde_json::Value, HostResultError> {
-        let Some(kv) = &self.kv else {
-            return Err(denied(
-                "not_implemented",
-                "kv capability is not configured on this stage (no Valkey connection)",
-            ));
-        };
-        let kv_scope = KvScope::new(
-            self.tenant.clone(),
-            self.community.clone(),
-            self.app_id.clone(),
-        );
-
-        match call.op.as_str() {
-            "get" => {
-                let args: KvKeyArgs = parse_kv_args(&call.args)?;
-                let value = kv
-                    .get(&kv_scope, call.call_id, &args.key)
-                    .await
-                    .map_err(kv_err_to_host)?;
-                Ok(serde_json::json!({ "value": value }))
-            }
-            "set" => {
-                let args: KvSetArgs = parse_kv_args(&call.args)?;
-                kv.set(
-                    &kv_scope,
-                    call.call_id,
-                    &args.key,
-                    &args.value,
-                    args.ttl_seconds,
-                )
-                .await
-                .map_err(kv_err_to_host)?;
-                Ok(serde_json::json!({}))
-            }
-            "delete" => {
-                let args: KvKeyArgs = parse_kv_args(&call.args)?;
-                kv.delete(&kv_scope, call.call_id, &args.key)
-                    .await
-                    .map_err(kv_err_to_host)?;
-                Ok(serde_json::json!({}))
-            }
-            "increment" => {
-                let args: KvIncrementArgs = parse_kv_args(&call.args)?;
-                let value = kv
-                    .increment(
-                        &kv_scope,
-                        call.call_id,
-                        &args.key,
-                        args.delta,
-                        args.ttl_seconds,
-                    )
-                    .await
-                    .map_err(kv_err_to_host)?;
-                Ok(serde_json::json!({ "value": value }))
-            }
-            other => Err(denied(
-                "unknown_op",
-                format!("kv op {other:?} not supported"),
-            )),
-        }
-    }
 }
 
 fn json_to_db_value(v: &serde_json::Value) -> Result<DbValue, HostResultError> {
@@ -641,12 +657,25 @@ impl<K: KvBackend> CapabilityHandler for StageCapabilities<K> {
                 CapabilityKind::Clock => self.handle_clock(&call.op),
                 CapabilityKind::Context => self.handle_context(),
                 CapabilityKind::Log => self.handle_log(&call.args),
+                CapabilityKind::Kv => self.handle_kv(&call).await,
                 // `http` is wired to the shared `bundle_host_http::egress::
                 // EgressGuard` (`self.egress`, see the struct doc) -- `kv`
                 // is wired to `bundle_host_kv::KvHost` above (`self.kv`,
                 // see `Self::with_kv`'s doc).
                 CapabilityKind::Http => self.handle_http(&call.args).await,
-                CapabilityKind::Kv => self.handle_kv(&call).await,
+                // `db` needs per-app Postgres schema provisioning
+                // (`app_core.<app_id>`/`app_community.<app_id>`), a
+                // schema-scoped runtime role, and RLS -- designed in
+                // `docs/superpowers/specs/
+                // 2026-09-28-bundle-db-capability-and-schemas.md` (PR
+                // #415), with the grant itself (the `storage.tables`
+                // permission) gated by the standard permission-catalog
+                // design in `docs/superpowers/specs/
+                // 2026-09-28-bundle-permissions-and-capability-gate.md`
+                // (PR #419) -- both in progress, neither landed here yet
+                // (PR #498 wires this next). Denying (never silently
+                // succeeding) is the correct behavior for an unimplemented
+                // capability until it does.
                 CapabilityKind::Db => self.handle_db(&call).await,
                 CapabilityKind::Flags => Err(denied(
                     "not_implemented",
