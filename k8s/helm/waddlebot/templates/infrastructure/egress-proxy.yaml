@@ -21,6 +21,20 @@
 # below is just the bare repo name; CI/build fills `global.imageTag` (or
 # `egressProxy.imageTag` for a component-specific override) with the
 # actual built digest/tag at deploy time, same as those services.
+#
+# fix/alpha-clean-deploy -- removed the ALLOWLIST_SIGNING_KEY_PATH env var and
+# its "signing-key" Secret volume (formerly egressProxy.allowlistSigning,
+# mounting a Secret this proxy never actually reads): core/egress_proxy has
+# zero references to that env var anywhere in its source. The real assertion
+# verification path is the shared per-service JWKS trust bundle
+# (MACHINE_JWT_JWKS_URL below), same as machine-JWT auth. Mounting a private
+# signing key into this pod would be wrong regardless -- if/when the egress
+# assertion Ed25519 keypair (core/egress_assertion, PR #468) is wired up, the
+# private half belongs to the SIGNER (bundle_host_http in svc-process/
+# svc-action), never this verifier. That wiring is separate follow-up work,
+# not done here; this alpha rev-28 fix only removes the dead reference that
+# was leaving this Deployment stuck ContainerCreating on a Secret nothing
+# ever provisioned.
 {{- if and (ne .Values.egressProxy.environment "alpha") (ne .Values.egressProxy.environment "local") (not .Values.egressProxy.enabled) }}
 {{- fail "egressProxy.enabled must be true in beta/gamma/production — bundle net.http and connector-platform traffic has no host-level enforcement without it (see feature/bundle-egress-gateway)." }}
 {{- end }}
@@ -68,16 +82,23 @@ spec:
           value: {{ .Values.egressProxy.port | quote }}
         - name: ALLOWED_PORTS
           value: {{ .Values.egressProxy.allowedPorts | join "," | quote }}
-        - name: ALLOWLIST_SIGNING_KEY_PATH
-          value: "/etc/egress-proxy/signing/{{ .Values.egressProxy.allowlistSigning.secretKey }}"
         - name: DENY_CIDRS
           value: {{ .Values.egressPolicy.denyCidrs | join "," | quote }}
+        # fix/alpha-clean-deploy -- found while verifying this Deployment reaches
+        # Ready on kind: piping to quote inside a ">-" folded block scalar
+        # embeds literal double-quote characters INTO the value itself (the
+        # block scalar's own indentation/folding is what YAML uses to delimit
+        # the string here, not a wrapping quote pair like a single-line
+        # "value: <templated>" field would get) -- egress_proxy's CIDR parser
+        # then rejected the leading quote character as invalid and
+        # crash-looped on every startup. No quoting needed: this is a plain
+        # comma/dot/slash string, none of which require YAML quoting.
         - name: DENY_CLUSTER_CIDRS
           value: >-
             {{ printf "%s,%s,%s"
                  .Values.egressPolicy.clusterCidrs.podCidr
                  .Values.egressPolicy.clusterCidrs.serviceCidr
-                 .Values.egressPolicy.clusterCidrs.nodeCidr | quote }}
+                 .Values.egressPolicy.clusterCidrs.nodeCidr }}
         # Machine-JWT verification (core/service_auth, feature/eddsa-machine-jwt)
         # -- authenticates svc-ingest/svc-process/svc-action before the
         # allowlist assertion or destination is even parsed. Shares hub-api's
@@ -122,18 +143,9 @@ spec:
         resources:
           {{- toYaml .Values.egressProxy.resources | nindent 10 }}
         volumeMounts:
-        - name: signing-key
-          mountPath: /etc/egress-proxy/signing
-          readOnly: true
         - name: tmp
           mountPath: /tmp
       volumes:
-      - name: signing-key
-        # Pre-created out-of-band (kubectl create secret / Vault / External
-        # Secrets Operator) — the proxy's signing public key is not app
-        # config and is never generated or defaulted by this chart.
-        secret:
-          secretName: {{ .Values.egressProxy.allowlistSigning.secretName }}
       - name: tmp
         emptyDir: {}
 ---

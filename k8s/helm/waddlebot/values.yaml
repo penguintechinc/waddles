@@ -2297,9 +2297,6 @@ egressProxy:
   # what was actually granted to that tenant/app; a compromised proxy host
   # still can't reach loopback/link-local/metadata/cluster CIDRs (egressPolicy
   # .denyCidrs/.clusterCidrs, enforced at the network layer as a backstop).
-  allowlistSigning:
-    secretName: "waddlebot-egress-proxy-signing-key"
-    secretKey: "public-key.pem"
   # Machine-JWT auth (core/service_auth) -- callers additionally need
   # `egress:connect` granted in serviceJwt.identities[*].allowedScopes
   # (see that block's own comment) on top of hub-api's existing
