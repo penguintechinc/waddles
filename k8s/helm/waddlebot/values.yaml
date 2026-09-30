@@ -2106,6 +2106,122 @@ networkPolicy:
   enabled: false
   ingressNamespace: ingress-nginx
 
+# OTel collector — not yet deployed by this chart (tracked separately);
+# stub so egressPolicy can conditionally allow data-plane egress to it once
+# it exists, without another chart-wide feature landing first.
+otel:
+  collector:
+    enabled: false
+
+# Egress lockdown (CiliumNetworkPolicy) — feature/bundle-egress-gateway.
+# All bundle network access (app bundles' net.http via the in-process guard
+# core/bundle_host_http, feature/svc-process-http-capability, PLUS connector
+# bundles' platform traffic run by svc-ingest/svc-action) goes through the
+# host's egress proxy below. Data-plane pods (svc-ingest/svc-process/
+# svc-action, Rust AND legacy per-module Deployments performing the same
+# role) are default-deny for egress to the internet; the only path out is
+# the egress-proxy Service. Disabled == the CNPs below aren't rendered at
+# all, which is a real security regression outside alpha/local — enforced
+# by a `fail` guard in templates/infrastructure/egress-proxy.yaml.
+egressPolicy:
+  enabled: true
+  # Components (app.kubernetes.io/component label values) subject to the
+  # egress default-deny. Extend as more Rust dataplane Deployments land.
+  dataPlaneComponents:
+    - svc-ingest
+    - svc-ingest-rust
+    - svc-process
+    - svc-process-rust
+    - svc-action
+    - svc-action-rust
+    - discord-collector
+    - twitch-collector
+    - slack-collector
+    - teams-collector
+    - kick-collector
+    - mattermost-collector
+    - googlechat-collector
+    - youtube-live-collector
+    - trigger-webhooks
+    - trigger-streaming
+    - action-platforms
+    - action-serverless
+  # In-cluster destinations the data plane is still allowed to reach
+  # directly (everything else in-cluster is same-namespace-only via
+  # network-policies.yaml; these are the specific service ports needed).
+  # postgresReplicaPort currently points at the same primary Postgres
+  # (infrastructure.postgresql) — no read replica is provisioned yet (see
+  # pipeline.rustDataPlane.svcProcess.dbReaderHost's own comment); this
+  # becomes a distinct endpoint once one exists, no CNP change needed.
+  # NOTE: values.yaml is raw YAML, not template-evaluated — these mirror
+  # infrastructure.redis.service.port / infrastructure.postgresql.service.port
+  # / pipeline.hubApi.grpcPort / infrastructure.minio.service.apiPort above;
+  # keep in sync if those change.
+  inCluster:
+    dnsPort: 53
+    valkeyPort: 6379
+    postgresReplicaPort: 5432
+    hubApiGrpcPort: 50204
+    minioPort: 9000
+    otelGrpcPort: 4317
+  # CIDRs that must NEVER be reachable via the egress proxy's "world" allow,
+  # even though the proxy needs broad internet + customer-private-range
+  # reach for net.http.private-ip grants. Set podCidr/serviceCidr/nodeCidr
+  # per-cluster in each env's values file — these vary per install.
+  denyCidrs:
+    - "127.0.0.0/8"      # loopback
+    - "::1/128"          # loopback v6
+    - "169.254.0.0/16"   # link-local incl. cloud metadata (169.254.169.254)
+    - "fe80::/10"        # link-local v6
+  clusterCidrs:
+    podCidr: "10.244.0.0/16"
+    serviceCidr: "10.96.0.0/12"
+    nodeCidr: "10.0.0.0/8"
+
+# Egress proxy — the ONLY data-plane component allowed to reach external
+# addresses (net.http.fqdn / .public-ip / .private-ip grants). Design:
+# dedicated rootless Rust CONNECT/forward proxy (crates/egress-proxy, new
+# crate — in-line-of-traffic mandates Rust per critical-rules.md Data
+# Plane); not Squid/etc — none of the org's already-pinned forward proxies
+# support the per-request signed-allowlist re-check this needs, and a bare
+# Cilium egress-gateway/FQDN policy can't express per-tenant/app identity
+# either (see templates/network-policies-egress.yaml header for the full
+# design write-up). SKELETON: no Dockerfile/CI image yet, pinned to the
+# same debian:bookworm-slim digest already used as pipeline.goRuntimeImage
+# as a placeholder — replace once the crate has its own CI-built image.
+egressProxy:
+  enabled: true
+  environment: "alpha"
+  image: "debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a"
+  port: 8443
+  metricsPort: 9090
+  replicas: 1
+  # Ports the proxy itself is allowed to reach externally.
+  allowedPorts:
+    - 80    # plain HTTP (net.http.fqdn / .public-ip)
+    - 443   # HTTPS + Discord gateway (wss over 443)
+    - 6697  # Twitch IRC (TLS)
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+  # Signed allowlist header: hub-api signs a per-tenant/app grant set
+  # (net.http.fqdn / .public-ip / .private-ip) that the in-process guard
+  # (core/bundle_host_http, feature/svc-process-http-capability) attaches
+  # to every proxied request; the proxy verifies the signature and
+  # re-checks the destination against it — including which private-ip
+  # ranges were actually granted — before opening the upstream connection.
+  # So a compromised data-plane pod can reach the proxy but nothing beyond
+  # what was actually granted to that tenant/app; a compromised proxy host
+  # still can't reach loopback/link-local/metadata/cluster CIDRs (egressPolicy
+  # .denyCidrs/.clusterCidrs, enforced at the network layer as a backstop).
+  allowlistSigning:
+    secretName: "waddlebot-egress-proxy-signing-key"
+    secretKey: "public-key.pem"
+
 # SPIFFE/SPIRE workload identity (subchart: charts/spire). Off by default
 # (opt-in per environment via values-alpha.yaml/values-beta.yaml/
 # values-local.yaml). Only the values that differ from the subchart's own
@@ -2119,6 +2235,54 @@ spire:
     role: child
     upstreamRoot:
       enabled: false
+
+# Per-service EdDSA machine JWTs (feature/eddsa-machine-jwt) -- replaces
+# the platform-wide HS256 shared SECRET_KEY / static API keys for
+# service-to-service calls, starting with the new internal PII endpoints.
+# SPIFFE-ready by design (see libs/flask_core/flask_core/service_jwt.py
+# module docstring): retiring hub-api issuance for Skauswatch JWT-SVIDs
+# later is a config change here, not a template rewrite.
+serviceJwt:
+  # hub-api-only: private key material comes from an externally-managed
+  # Secret (`make generate-service-jwt-key`), never from values -- see
+  # scripts/generate-service-jwt-key.sh. This block only names the Secret.
+  signingSecretName: service-jwt-signing-key
+  # Public half of every key still valid for verification, keyed by kid.
+  # Safe to commit -- these are public keys. Populated by the "Public key"
+  # line `make generate-service-jwt-key` prints after each rotation.
+  publicKeys: {}
+  audience: waddlebot-internal
+  # Audience the bootstrap ServiceAccount token projection (below) must
+  # request -- hub-api's TokenReview call rejects any other audience.
+  # "hub-api" (not a generic "waddlebot-internal-bootstrap" string, security
+  # review HIGH finding) -- binding the projected token's audience to the
+  # specific resource server it authenticates to is what makes a stolen
+  # bootstrap token useless against any other in-cluster TokenReview
+  # consumer, standard "aud" scoping practice for workload-identity tokens.
+  bootstrapAudience: hub-api
+  # Per-service allow-list mapping a k8s ServiceAccount identity to a
+  # SPIFFE-shaped service id + permitted scopes. hub-api is the only
+  # consumer; it never trusts a caller-supplied service id.
+  identities:
+    svc-process:
+      spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-process"
+      serviceAccount: svc-process
+      allowedScopes:
+        - "identity:ephemeral:mint"
+    svc-action:
+      spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-action"
+      serviceAccount: svc-action
+      allowedScopes:
+        - "users:display-name:resolve"
+  # Every calling pod projects its own ServiceAccount token bound to
+  # `bootstrapAudience` -- this is the bootstrap credential, no shared
+  # secret distributed to callers. Reusable via the
+  # `waddlebot.serviceJwtBootstrapVolume` named template
+  # (templates/_service_jwt.tpl) -- add its volume/volumeMount output to
+  # any deployment that calls hub-api's /internal/service-token endpoint.
+  bootstrapTokenProjection:
+    expirationSeconds: 3600
+    path: service-jwt-bootstrap-token
 
 # feature/helm-auto-provision-keys -- deploys must never require a human to run a
 # script before `helm install`/`helm upgrade` succeeds. Every Secret below is looked
