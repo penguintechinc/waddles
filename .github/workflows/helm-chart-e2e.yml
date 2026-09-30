@@ -35,6 +35,15 @@ env:
   CHART_DIR: "k8s/helm/waddlebot"
   NAMESPACE: "waddlebot"
   HELM_TIMEOUT: "5m"
+  # Pinned to the v1.16.5 tag commit (GPG-signature-verified against cilium/cilium),
+  # checksum-verified below -- kind ships kindnet, not Cilium, so every
+  # CiliumNetworkPolicy the chart renders (security.md Kubernetes Network
+  # Security: mandatory, every product) needs its CRD registered or `helm
+  # install` fails with "no matches for kind CiliumNetworkPolicy" before a
+  # single pod is even scheduled. CRD-only (no cilium-agent) is sufficient here:
+  # this workflow validates install/upgrade/hook lifecycle, not policy enforcement.
+  CILIUM_CRD_COMMIT: "ad6882773c5f89feda9c295276707f01de269296"
+  CILIUM_CRD_SHA256: "60606cb4060a25a2131461773939714d1c0dbd910273449e68d0caf39927249c"
 
 jobs:
   lint-workflow:
@@ -72,10 +81,16 @@ jobs:
       - name: Install kind (checksum-verified)
         run: |
           set -euo pipefail
-          curl -fsSL -o /usr/local/bin/kind \
+          # ubuntu-latest images ship a pre-installed /usr/local/bin/kind owned by
+          # root; downloading straight to that path lets curl overwrite the file's
+          # *content* (world-writable dir) but a plain `chmod` on it then fails with
+          # "Operation not permitted" since the runner user isn't the file's owner.
+          # Download + verify to a runner-owned temp path, install with sudo instead.
+          curl -fsSL -o "${RUNNER_TEMP}/kind" \
             "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
-          echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  /usr/local/bin/kind" | sha256sum -c -
-          chmod +x /usr/local/bin/kind
+          echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  ${RUNNER_TEMP}/kind" | sha256sum -c -
+          sudo install -m 0755 -o root -g root "${RUNNER_TEMP}/kind" /usr/local/bin/kind
+          rm -f "${RUNNER_TEMP}/kind"
           kind version
 
       - name: Create kind cluster
@@ -83,16 +98,30 @@ jobs:
           set -euo pipefail
           kind create cluster --name waddlebot-e2e --image "${KIND_NODE_IMAGE}" --wait 120s
 
+      - name: Install CiliumNetworkPolicy CRD (kind has no Cilium CNI)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml" \
+            "https://raw.githubusercontent.com/cilium/cilium/${CILIUM_CRD_COMMIT}/pkg/k8s/apis/cilium.io/client/crds/v2/ciliumnetworkpolicies.yaml"
+          echo "${CILIUM_CRD_SHA256}  ${RUNNER_TEMP}/ciliumnetworkpolicies.yaml" | sha256sum -c -
+          kubectl apply -f "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml"
+          rm -f "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml"
+
       - name: Build + kind-load images
         run: |
           set -euo pipefail
+          # Build context per Dockerfile's own COPY paths, not a blanket root/subdir
+          # guess: hub_api/Dockerfile COPYs "hub_api/..." + "libs/flask_core" (root
+          # context); svc_ingest's Dockerfile.rust COPYs "Cargo.toml"/"src" bare (its
+          # own dir); svc_process/svc_action COPY "svc_process/..." + sibling
+          # "bundle_active_set"/"bundle_host_http" (the shared "core" dir, one level up).
           declare -a IMAGES=(
             "waddlebot-migrations:ci:migrations/Dockerfile:."
-            "waddlebot-hub-api:ci:hub_api/Dockerfile:hub_api"
+            "hub-api:ci:hub_api/Dockerfile:."  # chart default repository is bare "hub-api" (templates/hub-api.yaml waddlebot.legacyModuleImage helper), not "waddlebot-hub-api"
             "core-bundle-seeder:ci:bundles/Dockerfile.core-bundles:."
-            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:."
-            "svc-process-rust:ci:core/svc_process/Dockerfile.rust:."
-            "svc-action-rust:ci:core/svc_action/Dockerfile.rust:."
+            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:core/svc_ingest"
+            "svc-process-rust:ci:core/svc_process/Dockerfile.rust:core"
+            "svc-action-rust:ci:core/svc_action/Dockerfile.rust:core"
           )
           built=0
           for entry in "${IMAGES[@]}"; do
@@ -114,7 +143,7 @@ jobs:
           set -euo pipefail
           curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
           chmod +x get_helm.sh
-          DESIRED_VERSION=v4.0.0 ./get_helm.sh
+          DESIRED_VERSION=v4.3.0 ./get_helm.sh
           rm -f get_helm.sh
           helm version
 
@@ -313,32 +342,49 @@ jobs:
       - name: Install kind (checksum-verified)
         run: |
           set -euo pipefail
-          curl -fsSL -o /usr/local/bin/kind \
+          # See identical step in the chart-e2e job above for why this installs via
+          # a runner-owned temp path + sudo instead of a direct chmod in-place.
+          curl -fsSL -o "${RUNNER_TEMP}/kind" \
             "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
-          echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  /usr/local/bin/kind" | sha256sum -c -
-          chmod +x /usr/local/bin/kind
+          echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  ${RUNNER_TEMP}/kind" | sha256sum -c -
+          sudo install -m 0755 -o root -g root "${RUNNER_TEMP}/kind" /usr/local/bin/kind
+          rm -f "${RUNNER_TEMP}/kind"
 
       - name: Install Helm v4
         run: |
           set -euo pipefail
           curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
           chmod +x get_helm.sh
-          DESIRED_VERSION=v4.0.0 ./get_helm.sh
+          DESIRED_VERSION=v4.3.0 ./get_helm.sh
           rm -f get_helm.sh
 
       - name: Create kind cluster
         run: kind create cluster --name waddlebot-upgrade --image "${KIND_NODE_IMAGE}" --wait 120s
 
+      - name: Install CiliumNetworkPolicy CRD (kind has no Cilium CNI)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml" \
+            "https://raw.githubusercontent.com/cilium/cilium/${CILIUM_CRD_COMMIT}/pkg/k8s/apis/cilium.io/client/crds/v2/ciliumnetworkpolicies.yaml"
+          echo "${CILIUM_CRD_SHA256}  ${RUNNER_TEMP}/ciliumnetworkpolicies.yaml" | sha256sum -c -
+          kubectl apply -f "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml"
+          rm -f "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml"
+
       - name: Build + kind-load images (PR ref; base ref reuses same tags)
         run: |
           set -euo pipefail
+          # Build context per Dockerfile's own COPY paths, not a blanket root/subdir
+          # guess: hub_api/Dockerfile COPYs "hub_api/..." + "libs/flask_core" (root
+          # context); svc_ingest's Dockerfile.rust COPYs "Cargo.toml"/"src" bare (its
+          # own dir); svc_process/svc_action COPY "svc_process/..." + sibling
+          # "bundle_active_set"/"bundle_host_http" (the shared "core" dir, one level up).
           declare -a IMAGES=(
             "waddlebot-migrations:ci:migrations/Dockerfile:."
-            "waddlebot-hub-api:ci:hub_api/Dockerfile:hub_api"
+            "hub-api:ci:hub_api/Dockerfile:."  # chart default repository is bare "hub-api" (templates/hub-api.yaml waddlebot.legacyModuleImage helper), not "waddlebot-hub-api"
             "core-bundle-seeder:ci:bundles/Dockerfile.core-bundles:."
-            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:."
-            "svc-process-rust:ci:core/svc_process/Dockerfile.rust:."
-            "svc-action-rust:ci:core/svc_action/Dockerfile.rust:."
+            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:core/svc_ingest"
+            "svc-process-rust:ci:core/svc_process/Dockerfile.rust:core"
+            "svc-action-rust:ci:core/svc_action/Dockerfile.rust:core"
           )
           built=0
           for entry in "${IMAGES[@]}"; do
