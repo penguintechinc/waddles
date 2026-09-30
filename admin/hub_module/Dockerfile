@@ -1,6 +1,8 @@
 # Multi-stage Dockerfile for WaddleBot Hub Module
+# node:20 reached upstream EOL 2026-04-30; bumped to node:24 (Active LTS;
+# org target is node:26, not yet released — 24 is the sanctioned interim).
 # Stage 1: Build frontend
-FROM node:20-bookworm-slim@sha256:1e85773c98c31d4fe5b545e4cb17379e617b348832fb3738b22a08f68dec30f3 AS frontend-build
+FROM node:24-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6 AS frontend-build
 
 WORKDIR /build/admin/hub_module/frontend
 
@@ -20,7 +22,7 @@ COPY admin/hub_module/frontend/ ./
 RUN npm run build
 
 # Stage 2: Production image
-FROM node:20-bookworm-slim@sha256:1e85773c98c31d4fe5b545e4cb17379e617b348832fb3738b22a08f68dec30f3
+FROM node:24-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
 
 WORKDIR /app
 
@@ -43,6 +45,13 @@ RUN npm ci --omit=dev --ignore-scripts && npm rebuild bcrypt
 
 # Remove build tools to reduce image size (keep curl for healthcheck)
 RUN apt-get purge -y make g++ && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+# The runtime entrypoint is `node src/index.js` — npm/npx/corepack are never
+# invoked after this point. Remove the base image's bundled global npm (and
+# its own vendored node_modules, which carry independent CVEs unrelated to
+# this app's package-lock.json) to close that residual attack surface.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+    /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 
 # Copy backend source
 COPY --chown=nodejs:nodejs admin/hub_module/backend/src ./src
