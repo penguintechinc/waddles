@@ -481,3 +481,101 @@ jobs:
       # chart-referenced image against the registry before helm ever runs.
       - name: alpha-deploy.sh missing-image preflight regression test
         run: bash scripts/ci/tests/test_alpha_deploy_image_preflight.sh
+
+  dockerfile-rust-path-deps:
+    name: Dockerfile.rust path-dependency coverage
+    runs-on: ubuntu-latest
+    # Static analysis of the current tree only (no diff needed) -- narrower
+    # than the workflow-level default, matching alembic-migration-chain's
+    # own least-privilege override.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      # Regression gate for gh-425/gh-498/gh-465/gh-468/gh-469: a Rust
+      # service Dockerfile that COPYs a sibling crate directly but misses a
+      # deeper transitive same-repo path dependency (e.g. bundle-host-http's
+      # own path dependency on egress-assertion) fails INSIDE `cargo build`,
+      # discovered only after a full CI round trip. This proves every
+      # transitive path dep is COPYed before Docker ever runs.
+      - name: Check Dockerfile.rust path-dependency coverage
+        run: python3 scripts/ci/check-dockerfile-rust-path-deps.py
+
+  alembic-single-head:
+    name: Alembic single-head invariant (static, no DB)
+    runs-on: ubuntu-latest
+    # Pure revision-graph walk over alembic/versions/*.py source text -- no
+    # DB, no alembic package import -- so this runs on every PR regardless
+    # of whether alembic/** changed, unlike the heavier real-Postgres
+    # alembic-migration-chain job above.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      # Regression gate for a class of bug hit 4x: diverged alembic heads
+      # (a stacked-branch rebase or a same-cycle parallel migration PR
+      # leaves two revisions both claiming no successor) plus the Postgres
+      # VARCHAR(32) revision-id width limit and dangling down_revision refs.
+      - name: Check single alembic head
+        run: bash scripts/ci/check-alembic-single-head.sh .
+
+  lockfile-no-downgrades:
+    name: Lockfile additions-only (no silent version changes)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      # PR body is written to a file via env var (never interpolated into
+      # the run script directly -- zizmor template-injection) so the check
+      # script can read it without any `${{ }}` expansion touching shell text.
+      - name: Write PR body to file
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s' "$PR_BODY" > /tmp/pr-body.txt
+
+      # Regression gate for gh-425: an unrelated PR silently changed an
+      # EXISTING lockfile package's version (buried in a large Cargo.lock/
+      # package-lock.json/hashed-requirements.txt diff) and nobody noticed
+      # in review. Additions are always fine; a version change on a
+      # pre-existing package must carry an explicit
+      # `lockfile-bump: <pkg> <old>-><new> <reason>` line in the PR body or
+      # a commit message, or this job fails.
+      - name: Check lockfiles for unacknowledged version changes
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/check-lockfile-no-downgrades.py \
+            --merge-base "${PR_BASE_SHA}" \
+            --head HEAD \
+            --pr-body-file /tmp/pr-body.txt
