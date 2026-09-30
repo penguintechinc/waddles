@@ -2120,6 +2120,54 @@ spire:
     upstreamRoot:
       enabled: false
 
+# Per-service EdDSA machine JWTs (feature/eddsa-machine-jwt) -- replaces
+# the platform-wide HS256 shared SECRET_KEY / static API keys for
+# service-to-service calls, starting with the new internal PII endpoints.
+# SPIFFE-ready by design (see libs/flask_core/flask_core/service_jwt.py
+# module docstring): retiring hub-api issuance for Skauswatch JWT-SVIDs
+# later is a config change here, not a template rewrite.
+serviceJwt:
+  # hub-api-only: private key material comes from an externally-managed
+  # Secret (`make generate-service-jwt-key`), never from values -- see
+  # scripts/generate-service-jwt-key.sh. This block only names the Secret.
+  signingSecretName: service-jwt-signing-key
+  # Public half of every key still valid for verification, keyed by kid.
+  # Safe to commit -- these are public keys. Populated by the "Public key"
+  # line `make generate-service-jwt-key` prints after each rotation.
+  publicKeys: {}
+  audience: waddlebot-internal
+  # Audience the bootstrap ServiceAccount token projection (below) must
+  # request -- hub-api's TokenReview call rejects any other audience.
+  # "hub-api" (not a generic "waddlebot-internal-bootstrap" string, security
+  # review HIGH finding) -- binding the projected token's audience to the
+  # specific resource server it authenticates to is what makes a stolen
+  # bootstrap token useless against any other in-cluster TokenReview
+  # consumer, standard "aud" scoping practice for workload-identity tokens.
+  bootstrapAudience: hub-api
+  # Per-service allow-list mapping a k8s ServiceAccount identity to a
+  # SPIFFE-shaped service id + permitted scopes. hub-api is the only
+  # consumer; it never trusts a caller-supplied service id.
+  identities:
+    svc-process:
+      spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-process"
+      serviceAccount: svc-process
+      allowedScopes:
+        - "identity:ephemeral:mint"
+    svc-action:
+      spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-action"
+      serviceAccount: svc-action
+      allowedScopes:
+        - "users:display-name:resolve"
+  # Every calling pod projects its own ServiceAccount token bound to
+  # `bootstrapAudience` -- this is the bootstrap credential, no shared
+  # secret distributed to callers. Reusable via the
+  # `waddlebot.serviceJwtBootstrapVolume` named template
+  # (templates/_service_jwt.tpl) -- add its volume/volumeMount output to
+  # any deployment that calls hub-api's /internal/service-token endpoint.
+  bootstrapTokenProjection:
+    expirationSeconds: 3600
+    path: service-jwt-bootstrap-token
+
 # feature/helm-auto-provision-keys -- deploys must never require a human to run a
 # script before `helm install`/`helm upgrade` succeeds. Every Secret below is looked
 # up first (an existing Secret is KEPT untouched, never regenerated/rotated by this
