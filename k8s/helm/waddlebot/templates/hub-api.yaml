@@ -116,6 +116,23 @@ spec:
         # added here.
         - name: CONNECTIONS_STATE_TTL_S
           value: {{ .Values.pipeline.hubApi.connectionsStateTtlS | quote }}
+        # feature/seaweedfs-object-storage -- least-privilege "hub-api" S3 identity
+        # (Read/Write/List/Tagging, scoped to bucketName only -- see
+        # templates/infrastructure/seaweedfs.yaml's s3-identities.json), overriding the
+        # admin-identity S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY that would otherwise reach
+        # this container via the envFrom.secretRef block above (Kubernetes resolves `env`
+        # after `envFrom`, so an explicit entry here always wins on a name collision).
+        # hub_api/services/storage_service.py reads exactly these two var names.
+        - name: S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: HUB_API_S3_ACCESS_KEY_ID
+        - name: S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: HUB_API_S3_SECRET_ACCESS_KEY
         - name: CREDENTIAL_ENCRYPTION_KEY
           valueFrom:
             secretKeyRef:
