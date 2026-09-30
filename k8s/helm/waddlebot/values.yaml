@@ -306,25 +306,20 @@ infrastructure:
     s3Port: 8333
     masterPort: 9333
     bucketName: "waddlebot-assets"
-    # S3 identity (SeaweedFS `weed server -s3.config` identities.json), rendered
-    # from this Secret at container start -- same "REPLACE_ME" dev-default
-    # pattern as the former MinIO rootUser/rootPassword. Kept as the "waddlebot"
-    # back-compat/admin identity (full Read/Write/List/Tagging/Admin, unscoped
-    # to any bucket) -- still consumed by templates/svc-streaming.yaml's
-    # recordings write path, which is not migrated to its own identity in this
-    # change (see PR "remaining work"). New consumers should use one of the
-    # scoped identities below instead of this one.
-    rootUser: "REPLACE_ME"
-    rootPassword: "REPLACE_ME"
     # Least-privilege S3 identities (one per workload, each its own
-    # accessKey/secretKey pair) -- replaces routing every consumer through the
-    # single rootUser/rootPassword admin credential above. Same
-    # lookup(KEEP)-then-generate(alpha/local)-or-require(else) provisioning
-    # policy as rootUser/rootPassword (see templates/secrets.yaml
-    # waddlebot.autoSecretValue and _helpers.tpl): "REPLACE_ME" here means
-    # "unset" -- alpha/local auto-generate and persist via `lookup`+
-    # `resource-policy: keep`, beta/gamma/production MUST set a real value (or
-    # pre-populate the waddlebot-secrets Secret out-of-band) or the render fails.
+    # accessKey/secretKey pair), rendered into SeaweedFS's `weed server
+    # -s3.config` identities.json at container start (templates/infrastructure/
+    # seaweedfs.yaml). The former unscoped "waddlebot" admin identity
+    # (Read/Write/List/Tagging/Admin across every bucket, fed by rootUser/
+    # rootPassword/MINIO_ROOT_* below) has been REMOVED -- every consumer,
+    # including svc-streaming's recordings path, now has its own
+    # bucket-scoped identity. Same lookup(KEEP)-then-generate(alpha/local)-
+    # or-require(else) provisioning policy for every identity below (see
+    # templates/secrets.yaml waddlebot.autoSecretValue and _helpers.tpl):
+    # "REPLACE_ME" here means "unset" -- alpha/local auto-generate and persist
+    # via `lookup`+`resource-policy: keep`, beta/gamma/production MUST set a
+    # real value (or pre-populate the waddlebot-secrets Secret out-of-band) or
+    # the render fails.
     identities:
       # hub_api/services/storage_service.py -- reads/writes bundle components,
       # avatars, community logos. Read/Write/List/Tagging, scoped to
@@ -347,6 +342,18 @@ infrastructure:
       # since it must be able to create buckets that don't exist yet. Never
       # mounted by a long-running Deployment.
       bucketInit:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
+      # core/svc_streaming (templates/svc-streaming.yaml) -- egress::record's
+      # only S3 calls are `put_opts`/`put_multipart_opts` against the
+      # "recordings" bucket (finished HLS/recording segments); Read is also
+      # granted for parity with the standard object_store Put-then-verify
+      # path. Read/Write ONLY, scoped to the literal "recordings" bucket --
+      # this identity must NOT reach "waddlebot-assets" or
+      # pipeline.rustDataPlane.bundleExecutor.bucketName ("waddles-bundles").
+      # Replaces the former "waddlebot" full-admin back-compat identity this
+      # was the last consumer of.
+      streaming:
         accessKey: "REPLACE_ME"
         secretKey: "REPLACE_ME"
     service:

@@ -175,21 +175,14 @@ spec:
           mkdir -p /etc/seaweedfs
           # Least-privilege S3 identities, one per workload (feature/seaweedfs-object-storage),
           # replacing the former single "waddlebot" identity that granted every consumer full
-          # Read/Write/List/Tagging/Admin across every bucket. Bucket-scoped actions
+          # Read/Write/List/Tagging/Admin across every bucket -- that identity has been
+          # REMOVED entirely (no unscoped/full-access identity remains except the
+          # hook-scoped, never-Deployment-mounted "bucket-init" below). Bucket-scoped actions
           # ("Action:bucket") restrict an identity's Read/Write/List/Tagging grant to exactly
-          # the bucket it owns -- see SeaweedFS's s3.config IAM docs. "waddlebot" is kept
-          # unscoped/full-access ONLY for back-compat (templates/svc-streaming.yaml's
-          # recordings path, not yet migrated -- see PR "remaining work").
+          # the bucket it owns -- see SeaweedFS's s3.config IAM docs.
           cat > /etc/seaweedfs/s3-identities.json <<EOF
           {
             "identities": [
-              {
-                "name": "waddlebot",
-                "credentials": [
-                  {"accessKey": "${S3_ACCESS_KEY_ID}", "secretKey": "${S3_SECRET_ACCESS_KEY}"}
-                ],
-                "actions": ["Read", "Write", "List", "Tagging", "Admin"]
-              },
               {
                 "name": "hub-api",
                 "credentials": [
@@ -218,6 +211,13 @@ spec:
                   {"accessKey": "${BUCKET_INIT_S3_ACCESS_KEY_ID}", "secretKey": "${BUCKET_INIT_S3_SECRET_ACCESS_KEY}"}
                 ],
                 "actions": ["Admin"]
+              },
+              {
+                "name": "svc-streaming",
+                "credentials": [
+                  {"accessKey": "${STREAMING_S3_ACCESS_KEY_ID}", "secretKey": "${STREAMING_S3_SECRET_ACCESS_KEY}"}
+                ],
+                "actions": ["Read:recordings", "Write:recordings"]
               }
             ]
           }
@@ -240,16 +240,6 @@ spec:
           containerPort: {{ .Values.infrastructure.seaweedfs.masterPort }}
           protocol: TCP
         env:
-        - name: S3_ACCESS_KEY_ID
-          valueFrom:
-            secretKeyRef:
-              name: waddlebot-secrets
-              key: S3_ACCESS_KEY_ID
-        - name: S3_SECRET_ACCESS_KEY
-          valueFrom:
-            secretKeyRef:
-              name: waddlebot-secrets
-              key: S3_SECRET_ACCESS_KEY
         - name: HUB_API_S3_ACCESS_KEY_ID
           valueFrom:
             secretKeyRef:
@@ -280,6 +270,16 @@ spec:
             secretKeyRef:
               name: waddlebot-secrets
               key: BUCKET_INIT_S3_SECRET_ACCESS_KEY
+        - name: STREAMING_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: STREAMING_S3_ACCESS_KEY_ID
+        - name: STREAMING_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: STREAMING_S3_SECRET_ACCESS_KEY
         {{- if and .Values.infrastructure.seaweedfs.encryption.enabled .Values.infrastructure.seaweedfs.encryption.secretName }}
         - name: WEED_S3_SSE_KEK
           valueFrom:
