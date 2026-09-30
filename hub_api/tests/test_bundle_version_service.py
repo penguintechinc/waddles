@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -314,6 +315,181 @@ async def test_advance_state_unknown_version_raises_404(install_dal: Any) -> Non
             install_dal, app_id="waddles.x.y.default", version="9.9.9", target=STATUS_VALIDATING
         )
     assert exc.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# STATUS_ABANDONED -- stalled-upload self-healing (fix/seeder-stalled-upload-recovery)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True, frozen=True)
+class _FakeUploadRow:
+    """Minimal stand-in for an `app_version_uploads` row.
+
+    `is_lease_expired()` reads only `updated_at`/`created_at`, so a full DB round-trip
+    is unnecessary here.
+    """
+
+    updated_at: datetime
+    created_at: datetime
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        STATUS_UPLOADED,
+        STATUS_VALIDATING,
+        svc.STATUS_SCANNING,
+        STATUS_INSPECTING,
+        svc.STATUS_COMPILING,
+        STATUS_ADDRESSING,
+        STATUS_PUBLISHING,
+    ],
+)
+def test_valid_transition_every_nonterminal_state_can_be_abandoned(source: str) -> None:
+    assert valid_transition(source, svc.STATUS_ABANDONED) is True
+
+
+def test_valid_transition_abandoned_is_terminal() -> None:
+    assert valid_transition(svc.STATUS_ABANDONED, STATUS_VALIDATING) is False
+
+
+def test_is_terminal_status() -> None:
+    assert svc.is_terminal_status(STATUS_PUBLISHED) is True
+    assert svc.is_terminal_status(STATUS_REJECTED) is True
+    assert svc.is_terminal_status(svc.STATUS_ABANDONED) is True
+    assert svc.is_terminal_status(STATUS_INSPECTING) is False
+
+
+def test_is_lease_expired_false_within_lease() -> None:
+    now = datetime.now(UTC)
+    row = _FakeUploadRow(updated_at=now, created_at=now)
+    assert svc.is_lease_expired(row, lease_seconds=600) is False
+
+
+def test_is_lease_expired_true_past_lease() -> None:
+    stale = datetime.now(UTC) - timedelta(seconds=700)
+    row = _FakeUploadRow(updated_at=stale, created_at=stale)
+    assert svc.is_lease_expired(row, lease_seconds=600) is True
+
+
+def test_is_lease_expired_handles_a_naive_datetime() -> None:
+    """The sqlite test fixture's own `DateTime` column returns naive datetimes."""
+    stale_naive = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=700)
+    row = _FakeUploadRow(updated_at=stale_naive, created_at=stale_naive)
+    assert svc.is_lease_expired(row, lease_seconds=600) is True
+
+
+async def test_abandon_stalled_upload_moves_to_abandoned_and_writes_audit_row(
+    install_dal: Any,
+) -> None:
+    now = datetime.now(UTC)
+    await install_dal.app_version_uploads.async_insert(
+        app_id="waddles.core.example.ping",
+        version="1.0.0",
+        tenant_id=1,
+        artifact_kind="prebuilt",
+        language="rust",
+        status=STATUS_INSPECTING,
+        created_at=now,
+        updated_at=now,
+    )
+    row = await svc.abandon_stalled_upload(
+        install_dal,
+        app_id="waddles.core.example.ping",
+        version="1.0.0",
+        reason="lease_expired:INSPECTING",
+        actor="system:core-seeder",
+    )
+    assert row.status == svc.STATUS_ABANDONED
+    assert row.reject_reason == "lease_expired:INSPECTING"
+
+    audit_rows = await install_dal(
+        install_dal.audit_log.action == "app_version_upload_abandoned"
+    ).select()
+    assert len(audit_rows) == 1
+    assert audit_rows.first().target_id == "waddles.core.example.ping@1.0.0"
+    assert audit_rows.first().details["actor"] == "system:core-seeder"
+
+
+async def test_abandon_stalled_upload_refuses_an_already_terminal_row(install_dal: Any) -> None:
+    now = datetime.now(UTC)
+    await install_dal.app_version_uploads.async_insert(
+        app_id="waddles.core.example.ping",
+        version="1.0.0",
+        tenant_id=1,
+        artifact_kind="prebuilt",
+        language="rust",
+        status=STATUS_PUBLISHED,
+        created_at=now,
+        updated_at=now,
+    )
+    with pytest.raises(ApiError) as exc:
+        await svc.abandon_stalled_upload(
+            install_dal,
+            app_id="waddles.core.example.ping",
+            version="1.0.0",
+            reason="lease_expired:PUBLISHED",
+            actor="system:core-seeder",
+        )
+    assert exc.value.code == "invalid_state_transition"
+
+
+async def test_create_version_allows_resubmission_after_a_rejected_row(install_dal: Any) -> None:
+    """A REJECTED upload for the same (app_id, version) never blocks a fresh submission."""
+    now = datetime.now(UTC)
+    await install_dal.app_version_uploads.async_insert(
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        artifact_kind="source",
+        language="python",
+        status=STATUS_REJECTED,
+        reject_reason="wit_conformance_failed",
+        created_at=now,
+        updated_at=now,
+    )
+    row = await create_version(
+        install_dal,
+        tenant_id=1,
+        app_id="waddles.socials.music.default",
+        requested_by=1,
+        manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
+        source_bytes=b"fresh-tarball",
+        component_bytes=None,
+        known_custom_platforms=frozenset(),
+        allow_wildcard_consumes=False,
+        allow_prebuilt=True,
+    )
+    assert row.status == STATUS_UPLOADED
+
+
+async def test_create_version_allows_resubmission_after_an_abandoned_row(install_dal: Any) -> None:
+    now = datetime.now(UTC)
+    await install_dal.app_version_uploads.async_insert(
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        artifact_kind="source",
+        language="python",
+        status=svc.STATUS_ABANDONED,
+        reject_reason="lease_expired:INSPECTING",
+        created_at=now,
+        updated_at=now,
+    )
+    row = await create_version(
+        install_dal,
+        tenant_id=1,
+        app_id="waddles.socials.music.default",
+        requested_by=1,
+        manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
+        source_bytes=b"fresh-tarball",
+        component_bytes=None,
+        known_custom_platforms=frozenset(),
+        allow_wildcard_consumes=False,
+        allow_prebuilt=True,
+    )
+    assert row.status == STATUS_UPLOADED
 
 
 # ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -494,6 +494,76 @@ async def test_resolve_or_publish_version_reports_a_stalled_upload_clearly(
     with pytest.raises(ApiError) as excinfo:
         await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
     assert excinfo.value.code == "stalled_core_bundle_upload"
+
+
+async def test_resolve_or_publish_version_reclaims_a_stalled_upload_past_its_lease(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The self-healing case this branch exists for: a crashed run's stale row auto-abandons.
+
+    Regression scope: `fix/seeder-stalled-upload-recovery` -- an INSPECTING row older than
+    its lease must no longer require a manual DB delete; the next seeder run reclaims it
+    (through the FSM's `abandon_stalled_upload()`, never a raw delete) and succeeds.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    entry = _write_bundle(tmp_path)
+    stale = datetime.now(UTC) - timedelta(seconds=700)
+    await install_dal.app_version_uploads.async_insert(
+        app_id=entry.app_id,
+        version=entry.version,
+        tenant_id=1,
+        artifact_kind="prebuilt",
+        language="rust",
+        status="INSPECTING",
+        created_at=stale,
+        updated_at=stale,
+    )
+
+    results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+
+    assert [r.outcome for r in results] == ["activated"]
+
+    # The stale row was moved to ABANDONED through the FSM (never deleted directly) before
+    # create_version() cleared it to make room for the fresh attempt -- the transition
+    # itself, and who/why performed it, is durably recorded in audit_log, not by leaving a
+    # second, terminal row behind (every other `(app_id, version)` lookup in
+    # `bundle_version_service.py` assumes exactly one row per key).
+    uploads = await install_dal(
+        (install_dal.app_version_uploads.app_id == entry.app_id)
+        & (install_dal.app_version_uploads.version == entry.version)
+    ).select()
+    assert [row.status for row in uploads] == ["PUBLISHED"]
+
+    audit_rows = await install_dal(
+        install_dal.audit_log.action == "app_version_upload_abandoned"
+    ).select()
+    assert len(audit_rows) == 1
+    assert audit_rows.first().details["actor"] == seeder.SYSTEM_ACTOR
+    assert audit_rows.first().details["reason"] == "lease_expired:INSPECTING"
+
+
+async def test_resolve_or_publish_version_leftover_rejected_row_does_not_block(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A REJECTED row (a prior build's validation failure) never blocks a fresh publish."""
+    _patch_validator_and_storage(monkeypatch)
+    entry = _write_bundle(tmp_path)
+    now = datetime.now(UTC)
+    await install_dal.app_version_uploads.async_insert(
+        app_id=entry.app_id,
+        version=entry.version,
+        tenant_id=1,
+        artifact_kind="prebuilt",
+        language="rust",
+        status="REJECTED",
+        reject_reason="wit_conformance_failed",
+        created_at=now,
+        updated_at=now,
+    )
+
+    results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+
+    assert [r.outcome for r in results] == ["activated"]
 
 
 # ---------------------------------------------------------------------------

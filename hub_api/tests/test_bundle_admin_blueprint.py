@@ -10,7 +10,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.bundle_admin import BLUEPRINTS
-from tests.conftest import make_token
+from tests.conftest import make_token, make_user_token
 
 
 async def _insert_upload(
@@ -145,3 +145,75 @@ async def test_response_matches_dto_shape(app: Quart, install_dal: Any) -> None:
         "createdAt",
         "rejectReason",
     }
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/admin/bundle-versions/<app_id>/<version>/abandon -- vendor stall recovery
+# ---------------------------------------------------------------------------
+
+
+async def test_abandon_requires_platform_admin_scope(app: Quart, install_dal: Any) -> None:
+    await _insert_upload(
+        install_dal, app_id="waddles.integrations.vendor-1.a", version="1.0.0", status="INSPECTING"
+    )
+    token = make_token(scope="")
+    client = app.test_client()
+    response = await client.post(
+        "/api/v1/admin/bundle-versions/waddles.integrations.vendor-1.a/1.0.0/abandon",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"reason": "operator cleanup"},
+    )
+    assert response.status_code == 403
+
+
+async def test_abandon_transitions_a_stuck_vendor_upload_and_writes_an_audit_row(
+    app: Quart, install_dal: Any
+) -> None:
+    """The explicit admin escape hatch for a vendor upload -- vendors get no auto-reclaim."""
+    await _insert_upload(
+        install_dal, app_id="waddles.integrations.vendor-1.a", version="1.0.0", status="INSPECTING"
+    )
+    token = make_user_token(user_id=7, scope="platform:admin")
+    client = app.test_client()
+    response = await client.post(
+        "/api/v1/admin/bundle-versions/waddles.integrations.vendor-1.a/1.0.0/abandon",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"reason": "operator cleanup: known-crashed compiler Job"},
+    )
+    assert response.status_code == 200
+    body = await response.get_json()
+    assert body == {
+        "success": True,
+        "appId": "waddles.integrations.vendor-1.a",
+        "version": "1.0.0",
+        "status": "ABANDONED",
+    }
+
+    rows = await install_dal(
+        (install_dal.app_version_uploads.app_id == "waddles.integrations.vendor-1.a")
+        & (install_dal.app_version_uploads.version == "1.0.0")
+    ).select()
+    assert rows.first().status == "ABANDONED"
+
+    audit_rows = await install_dal(
+        install_dal.audit_log.action == "app_version_upload_abandoned"
+    ).select()
+    assert len(audit_rows) == 1
+    assert audit_rows.first().user_id == 7
+    assert audit_rows.first().details["actor"] == "admin:7"
+
+
+async def test_abandon_refuses_an_already_terminal_row(app: Quart, install_dal: Any) -> None:
+    await _insert_upload(
+        install_dal, app_id="waddles.integrations.vendor-1.a", version="1.0.0", status="PUBLISHED"
+    )
+    token = make_user_token(user_id=7, scope="platform:admin")
+    client = app.test_client()
+    response = await client.post(
+        "/api/v1/admin/bundle-versions/waddles.integrations.vendor-1.a/1.0.0/abandon",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"reason": "operator cleanup"},
+    )
+    assert response.status_code == 409
+    body = await response.get_json()
+    assert body["error"]["code"] == "invalid_state_transition"
