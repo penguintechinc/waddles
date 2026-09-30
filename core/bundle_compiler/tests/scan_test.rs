@@ -517,3 +517,128 @@ fn js_dependency_audit_tool_error_fails_closed_by_default() {
         other => panic!("expected ScanBlocked(scan_tool_error), got {other:?}"),
     }
 }
+
+// C# ("csharp") dependency audit -- `dotnet list package --vulnerable`,
+// parsing examined count from `packages.lock.json` on disk the same way
+// the rust/python/js branches parse their own lockfile/requirements file
+// directly, independent of the tool's own JSON. Same hermeticity
+// rationale as every other language above: CI has no network access to
+// NuGet's advisory feed, so every test here uses a fixture stub, never
+// the real `dotnet` binary.
+
+#[test]
+fn csharp_dependency_audit_examines_a_real_lockfile() {
+    let config = ScannerConfig {
+        dotnet_bin: "tests/fixtures/bin/dotnet-audit-stub-clean.sh".to_string(),
+        ..test_scanner_config()
+    };
+    let report = run_source_scans_with_config(
+        Path::new("tests/fixtures/bundles/csharp-with-deps"),
+        "csharp",
+        &config,
+    )
+    .unwrap();
+    assert!(
+        report.dependencies_examined > 0,
+        "examined must come from the fixture's real packages.lock.json on disk"
+    );
+    assert_eq!(report.dependency_advisories, 0);
+}
+
+#[test]
+fn csharp_dependency_audit_blocks_on_a_fabricated_advisory() {
+    let config = ScannerConfig {
+        dotnet_bin: "tests/fixtures/bin/dotnet-audit-stub-vulnerable.sh".to_string(),
+        ..test_scanner_config()
+    };
+    let err = run_source_scans_with_config(
+        Path::new("tests/fixtures/bundles/csharp-with-deps"),
+        "csharp",
+        &config,
+    )
+    .unwrap_err();
+    match err {
+        CompilerError::ScanBlocked { reason, .. } => assert_eq!(reason, "dependency_vulnerability"),
+        other => panic!("expected ScanBlocked(dependency_vulnerability), got {other:?}"),
+    }
+}
+
+#[test]
+fn missing_dotnet_binary_reports_scan_tool_missing() {
+    let config = ScannerConfig {
+        dotnet_bin: "definitely-not-a-real-binary-xyz".to_string(),
+        ..test_scanner_config()
+    };
+    let err = run_source_scans_with_config(
+        Path::new("tests/fixtures/bundles/csharp-with-deps"),
+        "csharp",
+        &config,
+    )
+    .unwrap_err();
+    match err {
+        CompilerError::ScanBlocked { reason, .. } => assert_eq!(reason, "scan_tool_missing"),
+        other => panic!("expected ScanBlocked(scan_tool_missing), got {other:?}"),
+    }
+}
+
+#[test]
+fn csharp_examined_count_survives_a_dotnet_audit_network_failure_when_tolerated() {
+    let config = ScannerConfig {
+        dotnet_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        tolerate_degraded_dependency_audit: true,
+        ..test_scanner_config()
+    };
+    let report = run_source_scans_with_config(
+        Path::new("tests/fixtures/bundles/csharp-with-deps"),
+        "csharp",
+        &config,
+    )
+    .unwrap();
+    assert!(
+        report.dependencies_examined > 0,
+        "examined must come from packages.lock.json on disk, not dotnet's (failed) JSON output"
+    );
+    assert_eq!(
+        report.dependency_advisories, 0,
+        "advisories degrade to 0 on a tool failure only under the explicit opt-in"
+    );
+}
+
+#[test]
+fn csharp_dependency_audit_tool_error_fails_closed_by_default() {
+    let config = ScannerConfig {
+        dotnet_bin: "tests/fixtures/bin/audit-stub-network-failure.sh".to_string(),
+        ..test_scanner_config()
+    };
+    let err = run_source_scans_with_config(
+        Path::new("tests/fixtures/bundles/csharp-with-deps"),
+        "csharp",
+        &config,
+    )
+    .unwrap_err();
+    match err {
+        CompilerError::ScanBlocked { reason, message } => {
+            assert_eq!(reason, "scan_tool_error");
+            assert!(message.contains("dotnet list package"));
+        }
+        other => panic!("expected ScanBlocked(scan_tool_error), got {other:?}"),
+    }
+}
+
+#[test]
+fn csharp_dependency_audit_with_no_lockfile_is_zero_not_a_failure() {
+    // No `packages.lock.json` in this bundle (`bundles/csharp/csping`
+    // doesn't opt into `RestorePackagesWithLockFile` -- see the
+    // production code's own doc comment) -- must legitimately report
+    // (0, 0), never trip the denominator gate.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("Program.cs"), "// no lockfile here").unwrap();
+    let config = ScannerConfig {
+        dotnet_bin: "definitely-not-a-real-binary-xyz".to_string(),
+        ..test_scanner_config()
+    };
+    let report =
+        run_source_scans_with_config(tmp.path(), "csharp", &config).expect("dotnet never invoked");
+    assert_eq!(report.dependency_advisories, 0);
+    assert_eq!(report.dependencies_examined, 0);
+}

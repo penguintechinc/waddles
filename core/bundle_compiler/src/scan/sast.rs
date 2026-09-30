@@ -61,6 +61,9 @@ pub struct ScannerConfig {
     pub cargo_bin: String,
     /// `npm` binary name or path.
     pub npm_bin: String,
+    /// `dotnet` binary name or path (invoked as
+    /// `dotnet list package --vulnerable`).
+    pub dotnet_bin: String,
     /// Tier-gated escape hatch for a dependency-audit tool (`pip-audit`/
     /// `cargo-audit`/`npm audit`) that ran but produced no parseable
     /// output -- typically a transient failure fetching its advisory
@@ -86,6 +89,7 @@ impl Default for ScannerConfig {
             pip_audit_bin: "pip-audit".to_string(),
             cargo_bin: "cargo".to_string(),
             npm_bin: "npm".to_string(),
+            dotnet_bin: "dotnet".to_string(),
             tolerate_degraded_dependency_audit: false,
         }
     }
@@ -430,6 +434,51 @@ fn run_dependency_audit(
             };
             Ok((advisories, examined))
         }
+        "csharp" => {
+            // NuGet only emits a lockfile when a project opts in
+            // (`<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>`)
+            // -- `bundles/csharp/csping/csping.csproj` doesn't, so this
+            // legitimately audits zero dependencies for that bundle today,
+            // the same "no lockfile present" shape the other three
+            // branches already handle.
+            let lockfile = source_dir.join("packages.lock.json");
+            if !lockfile.exists() {
+                return Ok((0, 0));
+            }
+            let examined = count_nuget_lock_entries(&lockfile)?;
+            let source_dir_str = source_dir.to_string_lossy().into_owned();
+            let out = Command::new(&config.dotnet_bin)
+                .args([
+                    "list",
+                    &source_dir_str,
+                    "package",
+                    "--vulnerable",
+                    "--include-transitive",
+                    "--format",
+                    "json",
+                ])
+                .output()
+                .map_err(|e| CompilerError::ScanBlocked {
+                    reason: "scan_tool_missing".to_string(),
+                    message: format!("dotnet not runnable: {e}"),
+                })?;
+            let advisories = match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                Ok(json) => count_dotnet_vulnerable_packages(&json),
+                Err(e) => {
+                    if config.tolerate_degraded_dependency_audit {
+                        warn_degraded_audit("dotnet list package --vulnerable", &e, &out.stderr);
+                        0
+                    } else {
+                        return Err(degraded_audit_blocked(
+                            "dotnet list package --vulnerable",
+                            &e,
+                            &out.stderr,
+                        ));
+                    }
+                }
+            };
+            Ok((advisories, examined))
+        }
         other => Err(CompilerError::Config(format!(
             "no dependency auditor wired for language {other:?}"
         ))),
@@ -527,4 +576,68 @@ fn count_package_lock_entries(path: &Path) -> Result<usize, CompilerError> {
         return Ok(deps.len());
     }
     Ok(0)
+}
+
+/// Counts package entries across every target framework in a NuGet
+/// `packages.lock.json` (`{"dependencies": {"<tfm>": {"<pkg>": {...}}}}`)
+/// -- a hermetic proxy for "how many packages were pinned," independent of
+/// whether `dotnet list package --vulnerable` itself could reach NuGet's
+/// advisory feed, mirroring `count_cargo_lock_packages`/
+/// `count_package_lock_entries`'s own rationale.
+fn count_nuget_lock_entries(path: &Path) -> Result<usize, CompilerError> {
+    let contents = std::fs::read_to_string(path)?;
+    let json: serde_json::Value =
+        serde_json::from_str(&contents).map_err(|e| CompilerError::ScanBlocked {
+            reason: "scan_tool_error".to_string(),
+            message: format!("{}: not valid JSON: {e}", path.display()),
+        })?;
+    Ok(json
+        .get("dependencies")
+        .and_then(|d| d.as_object())
+        .map(|frameworks| {
+            frameworks
+                .values()
+                .filter_map(|pkgs| pkgs.as_object())
+                .map(serde_json::Map::len)
+                .sum()
+        })
+        .unwrap_or(0))
+}
+
+/// Counts high/critical-severity advisories out of `dotnet list package
+/// --vulnerable --format json`'s output shape
+/// (`{"projects": [{"frameworks": [{"topLevelPackages": [...],
+/// "transitivePackages": [...]}]}]}`, each package entry carrying a
+/// `vulnerabilities: [{"severity": "High"|"Critical"|...}]` array) --
+/// mirrors the "high/critical only" convention `run_dependency_audit`'s
+/// `javascript`/`typescript` branch already applies to `npm audit`.
+fn count_dotnet_vulnerable_packages(json: &serde_json::Value) -> usize {
+    let is_high_or_critical = |v: &serde_json::Value| {
+        matches!(
+            v.get("severity").and_then(serde_json::Value::as_str),
+            Some("High") | Some("Critical")
+        )
+    };
+    json.get("projects")
+        .and_then(serde_json::Value::as_array)
+        .map(|projects| {
+            projects
+                .iter()
+                .filter_map(|p| p.get("frameworks").and_then(serde_json::Value::as_array))
+                .flatten()
+                .flat_map(|fw| {
+                    ["topLevelPackages", "transitivePackages"]
+                        .into_iter()
+                        .filter_map(move |key| fw.get(key).and_then(serde_json::Value::as_array))
+                })
+                .flatten()
+                .filter_map(|pkg| {
+                    pkg.get("vulnerabilities")
+                        .and_then(serde_json::Value::as_array)
+                })
+                .flatten()
+                .filter(|v| is_high_or_critical(v))
+                .count()
+        })
+        .unwrap_or(0)
 }
