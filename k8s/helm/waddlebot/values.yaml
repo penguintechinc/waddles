@@ -862,6 +862,25 @@ pipeline:
   rustDataPlane:
     enabled: false
 
+    # Security review fix (PR #468, MEDIUM): bundle_host_http::egress::EgressGuard's
+    # operator-configured cluster pod/Service/node CIDR denylist, shared by every Rust
+    # data-plane stage (svcAction/svcProcess -- templates/svc-action-rust.yaml,
+    # templates/svc-process-rust.yaml -- EGRESS_CLUSTER_CIDR_DENYLIST env). Never liftable
+    # by any bundle egress grant or by instanceEgressAllowPrivateIp below -- this is the
+    # hard SSRF backstop against a bundle reaching this cluster's own control plane/other
+    # pods via the `http` capability. Empty (this default) is accepted only when
+    # global.deploymentTier is alpha/local -- CliConfig::validate hard-fails startup
+    # otherwise. OVERRIDE REQUIRED in beta/gamma/production: set to this cluster's actual
+    # pod CIDR, Service CIDR, and node CIDR/subnet (e.g. dal2's `kubectl cluster-info
+    # dump | grep -m3 -E 'cluster-cidr|service-cluster-ip-range'` output, plus the node
+    # subnet) -- values-alpha.yaml is exempt via deploymentTier: "alpha".
+    egressClusterCidrDenylist: []
+    # Interim, config-sourced bundle_host_http::egress::InstanceEgressPolicy (Justin's
+    # decision: "private-ip is also subject to the INSTANCE policy -- default deny,
+    # global-admin opt-in"). PR #428/#432's capability-gate grant snapshot is the eventual
+    # live source; `false` (deny, the default) until an operator opts in at the pod level.
+    instanceEgressAllowPrivateIp: false
+
     svcIngest:
       enabled: true
       # fix/helm-alpha-self-provisioning -- distinct image repository from

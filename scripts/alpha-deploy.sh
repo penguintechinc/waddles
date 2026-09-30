@@ -27,8 +27,8 @@
 #
 # fix/helm-alpha-self-provisioning -- this script NEVER generates or rotates
 # any secret material. `helm upgrade -f values-alpha.yaml` is self-sufficient
-# on its own now: every platform Secret (minio-kms, tenant-kek, bundle-signing,
-# service-jwt, waddlebot-valkey-tls, and the DB/Redis/MinIO-root/JWT/module/
+# on its own now: every platform Secret (seaweedfs-sse-kek, tenant-kek, bundle-signing,
+# service-jwt, waddlebot-valkey-tls, and the DB/Redis/S3-root/JWT/module/
 # service-api-key/credential-encryption/envelope-binding fields inside
 # waddlebot-secrets) is provisioned by the chart itself via lookup(KEEP)-then-
 # generate(alpha/local)-or-require(else) Helm template logic -- see
