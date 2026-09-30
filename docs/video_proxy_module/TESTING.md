@@ -157,16 +157,19 @@ docker run -d \
 sleep 5
 ```
 
-### Step 2: Start MinIO (optional)
+### Step 2: Start SeaweedFS (optional)
 
 ```bash
 docker run -d \
-  --name test-minio \
-  -e MINIO_ROOT_USER=minioadmin \
-  -e MINIO_ROOT_PASSWORD=minioadmin \
-  -p 9000:9000 \
-  minio/minio:latest server /data
+  --name test-seaweedfs \
+  -p 8333:8333 -p 9333:9333 \
+  chrislusf/seaweedfs:4.48 server -dir=/data -s3 -s3.port=8333 -master.port=9333
 ```
+
+No identity file means the S3 gateway runs in anonymous mode (fine for local
+testing only) -- set `-s3.config=/path/to/s3-identities.json` for a scoped
+access key/secret pair, matching `docker-compose.yml`'s `infra-seaweedfs`
+service.
 
 ### Step 3: Configure Test Environment
 
@@ -181,9 +184,9 @@ MODULE_PORT=8092
 MODULE_HOST=0.0.0.0
 GRPC_PORT=50065
 JWT_SECRET_KEY=test-secret-key
-MINIO_ENDPOINT=localhost:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
+S3_ENDPOINT_URL=localhost:8333
+S3_ACCESS_KEY_ID=waddlebot
+S3_SECRET_ACCESS_KEY=waddlebot
 LOG_LEVEL=DEBUG
 RELEASE_MODE=false
 EOF

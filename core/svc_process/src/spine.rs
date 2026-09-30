@@ -484,6 +484,11 @@ pub struct ProcessDeps<S: SpineOps> {
     /// gets disabled (dead-lettered without ever reaching the executor)
     /// without affecting any other source or tenant.
     pub breaker: Arc<CircuitBreaker>,
+    /// The per-process `bundle_host_http::egress::EgressGuard` cloned into
+    /// every per-invoke [`crate::capabilities::StageCapabilities`]'s
+    /// `http` capability (see that struct's doc for why this is a
+    /// singleton, not scope-implicit like every other capability).
+    pub egress: Arc<bundle_host_http::egress::EgressGuard>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -628,6 +633,7 @@ async fn handle_delivered<S: SpineOps>(
         d.env.tenant.clone(),
         d.env.community.clone(),
         deps.app_id.clone(),
+        Arc::clone(&deps.egress),
     ));
     let trace = d.env.trace.as_ref().map(|t| TraceContext {
         traceparent: t.traceparent.clone(),
@@ -1100,6 +1106,31 @@ mod tests {
             // directly by the `license_gate_*` tests below.
             license: Arc::new(crate::license::test_support::FixedGate(true)),
             breaker: Arc::new(CircuitBreaker::new(Arc::new(()))),
+            // Deny-by-default fixture (empty catalog, see
+            // `crate::capabilities::HttpEgressCatalog`'s doc) -- no test in
+            // this module exercises `http` through `ProcessDeps` itself
+            // (that's `crate::capabilities`'s own test module's job); this
+            // only needs to satisfy the field.
+            egress: Arc::new(bundle_host_http::egress::EgressGuard::new(
+                Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
+                bundle_host_http::egress::EgressLimits {
+                    allow_private_hosts: false,
+                    rate_limit_rps: 10,
+                    rate_limit_burst: 20,
+                    timeout: std::time::Duration::from_secs(5),
+                    max_redirects: 3,
+                    max_response_bytes: 1_048_576,
+                    allowed_ports: vec![443],
+                    proxy_url: None,
+                },
+                crate::capabilities::HttpEgressCatalog::new(),
+                prometheus::IntCounterVec::new(
+                    prometheus::Opts::new("test_spine_egress_denied_total", "test"),
+                    &["app_id", "reason"],
+                )
+                .unwrap(),
+                bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(true)),
+            )),
         };
         (deps, metrics)
     }

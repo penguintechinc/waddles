@@ -3,7 +3,7 @@
 //! Segments live pipeline output to local disk via ffmpeg's `segment`
 //! muxer ([`RecordSink::ffmpeg_output_args`]), then a background watcher
 //! task ([`egress::record::watcher`]) uploads each closed segment to
-//! S3-compatible object storage (MinIO in this cluster -- see
+//! S3-compatible object storage (SeaweedFS in this cluster -- see
 //! `k8s/helm/waddlebot/templates/svc-streaming.yaml`) via `object_store`,
 //! deleting the local copy once the upload succeeds. See
 //! `docs/plans/2026-09-11-svc-streaming-pipeline-matrix.md` §4 Record + §8

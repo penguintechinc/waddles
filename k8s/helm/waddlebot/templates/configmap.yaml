@@ -27,11 +27,13 @@ data:
   REDIS_HOST: {{ .Values.infrastructure.redis.service.name | quote }}
   REDIS_PORT: {{ .Values.infrastructure.redis.service.port | quote }}
 
-  # MinIO Configuration
-  MINIO_ENDPOINT: "http://{{ .Values.infrastructure.minio.service.name }}:{{ .Values.infrastructure.minio.service.apiPort }}"
-  MINIO_CONSOLE_ENDPOINT: "http://{{ .Values.infrastructure.minio.service.name }}:{{ .Values.infrastructure.minio.service.consolePort }}"
-  S3_ENDPOINT_URL: "http://{{ .Values.infrastructure.minio.service.name }}:{{ .Values.infrastructure.minio.service.apiPort }}"
-  S3_BUCKET_NAME: {{ .Values.infrastructure.minio.bucketName | quote }}
+  # S3-compatible object storage (SeaweedFS, was MinIO) -- key names kept as
+  # MINIO_* for backward compatibility with consumers still reading them
+  # (e.g. core/video_proxy_module); S3_* names are the primary/preferred keys.
+  MINIO_ENDPOINT: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
+  MINIO_CONSOLE_ENDPOINT: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.masterPort }}"
+  S3_ENDPOINT_URL: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
+  S3_BUCKET_NAME: {{ .Values.infrastructure.seaweedfs.bucketName | quote }}
   S3_STORAGE_ENABLED: "true"
 
   # Qdrant Configuration

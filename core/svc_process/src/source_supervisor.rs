@@ -137,6 +137,9 @@ pub struct SupervisorDeps {
     /// keyed independently per `(platform, source_id)` -- see
     /// `crate::spine::ProcessDeps::breaker`'s doc for the full rationale.
     pub breaker: Arc<circuit_breaker::CircuitBreaker>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::egress`'s doc.
+    pub egress: Arc<bundle_host_http::egress::EgressGuard>,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -262,6 +265,7 @@ async fn run_binding_consumer(
             metrics: deps.metrics.clone(),
             license: Arc::clone(&deps.license),
             breaker: Arc::clone(&deps.breaker),
+            egress: Arc::clone(&deps.egress),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();

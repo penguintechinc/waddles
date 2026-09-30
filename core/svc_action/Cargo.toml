@@ -123,6 +123,14 @@ bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
 # 5) -- same crate core/svc_process uses for its own per-source breaker;
 # here keyed per (app_id, scope, destination) -- see dispatch.rs's doc.
 circuit-breaker = { path = "../circuit_breaker", version = "=0.1.0" }
+# The bundle `http` host capability's shared, SSRF-hardened egress guard
+# (`src/egress.rs`, now a thin re-export shim) -- extracted here (PR #459
+# follow-up) so `core/svc_process` can enforce the identical pipeline for
+# its own `http` capability without a second copy. Same same-repo `path`-
+# dependency rationale as `bundle-active-set` above: this pipeline is
+# specific to this repo's own bundle-host wire shapes, not a penguin-libs
+# crate.
+bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
 
 [dev-dependencies]
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks

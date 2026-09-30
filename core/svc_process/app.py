@@ -16,6 +16,20 @@ the live schema directly -- so a stateful process bundle can call
 best-effort activity emit has a table to write to with no separate
 per-table binding step. The frozen `transform(event) -> PlatformEvent | None`
 signature itself carries no DAL parameter.
+
+DEPRECATED (chore/retire-python-dataplane, 2026-09-28): PenguinTech is
+retiring Python from all live-traffic (data-plane) services in favor of
+`core/svc_process`'s Rust build (`src/`, `Cargo.toml`) -- see
+`critical-rules.md` Data Plane (In-Line of Traffic). This Python service
+remains the ONLY functioning process stage today: the Rust build is a
+generic DB-driven WASM bundle executor/loader (`src/bundle_loader.rs`,
+`src/spine.rs`) with NO business-logic bundles compiled yet -- `bundles/
+rust/` contains only `example` and `ping` test bundles, none of this
+module's 16 real `bundles/*_process.py` bundles (bot, community_*,
+inventory, marketing_engagement, social_*, echo) have a Rust/WASM
+equivalent. Do not remove this module or its Helm Deployment
+(`k8s/helm/waddlebot/templates/svc-process.yaml`) until the Rust bundles
+reach parity -- tracked as Rust follow-up work, not scheduled here.
 """
 
 from __future__ import annotations
