@@ -126,6 +126,7 @@ mod tests {
             digest: digest.to_string(),
             component_key: format!("bundles/{digest}/component.wasm"),
             sidecar_key: format!("bundles/{digest}/sidecar.json"),
+            declared_capabilities: Vec::new(),
         }
     }
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -217,6 +218,49 @@ async def test_seed_one_publishes_and_activates_under_system_actor(
     assert active_row is not None
     assert active_row.version_id == version_row.id
     assert active_row.activated_by is None
+
+
+async def test_ensure_app_catalog_row_logs_without_a_reserved_logrecord_key_collision(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression: a brand-new `app_catalog` row must log successfully, not crash.
+
+    `_ensure_app_catalog_row()`'s "row created" log call previously passed
+    `extra={"module": manifest.module}` -- "module" collides with
+    `logging.LogRecord`'s own reserved `module` attribute (the calling module's
+    name, always present on every record), so `Logger.makeRecord()` unconditionally
+    raises `KeyError: "Attempt to overwrite 'module' in LogRecord"` the instant this
+    logger's effective level allows INFO through. That crash was invisible under
+    pytest's default logging config (root logger defaults to WARNING, so
+    `logger.info(...)`'s `isEnabledFor(INFO)` fast-path skips `makeRecord()`
+    entirely) -- but very real under the deployed seeder's `main()`, which calls
+    `logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))`, enabling INFO and
+    triggering the crash on every genuinely first-time catalog entry (a pre-existing
+    row skips this log call entirely via its `if existing: return` early-out, which
+    is why a repeat/upgrade install never surfaced it). `caplog.set_level(INFO, ...)`
+    below reproduces that same "INFO enabled" condition a plain pytest run would
+    otherwise mask.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    caplog.set_level(logging.INFO, logger="waddles.hub_api.core_bundle_seeder")
+    entry = _write_bundle(tmp_path)
+
+    # Must not raise -- a fresh app_id's first seed always hits the "row created"
+    # log call; before the fix this raised KeyError before ever reaching the DB
+    # insert's caller (seed_one), surfacing in _run() as a generic "bundle failed".
+    results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert results
+
+    catalog_row = (
+        await install_dal(install_dal.app_catalog.app_id == entry.app_id).select()
+    ).first()
+    assert catalog_row is not None
+    assert any(
+        record.message == "core-bundle-seeder: app_catalog row created" for record in caplog.records
+    )
 
 
 async def test_seed_one_with_no_community_id_only_makes_available_never_activates(

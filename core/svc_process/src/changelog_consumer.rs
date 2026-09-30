@@ -317,6 +317,7 @@ async fn apply_active_set(
     state: &mut ConsumerState,
     sink: Option<&dyn BundleSink>,
     excluded_metric: &prometheus::IntCounterVec,
+    kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
 ) {
     // Scope-preserving: NEVER collapses two different `(tenant, community)`
     // scopes' independently-active digests for the same `app_id` onto one
@@ -326,6 +327,13 @@ async fn apply_active_set(
     // src/invoke.rs`'s digest-keyed, refcounted registry that makes this
     // safe).
     let active = bundle_active_set::scoped_active_rows(&state.by_scope);
+    // Mirrors `core/svc_action/src/changelog_consumer.rs`'s identical
+    // refresh (PR #425 coordinator fix): every active app's declared-
+    // capability snapshot is refreshed every tick, not just the diffed
+    // to_load set.
+    for row in active.values() {
+        kv_capabilities.update(row.app_id.clone(), row.declared_capabilities.clone());
+    }
     for active_set in state.by_scope.values() {
         for (app_id, reason) in &active_set.excluded {
             excluded_metric
@@ -448,6 +456,7 @@ pub async fn run_incremental_tick(
     excluded_metric: &prometheus::IntCounterVec,
     binding_metrics: &crate::telemetry::SourceBindingSupervisorMetrics,
     metrics: &ChangelogConsumerMetrics,
+    kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
 ) {
     let start = Instant::now();
     let watermark =
@@ -491,6 +500,7 @@ pub async fn run_incremental_tick(
             excluded_metric,
             binding_metrics,
             metrics,
+            kv_capabilities,
         )
         .await;
         state.tracker.advance(safe_seq);
@@ -529,6 +539,7 @@ pub async fn run_incremental_tick(
                 excluded_metric,
                 binding_metrics,
                 metrics,
+                kv_capabilities,
             )
             .await;
             state.tracker.advance(safe_seq);
@@ -627,7 +638,7 @@ pub async fn run_incremental_tick(
     state.tracker.advance(new_last_seq);
     metrics.changelog_lag.set(state.tracker.lag(safe_seq));
 
-    apply_active_set(state, sink, excluded_metric).await;
+    apply_active_set(state, sink, excluded_metric, kv_capabilities).await;
     update_tenant_gauges(state, metrics);
 
     if let Some(spawner) = spawner {
@@ -652,6 +663,7 @@ pub async fn run_incremental_tick(
 /// incremental tick. Bounds the blast radius of any change-log defect to
 /// one interval, independent of the change-log's own correctness. Timed
 /// into [`ChangelogConsumerMetrics::reconcile_duration_seconds`].
+#[allow(clippy::too_many_arguments)]
 pub async fn run_full_reconcile(
     db: &DatabaseConnection,
     state: &mut ConsumerState,
@@ -660,6 +672,7 @@ pub async fn run_full_reconcile(
     excluded_metric: &prometheus::IntCounterVec,
     binding_metrics: &crate::telemetry::SourceBindingSupervisorMetrics,
     metrics: &ChangelogConsumerMetrics,
+    kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
 ) {
     let start = Instant::now();
     match bundle_active_set::read_active_set_all(db).await {
@@ -703,7 +716,7 @@ pub async fn run_full_reconcile(
         .await;
     }
 
-    apply_active_set(state, sink, excluded_metric).await;
+    apply_active_set(state, sink, excluded_metric, kv_capabilities).await;
     update_tenant_gauges(state, metrics);
 
     metrics
@@ -725,6 +738,7 @@ pub async fn run(
     connections: Arc<crate::host_api::ConnectionRegistry>,
     spawner: Option<Arc<dyn ConsumerSupervisor>>,
     excluded_metric: prometheus::IntCounterVec,
+    kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     binding_metrics: crate::telemetry::SourceBindingSupervisorMetrics,
     metrics: ChangelogConsumerMetrics,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
@@ -797,7 +811,7 @@ pub async fn run(
                 }
                 run_incremental_tick(
                     &db, &mut state, sink_ref, spawner.as_deref(), &excluded_metric,
-                    &binding_metrics, &metrics,
+                    &binding_metrics, &metrics, &kv_capabilities,
                 ).await;
             }
             _ = reconcile_tick.tick() => {
@@ -806,7 +820,7 @@ pub async fn run(
                 }
                 run_full_reconcile(
                     &db, &mut state, sink_ref, spawner.as_deref(), &excluded_metric,
-                    &binding_metrics, &metrics,
+                    &binding_metrics, &metrics, &kv_capabilities,
                 ).await;
             }
         }
@@ -860,6 +874,7 @@ mod tests {
             app_id: app_id.to_string(),
             version: "1".to_string(),
             superseded_by: None,
+            summary_json: sea_orm::JsonValue::Null,
         }
     }
 
@@ -1090,6 +1105,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &metrics,
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
 
@@ -1122,6 +1138,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &test_changelog_metrics(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         assert!(sink.calls().is_empty());
@@ -1157,6 +1174,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &test_changelog_metrics(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -1208,6 +1226,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &metrics,
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -1268,6 +1287,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &test_changelog_metrics(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         assert_eq!(state.running_len(), 1, "one consumer must be spawned");
@@ -1304,6 +1324,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &test_changelog_metrics(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         assert_eq!(state.last_seq(), 120);
@@ -1337,6 +1358,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &test_changelog_metrics(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -1372,6 +1394,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &test_changelog_metrics(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -1520,6 +1543,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &test_changelog_metrics(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -1556,6 +1580,7 @@ mod tests {
                     digest: "sha256:00".to_string(),
                     component_key: "k".to_string(),
                     sidecar_key: "s".to_string(),
+                    declared_capabilities: Vec::new(),
                 }],
                 excluded: Vec::new(),
                 degraded: Vec::new(),
@@ -1578,6 +1603,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &test_changelog_metrics(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
 
@@ -1623,6 +1649,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &metrics,
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
 
@@ -1677,6 +1704,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &metrics,
+            &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
 

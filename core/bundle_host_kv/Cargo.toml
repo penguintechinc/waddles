@@ -1,0 +1,50 @@
+[package]
+name = "bundle-host-kv"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Shared `kv` bundle host-capability implementation (stage.wit `interface kv`: get/set/delete/increment) for the data-plane's two invoke-side stages (svc_process + svc_action). A path dependency within this repo -- NOT a penguin-libs crate: the key scheme, quotas, and isolation rules here are this repo's own security boundary for untrusted vendor bundle state, evolved alongside stage.wit and the manifest schema this repo owns. Backed by Valkey; every guest-visible key is namespaced server-side from the invocation's authenticated (tenant, community, app_id) scope, never from guest input, so one app can never read or enumerate another app's or another tenant's keys."
+
+[lib]
+name = "bundle_host_kv"
+path = "src/lib.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- rules/critical-rules.md
+# Dependency Pinning. Cargo.lock is committed in every crate that depends
+# on this one (svc_process, svc_action) alongside this file. Versions
+# mirror core/svc_process's and core/svc_action's own pins for the same
+# crates -- both already depend on these exact versions, so a path
+# dependency on this crate introduces no second pin of the same package.
+[dependencies]
+redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "script"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+thiserror = "=2.0.20"
+tracing = "=0.1.44"
+sha2 = "=0.10.9"
+# Custom OTel metrics (spec: kv op latency histogram, error counter by
+# kind, quota-rejection counter -- rules/critical-rules.md Observability).
+# `penguin-logging` (a dependency of svc_process/svc_action, not of this
+# crate) installs the global `SdkMeterProvider` at process startup; this
+# crate only reads `opentelemetry::global::meter(..)` to register its own
+# instruments against whatever provider is already installed, exactly the
+# same exact version pin `penguin-logging` itself uses so no second copy
+# of the crate ever enters either service's dependency graph.
+opentelemetry = "=0.32.0"
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }
+# Integration test against a real Valkey container (task requirement --
+# no existing testcontainers pattern in this repo to follow yet, so this
+# is the first landing of it; `rust-bundle-host-kv.yml` installs Docker
+# via the standard `ubuntu-latest` runner image, which already ships it).
+# `testcontainers::GenericImage` directly (`tests/valkey_integration.rs`)
+# rather than `testcontainers-modules`'s prebuilt "redis" module: that
+# crate's latest release (0.15.0) pins `testcontainers` to `^0.27.0`, which
+# in turn pins `astral-tokio-tar = "0.5.6"` -- four RustSec advisories
+# (RUSTSEC-2026-0066/0112/0113/0145) fixed only in `astral-tokio-tar`
+# >=0.6.2, which only `testcontainers` 0.28.0+ pulls in. A hand-rolled
+# image definition is a few lines and keeps this crate on the patched line.
+testcontainers = "=0.28.0"

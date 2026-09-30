@@ -21,10 +21,11 @@
 //! - The content-moderation gate itself (`crate::builtins::
 //!   run_moderation_gate`) -- needs a Rust Ollama classifier client and
 //!   PostHog flag client, neither of which exists in this crate yet
-//! - The `db`/`kv`/`flags` host capabilities
-//!   (`crate::capabilities::StageCapabilities`) -- `context`/`clock`/`log`
-//!   and `http` (shared `bundle_host_http::egress::EgressGuard`, PR #459
-//!   follow-up) are fully wired
+//! - The `db`/`flags` host capabilities
+//!   (`crate::capabilities::StageCapabilities`) -- `context`/`clock`/`log`,
+//!   `kv` (shared `bundle_host_kv::KvHost`, PR #425), and `http` (shared
+//!   `bundle_host_http::egress::EgressGuard`, PR #459 follow-up) are fully
+//!   wired
 //! - The `GET /api/v1/distribution/bundles?stage=process` activation poll
 //!   (spec §6.7) that would resolve `PROCESS_APP_ID`'s real granted-stream
 //!   list, bundle digest, and approved `routes_to` set -- see
@@ -215,6 +216,131 @@ fn try_start_host_api(cli: &config::CliConfig) -> Arc<host_api::ConnectionRegist
     registry
 }
 
+/// Opens the direct Valkey connection the `kv` host capability is backed
+/// by (`spine::ProcessDeps::kv_conn`'s doc), built from the same
+/// `VALKEY_URL`/username/password/TLS/CA-file settings
+/// `penguin_spine::SpineClient` connects with -- byte-for-byte the same
+/// connection-building logic as `core/svc_action::usage::connect`
+/// (duplicated rather than shared: it is a dozen lines of `redis`-crate
+/// client construction, not the `kv` capability's own logic, which
+/// already lives in exactly one place, `bundle_host_kv`). Never fatal on
+/// failure -- returns `None` (logged) so the caller can start every other
+/// capability regardless (`crate::capabilities::StageCapabilities::with_kv`'s
+/// doc).
+async fn connect_kv(cfg: &penguin_spine::SpineConfig) -> Option<redis::aio::MultiplexedConnection> {
+    use redis::IntoConnectionInfo;
+
+    let info: redis::ConnectionInfo = match cfg.valkey_url.as_str().into_connection_info() {
+        Ok(info) => info,
+        Err(err) => {
+            tracing::warn!(error = %err, "kv capability: invalid VALKEY_URL; kv disabled (not_implemented on every kv host-call)");
+            return None;
+        }
+    };
+    let mut settings = info.redis_settings().clone();
+    if let Some(username) = &cfg.valkey_username {
+        settings = settings.set_username(username);
+    }
+    if let Some(password) = &cfg.valkey_password {
+        settings = settings.set_password(password);
+    }
+    let info = info.set_redis_settings(settings);
+
+    let client = if cfg.security_transport_tls {
+        host_api::ensure_crypto_provider_installed();
+        let root_cert = std::fs::read(&cfg.valkey_ca_file).ok();
+        match redis::Client::build_with_tls(
+            info,
+            redis::TlsCertificates {
+                client_tls: None,
+                root_cert,
+            },
+        ) {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::warn!(error = %err, "kv capability: TLS Valkey client build failed; kv disabled");
+                return None;
+            }
+        }
+    } else {
+        match redis::Client::open(info) {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::warn!(error = %err, "kv capability: Valkey client build failed; kv disabled");
+                return None;
+            }
+        }
+    };
+
+    match client.get_multiplexed_async_connection().await {
+        Ok(mut conn) => {
+            // Low-severity fix, security review of PR #425: `count_key`
+            // has no TTL, so an `allkeys-*` `maxmemory-policy` can evict it
+            // under memory pressure, silently resetting the kv quota --
+            // checked once here, never on the per-op hot path
+            // (`bundle_host_kv::policy`'s doc).
+            let policy_check = bundle_host_kv::policy::check_maxmemory_policy(&mut conn).await;
+            bundle_host_kv::policy::log_and_record(&policy_check);
+            Some(conn)
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "kv capability: Valkey connection failed; kv disabled (not_implemented on every kv host-call)");
+            None
+        }
+    }
+}
+
+/// Builds the `http` bundle capability's shared
+/// [`bundle_host_http::egress::EgressGuard`], wired with the cluster CIDR
+/// denylist and instance-wide private-IP egress policy
+/// (`cli.cluster_cidr_denylist()`/`cli.instance_egress_policy()`) -- shared
+/// by [`try_start_process_loop`] and [`try_start_changelog_consumer`] (this
+/// crate's two mutually-exclusive startup paths), pulled out so both can be
+/// exercised directly in tests without a live Valkey/Postgres connection.
+/// See `mod tests`'s `process_egress_guard_denies_cluster_cidr_even_with_grant_and_policy_allow`
+/// regression test for #425's dropped-denylist bug this guards against.
+///
+/// `None` mirrors both callers' own fail-closed posture: a denylist
+/// re-parse failure (should be impossible, since `CliConfig::validate`
+/// already parsed it successfully at `Config::load` time) disables the
+/// caller rather than starting with a silently-empty denylist.
+fn build_process_egress_guard(
+    cli: &config::CliConfig,
+    catalog: Arc<capabilities::HttpEgressCatalog>,
+    egress_denied_metric: prometheus::IntCounterVec,
+    bundle_egress_flag: Arc<dyn bundle_host_http::egress::FeatureFlag>,
+) -> Option<Arc<bundle_host_http::egress::EgressGuard>> {
+    let cluster_denylist = match cli.cluster_cidr_denylist() {
+        Ok(denylist) => denylist,
+        Err(err) => {
+            tracing::warn!(error = %err, "cluster CIDR denylist re-parse failed after startup validation passed; egress guard not built");
+            return None;
+        }
+    };
+    Some(Arc::new(
+        bundle_host_http::egress::EgressGuard::new(
+            Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
+            bundle_host_http::egress::EgressLimits {
+                allow_private_hosts: false,
+                rate_limit_rps: 10,
+                rate_limit_burst: 20,
+                timeout: std::time::Duration::from_secs(10),
+                max_redirects: 3,
+                max_response_bytes: 1_048_576,
+                allowed_ports: vec![443],
+                proxy_url: None,
+            },
+            catalog,
+            egress_denied_metric,
+            bundle_egress_flag,
+        )
+        .with_instance_policy(Arc::new(std::sync::RwLock::new(
+            cli.instance_egress_policy(),
+        )))
+        .with_cluster_denylist(cluster_denylist),
+    ))
+}
+
 /// Attempts to start the **legacy, single-consumer** process-stage drain
 /// loop (`crate::spine::run`) as its own background task, mirroring
 /// `core/svc_action::try_start_dispatch`'s shape: three independent reasons
@@ -330,38 +456,15 @@ fn try_start_process_loop(
             // this function already takes.
             Err(_) => bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(false)),
         };
-    // `CliConfig::validate` (run at `Config::load` time, before this
-    // function is ever reached) already parsed this successfully and
-    // enforced the alpha/local-only empty-denylist exception.
-    let cluster_denylist = match config.cli.cluster_cidr_denylist() {
-        Ok(denylist) => denylist,
-        Err(err) => {
-            tracing::warn!(error = %err, "cluster CIDR denylist re-parse failed after startup validation passed; process loop disabled");
-            return;
-        }
+    let Some(egress) = build_process_egress_guard(
+        &config.cli,
+        capabilities::HttpEgressCatalog::new(),
+        egress_denied_metric,
+        bundle_egress_flag,
+    ) else {
+        tracing::warn!("cluster CIDR denylist re-parse failed after startup validation passed; process loop disabled");
+        return;
     };
-    let egress = Arc::new(
-        bundle_host_http::egress::EgressGuard::new(
-            Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
-            bundle_host_http::egress::EgressLimits {
-                allow_private_hosts: false,
-                rate_limit_rps: 10,
-                rate_limit_burst: 20,
-                timeout: std::time::Duration::from_secs(10),
-                max_redirects: 3,
-                max_response_bytes: 1_048_576,
-                allowed_ports: vec![443],
-                proxy_url: None,
-            },
-            capabilities::HttpEgressCatalog::new(),
-            egress_denied_metric,
-            bundle_egress_flag,
-        )
-        .with_instance_policy(Arc::new(std::sync::RwLock::new(
-            config.cli.instance_egress_policy(),
-        )))
-        .with_cluster_denylist(cluster_denylist),
-    );
 
     let cli = config.cli.clone();
     let app_id = cli.process_app_id.clone();
@@ -389,6 +492,12 @@ fn try_start_process_loop(
         };
 
         let metrics: Arc<dyn penguin_spine::SpineMetrics> = Arc::new(penguin_spine::NoopMetrics);
+        // `kv` host capability: opened once here, cloned into every
+        // per-invoke `StageCapabilities` (`spine::ProcessDeps::kv_conn`'s
+        // doc) rather than reopened per invoke. `None` on failure is not
+        // fatal to the process loop -- every `kv` host-call then sees
+        // `not_implemented` instead (`connect_kv`'s doc).
+        let kv_conn = connect_kv(&spine_cfg).await;
         let deps = spine::ProcessDeps {
             app_id: app_id.clone(),
             digest: cli.process_bundle_digest.clone(),
@@ -412,6 +521,12 @@ fn try_start_process_loop(
             },
             metrics,
             license: license_gate,
+            kv_conn,
+            // The legacy, single-bundle, env-driven path has no active-set
+            // snapshot at all (no DB row, no consent record) -- `kv`
+            // denies by default here, always (`bundle_host_kv::authorize`'s
+            // own module doc: "undeclared means denied").
+            kv_capabilities: Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
             egress,
         };
 
@@ -551,35 +666,15 @@ fn try_start_changelog_consumer(
     // `try_start_process_loop` (this crate's other, mutually-exclusive
     // startup path) -- see that function's own doc for the deny-by-default
     // `HttpEgressCatalog` seam.
-    let cluster_denylist = match config.cli.cluster_cidr_denylist() {
-        Ok(denylist) => denylist,
-        Err(err) => {
-            tracing::warn!(error = %err, "cluster CIDR denylist re-parse failed after startup validation passed; DB-driven bundle loader/source-binding supervisor not started");
-            return;
-        }
+    let Some(egress) = build_process_egress_guard(
+        &config.cli,
+        capabilities::HttpEgressCatalog::new(),
+        egress_denied_metric,
+        bundle_host_http::egress::boxed(license::BundleEgressFlag::new(license_client)),
+    ) else {
+        tracing::warn!("cluster CIDR denylist re-parse failed after startup validation passed; DB-driven bundle loader/source-binding supervisor not started");
+        return;
     };
-    let egress = Arc::new(
-        bundle_host_http::egress::EgressGuard::new(
-            Arc::new(bundle_host_http::egress::ReqwestTransport::new()),
-            bundle_host_http::egress::EgressLimits {
-                allow_private_hosts: false,
-                rate_limit_rps: 10,
-                rate_limit_burst: 20,
-                timeout: std::time::Duration::from_secs(10),
-                max_redirects: 3,
-                max_response_bytes: 1_048_576,
-                allowed_ports: vec![443],
-                proxy_url: None,
-            },
-            capabilities::HttpEgressCatalog::new(),
-            egress_denied_metric,
-            bundle_host_http::egress::boxed(license::BundleEgressFlag::new(license_client)),
-        )
-        .with_instance_policy(Arc::new(std::sync::RwLock::new(
-            config.cli.instance_egress_policy(),
-        )))
-        .with_cluster_denylist(cluster_denylist),
-    );
 
     let reader_cfg = bundle_active_set::ReaderConfig {
         host: config.cli.db_reader_host.clone(),
@@ -592,28 +687,30 @@ fn try_start_changelog_consumer(
     let full_reconcile_interval = config.cli.full_reconcile_interval();
     let call_timeout_ms = config.cli.executor_call_timeout_ms;
 
-    // The source-binding supervisor's own optional dependencies -- built
-    // eagerly (no network I/O) so a missing/invalid one only disables the
-    // supervisor half, never the bundle load/unload half. Shares the SAME
-    // `connections` registry as `bundle_loader::run`/the host-api listener
-    // (`try_start_host_api`'s own registry, threaded through this
-    // function's `connections` parameter) -- a per-consumer registry of its
-    // own would never see the executor connection the listener actually
-    // accepts. Unlike the pre-multi-tenant version, tenant/community scope
-    // is no longer part of this dependency set (resolved per-scope, inside
-    // `changelog_consumer`, not once per whole supervisor instance).
-    let spawner: Option<Arc<dyn source_supervisor::ConsumerSupervisor>> =
-        build_source_supervisor_deps(
-            config,
-            Arc::clone(&connections),
-            Arc::clone(&gate),
-            Arc::clone(&egress),
-        )
-        .map(|deps| {
-            Arc::new(source_supervisor::SpineConsumerSupervisor {
-                deps: Arc::new(deps),
-            }) as Arc<dyn source_supervisor::ConsumerSupervisor>
-        });
+    // supervisor half, never the bundle load/unload half. Unlike the
+    // pre-multi-tenant version, tenant/community scope is no longer part
+    // of this prereq (resolved per-scope, inside `changelog_consumer`, not
+    // once per whole supervisor instance). Shares the SAME `connections`
+    // registry as the host-api listener (`try_start_host_api`'s own
+    // registry, threaded through this function's `connections` parameter).
+    //
+    // `kv_capabilities`: shared between `changelog_consumer::run`'s
+    // DB-driven poll (writer -- every tick's `ActiveBundleRow::
+    // declared_capabilities`) and every source-binding consumer's own
+    // per-invoke `StageCapabilities` (reader, `bundle_host_kv::authorize::
+    // authorize_kv`) -- one snapshot, one writer, many readers, mirroring
+    // `core/svc_action`'s identical pattern. `kv_conn` is left `None` here
+    // (opened async, once, inside the spawned task below -- this function
+    // stays synchronous/no-I/O per its own doc) and filled in there before
+    // the spawner is actually constructed.
+    let kv_capabilities = Arc::new(bundle_host_kv::CapabilitySnapshot::new());
+    let supervisor_deps = build_source_supervisor_deps(
+        config,
+        Arc::clone(&connections),
+        Arc::clone(&gate),
+        Arc::clone(&kv_capabilities),
+        Arc::clone(&egress),
+    );
 
     tokio::spawn(async move {
         let db = match bundle_active_set::reader::connect(&reader_cfg, &password).await {
@@ -629,6 +726,25 @@ fn try_start_changelog_consumer(
             shutdown_signal().await;
             let _ = shutdown_tx.send(());
         });
+        // `kv` host capability connection for every source-binding consumer
+        // this supervisor spawns -- opened once here (network I/O
+        // deliberately kept out of `build_source_supervisor_deps`, see that
+        // function's doc) and cloned into each consumer's `ProcessDeps`
+        // (`source_supervisor::run_binding_consumer`). Built inside this
+        // spawned task, not before it, purely because opening it is async
+        // and `try_start_changelog_consumer` itself stays synchronous.
+        let spawner: Option<Arc<dyn source_supervisor::ConsumerSupervisor>> = match supervisor_deps
+        {
+            Some(mut deps) => {
+                deps.kv_conn = connect_kv(&deps.spine_cfg).await;
+                Some(Arc::new(source_supervisor::SpineConsumerSupervisor {
+                    deps: Arc::new(deps),
+                })
+                    as Arc<dyn source_supervisor::ConsumerSupervisor>)
+            }
+            None => None,
+        };
+
         changelog_consumer::run(
             db,
             poll_interval,
@@ -638,6 +754,7 @@ fn try_start_changelog_consumer(
             connections,
             spawner,
             excluded_metric,
+            kv_capabilities,
             source_supervisor_metrics,
             changelog_consumer_metrics,
             shutdown_rx,
@@ -660,6 +777,7 @@ fn build_source_supervisor_deps(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
     gate: Arc<dyn license::FeatureGate>,
+    kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     egress: Arc<bundle_host_http::egress::EgressGuard>,
 ) -> Option<source_supervisor::SupervisorDeps> {
     let Some(keys_raw) = config.envelope_binding_keys.as_ref() else {
@@ -694,6 +812,12 @@ fn build_source_supervisor_deps(
         approved_targets,
         metrics,
         license: gate,
+        // Opened async, once, inside `try_start_changelog_consumer`'s
+        // spawned task (this function stays synchronous/no-I/O, per its own
+        // doc) -- filled in there before the spawner is actually
+        // constructed.
+        kv_conn: None,
+        kv_capabilities,
         egress,
     })
 }
@@ -839,6 +963,7 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             gate,
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
             test_egress_guard(),
         )
         .is_none());
@@ -861,6 +986,7 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             gate,
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
             test_egress_guard(),
         );
         // SAFETY: serialized by ENV_LOCK above.
@@ -893,6 +1019,102 @@ mod tests {
             test_egress_denied_metric(),
             bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(true)),
         ))
+    }
+
+    // regression: #425 dropped cluster denylist -- both tests below go
+    // through `build_process_egress_guard`, the exact function both
+    // `try_start_process_loop` and `try_start_changelog_consumer` (the
+    // production wiring) call, so a future merge that silently drops the
+    // `.with_cluster_denylist()`/`.with_instance_policy()` calls fails
+    // these tests, not just the shared `bundle_host_http::egress` crate's
+    // own generic guard suite (which would keep passing even if this crate
+    // stopped wiring the guard up at all).
+
+    /// The cluster CIDR denylist must win even when a `PrivateIp` grant
+    /// covers the address AND the instance policy has opted into private-IP
+    /// egress -- proves `build_process_egress_guard` actually threads
+    /// `cli.cluster_cidr_denylist()` into the guard via
+    /// `.with_cluster_denylist()`, not just that the shared crate supports
+    /// it.
+    #[tokio::test]
+    async fn process_egress_guard_denies_cluster_cidr_even_with_grant_and_policy_allow() {
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--deployment-tier",
+            "production",
+            "--egress-cluster-cidr-denylist",
+            "10.244.0.0/16",
+            "--instance-egress-allow-private-ip",
+        ]);
+        cli.validate().expect("populated denylist passes");
+        let catalog = capabilities::HttpEgressCatalog::new();
+        catalog.update(
+            "waddles.a.b.c",
+            bundle_host_http::egress::EgressRuleRow {
+                private_ip_grants: vec![("10.244.5.6".to_string(), vec!["GET".to_string()])],
+                ..Default::default()
+            },
+        );
+        let guard = build_process_egress_guard(
+            &cli,
+            catalog,
+            test_egress_denied_metric(),
+            bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(true)),
+        )
+        .expect("valid config produces a guard");
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://10.244.5.6/"}),
+            )
+            .await
+            .expect_err("cluster CIDR denylist must deny despite grant + policy allow");
+        assert_eq!(err.code, "ssrf_blocked_address");
+    }
+
+    /// The instance-wide private-IP policy denies a `PrivateIp` grant by
+    /// default (no cluster CIDR involved) -- proves `build_process_egress_
+    /// guard` actually threads `cli.instance_egress_policy()` into the
+    /// guard via `.with_instance_policy()`.
+    #[tokio::test]
+    async fn process_egress_guard_denies_private_ip_grant_when_instance_policy_is_default_deny() {
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--deployment-tier",
+            "production",
+            "--egress-cluster-cidr-denylist",
+            "10.99.0.0/16",
+        ]);
+        cli.validate().expect("populated denylist passes");
+        assert!(
+            !cli.instance_egress_policy().allow_private_ip_egress,
+            "default instance policy must deny private-ip egress"
+        );
+        let catalog = capabilities::HttpEgressCatalog::new();
+        catalog.update(
+            "waddles.a.b.c",
+            bundle_host_http::egress::EgressRuleRow {
+                // 10.0.0.9 is outside the cluster denylist above, so only
+                // the instance policy is under test here.
+                private_ip_grants: vec![("10.0.0.9".to_string(), vec!["GET".to_string()])],
+                ..Default::default()
+            },
+        );
+        let guard = build_process_egress_guard(
+            &cli,
+            catalog,
+            test_egress_denied_metric(),
+            bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(true)),
+        )
+        .expect("valid config produces a guard");
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://10.0.0.9/"}),
+            )
+            .await
+            .expect_err("default-deny instance policy must deny an otherwise-granted private IP");
+        assert_eq!(err.code, "ssrf_blocked_address");
     }
 
     #[test]

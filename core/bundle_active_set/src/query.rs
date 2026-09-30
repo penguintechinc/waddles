@@ -29,6 +29,38 @@ pub struct ActiveBundleRow {
     pub digest: String,
     pub component_key: String,
     pub sidecar_key: String,
+    /// The install-time consent summary's derived `"capabilities"` array
+    /// (`app_install_approvals.summary_json`, `crate::entities::
+    /// app_install_approvals`'s doc) -- e.g. `["context","kv","flags",
+    /// "log","clock","http"]`. Each service's own `bundle_loader` folds
+    /// this into a per-`app_id` declared-capability snapshot
+    /// (`bundle_host_kv::authorize::CapabilitySnapshot`) that
+    /// `authorize_kv` checks before granting `kv` (coordinator fix on PR
+    /// #425: "undeclared means denied", no more unconditional grant).
+    /// Empty (never `None`) if `summary_json` was missing the key, was not
+    /// an array of strings, or failed to parse -- a malformed/absent
+    /// summary denies every capability it might have granted, the correct
+    /// fail-closed direction for a consent record this crate cannot
+    /// validate further than "is this valid JSON shaped like the summary
+    /// schema".
+    pub declared_capabilities: Vec<String>,
+}
+
+/// Extracts `summary_json.capabilities` (a JSON array of strings) as a
+/// plain `Vec<String>`, or `vec![]` for any malformed/missing shape (this
+/// function's own doc: fail closed, never fail the whole active-set read
+/// over one bundle's malformed consent record).
+fn declared_capabilities_from_summary(summary_json: &sea_orm::JsonValue) -> Vec<String> {
+    summary_json
+        .get("capabilities")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A cheap change signal for one `(tenant_id, community_id)` scope: a
@@ -322,14 +354,14 @@ pub(crate) fn assemble_active_set(
             continue;
         };
 
-        let approved = approval_rows.iter().any(|appr| {
+        let approval = approval_rows.iter().find(|appr| {
             appr.tenant_id == active.tenant_id
                 && appr.app_id == active.app_id
                 && appr.version == version_row.version
                 && (appr.community_id == Some(active.community_id)
                     || (appr.community_id.is_none() && active.community_id == 0))
         });
-        if !approved {
+        if approval.is_none() {
             // Ops-visibility fix (security review): a bundle silently
             // losing its approval is a feature going dark, not routine
             // background noise -- this was `debug!` and easy to miss.
@@ -383,12 +415,18 @@ pub(crate) fn assemble_active_set(
                 derive_component_keys(&digest)
             }
         };
+        // `approval` is `Some` here -- the `None` arm above always
+        // `continue`s before this point.
+        let declared_capabilities = approval
+            .map(|appr| declared_capabilities_from_summary(&appr.summary_json))
+            .unwrap_or_default();
         rows.push(ActiveBundleRow {
             app_id: active.app_id.clone(),
             version: version_row.version.clone(),
             digest,
             component_key,
             sidecar_key,
+            declared_capabilities,
         });
     }
 
@@ -733,6 +771,7 @@ mod tests {
                 app_id: "waddles.test.app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
             }]])
             .into_connection();
         let result = read_active_set(&db, 1, 0, None).await?;
@@ -786,6 +825,7 @@ mod tests {
                 app_id: "waddles.test.app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
             }]])
             .into_connection();
         let result = read_active_set(&db, 1, 0, None).await?;
@@ -836,6 +876,7 @@ mod tests {
                 app_id: "waddles.test.app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
             }]])
             .into_connection();
         let result = read_active_set(&db, 1, 0, None).await?;
@@ -884,6 +925,7 @@ mod tests {
                 app_id: "waddles.shared".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
             }]])
             .into_connection();
         let result = read_active_set(&db, 1, 0, None).await?;
@@ -923,6 +965,7 @@ mod tests {
                 app_id: "waddles.test.app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
             }]])
             .into_connection();
         let result = read_active_set(&db, 1, 0, None).await?;
@@ -934,6 +977,128 @@ mod tests {
                 ExclusionReason::MissingDigest
             )]
         );
+        Ok(())
+    }
+
+    /// `declared_capabilities_from_summary`'s own contract, exercised
+    /// standalone (no database) -- `summary_json.capabilities` renders
+    /// verbatim as `Vec<String>`.
+    #[test]
+    fn declared_capabilities_from_summary_reads_the_capabilities_array() {
+        let summary: sea_orm::JsonValue = serde_json::json!({
+            "capabilities": ["context", "kv", "flags", "log", "clock", "http"],
+            "egress": [],
+        });
+        assert_eq!(
+            declared_capabilities_from_summary(&summary),
+            vec!["context", "kv", "flags", "log", "clock", "http"]
+        );
+    }
+
+    #[test]
+    fn declared_capabilities_from_summary_is_empty_for_every_malformed_shape() {
+        for summary in [
+            sea_orm::JsonValue::Null,
+            serde_json::json!({}),
+            serde_json::json!({"capabilities": "kv"}),
+            serde_json::json!({"capabilities": [1, 2, 3]}),
+            serde_json::json!("not even an object"),
+        ] {
+            assert_eq!(
+                declared_capabilities_from_summary(&summary),
+                Vec::<String>::new(),
+                "expected an empty result for {summary:?}"
+            );
+        }
+    }
+
+    /// End-to-end through [`read_active_set`]: a real `summary_json` with a
+    /// `"capabilities"` array containing `"kv"` surfaces on the resulting
+    /// [`ActiveBundleRow::declared_capabilities`] -- the field
+    /// `bundle_host_kv::authorize::CapabilitySnapshot` is populated from.
+    #[tokio::test]
+    async fn read_active_set_surfaces_declared_capabilities_from_summary_json(
+    ) -> Result<(), ActiveSetError> {
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.test.app".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(digest.clone()),
+                scan_status: "scanned".to_string(),
+                component_key: Some("bundles/waddles.test.app/1/c.wasm".to_string()),
+                sidecar_key: Some("bundles/waddles.test.app/1/s.json".to_string()),
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 1,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+                summary_json: serde_json::json!({
+                    "capabilities": ["context", "kv", "flags", "log", "clock"]
+                }),
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].declared_capabilities,
+            vec!["context", "kv", "flags", "log", "clock"]
+        );
+        Ok(())
+    }
+
+    /// A row whose approval's `summary_json` never declares `"kv"` (the
+    /// entire point of the coordinator fix on PR #425 -- `kv` is no longer
+    /// unconditionally present in every bundle's derived capability set)
+    /// surfaces an empty/absent-`kv` list, never a fabricated grant.
+    #[tokio::test]
+    async fn read_active_set_reflects_a_bundle_that_never_declared_kv() -> Result<(), ActiveSetError>
+    {
+        let digest = format!("sha256:{}", "e".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.test.app".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(digest.clone()),
+                scan_status: "scanned".to_string(),
+                component_key: Some("bundles/waddles.test.app/1/c.wasm".to_string()),
+                sidecar_key: Some("bundles/waddles.test.app/1/s.json".to_string()),
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 1,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+                summary_json: serde_json::json!({
+                    "capabilities": ["context", "flags", "log", "clock", "http"]
+                }),
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert_eq!(result.rows.len(), 1);
+        assert!(!result.rows[0]
+            .declared_capabilities
+            .iter()
+            .any(|c| c == "kv"));
         Ok(())
     }
 }

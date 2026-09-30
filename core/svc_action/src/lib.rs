@@ -122,6 +122,16 @@ where
     // capability set's `EgressGuard` (reader, spec §7.4's `http` egress
     // allowlist) -- see `crate::distribution`'s module doc.
     let catalog = Arc::new(distribution::BundleCatalog::new());
+    // Shared between `bundle_loader`'s DB-driven poll (writer -- every
+    // tick's `ActiveBundleRow::declared_capabilities`, `bundle_loader`'s
+    // own doc) and the host-API capability set's `kv` capability (reader,
+    // `bundle_host_kv::authorize::authorize_kv`) -- same "one snapshot,
+    // shared Arc, one writer, one reader" pattern as `catalog` above. The
+    // legacy `ACTION_BUNDLE_*` env path never writes to this snapshot at
+    // all (`try_start_env_bundle_loader` has no active-set row to derive
+    // capabilities from), so `kv` denies by default under that path --
+    // `bundle_host_kv::authorize`'s own module doc.
+    let kv_capabilities = Arc::new(bundle_host_kv::CapabilitySnapshot::new());
     let egress_denied_total = telemetry::register_egress_metrics(&prom_registry);
 
     // Spec §13.5's two-gate check for this service's flags
@@ -165,15 +175,24 @@ where
         config.discord_bot_token.clone(),
         Arc::clone(&usage),
         catalog,
+        Arc::clone(&kv_capabilities),
         egress_denied_total,
         license.clone(),
     );
+    // Both bundle-selection sources run unconditionally, gated
+    // independently (this module's top doc, dataplane scale design rev 4):
+    // the legacy `ACTION_BUNDLE_*` env override never gates on the
+    // multi-tenant DB path's own state. `resolve_db_path_active`/
+    // `try_start_db_bundle_loader` (single-tenant, mutual-exclusion) are
+    // retired -- superseded by `try_start_changelog_consumer`'s multi-tenant
+    // discovery of every `(tenant_id, community_id)` scope in the database.
     try_start_env_bundle_loader(&config.cli, Arc::clone(&connections));
     try_start_changelog_consumer(
         &config,
         Arc::clone(&connections),
         license.clone(),
         bundle_loader_excluded_metric,
+        Arc::clone(&kv_capabilities),
         changelog_consumer_metrics,
     );
     try_start_dispatch(&config, connections, usage, license);
@@ -300,6 +319,55 @@ fn flag_or_closed(
     }
 }
 
+/// Builds the production `http` capability's [`egress::EgressGuard`],
+/// wired with the cluster CIDR denylist and instance-wide private-IP
+/// egress policy (`cli.cluster_cidr_denylist()`/`cli.
+/// instance_egress_policy()`) -- pulled out of [`build_stage_capabilities`]
+/// so it can be exercised directly in tests without a live Valkey
+/// connection (`regression: #425 dropped cluster denylist` -- see
+/// `mod tests`, `action_egress_guard_denies_cluster_cidr_even_with_grant`).
+/// `None` mirrors `build_stage_capabilities`'s own fail-closed posture: a
+/// denylist re-parse failure (should be impossible -- `CliConfig::validate`
+/// already parsed it successfully at `Config::load` time) disables
+/// capabilities rather than starting with a silently-empty denylist.
+fn build_action_egress_guard(
+    cli: &config::CliConfig,
+    catalog: Arc<distribution::BundleCatalog>,
+    egress_denied_total: prometheus::IntCounterVec,
+    bundle_egress_flag: Arc<dyn flags::FeatureFlag>,
+) -> Option<Arc<egress::EgressGuard>> {
+    let cluster_denylist = match cli.cluster_cidr_denylist() {
+        Ok(denylist) => denylist,
+        Err(err) => {
+            tracing::warn!(error = %err, "cluster CIDR denylist re-parse failed after startup validation passed; capabilities disabled (DenyAllCapabilities)");
+            return None;
+        }
+    };
+    Some(Arc::new(
+        egress::EgressGuard::new(
+            Arc::new(egress::ReqwestTransport::new()),
+            egress::EgressLimits {
+                allow_private_hosts: false,
+                rate_limit_rps: cli.egress_rate_limit_rps,
+                rate_limit_burst: cli.egress_rate_limit_burst,
+                timeout: std::time::Duration::from_millis(cli.egress_timeout_ms),
+                max_redirects: cli.egress_max_redirects,
+                max_response_bytes: cli.egress_max_response_bytes,
+                // Not yet CLI-tunable -- see `EgressLimits::allowed_ports` doc.
+                allowed_ports: vec![443],
+                proxy_url: None,
+            },
+            catalog,
+            egress_denied_total,
+            bundle_egress_flag,
+        )
+        .with_instance_policy(Arc::new(std::sync::RwLock::new(
+            cli.instance_egress_policy(),
+        )))
+        .with_cluster_denylist(cluster_denylist),
+    ))
+}
+
 /// Builds the real [`capabilities::StageCapabilities`] (a live Valkey
 /// connection for `relay`, [`egress::EgressGuard`] for `http`), or `None`
 /// if either dependency is unavailable right now. `try_start_host_api`
@@ -315,6 +383,7 @@ async fn build_stage_capabilities(
     discord_bot_token: Option<config::Secret>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
     catalog: Arc<distribution::BundleCatalog>,
+    kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     egress_denied_total: prometheus::IntCounterVec,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
 ) -> Option<Arc<dyn capabilities::CapabilityHandler>> {
@@ -332,43 +401,33 @@ async fn build_stage_capabilities(
             return None;
         }
     };
-    // `CliConfig::validate` (run at `Config::load` time, before this
-    // function is ever reached) already parsed this successfully and
-    // enforced the alpha/local-only empty-denylist exception -- a parse
-    // failure here would mean startup validation was bypassed entirely, the
-    // same class of "should be impossible" case `spine_cfg`/`relay_conn`
-    // above handle by disabling capabilities rather than panicking.
-    let cluster_denylist = match cli.cluster_cidr_denylist() {
-        Ok(denylist) => denylist,
-        Err(err) => {
-            tracing::warn!(error = %err, "cluster CIDR denylist re-parse failed after startup validation passed; capabilities disabled (DenyAllCapabilities)");
-            return None;
-        }
+    let egress = match build_action_egress_guard(
+        cli,
+        catalog,
+        egress_denied_total,
+        flag_or_closed(&license, flags::BUNDLE_EGRESS_FLAG),
+    ) {
+        Some(guard) => guard,
+        None => return None,
     };
-    let egress = Arc::new(
-        egress::EgressGuard::new(
-            Arc::new(egress::ReqwestTransport::new()),
-            egress::EgressLimits {
-                allow_private_hosts: false,
-                rate_limit_rps: cli.egress_rate_limit_rps,
-                rate_limit_burst: cli.egress_rate_limit_burst,
-                timeout: std::time::Duration::from_millis(cli.egress_timeout_ms),
-                max_redirects: cli.egress_max_redirects,
-                max_response_bytes: cli.egress_max_response_bytes,
-                // Not yet CLI-tunable -- see `EgressLimits::allowed_ports` doc.
-                allowed_ports: vec![443],
-                proxy_url: None,
-            },
-            catalog,
-            egress_denied_total,
-            flag_or_closed(&license, flags::BUNDLE_EGRESS_FLAG),
-        )
-        .with_instance_policy(Arc::new(std::sync::RwLock::new(
-            cli.instance_egress_policy(),
-        )))
-        .with_cluster_denylist(cluster_denylist),
-    );
-    let caps = capabilities::StageCapabilities::new(relay_conn, egress, usage);
+    // `kv` reuses this same direct Valkey connection (cloned -- a cheap
+    // handle clone over one shared TCP connection, not a second socket)
+    // rather than opening a dedicated one: `relay_conn` already IS the
+    // "second, direct redis connection" `usage.rs`'s module doc describes,
+    // and `kv`'s isolation/quota model needs nothing about the connection
+    // itself that `relay`/usage don't already require (`crate::capabilities`'
+    // `StageCapabilities::with_kv`'s doc).
+    let mut kv_conn = relay_conn.clone();
+    // Low-severity fix, security review of PR #425: `count_key` has no
+    // TTL, so an `allkeys-*` `maxmemory-policy` can evict it under memory
+    // pressure, silently resetting the kv quota -- checked once here,
+    // never on the per-op hot path (`bundle_host_kv::policy`'s doc).
+    let policy_check = bundle_host_kv::policy::check_maxmemory_policy(&mut kv_conn).await;
+    bundle_host_kv::policy::log_and_record(&policy_check);
+    let caps = capabilities::StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
+        relay_conn, egress, usage,
+    )
+    .with_kv(kv_conn, kv_capabilities);
     // Discord relay send (spec: relay providers, `discord`) -- graceful
     // degradation, not a startup requirement: a deployment that never sets
     // `DISCORD_BOT_TOKEN` simply never enables this provider, and a bundle
@@ -402,6 +461,7 @@ fn try_start_host_api(
     discord_bot_token: Option<config::Secret>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
     catalog: Arc<distribution::BundleCatalog>,
+    kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     egress_denied_total: prometheus::IntCounterVec,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
 ) -> Arc<host_api::ConnectionRegistry> {
@@ -419,6 +479,7 @@ fn try_start_host_api(
             discord_bot_token,
             usage,
             catalog,
+            kv_capabilities,
             egress_denied_total,
             license,
         )
@@ -596,6 +657,7 @@ fn try_start_changelog_consumer(
     connections: Arc<host_api::ConnectionRegistry>,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
     excluded_metric: prometheus::IntCounterVec,
+    kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     changelog_consumer_metrics: telemetry::ChangelogConsumerMetrics,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
@@ -649,6 +711,7 @@ fn try_start_changelog_consumer(
             connections,
             excluded_metric,
             changelog_consumer_metrics,
+            kv_capabilities,
             shutdown_rx,
         )
         .await;
@@ -1211,8 +1274,123 @@ mod tests {
             connections,
             None,
             test_excluded_metric(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
             test_changelog_consumer_metrics(),
         );
+    }
+
+    // regression: #425 dropped cluster denylist -- both tests below go
+    // through `build_action_egress_guard`, the exact function
+    // `build_stage_capabilities` (the production wiring) calls, so a
+    // future merge that silently drops the `.with_cluster_denylist()`/
+    // `.with_instance_policy()` calls fails these tests, not just the
+    // shared `bundle_host_http::egress` crate's own generic guard suite
+    // (which would keep passing even if this crate stopped wiring the
+    // guard up at all).
+
+    /// The cluster CIDR denylist must win even when a `PrivateIp` grant
+    /// covers the address AND the instance policy has opted into private-IP
+    /// egress -- proves `build_action_egress_guard` actually threads
+    /// `cli.cluster_cidr_denylist()` into the guard via
+    /// `.with_cluster_denylist()`, not just that the shared crate supports
+    /// it.
+    #[tokio::test]
+    async fn action_egress_guard_denies_cluster_cidr_even_with_grant_and_policy_allow() {
+        let cli = CliConfig::parse_from([
+            "svc-action",
+            "--deployment-tier",
+            "production",
+            "--egress-cluster-cidr-denylist",
+            "10.244.0.0/16",
+            "--instance-egress-allow-private-ip",
+        ]);
+        cli.validate().expect("populated denylist passes");
+        let catalog = Arc::new(distribution::BundleCatalog::new());
+        catalog.update(vec![distribution::BundleRow {
+            app_id: "waddles.a.b.c".to_string(),
+            version: "1.0.0".to_string(),
+            artifact_digest: Some("sha256:00".to_string()),
+            component_key: "k".to_string(),
+            sidecar_key: "s".to_string(),
+            // A private-ip grant that, absent the cluster denylist, would
+            // permit this exact address once instance policy allows it.
+            egress: vec![("10.244.5.6".to_string(), vec!["GET".to_string()])],
+            egress_rps: None,
+            config_json: "{}".to_string(),
+            granted_secret_refs: std::collections::HashMap::new(),
+        }]);
+        let guard = build_action_egress_guard(
+            &cli,
+            catalog,
+            test_egress_denied_metric(),
+            flags::boxed(flags::StaticFlag(true)),
+        )
+        .expect("valid config produces a guard");
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://10.244.5.6/"}),
+            )
+            .await
+            .expect_err("cluster CIDR denylist must deny despite grant + policy allow");
+        assert_eq!(err.code, "ssrf_blocked_address");
+    }
+
+    /// The instance-wide private-IP policy denies a `PrivateIp` grant by
+    /// default (no cluster CIDR involved) -- proves `build_action_egress_
+    /// guard` actually threads `cli.instance_egress_policy()` into the
+    /// guard via `.with_instance_policy()`.
+    #[tokio::test]
+    async fn action_egress_guard_denies_private_ip_grant_when_instance_policy_is_default_deny() {
+        let cli = CliConfig::parse_from([
+            "svc-action",
+            "--deployment-tier",
+            "production",
+            "--egress-cluster-cidr-denylist",
+            "10.99.0.0/16",
+        ]);
+        cli.validate().expect("populated denylist passes");
+        assert!(
+            !cli.instance_egress_policy().allow_private_ip_egress,
+            "default instance policy must deny private-ip egress"
+        );
+        let catalog = Arc::new(distribution::BundleCatalog::new());
+        catalog.update(vec![distribution::BundleRow {
+            app_id: "waddles.a.b.c".to_string(),
+            version: "1.0.0".to_string(),
+            artifact_digest: Some("sha256:00".to_string()),
+            component_key: "k".to_string(),
+            sidecar_key: "s".to_string(),
+            // 10.0.0.9 is outside the cluster denylist above, so only the
+            // instance policy is under test here.
+            egress: vec![("10.0.0.9".to_string(), vec!["GET".to_string()])],
+            egress_rps: None,
+            config_json: "{}".to_string(),
+            granted_secret_refs: std::collections::HashMap::new(),
+        }]);
+        let guard = build_action_egress_guard(
+            &cli,
+            catalog,
+            test_egress_denied_metric(),
+            flags::boxed(flags::StaticFlag(true)),
+        )
+        .expect("valid config produces a guard");
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://10.0.0.9/"}),
+            )
+            .await
+            .expect_err("default-deny instance policy must deny an otherwise-granted private IP");
+        assert_eq!(err.code, "ssrf_blocked_address");
+    }
+
+    fn test_egress_denied_metric() -> prometheus::IntCounterVec {
+        prometheus::IntCounterVec::new(
+            prometheus::Opts::new("test_action_egress_denied_total", "test"),
+            &["app_id", "reason"],
+        )
+        .unwrap()
     }
 
     /// Removal regression (dataplane scale design, multi-tenant): the
