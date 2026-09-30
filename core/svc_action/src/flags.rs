@@ -59,9 +59,12 @@ pub const DISABLE_DB_BUNDLE_CONFIG_FLAG: &str = "waddles.core.disable-db-bundle-
 /// One flag's live enabled/disabled state. Object-safe (a manually-boxed
 /// future, matching every other async trait in this crate) so callers can
 /// hold `Arc<dyn FeatureFlag>` without an `async_trait` dependency.
-pub trait FeatureFlag: Send + Sync {
-    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
-}
+/// Re-exported from the shared `bundle_host_http` crate (PR #459
+/// follow-up, `core/svc_action::egress`'s own doc): identical trait, now
+/// defined once so `core/svc_process`'s own capability gate can hold the
+/// same `Arc<dyn FeatureFlag>` shape `EgressGuard::new` expects without a
+/// second, divergent trait.
+pub use bundle_host_http::egress::FeatureFlag;
 
 /// The real [`FeatureFlag`]: `key` resolved via a live
 /// `penguin_licensing::LicenseClient` (cheap to clone via `Arc`, per that
