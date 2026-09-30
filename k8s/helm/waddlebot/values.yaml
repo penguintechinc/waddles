@@ -308,9 +308,47 @@ infrastructure:
     bucketName: "waddlebot-assets"
     # S3 identity (SeaweedFS `weed server -s3.config` identities.json), rendered
     # from this Secret at container start -- same "REPLACE_ME" dev-default
-    # pattern as the former MinIO rootUser/rootPassword.
+    # pattern as the former MinIO rootUser/rootPassword. Kept as the "waddlebot"
+    # back-compat/admin identity (full Read/Write/List/Tagging/Admin, unscoped
+    # to any bucket) -- still consumed by templates/svc-streaming.yaml's
+    # recordings write path, which is not migrated to its own identity in this
+    # change (see PR "remaining work"). New consumers should use one of the
+    # scoped identities below instead of this one.
     rootUser: "REPLACE_ME"
     rootPassword: "REPLACE_ME"
+    # Least-privilege S3 identities (one per workload, each its own
+    # accessKey/secretKey pair) -- replaces routing every consumer through the
+    # single rootUser/rootPassword admin credential above. Same
+    # lookup(KEEP)-then-generate(alpha/local)-or-require(else) provisioning
+    # policy as rootUser/rootPassword (see templates/secrets.yaml
+    # waddlebot.autoSecretValue and _helpers.tpl): "REPLACE_ME" here means
+    # "unset" -- alpha/local auto-generate and persist via `lookup`+
+    # `resource-policy: keep`, beta/gamma/production MUST set a real value (or
+    # pre-populate the waddlebot-secrets Secret out-of-band) or the render fails.
+    identities:
+      # hub_api/services/storage_service.py -- reads/writes bundle components,
+      # avatars, community logos. Read/Write/List/Tagging, scoped to
+      # bucketName ("waddlebot-assets") only -- see templates/infrastructure/
+      # seaweedfs.yaml's s3-identities.json rendering.
+      hubApi:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
+      # core/bundle_executor (templates/bundle-executor.yaml,
+      # bundle-executor-action.yaml) -- the Rust data-plane's one credentialed
+      # egress path (bucket.rs), a single unsigned-body GET of a compiled
+      # component + its JSON sidecar. Read/List ONLY, scoped to
+      # pipeline.rustDataPlane.bundleExecutor.bucketName ("waddles-bundles") --
+      # this identity must NOT be able to PUT.
+      dataPlane:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
+      # templates/infrastructure/seaweedfs.yaml's seaweedfs-bucket-init Job
+      # ONLY -- Admin (bucket create/head + PutBucketEncryption), unscoped
+      # since it must be able to create buckets that don't exist yet. Never
+      # mounted by a long-running Deployment.
+      bucketInit:
+        accessKey: "REPLACE_ME"
+        secretKey: "REPLACE_ME"
     service:
       name: "infra-seaweedfs"
       type: ClusterIP
@@ -1002,9 +1040,11 @@ pipeline:
       # bucketName/bucketRegion are static across environments; the endpoint is derived in
       # the template from infrastructure.seaweedfs.service.name/s3Port (alpha: in-cluster
       # SeaweedFS, plain http:// -- no BUNDLE_BUCKET_CA_FILE needed) and the access
-      # key/secret come from the shared MINIO_ROOT_USER/MINIO_ROOT_PASSWORD secret keys
-      # (kept for compatibility, see templates/secrets.yaml), individually referenced
-      # (not envFrom) to keep this pod's credential surface to exactly what bucket.rs needs.
+      # key/secret come from the dedicated "bundle-executor" (data-plane) S3 identity
+      # (DATAPLANE_S3_ACCESS_KEY_ID/_SECRET_ACCESS_KEY, Read/List only -- see
+      # infrastructure.seaweedfs.identities.dataPlane above and templates/secrets.yaml),
+      # individually referenced (not envFrom) to keep this pod's credential surface to
+      # exactly what bucket.rs needs.
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
       resources:

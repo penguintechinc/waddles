@@ -85,7 +85,12 @@ spec:
           export AWS_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY}"
           export AWS_DEFAULT_REGION="us-east-1"
           ENDPOINT="http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
-          for bucket in "{{ .Values.infrastructure.seaweedfs.bucketName }}" "recordings"; do
+          # "recordings" (svc-streaming egress) and bundleExecutor.bucketName
+          # ("waddles-bundles", core/bundle_executor's BUNDLE_BUCKET_NAME) --
+          # both consumers expect their bucket to already exist; previously
+          # only bucketName + "recordings" were created here, leaving
+          # "waddles-bundles" as a pre-existing gap.
+          for bucket in "{{ .Values.infrastructure.seaweedfs.bucketName }}" "recordings" "{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}"; do
             aws --endpoint-url "$ENDPOINT" s3 mb "s3://${bucket}" --region us-east-1 2>&1 | grep -qi "already" && true || true
             aws --endpoint-url "$ENDPOINT" s3api head-bucket --bucket "${bucket}" 2>/dev/null \
               || aws --endpoint-url "$ENDPOINT" s3api create-bucket --bucket "${bucket}" --region us-east-1
@@ -98,18 +103,22 @@ spec:
           {{- end }}
           done
           aws --endpoint-url "$ENDPOINT" s3 ls
-          echo "Buckets {{ .Values.infrastructure.seaweedfs.bucketName }}, recordings initialized successfully"
+          echo "Buckets {{ .Values.infrastructure.seaweedfs.bucketName }}, recordings, {{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }} initialized successfully"
         env:
+        # Dedicated hook-scoped "bucket-init" identity (Admin) -- never the
+        # shared rootUser/rootPassword admin credential, and never mounted by
+        # any long-running Deployment. See values.yaml
+        # infrastructure.seaweedfs.identities.bucketInit.
         - name: S3_ACCESS_KEY_ID
           valueFrom:
             secretKeyRef:
               name: waddlebot-secrets
-              key: S3_ACCESS_KEY_ID
+              key: BUCKET_INIT_S3_ACCESS_KEY_ID
         - name: S3_SECRET_ACCESS_KEY
           valueFrom:
             secretKeyRef:
               name: waddlebot-secrets
-              key: S3_SECRET_ACCESS_KEY
+              key: BUCKET_INIT_S3_SECRET_ACCESS_KEY
         resources:
           requests:
             memory: "64Mi"
@@ -164,10 +173,13 @@ spec:
         - |
           set -e
           mkdir -p /etc/seaweedfs
-          # Single S3 identity, full Read/Write/List/Tagging/Admin -- mirrors the
-          # single MINIO_ROOT_USER/MINIO_ROOT_PASSWORD credential this chart used
-          # before (no consumer currently needs a separate read-only identity;
-          # see PR description "remaining work" for splitting this once one does).
+          # Least-privilege S3 identities, one per workload (feature/seaweedfs-object-storage),
+          # replacing the former single "waddlebot" identity that granted every consumer full
+          # Read/Write/List/Tagging/Admin across every bucket. Bucket-scoped actions
+          # ("Action:bucket") restrict an identity's Read/Write/List/Tagging grant to exactly
+          # the bucket it owns -- see SeaweedFS's s3.config IAM docs. "waddlebot" is kept
+          # unscoped/full-access ONLY for back-compat (templates/svc-streaming.yaml's
+          # recordings path, not yet migrated -- see PR "remaining work").
           cat > /etc/seaweedfs/s3-identities.json <<EOF
           {
             "identities": [
@@ -177,6 +189,35 @@ spec:
                   {"accessKey": "${S3_ACCESS_KEY_ID}", "secretKey": "${S3_SECRET_ACCESS_KEY}"}
                 ],
                 "actions": ["Read", "Write", "List", "Tagging", "Admin"]
+              },
+              {
+                "name": "hub-api",
+                "credentials": [
+                  {"accessKey": "${HUB_API_S3_ACCESS_KEY_ID}", "secretKey": "${HUB_API_S3_SECRET_ACCESS_KEY}"}
+                ],
+                "actions": [
+                  "Read:{{ .Values.infrastructure.seaweedfs.bucketName }}",
+                  "Write:{{ .Values.infrastructure.seaweedfs.bucketName }}",
+                  "List:{{ .Values.infrastructure.seaweedfs.bucketName }}",
+                  "Tagging:{{ .Values.infrastructure.seaweedfs.bucketName }}"
+                ]
+              },
+              {
+                "name": "bundle-executor",
+                "credentials": [
+                  {"accessKey": "${DATAPLANE_S3_ACCESS_KEY_ID}", "secretKey": "${DATAPLANE_S3_SECRET_ACCESS_KEY}"}
+                ],
+                "actions": [
+                  "Read:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}",
+                  "List:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}"
+                ]
+              },
+              {
+                "name": "bucket-init",
+                "credentials": [
+                  {"accessKey": "${BUCKET_INIT_S3_ACCESS_KEY_ID}", "secretKey": "${BUCKET_INIT_S3_SECRET_ACCESS_KEY}"}
+                ],
+                "actions": ["Admin"]
               }
             ]
           }
@@ -209,6 +250,36 @@ spec:
             secretKeyRef:
               name: waddlebot-secrets
               key: S3_SECRET_ACCESS_KEY
+        - name: HUB_API_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: HUB_API_S3_ACCESS_KEY_ID
+        - name: HUB_API_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: HUB_API_S3_SECRET_ACCESS_KEY
+        - name: DATAPLANE_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: DATAPLANE_S3_ACCESS_KEY_ID
+        - name: DATAPLANE_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: DATAPLANE_S3_SECRET_ACCESS_KEY
+        - name: BUCKET_INIT_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: BUCKET_INIT_S3_ACCESS_KEY_ID
+        - name: BUCKET_INIT_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: BUCKET_INIT_S3_SECRET_ACCESS_KEY
         {{- if and .Values.infrastructure.seaweedfs.encryption.enabled .Values.infrastructure.seaweedfs.encryption.secretName }}
         - name: WEED_S3_SSE_KEK
           valueFrom:
