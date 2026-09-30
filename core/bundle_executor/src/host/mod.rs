@@ -6,6 +6,7 @@
 //! SS6.5/SS7.4).
 
 pub mod bridge;
+pub mod connector_imports;
 pub mod imports;
 
 use std::sync::atomic::{AtomicBool, Ordering};

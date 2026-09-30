@@ -1,9 +1,9 @@
 /**
- * Storage Service - S3/MinIO and Local Filesystem Storage Abstraction
+ * Storage Service - S3-Compatible and Local Filesystem Storage Abstraction
  *
  * Provides unified file storage operations with configurable backend:
  * - Local filesystem (default for development)
- * - S3-compatible storage (MinIO default, AWS S3 supported)
+ * - S3-compatible storage (SeaweedFS default, AWS S3 supported)
  */
 import { S3Client, PutObjectCommand, DeleteObjectCommand, HeadBucketCommand, CreateBucketCommand } from '@aws-sdk/client-s3';
 import { query } from '../config/database.js';
@@ -36,12 +36,12 @@ export async function getStorageConfig() {
     const config = {
       storageType: 'local', // Default to local
       localUploadDir: process.env.UPLOAD_DIR || '/tmp/uploads',
-      s3Endpoint: process.env.S3_ENDPOINT_URL || 'http://minio:9000',
+      s3Endpoint: process.env.S3_ENDPOINT_URL || 'http://infra-seaweedfs:8333',
       s3Bucket: process.env.S3_BUCKET_NAME || 'waddlebot-assets',
       s3AccessKey: process.env.S3_ACCESS_KEY_ID || '',
       s3SecretKey: process.env.S3_SECRET_ACCESS_KEY || '',
       s3Region: process.env.S3_REGION || 'us-east-1',
-      s3PublicUrl: process.env.S3_PUBLIC_BASE_URL || 'http://localhost:9000/waddlebot-assets',
+      s3PublicUrl: process.env.S3_PUBLIC_BASE_URL || 'http://localhost:8333/waddlebot-assets',
     };
 
     // Override with database settings
@@ -80,12 +80,12 @@ export async function getStorageConfig() {
     return {
       storageType: process.env.S3_STORAGE_ENABLED === 'true' ? 's3' : 'local',
       localUploadDir: process.env.UPLOAD_DIR || '/tmp/uploads',
-      s3Endpoint: process.env.S3_ENDPOINT_URL || 'http://minio:9000',
+      s3Endpoint: process.env.S3_ENDPOINT_URL || 'http://infra-seaweedfs:8333',
       s3Bucket: process.env.S3_BUCKET_NAME || 'waddlebot-assets',
       s3AccessKey: process.env.S3_ACCESS_KEY_ID || '',
       s3SecretKey: process.env.S3_SECRET_ACCESS_KEY || '',
       s3Region: process.env.S3_REGION || 'us-east-1',
-      s3PublicUrl: process.env.S3_PUBLIC_BASE_URL || 'http://localhost:9000/waddlebot-assets',
+      s3PublicUrl: process.env.S3_PUBLIC_BASE_URL || 'http://localhost:8333/waddlebot-assets',
     };
   }
 }
@@ -120,7 +120,7 @@ async function getS3Client() {
       accessKeyId: config.s3AccessKey,
       secretAccessKey: config.s3SecretKey,
     },
-    forcePathStyle: true, // Required for MinIO
+    forcePathStyle: true, // Required for SeaweedFS
   });
 }
 

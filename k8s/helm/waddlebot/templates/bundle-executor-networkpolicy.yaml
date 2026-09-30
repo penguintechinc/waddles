@@ -52,6 +52,6 @@ spec:
             app.kubernetes.io/component: storage
       toPorts:
         - ports:
-            - port: {{ .Values.infrastructure.minio.service.apiPort | quote }}
+            - port: {{ .Values.infrastructure.seaweedfs.service.s3Port | quote }}
               protocol: TCP
 {{- end }}

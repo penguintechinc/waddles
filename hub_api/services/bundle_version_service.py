@@ -27,7 +27,7 @@ drives a freshly-`UPLOADED` row through `VALIDATING` -> `INSPECTING`
 own "ADDRESSING: sha256 over the component bytes"), provisioning both
 the `process` and `action` consumer groups along the way, then
 `_publish_prebuilt_version()` creates the `app_versions` row
-(`component_key`/`sidecar_key`, migration 0024 -- the exact MinIO keys
+(`component_key`/`sidecar_key`, migration 0024 -- the exact S3 keys
 already uploaded, so the data-plane loader needs no digest-to-key
 re-derivation) and advances straight to `PUBLISHED`: a successfully
 staged prebuilt component has no separate compile/SAST gate to wait on.
@@ -332,7 +332,7 @@ async def _publish_prebuilt_version(
     """Create the `app_versions` row for a staged prebuilt component and advance it to PUBLISHED.
 
     Writes `component_key`/`sidecar_key` (migration 0024) -- the exact
-    MinIO keys `process_prebuilt_component()` already uploaded to -- so
+    S3 keys `process_prebuilt_component()` already uploaded to -- so
     the data-plane loader resolves a published version's bytes straight
     from `app_versions`, no digest-to-key re-derivation needed on that
     side. `scan_status="not_scanned"`: no SAST/scan step runs for the

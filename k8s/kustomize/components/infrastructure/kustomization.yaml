@@ -4,6 +4,6 @@ kind: Component
 resources:
   - postgres.yaml
   - redis.yaml
-  - minio.yaml
+  - seaweedfs.yaml
   - qdrant.yaml
   - ollama.yaml

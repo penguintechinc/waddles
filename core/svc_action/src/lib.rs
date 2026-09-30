@@ -332,20 +332,42 @@ async fn build_stage_capabilities(
             return None;
         }
     };
-    let egress = Arc::new(egress::EgressGuard::new(
-        Arc::new(egress::ReqwestTransport),
-        egress::EgressLimits {
-            allow_private_hosts: cli.egress_allow_private_hosts,
-            rate_limit_rps: cli.egress_rate_limit_rps,
-            rate_limit_burst: cli.egress_rate_limit_burst,
-            timeout: std::time::Duration::from_millis(cli.egress_timeout_ms),
-            max_redirects: cli.egress_max_redirects,
-            max_response_bytes: cli.egress_max_response_bytes,
-        },
-        catalog,
-        egress_denied_total,
-        flag_or_closed(&license, flags::BUNDLE_EGRESS_FLAG),
-    ));
+    // `CliConfig::validate` (run at `Config::load` time, before this
+    // function is ever reached) already parsed this successfully and
+    // enforced the alpha/local-only empty-denylist exception -- a parse
+    // failure here would mean startup validation was bypassed entirely, the
+    // same class of "should be impossible" case `spine_cfg`/`relay_conn`
+    // above handle by disabling capabilities rather than panicking.
+    let cluster_denylist = match cli.cluster_cidr_denylist() {
+        Ok(denylist) => denylist,
+        Err(err) => {
+            tracing::warn!(error = %err, "cluster CIDR denylist re-parse failed after startup validation passed; capabilities disabled (DenyAllCapabilities)");
+            return None;
+        }
+    };
+    let egress = Arc::new(
+        egress::EgressGuard::new(
+            Arc::new(egress::ReqwestTransport::new()),
+            egress::EgressLimits {
+                allow_private_hosts: false,
+                rate_limit_rps: cli.egress_rate_limit_rps,
+                rate_limit_burst: cli.egress_rate_limit_burst,
+                timeout: std::time::Duration::from_millis(cli.egress_timeout_ms),
+                max_redirects: cli.egress_max_redirects,
+                max_response_bytes: cli.egress_max_response_bytes,
+                // Not yet CLI-tunable -- see `EgressLimits::allowed_ports` doc.
+                allowed_ports: vec![443],
+                proxy_url: None,
+            },
+            catalog,
+            egress_denied_total,
+            flag_or_closed(&license, flags::BUNDLE_EGRESS_FLAG),
+        )
+        .with_instance_policy(Arc::new(std::sync::RwLock::new(
+            cli.instance_egress_policy(),
+        )))
+        .with_cluster_denylist(cluster_denylist),
+    );
     let caps = capabilities::StageCapabilities::new(relay_conn, egress, usage);
     // Discord relay send (spec: relay providers, `discord`) -- graceful
     // degradation, not a startup requirement: a deployment that never sets
@@ -354,7 +376,7 @@ async fn build_stage_capabilities(
     // than this process failing to start (`config::Config::
     // discord_bot_token`'s doc).
     let caps = match discord_bot_token {
-        Some(token) => caps.with_discord(Arc::new(egress::ReqwestTransport), token),
+        Some(token) => caps.with_discord(Arc::new(egress::ReqwestTransport::new()), token),
         None => {
             tracing::warn!(
                 "DISCORD_BOT_TOKEN not set; discord relay provider disabled \

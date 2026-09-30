@@ -122,16 +122,31 @@ spec:
               key: SECRET_KEY
         - name: WADDLES_AI_ENABLED
           value: {{ .Values.pipeline.hubApi.aiEnabled | quote }}
+        # fix/helm-platform-credentials -- sourced from the operator-managed
+        # platform-credentials Secret, never the chart-rendered `-secrets`
+        # Secret (see docs/PLATFORM_CREDENTIALS.md); `optional: true` so an
+        # unconfigured platform doesn't block scheduling -- config.rs must
+        # fail fast at startup if a *required* one is absent instead of
+        # connecting with an empty/garbage credential.
         - name: DISCORD_BOT_TOKEN
           valueFrom:
             secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
+              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
               key: DISCORD_BOT_TOKEN
-        - name: TWITCH_OAUTH_TOKEN
+              optional: true
+        # fix/helm-platform-credentials -- env var NAME corrected to
+        # TWITCH_IRC_OAUTH_TOKEN, the one core/svc_ingest/src/config.rs
+        # actually reads (`std::env::var("TWITCH_IRC_OAUTH_TOKEN")`); the
+        # previous `TWITCH_OAUTH_TOKEN` name meant this Rust receiver never
+        # saw the value regardless of what Helm rendered. Secret key name
+        # (TWITCH_OAUTH_TOKEN) is unchanged for continuity with the
+        # operator-facing platform-credentials Secret.
+        - name: TWITCH_IRC_OAUTH_TOKEN
           valueFrom:
             secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
+              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
               key: TWITCH_OAUTH_TOKEN
+              optional: true
         - name: TWITCH_NICK
           value: {{ .Values.oauth.twitch.nick | default "" | quote }}
         - name: TWITCH_CHANNELS

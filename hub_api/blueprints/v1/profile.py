@@ -4,7 +4,7 @@ Mounted at `/api/v1/user` (matches `routes/user.js`'s profile block:
 `/profile`, `/profile/avatar`, `/linked-platforms`). Public/community
 profile viewing (`getPublicProfile`/`getMemberProfile`) is out of scope
 -- see `services/profile_service.py`'s module docstring. Avatar
-upload/delete uses `services/storage_service.py` (S3/MinIO only, no
+upload/delete uses `services/storage_service.py` (S3-compatible only, no
 local-disk fallback -- hub-api's rootless contract).
 """
 

@@ -239,6 +239,19 @@ class HubAPIConfig:
     connections_callback_base_url: str = "http://localhost:30879"
     connections_state_ttl_s: int = 600
 
+    # feature/hub-api-internal-grpc: gate for `grpc_internal/server.py`'s
+    # `waddles.hub.internal.v1` listener. `grpc_enabled=False` (or a
+    # missing TLS cert / empty identity allow-list at startup, handled in
+    # `app.py`) means the gRPC surface simply never starts -- fail-closed
+    # for the gRPC surface, fail-open for the rest of hub-api's HTTP app.
+    # `deployment_env` feeds `flask_core.service_jwt.load_identities_from_
+    # env()`'s bare-service-name -> SPIFFE-ID expansion
+    # (`spiffe://penguintech.io/<deployment_env>/<service>`, penguintech.md
+    # SPIFFE Identity) -- mirrors the `alpha`/`beta`/`gamma`/`v{X}` env
+    # naming `penguintech.md` Domains & TLDs already uses.
+    grpc_enabled: bool = True
+    deployment_env: str = "alpha"
+
     @classmethod
     def from_env(cls) -> HubAPIConfig:
         """Build config from the process environment. Raises on an invalid DB_TYPE."""
@@ -312,4 +325,6 @@ class HubAPIConfig:
                 or os.getenv("PUBLIC_WEBUI_URL", "http://localhost:30879")
             ).rstrip("/"),
             connections_state_ttl_s=int(os.getenv("CONNECTIONS_STATE_TTL_S", "600")),
+            grpc_enabled=_bool_env("GRPC_INTERNAL_ENABLED", True),
+            deployment_env=os.getenv("DEPLOYMENT_ENV", "alpha"),
         )
