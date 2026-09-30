@@ -30,9 +30,10 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import tomllib
 
 DOCKERFILE_GLOB = "core/**/Dockerfile.rust"
 COPY_RE = re.compile(r"^\s*COPY\s+(.*)$", re.IGNORECASE)
@@ -112,10 +113,9 @@ def resolve_build_context(
                 if m:
                     env_vars[m.group(1)] = m.group(2)
 
-        def substitute(value: str) -> str:
-            def repl(m: re.Match[str]) -> str:
-                name = m.group(1)
-                return env_vars.get(name, m.group(0))
+        def substitute(value: str, _env_vars: dict[str, str] = env_vars) -> str:
+            def repl(match: re.Match[str], _env_vars: dict[str, str] = _env_vars) -> str:
+                return _env_vars.get(match.group(1), match.group(0))
 
             return re.sub(r"\$\{\{\s*env\.([A-Za-z0-9_]+)\s*\}\}", repl, value)
 
