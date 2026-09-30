@@ -119,6 +119,23 @@ redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp"
 # declares the identical dependency so the query/diff logic is written and
 # tested exactly once. See `core/bundle_active_set/Cargo.toml`.
 bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
+# Shared per-key guest-fault circuit breaker (connector spec SS0 condition
+# 5) -- same crate core/svc_process uses for its own per-source breaker;
+# here keyed per (app_id, scope, destination) -- see dispatch.rs's doc.
+circuit-breaker = { path = "../circuit_breaker", version = "=0.1.0" }
+# The `kv` bundle host capability's shared key-derivation/isolation/quota
+# logic (`src/capabilities.rs`'s `handle_kv`) -- a same-repo `path`
+# dependency, NOT a `penguin-libs` git dependency: like `bundle-active-set`
+# above, this is this repo's own security boundary for `stage.wit`'s
+# `interface kv`, evolved alongside the manifest schema and executor this
+# repo owns. `core/svc_process` declares the identical dependency so the
+# capability is written and tested exactly once. See
+# `core/bundle_host_kv/Cargo.toml`.
+bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0" }
+# The standard enforcement gate every host capability arm calls first
+# (`docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+# SS5, `src/capabilities.rs`).
+bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0" }
 # The bundle `http` host capability's shared, SSRF-hardened egress guard
 # (`src/egress.rs`, now a thin re-export shim) -- extracted here (PR #459
 # follow-up) so `core/svc_process` can enforce the identical pipeline for

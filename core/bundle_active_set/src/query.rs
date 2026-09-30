@@ -26,6 +26,13 @@ pub enum ActiveSetError {
 pub struct ActiveBundleRow {
     pub app_id: String,
     pub version: String,
+    /// `app_versions.id` -- the same numeric id `app_active_versions.
+    /// version_id` stores and [`bundle_capability_gate::GrantScopeKey::
+    /// app_version`]/`InvokeScope::app_version` actually key grants on
+    /// (`core/svc_action::grant_gate::PgGrantLoader`'s own doc). Callers
+    /// resolving a live invocation's `app_version` must read this field --
+    /// never re-derive it from `version` (the semver TEXT) or hardcode `0`.
+    pub version_id: i64,
     pub digest: String,
     pub component_key: String,
     pub sidecar_key: String,
@@ -386,6 +393,7 @@ pub(crate) fn assemble_active_set(
         rows.push(ActiveBundleRow {
             app_id: active.app_id.clone(),
             version: version_row.version.clone(),
+            version_id: version_row.id,
             digest,
             component_key,
             sidecar_key,

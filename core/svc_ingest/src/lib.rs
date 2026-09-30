@@ -59,6 +59,28 @@
 //! usage-delta metering (`UsageBatcher`/`append_usage`, a `penguin-spine`
 //! crate gap at the pinned rev -- see `crate::publish`'s module doc).
 //!
+//! **Not yet wired: the `circuit_breaker` crate (connector spec SS0
+//! condition 5).** `core/svc_process`/`core/svc_action` both depend on
+//! `circuit-breaker` (`core/circuit_breaker`, a shared path crate) to
+//! disable a faulting per-source/per-destination bundle-executor target
+//! after N guest faults in a window. This crate does not invoke
+//! bundle-executor at all today -- every receiver here
+//! (`crate::ingest::{twitch,discord,twitch_eventsub}`) is still a native
+//! Rust transport, not a WASM guest; the connector-bundle host that would
+//! run a `receiver`/`sender` component per source (spec `docs/superpowers/
+//! specs/2026-09-28-connector-bundles.md` SS1's `connector@1.0.0` world) is
+//! itself not implemented yet. Adopting `circuit-breaker` here is NOT
+//! trivial to wire today for that reason -- it has no invoke call site to
+//! attach to. **Next step, once the connector-bundle host lands:** add
+//! `circuit-breaker` as a path dependency (mirroring `core/svc_process`/
+//! `core/svc_action`'s `Cargo.toml` pattern) and key the breaker by
+//! `connection-ctx.source-id` (the spec's own per-connection identity,
+//! never a channel/guild name) around that host's `receiver.on-frame`/
+//! `sender.build-request` invoke call sites, exactly the same
+//! allow/record_success/record_failure shape `svc_process::spine::
+//! handle_delivered` and `svc_action::dispatch::handle_delivered` already
+//! use.
+//!
 //! Per spec S4.1, this service has **no database** -- no `sea-orm`
 //! dependency, unlike `svc_process`/`svc_action`.
 

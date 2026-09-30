@@ -49,6 +49,35 @@ pub struct CliConfig {
     #[arg(long, env = "EXECUTOR_INSTANCES_PER_BUNDLE", default_value_t = 4)]
     pub executor_instances_per_bundle: u32,
 
+    /// Wasmtime fuel budget armed on every `process-stage.transform` call
+    /// (connector spec docs/superpowers/specs/2026-09-28-connector-bundles.md
+    /// SS0 condition 4: "the existing epoch deadline (PR #406) plus fuel per
+    /// `on-frame` invocation"). `transform` is this executor's hot,
+    /// per-event path -- the `stage` world's analogue of the connector
+    /// world's not-yet-implemented `receiver.on-frame` -- so it gets its own
+    /// budget, distinct from `dispatch`'s. A guest instruction executes
+    /// roughly one unit of fuel per operation (wasmtime's own accounting,
+    /// not wall-clock), so this is a CPU-work bound complementing (never
+    /// replacing) the epoch wall-clock deadline: a tight loop that never
+    /// yields can burn this budget well before an epoch tick fires.
+    #[arg(
+        long,
+        env = "EXECUTOR_FUEL_LIMIT_TRANSFORM",
+        default_value_t = 500_000_000
+    )]
+    pub executor_fuel_limit_transform: u64,
+
+    /// Same as [`Self::executor_fuel_limit_transform`], armed instead for
+    /// `action-stage.dispatch` calls -- kept as its own knob since a sender
+    /// bundle's outbound-shaping work has a different realistic cost profile
+    /// than a receiver-side transform.
+    #[arg(
+        long,
+        env = "EXECUTOR_FUEL_LIMIT_DISPATCH",
+        default_value_t = 500_000_000
+    )]
+    pub executor_fuel_limit_dispatch: u64,
+
     /// Global ceiling on in-flight calls across all loaded bundles (spec
     /// SS7.2).
     #[arg(long, env = "EXECUTOR_MAX_CONCURRENT_CALLS", default_value_t = 32)]
@@ -180,6 +209,8 @@ impl CliConfig {
             executor_memory_limit_mb: 64,
             executor_max_memory_limit_mb: 256,
             executor_instances_per_bundle: 4,
+            executor_fuel_limit_transform: 500_000_000,
+            executor_fuel_limit_dispatch: 500_000_000,
             executor_max_concurrent_calls: 32,
             executor_pool_wait_ms: 500,
             executor_precompile_dir: PathBuf::from("/var/cache/waddles/wasm"),
@@ -222,6 +253,16 @@ impl CliConfig {
                 "EXECUTOR_MEMORY_LIMIT_MB ({}) must be > 0 and <= EXECUTOR_MAX_MEMORY_LIMIT_MB ({})",
                 self.executor_memory_limit_mb, self.executor_max_memory_limit_mb
             )));
+        }
+        if self.executor_fuel_limit_transform == 0 {
+            return Err(ExecutorError::Config(
+                "EXECUTOR_FUEL_LIMIT_TRANSFORM must be > 0".to_string(),
+            ));
+        }
+        if self.executor_fuel_limit_dispatch == 0 {
+            return Err(ExecutorError::Config(
+                "EXECUTOR_FUEL_LIMIT_DISPATCH must be > 0".to_string(),
+            ));
         }
         if self.executor_wasm_collector != "drc" {
             // spec SS7.2: the collector is part of the artifact's

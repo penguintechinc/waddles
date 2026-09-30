@@ -107,6 +107,17 @@ pub fn build_engine(_cfg: &CliConfig) -> Result<Engine, ExecutorError> {
     let mut config = Config::new();
     config.wasm_component_model(true);
     config.epoch_interruption(true);
+    // Connector spec SS0 condition 4: fuel metering alongside the epoch
+    // deadline above. Epoch ticks bound wall-clock time between yield
+    // points; fuel bounds the amount of guest-executed work directly, so a
+    // tight loop that never reaches a yield point (component-model host
+    // calls are the only yield points under `async` instantiation) still
+    // traps deterministically rather than riding out the remainder of an
+    // epoch tick. `crate::invoke::on_invoke` arms the actual per-call budget
+    // via `Store::set_fuel`; this only turns fuel accounting on for the
+    // engine -- a `Store` with accounting on and no fuel set traps
+    // immediately (zero fuel), so every call site MUST call `set_fuel`.
+    config.consume_fuel(true);
     config.collector(Collector::DeferredReferenceCounting);
 
     let mut pooling = PoolingAllocationConfig::default();

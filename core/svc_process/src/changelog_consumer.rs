@@ -317,6 +317,7 @@ async fn apply_active_set(
     state: &mut ConsumerState,
     sink: Option<&dyn BundleSink>,
     excluded_metric: &prometheus::IntCounterVec,
+    app_version_snapshot: &bundle_active_set::ActiveVersionSnapshot,
 ) {
     // Scope-preserving: NEVER collapses two different `(tenant, community)`
     // scopes' independently-active digests for the same `app_id` onto one
@@ -326,6 +327,11 @@ async fn apply_active_set(
     // src/invoke.rs`'s digest-keyed, refcounted registry that makes this
     // safe).
     let active = bundle_active_set::scoped_active_rows(&state.by_scope);
+    // Feeds `crate::spine::ProcessDeps::app_version_snapshot` (bundle
+    // capability-gate wiring, spec SS12 Phase 4) -- see
+    // `core/svc_action::changelog_consumer::apply_active_set`'s identical
+    // feed for why flattening onto `app_id` here is safe.
+    app_version_snapshot.update(&active.values().cloned().collect::<Vec<_>>());
     for active_set in state.by_scope.values() {
         for (app_id, reason) in &active_set.excluded {
             excluded_metric
@@ -448,6 +454,7 @@ pub async fn run_incremental_tick(
     excluded_metric: &prometheus::IntCounterVec,
     binding_metrics: &crate::telemetry::SourceBindingSupervisorMetrics,
     metrics: &ChangelogConsumerMetrics,
+    app_version_snapshot: &bundle_active_set::ActiveVersionSnapshot,
 ) {
     let start = Instant::now();
     let watermark =
@@ -491,6 +498,7 @@ pub async fn run_incremental_tick(
             excluded_metric,
             binding_metrics,
             metrics,
+            app_version_snapshot,
         )
         .await;
         state.tracker.advance(safe_seq);
@@ -529,6 +537,7 @@ pub async fn run_incremental_tick(
                 excluded_metric,
                 binding_metrics,
                 metrics,
+                app_version_snapshot,
             )
             .await;
             state.tracker.advance(safe_seq);
@@ -627,7 +636,7 @@ pub async fn run_incremental_tick(
     state.tracker.advance(new_last_seq);
     metrics.changelog_lag.set(state.tracker.lag(safe_seq));
 
-    apply_active_set(state, sink, excluded_metric).await;
+    apply_active_set(state, sink, excluded_metric, app_version_snapshot).await;
     update_tenant_gauges(state, metrics);
 
     if let Some(spawner) = spawner {
@@ -652,6 +661,7 @@ pub async fn run_incremental_tick(
 /// incremental tick. Bounds the blast radius of any change-log defect to
 /// one interval, independent of the change-log's own correctness. Timed
 /// into [`ChangelogConsumerMetrics::reconcile_duration_seconds`].
+#[allow(clippy::too_many_arguments)]
 pub async fn run_full_reconcile(
     db: &DatabaseConnection,
     state: &mut ConsumerState,
@@ -660,6 +670,7 @@ pub async fn run_full_reconcile(
     excluded_metric: &prometheus::IntCounterVec,
     binding_metrics: &crate::telemetry::SourceBindingSupervisorMetrics,
     metrics: &ChangelogConsumerMetrics,
+    app_version_snapshot: &bundle_active_set::ActiveVersionSnapshot,
 ) {
     let start = Instant::now();
     match bundle_active_set::read_active_set_all(db).await {
@@ -703,7 +714,7 @@ pub async fn run_full_reconcile(
         .await;
     }
 
-    apply_active_set(state, sink, excluded_metric).await;
+    apply_active_set(state, sink, excluded_metric, app_version_snapshot).await;
     update_tenant_gauges(state, metrics);
 
     metrics
@@ -727,6 +738,7 @@ pub async fn run(
     excluded_metric: prometheus::IntCounterVec,
     binding_metrics: crate::telemetry::SourceBindingSupervisorMetrics,
     metrics: ChangelogConsumerMetrics,
+    app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
     let mut state = match initial_state(&db).await {
@@ -736,6 +748,14 @@ pub async fn run(
             return;
         }
     };
+    // Seed from the same startup full read, before the first tick -- see
+    // `apply_active_set`'s doc for why flattening onto `app_id` is safe.
+    app_version_snapshot.update(
+        &bundle_active_set::scoped_active_rows(&state.by_scope)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
 
     let mut poll_tick = tokio::time::interval(poll_interval);
     poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -797,7 +817,7 @@ pub async fn run(
                 }
                 run_incremental_tick(
                     &db, &mut state, sink_ref, spawner.as_deref(), &excluded_metric,
-                    &binding_metrics, &metrics,
+                    &binding_metrics, &metrics, &app_version_snapshot,
                 ).await;
             }
             _ = reconcile_tick.tick() => {
@@ -806,7 +826,7 @@ pub async fn run(
                 }
                 run_full_reconcile(
                     &db, &mut state, sink_ref, spawner.as_deref(), &excluded_metric,
-                    &binding_metrics, &metrics,
+                    &binding_metrics, &metrics, &app_version_snapshot,
                 ).await;
             }
         }
@@ -1090,6 +1110,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &metrics,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
 
@@ -1122,6 +1143,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &test_changelog_metrics(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert!(sink.calls().is_empty());
@@ -1157,6 +1179,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &test_changelog_metrics(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -1208,6 +1231,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &metrics,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -1268,6 +1292,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &test_changelog_metrics(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(state.running_len(), 1, "one consumer must be spawned");
@@ -1304,6 +1329,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &test_changelog_metrics(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(state.last_seq(), 120);
@@ -1337,6 +1363,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &test_changelog_metrics(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -1372,6 +1399,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &test_changelog_metrics(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -1520,6 +1548,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &test_changelog_metrics(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -1553,6 +1582,7 @@ mod tests {
                 rows: vec![bundle_active_set::ActiveBundleRow {
                     app_id: "waddles.a".to_string(),
                     version: "1".to_string(),
+                    version_id: 0,
                     digest: "sha256:00".to_string(),
                     component_key: "k".to_string(),
                     sidecar_key: "s".to_string(),
@@ -1578,6 +1608,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &test_changelog_metrics(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
 
@@ -1623,6 +1654,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &metrics,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
 
@@ -1677,6 +1709,7 @@ mod tests {
             &test_excluded_metric(),
             &test_binding_metrics(),
             &metrics,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
 
