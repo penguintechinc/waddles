@@ -15,7 +15,7 @@ pyjwt>=2.13.0,<3.0.0
 
 # M1 Core Identity/Auth group (bcrypt, httpx come transitively via flask_core):
 webauthn>=3.0.0,<4.0.0  # passkey_service.py -- WebAuthn/FIDO2 registration+auth
-boto3>=1.35.0,<2.0.0  # storage_service.py -- S3/MinIO avatar storage only, no local-disk fallback
+boto3>=1.35.0,<2.0.0  # storage_service.py -- S3-compatible avatar storage only, no local-disk fallback
 # Async HTTP client -- blueprints/v1/event.py's EventCalendarProxyClient
 # forwards to the calendar-interaction service; pin matches
 # action/interactive/calendar_interaction_module/requirements.in's own

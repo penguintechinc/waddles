@@ -602,7 +602,7 @@ Single instance (typical 4-core VM):
 
 1. **Redis State Persistence**: Move hands queue to Redis for cross-instance consistency
 2. **WebSocket Support**: Real-time hand raise notifications
-3. **Recording**: Video recording integration with MinIO
+3. **Recording**: Video recording integration with SeaweedFS (S3-compatible)
 4. **Screen Sharing**: Built-in screen annotation
 5. **Metrics**: Prometheus metrics export
 6. **Tracing**: Distributed tracing (OpenTelemetry)

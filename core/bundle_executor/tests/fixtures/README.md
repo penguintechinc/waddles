@@ -85,3 +85,40 @@ manually if an ad hoc executor integration check is needed. Its WIT
 conformance (`hub_api/services/bundle_component_validator.py`) and business
 logic (`bundles/csharp/superpenguin-roll/tests/`) are both otherwise fully
 covered without a committed fixture.
+
+## `connector_fixture.wasm`
+
+A real, compiled `waddle:connector@1.0.0` component (`connector-fixture-
+src/`), used by `tests/linker_isolation.rs` to prove the per-component
+`Linker`'s `identity.lookup` gate (spec `docs/superpowers/specs/2026-09-28-
+connector-bundles.md` S3.2.1). `receiver.on-connect` calls
+`identity.lookup` unconditionally, so this component's compiled import set
+genuinely requires it to be linked -- instantiation succeeds only against a
+`Linker` built for a manifest passing
+`crate::manifest::VerifiedManifest::may_link_identity`, and fails
+(wasmtime's standard "unknown import" error, before any guest code runs)
+against one that doesn't.
+
+The fixture's own `wit/connector.wit` is a trimmed, self-contained copy of
+the normative `wit/waddle-connector/connector.wit` (`identity`/`receiver`/
+`sender` byte-for-byte identical; `http`/`log`/`clock`/`%flags` omitted
+since this fixture never calls them) -- avoiding this standalone
+`cargo-component` package needing its own cross-package `waddle:bundle`
+dependency resolution, which `cargo-component 0.21.1`'s `deps/` merge did
+not accept in the same layout `wasm-tools component wit` itself resolves
+correctly (worth revisiting if a future fixture needs the reused imports
+too).
+
+### Regenerating
+
+```bash
+rustup target add wasm32-wasip1
+cargo install cargo-component --locked
+cd connector-fixture-src
+cargo component build --release
+cp target/wasm32-wasip1/release/connector_fixture.wasm ../connector_fixture.wasm
+```
+
+Built and verified with `cargo-component 0.21.1` / `wasm-tools 1.259.0`
+against `wit-bindgen-rt 0.44.0` (same toolchain as `hostile_fixture.wasm`
+above).

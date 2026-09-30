@@ -35,7 +35,7 @@ hub_api/
     identity_service.py      linked-identity CRUD + identity-linking OAuth flow
     passkey_service.py       WebAuthn registration/authentication
     profile_service.py       self-service profile CRUD + avatar
-    storage_service.py       S3/MinIO avatar object storage (no local-disk fallback)
+    storage_service.py       S3-compatible avatar object storage (no local-disk fallback)
     user_management_service.py  superadmin user CRUD
     current_user.py         resolve the caller's user id from the bearer JWT
     dto_response.py         jsonify_dto() -- workaround for a quart-schema/pydantic-core crash

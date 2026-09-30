@@ -29,7 +29,7 @@ volumes:
   postgres-replica-data:
   redis-data:
   rabbitmq-data:
-  minio-data:
+  seaweedfs-data:
   ollama-data:
   qdrant-data:
 
@@ -190,21 +190,42 @@ services:
       retries: 5
     restart: unless-stopped
 
-  infra-minio:
-    image: minio/minio:RELEASE.2024-01-16T16-07-38Z
-    container_name: infra-minio
+  infra-seaweedfs:
+    # chrislusf/seaweedfs (Apache-2.0) -- matches k8s/helm/waddlebot's
+    # infrastructure.seaweedfs image/ports (S3 gateway replaces MinIO).
+    image: docker.io/chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    container_name: infra-seaweedfs
     ports:
-      - "9000:9000"   # MinIO API
-      - "9001:9001"   # MinIO Console
+      - "8333:8333"   # S3 API
+      - "9333:9333"   # Master
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
-      MINIO_DOMAIN: localhost
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-waddlebot}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-waddlebot-dev-secret}
     volumes:
-      - minio-data:/data
-    command: server /data --console-address ":9001"
+      - seaweedfs-data:/data
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mkdir -p /etc/seaweedfs
+        cat > /etc/seaweedfs/s3-identities.json <<EOF
+        {
+          "identities": [
+            {
+              "name": "waddlebot",
+              "credentials": [
+                {"accessKey": "$${S3_ACCESS_KEY_ID}", "secretKey": "$${S3_SECRET_ACCESS_KEY}"}
+              ],
+              "actions": ["Read", "Write", "List", "Tagging", "Admin"]
+            }
+          ]
+        }
+        EOF
+        exec weed server -dir=/data -s3 -s3.port=8333 \
+          -s3.config=/etc/seaweedfs/s3-identities.json \
+          -master.port=9333 -volume.port=8080 -filer=true -filer.port=8888 -ip=0.0.0.0
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8333"]
       interval: 30s
       timeout: 20s
       retries: 3
@@ -460,13 +481,13 @@ services:
       LOYALTY_API_URL: http://interactive-loyalty:8032
       # Overlay Configuration
       OVERLAY_BASE_URL: ${OVERLAY_BASE_URL:-http://localhost:8027}
-      # S3 Storage Configuration (MinIO)
+      # S3 Storage Configuration (SeaweedFS)
       S3_STORAGE_ENABLED: "true"
       S3_BUCKET_NAME: waddlebot-assets
-      S3_ENDPOINT_URL: http://infra-minio:9000
-      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
-      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
-      S3_PUBLIC_BASE_URL: http://localhost:9000/waddlebot-assets
+      S3_ENDPOINT_URL: http://infra-seaweedfs:8333
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-waddlebot}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-waddlebot-dev-secret}
+      S3_PUBLIC_BASE_URL: http://localhost:8333/waddlebot-assets
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "8060:8060"  # Hub admin portal
@@ -478,7 +499,7 @@ services:
         condition: service_healthy
       infra-redis:
         condition: service_healthy
-      infra-minio:
+      infra-seaweedfs:
         condition: service_healthy
       db-migrations:
         condition: service_completed_successfully
@@ -1465,10 +1486,12 @@ services:
       SECRETS_PATH: /secrets/db-passwords
       MARCHPROXY_GRPC_HOST: marchproxy-rtmp
       MARCHPROXY_GRPC_PORT: 50050
-      MINIO_ENDPOINT: infra-minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
-      MINIO_BUCKET: video-proxy
+      S3_ENDPOINT_URL: http://infra-seaweedfs:8333
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-waddlebot}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-waddlebot-dev-secret}
+      S3_BUCKET_NAME: video-proxy
+      S3_REGION: us-east-1
+      S3_FORCE_PATH_STYLE: "true"
       LICENSE_SERVER_URL: ${LICENSE_SERVER_URL:-}
       RELEASE_MODE: ${RELEASE_MODE:-false}
       JWT_SECRET_KEY: ${JWT_SECRET:-changeme_jwt_secret}
@@ -1479,7 +1502,7 @@ services:
     depends_on:
       infra-postgres:
         condition: service_healthy
-      infra-minio:
+      infra-seaweedfs:
         condition: service_healthy
       db-migrations:
         condition: service_completed_successfully
