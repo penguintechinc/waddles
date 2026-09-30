@@ -1,0 +1,67 @@
+# egress-proxy (Rust) -- Waddles network-level egress gateway
+# (feature/bundle-egress-gateway PR #463's skeleton Deployment; this is
+# the real image, replacing that PR's `debian:bookworm-slim` placeholder
+# in `k8s/helm/waddlebot/values.yaml` `egressProxy.image`).
+#
+# Build (context = core/, the PARENT of this directory -- NOT this
+# directory alone). egress-proxy's Cargo.toml declares same-repo path
+# dependencies on three sibling crates (`service_auth`, the hub-api
+# machine-JWT verifier; `bundle-host-http`, the shared SSRF-hardened
+# address checks; and `egress-assertion`, the signed allowlist assertion
+# wire format shared with `bundle-host-http`'s signer -- PR #468/#469).
+# `bundle-host-http` itself has a same-repo path dependency on
+# `egress-assertion` too, so the build context must include all three or
+# `cargo build` fails closed with "unable to update /service_auth" /
+# "/bundle_host_http" / "/egress_assertion" (no such file). Run from core/:
+#   docker build -f egress_proxy/Dockerfile.rust -t localhost:32000/waddlebot/egress-proxy:alpha-<epoch> .
+
+FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
+
+# cmake + a C/C++ compiler are required to build aws-lc-sys -- this
+# crate's `jsonwebtoken` dependency (verifying the signed allowlist
+# assertion, `src/assertion.rs`) uses the `aws_lc_rs` crypto backend, same
+# rationale as core/service_auth's own Cargo.toml/Dockerfile comment
+# (RUSTSEC-2023-0071 -- no `rsa` crate in the graph).
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        cmake=3.25.1-1 build-essential=12.9 ca-certificates=20250419~deb12u1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY egress_proxy/Cargo.toml egress_proxy/Cargo.lock ./egress_proxy/
+COPY egress_proxy/src ./egress_proxy/src
+COPY service_auth ./service_auth
+COPY bundle_host_http ./bundle_host_http
+COPY egress_assertion ./egress_assertion
+WORKDIR /build/egress_proxy
+RUN cargo build --release --locked
+
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
+
+# `ca-certificates` for rustls (webpki/native roots) on outbound TLS
+# (JWKS fetch via reqwest, OTLP export once wired).
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        ca-certificates=20250419~deb12u1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --system --gid 10001 appuser \
+    && useradd --system --uid 10001 --gid appuser --home-dir /nonexistent \
+       --shell /usr/sbin/nologin appuser
+
+COPY --from=builder --chown=appuser:appuser /build/egress_proxy/target/release/egress-proxy /app/egress-proxy
+
+WORKDIR /app
+USER appuser
+
+ENV PROXY_LISTEN_PORT=8443 \
+    METRICS_PORT=9090
+
+# Native Rust healthcheck subcommand -- never curl (rules/client.md,
+# rules/general.md anti-patterns table).
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+    CMD ["/app/egress-proxy", "--healthcheck"]
+
+EXPOSE 8443 9090
+
+ENTRYPOINT ["/app/egress-proxy"]
