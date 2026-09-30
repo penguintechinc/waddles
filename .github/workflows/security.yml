@@ -138,7 +138,17 @@ jobs:
           # flagged forever. Only the yanked 1.8.5 carried the malicious
           # payload, and our pins are hash-verified against the audited
           # artifact. Drop this once upstream publishes a fixed range.
-          IGNORES="--ignore-vuln PYSEC-2022-252"
+          #
+          # GHSA-g75f-g53v-794x is a CPU-exhaustion DoS in bleach's
+          # `linkify(..., parse_email=True)` email-scanning regex (bleach
+          # 6.3.0+, no fixed version published). Every service in this repo
+          # only calls `bleach.clean()` for HTML sanitization
+          # (flask_core/sanitization.py) -- `linkify`/`parse_email` is never
+          # invoked anywhere in the codebase (verified via repo-wide grep for
+          # "linkify"), so the vulnerable code path is unreachable here.
+          # Review by 2026-12-31: re-grep for `linkify` before renewing, and
+          # drop this once upstream publishes a fix or bleach is replaced.
+          IGNORES="--ignore-vuln PYSEC-2022-252 --ignore-vuln GHSA-g75f-g53v-794x"
 
           gated=0; ungated=0; gated_bad=0; ungated_bad=0
           for f in $(find . -name requirements.txt \

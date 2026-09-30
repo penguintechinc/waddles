@@ -68,6 +68,24 @@ SDK (`10.0.401`) / `wit-bindgen` `0.58.0` (vendored by
 `Microsoft.DotNet.ILCompiler.LLVM` `10.0.0-rc.1.26306.1`. See
 `bundles/csharp/csping/README.md` for the full toolchain writeup.
 
+## No `superpenguin_roll.wasm` fixture here (by design)
+
+`bundles/csharp/superpenguin-roll` (the first real C# app bundle built on
+`sdk/waddle-sdk-cs`, not a spike) builds with the exact same toolchain as
+`csping` above, but its compiled component measured **6,659,228 bytes
+(6.35 MiB)** at build time -- above the informal size this repo has used so
+far for a committed binary blob under this directory (`csping.wasm` at
+4.36 MiB was already the largest; `hostile_fixture.wasm` is 96,489 bytes).
+Rather than committing a second multi-megabyte NativeAOT-LLVM binary here,
+`core/bundle_executor` has no
+`tests/csharp_superpenguin_roll_integration.rs` -- build the component
+locally instead (`make build-superpenguin-roll-bundle`, or
+`bundles/csharp/superpenguin-roll/README.md`'s Build section) and load it
+manually if an ad hoc executor integration check is needed. Its WIT
+conformance (`hub_api/services/bundle_component_validator.py`) and business
+logic (`bundles/csharp/superpenguin-roll/tests/`) are both otherwise fully
+covered without a committed fixture.
+
 ## `connector_fixture.wasm`
 
 A real, compiled `waddle:connector@1.0.0` component (`connector-fixture-

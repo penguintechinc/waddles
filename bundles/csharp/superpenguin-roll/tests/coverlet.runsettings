@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This test project links RollLogic.cs/RollDispatch.cs directly into the
+     SuperpenguinRoll.Tests assembly (see this directory's .csproj header
+     comment for why: no separate wasi-wasm-compatible "superpenguin-roll"
+     module exists to measure). coverlet's default `IncludeTestAssembly=false`
+     would exclude that entire module, including RollLogic/RollDispatch,
+     from coverage, silently reporting 0% for the very code this project
+     exists to test (`critical-rules.md` Verification Integrity: "zero items
+     examined is a FAILURE, not a pass"). `IncludeTestAssembly=true` fixes
+     that; `[WaddleSdk]*` is excluded so the SDK's OWN (separately gated by
+     `test-waddle-sdk-cs`) coverage doesn't dilute this project's number, and
+     the `.Tests` namespace (xUnit test classes + local fakes, trivially
+     100% "covered" by definition) is excluded so the gate measures
+     RollLogic/RollDispatch specifically, not the harness around them. -->
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat code coverage">
+        <Configuration>
+          <IncludeTestAssembly>true</IncludeTestAssembly>
+          <Exclude>[*]*.g,[WaddleSdk]*,[SuperpenguinRoll.Tests]WaddleBundleSuperpenguinRoll.Tests.*</Exclude>
+          <ExcludeByFile>**/obj/**/*.g.cs</ExcludeByFile>
+          <ExcludeByAttribute>GeneratedCodeAttribute,CompilerGeneratedAttribute</ExcludeByAttribute>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>

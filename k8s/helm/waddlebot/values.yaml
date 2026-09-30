@@ -90,12 +90,17 @@ global:
   # link simply never establishes (svc-action's host-api listener logs a warning and keeps
   # its HTTP/metrics servers up regardless -- see try_start_host_api's graceful-degradation
   # comment -- and bundle-executor retries the dial forever with capped exponential backoff,
-  # so neither pod crashloops); only the executor-invoked-bundle path stays inert. Real PEM
-  # material is therefore an OVERRIDE REQUIRED operator step in every environment, alpha
-  # included -- populate via `helm upgrade --set-file global.hostApiTls.ca.crt=...
-  # --set-file global.hostApiTls.tls.crt=... --set-file global.hostApiTls.tls.key=...`
-  # before setting pipeline.rustDataPlane.enabled=true, exactly like global.grpcTls already
-  # requires for beta/gamma/production.
+  # so neither pod crashloops); only the executor-invoked-bundle path stays inert.
+  #
+  # fix/alpha-host-api-tls -- templates/host-api-tls-secret.yaml now guarantees the
+  # <fullname>-host-api-tls Secret exists (kept, explicitly supplied, generated alpha/local,
+  # or the whole release fails to render) whenever pipeline.rustDataPlane.enabled is true,
+  # exactly mirroring global.valkeyTls's self-provisioning policy -- alpha/local no longer
+  # need real PEM material supplied out of band. beta/gamma/production still REQUIRE real
+  # material (--set-file global.hostApiTls.ca.crt=... --set-file global.hostApiTls.tls.crt=...
+  # --set-file global.hostApiTls.tls.key=...), cert-manager (certManager.enabled=true), or
+  # externalSecret: true delegating to an out-of-band controller -- auto-generation is
+  # alpha/local only, fails closed otherwise.
   hostApiTls:
     certManager:
       enabled: false
@@ -111,6 +116,11 @@ global:
     tls:
       crt: ""
       key: ""
+    # fix/alpha-host-api-tls -- true delegates provisioning of the <fullname>-host-api-tls
+    # Secret to an out-of-band ExternalSecret/SealedSecret controller instead of failing the
+    # render on beta/gamma/production. Alpha/local ignore this flag entirely (auto-generated
+    # instead, see templates/host-api-tls-secret.yaml).
+    externalSecret: false
 
   # fix/valkey-tls-alpha -- TLS material for the Valkey (infra-redis) cache/streams
   # listener. `penguin_spine::SpineConfig::validate()` (core/svc_process, core/svc_action,
@@ -2275,7 +2285,17 @@ egressPolicy:
 egressProxy:
   enabled: true
   environment: "alpha"
-  image: "debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a"
+  # core/egress_proxy (feature/egress-proxy-service) -- bare repo name,
+  # composed with global.imageRegistry/imageTag via the same
+  # `waddlebot.legacyModuleImage` helper svc-action-rust/svc-process-rust
+  # use (templates/infrastructure/egress-proxy.yaml). Build target:
+  # `docker build -f egress_proxy/Dockerfile.rust -t
+  # <registry>/waddlebot-egress-proxy:<tag> .` run from `core/` (the
+  # PARENT of core/egress_proxy -- see that Dockerfile's own header
+  # comment for why). CI fills imageTag with the built digest/tag; leave
+  # empty here to fall back to global.imageTag.
+  image: "waddlebot-egress-proxy"
+  imageTag: ""
   port: 8443
   metricsPort: 9090
   replicas: 1
@@ -2301,9 +2321,28 @@ egressProxy:
   # what was actually granted to that tenant/app; a compromised proxy host
   # still can't reach loopback/link-local/metadata/cluster CIDRs (egressPolicy
   # .denyCidrs/.clusterCidrs, enforced at the network layer as a backstop).
-  allowlistSigning:
-    secretName: "waddlebot-egress-proxy-signing-key"
-    secretKey: "public-key.pem"
+  # Machine-JWT auth (core/service_auth) -- callers additionally need
+  # `egress:connect` granted in serviceJwt.identities[*].allowedScopes
+  # (see that block's own comment) on top of hub-api's existing
+  # per-service scopes.
+  machineJwtRequiredScope: "egress:connect"
+  allowedCallerServices:
+    - svc-ingest
+    - svc-process
+    - svc-action
+  perTenantMaxConnections: 50
+  # Quoted (not a bare int) -- Helm/Sprig's `quote` on a large value.yaml
+  # int round-trips through Go's JSON-decoded float64 and can render in
+  # scientific notation (e.g. "1.048576e+07"), which egress_proxy's
+  # `u64` env parser then rejects. Quoting here keeps it a plain string
+  # end to end.
+  perTenantBandwidthBytesPerSec: "10485760"  # 10 MiB/s
+  connectTimeoutSeconds: 10
+  # Deliberately short (connector spec's egress assertion is minted
+  # per-request, not cached like the machine JWT) -- bounds the replay
+  # window if an assertion were ever intercepted. See
+  # core/egress_proxy/src/assertion.rs module doc.
+  assertionMaxTtlSeconds: 60
 
 # SPIFFE/SPIRE workload identity (subchart: charts/spire). Off by default
 # (opt-in per environment via values-alpha.yaml/values-beta.yaml/
@@ -2352,11 +2391,19 @@ serviceJwt:
       serviceAccount: svc-process
       allowedScopes:
         - "identity:ephemeral:mint"
+        # feature/egress-proxy-service -- required to call core/egress_proxy
+        # for any bundle net.http/CONNECT egress.
+        - "egress:connect"
     svc-action:
       spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-action"
       serviceAccount: svc-action
       allowedScopes:
         - "users:display-name:resolve"
+        - "egress:connect"
+    # svc-ingest isn't in this Rust-data-plane identities map yet (still
+    # legacy/Python) but is one of egressProxy.allowedCallerServices --
+    # add its identity+`egress:connect` scope here once it mints machine
+    # JWTs, matching svc-process/svc-action above.
   # Every calling pod projects its own ServiceAccount token bound to
   # `bootstrapAudience` -- this is the bootstrap credential, no shared
   # secret distributed to callers. Reusable via the

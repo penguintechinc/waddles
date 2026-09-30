@@ -1,7 +1,9 @@
 .PHONY: dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
-        verify-csping-fixture verify-ping-bundle-reproducible generate-seaweedfs-sse-key alpha-deploy
+        verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll \
+        build-superpenguin-roll-bundle test-csharp-bundle-compile \
+        verify-ping-bundle-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -97,6 +99,33 @@ run-ai-local: ## Run ai_interaction_module container locally (standalone, 1 work
 verify-csping-fixture:
 	@bash scripts/verify-csping-fixture.sh
 
+# waddle-sdk-cs: shared C# SDK for Waddles app bundles (sdk/waddle-sdk-cs) --
+# xUnit tests run in the same pinned containerized .NET SDK image as every
+# other C# build in this repo (see scripts/test-waddle-sdk-cs.sh).
+test-waddle-sdk-cs:
+	@bash scripts/test-waddle-sdk-cs.sh
+
+# superpenguin-roll: first C# bundle built on waddle-sdk-cs, ported from
+# PenguinTwitchBot's PastyGames/Roll.cs (MIT, used with permission -- see
+# bundles/csharp/superpenguin-roll/bundle.yaml `notice`).
+test-superpenguin-roll:
+	@bash scripts/test-superpenguin-roll.sh
+
+# Rebuilds bundles/csharp/superpenguin-roll to a real .wasm component and
+# reports its size/sha256 -- see scripts/verify-superpenguin-roll-fixture.sh
+# for why no committed fixture is byte-identity-checked here (unlike
+# verify-csping-fixture, this component is not committed to
+# core/bundle_executor/tests/fixtures/).
+build-superpenguin-roll-bundle:
+	@bash scripts/verify-superpenguin-roll-fixture.sh
+
+# End-to-end: builds the real bundles/csharp/csping spike bundle through
+# CSharpBuilder (core/bundle_compiler/src/build/csharp.rs), the
+# builder_for("csharp") arm now returns -- ignored by default cargo test
+# (needs docker + network, ~1-2 minutes), so this is its only run path.
+test-csharp-bundle-compile:
+	@cd core/bundle_compiler && cargo test --locked builds_csping_via_docker -- --ignored --nocapture
+
 # Proves bundles/rust/ping's WASI 0.2 component build (bundles/Dockerfile.core-bundles's
 # rust-bundle-builder stage) is byte-reproducible -- two independent --no-cache builds must
 # produce an identical sha256. See scripts/verify-ping-bundle-reproducible.sh for why.
@@ -127,6 +156,23 @@ generate-seaweedfs-sse-key:
 # rejects any other KUBE_CONTEXT before build/push/helm run). Usage: make alpha-deploy [ARGS="--skip-build"]
 alpha-deploy:
 	@bash scripts/alpha-deploy.sh $(ARGS)
+
+# resolve-433 -- alpha-deploy.sh's registry-backed build cache
+# (localhost:32000/waddlebot/buildcache/*) shares disk with the MicroK8s
+# registry's PVC, which was evicted once under DiskPressure. This runs the
+# registry's own garbage-collect (distribution/distribution's
+# `registry garbage-collect`) inside the registry pod via kubectl exec --
+# it does NOT touch alpha-deploy.sh's cache tags themselves (those are
+# already bounded to one overwritten tag per image; this reclaims the
+# now-unreferenced blobs those overwrites leave behind). Never run
+# automatically -- always explicit, always local-alpha only.
+# Usage: make alpha-registry-gc
+alpha-registry-gc:
+	@echo "Running MicroK8s registry garbage collection (context: local-alpha, namespace: container-registry)..."
+	@echo "NOTE: confirm the registry Deployment/config path first if this differs from the microk8s registry addon default:"
+	@echo "  kubectl --context local-alpha get pods -n container-registry"
+	kubectl --context local-alpha exec -n container-registry deploy/registry -- \
+		registry garbage-collect /etc/docker/registry/config.yml
 
 pre-commit:
 	@echo "=== Pre-commit checks ==="

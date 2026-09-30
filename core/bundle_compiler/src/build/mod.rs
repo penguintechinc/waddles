@@ -14,6 +14,10 @@
 //! would let unscanned code run; `build_orchestration_test.rs` asserts
 //! that a manifest or scan rejection never reaches a builder.
 
+/// C# build recipe: a pinned, containerized `dotnet build -c Release`
+/// against `componentize-dotnet`. Wired (not a stub) -- see
+/// `CSharpBuilder`'s doc comment for the recipe and its known gaps.
+mod csharp;
 /// JS/TS build recipe (`jco componentize --disable all`). Stub in this
 /// wave -- see `JsBuilder`'s doc comment.
 mod js;
@@ -108,6 +112,7 @@ fn builder_for(language: &str) -> Result<Box<dyn LanguageBuilder>, CompilerError
         "python" => Ok(Box::new(python::PythonBuilder)),
         "rust" => Ok(Box::new(rust::RustBuilder)),
         "javascript" | "typescript" => Ok(Box::new(js::JsBuilder)),
+        "csharp" => Ok(Box::new(csharp::CSharpBuilder)),
         other => Err(CompilerError::Config(format!(
             "no LanguageBuilder for language {other:?}"
         ))),
@@ -300,6 +305,7 @@ mod tests {
         assert!(builder_for("rust").is_ok());
         assert!(builder_for("javascript").is_ok());
         assert!(builder_for("typescript").is_ok());
+        assert!(builder_for("csharp").is_ok());
     }
 
     #[test]
