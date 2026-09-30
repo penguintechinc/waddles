@@ -13,8 +13,8 @@ Imports the REAL `app` module (module-level `db`/`bind_shared_read_tables`/
 `install_rate_limiting`/route wiring, same as production) rather than
 reconstructing it -- proves the actual call sites work. Uses sqlite:memory
 (via `DATABASE_URL` set in `conftest.py`) and never calls
-`async with app.test_app():` (would trigger `startup()`'s MinIO/license
-validation) -- routes here don't need MinIO, and the rate limiter is
+`async with app.test_app():` (would trigger `startup()`'s S3/license
+validation) -- routes here don't need S3 config, and the rate limiter is
 connected directly instead (same technique as `workflow_core_module`'s
 equivalent test).
 """
@@ -52,7 +52,7 @@ def _schema() -> None:
     `stream_configs`/`stream_destinations`/`stream_status` are normally
     defined inside `startup()` (`@app.before_serving`) -- `init_database()`
     is called directly here (pure `db.define_table()` calls, no I/O)
-    instead of running the full `startup()`, which also validates MinIO/
+    instead of running the full `startup()`, which also validates S3/
     license config this suite doesn't need. Session-scoped because `app.py`
     is a module-level singleton, imported once per test process --
     `db.define_table()` raises `SyntaxError: table already defined` on a

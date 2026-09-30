@@ -26,9 +26,12 @@ Environment variables:
 | `DB_PASS` | Database password | - |
 | `MARCHPROXY_HOST` | MarchProxy RTMP host | marchproxy-rtmp |
 | `MARCHPROXY_GRPC_PORT` | MarchProxy gRPC port | 50050 |
-| `MINIO_ENDPOINT` | MinIO endpoint | minio:9000 |
-| `MINIO_ACCESS_KEY` | MinIO access key | - |
-| `MINIO_SECRET_KEY` | MinIO secret key | - |
+| `S3_ENDPOINT_URL` | S3-compatible object store endpoint (SeaweedFS) | http://seaweedfs:8333 |
+| `S3_ACCESS_KEY_ID` | S3 access key | - |
+| `S3_SECRET_ACCESS_KEY` | S3 secret key | - |
+| `S3_BUCKET_NAME` | S3 bucket name | video-proxy |
+| `S3_REGION` | S3 region | us-east-1 |
+| `S3_FORCE_PATH_STYLE` | Force path-style addressing (required by SeaweedFS) | true |
 | `LICENSE_SERVER_URL` | License server URL | https://license.penguintech.io |
 
 ## API Endpoints

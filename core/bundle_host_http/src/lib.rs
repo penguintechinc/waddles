@@ -14,23 +14,21 @@
 //! [`egress::EgressGuard`] never depends on either service's concrete
 //! catalog type.
 //!
-//! **Future adoption (`core/svc_ingest`, not part of this landing).**
-//! `svc_ingest`'s connector host transports -- webhook callbacks, source
-//! polling, sender requests, and non-HTTP dial targets (IRC/WebSocket
-//! connection establishment) -- are the same category of "a stage-side
-//! client reaches an operator/bundle-declared network endpoint" this
-//! guard already governs for `http.send`. The intended shape for that
-//! follow-up: `svc_ingest` implements its own [`egress::EgressRuleSource`]
-//! over its connector manifest state (mirroring this landing's
-//! `svc_process` wiring) and calls [`egress::EgressGuard::send`] for its
-//! outbound HTTP calls unchanged. A non-HTTP dial target (IRC/WebSocket)
-//! cannot reuse `send` itself (no HTTP request/response to shape), so that
-//! adoption needs a second, narrower entry point performing only the
-//! allowlist/SSRF/DNS-pinning steps (spec §8.2 steps 1-2, 5-7) and
-//! returning the validated [`std::net::SocketAddr`] to dial -- **not
-//! implemented in this landing** (scope explicitly deferred by the task
-//! that added this doc paragraph); track as a follow-up before
-//! `svc_ingest` adopts this crate.
+//! **`egress::EgressGuard::validate_dial` (landed).** The "second, narrower
+//! entry point" this doc used to flag as future work: validates a bare
+//! `host:port` dial target (a connector host transport establishing a
+//! WebSocket-over-TLS or IRC-over-TLS connection) through the same
+//! declared-host/category-match/SSRF/DNS-pinning steps `send` runs for
+//! `http.send` (spec §8.2 steps 1-2, 5-7 -- no HTTP method/scheme/redirect/
+//! response-size step applies to a bare connection establishment), and
+//! returns the [`egress::ValidatedTarget`] to dial. **`core/svc_ingest`
+//! adoption is still a following landing, not part of this one**:
+//! `svc_ingest` implements its own [`egress::EgressRuleSource`] over its
+//! connector manifest state (mirroring this crate's `svc_process` wiring)
+//! and calls `validate_dial` before connecting its Discord (wss) and
+//! Twitch (IRC-over-TLS) dial paths -- wiring those two call sites is
+//! tracked as `svc_ingest`'s own follow-up; the guard-side pipeline itself
+//! is complete and covered by this crate's own hermetic tests.
 //!
 //! **Upstream egress proxy (not part of this landing).** A
 //! network-level egress gateway is planned separately. [`egress::
@@ -45,20 +43,29 @@
 //! expected to enforce an equivalent policy on its own path; this field
 //! only threads the address through.
 //!
-//! **Explicitly deferred (raised after this crate's initial extraction,
-//! out of scope for this PR -- track as follow-up work, not implemented
-//! here):** a three-permission-family model
-//! (`net.http.fqdn:<host>`/`net.http.public-ip:<ip>`/
-//! `net.http.private-ip:<ip|cidr>`) with category-crossing enforcement
-//! (an FQDN resolving into a private IP requires a separate private-ip
-//! grant) and a configured cluster pod/service/node CIDR denylist. Today's
-//! model is the connector spec's original single exact-host-allowlist
-//! permission (`net.http:<host>`, declared as a plain hostname or IP
-//! literal, optionally with a port) plus the always-enforced SSRF address
-//! checks in [`egress::is_forbidden_address`] (loopback, link-local,
-//! unspecified, multicast, broadcast, cloud metadata, RFC1918/ULA private
-//! ranges, and CGNAT `100.64.0.0/10`) -- private ranges are gated by
-//! [`egress::EgressLimits::allow_private_hosts`] exactly as before, never
-//! by a separate permission family.
+//! **Three-permission-family model (landed).** [`egress::EgressRuleRow`]
+//! now carries three separate grant lists -- `fqdn_grants`
+//! (`net.http.fqdn:<host>`), `public_ip_grants` (`net.http.public-ip:<ip>`),
+//! `private_ip_grants` (`net.http.private-ip:<ip|cidr>`) -- each matched
+//! only by its own grants, with category-crossing enforcement (an FQDN
+//! resolving into a private IP requires a *separate* `private_ip_grants`
+//! entry covering the resolved address; a private literal declared under
+//! `public_ip_grants`, or vice versa, is never found by either list). A
+//! `private_ip_grants` match is additionally gated by
+//! [`egress::InstanceEgressPolicy`] (default deny, opt-in via
+//! [`egress::EgressGuard::with_instance_policy`]), and every resolved
+//! address is checked against an operator-configured
+//! [`egress::ClusterCidrDenylist`] ([`egress::EgressGuard::
+//! with_cluster_denylist`]) that beats any grant. The manifest/hub-api wire
+//! format itself is unchanged (still the flat `net.http:<host>` list);
+//! [`egress::EgressRuleRow::from_legacy_patterns`] auto-classifies each
+//! pattern into its new category so `svc_action`/`svc_process`'s existing
+//! adapters need no manifest-format migration -- a genuine three-
+//! permission-id manifest format is tracked as follow-up hub-api work.
+//! [`egress::is_forbidden_address`]'s always-enforced hard checks
+//! (loopback, link-local, unspecified, multicast, broadcast, cloud
+//! metadata) are never liftable by any of this; RFC1918/ULA/CGNAT are now
+//! uniformly the "private range" bucket the three-category model gates
+//! (superseding CGNAT's prior always-forbidden treatment).
 
 pub mod egress;
