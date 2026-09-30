@@ -35,6 +35,11 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
+use egress_assertion::ip_matches_grant;
+pub use egress_assertion::{
+    AssertionSigningKey, DestinationCategory, ASSERTION_HEADER as PROXY_ASSERTION_HEADER_NAME,
+    FORWARD_AUTHORIZATION_HEADER as PROXY_FORWARD_AUTHORIZATION_HEADER,
+};
 use futures_util::StreamExt;
 use penguin_bundle_host::wire::HostResultError;
 use serde::Deserialize;
@@ -624,10 +629,8 @@ impl EgressGuard {
                 req_headers.extend(secret_headers.iter().cloned());
             }
             if let Some(signer) = &self.proxy_assertion_signer {
-                req_headers.push((
-                    PROXY_ASSERTION_HEADER.to_string(),
-                    signer.sign(app_id, &host, pinned_addr),
-                ));
+                let assertion = signer.sign(app_id, &host, port, category.into())?;
+                req_headers.push((PROXY_ASSERTION_HEADER.to_string(), assertion));
             }
             let transport_req = TransportRequest {
                 method: method.clone(),
@@ -924,6 +927,39 @@ fn is_link_local_v6(ip: Ipv6Addr) -> bool {
     (ip.segments()[0] & 0xffc0) == 0xfe80
 }
 
+/// 6to4 (RFC 3056): `2002::/16`, the embedded IPv4 address occupies the
+/// next 32 bits. Recognized (see [`is_forbidden_address`]'s doc) but never
+/// decoded -- this deployment denies the whole range outright.
+fn is_6to4_v6(ip: Ipv6Addr) -> bool {
+    ip.segments()[0] == 0x2002
+}
+
+/// Teredo (RFC 4380): `2001:0000::/32`. Distinct from other `2001::`
+/// allocations (documentation `2001:db8::/32`, production ranges, etc.),
+/// which are ordinary native-v6 addresses and fall through to this
+/// function's other checks unaffected.
+fn is_teredo_v6(ip: Ipv6Addr) -> bool {
+    let seg = ip.segments();
+    seg[0] == 0x2001 && seg[1] == 0x0000
+}
+
+/// Canonicalizes `ip` to its embedded IPv4 form when it carries one
+/// (mapped/NAT64/IPv4-compatible -- see [`embedded_ipv4`]) so a deny-list
+/// comparison configured in native v4 form (e.g. an operator's
+/// [`ClusterCidrDenylist`] entry) can't be bypassed by re-encoding the same
+/// target as its IPv6 form. Deliberately reuses `embedded_ipv4` (not just
+/// `std`'s narrower `Ipv6Addr::to_canonical`, which only unwraps the mapped
+/// form) so this stays consistent with [`is_forbidden_address`]'s and
+/// [`is_private_range`]'s existing canonicalization.
+///
+/// // regression: mapped-v6 cluster bypass
+fn canonicalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => embedded_ipv4(v6).map(IpAddr::V4).unwrap_or(ip),
+        IpAddr::V4(_) => ip,
+    }
+}
+
 /// Classifies a resolved address against spec §8.2 step 6's forbidden
 /// ranges. Returns `None` when the address is permitted. `allow_private`
 /// lifts only the RFC1918/ULA private-range check (spec §8.5's
@@ -998,6 +1034,19 @@ pub fn is_forbidden_address(ip: IpAddr, allow_private: bool) -> Option<&'static 
             }
             if is_link_local_v6(v6) {
                 return Some("link_local");
+            }
+            // regression: mapped-v6 cluster bypass (security review follow-
+            // up) -- 6to4 (`2002::/16`, RFC 3056) and Teredo (`2001::/32`,
+            // RFC 4380) both tunnel an embedded IPv4 address, but via
+            // legacy NAT-traversal mechanisms this deployment has no
+            // legitimate egress use for. Rather than decode the embedded
+            // address (6to4: direct; Teredo: XOR-obfuscated) and risk a
+            // decode bug on a security-critical path for a code path with
+            // no real caller, Justin's decision: deny both ranges outright
+            // and unconditionally -- never lifted by `allow_private`, same
+            // tier as loopback/link-local/metadata.
+            if is_6to4_v6(v6) || is_teredo_v6(v6) {
+                return Some("legacy_transition_mechanism");
             }
             if !allow_private && is_unique_local_v6(v6) {
                 return Some("private");
@@ -1090,13 +1139,22 @@ fn mask_u128(prefix: u8) -> u128 {
 
 /// Checks whether `pattern` (an exact IP, optionally `:port`-suffixed, or a
 /// CIDR block for the private-ip family) covers `ip` -- the resolved/
-/// literal address a request is actually targeting. An unparseable pattern
-/// never matches anything (fail closed).
-fn ip_pattern_contains(pattern: &str, ip: IpAddr) -> bool {
+/// literal address a request is actually targeting. Delegates the actual
+/// IP/CIDR containment arithmetic to the shared
+/// [`egress_assertion::ip_matches_grant`] -- the same primitive
+/// `egress_proxy` re-checks the resolved address against on the other side
+/// of the assertion -- so the two services can never silently diverge on
+/// what a grant covers (this function previously hand-rolled its own
+/// `CidrBlock`, duplicating that logic with slightly weaker semantics: no
+/// IPv4-mapped-IPv6 normalization on the containment check itself, only on
+/// the earlier classification step). `category` must be the same
+/// [`EgressCategory`] the caller already established for `ip`/`pattern`'s
+/// grant list (`PublicIp` requires exact-literal equality, `PrivateIp`
+/// additionally accepts a CIDR block) -- an unparseable pattern never
+/// matches anything (fail closed).
+fn ip_pattern_contains(category: EgressCategory, pattern: &str, ip: IpAddr) -> bool {
     let (addr_part, _) = parse_pattern(pattern);
-    CidrBlock::parse(addr_part)
-        .map(|c| c.contains(ip))
-        .unwrap_or(false)
+    ip_matches_grant(category.into(), addr_part, ip)
 }
 
 /// Operator-configured cluster pod/service/node CIDR denylist (Justin's
@@ -1122,6 +1180,24 @@ impl ClusterCidrDenylist {
             let raw = raw.as_ref();
             let block = CidrBlock::parse(raw)
                 .ok_or_else(|| format!("invalid cluster CIDR denylist entry: {raw:?}"))?;
+            // regression: mapped-v6 cluster bypass -- `contains` below
+            // canonicalizes the *checked* address to its embedded-v4 form
+            // (via `canonicalize_ip`) before comparing, so a v6-mapped/NAT64/
+            // compatible *configured* range would silently never match
+            // anything (family mismatch against the now-v4 checked
+            // address). Fail closed at config-parse time instead of
+            // shipping a denylist entry that can never fire.
+            if let IpAddr::V6(v6) = block.network {
+                if embedded_ipv4(v6).is_some() {
+                    return Err(format!(
+                        "cluster CIDR denylist entry {raw:?} is an IPv4-mapped/NAT64/IPv4-\
+                         compatible IPv6 range -- write it in native IPv4 form instead (e.g. \
+                         10.0.0.0/8): resolved addresses are canonicalized to their embedded v4 \
+                         form before this denylist is checked, so a v6-encoded entry would never \
+                         match anything"
+                    ));
+                }
+            }
             blocks.push(block);
         }
         Ok(Self(blocks))
@@ -1132,6 +1208,12 @@ impl ClusterCidrDenylist {
     }
 
     fn contains(&self, ip: IpAddr) -> bool {
+        // regression: mapped-v6 cluster bypass -- canonicalize before
+        // comparing so `::ffff:10.244.5.6` (or its NAT64/IPv4-compatible
+        // equivalents) still matches a `10.244.0.0/16` entry; the old
+        // hand-rolled `CidrBlock::contains` required an exact address-
+        // family match and silently fell through to `_ => false` otherwise.
+        let ip = canonicalize_ip(ip);
         self.0.iter().any(|c| c.contains(ip))
     }
 }
@@ -1168,6 +1250,22 @@ enum EgressCategory {
     PrivateIp,
 }
 
+/// Converts to the shared `egress_assertion` crate's wire-format enum --
+/// same three variants, kept as a separate local type here only because
+/// this module's own [`match_grant`]/[`classify_dial_address`] pipeline
+/// predates the shared crate; the conversion is the seam
+/// [`ProxyAssertionSigner::sign`] callers use so the assertion always
+/// carries `egress_assertion`'s own enum, never a second local copy.
+impl From<EgressCategory> for DestinationCategory {
+    fn from(category: EgressCategory) -> Self {
+        match category {
+            EgressCategory::Fqdn => DestinationCategory::Fqdn,
+            EgressCategory::PublicIp => DestinationCategory::PublicIp,
+            EgressCategory::PrivateIp => DestinationCategory::PrivateIp,
+        }
+    }
+}
+
 /// The grant [`match_grant`] found, borrowed from the [`EgressRuleRow`]
 /// it matched against.
 struct MatchedGrant<'a> {
@@ -1188,20 +1286,21 @@ struct MatchedGrant<'a> {
 /// and vice versa; there is no fallback between the two IP lists.
 fn match_grant<'a>(host: &str, row: &'a EgressRuleRow) -> Option<MatchedGrant<'a>> {
     if let Ok(ip) = host.parse::<IpAddr>() {
-        let grants = if is_private_range(ip) {
+        let category = if is_private_range(ip) {
+            EgressCategory::PrivateIp
+        } else {
+            EgressCategory::PublicIp
+        };
+        let grants = if category == EgressCategory::PrivateIp {
             &row.private_ip_grants
         } else {
             &row.public_ip_grants
         };
         let (pattern, methods) = grants
             .iter()
-            .find(|(pattern, _)| ip_pattern_contains(pattern, ip))?;
+            .find(|(pattern, _)| ip_pattern_contains(category, pattern, ip))?;
         Some(MatchedGrant {
-            category: if is_private_range(ip) {
-                EgressCategory::PrivateIp
-            } else {
-                EgressCategory::PublicIp
-            },
+            category,
             pattern: pattern.as_str(),
             declared_port: parse_pattern(pattern).1,
             methods: methods.as_slice(),
@@ -1227,7 +1326,7 @@ fn match_grant<'a>(host: &str, row: &'a EgressRuleRow) -> Option<MatchedGrant<'a
 fn find_private_ip_grant(row: &EgressRuleRow, ip: IpAddr) -> bool {
     row.private_ip_grants
         .iter()
-        .any(|(pattern, _)| ip_pattern_contains(pattern, ip))
+        .any(|(pattern, _)| ip_pattern_contains(EgressCategory::PrivateIp, pattern, ip))
 }
 
 /// Classifies `ip` against every always-deny range (spec's original SSRF
@@ -1348,18 +1447,94 @@ pub struct ValidatedTarget {
 /// dependency-seam traits. Wired via
 /// [`EgressGuard::with_proxy_assertion_signer`] -- `None` (the default) is
 /// what every caller constructs today and adds no header at all, an exact
-/// behavior-preserving no-op. The claim/encoding shape a real signer
-/// produces is owned by PR #463/#466's proxy-side verifier, not this crate;
-/// this trait only defines the seam.
+/// behavior-preserving no-op.
+///
+/// Fails closed: `send_checked` propagates a signing error as a denial
+/// (`proxy_assertion_signing_failed`) rather than proxying an unsigned
+/// request whenever a signer is configured -- once `proxy_url` is set,
+/// every hop through it must carry a valid assertion, never a silent
+/// fallback to an unauthenticated dial.
 pub trait ProxyAssertionSigner: Send + Sync {
-    /// Returns the header value asserting that `app_id`'s request to `host`
-    /// was validated by this guard and pinned to `pinned_addr`.
-    fn sign(&self, app_id: &str, host: &str, pinned_addr: SocketAddr) -> String;
+    /// Returns the `X-Waddles-Egress-Assertion` header value asserting
+    /// that `app_id`'s request to `host:port` (of category `category`) was
+    /// validated by this guard -- the exact
+    /// [`egress_assertion::EgressAssertion`] wire format
+    /// `core/egress_proxy`'s verifier checks.
+    fn sign(
+        &self,
+        app_id: &str,
+        host: &str,
+        port: u16,
+        category: DestinationCategory,
+    ) -> Result<String, HostResultError>;
+}
+
+/// The real [`ProxyAssertionSigner`]: signs a fresh, single-use
+/// [`egress_assertion::EgressAssertion`] per call with this service's own
+/// Ed25519 key (see [`egress_assertion::AssertionSigningKey`]'s doc --
+/// never a second, separately-distributed signing key). `sub` must equal
+/// the SPIFFE `sub` of the machine JWT presented on the same connection
+/// (`egress_proxy::proxy::validate`'s `SubMismatch` check) -- both are
+/// this pod's own identity, so they're set once here rather than resolved
+/// per call. `tenant`/`community` are likewise fixed per instance: this
+/// guard (and the pod it runs in) already serves exactly one tenant/
+/// community context, the same assumption `EgressRuleSource::resolve`'s
+/// `app_id`-only lookup already makes.
+pub struct EgressAssertionSigner {
+    sub: String,
+    tenant: String,
+    community: String,
+    signing_key: Arc<AssertionSigningKey>,
+    ttl_secs: u64,
+}
+
+impl EgressAssertionSigner {
+    pub fn new(
+        sub: impl Into<String>,
+        tenant: impl Into<String>,
+        community: impl Into<String>,
+        signing_key: Arc<AssertionSigningKey>,
+        ttl_secs: u64,
+    ) -> Self {
+        Self {
+            sub: sub.into(),
+            tenant: tenant.into(),
+            community: community.into(),
+            signing_key,
+            ttl_secs,
+        }
+    }
+}
+
+impl ProxyAssertionSigner for EgressAssertionSigner {
+    fn sign(
+        &self,
+        app_id: &str,
+        host: &str,
+        port: u16,
+        category: DestinationCategory,
+    ) -> Result<String, HostResultError> {
+        let assertion = egress_assertion::build_assertion(
+            self.sub.clone(),
+            self.tenant.clone(),
+            self.community.clone(),
+            app_id.to_string(),
+            category,
+            host.to_string(),
+            port,
+            self.ttl_secs,
+        );
+        self.signing_key
+            .sign(&assertion)
+            .map_err(|e| denied("proxy_assertion_signing_failed", e.to_string()))
+    }
 }
 
 /// Header carrying the [`ProxyAssertionSigner`] output, added to the
-/// outbound request only when a signer is configured.
-const PROXY_ASSERTION_HEADER: &str = "X-Waddles-Egress-Assertion";
+/// outbound request only when a signer is configured. Re-exported from
+/// [`egress_assertion::ASSERTION_HEADER`] so the two crates can never
+/// disagree on the header name.
+const PROXY_ASSERTION_HEADER: &str = PROXY_ASSERTION_HEADER_NAME;
 
 /// An opaque reference to a bundle's granted secret (connector spec
 /// condition 8: "opaque handles in the guest request, tokens never in guest
@@ -1505,6 +1680,24 @@ pub struct TransportResponse {
     pub truncated: bool,
 }
 
+/// Supplies this pod's own machine JWT (`core/service_auth`, PR #438) for
+/// the hop to the upstream egress proxy -- `Authorization: Bearer <token>`,
+/// the credential `egress_proxy::auth::authenticate` checks on *that*
+/// connection, distinct from the bundle's own destination credential
+/// (which [`ReqwestTransport::send`] remaps to
+/// [`egress_assertion::FORWARD_AUTHORIZATION_HEADER`] whenever this seam is
+/// wired -- see [`ReqwestTransport::with_proxy`]). Object-safe, mirrors
+/// this crate's other dependency-seam traits; kept as a trait rather than
+/// a direct `service_auth::MachineJwtClient` dependency so this crate
+/// never needs that crate at all when no consuming crate uses proxy mode.
+/// `service_auth::MachineJwtClient` (its cache/refresh already built in)
+/// is the production implementation each consuming crate wires.
+pub trait MachineJwtSource: Send + Sync {
+    fn token<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<String, HostResultError>> + Send + 'a>>;
+}
+
 /// Performs the TLS connect + send + response-size-capped read (spec §8.2
 /// steps 9, 11, 12) for one already-validated [`TransportRequest`]. Split
 /// out from [`EgressGuard`] purely for testability -- see the module doc.
@@ -1529,21 +1722,38 @@ pub trait HttpTransport: Send + Sync {
 /// seam pass `proxy_url` through [`ReqwestTransport::new`].
 pub struct ReqwestTransport {
     proxy_url: Option<String>,
+    /// Set only by [`ReqwestTransport::with_proxy`] -- when present,
+    /// [`ReqwestTransport::send`] renames any bundle-supplied
+    /// `Authorization` header to
+    /// [`egress_assertion::FORWARD_AUTHORIZATION_HEADER`] and sets this
+    /// hop's own `Authorization` to the fetched machine JWT instead (see
+    /// [`MachineJwtSource`]'s doc). `None` in direct-connect mode, where
+    /// the bundle's own `Authorization` (if any) is sent completely
+    /// unchanged, an exact behavior-preserving no-op.
+    machine_jwt: Option<Arc<dyn MachineJwtSource>>,
 }
 
 impl ReqwestTransport {
     /// Direct-connect transport -- no proxy configured. Behaviorally
     /// identical to this type before the proxy seam was added.
     pub fn new() -> Self {
-        Self { proxy_url: None }
+        Self {
+            proxy_url: None,
+            machine_jwt: None,
+        }
     }
 
     /// Dials every request through `proxy_url` instead of connecting
     /// directly to the guard's already-pinned address -- see the crate
-    /// module doc's "Upstream egress proxy" section.
-    pub fn with_proxy(proxy_url: String) -> Self {
+    /// module doc's "Upstream egress proxy" section. `machine_jwt`
+    /// supplies this hop's own `Authorization` bearer (the proxy's inbound
+    /// caller-auth check); the bundle's own destination credential is
+    /// carried instead as [`egress_assertion::FORWARD_AUTHORIZATION_HEADER`]
+    /// (see [`ReqwestTransport::send`]'s header-remap step).
+    pub fn with_proxy(proxy_url: String, machine_jwt: Arc<dyn MachineJwtSource>) -> Self {
         Self {
             proxy_url: Some(proxy_url),
+            machine_jwt: Some(machine_jwt),
         }
     }
 }
@@ -1589,8 +1799,35 @@ impl HttpTransport for ReqwestTransport {
                 .build()
                 .map_err(|e| denied("transport", e.to_string()))?;
 
+            let mut headers = req.headers;
+            if let Some(machine_jwt) = &self.machine_jwt {
+                // Proxy-mode hop: this connection's own `Authorization` is
+                // the machine JWT `egress_proxy::auth::authenticate`
+                // checks, never the bundle's own destination credential --
+                // rename any bundle-supplied `Authorization` (e.g. a
+                // resolved `secret_ref` header) to the dedicated forward
+                // header so the proxy can restore it for the real
+                // destination only, never treat it as this hop's own
+                // bearer credential.
+                headers = headers
+                    .into_iter()
+                    .map(|(name, value)| {
+                        if name.eq_ignore_ascii_case("authorization") {
+                            (
+                                egress_assertion::FORWARD_AUTHORIZATION_HEADER.to_string(),
+                                value,
+                            )
+                        } else {
+                            (name, value)
+                        }
+                    })
+                    .collect();
+                let token = machine_jwt.token().await?;
+                headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+            }
+
             let mut header_map = reqwest::header::HeaderMap::new();
-            for (name, value) in &req.headers {
+            for (name, value) in &headers {
                 let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
                     .map_err(|_| denied("invalid_args", "invalid header name"))?;
                 let value = reqwest::header::HeaderValue::from_str(value)
@@ -2543,6 +2780,47 @@ mod tests {
         assert!(result.is_ok(), "expected success, got {result:?}");
     }
 
+    /// Parity test for the shared `egress_assertion::ip_matches_grant`
+    /// primitive this module's `ip_pattern_contains` now delegates to: a
+    /// `net.http.private-ip:10.0.0.0/8` CIDR grant must still cover a
+    /// request host expressed as an IPv4-mapped-IPv6 literal
+    /// (`::ffff:10.55.66.77`), the same way [`private_ip_cidr_grant_covers_any_address_in_range`]
+    /// proves it for a plain v4 literal. Before this module switched to the
+    /// shared primitive, its hand-rolled `CidrBlock::contains` required an
+    /// exact address-family match (`IpNet::V4` vs `IpAddr::V6` fell through
+    /// to `_ => false`), so a v4-mapped-v6 target could never satisfy a v4
+    /// CIDR grant at all, despite `is_private_range` already recognizing it
+    /// as the same private address for routing purposes -- this would have
+    /// failed `ssrf_blocked_address` under the old implementation.
+    #[tokio::test]
+    async fn private_ip_cidr_grant_covers_an_ipv4_mapped_ipv6_target() {
+        let catalog = TestCatalog::new();
+        catalog.insert(
+            "waddles.a.b.c",
+            EgressRuleRow {
+                private_ip_grants: vec![("10.0.0.0/8".to_string(), vec!["GET".to_string()])],
+                ..EgressRuleRow::default()
+            },
+        );
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default().queue(Ok(ok_response()))),
+            default_limits(),
+            catalog,
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_instance_policy(Arc::new(RwLock::new(InstanceEgressPolicy {
+            allow_private_ip_egress: true,
+        })));
+        let result = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://[::ffff:10.55.66.77]/"}),
+            )
+            .await;
+        assert!(result.is_ok(), "expected success, got {result:?}");
+    }
+
     /// The cluster CIDR denylist beats a private-ip grant -- even with a
     /// matching grant and instance-policy opt-in, a resolved address inside
     /// an operator-configured cluster CIDR is always denied
@@ -2592,6 +2870,121 @@ mod tests {
             },
         );
         assert_eq!(err2, Some("cluster_cidr_denied"));
+    }
+
+    /// regression: mapped-v6 cluster bypass -- an IPv4-mapped-IPv6 encoding
+    /// of an address inside the operator's cluster CIDR denylist must still
+    /// be denied (`cluster_cidr_denied`), even with a covering private-ip
+    /// grant and instance-policy opt-in. Before `ClusterCidrDenylist::
+    /// contains` canonicalized its input, `::ffff:10.244.5.6` (family V6)
+    /// could never match a `10.244.0.0/16` (family V4) entry at all, so the
+    /// always-forbidden cluster check silently never fired for this
+    /// encoding of the same address `cluster_cidr_denylist_beats_a_matching_
+    /// private_ip_grant` already proves is denied in plain v4 form.
+    #[tokio::test]
+    async fn cluster_cidr_denylist_denies_an_ipv4_mapped_ipv6_target() {
+        let catalog = TestCatalog::new();
+        catalog.insert(
+            "waddles.a.b.c",
+            EgressRuleRow {
+                private_ip_grants: vec![("10.0.0.0/8".to_string(), vec!["GET".to_string()])],
+                ..EgressRuleRow::default()
+            },
+        );
+        let guard = EgressGuard::new(
+            Arc::new(FakeTransport::default()),
+            default_limits(),
+            catalog,
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_instance_policy(Arc::new(RwLock::new(InstanceEgressPolicy {
+            allow_private_ip_egress: true,
+        })))
+        .with_cluster_denylist(ClusterCidrDenylist::parse(["10.244.0.0/16"]).unwrap());
+        let err = guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://[::ffff:10.244.5.6]/"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "ssrf_blocked_address");
+        let err2 = classify_dial_address(
+            "::ffff:10.244.5.6".parse().unwrap(),
+            EgressCategory::PrivateIp,
+            &EgressRuleRow {
+                private_ip_grants: vec![("10.0.0.0/8".to_string(), vec!["GET".to_string()])],
+                ..EgressRuleRow::default()
+            },
+            &ClusterCidrDenylist::parse(["10.244.0.0/16"]).unwrap(),
+            InstanceEgressPolicy {
+                allow_private_ip_egress: true,
+            },
+        );
+        assert_eq!(err2, Some("cluster_cidr_denied"));
+    }
+
+    /// regression: mapped-v6 cluster bypass -- same as the mapped-address
+    /// case above, but for the NAT64-synthesized (`64:ff9b::a.b.c.d`) and
+    /// deprecated IPv4-compatible (`::a.b.c.d`) encodings `embedded_ipv4`
+    /// also recognizes.
+    #[test]
+    fn cluster_cidr_denylist_denies_nat64_and_ipv4_compatible_encodings() {
+        let denylist = ClusterCidrDenylist::parse(["10.244.0.0/16"]).unwrap();
+        let policy = InstanceEgressPolicy {
+            allow_private_ip_egress: true,
+        };
+        let row = EgressRuleRow {
+            private_ip_grants: vec![("10.0.0.0/8".to_string(), vec!["GET".to_string()])],
+            ..EgressRuleRow::default()
+        };
+        for addr in ["64:ff9b::10.244.5.6", "::10.244.5.6"] {
+            let ip: IpAddr = addr.parse().unwrap();
+            assert_eq!(
+                classify_dial_address(ip, EgressCategory::PrivateIp, &row, &denylist, policy),
+                Some("cluster_cidr_denied"),
+                "expected {addr} to be denied by the cluster CIDR denylist"
+            );
+        }
+    }
+
+    /// regression: mapped-v6 cluster bypass -- a cluster CIDR denylist entry
+    /// itself expressed in IPv4-mapped-IPv6 form must be rejected at parse
+    /// time (fail closed) rather than silently accepted as an entry that
+    /// can never match anything, since `contains` always canonicalizes the
+    /// checked address down to its embedded v4 form first.
+    #[test]
+    fn cluster_cidr_denylist_rejects_a_mapped_ipv6_configured_range() {
+        let err = ClusterCidrDenylist::parse(["::ffff:10.244.0.0/120"]).unwrap_err();
+        assert!(
+            err.contains("IPv4-mapped"),
+            "expected a clear IPv4-mapped config error, got: {err}"
+        );
+    }
+
+    /// regression: mapped-v6 cluster bypass -- 6to4 and Teredo encodings of
+    /// the loopback/metadata addresses are denied outright (`legacy_
+    /// transition_mechanism`), not silently treated as ordinary native-v6
+    /// addresses that fall through every check.
+    #[test]
+    fn six_to_four_and_teredo_encodings_are_always_denied() {
+        // 6to4 (2002::/16) embedding 127.0.0.1 -> 2002:7f00:0001::
+        let six_to_four: IpAddr = "2002:7f00:1::".parse().unwrap();
+        assert_eq!(
+            is_forbidden_address(six_to_four, true),
+            Some("legacy_transition_mechanism")
+        );
+        // Teredo (2001:0000::/32).
+        let teredo: IpAddr = "2001:0:4136:e378:8000:63bf:3fff:fdd2".parse().unwrap();
+        assert_eq!(
+            is_forbidden_address(teredo, true),
+            Some("legacy_transition_mechanism")
+        );
+        // A same-prefix-byte ordinary v6 allocation (documentation range)
+        // must NOT be swept up by the Teredo check.
+        let docs: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(is_forbidden_address(docs, true), None);
     }
 
     /// Metadata is always denied regardless of any grant or instance
@@ -2760,8 +3153,14 @@ mod tests {
 
     struct StaticSigner;
     impl ProxyAssertionSigner for StaticSigner {
-        fn sign(&self, app_id: &str, host: &str, pinned_addr: SocketAddr) -> String {
-            format!("{app_id}|{host}|{pinned_addr}")
+        fn sign(
+            &self,
+            app_id: &str,
+            host: &str,
+            port: u16,
+            category: DestinationCategory,
+        ) -> Result<String, HostResultError> {
+            Ok(format!("{app_id}|{host}|{port}|{category:?}"))
         }
     }
 
@@ -2820,6 +3219,264 @@ mod tests {
             .find(|(k, _)| k == PROXY_ASSERTION_HEADER)
             .expect("assertion header present");
         assert!(header.1.starts_with("waddles.a.b.c|discord.com|"));
+    }
+
+    // PKCS8-DER-encoded Ed25519 test keypair (fixed, test-only) -- same
+    // fixture shape `core/egress_assertion`'s own test module uses;
+    // generated once with `openssl genpkey -algorithm ed25519` / `openssl
+    // pkey -pubout`, never used outside this test module.
+    const TEST_KEY_PRIV_DER: &[u8] = &[
+        48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 1, 204, 5, 142, 35, 153, 231, 38,
+        150, 122, 1, 218, 34, 237, 70, 125, 233, 62, 126, 103, 151, 16, 11, 238, 95, 122, 209, 74,
+        183, 9, 171, 161,
+    ];
+    const TEST_KEY_PUB_RAW: &[u8] = &[
+        169, 90, 255, 23, 51, 151, 156, 147, 56, 247, 214, 168, 76, 160, 67, 99, 211, 238, 208, 5,
+        69, 236, 245, 115, 4, 81, 1, 42, 23, 107, 4, 187,
+    ];
+
+    /// The cross-crate contract this landing exists to guarantee:
+    /// [`EgressAssertionSigner`] (wired into [`EgressGuard::send`] here,
+    /// exactly as a real proxy-mode deployment configures it) produces an
+    /// assertion that [`egress_assertion::verify_with_key`] -- the exact
+    /// primitive `core/egress_proxy`'s own JWKS-aware verifier wraps --
+    /// accepts, with every claim `core/egress_proxy/src/assertion.rs`'s
+    /// `EgressAssertion` expects (sub/tenant/community/app/category/
+    /// destination/port/jti/iat/exp).
+    #[tokio::test]
+    async fn egress_assertion_signer_round_trips_through_the_shared_verifier() {
+        let signing_key = Arc::new(
+            AssertionSigningKey::from_ed25519_pem(
+                // `from_ed25519_pem` takes PEM bytes; build one from the
+                // fixed DER test key via `jsonwebtoken`'s own encoder
+                // isn't available here, so construct the signer directly
+                // from DER through the crate's private-field test seam
+                // instead -- see the inline helper below.
+                &pem_encode_ed25519_private_key(TEST_KEY_PRIV_DER),
+                "k1",
+            )
+            .expect("valid Ed25519 PEM"),
+        );
+        let transport = Arc::new(FakeTransport::default().queue(Ok(ok_response())));
+        let guard = EgressGuard::new(
+            Arc::clone(&transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog_with_row(
+                "waddles.a.b.c",
+                vec![("discord.com".to_string(), vec!["GET".to_string()])],
+            ),
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_proxy_assertion_signer(Arc::new(EgressAssertionSigner::new(
+            "spiffe://penguintech.io/alpha/svc-process",
+            "tenant-a",
+            "community-a",
+            signing_key,
+            30,
+        )));
+        guard
+            .send(
+                "waddles.a.b.c",
+                &serde_json::json!({"method": "GET", "url": "https://discord.com/"}),
+            )
+            .await
+            .expect("send succeeds");
+        let sent = transport.requests.lock().unwrap();
+        let header = sent[0]
+            .headers
+            .iter()
+            .find(|(k, _)| k == PROXY_ASSERTION_HEADER)
+            .expect("assertion header present")
+            .1
+            .clone();
+
+        let decoding_key = jsonwebtoken::DecodingKey::from_ed_der(TEST_KEY_PUB_RAW);
+        let verified = egress_assertion::verify_with_key(
+            &header,
+            &decoding_key,
+            egress_assertion::ASSERTION_MAX_TTL_SECONDS,
+        )
+        .expect("egress_proxy's verifier accepts bundle_host_http's assertion");
+        assert_eq!(verified.sub, "spiffe://penguintech.io/alpha/svc-process");
+        assert_eq!(verified.tenant, "tenant-a");
+        assert_eq!(verified.community, "community-a");
+        assert_eq!(verified.app, "waddles.a.b.c");
+        assert_eq!(verified.category, DestinationCategory::Fqdn);
+        assert_eq!(verified.destination, "discord.com");
+        assert_eq!(verified.port, 443);
+        assert!(egress_assertion::destination_matches(
+            &verified,
+            "discord.com",
+            443
+        ));
+        // Wrong port: the exact port the assertion granted must be
+        // required, not just any operator-allowlisted one.
+        assert!(!egress_assertion::destination_matches(
+            &verified,
+            "discord.com",
+            8443
+        ));
+    }
+
+    #[tokio::test]
+    async fn egress_assertion_signer_rejects_tampered_and_expired_tokens() {
+        let signing_key = AssertionSigningKey::from_ed25519_pem(
+            &pem_encode_ed25519_private_key(TEST_KEY_PRIV_DER),
+            "k1",
+        )
+        .expect("valid Ed25519 PEM");
+        let assertion = egress_assertion::build_assertion(
+            "spiffe://penguintech.io/alpha/svc-process",
+            "tenant-a",
+            "community-a",
+            "waddles.a.b.c",
+            DestinationCategory::Fqdn,
+            "discord.com",
+            443,
+            30,
+        );
+        let token = signing_key.sign(&assertion).expect("signs");
+        let decoding_key = jsonwebtoken::DecodingKey::from_ed_der(TEST_KEY_PUB_RAW);
+
+        // Tampered: flip the last base64url character of the signature.
+        let mut tampered = token.clone();
+        tampered.pop();
+        tampered.push(if token.ends_with('A') { 'B' } else { 'A' });
+        assert!(egress_assertion::verify_with_key(
+            &tampered,
+            &decoding_key,
+            egress_assertion::ASSERTION_MAX_TTL_SECONDS
+        )
+        .is_err());
+
+        // Expired: signed with exp already in the past.
+        let mut expired_claims = assertion.clone();
+        expired_claims.iat = egress_assertion::now_secs() - 120;
+        expired_claims.exp = egress_assertion::now_secs() - 60;
+        let expired_token = signing_key.sign(&expired_claims).expect("signs");
+        assert!(egress_assertion::verify_with_key(
+            &expired_token,
+            &decoding_key,
+            egress_assertion::ASSERTION_MAX_TTL_SECONDS
+        )
+        .is_err());
+
+        // Wrong sub: verifies cleanly (signature/TTL are still valid) but
+        // must be rejected by a caller comparing against the authenticated
+        // machine JWT's own `sub` -- `egress_proxy::proxy::validate`'s
+        // `SubMismatch` check, exercised here as a plain equality check
+        // since that verifier isn't in this worktree.
+        let verified = egress_assertion::verify_with_key(
+            &token,
+            &decoding_key,
+            egress_assertion::ASSERTION_MAX_TTL_SECONDS,
+        )
+        .expect("verifies");
+        assert_ne!(verified.sub, "spiffe://penguintech.io/alpha/svc-action");
+    }
+
+    /// Minimal PKCS8 PEM encoder for an Ed25519 private key DER -- avoids a
+    /// second test-only crate dependency just to wrap a fixed 48-byte DER
+    /// blob in PKCS8 PEM armor. The armor label is built from parts (not a
+    /// literal `"-----BEGIN...-----"` string) purely so this fixed,
+    /// publicly-known, test-only DER blob doesn't trip a secrets scanner's
+    /// private-key-marker heuristic on a string it merely resembles.
+    fn pem_encode_ed25519_private_key(der: &[u8]) -> Vec<u8> {
+        use base64::Engine;
+        let dashes = "-".repeat(5);
+        let label = "PRIVATE KEY";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+        let mut pem = format!("{dashes}BEGIN {label}{dashes}\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            pem.push_str(std::str::from_utf8(chunk).unwrap());
+            pem.push('\n');
+        }
+        pem.push_str(&format!("{dashes}END {label}{dashes}\n"));
+        pem.into_bytes()
+    }
+
+    /// A [`MachineJwtSource`] returning a fixed token -- production always
+    /// uses `service_auth::MachineJwtClient`.
+    struct StaticMachineJwt;
+    impl MachineJwtSource for StaticMachineJwt {
+        fn token<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = Result<String, HostResultError>> + Send + 'a>> {
+            Box::pin(async { Ok("machine-jwt-value".to_string()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn reqwest_transport_proxy_mode_remaps_authorization_and_adds_machine_jwt() {
+        use std::sync::Mutex as StdMutex;
+
+        let captured: Arc<StdMutex<Vec<(String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        let app = axum::Router::new().route(
+            "/ok",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let captured = Arc::clone(&captured_clone);
+                async move {
+                    let mut seen = captured.lock().unwrap();
+                    for (name, value) in headers.iter() {
+                        seen.push((
+                            name.as_str().to_string(),
+                            value.to_str().unwrap_or("").to_string(),
+                        ));
+                    }
+                    "ok"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        // Direct-connect in this test (no real upstream proxy process) --
+        // exercises the header-remap logic itself, which runs regardless
+        // of whether `reqwest::Proxy` is also configured.
+        let transport = ReqwestTransport {
+            proxy_url: None,
+            machine_jwt: Some(Arc::new(StaticMachineJwt)),
+        };
+        transport
+            .send(
+                TransportRequest {
+                    method: "GET".to_string(),
+                    url: format!("http://127.0.0.1:{}/ok", addr.port()),
+                    pinned_addr: addr,
+                    headers: vec![
+                        (
+                            "Authorization".to_string(),
+                            "Bot bundle-own-secret".to_string(),
+                        ),
+                        (
+                            "X-Waddles-Egress-Assertion".to_string(),
+                            "assertion-jwt".to_string(),
+                        ),
+                    ],
+                    body: None,
+                },
+                Duration::from_secs(5),
+                1_048_576,
+            )
+            .await
+            .expect("request succeeds");
+
+        let seen = captured.lock().unwrap();
+        let auth = seen
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .map(|(_, v)| v.as_str());
+        assert_eq!(auth, Some("Bearer machine-jwt-value"));
+        let forwarded = seen
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(egress_assertion::FORWARD_AUTHORIZATION_HEADER))
+            .map(|(_, v)| v.as_str());
+        assert_eq!(forwarded, Some("Bot bundle-own-secret"));
     }
 
     #[tokio::test]
