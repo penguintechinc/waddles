@@ -92,6 +92,19 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: DB_PASSWORD
+        # fix/helm-platform-credentials -- core/svc_action/src/config.rs reads
+        # this directly (`std::env::var("DISCORD_BOT_TOKEN").ok()`) and already
+        # degrades gracefully (relay provider disabled, clear log line) when
+        # absent -- see capabilities.rs/lib.rs. Sourced from the
+        # operator-managed platform-credentials Secret, never the
+        # chart-rendered `-secrets` Secret; `optional: true` so an
+        # unconfigured community starts without this var.
+        - name: DISCORD_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.platformCredentialsSecretName" . }}
+              key: DISCORD_BOT_TOKEN
+              optional: true
         - name: WADDLES_SANDBOX_GVISOR
           value: {{ .Values.pipeline.rustDataPlane.svcAction.sandboxGvisor | quote }}
         # Per-call wall-clock budget handed to the executor on every `invoke` -- kept in
