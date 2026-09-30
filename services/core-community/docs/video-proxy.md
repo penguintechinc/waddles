@@ -165,9 +165,12 @@ usage_count, last_used_at, month_quota
 | DB_PASS | Database password | (required) |
 | MARCHPROXY_HOST | MarchProxy RTMP host | marchproxy-rtmp |
 | MARCHPROXY_GRPC_PORT | MarchProxy gRPC port | 50050 |
-| MINIO_ENDPOINT | MinIO endpoint | minio:9000 |
-| MINIO_ACCESS_KEY | MinIO access key | (required) |
-| MINIO_SECRET_KEY | MinIO secret key | (required) |
+| S3_ENDPOINT_URL | S3-compatible object store endpoint (SeaweedFS) | http://seaweedfs:8333 |
+| S3_ACCESS_KEY_ID | S3 access key | (required) |
+| S3_SECRET_ACCESS_KEY | S3 secret key | (required) |
+| S3_BUCKET_NAME | S3 bucket name | video-proxy |
+| S3_REGION | S3 region | us-east-1 |
+| S3_FORCE_PATH_STYLE | Force path-style addressing (required by SeaweedFS) | true |
 | LICENSE_SERVER_URL | License server URL | https://license.penguintech.io |
 
 ### Docker
@@ -178,8 +181,8 @@ Build and run the container:
 docker build -t waddlebot/video-proxy .
 docker run -p 8092:8092 -p 50065:50065 \
   -e DB_PASS=<password> \
-  -e MINIO_ACCESS_KEY=<key> \
-  -e MINIO_SECRET_KEY=<secret> \
+  -e S3_ACCESS_KEY_ID=<key> \
+  -e S3_SECRET_ACCESS_KEY=<secret> \
   waddlebot/video-proxy
 ```
 
