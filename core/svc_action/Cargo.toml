@@ -124,6 +124,14 @@ bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
 # crate's identifier-safety/tenant-isolation rules are owned by this
 # repo's own bundle-db-capability design doc, not penguin-libs.
 bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
+# The bundle `http` host capability's shared, SSRF-hardened egress guard
+# (`src/egress.rs`, now a thin re-export shim) -- extracted here (PR #459
+# follow-up) so `core/svc_process` can enforce the identical pipeline for
+# its own `http` capability without a second copy. Same same-repo `path`-
+# dependency rationale as `bundle-active-set` above: this pipeline is
+# specific to this repo's own bundle-host wire shapes, not a penguin-libs
+# crate.
+bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
 
 [dev-dependencies]
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks

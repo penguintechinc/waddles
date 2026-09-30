@@ -4,7 +4,7 @@
 # pre-install/pre-upgrade hook -- Helm always finishes the pre-* hook phase before starting the
 # post-* phase, so 0020-0026's tables are guaranteed to exist here with no explicit weight
 # ordering needed against that other Job) and independently of the hub-api Deployment's own
-# readiness -- this Job talks to Postgres/MinIO/Valkey directly, never hub-api's HTTP API.
+# readiness -- this Job talks to Postgres/SeaweedFS/Valkey directly, never hub-api's HTTP API.
 {{- if .Values.pipeline.coreBundleSeeder.enabled }}
 apiVersion: batch/v1
 kind: Job
