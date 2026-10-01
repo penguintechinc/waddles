@@ -226,6 +226,34 @@ impl FeatureGate for AllGate {
     }
 }
 
+/// Gates the bundle `db` host capability (`crate::capabilities::
+/// StageCapabilities::handle_db`) -- a plain opt-in flag (not an inverted
+/// kill-switch like [`DISABLE_DB_BUNDLE_CONFIG_FLAG`] above): unseen/OFF
+/// means every `db` call is denied `feature_disabled`, matching
+/// `core/svc_action::flags::BUNDLE_EGRESS_FLAG`'s identical opt-in shape
+/// for the `http` capability. Flag-key convention: `{product}.
+/// {feature-name}` (`rules/critical-rules.md` Feature Flags & License
+/// Tiers).
+pub const BUNDLE_DB_CAPABILITY_FLAG: &str = "waddles.bundle-db-capability";
+
+/// Production [`FeatureGate`] for [`BUNDLE_DB_CAPABILITY_FLAG`] -- plain
+/// (non-inverted) read of `LicenseClient::flag_enabled`, so "never seen"/
+/// "license server unreachable" both resolve to `false` (capability
+/// denied), the correct fail-closed default for an opt-in flag.
+pub struct BundleDbCapabilityGate(Arc<LicenseClient>);
+
+impl BundleDbCapabilityGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for BundleDbCapabilityGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { self.0.flag_enabled(BUNDLE_DB_CAPABILITY_FLAG).await })
+    }
+}
+
 /// PenguinTech/Waddles-owned bypass suffix -- the sole license/flag
 /// bypass lever, and it must be a hardcoded source-level constant, never
 /// an env var, CLI flag, or Helm-templated value (`rules/critical-
@@ -400,6 +428,11 @@ mod tests {
     #[test]
     fn rust_data_plane_flag_matches_the_product_flag_key_convention() {
         assert_eq!(RUST_DATA_PLANE_FLAG, "waddles.core.rust-data-plane");
+    }
+
+    #[test]
+    fn bundle_db_capability_flag_matches_the_product_flag_key_convention() {
+        assert_eq!(BUNDLE_DB_CAPABILITY_FLAG, "waddles.bundle-db-capability");
     }
 
     #[test]

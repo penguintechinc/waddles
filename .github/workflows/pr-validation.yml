@@ -5,7 +5,7 @@ on:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
   merge_group:
     types: [checks_requested]
-    branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
+    branches: ['release/**']
   workflow_dispatch:
 
 permissions:
@@ -481,3 +481,11 @@ jobs:
       # chart-referenced image against the registry before helm ever runs.
       - name: alpha-deploy.sh missing-image preflight regression test
         run: bash scripts/ci/tests/test_alpha_deploy_image_preflight.sh
+
+      # resolve-433 -- the dev box's hourly `docker system prune -a` wipes the
+      # local BuildKit cache, so every build was a cold build (~25min). Builds
+      # now go through a dedicated docker-container buildx builder with
+      # --cache-from/--cache-to pointed at the MicroK8s registry (survives
+      # the prune, unlike docker's own cache store).
+      - name: alpha-deploy.sh registry build-cache regression test
+        run: bash scripts/ci/tests/test_alpha_deploy_build_cache.sh

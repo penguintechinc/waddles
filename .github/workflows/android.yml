@@ -11,6 +11,9 @@ on:
     paths:
       - 'mobile/android/**'
       - '.github/workflows/android.yml'
+  merge_group:
+    types: [checks_requested]
+    branches: ['release/**']
   workflow_dispatch:
 
 permissions:

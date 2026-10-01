@@ -6,7 +6,7 @@ grpcio-tools==1.83.0
 pydal==20241204.1
 psycopg2-binary==2.9.12
 aiohttp==3.14.3
-pyjwt==2.13.0
+pyjwt==2.15.0
 setuptools==84.0.0
 
 # Testing

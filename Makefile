@@ -3,7 +3,7 @@
         seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll \
         build-superpenguin-roll-bundle test-csharp-bundle-compile \
-        verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy
+        verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -157,6 +157,23 @@ generate-seaweedfs-sse-key:
 # rejects any other KUBE_CONTEXT before build/push/helm run). Usage: make alpha-deploy [ARGS="--skip-build"]
 alpha-deploy:
 	@bash scripts/alpha-deploy.sh $(ARGS)
+
+# resolve-433 -- alpha-deploy.sh's registry-backed build cache
+# (localhost:32000/waddlebot/buildcache/*) shares disk with the MicroK8s
+# registry's PVC, which was evicted once under DiskPressure. This runs the
+# registry's own garbage-collect (distribution/distribution's
+# `registry garbage-collect`) inside the registry pod via kubectl exec --
+# it does NOT touch alpha-deploy.sh's cache tags themselves (those are
+# already bounded to one overwritten tag per image; this reclaims the
+# now-unreferenced blobs those overwrites leave behind). Never run
+# automatically -- always explicit, always local-alpha only.
+# Usage: make alpha-registry-gc
+alpha-registry-gc:
+	@echo "Running MicroK8s registry garbage collection (context: local-alpha, namespace: container-registry)..."
+	@echo "NOTE: confirm the registry Deployment/config path first if this differs from the microk8s registry addon default:"
+	@echo "  kubectl --context local-alpha get pods -n container-registry"
+	kubectl --context local-alpha exec -n container-registry deploy/registry -- \
+		registry garbage-collect /etc/docker/registry/config.yml
 
 pre-commit:
 	@echo "=== Pre-commit checks ==="
