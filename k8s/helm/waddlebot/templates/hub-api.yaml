@@ -143,6 +143,26 @@ spec:
               # (live alpha's waddlebot-secrets predates this key); hub_api/config.py
               # must fail closed on Connections use if this resolves empty/unset.
               optional: true
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        # regression: seeder VALKEY_URL REPLACE_ME / missing TLS wiring -- hub-api itself
+        # calls hub_api/services/valkey_admin_client.py::build_client() (via
+        # bundle_approval_service.py/bundle_version_service.py/usage_aggregator_service.py,
+        # consumer-group provisioning), the same function the core-bundle-seeder Job calls
+        # (see templates/core-bundle-seeder-job.yaml's identical block) -- without this
+        # override this container inherits the plaintext VALKEY_URL from envFrom's
+        # secretRef above and crashes the first time any of those call sites run, with
+        # "VALKEY_URL must use rediss://" (SECURITY_TRANSPORT_TLS defaults true).
+        - name: VALKEY_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: VALKEY_URL_TLS
+        - name: VALKEY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: REDIS_PASSWORD
+        {{- end }}
         {{- if .Values.modules.bot.enabled }}
         - name: MODULE_LOAD_BOT
           value: "true"
@@ -182,11 +202,17 @@ spec:
           mountPath: /var/log/waddlebotlog
         - name: tmp
           mountPath: /tmp
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
+        {{- end }}
       volumes:
       - name: logs
         emptyDir: {}
       - name: tmp
         emptyDir: {}
+      {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+      {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

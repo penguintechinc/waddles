@@ -15,24 +15,65 @@ stage is the enforcement point").
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import redis.asyncio as redis_asyncio
 import redis.exceptions
+
+#: regression: seeder VALKEY_URL REPLACE_ME / missing TLS wiring. Same default path
+#: `penguin_spine::SpineConfig`'s Rust services read their mounted CA from
+#: (`templates/_helpers.tpl`'s `waddlebot.valkeyTlsCaVolumeMount`) -- using the identical
+#: default here means the chart mounts one CA volume per pod and both the Rust and Python
+#: consumers find it with zero per-language Helm divergence.
+_DEFAULT_CA_FILE = "/etc/waddles/ca/valkey-ca.crt"
 
 
 def _tls_required() -> bool:
     return os.environ.get("SECURITY_TRANSPORT_TLS", "true").lower() != "false"
 
 
+def _with_password(url: str, password: str) -> str:
+    """Inject `password` as the URL's userinfo (password-only auth, empty username).
+
+    `templates/secrets.yaml`'s `VALKEY_URL_TLS` key is deliberately credential-free (see
+    its own comment: the Rust data-plane pods take the password from a separate
+    `VALKEY_PASSWORD` env var instead, so the URL never needs rewriting when the password
+    rotates) -- this reconstructs the equivalent at connect time rather than requiring a
+    second, Python-only secret key. No-op if `url` already carries credentials (an
+    operator-supplied `VALKEY_URL` with embedded auth always wins) or `password` is empty.
+    """
+    if not password:
+        return url
+    parts = urlsplit(url)
+    if "@" in parts.netloc:
+        return url
+    netloc = f":{password}@{parts.netloc}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
 def build_client() -> Any:
-    """A `redis.asyncio.Redis` from `VALKEY_URL`. Refuses a plaintext URL when TLS is required."""
+    """A `redis.asyncio.Redis` from `VALKEY_URL`. Refuses a plaintext URL when TLS is required.
+
+    `VALKEY_PASSWORD` (if set) is injected into the URL's userinfo before connecting --
+    see `_with_password()`. Over `rediss://`, the CA bundle at `VALKEY_CA_FILE` (default:
+    the same mount path the Rust data-plane pods use) is passed to `redis.asyncio` for
+    server-certificate verification when the file is present on disk; absent, this falls
+    back to the system trust store rather than silently disabling verification.
+    """
     url = os.environ.get("VALKEY_URL", "rediss://valkey:6379/0")
     if _tls_required() and not url.startswith("rediss://"):
         raise ValueError(
             f"VALKEY_URL must use rediss:// when security.transport.tls is true (got {url!r})"
         )
-    return redis_asyncio.from_url(url)
+    url = _with_password(url, os.environ.get("VALKEY_PASSWORD", ""))
+    kwargs: dict[str, Any] = {}
+    if url.startswith("rediss://"):
+        ca_file = os.environ.get("VALKEY_CA_FILE", _DEFAULT_CA_FILE)
+        if Path(ca_file).is_file():
+            kwargs["ssl_ca_certs"] = ca_file
+    return redis_asyncio.from_url(url, **kwargs)
 
 
 async def ensure_group(client: Any, *, stream: str, group: str) -> None:

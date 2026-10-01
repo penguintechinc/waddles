@@ -93,6 +93,26 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: HUB_API_S3_SECRET_ACCESS_KEY
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        # regression: seeder VALKEY_URL REPLACE_ME / missing TLS wiring -- this Job calls
+        # services/bundle_version_service.py::create_version()/process_prebuilt_component()
+        # -> valkey_admin_client.build_client() (consumer-group provisioning), the exact
+        # same function hub-api's Deployment calls -- see templates/hub-api.yaml's identical
+        # block for the full rationale. Without this override the Job inherited the
+        # plaintext VALKEY_URL from envFrom's secretRef above and crashed at
+        # valkey_admin_client.build_client() with "VALKEY_URL must use rediss://" (hub_api/
+        # services/valkey_admin_client.py's SECURITY_TRANSPORT_TLS=true-by-default check).
+        - name: VALKEY_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: VALKEY_URL_TLS
+        - name: VALKEY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: REDIS_PASSWORD
+        {{- end }}
         # Platform connections (services/ingest_source_service.py::ensure_ingest_source(),
         # NO credentials/tokens stored -- see hub_api/cli/seed_core_bundles.py's own module
         # docstring) -- built from the SAME values already wired to svc-ingest's Discord guild
@@ -120,7 +140,13 @@ spec:
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
+        {{- end }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+      {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
+      {{- end }}
 {{- end }}

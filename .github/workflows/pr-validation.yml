@@ -428,6 +428,21 @@ jobs:
             --kube-version 1.30.0 \
           | python3 scripts/ci/check-helm-rendered-manifest-invariants.py
 
+      # regression: seeder VALKEY_URL REPLACE_ME / missing TLS wiring -- the
+      # core-bundle-seeder Job (and hub-api, same valkey_admin_client.build_client() call
+      # path) used to inherit a plaintext VALKEY_URL from envFrom's chart Secret alone and
+      # crash-looped on alpha ("VALKEY_URL must use rediss://"). Checks the EFFECTIVE env
+      # (envFrom merged with explicit env, matching Kubernetes' own resolution order)
+      # never resolves to a REPLACE_ME placeholder, and that core-bundle-seeder/hub-api
+      # mount the same valkey-ca CA volume the Rust data-plane Deployments do.
+      - name: helm template + seeder Valkey TLS wiring check (alpha)
+        run: |
+          set -euo pipefail
+          helm template waddlebot k8s/helm/waddlebot \
+            --values k8s/helm/waddlebot/values-alpha.yaml \
+            --kube-version 1.30.0 \
+          | python3 scripts/ci/check-seeder-valkey-tls-wiring.py
+
       # values-beta.yaml pins global.deploymentTier=production, which requires every
       # generated secret to be supplied explicitly (or already present on a live
       # cluster via `lookup`) -- neither is available to an offline `helm template` in
