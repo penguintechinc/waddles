@@ -356,9 +356,17 @@ infrastructure:
     # the render fails.
     identities:
       # hub_api/services/storage_service.py -- reads/writes bundle components,
-      # avatars, community logos. Read/Write/List/Tagging, scoped to
-      # bucketName ("waddlebot-assets") only -- see templates/infrastructure/
-      # seaweedfs.yaml's s3-identities.json rendering.
+      # avatars, community logos. Read/Write/List/Tagging, scoped to BOTH
+      # bucketName ("waddlebot-assets", avatars/community logos) AND
+      # pipeline.rustDataPlane.bundleExecutor.bucketName ("waddles-bundles",
+      # bundle components/sidecars -- shared with core-bundle-seeder-job.yaml,
+      # which reuses this same identity) -- see templates/infrastructure/
+      # seaweedfs.yaml's s3-identities.json rendering. regression: bundle
+      # publish/fetch bucket split after SeaweedFS migration (#508/#509) --
+      # this identity used to be scoped to bucketName only, so a bundle
+      # publish "succeeded" into the wrong bucket and 404'd for every
+      # bundle-executor fetch (that identity, below, is correctly Read/List-
+      # only on this SAME "waddles-bundles" bucket).
       hubApi:
         accessKey: "REPLACE_ME"
         secretKey: "REPLACE_ME"

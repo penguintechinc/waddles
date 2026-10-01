@@ -228,22 +228,48 @@ async def create_version(
         (install_dal.app_version_uploads.app_id == app_id)
         & (install_dal.app_version_uploads.version == manifest.version)
     ).select()
-    if existing:
+    # regression: REJECTED rows permanently blocked reseeding (gh-core-bundle-seeder). A
+    # version string is only truly "taken" while a prior row is still in-flight (any
+    # non-terminal status) or already PUBLISHED -- a row that was REJECTED never produced a
+    # usable `app_versions` entry, so leaving it as a permanent 409 meant the ONLY recovery
+    # was manual DB cleanup. Every existing row for this (app_id, version) must be REJECTED
+    # before a new upload is allowed; a single non-REJECTED row (in-flight or published)
+    # still 409s, same as before.
+    if existing and not all(row.status == STATUS_REJECTED for row in existing):
         raise conflict(f"version {manifest.version} of {app_id} already exists")
 
     now = datetime.now(UTC)
-    upload_id = await install_dal.app_version_uploads.async_insert(
-        app_id=app_id,
-        version=manifest.version,
-        tenant_id=tenant_id,
-        requested_by=requested_by,
-        artifact_kind=manifest.artifact,
-        language=manifest.language,
-        status=STATUS_UPLOADED,
-        manifest_json=raw,
-        created_at=now,
-        updated_at=now,
-    )
+    existing_row = existing.first()
+    if existing_row is not None:
+        # `app_version_uploads` has `UNIQUE (app_id, version)` (migration 0023) -- a fresh
+        # INSERT for this exact pair would violate it even though every existing row is
+        # REJECTED, so re-upload UPDATEs the (sole, per that constraint) REJECTED row back to
+        # a clean UPLOADED state in place rather than inserting a second row.
+        upload_id = int(existing_row.id)
+        await install_dal(install_dal.app_version_uploads.id == upload_id).update(
+            tenant_id=tenant_id,
+            requested_by=requested_by,
+            artifact_kind=manifest.artifact,
+            language=manifest.language,
+            status=STATUS_UPLOADED,
+            reject_reason=None,
+            manifest_json=raw,
+            app_version_id=None,
+            updated_at=now,
+        )
+    else:
+        upload_id = await install_dal.app_version_uploads.async_insert(
+            app_id=app_id,
+            version=manifest.version,
+            tenant_id=tenant_id,
+            requested_by=requested_by,
+            artifact_kind=manifest.artifact,
+            language=manifest.language,
+            status=STATUS_UPLOADED,
+            manifest_json=raw,
+            created_at=now,
+            updated_at=now,
+        )
     rows = await install_dal(install_dal.app_version_uploads.id == upload_id).select()
     return rows.first()
 

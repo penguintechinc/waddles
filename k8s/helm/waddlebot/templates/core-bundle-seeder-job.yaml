@@ -70,6 +70,29 @@ spec:
         env:
         - name: MODULE_NAME
           value: "core-bundle-seeder"
+        # regression: bundle publish/fetch bucket split after SeaweedFS migration (#508/#509) --
+        # this Job calls services/bundle_version_service.py::create_version()/
+        # process_prebuilt_component() -> storage_service.upload_bundle_component(), the exact
+        # same S3 write path hub-api.yaml's Deployment uses -- but unlike that Deployment, this
+        # Job previously had NO explicit S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY override, so
+        # storage_service._client() fell back to os.getenv(..., "") (empty credentials): every
+        # core-bundle seed attempt failed with botocore InvalidAccessKeyId, silently swallowed
+        # into the generic "core-bundle-seeder: bundle failed" log line (hand-rolled `logging`
+        # drops `extra`, see hub_api/cli/seed_core_bundles.py). Same least-privilege "hub-api"
+        # S3 identity hub-api.yaml uses (Read/Write/List/Tagging, scoped to S3_BUCKET_NAME AND
+        # BUNDLE_BUCKET_NAME -- see templates/infrastructure/seaweedfs.yaml), not the
+        # envFrom.secretRef block above (that Secret carries no plain S3_ACCESS_KEY_ID/
+        # S3_SECRET_ACCESS_KEY key at all since the former unscoped admin identity was removed).
+        - name: S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: HUB_API_S3_ACCESS_KEY_ID
+        - name: S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: HUB_API_S3_SECRET_ACCESS_KEY
         # Platform connections (services/ingest_source_service.py::ensure_ingest_source(),
         # NO credentials/tokens stored -- see hub_api/cli/seed_core_bundles.py's own module
         # docstring) -- built from the SAME values already wired to svc-ingest's Discord guild

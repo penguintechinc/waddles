@@ -55,6 +55,20 @@ def _bucket() -> str:
     return os.getenv("S3_BUCKET_NAME", "waddlebot-assets")
 
 
+def _bundle_bucket() -> str:
+    """The bucket `core/bundle_executor`'s `BUNDLE_BUCKET_NAME` reads from -- NEVER `_bucket()`.
+
+    regression: bundle publish/fetch bucket split after SeaweedFS migration (#508/#509).
+    `_bucket()` (`S3_BUCKET_NAME`, default `waddlebot-assets`) and this bucket diverged once
+    the SeaweedFS migration split identities per-workload: the bundle-executor's Rust
+    `BucketConfig` reads `BUNDLE_BUCKET_NAME` (Helm `pipeline.rustDataPlane.bundleExecutor.
+    bucketName`, `waddles-bundles`), so a component staged to `_bucket()` instead publishes
+    successfully but 404s for every executor fetch. Default matches that chart value exactly
+    so a local/dev run without the env var set still agrees with the executor's own default.
+    """
+    return os.getenv("BUNDLE_BUCKET_NAME", "waddles-bundles")
+
+
 def _public_base_url() -> str:
     return os.getenv("S3_PUBLIC_BASE_URL", "http://localhost:9000/waddlebot-assets")
 
@@ -148,14 +162,14 @@ async def upload_bundle_component(app_id: str, version: str, sha256_hex: str, da
     def _put() -> None:
         client = _client()
         client.put_object(
-            Bucket=_bucket(),
+            Bucket=_bundle_bucket(),
             Key=key,
             Body=data,
             ContentType="application/wasm",
             ServerSideEncryption="AES256",  # security.md: default server-side encryption
         )
         client.put_object(
-            Bucket=_bucket(),
+            Bucket=_bundle_bucket(),
             Key=sidecar_key,
             Body=b"{}",
             ContentType="application/json",
