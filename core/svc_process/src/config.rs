@@ -234,6 +234,7 @@ pub struct CliConfig {
     )]
     pub bundle_config_full_reconcile_minutes: i64,
 
+    // regression: #425 dropped cluster denylist
     /// Interim, config-sourced instance-wide private-IP egress policy
     /// (`bundle_host_http::egress::InstanceEgressPolicy`, Justin's
     /// decision: "private-ip is also subject to the INSTANCE policy --

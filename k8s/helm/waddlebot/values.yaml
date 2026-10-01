@@ -90,12 +90,17 @@ global:
   # link simply never establishes (svc-action's host-api listener logs a warning and keeps
   # its HTTP/metrics servers up regardless -- see try_start_host_api's graceful-degradation
   # comment -- and bundle-executor retries the dial forever with capped exponential backoff,
-  # so neither pod crashloops); only the executor-invoked-bundle path stays inert. Real PEM
-  # material is therefore an OVERRIDE REQUIRED operator step in every environment, alpha
-  # included -- populate via `helm upgrade --set-file global.hostApiTls.ca.crt=...
-  # --set-file global.hostApiTls.tls.crt=... --set-file global.hostApiTls.tls.key=...`
-  # before setting pipeline.rustDataPlane.enabled=true, exactly like global.grpcTls already
-  # requires for beta/gamma/production.
+  # so neither pod crashloops); only the executor-invoked-bundle path stays inert.
+  #
+  # fix/alpha-host-api-tls -- templates/host-api-tls-secret.yaml now guarantees the
+  # <fullname>-host-api-tls Secret exists (kept, explicitly supplied, generated alpha/local,
+  # or the whole release fails to render) whenever pipeline.rustDataPlane.enabled is true,
+  # exactly mirroring global.valkeyTls's self-provisioning policy -- alpha/local no longer
+  # need real PEM material supplied out of band. beta/gamma/production still REQUIRE real
+  # material (--set-file global.hostApiTls.ca.crt=... --set-file global.hostApiTls.tls.crt=...
+  # --set-file global.hostApiTls.tls.key=...), cert-manager (certManager.enabled=true), or
+  # externalSecret: true delegating to an out-of-band controller -- auto-generation is
+  # alpha/local only, fails closed otherwise.
   hostApiTls:
     certManager:
       enabled: false
@@ -111,6 +116,11 @@ global:
     tls:
       crt: ""
       key: ""
+    # fix/alpha-host-api-tls -- true delegates provisioning of the <fullname>-host-api-tls
+    # Secret to an out-of-band ExternalSecret/SealedSecret controller instead of failing the
+    # render on beta/gamma/production. Alpha/local ignore this flag entirely (auto-generated
+    # instead, see templates/host-api-tls-secret.yaml).
+    externalSecret: false
 
   # fix/valkey-tls-alpha -- TLS material for the Valkey (infra-redis) cache/streams
   # listener. `penguin_spine::SpineConfig::validate()` (core/svc_process, core/svc_action,
@@ -255,6 +265,30 @@ infrastructure:
       discord: "REPLACE_ME"
       slack: "REPLACE_ME"
     maxMemory: "256mb"
+    # SECURITY REVIEW FINDING (PR #425, low severity): this default,
+    # `allkeys-lru`, is an eviction policy that CAN evict the Rust
+    # data-plane's `bundlekv:...:count` keys (the per-app `storage.kv`
+    # live-key-count quota counter -- `core/bundle_host_kv::scope::
+    # KvScope::count_key`). Those counter keys are deliberately set with
+    # NO TTL (non-volatile), so only an `allkeys-*` policy can evict them --
+    # a `volatile-*` policy never touches a non-volatile key, and
+    # `noeviction` never evicts anything. An evicted counter silently
+    # resets an app's kv quota to what a background `SCAN`-based
+    # reconciliation (`core/bundle_host_kv::backend::KvBackend::
+    # reconcile_count_if_missing`) recomputes on the next write -- a
+    # self-heal, not a substitute for the right policy. Both
+    # `svc-process-rust`/`svc-action-rust` runtime-check this setting at
+    # startup (`CONFIG GET maxmemory-policy`) and log `ERROR` + emit
+    # `waddles_bundle_kv_maxmemory_policy_violation_total` if it is still
+    # `allkeys-*` when they connect. **Recommended for any deployment
+    # actually using `storage.kv`:** `noeviction` (refuses new writes at
+    # capacity rather than evicting) or a `volatile-*` policy (safe for
+    # `storage.kv` specifically, since its own keys never carry a TTL) --
+    # left as `allkeys-lru` here only because other consumers of this same
+    # instance (spine streams, usage-metering, relay queues) may
+    # legitimately want size-bounded eviction; changing the cluster-wide
+    # default is a capacity-planning decision, not something this fix
+    # makes unilaterally.
     maxMemoryPolicy: "allkeys-lru"
     # fix/valkey-tls-alpha -- adds a `tls-port` listener ALONGSIDE the existing plaintext
     # `port` above (dual-listener: `redis-server --port 6379 --tls-port <this>` runs both),
@@ -2287,9 +2321,6 @@ egressProxy:
   # what was actually granted to that tenant/app; a compromised proxy host
   # still can't reach loopback/link-local/metadata/cluster CIDRs (egressPolicy
   # .denyCidrs/.clusterCidrs, enforced at the network layer as a backstop).
-  allowlistSigning:
-    secretName: "waddlebot-egress-proxy-signing-key"
-    secretKey: "public-key.pem"
   # Machine-JWT auth (core/service_auth) -- callers additionally need
   # `egress:connect` granted in serviceJwt.identities[*].allowedScopes
   # (see that block's own comment) on top of hub-api's existing

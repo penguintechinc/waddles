@@ -14,16 +14,24 @@
 # shared/non-alpha context (e.g. dal2-beta) would silently provision throwaway
 # secrets there. See the validation block below.
 #
-# fix/alpha-deploy-hub-webui -- SERVICES previously omitted hub-webui and the
-# plain-name Python svc-ingest/svc-process/svc-action images that values-alpha.yaml
-# deploys alongside their *-rust counterparts (coexistence, not cutover -- see
-# k8s/helm/waddlebot/values-alpha.yaml pipeline.rustDataPlane comment), so those
-# Deployments hit ImagePullBackOff on a fresh alpha build. All four are now built
-# and pushed. A generic preflight (check_images_in_registry, below) renders the
+# fix/alpha-deploy-hub-webui -- SERVICES previously omitted hub-webui, which
+# values-alpha.yaml deploys, so that Deployment hit ImagePullBackOff on a fresh
+# alpha build. A generic preflight (check_images_in_registry, below) renders the
 # chart with the same values used by the live `helm upgrade` and HEAD-checks
 # every localhost:32000/waddlebot/* image:tag it references against the registry
 # BEFORE helm ever runs, so any future chart image SERVICES forgets to build
 # fails loudly here instead of as an in-cluster ImagePullBackOff.
+#
+# fix/alpha-clean-deploy -- the plain-name Python svc-ingest-py/svc-process-py/
+# svc-action-py images (built from core/svc_{ingest,process,action}/Dockerfile)
+# were dropped from SERVICES: k8s/helm/waddlebot/values-alpha.yaml now sets
+# pipeline.{svcIngest,svcProcess,svcAction}.enabled=false (those Deployments
+# crash-looped -- "No module named 'waddle'" -- behind the live Rust data
+# plane), so those Deployments no longer render in alpha and building/pushing
+# those images is wasted work. waddlebot-egress-proxy was added: the chart's
+# egress-proxy Deployment (templates/infrastructure/egress-proxy.yaml,
+# egressProxy.image="waddlebot-egress-proxy") was never in this build list, so
+# alpha always pulled a nonexistent tag for it until now.
 #
 # fix/helm-alpha-self-provisioning -- this script NEVER generates or rotates
 # any secret material. `helm upgrade -f values-alpha.yaml` is self-sufficient
@@ -38,17 +46,34 @@
 # --skip-secrets-style step is ever needed again, it belongs in the chart,
 # not here.
 #
+# resolve-433 -- the dev box runs `docker system prune -a` HOURLY, wiping the
+# local BuildKit cache, so every build here used to be a full cold build
+# (~25min). Builds now go through a dedicated `docker-container` buildx
+# builder (see ensure_cache_builder below) with --cache-from/--cache-to
+# pointed at localhost:32000/waddlebot/buildcache/<image> -- the MicroK8s
+# registry (a pod+PVC in namespace container-registry) lives outside
+# docker's image/build-cache store, so it survives the hourly prune. The
+# docker-container driver is required: the classic `docker` driver only
+# supports `--cache-to type=inline` (baked into the final image, no separate
+# cache manifest) and cannot push a standalone `type=registry` cache blob at
+# all -- verified locally (`docker buildx build --cache-to type=registry...`
+# on the default docker-driver builder errors with "docker exporter does not
+# support cache export"). One cache tag per image, overwritten every build
+# (mode=max, image-manifest=true, oci-mediatypes=true) -- see
+# `make alpha-registry-gc` below for bounding registry disk growth (it was
+# evicted once under DiskPressure).
+#
 # Usage:
 #   scripts/alpha-deploy.sh [--skip-build]
 #
 # --skip-build   Reuse whatever is already pushed under the current HEAD's
 #                sha8 tag (skips the build+push step).
 #
-# Requires: docker, kubectl, helm. Kube context must be local-alpha or
-# microk8s (validated below; KUBE_CONTEXT set to anything else is rejected
-# before any build/push/helm step). bash 3.2 compatible (no associative
-# arrays, no `mapfile`, no `&>>`) -- macOS ships bash 3.2 as /bin/bash and
-# this script must run there unmodified.
+# Requires: docker (with buildx), kubectl, helm. Kube context must be
+# local-alpha or microk8s (validated below; KUBE_CONTEXT set to anything
+# else is rejected before any build/push/helm step). bash 3.2 compatible (no
+# associative arrays, no `mapfile`, no `&>>`) -- macOS ships bash 3.2 as
+# /bin/bash and this script must run there unmodified.
 
 set -euo pipefail
 
@@ -60,7 +85,8 @@ NAMESPACE="${NAMESPACE:-waddlebot}"
 RELEASE="${RELEASE:-waddlebot}"
 HELM_CHART="${HELM_CHART:-k8s/helm/waddlebot}"
 REGISTRY="${REGISTRY:-localhost:32000/waddlebot}"
-readonly NAMESPACE RELEASE HELM_CHART REGISTRY
+CACHE_BUILDER="${CACHE_BUILDER:-alpha-registry-cache}"
+readonly NAMESPACE RELEASE HELM_CHART REGISTRY CACHE_BUILDER
 
 SKIP_BUILD=false
 for arg in "$@"; do
@@ -134,22 +160,23 @@ info "Deploying release SHA ${SHA} (tag ${SHA8}) to context ${KUBE_CONTEXT}, nam
 # Step 1: build + push, one image per line, verified by revision label.
 #
 # svc-ingest/svc-process/svc-action build from Dockerfile.rust into their own
-# "*-rust" repositories -- distinct from the Python images built under the
-# plain service name -- so the two coexisting Deployments (Python stays
-# enabled alongside the Rust data plane, pipeline.rustDataPlane.enabled=true
-# in values-alpha.yaml) never race on a shared repository:tag
-# (fix/helm-alpha-self-provisioning; see k8s/helm/waddlebot's
-# rustDataPlane.svc{Ingest,Process,Action}.imageRepository values.yaml
-# comments). core-bundle-seeder builds the ping/pyping WASM components +
-# hub_api/cli seeder in one image (bundles/Dockerfile.core-bundles).
+# "*-rust" repositories (fix/helm-alpha-self-provisioning; see k8s/helm/
+# waddlebot's rustDataPlane.svc{Ingest,Process,Action}.imageRepository
+# values.yaml comments) -- these are the live path in alpha, the Python
+# pipeline.svc{Ingest,Process,Action} Deployments are disabled there (see
+# fix/alpha-clean-deploy header comment). core-bundle-seeder builds the ping/
+# pyping WASM components + hub_api/cli seeder in one image (bundles/
+# Dockerfile.core-bundles). waddlebot-egress-proxy builds core/egress_proxy/
+# Dockerfile.rust from the "core" context (its Cargo.toml has same-repo path
+# deps on sibling crates service_auth/bundle_host_http/egress_assertion --
+# see that Dockerfile's own header).
 #
 # Bash 3.2 has no associative arrays (`declare -A`) -- SERVICES below is a
 # plain list; per-service Dockerfile/context/image-name come from the
 # service_dockerfile/service_context/service_image case functions.
 #
-# hub-webui and the svc-*-py entries are the plain-name Python images
-# values-alpha.yaml deploys alongside svc-ingest/svc-process/svc-action's
-# *-rust counterparts (fix/alpha-deploy-hub-webui) -- see the header comment.
+# hub-webui is the plain-name Python image values-alpha.yaml deploys
+# (fix/alpha-deploy-hub-webui) -- see the header comment.
 # ---------------------------------------------------------------------------
 # resolve-433 -- reputation-module, svc-presentation, and svc-streaming are
 # chart-referenced (values-alpha.yaml's reputation/presentation/streaming
@@ -158,7 +185,7 @@ info "Deploying release SHA ${SHA} (tag ${SHA8}) to context ${KUBE_CONTEXT}, nam
 # than the per-commit SHA8 (same pattern as bundleExecutor's own comment:
 # "built locally + pushed to the local registry ... same as every other
 # alpha-only module image") -- see service_image_tag below.
-readonly SERVICES="hub-api hub-webui waddlebot-migrations svc-ingest svc-process svc-action svc-ingest-py svc-process-py svc-action-py core-bundle-seeder reputation-module svc-presentation svc-streaming"
+readonly SERVICES="hub-api hub-webui waddlebot-migrations svc-ingest svc-process svc-action waddlebot-egress-proxy core-bundle-seeder reputation-module svc-presentation svc-streaming"
 
 service_dockerfile() {
     case "$1" in
@@ -169,9 +196,7 @@ service_dockerfile() {
         svc-ingest) echo "core/svc_ingest/Dockerfile.rust" ;;
         svc-process) echo "core/svc_process/Dockerfile.rust" ;;
         svc-action) echo "core/svc_action/Dockerfile.rust" ;;
-        svc-ingest-py) echo "core/svc_ingest/Dockerfile" ;;
-        svc-process-py) echo "core/svc_process/Dockerfile" ;;
-        svc-action-py) echo "core/svc_action/Dockerfile" ;;
+        waddlebot-egress-proxy) echo "core/egress_proxy/Dockerfile.rust" ;;
         reputation-module) echo "core/reputation_module/Dockerfile" ;;
         svc-presentation) echo "core/svc_presentation/Dockerfile" ;;
         svc-streaming) echo "core/svc_streaming/Dockerfile.rust" ;;
@@ -181,25 +206,22 @@ service_dockerfile() {
 
 service_context() {
     case "$1" in
-        hub-api|hub-webui|waddlebot-migrations|core-bundle-seeder|svc-ingest-py|svc-process-py|svc-action-py|reputation-module|svc-presentation) echo "." ;;
+        hub-api|hub-webui|waddlebot-migrations|core-bundle-seeder|reputation-module|svc-presentation) echo "." ;;
         svc-ingest) echo "core/svc_ingest" ;;
-        svc-process|svc-action) echo "core" ;;
+        svc-process|svc-action|waddlebot-egress-proxy) echo "core" ;;
         svc-streaming) echo "core/svc_streaming" ;;
         *) err "unknown service: $1"; exit 1 ;;
     esac
 }
 
 # Image repository name (differs from the service name for the 3 Rust
-# stages, and for the svc-*-py entries which push under the chart's plain
-# service-name repo -- see the comment above).
+# stages -- see the comment above; waddlebot-egress-proxy pushes under its
+# own name, matching egressProxy.image in values.yaml).
 service_image_repo() {
     case "$1" in
         svc-ingest) echo "svc-ingest-rust" ;;
         svc-process) echo "svc-process-rust" ;;
         svc-action) echo "svc-action-rust" ;;
-        svc-ingest-py) echo "svc-ingest" ;;
-        svc-process-py) echo "svc-process" ;;
-        svc-action-py) echo "svc-action" ;;
         *) echo "$1" ;;
     esac
 }
@@ -215,15 +237,66 @@ service_image_tag() {
     esac
 }
 
+# ---------------------------------------------------------------------------
+# resolve-433 -- idempotent buildx builder for the registry-backed cache.
+#
+# Requires the `docker-container` driver: it's the only driver that can
+# export `--cache-to type=registry` as a standalone cache manifest (the
+# default `docker` driver only supports `type=inline`, and refuses
+# `type=registry` outright -- "docker exporter does not support cache
+# export"). `--driver-opt network=host` puts the buildkitd container on the
+# host network namespace so it can actually reach localhost:32000 (the
+# MicroK8s registry NodePort) -- without it the builder container has no
+# route to the host's localhost. The registry has no TLS, so buildkitd needs
+# an explicit insecure/http registry entry in its own config (buildx has no
+# CLI flag for this -- it's buildkitd.toml only), written to a scratch temp
+# file and passed via --buildkitd-config.
+# ---------------------------------------------------------------------------
+ensure_cache_builder() {
+    if docker buildx inspect "${CACHE_BUILDER}" >/dev/null 2>&1; then
+        info "buildx builder '${CACHE_BUILDER}' already exists"
+    else
+        info "Creating buildx builder '${CACHE_BUILDER}' (docker-container driver, insecure registry ${REGISTRY_HOST})"
+        local buildkitd_config
+        buildkitd_config="$(mktemp /tmp/alpha-cache-buildkitd-XXXXXX.toml)"
+        cat > "${buildkitd_config}" <<EOF
+[registry."${REGISTRY_HOST}"]
+  http = true
+  insecure = true
+EOF
+        if ! docker buildx create --name "${CACHE_BUILDER}" \
+            --driver docker-container \
+            --driver-opt network=host \
+            --buildkitd-config "${buildkitd_config}" \
+            --bootstrap; then
+            rm -f "${buildkitd_config}"
+            err "Failed to create buildx builder '${CACHE_BUILDER}'"
+            exit 1
+        fi
+        rm -f "${buildkitd_config}"
+    fi
+}
+
+# Host[:port] portion of REGISTRY (e.g. "localhost:32000") -- used both for
+# the buildkitd insecure-registry config above and to build each image's
+# buildcache ref below.
+REGISTRY_HOST="${REGISTRY%%/*}"
+readonly REGISTRY_HOST
+
 if [[ "${SKIP_BUILD}" != "true" ]]; then
+    ensure_cache_builder
     for svc in ${SERVICES}; do
         repo="$(service_image_repo "${svc}")"
         tag="$(service_image_tag "${svc}")"
         img="${REGISTRY}/${repo}:${tag}"
         dockerfile="$(service_dockerfile "${svc}")"
         context="$(service_context "${svc}")"
-        info "Building ${img} (${dockerfile})"
-        docker build --pull=false \
+        cache_ref="${REGISTRY}/buildcache/${repo}"
+        info "Building ${img} (${dockerfile}), cache ${cache_ref}"
+        docker buildx build --builder "${CACHE_BUILDER}" --pull=false \
+            --cache-from "type=registry,ref=${cache_ref}" \
+            --cache-to "type=registry,ref=${cache_ref},mode=max,image-manifest=true,oci-mediatypes=true" \
+            --load \
             -f "${dockerfile}" \
             -t "${img}" \
             --label "org.opencontainers.image.revision=${SHA}" \
