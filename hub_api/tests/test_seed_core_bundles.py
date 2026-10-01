@@ -737,6 +737,72 @@ async def test_run_reports_a_clear_digest_conflict_and_nonzero_exit(
     assert "DIFFERENT digest" in record.error
 
 
+async def test_run_logs_the_exception_type_and_message_on_an_unexpected_storage_failure(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """regression: the alpha `!ping` blocker.
+
+    A boto3 `ClientError` (bad S3 credentials / bucket-grant mismatch, see storage_service's
+    `BUNDLE_BUCKET_NAME` split) landed in `_run()`'s generic `except Exception` branch and
+    rendered as a bare "core-bundle-seeder: bundle failed" with NO detail under this module's
+    own `logging.basicConfig()` (default format drops every `extra` key). The exception's type
+    and message must now be in the message string itself, not only in `extra` (which `caplog`
+    captures regardless, but a plain `kubectl logs` tail never renders).
+    """
+    from services import bundle_version_service as bvs
+
+    monkeypatch.setattr(
+        bvs, "validate_component", AsyncMock(return_value=ComponentValidationResult(ok=True))
+    )
+    monkeypatch.setattr(
+        bvs.storage_service,
+        "upload_bundle_component",
+        AsyncMock(side_effect=ConnectionError("access denied: dummy InvalidAccessKeyId")),
+    )
+    _patch_run_dependencies(install_dal, monkeypatch)
+
+    entry = _write_bundle(tmp_path)
+    catalog_path = tmp_path / "core-bundles.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(
+            {
+                "bundles": [
+                    {
+                        "app_id": entry.app_id,
+                        "version": entry.version,
+                        "language": "rust",
+                        "manifest_path": "ping.manifest.yaml",
+                        "artifact_path": "ping.wasm",
+                        "activation_targets": [{"tenant_slug": TENANT_SLUG}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level("ERROR", logger="waddles.hub_api.core_bundle_seeder"):
+        exit_code = await seeder._run(tmp_path, catalog_path)
+
+    assert exit_code == 1
+
+    failure_records = [
+        r
+        for r in caplog.records
+        if getattr(r, "app_id", None) == entry.app_id and r.levelname == "ERROR"
+    ]
+    assert failure_records, "expected a logged failure for the storage exception"
+    record = failure_records[0]
+    # The error type/message are in the rendered message itself -- never only in `extra`.
+    assert "ConnectionError" in record.getMessage()
+    assert "access denied: dummy InvalidAccessKeyId" in record.getMessage()
+    assert record.error_type == "ConnectionError"
+    assert record.error == "access denied: dummy InvalidAccessKeyId"
+
+
 # ---------------------------------------------------------------------------
 # main() -- CLI wiring
 # ---------------------------------------------------------------------------

@@ -96,6 +96,85 @@ async def test_create_version_rejects_duplicate(install_dal: Any) -> None:
     assert exc.value.status_code == 409
 
 
+# regression: a REJECTED app_version_uploads row permanently 409'd reseeding
+# (gh-core-bundle-seeder) -- only a non-terminal/PUBLISHED row should still block.
+
+
+async def test_create_version_allows_reupload_when_every_prior_row_is_rejected(
+    install_dal: Any,
+) -> None:
+    now = datetime.now(UTC)
+    rejected_id = await install_dal.app_version_uploads.async_insert(
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        artifact_kind="source",
+        language="python",
+        status=STATUS_REJECTED,
+        reject_reason="wit_conformance_failed",
+        manifest_json={"stale": True},
+        created_at=now,
+        updated_at=now,
+    )
+
+    row = await create_version(
+        install_dal,
+        tenant_id=1,
+        app_id="waddles.socials.music.default",
+        requested_by=2,
+        manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
+        source_bytes=b"fresh-tarball",
+        component_bytes=None,
+        known_custom_platforms=frozenset(),
+        allow_wildcard_consumes=False,
+        allow_prebuilt=True,
+    )
+
+    # UPDATEs the existing row in place -- `app_version_uploads` has `UNIQUE (app_id,
+    # version)` (migration 0023), so a second INSERT for this pair would violate it.
+    assert row.id == rejected_id
+    assert row.status == STATUS_UPLOADED
+    assert row.reject_reason is None
+    assert row.requested_by == 2
+
+    all_rows = await install_dal(
+        (install_dal.app_version_uploads.app_id == "waddles.socials.music.default")
+        & (install_dal.app_version_uploads.version == "3.0.1")
+    ).select()
+    assert len(all_rows) == 1  # never a second row for the same (app_id, version)
+
+
+async def test_create_version_still_409s_with_one_non_rejected_prior_row(
+    install_dal: Any,
+) -> None:
+    now = datetime.now(UTC)
+    await install_dal.app_version_uploads.async_insert(
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        artifact_kind="source",
+        language="python",
+        status=STATUS_PUBLISHED,
+        created_at=now,
+        updated_at=now,
+    )
+
+    with pytest.raises(ApiError) as exc:
+        await create_version(
+            install_dal,
+            tenant_id=1,
+            app_id="waddles.socials.music.default",
+            requested_by=1,
+            manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
+            source_bytes=b"x",
+            component_bytes=None,
+            known_custom_platforms=frozenset(),
+            allow_wildcard_consumes=False,
+            allow_prebuilt=True,
+        )
+    assert exc.value.status_code == 409
+
+
 async def test_create_version_rejects_bad_manifest(install_dal: Any) -> None:
     bad_manifest = {**_MANIFEST, "schema_version": 1}
     with pytest.raises(ApiError) as exc:

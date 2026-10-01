@@ -724,9 +724,27 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                 failures += 1
                 continue
             except Exception as exc:  # noqa: BLE001 -- one bundle's failure must not abort the batch or hide the exit code
+                # regression: this branch was the actual alpha !ping blocker -- a boto3
+                # ClientError (bad S3 credentials / bucket-grant mismatch) landed here and
+                # rendered as a bare "core-bundle-seeder: bundle failed" with NO detail: this
+                # module's own `main()` wires only `logging.basicConfig()` (default format
+                # "%(levelname)s:%(name)s:%(message)s"), which silently drops every `extra`
+                # key from the rendered line -- `extra=` still reaches a structured consumer
+                # (e.g. pytest's `caplog`) via the LogRecord's attributes, but a plain
+                # `kubectl logs` tail (this Job's only real-world observability today) never
+                # sees them. The exception's type AND message are therefore put directly in
+                # the message string itself -- sanitized by construction: `str(exc)` on a
+                # botocore ClientError/any stdlib exception never embeds the S3 secret key
+                # (boto3 never puts credentials in an exception message), only the operation,
+                # bucket/key, and the server's error code.
                 logger.error(
-                    "core-bundle-seeder: bundle failed",
-                    extra={"app_id": entry.app_id, "version": entry.version, "error": str(exc)},
+                    "core-bundle-seeder: bundle failed " f"({type(exc).__name__}: {exc})",
+                    extra={
+                        "app_id": entry.app_id,
+                        "version": entry.version,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
                 )
                 counter.add(1, {"app_id": entry.app_id, "outcome": "failed"})
                 failures += 1
