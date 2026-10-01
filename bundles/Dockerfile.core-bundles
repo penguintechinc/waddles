@@ -22,7 +22,14 @@ RUN apt-get update \
         build-essential=12.9 ca-certificates=20250419~deb12u1 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN rustup toolchain install 1.97.1 --target wasm32-wasip2 --component rustfmt,clippy \
+# Both targets, matching bundles/rust/ping/rust-toolchain.toml's own `targets` list exactly --
+# if the toolchain file requests a target this explicit install doesn't already have, rustup's
+# proxy shim auto-installs it ON DEMAND the first time `cargo`/`cargo component` runs (observed
+# directly: `cargo component build` below failed reaching static.rust-lang.org for the
+# wasm32-wasip1 manifest when only wasm32-wasip2 was pre-installed here). An implicit,
+# unpinned, network-timed install is itself a nondeterminism/reliability source this Dockerfile
+# otherwise goes out of its way to eliminate -- pre-installing both closes it.
+RUN rustup toolchain install 1.97.1 --target wasm32-wasip2 --target wasm32-wasip1 --component rustfmt,clippy \
     && rustup default 1.97.1
 
 # cargo-component/wasm-tools have no taiki-e/install-action binstall entry proven for this
@@ -38,8 +45,9 @@ COPY bundles/rust/ping bundles/rust/ping
 WORKDIR /repo/bundles/rust/ping
 
 # Reproducible-build pins -- proven byte-identical sha256 across two independent
-# `--no-cache` builds (scripts/verify-ping-bundle-reproducible.sh / `make
-# verify-ping-bundle-reproducible`, also run in CI on any change under this path). Every
+# `--no-cache` builds (scripts/verify-core-bundles-reproducible.sh / `make
+# verify-core-bundles-reproducible`, also run in CI on any change under this path -- see
+# .github/workflows/core-bundles-reproducible.yml). Every
 # knob below closes one specific nondeterminism source; `--locked` (already on the
 # `cargo install`/`cargo component build` invocations above/below) plus the pinned
 # `rust:1.97-slim-bookworm` digest and pinned cargo-component/wasm-tools versions handle
@@ -88,6 +96,33 @@ COPY bundles/python/pyping/src bundles/python/pyping/src
 # supersedes this bundle's own now-deleted _wit_app.py stand-in. bundles/python/pyping/src/
 # _entry_wiring.py (added by that same merge) supplies the static bundle_transform/
 # bundle_dispatch wiring _component_entry.py expects from the bundle's own source directory.
+#
+# Reproducible-build pins (same proof requirement as rust-bundle-builder above --
+# scripts/verify-core-bundles-reproducible.sh / `make verify-core-bundles-reproducible`).
+# componentize-py wizens a real CPython interpreter (imports every bundled module, then
+# snapshots its post-import state into the component's linear memory), so unlike a plain
+# compiler invocation, ambient Python hashing/locale/clock state is directly bakeable into
+# the emitted component bytes:
+#   - PYTHONHASHSEED=0: str/bytes hashing is randomized per-process by default (PYTHONHASHSEED
+#     unset picks a random seed at interpreter start) -- that seed drives internal dict/set
+#     bucket layout, which the wizened snapshot's iteration order (module __dict__ enumeration,
+#     any set-backed structure componentize-py or CPython's own import machinery touches) can
+#     expose as differently-ordered bytes across two otherwise-identical runs.
+#   - PYTHONDONTWRITEBYTECODE=1: stops CPython writing __pycache__/*.pyc siblings during the
+#     import pass; componentize-py bundles compiled code objects directly (not .pyc files), but
+#     a stray .pyc header embeds its source mtime, so this only matters if a future change reads
+#     bytecode back from disk instead of recompiling in-memory -- defensive, zero cost either way.
+#   - SOURCE_DATE_EPOCH: same constant as the Rust stage -- fixes any wall-clock timestamp a
+#     dependency's import-time code might otherwise embed (e.g. a `datetime.now()` default
+#     baked into a class attribute at import).
+#   - TZ/LC_ALL: defensive, mirrors the Rust stage's own rationale -- nothing here should read
+#     wall-clock/locale state, but pinning both means a future dependency addition can't
+#     silently regress this without CI's reproducibility check catching it.
+ENV PYTHONHASHSEED=0 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    SOURCE_DATE_EPOCH=1704067200 \
+    TZ=UTC \
+    LC_ALL=C.UTF-8
 RUN componentize-py \
         -d wit/waddle-bundle -w stage \
         componentize -p sdk/waddle-sdk/src -p bundles/python/pyping/src \

@@ -30,13 +30,14 @@
 platform_connections: []
 
 bundles:
-  # 1.0.0 is permanently retired -- fix/core-bundle-reproducible-ping. The alpha DB already
-  # has an app_versions row for this app_id@1.0.0 published from a non-reproducible build, and
-  # app_versions is immutable per (app_id, version); see bundles/rust/ping/hub-manifest.yaml's
-  # own comment for the full story. 1.0.1 is the first version built with
-  # bundles/Dockerfile.core-bundles's reproducibility pins.
+  # 1.0.0 AND 1.0.1 are permanently retired -- fix/reproducible-core-bundles. app_versions is
+  # immutable per (app_id, version); see bundles/rust/ping/hub-manifest.yaml's own comment for
+  # the full story (1.0.1's build was never actually proven byte-reproducible -- no CI gate
+  # existed, and it depended on an unpinned on-demand rustup target install). 1.0.2 is the
+  # first version built with the wasm32-wasip1 preinstall fix and a CI-enforced two-build
+  # byte-identity gate (.github/workflows/core-bundles-reproducible.yml).
   - app_id: waddles.core.example.ping
-    version: "1.0.1"
+    version: "1.0.2"
     language: rust
     manifest_path: ping.manifest.yaml
     artifact_path: ping.wasm
