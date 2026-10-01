@@ -1383,6 +1383,11 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("app_version_id", BigInteger),
         Column("created_at", DateTime),
         Column("updated_at", DateTime),
+        # migration 0031 -- set only by advance_state()'s own FSM transitions (plus
+        # create_version()'s stall-abandon/REJECTED-reuse writes), never by a
+        # same-status column write (_set_staging_component_key(), etc.). The
+        # create_version() stall check reads this column, not updated_at.
+        Column("status_changed_at", DateTime),
     )
     Table(
         "app_install_approvals",

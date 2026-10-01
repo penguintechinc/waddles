@@ -182,10 +182,20 @@ async def advance_state(
             409,
             "invalid_state_transition",
         )
+    now = datetime.now(UTC)
     await install_dal(install_dal.app_version_uploads.id == upload.id).update(
         status=target,
         reject_reason=reject_reason,
-        updated_at=datetime.now(UTC),
+        updated_at=now,
+        # `status_changed_at` (migration 0031) -- advance_state() is the SOLE writer of
+        # this column, since it is the SOLE place a real FSM transition happens. Kept
+        # separate from `updated_at` precisely because several other writes to this row
+        # (`_set_staging_component_key()`, `_publish_prebuilt_version()`'s `app_version_id`
+        # write) legitimately bump `updated_at` without changing `status` -- see
+        # `create_version()`'s stall check, which reads `status_changed_at` and would
+        # otherwise be defeated by those same-status touches (alpha 2026-10-01: rows 8/9
+        # stuck in ADDRESSING kept 409ing forever because `updated_at` looked fresh).
+        status_changed_at=now,
     )
     return (await install_dal(install_dal.app_version_uploads.id == upload.id).select()).first()
 
@@ -262,18 +272,42 @@ async def create_version(
 
     now = datetime.now(UTC)
     # regression: alpha rows stuck in ADDRESSING forever block reseeding
-    # (gh-core-bundle-seeder). A non-terminal row whose last update predates the stall
-    # timeout is abandoned -- the uploader died mid-pipeline and will never advance it --
-    # so it is force-REJECTED here and then reused below exactly like a genuinely REJECTED
-    # row. A non-terminal row newer than the timeout is still presumed in-flight and still
-    # 409s via the check immediately below.
+    # (gh-core-bundle-seeder). A non-terminal row whose status hasn't CHANGED since
+    # before the stall timeout is abandoned -- the uploader died mid-pipeline and will
+    # never advance it -- so it is force-REJECTED here and then reused below exactly
+    # like a genuinely REJECTED row. A non-terminal row whose status changed more
+    # recently than the timeout is still presumed in-flight and still 409s via the
+    # check immediately below.
+    #
+    # Reads `status_changed_at` (migration 0031), NOT `updated_at` -- alpha 2026-10-01:
+    # `app_version_uploads` rows 8 (pyping 1.0.0) and 9 (ping 1.0.2) sat in ADDRESSING
+    # while `updated_at` kept getting refreshed to each seeder run's own timestamp by
+    # same-status writes (`_set_staging_component_key()`, `_publish_prebuilt_version()`'s
+    # `app_version_id` write), permanently defeating a staleness check based on
+    # `updated_at`. `status_changed_at` is written ONLY by `advance_state()` (the sole
+    # FSM transition point), so it only moves when the row genuinely makes progress.
     stale_cutoff = now - timedelta(seconds=_stall_timeout_seconds())
-    stalled_ids = [
-        int(row.id)
-        for row in existing
-        if row.status not in _TERMINAL_STATUSES
-        and _as_utc(row.updated_at or row.created_at) < stale_cutoff
-    ]
+    stalled_ids: list[int] = []
+    for row in existing:
+        status_ts = _as_utc(row.status_changed_at or row.updated_at or row.created_at)
+        is_stale = row.status not in _TERMINAL_STATUSES and status_ts < stale_cutoff
+        logger.debug(
+            "bundle_upload_stall_evaluated row_id=%s status=%s status_changed_at=%s "
+            "stale_cutoff=%s is_stale=%s",
+            row.id,
+            row.status,
+            status_ts.isoformat(),
+            stale_cutoff.isoformat(),
+            is_stale,
+            extra={
+                "upload_id": row.id,
+                "status": row.status,
+                "status_changed_at": status_ts.isoformat(),
+                "stale_cutoff": stale_cutoff.isoformat(),
+            },
+        )
+        if is_stale:
+            stalled_ids.append(int(row.id))
     if stalled_ids:
         reason = f"stalled: auto-abandoned after {_stall_timeout_seconds() // 60}m"
         for upload_id in stalled_ids:
@@ -281,9 +315,15 @@ async def create_version(
                 status=STATUS_REJECTED,
                 reject_reason=reason,
                 updated_at=now,
+                status_changed_at=now,
             )
         logger.warning(
-            "bundle_upload_stalled_auto_abandoned",
+            "bundle_upload_stalled_auto_abandoned app_id=%s version=%s upload_ids=%s "
+            "stall_timeout_seconds=%s",
+            app_id,
+            manifest.version,
+            stalled_ids,
+            _stall_timeout_seconds(),
             extra={
                 "app_id": app_id,
                 "version": manifest.version,
@@ -322,6 +362,7 @@ async def create_version(
             manifest_json=raw,
             app_version_id=None,
             updated_at=now,
+            status_changed_at=now,
         )
     else:
         upload_id = await install_dal.app_version_uploads.async_insert(
@@ -335,6 +376,7 @@ async def create_version(
             manifest_json=raw,
             created_at=now,
             updated_at=now,
+            status_changed_at=now,
         )
     rows = await install_dal(install_dal.app_version_uploads.id == upload_id).select()
     return rows.first()
