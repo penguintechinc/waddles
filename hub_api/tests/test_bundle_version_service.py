@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -16,6 +16,7 @@ from services.bundle_component_validator import (
     ComponentValidatorUnavailableError,
 )
 from services.bundle_version_service import (
+    BUNDLE_UPLOAD_STALL_TIMEOUT_ENV,
     STATUS_ADDRESSING,
     STATUS_INSPECTING,
     STATUS_PUBLISHED,
@@ -157,6 +158,84 @@ async def test_create_version_still_409s_with_one_non_rejected_prior_row(
         status=STATUS_PUBLISHED,
         created_at=now,
         updated_at=now,
+    )
+
+    with pytest.raises(ApiError) as exc:
+        await create_version(
+            install_dal,
+            tenant_id=1,
+            app_id="waddles.socials.music.default",
+            requested_by=1,
+            manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
+            source_bytes=b"x",
+            component_bytes=None,
+            known_custom_platforms=frozenset(),
+            allow_wildcard_consumes=False,
+            allow_prebuilt=True,
+        )
+    assert exc.value.status_code == 409
+
+
+# regression: alpha app_version_uploads rows stuck in ADDRESSING forever (the uploader
+# process died mid-pipeline) permanently 409'd reseeding, the exact same failure mode as
+# the REJECTED-row case above but for a non-terminal row -- manual DB deletes were the
+# only recovery (gh-core-bundle-seeder).
+
+
+async def test_create_version_auto_abandons_a_stalled_addressing_row(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(BUNDLE_UPLOAD_STALL_TIMEOUT_ENV, "60")
+    stale_updated_at = datetime.now(UTC) - timedelta(seconds=120)
+    stalled_id = await install_dal.app_version_uploads.async_insert(
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        artifact_kind="source",
+        language="python",
+        status=STATUS_ADDRESSING,
+        manifest_json={"stale": True},
+        created_at=stale_updated_at,
+        updated_at=stale_updated_at,
+    )
+
+    row = await create_version(
+        install_dal,
+        tenant_id=1,
+        app_id="waddles.socials.music.default",
+        requested_by=2,
+        manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
+        source_bytes=b"fresh-tarball",
+        component_bytes=None,
+        known_custom_platforms=frozenset(),
+        allow_wildcard_consumes=False,
+        allow_prebuilt=True,
+    )
+
+    assert row.id == stalled_id
+    assert row.status == STATUS_UPLOADED
+
+    all_rows = await install_dal(
+        (install_dal.app_version_uploads.app_id == "waddles.socials.music.default")
+        & (install_dal.app_version_uploads.version == "3.0.1")
+    ).select()
+    assert len(all_rows) == 1  # the stalled row was reused in place, never a second row
+
+
+async def test_create_version_still_409s_a_recent_non_terminal_row(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(BUNDLE_UPLOAD_STALL_TIMEOUT_ENV, "900")
+    recent = datetime.now(UTC) - timedelta(seconds=30)
+    await install_dal.app_version_uploads.async_insert(
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        artifact_kind="source",
+        language="python",
+        status=STATUS_ADDRESSING,
+        created_at=recent,
+        updated_at=recent,
     )
 
     with pytest.raises(ApiError) as exc:

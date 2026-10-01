@@ -43,7 +43,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import UTC, datetime
+import os
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import yaml
@@ -118,6 +119,36 @@ BUNDLE_MAX_MANIFEST_BYTES = 1_048_576
 BUNDLE_MAX_REQUEST_BYTES = (
     BUNDLE_MAX_SOURCE_BYTES + BUNDLE_MAX_COMPONENT_BYTES + BUNDLE_MAX_MANIFEST_BYTES + 65_536
 )
+
+#: regression: alpha core-bundle-seeder rows stuck in ADDRESSING forever block reseeding
+#: (gh-core-bundle-seeder). A non-terminal `app_version_uploads` row (anything but
+#: STATUS_PUBLISHED/STATUS_REJECTED) whose `updated_at` is older than this many seconds is
+#: treated as abandoned by `create_version()` -- the uploader process (e.g. the seeder Job)
+#: died mid-pipeline (OOMKill, crash, a bug) and will never advance or re-upload under the
+#: same (app_id, version), so the row would otherwise 409 every retry forever, same failure
+#: mode the REJECTED-row-reuse fix above already solved for terminal rows. Configurable via
+#: env for tests and for operators who need a longer/shorter grace window than the 15m
+#: default (long enough for a slow but healthy SCANNING/COMPILING pass).
+BUNDLE_UPLOAD_STALL_TIMEOUT_ENV = "BUNDLE_UPLOAD_STALL_TIMEOUT_SECONDS"
+_DEFAULT_STALL_TIMEOUT_SECONDS = 900
+
+#: Terminal statuses -- `create_version()`'s own non-terminal check (anything NOT in this
+#: set) must stay in sync with `_TRANSITIONS`'s two empty-frozenset entries above.
+_TERMINAL_STATUSES = frozenset({STATUS_PUBLISHED, STATUS_REJECTED})
+
+
+def _stall_timeout_seconds() -> int:
+    """The configurable stall timeout (default 15m), re-read per call so tests can monkeypatch."""
+    raw = os.environ.get(BUNDLE_UPLOAD_STALL_TIMEOUT_ENV, "")
+    try:
+        return int(raw) if raw else _DEFAULT_STALL_TIMEOUT_SECONDS
+    except ValueError:
+        return _DEFAULT_STALL_TIMEOUT_SECONDS
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Treat a naive timestamp (some DB drivers drop tzinfo on TIMESTAMPTZ) as UTC."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def valid_transition(current: str, target: str) -> bool:
@@ -228,6 +259,43 @@ async def create_version(
         (install_dal.app_version_uploads.app_id == app_id)
         & (install_dal.app_version_uploads.version == manifest.version)
     ).select()
+
+    now = datetime.now(UTC)
+    # regression: alpha rows stuck in ADDRESSING forever block reseeding
+    # (gh-core-bundle-seeder). A non-terminal row whose last update predates the stall
+    # timeout is abandoned -- the uploader died mid-pipeline and will never advance it --
+    # so it is force-REJECTED here and then reused below exactly like a genuinely REJECTED
+    # row. A non-terminal row newer than the timeout is still presumed in-flight and still
+    # 409s via the check immediately below.
+    stale_cutoff = now - timedelta(seconds=_stall_timeout_seconds())
+    stalled_ids = [
+        int(row.id)
+        for row in existing
+        if row.status not in _TERMINAL_STATUSES
+        and _as_utc(row.updated_at or row.created_at) < stale_cutoff
+    ]
+    if stalled_ids:
+        reason = f"stalled: auto-abandoned after {_stall_timeout_seconds() // 60}m"
+        for upload_id in stalled_ids:
+            await install_dal(install_dal.app_version_uploads.id == upload_id).update(
+                status=STATUS_REJECTED,
+                reject_reason=reason,
+                updated_at=now,
+            )
+        logger.warning(
+            "bundle_upload_stalled_auto_abandoned",
+            extra={
+                "app_id": app_id,
+                "version": manifest.version,
+                "upload_ids": stalled_ids,
+                "stall_timeout_seconds": _stall_timeout_seconds(),
+            },
+        )
+        existing = await install_dal(
+            (install_dal.app_version_uploads.app_id == app_id)
+            & (install_dal.app_version_uploads.version == manifest.version)
+        ).select()
+
     # regression: REJECTED rows permanently blocked reseeding (gh-core-bundle-seeder). A
     # version string is only truly "taken" while a prior row is still in-flight (any
     # non-terminal status) or already PUBLISHED -- a row that was REJECTED never produced a
@@ -237,8 +305,6 @@ async def create_version(
     # still 409s, same as before.
     if existing and not all(row.status == STATUS_REJECTED for row in existing):
         raise conflict(f"version {manifest.version} of {app_id} already exists")
-
-    now = datetime.now(UTC)
     existing_row = existing.first()
     if existing_row is not None:
         # `app_version_uploads` has `UNIQUE (app_id, version)` (migration 0023) -- a fresh
