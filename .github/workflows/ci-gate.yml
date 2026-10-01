@@ -18,7 +18,7 @@ on:
     branches: ['release/**']
 
 permissions:
-  contents: read # required to resolve the head commit ref
+  contents: read # required to resolve the head commit ref, and to checkout scripts/ci/
   checks: read # to list other check-runs on the head SHA via the Checks API
   statuses: read # to list classic commit statuses (e.g. submit-queue) on the head SHA
 
@@ -32,6 +32,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
+      - name: Checkout (scripts/ci only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci
+
       - name: Wait for all other checks on this commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -47,12 +54,21 @@ jobs:
           stable_count=0
           prev_signature=""
 
-          for attempt in $(seq 1 "${MAX_POLLS}"); do
-            runs_json=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" --paginate \
-              --jq '[.check_runs[] | select(.name != env.SELF_NAME and .name != env.IGNORE_CONTEXT) | {name: .name, status: .status, conclusion: .conclusion}]')
+          merge_pages="${GITHUB_WORKSPACE}/scripts/ci/ci-gate-merge-pages.sh"
 
-            statuses_json=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/status" \
-              --jq '[.statuses[] | select(.context != env.IGNORE_CONTEXT) | {name: .context, status: (if .state == "pending" then "in_progress" else "completed" end), conclusion: (if .state == "success" then "success" elif (.state == "failure" or .state == "error") then "failure" else .state end)}]')
+          for attempt in $(seq 1 "${MAX_POLLS}"); do
+            # --paginate re-runs --jq once per page of up to 100 results, so
+            # for >100 check-runs/statuses gh prints several JSON arrays back
+            # to back ("[..][..]"), not one valid document. ci-gate-merge-pages.sh
+            # slurps that stream and flattens it into a single array - see
+            # scripts/ci/tests/test_ci_gate_merge_pages.sh (regression: #515/#517).
+            runs_json=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100" --paginate \
+              --jq '[.check_runs[] | select(.name != env.SELF_NAME and .name != env.IGNORE_CONTEXT) | {name: .name, status: .status, conclusion: .conclusion}]' \
+              | "${merge_pages}")
+
+            statuses_json=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/status?per_page=100" --paginate \
+              --jq '[.statuses[] | select(.context != env.IGNORE_CONTEXT) | {name: .context, status: (if .state == "pending" then "in_progress" else "completed" end), conclusion: (if .state == "success" then "success" elif (.state == "failure" or .state == "error") then "failure" else .state end)}]' \
+              | "${merge_pages}")
 
             combined=$(jq -n --argjson a "${runs_json}" --argjson b "${statuses_json}" '$a + $b')
             examined=$(jq 'length' <<<"${combined}")
