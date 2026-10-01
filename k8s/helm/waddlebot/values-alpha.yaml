@@ -158,6 +158,20 @@ pipeline:
   # core-bundle-seeder-job.yaml -- explicit true here (matches values.yaml's own default)
   # since this is the environment this milestone's own e2e proof (waddles.core.example.ping/
   # pyping + the Discord guild connection below) targets first.
+  #
+  # fix/seeder-memory: this override previously capped the seeder at 64Mi/128Mi -- far
+  # below what a real seed run needs and the actual OOMKilled cause in CI's kind install
+  # (gh PR #480: "Job/waddlebot-core-bundle-seeder ... failed: 3/1", Reason: OOMKilled),
+  # NOT the base values.yaml limit (512Mi) the bug report assumed was in effect; Helm
+  # merges this file over the chart default, so this 128Mi override was the one actually
+  # applied to every alpha/pre-alpha install. Measured peak cgroup memory (`docker run
+  # --memory=4g` + `/sys/fs/cgroup/memory.peak`) running seed_one() against the REAL
+  # ping.wasm (173KB, Rust) and pyping.wasm (21.6MB, componentize-py) artifacts through
+  # the actual wasm-tools subprocess validate_component() call, sequentially in one
+  # process (matching `_run()`'s own for-loop, never concurrent) with only the S3 PUT
+  # network call mocked: 228,876,288 bytes (~218Mi) for BOTH bundles. Limits set to
+  # ~1.5x that measured peak, rounded up, with extra headroom for real asyncpg/Postgres
+  # (vs the measurement's sqlite fixture) and OTel SDK overhead not present in the probe.
   coreBundleSeeder:
     enabled: true
     # fix/seeder-memory (not yet merged as of this branch's base): 64Mi/128Mi was
@@ -168,8 +182,8 @@ pipeline:
     # Raised to 256Mi/512Mi (~1.5x peak headroom). Reconcile/drop this block if
     # fix/seeder-memory (PR #515) lands first.
     resources:
-      requests: { cpu: "50m", memory: "256Mi" }
-      limits: { cpu: "200m", memory: "512Mi" }
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits: { cpu: "300m", memory: "512Mi" }
   hubWebui:
     enabled: true
     replicas: 1
