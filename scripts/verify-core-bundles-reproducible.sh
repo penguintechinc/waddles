@@ -59,8 +59,8 @@ failed=0
 check_artifact() {
   label="$1"
   path="$2"
-  hash1=$(docker run --rm "$tag1" sha256sum "$path" | awk '{print $1}')
-  hash2=$(docker run --rm "$tag2" sha256sum "$path" | awk '{print $1}')
+  hash1=$(docker run --rm --entrypoint sha256sum "$tag1" "$path" | awk '{print $1}')
+  hash2=$(docker run --rm --entrypoint sha256sum "$tag2" "$path" | awk '{print $1}')
   checks_run=$((checks_run + 1))
 
   if [ -z "$hash1" ] || [ -z "$hash2" ]; then
