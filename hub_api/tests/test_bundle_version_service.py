@@ -222,6 +222,60 @@ async def test_create_version_auto_abandons_a_stalled_addressing_row(
     assert len(all_rows) == 1  # the stalled row was reused in place, never a second row
 
 
+# regression: stall check defeated by updated_at refresh (alpha 2026-10-01)
+async def test_create_version_auto_abandons_despite_fresh_updated_at(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stalled row still gets abandoned despite a fresh `updated_at`.
+
+    A row whose `status` hasn't changed in >timeout still gets abandoned even when
+    something (e.g. `_set_staging_component_key()`) keeps refreshing `updated_at` --
+    reproduces the alpha 2026-10-01 `app_version_uploads` rows 8/9 incident, where
+    ADDRESSING rows 409'd forever because `updated_at` always looked fresh.
+    """
+    monkeypatch.setenv(BUNDLE_UPLOAD_STALL_TIMEOUT_ENV, "60")
+    long_ago = datetime.now(UTC) - timedelta(seconds=120)
+    recently_touched = datetime.now(UTC) - timedelta(seconds=5)
+    stalled_id = await install_dal.app_version_uploads.async_insert(
+        app_id="waddles.socials.music.default",
+        version="3.0.1",
+        tenant_id=1,
+        artifact_kind="source",
+        language="python",
+        status=STATUS_ADDRESSING,
+        manifest_json={"stale": True},
+        created_at=long_ago,
+        # `status` has not changed since `long_ago` (well past the 60s timeout), but a
+        # same-status write (the seeder path's own `_set_staging_component_key()`-style
+        # column touch) refreshed `updated_at` moments ago -- a naive `updated_at`-based
+        # stall check would see this row as fresh and 409 forever.
+        updated_at=recently_touched,
+        status_changed_at=long_ago,
+    )
+
+    row = await create_version(
+        install_dal,
+        tenant_id=1,
+        app_id="waddles.socials.music.default",
+        requested_by=2,
+        manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
+        source_bytes=b"fresh-tarball",
+        component_bytes=None,
+        known_custom_platforms=frozenset(),
+        allow_wildcard_consumes=False,
+        allow_prebuilt=True,
+    )
+
+    assert row.id == stalled_id
+    assert row.status == STATUS_UPLOADED
+
+    all_rows = await install_dal(
+        (install_dal.app_version_uploads.app_id == "waddles.socials.music.default")
+        & (install_dal.app_version_uploads.version == "3.0.1")
+    ).select()
+    assert len(all_rows) == 1  # the stalled row was reused in place, never a second row
+
+
 async def test_create_version_still_409s_a_recent_non_terminal_row(
     install_dal: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
