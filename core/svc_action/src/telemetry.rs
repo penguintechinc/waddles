@@ -123,6 +123,62 @@ pub fn register_egress_metrics(registry: &prometheus::Registry) -> prometheus::I
     denied_total
 }
 
+/// Prometheus handles for `crate::host_api`'s heartbeat/dead-letter
+/// visibility (fix/executor-link-heartbeat, alpha 2026-10-02 incident: a
+/// rolled svc pod left the executor bound to a terminated peer with zero
+/// observable signal -- every pod showed `Running`/`Ready` while silently
+/// dead-lettering everything). `connected_executors` is a gauge (0 or 1 in
+/// this M3/M4 single-active-connection model -- see `ConnectionRegistry`'s
+/// own `TODO(M3+)` on multiplexing several connections); the two counters
+/// are monotonic so a dashboard can alert on rate-of-change, not just the
+/// current value. Mirrors `core/svc_process::telemetry::HostApiMetrics`
+/// field-for-field, same metric names (unprefixed -- shared across both
+/// stages so one dashboard panel covers both).
+#[derive(Clone)]
+pub struct HostApiMetrics {
+    pub connected_executors: prometheus::IntGauge,
+    pub heartbeat_timeouts_total: prometheus::IntCounter,
+    pub dead_lettered_no_executor_total: prometheus::IntCounter,
+}
+
+/// Registers [`HostApiMetrics`]. Must be called exactly once per `registry`
+/// -- see [`register_request_metrics`]'s identical constraint.
+pub fn register_host_api_metrics(registry: &prometheus::Registry) -> HostApiMetrics {
+    let connected_executors = prometheus::IntGauge::new(
+        "host_api_connected_executors",
+        "Number of live bundle-executor sessions this stage currently holds (0 or 1 in the \
+         current single-active-connection model)",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(connected_executors.clone()))
+        .expect("register host_api_connected_executors");
+
+    let heartbeat_timeouts_total = prometheus::IntCounter::new(
+        "host_api_heartbeat_timeouts_total",
+        "Executor sessions dropped after missing HEARTBEAT_MISSED_LIMIT consecutive heartbeats",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(heartbeat_timeouts_total.clone()))
+        .expect("register host_api_heartbeat_timeouts_total");
+
+    let dead_lettered_no_executor_total = prometheus::IntCounter::new(
+        "dispatch_dead_lettered_no_executor_total",
+        "Dispatch entries dead-lettered because no executor connection was available",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(dead_lettered_no_executor_total.clone()))
+        .expect("register dispatch_dead_lettered_no_executor_total");
+
+    HostApiMetrics {
+        connected_executors,
+        heartbeat_timeouts_total,
+        dead_lettered_no_executor_total,
+    }
+}
+
 /// Ops-visibility fix (security review): the DB-driven active-bundle
 /// loader (`crate::bundle_loader`) previously only logged when
 /// `bundle_active_set::read_active_set` excluded an active row (no current

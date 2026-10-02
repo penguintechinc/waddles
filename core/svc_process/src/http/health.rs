@@ -14,6 +14,7 @@
 //! (`// TODO(M4)` in `crate::lib`).
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::Json;
 use serde::Serialize;
 
@@ -25,16 +26,42 @@ use crate::http::AppState;
 pub struct LivenessBody {
     pub status: &'static str,
     pub uptime_seconds: u64,
+    /// Fix/executor-link-heartbeat: seconds since the last live executor
+    /// session, `0` while one is active. Surfaced even on the `200 OK` path
+    /// so an operator can see the clock running before it ever trips
+    /// liveness.
+    pub executor_outage_seconds: u64,
 }
 
-/// `GET /health` -- liveness only: the process is up and answering HTTP.
-/// Never checks external dependencies; a slow DB must not fail liveness
-/// and trigger a restart loop.
-pub async fn liveness(State(state): State<AppState>) -> Json<LivenessBody> {
-    Json(LivenessBody {
-        status: "ok",
-        uptime_seconds: state.started_at.elapsed().as_secs(),
-    })
+/// `GET /health` -- liveness: the process is up and answering HTTP, AND (if
+/// at least one executor has ever been expected) it has not gone more than
+/// `EXECUTOR_GRACE_SECONDS` with zero live executor sessions. Readiness
+/// (`/healthz`) fails immediately at zero sessions; liveness only after the
+/// grace period, so a pod stuck with no executor actually gets restarted by
+/// Kubernetes instead of sitting `Running` forever while silently
+/// dead-lettering everything -- the alpha 2026-10-02 incident this is
+/// fixing. A slow/absent DB or cache must still never fail liveness; this
+/// check is scoped to the executor link alone.
+pub async fn liveness(State(state): State<AppState>) -> (StatusCode, Json<LivenessBody>) {
+    let outage = state.connections.duration_without_executor();
+    let grace = state.config.cli.executor_grace();
+    let status = if outage >= grace {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    };
+    (
+        status,
+        Json(LivenessBody {
+            status: if status == StatusCode::OK {
+                "ok"
+            } else {
+                "unhealthy"
+            },
+            uptime_seconds: state.started_at.elapsed().as_secs(),
+            executor_outage_seconds: outage.as_secs(),
+        }),
+    )
 }
 
 /// Per-dependency readiness status.
@@ -50,14 +77,23 @@ pub struct DependencyStatus {
 pub struct ReadinessBody {
     pub status: &'static str,
     pub dependencies: Vec<DependencyStatus>,
+    /// Fix/executor-link-heartbeat: `false` while zero executor sessions
+    /// are live -- `status`/HTTP code already reflect this; this field
+    /// lets an operator see it without cross-referencing `host_api_
+    /// connected_executors`.
+    pub executor_connected: bool,
 }
 
-/// `GET /healthz` -- readiness: reports whether configured dependencies
-/// (Postgres, Valkey) look present. Neither is actually dialed here --
+/// `GET /healthz` -- readiness: `false` the instant zero executor sessions
+/// are live (never gated behind a grace period -- Kubernetes should stop
+/// routing new work here immediately, well before liveness considers
+/// restarting the pod), plus whether configured dependencies (Postgres,
+/// Valkey) look present. Neither DB/cache is actually dialed here --
 /// SeaORM/spine connection wiring is `// TODO(M4)`, blocked on M2's
 /// executor/compiler and `penguin-spine` landing in parallel.
-pub async fn readiness(State(state): State<AppState>) -> Json<ReadinessBody> {
+pub async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<ReadinessBody>) {
     let cfg = &state.config.cli;
+    let executor_connected = state.connections.active().is_some();
     let dependencies = vec![
         DependencyStatus {
             name: "database",
@@ -75,10 +111,23 @@ pub async fn readiness(State(state): State<AppState>) -> Json<ReadinessBody> {
             detail: cfg.hub_api_url.clone(),
         },
     ];
-    Json(ReadinessBody {
-        status: "ok",
-        dependencies,
-    })
+    let status = if executor_connected {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(ReadinessBody {
+            status: if executor_connected {
+                "ok"
+            } else {
+                "no_executor"
+            },
+            dependencies,
+            executor_connected,
+        }),
+    )
 }
 
 /// `GET /metrics` (secondary router, `METRICS_PORT`) -- Prometheus text
@@ -93,6 +142,7 @@ mod tests {
     use super::*;
     use crate::config::{CliConfig, Config, Secret};
     use clap::Parser;
+    use std::sync::Arc;
 
     fn test_state() -> AppState {
         let cli = CliConfig::parse_from(["svc-process"]);
@@ -104,19 +154,68 @@ mod tests {
             envelope_binding_keys: None,
             db_reader_password: None,
         };
-        AppState::new(config, prometheus::Registry::new())
+        AppState::new(
+            config,
+            prometheus::Registry::new(),
+            Arc::new(crate::host_api::ConnectionRegistry::new()),
+        )
     }
 
+    /// Liveness must still be `ok` immediately after zero executor
+    /// sessions begin -- it only fails once `EXECUTOR_GRACE_SECONDS` has
+    /// elapsed (regression: executor stuck on terminated svc pod after
+    /// rollout, alpha 2026-10-02 -- but liveness flapping on every
+    /// transient reconnect would be its own incident).
     #[tokio::test]
-    async fn liveness_reports_ok() {
-        let Json(body) = liveness(State(test_state())).await;
+    async fn liveness_reports_ok_with_no_executor_within_grace_period() {
+        let (status, Json(body)) = liveness(State(test_state())).await;
+        assert_eq!(status, StatusCode::OK);
         assert_eq!(body.status, "ok");
+        assert_eq!(body.executor_outage_seconds, 0);
     }
 
+    /// regression: executor stuck on terminated svc pod after rollout
+    /// (alpha 2026-10-02) -- liveness must fail once the zero-executor
+    /// outage exceeds `EXECUTOR_GRACE_SECONDS`, so Kubernetes actually
+    /// restarts a pod stuck with no live executor instead of leaving it
+    /// `Running` forever.
     #[tokio::test]
-    async fn readiness_reports_three_dependencies() {
-        let Json(body) = readiness(State(test_state())).await;
-        assert_eq!(body.status, "ok");
+    async fn liveness_fails_once_executor_outage_exceeds_grace_period() {
+        let cli = CliConfig::parse_from(["svc-process", "--executor-grace-seconds", "0"]);
+        // `executor_grace()` floors at 1s even when the CLI value is `0`;
+        // sleep past that floor so the outage genuinely exceeds it.
+        let config = Config {
+            cli,
+            db_password: Secret::new("x"),
+            cache_password: None,
+            service_api_key: Secret::new("x"),
+            envelope_binding_keys: None,
+            db_reader_password: None,
+        };
+        let state = AppState::new(
+            config,
+            prometheus::Registry::new(),
+            Arc::new(crate::host_api::ConnectionRegistry::new()),
+        );
+        // Establish `zero_since` now, then wait past the 1s floor.
+        assert!(state.connections.active().is_none());
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        let (status, Json(body)) = liveness(State(state)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "unhealthy");
+        assert!(body.executor_outage_seconds >= 1);
+    }
+
+    /// regression: executor stuck on terminated svc pod after rollout
+    /// (alpha 2026-10-02) -- readiness must go `false` the instant zero
+    /// executor sessions are live, with no grace period at all (unlike
+    /// liveness above).
+    #[tokio::test]
+    async fn readiness_fails_immediately_with_no_executor() {
+        let (status, Json(body)) = readiness(State(test_state())).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "no_executor");
+        assert!(!body.executor_connected);
         assert_eq!(body.dependencies.len(), 3);
         let db = body
             .dependencies
@@ -125,6 +224,25 @@ mod tests {
             .unwrap();
         assert!(db.configured);
         assert_eq!(db.detail, "localhost:5432/waddlebot");
+    }
+
+    /// Readiness flips back to `ok` the moment an executor session is
+    /// registered -- the recovery half of the transition, not just the
+    /// failure half.
+    #[tokio::test]
+    async fn readiness_recovers_once_an_executor_connects() {
+        let state = test_state();
+        let (status, Json(body)) = readiness(State(state.clone())).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!body.executor_connected);
+
+        state
+            .connections
+            .set_active(crate::host_api::test_connection());
+
+        let (status, Json(body)) = readiness(State(state)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.executor_connected);
     }
 
     #[tokio::test]

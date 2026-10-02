@@ -89,6 +89,14 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.metricsPort | quote }}
         - name: HOST_API_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.hostApiPort | quote }}
+        # fix/executor-link-heartbeat (alpha 2026-10-02 incident): how often
+        # this stage pings each connected executor session, and how long
+        # `/health` tolerates zero live sessions before liveness (not just
+        # readiness) fails -- see `core/svc_process/src/host_api.rs`.
+        - name: HEARTBEAT_INTERVAL_MS
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.heartbeatIntervalMs | default 5000 | quote }}
+        - name: EXECUTOR_GRACE_SECONDS
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.executorGraceSeconds | default 60 | quote }}
         # Security review fix (PR #468, MEDIUM): the bundle `http` egress guard's
         # cluster-CIDR denylist and instance-wide private-IP policy
         # (bundle_host_http::egress::{ClusterCidrDenylist,InstanceEgressPolicy}) -- shared
