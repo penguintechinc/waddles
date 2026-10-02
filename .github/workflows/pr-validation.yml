@@ -246,10 +246,16 @@ jobs:
       # swallows alembic's default INFO-level "Running upgrade X -> Y"
       # messages -- confirmed empty stdout/stderr from a real successful
       # upgrade during this job's own development).
+      # fix/no-empty-kept-secrets -- 0032_bundle_reader_role.py's upgrade() now
+      # refuses an empty DB_READER_PASSWORD (previously silently provisioned
+      # waddles_bundle_reader with no usable password). This generic chain
+      # smoke test has no chart/Secret involved, so it needs its own throwaway
+      # value -- never a real credential, this DB is destroyed at job end.
       - name: alembic upgrade head from empty baseline
         if: steps.changes.outputs.any == 'true'
         env:
           DATABASE_URL: postgresql://waddlebot:testpass123@localhost:5432/waddlebot
+          DB_READER_PASSWORD: ci-smoke-test-reader-pw
         run: |
           set -euo pipefail
           python3 -m alembic stamp 0019_kick_app
@@ -325,6 +331,9 @@ jobs:
         env:
           DATABASE_URL: postgresql://waddlebot:testpass123@localhost:5432/waddlebot
           PRIOR_BASE_REVISION: ${{ steps.base-rev.outputs.prior_base_revision }}
+          # fix/no-empty-kept-secrets -- see the identical env var on the
+          # "empty baseline" step above: 0032's upgrade() re-runs here too.
+          DB_READER_PASSWORD: ci-smoke-test-reader-pw
         run: |
           set -euo pipefail
           base_rev="${PRIOR_BASE_REVISION}"

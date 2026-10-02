@@ -179,6 +179,16 @@ global:
 namespace: waddlebot
 namespaceCreate: true  # Create namespace if it doesn't exist
 
+# fix/no-empty-kept-secrets -- test-only probe (templates/debug-helper-probe.yaml)
+# that renders waddlebot.secretKeyNonEmpty/waddlebot.tlsSecretComplete (_helpers.tpl)
+# against synthetic dicts, independent of `lookup` (which always returns empty
+# outside a real `helm install`/`upgrade` -- see auto-provisioned-secrets.yaml's
+# header comment). NEVER true in any real values file (values-alpha/beta/gamma/
+# production.yaml) -- set only via `--set debugHelperProbe.enabled=true` in
+# k8s/helm/waddlebot/tests/test_no_empty_kept_secrets_render.py.
+debugHelperProbe:
+  enabled: false
+
 # Service Account
 serviceAccount:
   create: true

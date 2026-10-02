@@ -39,11 +39,23 @@ values that could drift apart. Bridged into SQL only via a bound
 (`0001_baseline_from_sql_migrations.py`'s own `INITIAL_ADMIN_PASSWORD`
 pattern, mirrored again by 0030 for `waddles_bundle_migrator`/
 `waddles_bundle_runtime`) -- the password is never interpolated into SQL
-text, and this migration never logs it. An unset/empty value is not a
-migration failure: the role is created (or left alone) `LOGIN` with
-whatever password (or none) it already has, identical to 0030's own
-graceful-degradation precedent -- a not-yet-provisioned credential disables
-real traffic through the role, it never blocks the migration.
+text, and this migration never logs it.
+
+**fix/no-empty-kept-secrets (2026-10-02) -- UNLIKE 0030's graceful
+degradation, this migration now REFUSES an empty password.** The original
+design (below, superseded) treated an unset/empty `DB_READER_PASSWORD` as
+"no credential provided this run" and created the role anyway, LOGIN with no
+usable password, on the theory that a not-yet-provisioned credential should
+disable real traffic rather than block the migration. In production this
+silently combined with a chart bug (`waddlebot.autoSecretValue`'s lookup-KEEP
+branch treating an EXISTING-BUT-EMPTY Secret key as already-provisioned,
+never regenerating it) to leave the DB-driven multi-app path permanently
+disabled with no actionable error anywhere. Role creation and password
+reconciliation are now both delegated to `scripts/db/bundle_reader_role.py`
+(shared with `migrations/run-alembic.sh`'s every-run reconcile step, so the
+grant list is never duplicated), which raises loud on an empty password
+instead of silently provisioning an unusable role.
+# regression: lookup-keep preserved EMPTY reader password; multi-app path off (alpha 2026-10-02)
 
 **Grants -- exactly the six base tables `core/bundle_active_set`'s own
 crate-root doc enumerates (`app_active_versions`, `app_versions`,
@@ -177,6 +189,19 @@ def _revoke_sql(table: str) -> str:
 
 def upgrade() -> None:
     conn = op.get_bind()
+
+    # fix/no-empty-kept-secrets (2026-10-02) -- REFUSE an empty password instead
+    # of the graceful-degradation precedent this migration originally followed
+    # (see module docstring). See scripts/db/bundle_reader_role.py for the
+    # every-migration-run reconcile step this same posture now also applies to.
+    if not os.environ.get(_READER_PASSWORD_ENV, ""):
+        raise RuntimeError(
+            f"{_READER_PASSWORD_ENV} is empty -- refusing to provision "
+            f"{_READER_ROLE} with no usable password (this role gates the "
+            "DB-driven multi-app active-bundle path; an empty-password role "
+            "would silently leave it disabled). Set DB_READER_PASSWORD before "
+            "running this migration."
+        )
 
     _stage_password(conn, _READER_ROLE, _READER_PASSWORD_ENV)
     op.execute(_create_or_update_login_role(_READER_ROLE))

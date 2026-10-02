@@ -765,7 +765,7 @@ rotated) > fresh random generation (alpha/local only) > fail closed elsewhere.
 {{- $tier := $ctx.Values.global.deploymentTier -}}
 {{- $canGenerate := or (eq $tier "alpha") (eq $tier "local") -}}
 {{- $existing := lookup "v1" "Secret" $ctx.Values.namespace "waddlebot-secrets" -}}
-{{- if and $existing $existing.data (hasKey $existing.data $key) -}}
+{{- if (include "waddlebot.secretKeyNonEmpty" (dict "existing" $existing "key" $key)) -}}
 {{- index $existing.data $key | b64dec -}}
 {{- else if $canGenerate -}}
 {{- if $hex -}}
@@ -809,3 +809,50 @@ rotated) > fresh random generation (alpha/local only) > fail closed elsewhere.
   mountPath: /etc/waddles/ca
   readOnly: true
 {{- end }}
+
+{{/*
+fix/no-empty-kept-secrets -- shared "is this lookup-KEEP candidate actually usable"
+predicates. Every auto-provisioned Secret in this chart (waddlebot-secrets per-key
+fields via waddlebot.autoSecretValue above, auto-provisioned-secrets.yaml's symmetric
+keys, host-api-tls-secret.yaml, infrastructure/valkey-tls-secret.yaml) follows the same
+lookup(KEEP)-then-generate(alpha/local)-or-require(else) policy, and ALL of them had the
+same latent bug: `lookup` finding an existing Secret/key was treated as sufficient to
+KEEP, even when the stored value was the empty string (e.g. shipped by an earlier
+`readerPassword | default ""` render). An empty kept value silently disables whatever it
+gates (DB_READER_PASSWORD -> multi-app path off) forever, since KEEP always wins and
+generation/fail-closed never fires again. These helpers make "empty" count as "missing"
+everywhere a lookup result is consulted, so a pre-existing empty value is regenerated in
+alpha/local and fails chart rendering (actionable message) in beta/gamma/production,
+exactly like a Secret that never existed at all.
+
+waddlebot.secretKeyNonEmpty -- single scalar key. Args (dict): existing (a `lookup "v1"
+"Secret" ...` result, may be nil/empty outside a real cluster -- see
+auto-provisioned-secrets.yaml's header comment on `lookup` under `helm template`), key
+(data key name). Returns non-empty "true" only when the key is present AND decodes to a
+non-empty string.
+*/}}
+{{- define "waddlebot.secretKeyNonEmpty" -}}
+{{- $existing := .existing -}}
+{{- $key := .key -}}
+{{- if and $existing $existing.data (hasKey $existing.data $key) -}}
+{{- if ne (index $existing.data $key | b64dec) "" -}}
+true
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+waddlebot.tlsSecretComplete -- full ca.crt/tls.crt/tls.key bundle (host-api-tls-secret.yaml,
+infrastructure/valkey-tls-secret.yaml). Args (dict): existing (the `lookup` result).
+Returns non-empty "true" only when all three keys are present AND every one decodes to a
+non-empty string -- a partially-populated or empty-valued bundle counts as MISSING, same
+empty-is-missing rule as waddlebot.secretKeyNonEmpty.
+*/}}
+{{- define "waddlebot.tlsSecretComplete" -}}
+{{- $existing := .existing -}}
+{{- if and $existing $existing.data (hasKey $existing.data "ca.crt") (hasKey $existing.data "tls.crt") (hasKey $existing.data "tls.key") -}}
+{{- if and (ne (index $existing.data "ca.crt" | b64dec) "") (ne (index $existing.data "tls.crt" | b64dec) "") (ne (index $existing.data "tls.key" | b64dec) "") -}}
+true
+{{- end -}}
+{{- end -}}
+{{- end -}}

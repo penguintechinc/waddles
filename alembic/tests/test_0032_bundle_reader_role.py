@@ -180,6 +180,29 @@ class TestDowngradeThenUpgrade:
 
 
 @requires_docker
+class TestRefusesEmptyPassword:
+    """fix/no-empty-kept-secrets -- 0032's `upgrade()` must FAIL LOUD on an empty
+    DB_READER_PASSWORD, never silently provision the role with no usable password.
+
+    # regression: lookup-keep preserved EMPTY reader password; multi-app path off (alpha 2026-10-02)
+    """
+
+    def test_upgrade_raises_on_empty_reader_password(self) -> None:
+        # Explicitly "" (never just popped): pg_docker.migrated_postgres's
+        # subprocess env only `setdefault`s DB_READER_PASSWORD when the key is
+        # ABSENT from os.environ -- an explicit empty string must still win
+        # (the exact "existing-but-empty" shape this whole fix is about), so
+        # the subprocess really does inherit an empty value here.
+        os.environ["DB_READER_PASSWORD"] = ""
+        try:
+            with pytest.raises(RuntimeError, match="DB_READER_PASSWORD"):
+                with migrated_postgres("0032-bundle-reader-role-empty-pw"):
+                    pass
+        finally:
+            os.environ.pop("DB_READER_PASSWORD", None)
+
+
+@requires_docker
 class TestIdempotentRoleCreation:
     """Re-running the role-creation DDL against an already-existing role is a safe password refresh, never an error."""
 
