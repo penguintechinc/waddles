@@ -68,7 +68,12 @@ from penguin_dal import AsyncDB
 
 from config import HubAPIConfig
 from services import vendor_bundle_authz
-from services.bundle_approval_service import activate_for_community, install_version_globally
+from services.app_source_binding_service import TENANT_WIDE_COMMUNITY_SENTINEL
+from services.bundle_approval_service import (
+    activate_for_community,
+    activate_tenant_wide,
+    install_version_globally,
+)
 from services.bundle_install_dal import build_install_dal, raw_sql_write
 from services.bundle_manifest_v2 import BundleManifestV2, parse_bundle_manifest_v2
 from services.bundle_telemetry import get_meter
@@ -110,9 +115,16 @@ _APP_ID_CHARSET_RE = re.compile(r"^[a-z0-9]+(\.[a-z0-9-]+)+$")
 class ActivationTarget:
     """One `(tenant, community)` pair to seed.
 
-    `community_id=None` means TENANT-tier availability only (no
-    COMMUNITY-tier activation for this target; see the 3-tier split,
-    `services/bundle_approval_service.py`'s own module docstring).
+    `community_id=None` means TENANT-WIDE activation (`bundle_approval_
+    service.activate_tenant_wide()`, the schema's own sentinel convention
+    -- `app_active_versions.community_id=0`/`app_install_approvals.
+    community_id=NULL`) -- NOT a skip. Regression: seeder skipped
+    activation for community_id null (alpha 2026-10-02) -- every core
+    bundle's catalog entry declares `community_id: null` and the seeder
+    used to `continue` past COMMUNITY-tier activation entirely for it,
+    leaving `app_active_versions`/`app_source_bindings` empty forever. See
+    `services/bundle_approval_service.py`'s own module docstring for the
+    3-tier split and why this sentinel path is SYSTEM-actor-only.
     """
 
     tenant_slug: str
@@ -600,8 +612,44 @@ async def seed_one(
             )
 
         if target.community_id is None:
-            # TIER-2 only for this target -- catalog config declares no
-            # community to activate in (see `ActivationTarget`'s own docstring).
+            # TENANT-WIDE activation -- see `ActivationTarget`'s own docstring
+            # (regression: seeder skipped activation for community_id null,
+            # alpha 2026-10-02). The DB-side sentinel is 0
+            # (`TENANT_WIDE_COMMUNITY_SENTINEL`), so `_already_active` is
+            # checked against that, not a literal `None`.
+            if await _already_active(
+                install_dal,
+                app_id=entry.app_id,
+                tenant_id=tenant_id,
+                community_id=TENANT_WIDE_COMMUNITY_SENTINEL,
+                version_id=version_id,
+            ):
+                results.append(
+                    SeedResult(
+                        entry.app_id,
+                        entry.version,
+                        "no_op",
+                        f"already active tenant-wide for tenant={target.tenant_slug!r}",
+                    )
+                )
+                continue
+
+            await activate_tenant_wide(
+                install_dal,
+                tenant_id=tenant_id,
+                app_id=entry.app_id,
+                activated_by=None,
+                approval_source=SYSTEM_ACTOR,
+                valkey_client=valkey_client,
+            )
+            results.append(
+                SeedResult(
+                    entry.app_id,
+                    entry.version,
+                    "activated",
+                    f"tenant={target.tenant_slug!r} community_id=tenant-wide",
+                )
+            )
             continue
 
         if await _already_active(

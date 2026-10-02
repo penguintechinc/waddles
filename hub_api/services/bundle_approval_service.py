@@ -30,11 +30,17 @@ older `AppManifest` pipeline (`app_catalog` -> `app_tenant_availability`
      UNCHANGED in shape) -- activating an app requires a CURRENT
      `bundle_tenant_availability` row for its tenant (superset invariant:
      `activated <= available <= installed`). `community_id` is no longer
-     optional here -- every NEW activation is scoped to one real
-     community; the old tenant-wide `TENANT_WIDE_COMMUNITY_SENTINEL`
-     write path is retired (a pre-existing tenant-wide row written by the
-     old `approve_version()` is left as historical data, still readable,
-     never backfilled by this migration).
+     optional here -- every NEW activation THROUGH THIS FUNCTION is scoped
+     to one real community; the old tenant-wide `TENANT_WIDE_COMMUNITY_
+     SENTINEL` write path is retired from this community-admin-facing
+     surface (a pre-existing tenant-wide row written by the old
+     `approve_version()` is left as historical data, still readable, never
+     backfilled by this migration). `activate_tenant_wide()` (added
+     2026-10-02, `hub_api/cli/seed_core_bundles.py`'s SYSTEM-actor-only
+     seeder path) reinstates the sentinel write for exactly that one
+     caller -- the ruling above retired the HUMAN community-admin path,
+     not the sentinel convention itself, which the schema (migrations
+     0022-0023) and `app_source_binding_service.py` already fully retain.
 
      Data-plane contract verified unchanged by inspection, not schema
      change: `core/bundle_active_set/src/query.rs::read_active_set()`
@@ -674,6 +680,252 @@ async def _write_approval_and_activate(
             )
 
     return int(new_id), bound
+
+
+async def _write_tenant_wide_approval_and_activate(
+    install_dal: AsyncDB,
+    *,
+    app_id: str,
+    version: str,
+    tenant_id: int,
+    activated_by: int | None,
+    computed_hash: str,
+    summary: dict[str, Any],
+    version_id: int,
+    manifest: BundleManifestV2,
+    approval_source: str,
+) -> tuple[int, dict[str, list[str]]]:
+    """TENANT-WIDE sibling of `_write_approval_and_activate()` -- SYSTEM actor only.
+
+    Deliberately a SEPARATE function rather than a `community_id: int | None`
+    branch bolted onto `_write_approval_and_activate()` -- that function's own
+    docstring states its `community_id` is "now a required int (never None)"
+    per the 2026-09-27 community-admin-surface ruling, and this function must
+    never be reachable from that human-facing surface (see
+    `activate_tenant_wide()`'s own docstring for why the ruling does not
+    extend here).
+
+    Writes the schema's own, still-current tenant-wide split: `app_active_
+    versions.community_id = TENANT_WIDE_COMMUNITY_SENTINEL` (0 -- that
+    column is `NOT NULL`, migration 0022's own comment: "0 = tenant-wide
+    sentinel; communities.id never = 0") and `app_install_approvals.
+    community_id = NULL` (that column IS nullable -- no sentinel needed,
+    migration 0023; `core/bundle_active_set/src/entities/app_install_
+    approvals.rs`'s own doc: "NULL = tenant-wide, no sentinel needed since
+    it isn't a PK column"). `core/bundle_active_set::query::
+    assemble_active_set`'s read-side join deliberately matches these two
+    DIFFERENT raw values for the one logical scope (the "sentinel-mismatch
+    rule" its own module doc names) -- this is that convention's write
+    side, not a bug.
+    """
+    approvals_table = install_dal.metadata.tables["app_install_approvals"]
+    active_table = install_dal.metadata.tables["app_active_versions"]
+    now = datetime.now(UTC)
+    sentinel = app_source_binding_service.TENANT_WIDE_COMMUNITY_SENTINEL
+
+    async with install_dal.engine.begin() as conn:
+        previous_id = (
+            await conn.execute(
+                select(approvals_table.c.id).where(
+                    (approvals_table.c.app_id == app_id)
+                    & (approvals_table.c.tenant_id == tenant_id)
+                    & (approvals_table.c.community_id.is_(None))
+                    & (approvals_table.c.superseded_by.is_(None))
+                )
+            )
+        ).scalar_one_or_none()
+
+        insert_result = await conn.execute(
+            approvals_table.insert().values(
+                tenant_id=tenant_id,
+                community_id=None,
+                app_id=app_id,
+                version=version,
+                permission_hash=computed_hash,
+                summary_json=summary,
+                approved_by=activated_by,
+                approved_at=now,
+                approval_source=approval_source,
+            )
+        )
+        new_id = insert_result.inserted_primary_key[0]
+
+        if previous_id is not None:
+            await conn.execute(
+                sa_update(approvals_table)
+                .where(approvals_table.c.id == previous_id)
+                .values(superseded_by=new_id)
+            )
+
+        bound = await app_source_binding_service.sync_bindings(
+            conn,
+            tenant_id=tenant_id,
+            community_id=None,
+            app_id=app_id,
+            manifest=manifest,
+            bindings_table=install_dal.metadata.tables["app_source_bindings"],
+            ingest_sources_table=install_dal.metadata.tables["ingest_sources"],
+        )
+
+        active_where = (
+            (active_table.c.app_id == app_id)
+            & (active_table.c.tenant_id == tenant_id)
+            & (active_table.c.community_id == sentinel)
+        )
+        existing_active = (
+            await conn.execute(select(active_table.c.app_id).where(active_where))
+        ).first()
+        if existing_active is not None:
+            await conn.execute(
+                sa_update(active_table)
+                .where(active_where)
+                .values(version_id=version_id, activated_by=activated_by, activated_at=now)
+            )
+        else:
+            await conn.execute(
+                active_table.insert().values(
+                    app_id=app_id,
+                    tenant_id=tenant_id,
+                    community_id=sentinel,
+                    version_id=version_id,
+                    activated_by=activated_by,
+                    activated_at=now,
+                )
+            )
+
+    return int(new_id), bound
+
+
+async def activate_tenant_wide(
+    install_dal: AsyncDB,
+    *,
+    tenant_id: int,
+    app_id: str,
+    activated_by: int | None,
+    valkey_client: Any | None = None,
+    approval_source: str = "system:core-seeder",
+) -> Any:
+    """TENANT-WIDE activation -- SYSTEM actor only, never wired to any HTTP route.
+
+    Reinstates the tenant-wide write path this module's own docstring
+    describes as retired "for NEW writes" from `activate_for_community()` --
+    that 2026-09-27 ruling narrowed the COMMUNITY-ADMIN-facing function
+    specifically (closing the door on a community admin unilaterally
+    activating an app platform-wide via their own membership), it did not
+    remove the schema's own tenant-wide sentinel convention, which
+    `app_source_binding_service.TENANT_WIDE_COMMUNITY_SENTINEL`/
+    `sync_bindings()`/`provision_source_stream_groups()` already fully
+    support (`community_id=None`). `hub_api/cli/seed_core_bundles.py` is
+    this function's ONLY caller: `bundles/core-bundles.yaml`'s
+    `activation_targets: {community_id: null}` entries need every
+    `ingest_sources` row of a consumed platform bound tenant-wide (e.g.
+    every Discord guild in the tenant), not one real community's --
+    regression: seeder skipped activation for community_id null (alpha
+    2026-10-02).
+
+    Same 409-if-not-available / pinned-version-or-global-install
+    resolution as `activate_for_community()`, minus `_validate_community_
+    tenant()` (there is no community row to validate -- 404 is
+    impossible by construction, not skipped).
+    """
+    availability_rows = await install_dal(
+        (install_dal.bundle_tenant_availability.tenant_id == tenant_id)
+        & (install_dal.bundle_tenant_availability.app_id == app_id)
+        & (install_dal.bundle_tenant_availability.available == True)  # noqa: E712
+    ).select()
+    availability = availability_rows.first()
+    if availability is None:
+        raise conflict(f"{app_id!r} is not available in this tenant's marketplace")
+
+    if availability.pinned_version_id is not None:
+        version_id = int(availability.pinned_version_id)
+        version_rows = await install_dal(install_dal.app_versions.id == version_id).select()
+        version_row = version_rows.first()
+        if version_row is None:  # pragma: no cover - defensive, FK guarantees this in production
+            raise ApiError(f"pinned version {version_id} not found", 500, "missing_app_version")
+        version = str(version_row.version)
+    else:
+        install_rows = await install_dal(
+            (install_dal.app_global_installs.app_id == app_id)
+            & (install_dal.app_global_installs.superseded_by == None)  # noqa: E711
+            & (install_dal.app_global_installs.revoked_at == None)  # noqa: E711
+        ).select()
+        install = install_rows.first()
+        if install is None:  # pragma: no cover - defensive, availability implies a current install
+            raise conflict(f"{app_id!r} is not currently installed in the platform catalog")
+        version_id = int(install.version_id)
+        version = str(install.version)
+
+    upload_rows = await install_dal(
+        (install_dal.app_version_uploads.app_id == app_id)
+        & (install_dal.app_version_uploads.version == version)
+    ).select()
+    upload = upload_rows.first()
+    if upload is None:  # pragma: no cover - defensive, a global install always has a matching row
+        raise not_found(f"version {version} of {app_id} not found")
+
+    manifest = _reparse_trusted(upload.manifest_json)
+    if manifest.routes_to:
+        await _validate_routes_to(
+            install_dal,
+            routes_to=manifest.routes_to,
+            tenant_id=tenant_id,
+            activated_by=activated_by,
+            app_id=app_id,
+            version=version,
+        )
+
+    summary, computed_hash = await get_permission_summary(
+        install_dal, app_id=app_id, version=version
+    )
+
+    new_id, bound = await _write_tenant_wide_approval_and_activate(
+        install_dal,
+        app_id=app_id,
+        version=version,
+        tenant_id=tenant_id,
+        activated_by=activated_by,
+        computed_hash=computed_hash,
+        summary=summary,
+        version_id=version_id,
+        manifest=manifest,
+        approval_source=approval_source,
+    )
+    await bundle_audit.record(
+        install_dal,
+        actor_id=activated_by,
+        action="app_activated_tenant_wide",
+        target_type="app_active_versions",
+        target_id=f"{app_id}@{version}",
+        details={"tenant_id": tenant_id, "community_id": None},
+    )
+    logger.info(
+        "bundle activation: version activated tenant-wide",
+        extra={
+            "app_id": app_id,
+            "version": version,
+            "tenant_id": tenant_id,
+            "activated_by": activated_by,
+            "approval_source": approval_source,
+        },
+    )
+
+    if bound:
+        tenant_slug = await _tenant_slug(install_dal, tenant_id)
+        client = valkey_client if valkey_client is not None else valkey_admin_client.build_client()
+        try:
+            await app_source_binding_service.provision_source_stream_groups(
+                client,
+                tenant_slug=tenant_slug,
+                community_segment=None,
+                app_id=app_id,
+                bound=bound,
+            )
+        finally:
+            if valkey_client is None:
+                await client.aclose()
+
+    return (await install_dal(install_dal.app_install_approvals.id == new_id).select()).first()
 
 
 async def activate_for_community(

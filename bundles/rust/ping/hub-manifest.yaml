@@ -44,6 +44,13 @@ stages:
         event_types: ["chat.message"]
         filters:
           command_prefix: ["!ping"]
+      # regression: seeder skipped activation for community_id null (alpha 2026-10-02) --
+      # ping's manifest never declared `discord`, so even after the seeder started
+      # activating tenant-wide, auto-bind (app_source_binding_service.sync_bindings())
+      # had no `platform=discord` rule to match the alpha cluster's real Discord ingest
+      # source against (pyping/csping's manifests already declared it; this one did not).
+      - platform: discord
+        event_types: ["chat.message"]
   action:
     entry: "waddle:bundle/action-stage#dispatch"
 egress: []
