@@ -326,8 +326,7 @@ mod tests {
     // regression: drain loop exited on NOGROUP while the pod stayed Ready
     // forever (alpha 2026-10-02)
     #[tokio::test]
-    async fn readiness_is_ok_once_the_configured_consumer_loop_is_running_and_executor_connected(
-    ) {
+    async fn readiness_is_ok_once_the_configured_consumer_loop_is_running_and_executor_connected() {
         let state = readiness_state("waddles.core.example.ping", true);
         state
             .connections

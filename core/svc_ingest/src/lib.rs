@@ -840,6 +840,100 @@ mod tests {
         Arc::new(telemetry::register_ingest_metrics(&registry))
     }
 
+    /// Capped exponential sequence identical to `svc_action`/`svc_process`'s
+    /// own `backoff_for_attempt` -- 1s, 2s, 4s, 8s, 16s, then pinned at
+    /// `max` thereafter.
+    #[test]
+    fn backoff_for_attempt_doubles_then_caps_at_max() {
+        let max = Duration::from_secs(30);
+        assert_eq!(backoff_for_attempt(1, max), Duration::from_secs(1));
+        assert_eq!(backoff_for_attempt(2, max), Duration::from_secs(2));
+        assert_eq!(backoff_for_attempt(5, max), Duration::from_secs(16));
+        assert_eq!(backoff_for_attempt(6, max), max);
+        assert_eq!(backoff_for_attempt(1000, max), max);
+    }
+
+    fn unreachable_spine_cfg() -> penguin_spine::SpineConfig {
+        // A malformed URL fails `SpineClient::connect` immediately on parse
+        // -- no real network attempt, no delay -- so `grace_deadline`
+        // already-expired tests below return deterministically fast.
+        penguin_spine::SpineConfig {
+            valkey_url: "not a valid url".to_string(),
+            valkey_username: None,
+            valkey_password: None,
+            valkey_ca_file: std::path::PathBuf::from("/nonexistent-ca.crt"),
+            security_transport_tls: false,
+            security_transport_auth: false,
+            consumer_id: "test".to_string(),
+            stream_maxlen: 100,
+            read_count: 1,
+            block_ms: 1_000,
+            claim_idle_ms: 30_000,
+            claim_interval_ms: 15_000,
+            stats_interval_ms: 10_000,
+            pel_alert: 5_000,
+            dlq_maxlen: 100,
+            max_deliveries: 5,
+            drain_socket_timeout_s: 65,
+            relay_block_timeout_s: 30,
+        }
+    }
+
+    /// `grace_deadline` already in the past: exactly one connect attempt,
+    /// then the grace-exhaustion path returns `None` without ever sleeping
+    /// -- the escalation path `run_with_shutdown` treats as fatal.
+    #[tokio::test]
+    async fn connect_spine_with_retry_returns_none_once_grace_is_exhausted() {
+        let metrics = test_ingest_metrics();
+        let spine_metrics: Arc<dyn penguin_spine::SpineMetrics> = metrics.clone();
+        let readiness = ReceiverFlag::default();
+        readiness.set_ready(true); // prove it flips back to `false` on failure.
+
+        let result = connect_spine_with_retry(
+            unreachable_spine_cfg(),
+            spine_metrics,
+            metrics.as_ref(),
+            "test_receiver",
+            &readiness,
+            Duration::from_secs(30),
+            Instant::now(), // already expired
+        )
+        .await;
+
+        assert!(result.is_none());
+        assert!(readiness.is_enabled());
+        assert!(!readiness.is_ready());
+    }
+
+    /// `grace_deadline` slightly in the future: the loop retries at least
+    /// once (bounded by the tiny `backoff_max`) before the deadline passes,
+    /// proving the retry path itself runs, not just the single-attempt
+    /// exhaustion case above.
+    #[tokio::test]
+    async fn connect_spine_with_retry_retries_until_grace_expires() {
+        let metrics = test_ingest_metrics();
+        let spine_metrics: Arc<dyn penguin_spine::SpineMetrics> = metrics.clone();
+        let readiness = ReceiverFlag::default();
+
+        let grace_deadline = Instant::now() + Duration::from_millis(30);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            connect_spine_with_retry(
+                unreachable_spine_cfg(),
+                spine_metrics,
+                metrics.as_ref(),
+                "test_receiver",
+                &readiness,
+                Duration::from_millis(5),
+                grace_deadline,
+            ),
+        )
+        .await
+        .expect("must not hang past the 5s test timeout");
+
+        assert!(result.is_none());
+    }
+
     #[tokio::test]
     async fn try_start_twitch_irc_noop_when_not_configured() {
         // No `tracing` subscriber installed in this test (see

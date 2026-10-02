@@ -330,6 +330,21 @@ mod tests {
         assert!(flag.enabled().await);
     }
 
+    /// `Some(client)` branch: wraps a real client in `DisableDbBundleConfigFlag`
+    /// rather than the `None` fallback's fixed `StaticFlag(true)`.
+    #[tokio::test]
+    async fn db_bundle_config_flag_wraps_a_real_client_when_available() {
+        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-db-bundle-some")
+            .expect("default LicenseConfig::new never fails");
+        let client = penguin_licensing::LicenseClient::new(cfg)
+            .expect("LicenseClient::new with a valid default config never fails");
+        let flag = db_bundle_config_flag(&Some(client));
+        assert!(
+            flag.enabled().await,
+            "an unseen kill-switch flag must leave the DB-driven path enabled"
+        );
+    }
+
     #[test]
     fn disable_multi_tenant_watermark_flag_matches_the_product_flag_key_convention() {
         assert_eq!(
@@ -342,6 +357,22 @@ mod tests {
     async fn multi_tenant_watermark_flag_defaults_enabled_when_no_license_client_is_available() {
         let flag = multi_tenant_watermark_flag(&None);
         assert!(flag.enabled().await);
+    }
+
+    /// `Some(client)` branch: wraps a real client in
+    /// `DisableMultiTenantWatermarkFlag` rather than the `None` fallback's
+    /// fixed `StaticFlag(true)`.
+    #[tokio::test]
+    async fn multi_tenant_watermark_flag_wraps_a_real_client_when_available() {
+        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-multi-tenant-some")
+            .expect("default LicenseConfig::new never fails");
+        let client = penguin_licensing::LicenseClient::new(cfg)
+            .expect("LicenseClient::new with a valid default config never fails");
+        let flag = multi_tenant_watermark_flag(&Some(client));
+        assert!(
+            flag.enabled().await,
+            "an unseen kill-switch flag must leave the multi-tenant path enabled"
+        );
     }
 
     #[tokio::test]

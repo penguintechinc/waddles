@@ -1134,6 +1134,44 @@ mod tests {
         }
     }
 
+    /// Capped exponential sequence: 1s, 2s, 4s, 8s, 16s, then pinned at
+    /// `max` thereafter -- including well past the `u32` shift-overflow
+    /// guard (`attempt` saturating at 16 shifts).
+    #[test]
+    fn backoff_for_attempt_doubles_then_caps_at_max() {
+        let max = Duration::from_secs(30);
+        assert_eq!(backoff_for_attempt(1, max), Duration::from_secs(1));
+        assert_eq!(backoff_for_attempt(2, max), Duration::from_secs(2));
+        assert_eq!(backoff_for_attempt(3, max), Duration::from_secs(4));
+        assert_eq!(backoff_for_attempt(4, max), Duration::from_secs(8));
+        assert_eq!(backoff_for_attempt(5, max), Duration::from_secs(16));
+        // Would be 32s uncapped -- `max` wins.
+        assert_eq!(backoff_for_attempt(6, max), max);
+        // Deliberately huge attempt count: `checked_shl` would overflow
+        // `u64` well before this, but the `.min(16)` shift-amount guard
+        // keeps it defined, and `max` still wins either way.
+        assert_eq!(backoff_for_attempt(1000, max), max);
+    }
+
+    /// `wait_or_shutdown` returns `false` (timer path) when the duration
+    /// elapses before `shutdown` resolves.
+    #[tokio::test]
+    async fn wait_or_shutdown_reports_false_when_the_timer_elapses_first() {
+        let (_tx, mut rx) = tokio::sync::oneshot::channel::<()>();
+        let fired = wait_or_shutdown(&mut rx, Duration::from_millis(1)).await;
+        assert!(!fired);
+    }
+
+    /// `wait_or_shutdown` returns `true` (shutdown path) the instant
+    /// `shutdown` resolves, well before a long timer would otherwise fire.
+    #[tokio::test]
+    async fn wait_or_shutdown_reports_true_when_shutdown_resolves_first() {
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
+        drop(tx);
+        let fired = wait_or_shutdown(&mut rx, Duration::from_secs(30)).await;
+        assert!(fired);
+    }
+
     #[tokio::test]
     async fn flag_or_closed_fails_closed_to_off_when_no_license_client_is_available() {
         let flag = flag_or_closed(&None, flags::RUST_DATA_PLANE_FLAG);

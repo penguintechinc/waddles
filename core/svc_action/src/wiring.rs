@@ -186,6 +186,23 @@ mod tests {
         assert_eq!(resolver.resolve("no-such-tenant", None).await, None);
     }
 
+    /// `community_slug: None` (no community requested at all, not merely
+    /// unresolvable) takes its own `match` arm distinct from
+    /// `unresolvable_community_falls_back_to_tenant_wide` below -- no
+    /// community query is ever issued (the mock only queues a tenant
+    /// result; a stray community query would panic on an empty queue).
+    #[tokio::test]
+    async fn no_community_slug_requested_resolves_tenant_wide() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![tenants::Model {
+                id: 7,
+                slug: "acme".to_string(),
+            }]])
+            .into_connection();
+        let resolver = DbTenantResolver::new(db);
+        assert_eq!(resolver.resolve("acme", None).await, Some((7, None)));
+    }
+
     #[tokio::test]
     async fn unresolvable_community_falls_back_to_tenant_wide() {
         let db = MockDatabase::new(DatabaseBackend::Postgres)

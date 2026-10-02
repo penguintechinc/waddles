@@ -1620,4 +1620,178 @@ mod tests {
         assert_eq!(loaded.app_id, "waddles.bot.commands.default");
         assert_eq!(loaded.exports, vec!["dispatch".to_string()]);
     }
+
+    /// `Message::Error` reply to a `load` request maps to
+    /// `InvokeError::ExecutorError` -- distinct from the `Loaded` success
+    /// path above, never previously exercised.
+    #[tokio::test]
+    async fn ensure_loaded_returns_executor_error_on_error_reply() {
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, ErrorBody, ErrorCode, Frame, HelloBody, HelloOkBody,
+            SandboxInfo,
+        };
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            read_frame(&mut executor_io).await.unwrap();
+
+            let load = read_frame(&mut executor_io).await.unwrap();
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    load.id,
+                    Message::Error(ErrorBody {
+                        code: ErrorCode::DigestMismatch,
+                        message: "digest mismatch".to_string(),
+                        detail: None,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(crate::capabilities::DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let err = ensure_loaded(
+            &connection,
+            1,
+            0,
+            "waddles.bot.commands.default",
+            "1",
+            "sha256:00",
+            "component-key",
+            "sidecar-key",
+            LoadLimits {
+                timeout_ms: 2000,
+                memory_mb: 64,
+            },
+        )
+        .await
+        .expect_err("executor error reply must surface as an error");
+        match err {
+            InvokeError::ExecutorError { code, message } => {
+                assert_eq!(code, "DigestMismatch");
+                assert_eq!(message, "digest mismatch");
+            }
+            other => panic!("expected ExecutorError, got {other:?}"),
+        }
+    }
+
+    /// `ensure_unloaded`'s own success path -- never previously exercised
+    /// (mirrors `ensure_loaded_sends_load_and_returns_the_loaded_reply`
+    /// above exactly, swapped for `unload`/`Unloaded`).
+    #[tokio::test]
+    async fn ensure_unloaded_sends_unload_and_returns_the_unloaded_reply() {
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, Frame, HelloBody, HelloOkBody, SandboxInfo, UnloadedBody,
+        };
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            read_frame(&mut executor_io).await.unwrap();
+
+            let unload = read_frame(&mut executor_io).await.unwrap();
+            let unload_body = match unload.message {
+                Message::Unload(b) => b,
+                other => panic!("expected unload, got {other:?}"),
+            };
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    unload.id,
+                    Message::Unloaded(UnloadedBody {
+                        app_id: unload_body.app_id,
+                        digest: unload_body.digest,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(crate::capabilities::DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let unloaded = ensure_unloaded(
+            &connection,
+            1,
+            0,
+            "waddles.bot.commands.default",
+            "sha256:00",
+        )
+        .await
+        .expect("unload succeeds");
+        assert_eq!(unloaded.app_id, "waddles.bot.commands.default");
+        assert_eq!(unloaded.digest, "sha256:00");
+    }
 }
