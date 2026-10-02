@@ -640,6 +640,57 @@ true
   value: /etc/waddlebot/host-api-tls/tls.crt
 - name: HOST_API_CLIENT_KEY_FILE
   value: /etc/waddlebot/host-api-tls/tls.key
+# fix/chart-host-api-stage-identity -- core/bundle_executor/src/config.rs::
+# validate_host_api_tls hard-requires this (Config error, immediate crashloop, if unset);
+# core/bundle_executor/src/tls.rs's PinnedIdentityVerifier matches it against the stage
+# cert's URI SAN / DNS SAN / Subject CN. Both bundle-executor.yaml and
+# bundle-executor-action.yaml pull this helper, so they always get the SAME identity -- the
+# shared host-api-tls Secret's one identity cert serves both stages (see that Secret's own
+# "one identity cert ... serves both roles" comment), so one expected identity is correct
+# for both executors regardless of which stage (svc-process-rust/svc-action-rust) they dial.
+- name: HOST_API_STAGE_IDENTITY
+  value: {{ include "waddlebot.hostApiStageIdentity" . | quote }}
+{{- end }}
+
+{{/*
+fix/chart-host-api-stage-identity -- the single source of truth for the host-api-tls
+identity cert's CN (and `HOST_API_STAGE_IDENTITY`), read together with this file's
+waddlebot.hostApiTls* helpers above and templates/host-api-tls-secret.yaml's/
+host-api-tls-certificate.yaml's own comments. Used as:
+  - the CN argument to genSignedCert in templates/host-api-tls-secret.yaml (alpha/local
+    auto-generate path)
+  - the `commonName` field in templates/host-api-tls-certificate.yaml (cert-manager path)
+  - HOST_API_STAGE_IDENTITY in waddlebot.hostApiTlsClientEnv above (bundle-executor and
+    bundle-executor-action, the two consumers of that helper)
+so whichever provisioning path is live, the cert's CN and the executor's expected identity
+are byte-for-byte the same string and can never drift apart.
+
+**Why CN, not a real SPIFFE URI SAN:** sprig's genSignedCert/genCA (the alpha/local path)
+has no URI SAN support, so a true X.509-SVID URI SAN per security.md's
+`spiffe://penguintech.io/<env>/<service>` base isn't achievable there. Rather than carry
+two different identity *forms* across the two provisioning paths, both pin by Subject CN;
+the CN value itself is still written in the org's SPIFFE-style naming convention for
+operator readability, but PinnedIdentityVerifier matches it via its CN-exact-string
+fallback, not its URI-SAN branch. If genSignedCert ever gains URI SAN support (or the
+cert-manager path alone is extended with a `uris:` SAN), this is the one helper to change.
+
+**Fail-closed:** global.hostApiTls.stageIdentity is an explicit override, REQUIRED when
+neither chart-controlled provisioning path applies -- i.e. real material supplied directly
+via global.hostApiTls.ca.crt/tls.crt/tls.key, or global.hostApiTls.externalSecret: true --
+because in both cases an out-of-band CA mints the cert and this chart has no way to know
+what identity is actually baked into it. Mirrors templates/host-api-tls-secret.yaml's own
+`fail` for the same "chart doesn't control this material" cases.
+*/}}
+{{- define "waddlebot.hostApiStageIdentity" -}}
+{{- $ht := .Values.global.hostApiTls -}}
+{{- $tier := .Values.global.deploymentTier -}}
+{{- if $ht.stageIdentity -}}
+{{- $ht.stageIdentity -}}
+{{- else if or $ht.certManager.enabled (or (eq $tier "alpha") (eq $tier "local")) -}}
+{{- printf "spiffe://penguintech.io/%s/%s-host-api" $tier (include "waddlebot.fullname" .) -}}
+{{- else -}}
+{{- fail (printf "global.hostApiTls.stageIdentity is required when global.hostApiTls material is supplied directly (ca.crt/tls.crt/tls.key) or delegated to global.hostApiTls.externalSecret -- this chart does not mint that certificate, so it cannot derive HOST_API_STAGE_IDENTITY/the expected CN itself. Set global.hostApiTls.stageIdentity to the exact identity (SPIFFE URI SAN or Subject CN) that certificate actually carries.") -}}
+{{- end -}}
 {{- end }}
 
 {{/* Cert volume, sourced from the chart-managed {{ fullname }}-host-api-tls Secret. */}}
