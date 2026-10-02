@@ -24,11 +24,17 @@ name: Ping Example Bundle (Rust)
 # rust-toolchain.toml but never pre-installed by the Dockerfile), an unpinned, network-timed
 # step outside every other pin's control. Treating 1.0.1's digest as unverified/potentially
 # already-burned rather than risk a second conflict. app_versions is immutable per
-# (app_id, version), so neither slot can ever be reused. 1.0.2 is the first version built with
+# (app_id, version), so neither slot can ever be reused. 1.0.2 was the first version built with
 # the wasm32-wasip1 preinstall fix plus a CI-enforced two-build byte-identity gate
 # (.github/workflows/core-bundles-reproducible.yml) -- see
 # bundles/Dockerfile.core-bundles's own comment block for the full pin list.
-version: 1.0.2
+#
+# 1.0.3 (fix/seeder-activate-tenant-wide, alpha 2026-10-02) adds the `discord` consumes rule
+# below -- see bundles/core-bundles.yaml's own comment on this entry for why the version had
+# to bump (manifest-only change, but app_versions.artifact_digest is immutable+globally
+# UNIQUE per version string) and for the caveat that the resulting artifact digest actually
+# differing from 1.0.2's was not verified byte-level in this change.
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -44,6 +50,13 @@ stages:
         event_types: ["chat.message"]
         filters:
           command_prefix: ["!ping"]
+      # regression: seeder skipped activation for community_id null (alpha 2026-10-02) --
+      # ping's manifest never declared `discord`, so even after the seeder started
+      # activating tenant-wide, auto-bind (app_source_binding_service.sync_bindings())
+      # had no `platform=discord` rule to match the alpha cluster's real Discord ingest
+      # source against (pyping/csping's manifests already declared it; this one did not).
+      - platform: discord
+        event_types: ["chat.message"]
   action:
     entry: "waddle:bundle/action-stage#dispatch"
 egress: []

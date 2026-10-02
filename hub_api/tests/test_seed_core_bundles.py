@@ -263,19 +263,26 @@ async def test_ensure_app_catalog_row_logs_without_a_reserved_logrecord_key_coll
     )
 
 
-async def test_seed_one_with_no_community_id_only_makes_available_never_activates(
+async def test_seed_one_with_no_community_id_activates_tenant_wide(
     install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`community_id=None` (the real `bundles/core-bundles.yaml`'s own default) is TENANT-tier only.
+    """`community_id=None` (`bundles/core-bundles.yaml`'s own default) activates tenant-wide.
 
-    3-tier split: no COMMUNITY-tier activation happens for a target that
-    declares no community -- see `ActivationTarget`'s own docstring.
+    Regression: seeder skipped activation for community_id null (alpha
+    2026-10-02) -- a catalog entry with no `community_id` used to make the
+    app available in the tenant's marketplace and then `continue`,
+    permanently skipping `app_active_versions`/`app_source_bindings`
+    (via `services.bundle_approval_service.activate_tenant_wide()`'s
+    schema sentinel split -- see its own docstring). Never silently skip:
+    `bundles/core-bundles.yaml`'s every real entry declares
+    `community_id: null`, so a skip here means the DB-driven data plane
+    never loads waddles.core.* at all.
     """
     _patch_validator_and_storage(monkeypatch)
     entry = _write_bundle(tmp_path)  # community_id=None (default)
 
     results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
-    assert [r.outcome for r in results] == ["made_available"]
+    assert [r.outcome for r in results] == ["made_available", "activated"]
 
     availability_row = (
         await install_dal(
@@ -286,8 +293,40 @@ async def test_seed_one_with_no_community_id_only_makes_available_never_activate
     assert availability_row is not None
     assert availability_row.available is True
 
-    active = await install_dal(install_dal.app_active_versions.app_id == entry.app_id).select()
-    assert not active
+    active_row = (
+        await install_dal(
+            (install_dal.app_active_versions.app_id == entry.app_id)
+            & (
+                install_dal.app_active_versions.community_id
+                == seeder.TENANT_WIDE_COMMUNITY_SENTINEL
+            )
+        ).select()
+    ).first()
+    assert active_row is not None
+
+    approval_row = (
+        await install_dal(install_dal.app_install_approvals.app_id == entry.app_id).select()
+    ).first()
+    assert approval_row is not None
+    assert approval_row.community_id is None
+    assert approval_row.approval_source == "system:core-seeder"
+
+
+async def test_seed_one_with_no_community_id_rerun_is_a_no_op(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tenant-wide activation has its own no-op check, keyed on the DB sentinel, not `None`."""
+    _patch_validator_and_storage(monkeypatch)
+    entry = _write_bundle(tmp_path)
+
+    first = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert [r.outcome for r in first] == ["made_available", "activated"]
+
+    second = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert [r.outcome for r in second] == ["no_op"]
+
+    approvals = await install_dal(install_dal.app_install_approvals.app_id == entry.app_id).select()
+    assert len(approvals) == 1, "a no-op re-run must not write a second approval row"
 
 
 # ---------------------------------------------------------------------------
@@ -1036,3 +1075,96 @@ async def test_run_registers_platform_connections_before_activating_a_bundle_tha
     ).select()
     assert {b.platform for b in bindings} == {"discord"}
     assert bindings.first().source_id == "dg-474965105759748096"
+
+
+async def test_run_registers_platform_connection_and_binds_tenant_wide_to_discord(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The REAL shape: `bundles/core-bundles.yaml` declares `community_id: null` everywhere.
+
+    Regression: seeder skipped activation for community_id null (alpha
+    2026-10-02) -- this is the end-to-end reproduction of the alpha bug,
+    `CORE_BUNDLES_PLATFORM_CONNECTIONS`-shaped connection included (the
+    exact object shape `k8s/helm/waddlebot/templates/core-bundle-seeder-
+    job.yaml` renders from `pipeline.rustDataPlane.svcProcess.
+    processIngestPlatform`/`processIngestSourceId`), proving the fix
+    activates tenant-wide AND auto-binds the tenant-wide Discord ingest
+    source in one `_run()` pass -- no real `communities` row anywhere in
+    this test.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    digest = hashlib.sha256(_PYPING_COMPONENT_BYTES).hexdigest()
+    from services import bundle_version_service as bvs
+
+    monkeypatch.setattr(
+        bvs.storage_service,
+        "upload_bundle_component",
+        AsyncMock(return_value=f"bundles/waddles.core.example.pyping/1.0.0/{digest}.wasm"),
+    )
+    monkeypatch.setattr(bvs.valkey_admin_client, "build_client", lambda: AsyncMock())
+
+    async def _fake_build_install_dal(database_url: str, pool_size: int) -> Any:
+        return install_dal
+
+    class _FakeConfig:
+        database_url = "sqlite://"
+
+    monkeypatch.setattr(seeder, "build_install_dal", _fake_build_install_dal)
+    monkeypatch.setattr(seeder.HubAPIConfig, "from_env", staticmethod(lambda: _FakeConfig()))
+    monkeypatch.setattr(install_dal, "close", AsyncMock())
+
+    _write_pyping_bundle(tmp_path)
+    catalog_path = tmp_path / "core-bundles.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(
+            {
+                "platform_connections": [
+                    {
+                        "tenant_slug": TENANT_SLUG,
+                        "platform": "discord",
+                        "source_id": "dg-474965105759748096",
+                        "label": "svc-ingest platform connection",
+                        "community_id": None,
+                    }
+                ],
+                "bundles": [
+                    {
+                        "app_id": "waddles.core.example.pyping",
+                        "version": "1.0.0",
+                        "language": "python",
+                        "manifest_path": "pyping.manifest.yaml",
+                        "artifact_path": "pyping.wasm",
+                        "activation_targets": [{"tenant_slug": TENANT_SLUG, "community_id": None}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = await seeder._run(tmp_path, catalog_path)
+
+    assert exit_code == 0
+    connection_row = (
+        await install_dal(install_dal.ingest_sources.source_id == "dg-474965105759748096").select()
+    ).first()
+    assert connection_row is not None
+    assert connection_row.community_id is None
+
+    active_row = (
+        await install_dal(
+            (install_dal.app_active_versions.app_id == "waddles.core.example.pyping")
+            & (
+                install_dal.app_active_versions.community_id
+                == seeder.TENANT_WIDE_COMMUNITY_SENTINEL
+            )
+        ).select()
+    ).first()
+    assert active_row is not None
+
+    bindings = await install_dal(
+        install_dal.app_source_bindings.app_id == "waddles.core.example.pyping"
+    ).select()
+    assert {b.platform for b in bindings} == {"discord"}
+    assert bindings.first().source_id == "dg-474965105759748096"
+    assert bindings.first().community_id == seeder.TENANT_WIDE_COMMUNITY_SENTINEL
