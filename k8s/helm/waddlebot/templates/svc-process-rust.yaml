@@ -168,22 +168,37 @@ spec:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: REDIS_PASSWORD
         {{- end }}
-        # Empty (default) disables the spine drain loop entirely -- see config.rs.
+        # fix/alpha-deploy-executor-and-failfast -- the legacy single-app selection env
+        # below (PROCESS_APP_ID, PROCESS_INGEST_*, PROCESS_BUNDLE_*) now renders ONLY
+        # when an operator explicitly sets the driving value -- never unconditionally
+        # with an empty string. Default posture (unset): the DB-driven multi-tenant
+        # active-bundle loader further below is the sole bundle-selection path. Empty
+        # (default) previously disabled the spine drain loop/executor load path the
+        # same way, functionally, but left a stale digest/app_id one `helm upgrade` away
+        # from silently winning back if the DB-driven path is ever disabled -- see
+        # values-alpha.yaml's own comment on this change.
+        {{- if .Values.pipeline.rustDataPlane.svcProcess.processAppId }}
         - name: PROCESS_APP_ID
-          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processAppId | default "" | quote }}
-        # fix/process-bundle-wiring-alpha -- see values.yaml's comment on these fields.
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processAppId | quote }}
+        {{- end }}
+        {{- if .Values.pipeline.rustDataPlane.svcProcess.processIngestPlatform }}
         - name: PROCESS_INGEST_PLATFORM
-          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processIngestPlatform | default "" | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processIngestPlatform | quote }}
+        {{- end }}
+        {{- if .Values.pipeline.rustDataPlane.svcProcess.processIngestSourceId }}
         - name: PROCESS_INGEST_SOURCE_ID
-          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processIngestSourceId | default "" | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processIngestSourceId | quote }}
+        {{- end }}
+        {{- if .Values.pipeline.rustDataPlane.svcProcess.processBundleDigest }}
         - name: PROCESS_BUNDLE_DIGEST
-          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processBundleDigest | default "" | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.processBundleDigest | quote }}
         - name: PROCESS_BUNDLE_VERSION
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.processBundleVersion | default "1" | quote }}
         - name: PROCESS_BUNDLE_COMPONENT_KEY
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.processBundleComponentKey | default "" | quote }}
         - name: PROCESS_BUNDLE_SIDECAR_KEY
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.processBundleSidecarKey | default "" | quote }}
+        {{- end }}
         # DB-driven active-bundle loader (core/svc_process/src/config.rs,
         # core/bundle_active_set) -- see values.yaml's comment on this block. Reader
         # host/port/name default to the SAME primary Postgres this pod's DB_* above

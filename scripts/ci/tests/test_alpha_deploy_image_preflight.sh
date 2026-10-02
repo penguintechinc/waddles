@@ -76,6 +76,12 @@ if [ "\$1" = "template" ]; then
 YAML
     exit 0
 fi
+# fix/alpha-deploy-executor-and-failfast -- the post-upgrade helm-status
+# verification needs valid JSON with status=deployed to pass through.
+if [ "\$1" = "status" ]; then
+    echo '{"info":{"status":"deployed"},"version":1}'
+    exit 0
+fi
 exit 0
 EOS
 

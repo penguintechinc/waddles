@@ -140,22 +140,25 @@ spec:
         # the stage and the executor it drives never disagree about the budget.
         - name: EXECUTOR_CALL_TIMEOUT_MS
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.callTimeoutMs | quote }}
-        # Empty (default) disables the dispatch drain loop entirely -- see config.rs.
+        # fix/alpha-deploy-executor-and-failfast -- see templates/svc-process-rust.yaml's
+        # identical comment on its PROCESS_APP_ID/PROCESS_BUNDLE_* block: ACTION_APP_ID/
+        # ACTION_BUNDLE_* (core/svc_action/src/config.rs legacy single-bundle path, mutual
+        # exclusion with the DB-driven loader below per core/svc_action/src/lib.rs's top
+        # doc) now render ONLY when an operator explicitly sets the driving value.
+        {{- if .Values.pipeline.rustDataPlane.svcAction.actionAppId }}
         - name: ACTION_APP_ID
-          value: {{ .Values.pipeline.rustDataPlane.svcAction.actionAppId | default "" | quote }}
-        # ACTION_BUNDLE_* (core/svc_action/src/config.rs) -- the legacy bundle-selection
-        # path, active only when the DB-driven active-bundle loader below is not
-        # (mutual exclusion, core/svc_action/src/lib.rs's top doc). Field-for-field
-        # mirror of svc-process-rust.yaml's own PROCESS_BUNDLE_* block above. Empty
-        # digest (default) disables this path entirely.
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.actionAppId | quote }}
+        {{- end }}
+        {{- if .Values.pipeline.rustDataPlane.svcAction.actionBundleDigest }}
         - name: ACTION_BUNDLE_DIGEST
-          value: {{ .Values.pipeline.rustDataPlane.svcAction.actionBundleDigest | default "" | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.actionBundleDigest | quote }}
         - name: ACTION_BUNDLE_VERSION
           value: {{ .Values.pipeline.rustDataPlane.svcAction.actionBundleVersion | default "1" | quote }}
         - name: ACTION_BUNDLE_COMPONENT_KEY
           value: {{ .Values.pipeline.rustDataPlane.svcAction.actionBundleComponentKey | default "" | quote }}
         - name: ACTION_BUNDLE_SIDECAR_KEY
           value: {{ .Values.pipeline.rustDataPlane.svcAction.actionBundleSidecarKey | default "" | quote }}
+        {{- end }}
         # DB-driven active-bundle loader (core/svc_action/src/config.rs,
         # core/bundle_active_set) -- see values.yaml's comment on this block. Field-for-
         # field mirror of svc-process-rust.yaml's own identical block.
