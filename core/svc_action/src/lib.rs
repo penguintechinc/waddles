@@ -72,6 +72,7 @@ pub mod wiring;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use tokio::signal;
@@ -167,6 +168,8 @@ where
     let bundle_loader_excluded_metric =
         telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
     let changelog_consumer_metrics = telemetry::register_changelog_consumer_metrics(&prom_registry);
+    // regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+    let drain_loop_metrics = telemetry::register_drain_loop_metrics(&prom_registry);
     // fix/executor-link-heartbeat: `host_api_connected_executors`/
     // `host_api_heartbeat_timeouts_total`/`dispatch_dead_lettered_no_executor_total`.
     let host_api_metrics = telemetry::register_host_api_metrics(&prom_registry);
@@ -183,6 +186,7 @@ where
     );
 
     let state = http::AppState::new(config.clone(), prom_registry, Arc::clone(&connections));
+    let consumer_loop_ready = Arc::clone(&state.consumer_loop_ready);
     // Both bundle-selection sources run unconditionally, gated
     // independently (this module's top doc, dataplane scale design rev 4):
     // the legacy `ACTION_BUNDLE_*` env override never gates on the
@@ -199,7 +203,14 @@ where
         Arc::clone(&kv_capabilities),
         changelog_consumer_metrics,
     );
-    try_start_dispatch(&config, connections, usage, license);
+    try_start_dispatch(
+        &config,
+        connections,
+        usage,
+        license,
+        drain_loop_metrics,
+        consumer_loop_ready,
+    );
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
     let metrics_addr = SocketAddr::new(config.cli.bind_addr, config.cli.metrics_port);
@@ -743,6 +754,8 @@ fn try_start_dispatch(
     connections: Arc<host_api::ConnectionRegistry>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
+    drain_loop_metrics: telemetry::DrainLoopMetrics,
+    consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
 ) {
     if config.cli.action_app_id.is_empty() {
         tracing::info!("ACTION_APP_ID not set; dispatch loop not started (no bundle assigned)");
@@ -793,65 +806,175 @@ fn try_start_dispatch(
             source_id: app_id.clone(),
         };
         let metrics: Arc<dyn penguin_spine::SpineMetrics> = Arc::new(penguin_spine::NoopMetrics);
-        let spine = match penguin_spine::SpineClient::connect(spine_cfg.clone(), metrics.clone())
-            .await
-        {
-            Ok(c) => c,
-            Err(err) => {
-                tracing::error!(error = %err, "spine client connect failed; dispatch loop not started");
-                return;
-            }
-        };
-        let deps = dispatch::DispatchDeps {
-            app_id: app_id.clone(),
-            digest,
-            config_json,
-            key_ring,
-            connections,
-            retry_policy: dispatch::RetryPolicy {
-                max_retries: config.cli.action_max_retries,
-                base_backoff_ms: config.cli.action_base_backoff_ms,
-                max_backoff_ms: config.cli.action_max_backoff_ms,
-                call_timeout_ms: config.cli.executor_call_timeout_ms,
-            },
-            jitter: retry::Jitter::from_entropy(),
-            audit: wiring::DbAuditSink::new(db.clone()),
-            tenants: wiring::DbTenantResolver::new(db),
-            usage: Arc::clone(&usage),
-            // spec §5.11/D30 (mirrors `penguin_spine::client::claim_stale`'s
-            // own convention): a `DlqError.consumer_id` names the *pod*
-            // handling the entry, not the entry's own stream id.
-            consumer_id: spine_cfg.consumer_id.clone(),
-            spine,
-            metrics,
-        };
 
         try_start_usage_flush(
             config.cli.metering_flush_interval_s,
-            usage,
+            Arc::clone(&usage),
             spine_cfg.clone(),
         );
 
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let (outer_shutdown_tx, mut outer_shutdown_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             shutdown_signal().await;
-            let _ = shutdown_tx.send(());
+            let _ = outer_shutdown_tx.send(());
         });
 
         let rust_data_plane = flag_or_closed(&license, flags::RUST_DATA_PLANE_FLAG);
-        if let Err(err) = dispatch::run(
-            spine_cfg,
-            vec![grant],
-            stream_key,
-            deps,
-            rust_data_plane,
-            shutdown_rx,
-        )
-        .await
-        {
-            tracing::error!(error = %err, "action-stage dispatch loop exited");
+
+        // Capped exponential backoff between (re)connect attempts, never a
+        // one-shot connect/drain. Self-heals NOGROUP by (re)provisioning
+        // the action stream's consumer group before each attempt: on a
+        // fresh Valkey nothing else in this env-driven single-bundle path
+        // ever creates it. regression: drain loop exited on NOGROUP (alpha
+        // 2026-10-02)
+        const BACKOFF_MAX: Duration = Duration::from_secs(30);
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            drain_loop_metrics
+                .spine_connect_attempts_total
+                .with_label_values(&["dispatch"])
+                .inc();
+
+            match dispatch::ensure_consumer_group(&spine_cfg, &stream_key, &app_id).await {
+                Ok(true) => {
+                    drain_loop_metrics
+                        .consumer_group_created_total
+                        .with_label_values(&["dispatch"])
+                        .inc();
+                    tracing::info!(stream = %stream_key, group = %app_id, "consumer group created");
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(stream = %stream_key, group = %app_id, error = %err, "ensure consumer group failed, will retry");
+                }
+            }
+
+            let spine = match penguin_spine::SpineClient::connect(
+                spine_cfg.clone(),
+                metrics.clone(),
+            )
+            .await
+            {
+                Ok(c) => c,
+                Err(err) => {
+                    consumer_loop_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+                    drain_loop_metrics
+                        .consumer_loop_running
+                        .with_label_values(&["dispatch"])
+                        .set(0);
+                    tracing::error!(error = %err, attempt, "spine client connect failed, retrying");
+                    if wait_or_shutdown(
+                        &mut outer_shutdown_rx,
+                        backoff_for_attempt(attempt, BACKOFF_MAX),
+                    )
+                    .await
+                    {
+                        return;
+                    }
+                    continue;
+                }
+            };
+
+            let deps = dispatch::DispatchDeps {
+                app_id: app_id.clone(),
+                digest: digest.clone(),
+                config_json: config_json.clone(),
+                key_ring: key_ring.clone(),
+                connections: Arc::clone(&connections),
+                retry_policy: dispatch::RetryPolicy {
+                    max_retries: config.cli.action_max_retries,
+                    base_backoff_ms: config.cli.action_base_backoff_ms,
+                    max_backoff_ms: config.cli.action_max_backoff_ms,
+                    call_timeout_ms: config.cli.executor_call_timeout_ms,
+                },
+                jitter: retry::Jitter::from_entropy(),
+                audit: wiring::DbAuditSink::new(db.clone()),
+                tenants: wiring::DbTenantResolver::new(db.clone()),
+                usage: Arc::clone(&usage),
+                // spec §5.11/D30 (mirrors `penguin_spine::client::
+                // claim_stale`'s own convention): a `DlqError.consumer_id`
+                // names the *pod* handling the entry, not the entry's own
+                // stream id.
+                consumer_id: spine_cfg.consumer_id.clone(),
+                spine,
+                metrics: metrics.clone(),
+            };
+
+            let (inner_tx, inner_rx) = tokio::sync::oneshot::channel();
+            let run_fut = dispatch::run(
+                spine_cfg.clone(),
+                vec![grant.clone()],
+                stream_key.clone(),
+                deps,
+                Arc::clone(&rust_data_plane),
+                inner_rx,
+            );
+            tokio::pin!(run_fut);
+
+            consumer_loop_ready.store(true, std::sync::atomic::Ordering::Relaxed);
+            drain_loop_metrics
+                .consumer_loop_running
+                .with_label_values(&["dispatch"])
+                .set(1);
+
+            tokio::select! {
+                _ = &mut outer_shutdown_rx => {
+                    let _ = inner_tx.send(());
+                    let _ = run_fut.await;
+                    consumer_loop_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+                    drain_loop_metrics
+                        .consumer_loop_running
+                        .with_label_values(&["dispatch"])
+                        .set(0);
+                    return;
+                }
+                result = &mut run_fut => {
+                    consumer_loop_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+                    drain_loop_metrics
+                        .consumer_loop_running
+                        .with_label_values(&["dispatch"])
+                        .set(0);
+                    match result {
+                        // Only reachable via the shutdown branch above in
+                        // practice (`dispatch::run` returns `Ok(())` only
+                        // when its own `shutdown` receiver resolves).
+                        Ok(()) => return,
+                        Err(err) if dispatch::is_nogroup_error(&err) => {
+                            tracing::warn!(attempt, "action-stage dispatch loop: consumer group not yet provisioned (NOGROUP), self-healing and retrying");
+                        }
+                        Err(err) => {
+                            tracing::error!(error = %err, attempt, "action-stage dispatch loop exited, retrying");
+                        }
+                    }
+                    if wait_or_shutdown(&mut outer_shutdown_rx, backoff_for_attempt(attempt, BACKOFF_MAX)).await {
+                        return;
+                    }
+                }
+            }
         }
     });
+}
+
+/// Capped exponential backoff: 1s, 2s, 4s, 8s, 16s, then `max` thereafter.
+/// Shared by [`try_start_dispatch`]'s connect/self-heal retry loop.
+fn backoff_for_attempt(attempt: u32, max: Duration) -> Duration {
+    let secs = 1u64
+        .checked_shl(attempt.saturating_sub(1).min(16))
+        .unwrap_or(u64::MAX);
+    Duration::from_secs(secs).min(max)
+}
+
+/// Sleeps for `dur`, or returns early (reporting `true`) if `shutdown`
+/// resolves first.
+async fn wait_or_shutdown(
+    shutdown: &mut tokio::sync::oneshot::Receiver<()>,
+    dur: Duration,
+) -> bool {
+    tokio::select! {
+        _ = shutdown => true,
+        () = tokio::time::sleep(dur) => false,
+    }
 }
 
 /// Starts the usage-metering flush loop (spec §5.12/D31) as its own
@@ -1009,6 +1132,44 @@ mod tests {
             discord_bot_token: None,
             db_reader_password: None,
         }
+    }
+
+    /// Capped exponential sequence: 1s, 2s, 4s, 8s, 16s, then pinned at
+    /// `max` thereafter -- including well past the `u32` shift-overflow
+    /// guard (`attempt` saturating at 16 shifts).
+    #[test]
+    fn backoff_for_attempt_doubles_then_caps_at_max() {
+        let max = Duration::from_secs(30);
+        assert_eq!(backoff_for_attempt(1, max), Duration::from_secs(1));
+        assert_eq!(backoff_for_attempt(2, max), Duration::from_secs(2));
+        assert_eq!(backoff_for_attempt(3, max), Duration::from_secs(4));
+        assert_eq!(backoff_for_attempt(4, max), Duration::from_secs(8));
+        assert_eq!(backoff_for_attempt(5, max), Duration::from_secs(16));
+        // Would be 32s uncapped -- `max` wins.
+        assert_eq!(backoff_for_attempt(6, max), max);
+        // Deliberately huge attempt count: `checked_shl` would overflow
+        // `u64` well before this, but the `.min(16)` shift-amount guard
+        // keeps it defined, and `max` still wins either way.
+        assert_eq!(backoff_for_attempt(1000, max), max);
+    }
+
+    /// `wait_or_shutdown` returns `false` (timer path) when the duration
+    /// elapses before `shutdown` resolves.
+    #[tokio::test]
+    async fn wait_or_shutdown_reports_false_when_the_timer_elapses_first() {
+        let (_tx, mut rx) = tokio::sync::oneshot::channel::<()>();
+        let fired = wait_or_shutdown(&mut rx, Duration::from_millis(1)).await;
+        assert!(!fired);
+    }
+
+    /// `wait_or_shutdown` returns `true` (shutdown path) the instant
+    /// `shutdown` resolves, well before a long timer would otherwise fire.
+    #[tokio::test]
+    async fn wait_or_shutdown_reports_true_when_shutdown_resolves_first() {
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
+        drop(tx);
+        let fired = wait_or_shutdown(&mut rx, Duration::from_secs(30)).await;
+        assert!(fired);
     }
 
     #[tokio::test]
@@ -1247,7 +1408,14 @@ mod tests {
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
         let usage = Arc::new(std::sync::Mutex::new(usage::UsageBatcher::new()));
-        try_start_dispatch(&config, connections, usage, None);
+        try_start_dispatch(
+            &config,
+            connections,
+            usage,
+            None,
+            telemetry::register_drain_loop_metrics(&prometheus::Registry::new()),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        );
     }
 
     /// `try_start_env_bundle_loader`'s own gate: `ACTION_BUNDLE_DIGEST`

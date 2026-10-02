@@ -87,12 +87,23 @@ pub struct ReadinessBody {
 /// `GET /healthz` -- readiness: `false` the instant zero executor sessions
 /// are live (never gated behind a grace period -- Kubernetes should stop
 /// routing new work here immediately, well before liveness considers
-/// restarting the pod), plus whether configured dependencies (Postgres,
-/// Valkey) look present. Neither DB/cache is actually dialed here --
-/// SeaORM/spine connection wiring is `// TODO(M4)`, blocked on M2's
+/// restarting the pod), OR while the legacy single-consumer drain loop
+/// (`crate::lib::try_start_process_loop`) is configured (`PROCESS_APP_ID`
+/// set) but not yet (re)connected and reading -- regression: drain loop
+/// exited on NOGROUP while the pod stayed Ready forever (alpha 2026-10-02),
+/// and separately, an executor stuck on a terminated svc pod after rollout
+/// (alpha 2026-10-02). Also reports whether configured dependencies
+/// (Postgres, Valkey) look present. Neither DB/cache is actually dialed
+/// here -- SeaORM/spine connection wiring is `// TODO(M4)`, blocked on M2's
 /// executor/compiler and `penguin-spine` landing in parallel.
-pub async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<ReadinessBody>) {
+pub async fn readiness(
+    State(state): State<AppState>,
+) -> (axum::http::StatusCode, Json<ReadinessBody>) {
     let cfg = &state.config.cli;
+    let consumer_loop_configured = !cfg.process_app_id.is_empty();
+    let consumer_loop_running = state
+        .consumer_loop_ready
+        .load(std::sync::atomic::Ordering::Relaxed);
     let executor_connected = state.connections.active().is_some();
     let dependencies = vec![
         DependencyStatus {
@@ -110,20 +121,40 @@ pub async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<Readi
             configured: !cfg.hub_api_url.is_empty(),
             detail: cfg.hub_api_url.clone(),
         },
+        DependencyStatus {
+            name: "consumer_loop",
+            configured: consumer_loop_configured,
+            detail: if !consumer_loop_configured {
+                "not configured".to_string()
+            } else if consumer_loop_running {
+                "running".to_string()
+            } else {
+                "not running".to_string()
+            },
+        },
     ];
-    let status = if executor_connected {
-        StatusCode::OK
+    let consumer_loop_ready = !consumer_loop_configured || consumer_loop_running;
+    let ready = consumer_loop_ready && executor_connected;
+    let code = if ready {
+        axum::http::StatusCode::OK
     } else {
-        StatusCode::SERVICE_UNAVAILABLE
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    // `no_executor` takes priority over `degraded`: a dead executor link is
+    // the more actionable signal (fix/executor-link-heartbeat's own
+    // `healthz`/`liveness` status strings), and in practice the consumer
+    // loop can't make progress without an executor either.
+    let status = if ready {
+        "ok"
+    } else if !executor_connected {
+        "no_executor"
+    } else {
+        "degraded"
     };
     (
-        status,
+        code,
         Json(ReadinessBody {
-            status: if executor_connected {
-                "ok"
-            } else {
-                "no_executor"
-            },
+            status,
             dependencies,
             executor_connected,
         }),
@@ -216,7 +247,7 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.status, "no_executor");
         assert!(!body.executor_connected);
-        assert_eq!(body.dependencies.len(), 3);
+        assert_eq!(body.dependencies.len(), 4);
         let db = body
             .dependencies
             .iter()
@@ -224,6 +255,98 @@ mod tests {
             .unwrap();
         assert!(db.configured);
         assert_eq!(db.detail, "localhost:5432/waddlebot");
+    }
+
+    /// Builds an `AppState` with `PROCESS_APP_ID` set to `app_id` (empty =
+    /// unconfigured) and `consumer_loop_ready` forced to `running`, for
+    /// `readiness`'s own consumer-loop transition tests below.
+    fn readiness_state(app_id: &str, running: bool) -> AppState {
+        let mut cli = CliConfig::parse_from(["svc-process"]);
+        cli.process_app_id = app_id.to_string();
+        let config = Config {
+            cli,
+            db_password: Secret::new("x"),
+            cache_password: None,
+            service_api_key: Secret::new("x"),
+            envelope_binding_keys: None,
+            db_reader_password: None,
+        };
+        let state = AppState::new(
+            config,
+            prometheus::Registry::new(),
+            Arc::new(crate::host_api::ConnectionRegistry::new()),
+        );
+        state
+            .consumer_loop_ready
+            .store(running, std::sync::atomic::Ordering::Relaxed);
+        state
+    }
+
+    // regression: drain loop exited on NOGROUP while the pod stayed Ready
+    // forever (alpha 2026-10-02). `PROCESS_APP_ID` unset is "nothing to
+    // wait for" on the consumer-loop side, but readiness still requires a
+    // live executor (fix/executor-link-heartbeat).
+    #[tokio::test]
+    async fn readiness_is_ok_when_process_app_id_is_unset_and_executor_connected() {
+        let state = readiness_state("", true);
+        state
+            .connections
+            .set_active(crate::host_api::test_connection());
+        let (code, Json(body)) = readiness(State(state)).await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        let consumer_loop = body
+            .dependencies
+            .iter()
+            .find(|d| d.name == "consumer_loop")
+            .unwrap();
+        assert!(!consumer_loop.configured);
+    }
+
+    // regression: drain loop exited on NOGROUP while the pod stayed Ready
+    // forever (alpha 2026-10-02)
+    #[tokio::test]
+    async fn readiness_is_503_when_the_consumer_loop_is_configured_but_not_running() {
+        let state = readiness_state("waddles.core.example.ping", false);
+        state
+            .connections
+            .set_active(crate::host_api::test_connection());
+
+        let (code, Json(body)) = readiness(State(state)).await;
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "degraded");
+        let consumer_loop = body
+            .dependencies
+            .iter()
+            .find(|d| d.name == "consumer_loop")
+            .unwrap();
+        assert!(consumer_loop.configured);
+        assert_eq!(consumer_loop.detail, "not running");
+    }
+
+    // regression: drain loop exited on NOGROUP while the pod stayed Ready
+    // forever (alpha 2026-10-02)
+    #[tokio::test]
+    async fn readiness_is_ok_once_the_configured_consumer_loop_is_running_and_executor_connected() {
+        let state = readiness_state("waddles.core.example.ping", true);
+        state
+            .connections
+            .set_active(crate::host_api::test_connection());
+
+        let (code, Json(body)) = readiness(State(state)).await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert_eq!(body.status, "ok");
+    }
+
+    /// regression: executor stuck on terminated svc pod after rollout
+    /// (alpha 2026-10-02) -- readiness must be `503`/`no_executor` even
+    /// once the consumer loop itself is running, the moment zero executor
+    /// sessions are live.
+    #[tokio::test]
+    async fn readiness_is_no_executor_when_consumer_loop_running_but_no_executor() {
+        let state = readiness_state("waddles.core.example.ping", true);
+        let (code, Json(body)) = readiness(State(state)).await;
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "no_executor");
     }
 
     /// Readiness flips back to `ok` the moment an executor session is

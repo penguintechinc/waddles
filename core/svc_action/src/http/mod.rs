@@ -31,8 +31,16 @@ pub struct AppState {
     pub metrics: Arc<prometheus::Registry>,
     pub request_metrics: RequestMetrics,
     pub started_at: Instant,
-    /// Fix/executor-link-heartbeat: `/health`/`/healthz` read this directly
-    /// so liveness/readiness reflect whether an executor session is
+    /// `true` once the action-stage dispatch loop
+    /// (`crate::lib::try_start_dispatch`) is connected and actively
+    /// reading -- defaults `true` (nothing to wait for) when
+    /// `ACTION_APP_ID` is unset. Backs `GET /readyz` (combined with
+    /// `connections` below: readiness is loop-running AND
+    /// executor-connected). regression: drain loop exited on NOGROUP
+    /// (alpha 2026-10-02)
+    pub consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
+    /// Fix/executor-link-heartbeat: `/health`/`/healthz`/`/readyz` read this
+    /// directly so liveness/readiness reflect whether an executor session is
     /// actually live, not just "the HTTP server is answering" -- the alpha
     /// 2026-10-02 incident this exists to catch left every pod
     /// `Running`/`Ready` while silently dead-lettering everything.
@@ -56,6 +64,7 @@ impl AppState {
             metrics: Arc::new(metrics),
             request_metrics,
             started_at: Instant::now(),
+            consumer_loop_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             connections,
         }
     }
@@ -92,6 +101,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::health))
         .route("/healthz", get(health::healthz))
+        .route("/readyz", get(health::readyz))
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(
             state,

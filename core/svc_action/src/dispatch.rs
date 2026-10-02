@@ -654,10 +654,176 @@ pub async fn run<A: AuditSink, T: TenantResolver>(
     drain_loop(reader, stream_key, deps, rust_data_plane, shutdown).await
 }
 
+/// Builds a raw `redis::Client` for `cfg`'s transport -- the same
+/// connection-building logic as `core/svc_ingest/src/outbound.rs::
+/// build_redis_client`/`core/svc_process/src/spine.rs::build_raw_client`
+/// (duplicated rather than imported: `penguin_spine`'s own equivalent is
+/// `pub(crate)` to that crate). Used only by [`ensure_consumer_group`].
+fn build_raw_client(cfg: &SpineConfig) -> Result<redis::Client, redis::RedisError> {
+    let base: redis::ConnectionInfo =
+        redis::IntoConnectionInfo::into_connection_info(cfg.valkey_url.as_str())?;
+    let mut settings = base.redis_settings().clone();
+    if let Some(username) = &cfg.valkey_username {
+        settings = settings.set_username(username);
+    }
+    if let Some(password) = &cfg.valkey_password {
+        settings = settings.set_password(password);
+    }
+    let info = base.set_redis_settings(settings);
+
+    if cfg.security_transport_tls {
+        crate::crypto::ensure_crypto_provider_installed();
+        let root_cert = std::fs::read(&cfg.valkey_ca_file).ok();
+        redis::Client::build_with_tls(
+            info,
+            redis::TlsCertificates {
+                client_tls: None,
+                root_cert,
+            },
+        )
+    } else {
+        redis::Client::open(info)
+    }
+}
+
+/// Idempotently ensures `group` exists on `stream` via `XGROUP CREATE
+/// <stream> <group> $ MKSTREAM` -- `BUSYGROUP` (already exists) is treated
+/// as success, never an error. Called once at startup and again as the
+/// self-heal step whenever a [`is_nogroup_error`] error surfaces mid-drain
+/// (`crate::lib::try_start_dispatch`'s retry wrapper) -- on a fresh Valkey
+/// nothing else in this env-driven single-bundle path ever creates the
+/// group. Returns `Ok(true)` if newly created, `Ok(false)` if it already
+/// existed (`BUSYGROUP`).
+///
+/// regression: drain loop exited on NOGROUP (alpha 2026-10-02) -- same bug
+/// class as `core/svc_process`'s legacy process loop, fixed identically.
+pub(crate) async fn ensure_consumer_group(
+    cfg: &SpineConfig,
+    stream: &str,
+    group: &str,
+) -> Result<bool, SpineError> {
+    let client = build_raw_client(cfg)?;
+    let mut conn = client.get_multiplexed_async_connection().await?;
+    let result: Result<(), redis::RedisError> = redis::cmd("XGROUP")
+        .arg("CREATE")
+        .arg(stream)
+        .arg(group)
+        .arg("$")
+        .arg("MKSTREAM")
+        .query_async(&mut conn)
+        .await;
+    match result {
+        Ok(()) => Ok(true),
+        Err(e) if e.code() == Some("BUSYGROUP") => Ok(false),
+        Err(e) => Err(SpineError::from(e)),
+    }
+}
+
+/// `true` when `err` is Valkey's `NOGROUP` reply -- matches on
+/// [`redis::RedisError::code`], same rationale as `core/svc_process::
+/// source_supervisor::is_nogroup_error`'s identical check.
+pub(crate) fn is_nogroup_error(err: &SpineError) -> bool {
+    matches!(err, SpineError::Redis(e) if e.code() == Some("NOGROUP"))
+}
+
+/// Test-only helpers mirroring `core/svc_process/src/spine.rs::
+/// test_support` -- a real local Valkey/Redis on the default port when one
+/// happens to be reachable, skipped honestly (never a failure) otherwise.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::SpineConfig;
+
+    pub(crate) fn local_valkey_config() -> Option<SpineConfig> {
+        let client = redis::Client::open("redis://127.0.0.1:6379/").ok()?;
+        let mut conn = client.get_connection().ok()?;
+        let _: String = redis::cmd("PING").query(&mut conn).ok()?;
+        Some(SpineConfig {
+            valkey_url: "redis://127.0.0.1:6379/".to_string(),
+            valkey_username: None,
+            valkey_password: None,
+            valkey_ca_file: std::path::PathBuf::from("/nonexistent-ca.crt"),
+            security_transport_tls: false,
+            security_transport_auth: false,
+            consumer_id: "test-consumer".to_string(),
+            stream_maxlen: 1_000,
+            read_count: 16,
+            block_ms: 200,
+            claim_idle_ms: 30_000,
+            claim_interval_ms: 15_000,
+            stats_interval_ms: 10_000,
+            pel_alert: 5_000,
+            dlq_maxlen: 1_000,
+            max_deliveries: 5,
+            drain_socket_timeout_s: 5,
+            relay_block_timeout_s: 5,
+        })
+    }
+
+    pub(crate) fn unique_key(prefix: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("waddles:test:{prefix}:{nanos}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::hop::BoundaryReason;
+
+    // regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+    #[test]
+    fn is_nogroup_error_matches_on_the_redis_error_code_not_message_wording() {
+        let err = SpineError::Redis(redis::make_extension_error(
+            "NOGROUP".to_string(),
+            Some(
+                "No such key 'waddles:t:global:c:_tenant:app:waddles.a:action' or consumer \
+                 group 'waddles.a' in XREADGROUP with GROUP option"
+                    .to_string(),
+            ),
+        ));
+        assert!(is_nogroup_error(&err));
+    }
+
+    #[test]
+    fn is_nogroup_error_rejects_a_different_redis_error_code() {
+        let err = SpineError::Redis(redis::make_extension_error(
+            "WRONGTYPE".to_string(),
+            Some("Operation against a key holding the wrong kind of value".to_string()),
+        ));
+        assert!(!is_nogroup_error(&err));
+    }
+
+    #[test]
+    fn is_nogroup_error_rejects_a_non_redis_spine_error() {
+        let err = SpineError::Config("unrelated config error".to_string());
+        assert!(!is_nogroup_error(&err));
+    }
+
+    // regression: drain loop exited on NOGROUP (alpha 2026-10-02) -- proves
+    // `ensure_consumer_group` self-heals on a fresh Valkey (no group, no
+    // stream) rather than ever surfacing NOGROUP to the dispatch loop.
+    #[tokio::test]
+    async fn ensure_consumer_group_creates_the_group_and_stream_on_a_fresh_valkey() {
+        let Some(cfg) = test_support::local_valkey_config() else {
+            eprintln!("skipping: no local Valkey reachable at 127.0.0.1:6379");
+            return;
+        };
+        let stream = test_support::unique_key("action-ensure-group-stream");
+        let group = test_support::unique_key("action-ensure-group-group");
+
+        let created = ensure_consumer_group(&cfg, &stream, &group)
+            .await
+            .expect("first create succeeds");
+        assert!(created);
+
+        let created_again = ensure_consumer_group(&cfg, &stream, &group)
+            .await
+            .expect("second create (BUSYGROUP) must not error");
+        assert!(!created_again);
+    }
 
     #[test]
     fn envelope_to_wire_json_matches_the_wit_stage_envelope_shape() {
@@ -1453,5 +1619,179 @@ mod tests {
         .expect("load succeeds");
         assert_eq!(loaded.app_id, "waddles.bot.commands.default");
         assert_eq!(loaded.exports, vec!["dispatch".to_string()]);
+    }
+
+    /// `Message::Error` reply to a `load` request maps to
+    /// `InvokeError::ExecutorError` -- distinct from the `Loaded` success
+    /// path above, never previously exercised.
+    #[tokio::test]
+    async fn ensure_loaded_returns_executor_error_on_error_reply() {
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, ErrorBody, ErrorCode, Frame, HelloBody, HelloOkBody,
+            SandboxInfo,
+        };
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            read_frame(&mut executor_io).await.unwrap();
+
+            let load = read_frame(&mut executor_io).await.unwrap();
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    load.id,
+                    Message::Error(ErrorBody {
+                        code: ErrorCode::DigestMismatch,
+                        message: "digest mismatch".to_string(),
+                        detail: None,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(crate::capabilities::DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let err = ensure_loaded(
+            &connection,
+            1,
+            0,
+            "waddles.bot.commands.default",
+            "1",
+            "sha256:00",
+            "component-key",
+            "sidecar-key",
+            LoadLimits {
+                timeout_ms: 2000,
+                memory_mb: 64,
+            },
+        )
+        .await
+        .expect_err("executor error reply must surface as an error");
+        match err {
+            InvokeError::ExecutorError { code, message } => {
+                assert_eq!(code, "DigestMismatch");
+                assert_eq!(message, "digest mismatch");
+            }
+            other => panic!("expected ExecutorError, got {other:?}"),
+        }
+    }
+
+    /// `ensure_unloaded`'s own success path -- never previously exercised
+    /// (mirrors `ensure_loaded_sends_load_and_returns_the_loaded_reply`
+    /// above exactly, swapped for `unload`/`Unloaded`).
+    #[tokio::test]
+    async fn ensure_unloaded_sends_unload_and_returns_the_unloaded_reply() {
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, Frame, HelloBody, HelloOkBody, SandboxInfo, UnloadedBody,
+        };
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            read_frame(&mut executor_io).await.unwrap();
+
+            let unload = read_frame(&mut executor_io).await.unwrap();
+            let unload_body = match unload.message {
+                Message::Unload(b) => b,
+                other => panic!("expected unload, got {other:?}"),
+            };
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    unload.id,
+                    Message::Unloaded(UnloadedBody {
+                        app_id: unload_body.app_id,
+                        digest: unload_body.digest,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(crate::capabilities::DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let unloaded = ensure_unloaded(
+            &connection,
+            1,
+            0,
+            "waddles.bot.commands.default",
+            "sha256:00",
+        )
+        .await
+        .expect("unload succeeds");
+        assert_eq!(unloaded.app_id, "waddles.bot.commands.default");
+        assert_eq!(unloaded.digest, "sha256:00");
     }
 }

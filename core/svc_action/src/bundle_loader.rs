@@ -527,6 +527,93 @@ mod tests {
         );
     }
 
+    /// A watermark-read DB error must be logged and swallowed -- `run_tick`
+    /// returns early, leaving `loaded` untouched, never panicking or
+    /// propagating the error to the caller (the poll loop must keep
+    /// ticking on the next interval regardless).
+    #[tokio::test]
+    async fn run_tick_returns_when_watermark_read_fails() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_errors([sea_orm::DbErr::Custom("simulated".to_string())])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        run_tick(
+            &db,
+            1,
+            0,
+            &StaticFlag(true),
+            &mut tracker,
+            &mut loaded,
+            None,
+            &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
+        )
+        .await;
+        assert!(loaded.is_empty());
+    }
+
+    /// Same early-return/swallow contract as the watermark-read failure
+    /// above, but for the full active-set read that follows a changed
+    /// watermark.
+    #[tokio::test]
+    async fn run_tick_returns_when_active_set_read_fails() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
+            .append_query_errors([sea_orm::DbErr::Custom("simulated".to_string())])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        run_tick(
+            &db,
+            1,
+            0,
+            &StaticFlag(true),
+            &mut tracker,
+            &mut loaded,
+            None,
+            &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
+        )
+        .await;
+        assert!(loaded.is_empty());
+    }
+
+    /// An unchanged diff (nothing to load or unload) returns before ever
+    /// consulting `sink` -- distinct from
+    /// `run_tick_defers_when_no_executor_connection_is_active` below, which
+    /// covers a *non-empty* diff with `sink: None`.
+    #[tokio::test]
+    async fn run_tick_returns_early_when_the_diff_is_empty() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
+            .append_query_results([vec![approval_row("waddles.a", "1")]])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        // Pre-seed `loaded` to already match the active set -- `diff::plan`
+        // reports empty, so the sink (`None` here) must never be consulted.
+        let mut loaded = HashMap::new();
+        loaded.insert("waddles.a".to_string(), digest.clone());
+        run_tick(
+            &db,
+            1,
+            0,
+            &StaticFlag(true),
+            &mut tracker,
+            &mut loaded,
+            None,
+            &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
+        )
+        .await;
+        assert_eq!(loaded.get("waddles.a"), Some(&digest));
+    }
+
     #[tokio::test]
     async fn run_tick_defers_when_no_executor_connection_is_active() {
         let digest = format!("sha256:{}", "a".repeat(64));
@@ -843,5 +930,44 @@ mod tests {
         )
         .await;
         assert!(!kv_capabilities.declares("waddles.a", "kv"));
+    }
+
+    /// The live `run()` loop, never previously exercised: with the
+    /// kill-switch flag permanently OFF, `run_tick` returns before ever
+    /// touching the DB (its own first check), so an empty `MockDatabase`
+    /// (no queued results at all -- any query would panic) is sufficient to
+    /// prove the interval/shutdown `tokio::select!` itself works -- ticks
+    /// repeatedly (1ms interval, far shorter than the 50ms shutdown delay)
+    /// and returns promptly once `shutdown` resolves instead of hanging.
+    #[tokio::test]
+    async fn run_ticks_and_returns_promptly_on_shutdown() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = shutdown_tx.send(());
+        });
+
+        let flag: Arc<dyn FeatureFlag> = Arc::new(StaticFlag(false));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(
+                db,
+                1,
+                0,
+                std::time::Duration::from_millis(1),
+                2000,
+                flag,
+                Arc::new(crate::host_api::ConnectionRegistry::new()),
+                test_metric(),
+                Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+                shutdown_rx,
+            ),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "run() must return promptly once shutdown resolves, not hang"
+        );
     }
 }

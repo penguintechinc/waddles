@@ -1141,4 +1141,61 @@ mod tests {
             Duration::from_secs(1)
         ));
     }
+
+    /// The live `run()` loop, end to end against a `MockDatabase`: a
+    /// never-previously-exercised function. `initial_state` loads an empty
+    /// active set (no scopes at all -- the DB mock has nothing else queued,
+    /// so any further query would panic on an empty queue), the kill-switch
+    /// flag is permanently OFF so both the `poll_tick`/`reconcile_tick`
+    /// branches take their own `continue` arm without ever touching
+    /// `run_incremental_tick`/`run_full_reconcile`, and a short shutdown
+    /// delay exercises the `_ = &mut shutdown => return` arm -- proving the
+    /// loop actually ticks (both intervals are 1ms, far shorter than the
+    /// shutdown delay) and still returns promptly instead of hanging.
+    #[tokio::test]
+    async fn run_ticks_and_returns_promptly_on_shutdown() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([
+                Vec::<std::collections::BTreeMap<String, sea_orm::Value>>::new(),
+            ])
+            .append_query_results([vec![std::collections::BTreeMap::from([(
+                "safe_seq".to_string(),
+                sea_orm::Value::BigInt(Some(0)),
+            )])]])
+            .append_query_results([
+                Vec::<bundle_active_set::entities::app_active_versions::Model>::new(),
+            ])
+            .into_connection();
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = shutdown_tx.send(());
+        });
+
+        let flag: Arc<dyn FeatureFlag> = Arc::new(crate::flags::StaticFlag(false));
+        let excluded_metric = test_excluded_metric();
+        let metrics = test_changelog_metrics();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            run(
+                db,
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+                2000,
+                flag,
+                Arc::new(crate::host_api::ConnectionRegistry::new()),
+                excluded_metric,
+                metrics,
+                Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+                shutdown_rx,
+            ),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "run() must return promptly once shutdown resolves, not hang"
+        );
+    }
 }

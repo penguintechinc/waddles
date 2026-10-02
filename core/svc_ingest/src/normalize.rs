@@ -319,10 +319,30 @@ mod tests {
         assert_eq!(unescape_tag_value("abc\\"), "abc");
     }
 
+    /// An escape sequence outside the five known ones (`\s \: \\ \r \n`)
+    /// passes the escaped character through literally -- IRCv3's own
+    /// `UNESCAPE_SEQ` default case, distinct from every known-escape case
+    /// `unescape_tag_value_reverses_known_escapes` above already covers.
+    #[test]
+    fn unescape_tag_value_passes_through_an_unknown_escape_literally() {
+        assert_eq!(unescape_tag_value("a\\xb"), "axb");
+    }
+
     #[test]
     fn parse_tags_handles_empty_and_none_input() {
         assert!(parse_tags(None).is_empty());
         assert!(parse_tags(Some("")).is_empty());
+    }
+
+    /// A doubled `;;` separator (or a leading/trailing one) yields an empty
+    /// segment between/around real pairs -- skipped outright, not inserted
+    /// as a spurious empty-keyed tag.
+    #[test]
+    fn parse_tags_skips_empty_segments_from_doubled_separators() {
+        let tags = parse_tags(Some(";a=1;;b=2;"));
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags.get("a").unwrap(), "1");
+        assert_eq!(tags.get("b").unwrap(), "2");
     }
 
     #[test]

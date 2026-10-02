@@ -226,8 +226,13 @@ spec:
           timeoutSeconds: 5
           failureThreshold: 3
         readinessProbe:
+          # /readyz (not /healthz, a bare always-ok liveness probe
+          # mistakenly wired here) reflects whether the action-stage
+          # dispatch loop is actually connected and reading -- regression:
+          # drain loop exited on NOGROUP while the pod stayed Ready forever
+          # (alpha 2026-10-02).
           httpGet:
-            path: /healthz
+            path: /readyz
             port: http
           initialDelaySeconds: 5
           periodSeconds: 5

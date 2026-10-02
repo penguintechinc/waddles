@@ -701,6 +701,36 @@ mod tests {
     /// denylist is a hard startup error outside alpha/local -- the default
     /// `deployment_tier` in tests/CLI defaults is `"alpha"`, so this must be
     /// set explicitly to prove the gate actually fires.
+    /// regression: `heartbeat_interval_ms: 0` would otherwise sleep on a
+    /// zero-length interval -- `validate()` rejects it as a hard startup
+    /// error rather than letting the heartbeat loop hot-loop.
+    #[test]
+    fn heartbeat_interval_ms_zero_is_rejected() {
+        let cli = CliConfig::parse_from(["svc-action", "--heartbeat-interval-ms", "0"]);
+        assert_eq!(
+            cli.validate().unwrap_err(),
+            ConfigError::InvalidValue {
+                field: "heartbeat_interval_ms",
+                reason: "must be positive".to_string(),
+            }
+        );
+    }
+
+    /// regression: `executor_grace_seconds: 0` would fail liveness the
+    /// instant any executor session blips, even transiently -- `validate()`
+    /// rejects it as a hard startup error.
+    #[test]
+    fn executor_grace_seconds_zero_is_rejected() {
+        let cli = CliConfig::parse_from(["svc-action", "--executor-grace-seconds", "0"]);
+        assert_eq!(
+            cli.validate().unwrap_err(),
+            ConfigError::InvalidValue {
+                field: "executor_grace_seconds",
+                reason: "must be positive".to_string(),
+            }
+        );
+    }
+
     #[test]
     fn empty_cluster_cidr_denylist_is_rejected_outside_alpha_local() {
         let cli = CliConfig::parse_from(["svc-action", "--deployment-tier", "beta"]);
@@ -903,6 +933,37 @@ mod tests {
         assert_eq!(
             cli.full_reconcile_interval(),
             std::time::Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn bundle_config_poll_interval_is_clamped_to_a_five_second_floor() {
+        let cli = CliConfig::parse_from(["svc-action", "--bundle-config-poll-seconds", "0"]);
+        assert_eq!(
+            cli.bundle_config_poll_interval(),
+            std::time::Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn heartbeat_interval_reflects_the_configured_value() {
+        let cli = CliConfig::parse_from(["svc-action", "--heartbeat-interval-ms", "250"]);
+        assert_eq!(
+            cli.heartbeat_interval(),
+            std::time::Duration::from_millis(250)
+        );
+    }
+
+    /// `validate()` already rejects `0` (`heartbeat_interval_ms_zero_is_
+    /// rejected` above), but `heartbeat_interval()` is also called by a
+    /// couple of test helpers before `validate()` runs -- floors at 1ms
+    /// rather than panicking on a zero-length sleep/timeout.
+    #[test]
+    fn heartbeat_interval_floors_at_one_millisecond_pre_validation() {
+        let cli = CliConfig::parse_from(["svc-action", "--heartbeat-interval-ms", "0"]);
+        assert_eq!(
+            cli.heartbeat_interval(),
+            std::time::Duration::from_millis(1)
         );
     }
 

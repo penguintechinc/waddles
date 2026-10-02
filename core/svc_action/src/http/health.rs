@@ -59,6 +59,54 @@ pub async fn healthz(State(state): State<AppState>) -> (StatusCode, Json<Healthz
     )
 }
 
+/// `GET /readyz` response body.
+#[derive(Debug, Serialize)]
+pub struct ReadyBody {
+    pub status: &'static str,
+    pub configured: bool,
+    pub running: bool,
+    /// Fix/executor-link-heartbeat: mirrors `HealthzBody::executor_connected`
+    /// -- `readyz` combines both the dispatch loop's own state and the
+    /// host-API executor link so a pod reconnected to Valkey but still
+    /// talking to a dead executor is not reported Ready either.
+    pub executor_connected: bool,
+}
+
+/// `GET /readyz` -- real Kubernetes readiness: `503` while the action-stage
+/// dispatch loop (`crate::lib::try_start_dispatch`) is configured
+/// (`ACTION_APP_ID` set) but not yet (re)connected and reading, OR
+/// (fix/executor-link-heartbeat) while zero host-API executor sessions are
+/// live -- either dependency being down means this pod cannot actually do
+/// work and must not receive new traffic. Unlike `/healthz` (always `ok`
+/// when an executor is attached, the liveness-adjacent signal) and `/health`
+/// (rich, grace-period-gated liveness), this is the endpoint the
+/// readinessProbe must point at -- regression: drain loop exited on NOGROUP
+/// while the pod stayed Ready forever (alpha 2026-10-02), and separately,
+/// an executor stuck on a terminated svc pod after rollout (alpha
+/// 2026-10-02).
+pub async fn readyz(State(state): State<AppState>) -> (axum::http::StatusCode, Json<ReadyBody>) {
+    let configured = !state.config.cli.action_app_id.is_empty();
+    let running = state
+        .consumer_loop_ready
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let executor_connected = state.connections.active().is_some();
+    let ok = (!configured || running) && executor_connected;
+    let code = if ok {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        code,
+        Json(ReadyBody {
+            status: if ok { "ok" } else { "degraded" },
+            configured,
+            running,
+            executor_connected,
+        }),
+    )
+}
+
 /// Per-dependency configuration status reported by the rich `/health`
 /// endpoint.
 #[derive(Debug, Serialize)]
@@ -150,9 +198,83 @@ mod tests {
         )
     }
 
+    /// Builds an `AppState` with `ACTION_APP_ID` set to `app_id` (empty =
+    /// unconfigured) and the dispatch loop's `consumer_loop_ready` forced to
+    /// `running`, for `readyz`'s own transition tests below.
+    fn readyz_state(app_id: &str, running: bool) -> AppState {
+        let mut cli = CliConfig::parse_from(["svc-action"]);
+        cli.action_app_id = app_id.to_string();
+        let config = Config {
+            cli,
+            db_password: Secret::new("x"),
+            envelope_binding_keys: None,
+            discord_bot_token: None,
+            db_reader_password: None,
+        };
+        let state = AppState::new(
+            config,
+            prometheus::Registry::new(),
+            Arc::new(crate::host_api::ConnectionRegistry::new()),
+        );
+        state
+            .consumer_loop_ready
+            .store(running, std::sync::atomic::Ordering::Relaxed);
+        state
+    }
+
+    // regression: drain loop exited on NOGROUP while the pod stayed Ready
+    // forever (alpha 2026-10-02). `ACTION_APP_ID` unset is "nothing to wait
+    // for", but readiness still requires a live executor
+    // (fix/executor-link-heartbeat) -- 503 with zero sessions even when the
+    // dispatch loop itself has nothing configured.
+    #[tokio::test]
+    async fn readyz_is_503_when_action_app_id_is_unset_but_no_executor() {
+        let (code, Json(body)) = readyz(State(readyz_state("", true))).await;
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!body.configured);
+        assert!(!body.executor_connected);
+    }
+
+    // regression: drain loop exited on NOGROUP while the pod stayed Ready
+    // forever (alpha 2026-10-02)
+    #[tokio::test]
+    async fn readyz_is_503_when_configured_but_not_running() {
+        let state = readyz_state("waddles.core.example.ping", false);
+        state
+            .connections
+            .set_active(crate::host_api::test_connection());
+        let (code, Json(body)) = readyz(State(state)).await;
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.configured);
+        assert!(!body.running);
+    }
+
     /// regression: executor stuck on terminated svc pod after rollout
     /// (alpha 2026-10-02) -- readiness must be false the instant zero
-    /// executor sessions are live.
+    /// executor sessions are live, even once the dispatch loop itself is
+    /// running.
+    #[tokio::test]
+    async fn readyz_is_503_when_running_but_no_executor() {
+        let state = readyz_state("waddles.core.example.ping", true);
+        let (code, Json(body)) = readyz(State(state)).await;
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.running);
+        assert!(!body.executor_connected);
+    }
+
+    // regression: drain loop exited on NOGROUP while the pod stayed Ready
+    // forever (alpha 2026-10-02)
+    #[tokio::test]
+    async fn readyz_is_ok_once_the_configured_loop_is_running_and_executor_connected() {
+        let state = readyz_state("waddles.core.example.ping", true);
+        state
+            .connections
+            .set_active(crate::host_api::test_connection());
+        let (code, Json(body)) = readyz(State(state)).await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert!(body.executor_connected);
+    }
+
     #[tokio::test]
     async fn healthz_reports_no_executor_with_zero_sessions() {
         let (status, Json(body)) = healthz(State(test_state())).await;
