@@ -31,19 +31,23 @@ pub mod bucket;
 pub mod config;
 pub mod engine;
 pub mod error;
+pub mod heartbeat;
 pub mod host;
 pub mod invoke;
 pub mod manifest;
+pub mod probe;
 pub mod tls;
 pub mod wire;
 
 use std::sync::Arc;
+use std::time::Instant;
 
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::bucket::BucketComponentSource;
 use crate::config::CliConfig;
 use crate::error::ExecutorError;
+use crate::heartbeat::{Heartbeat, HeartbeatConfig, HeartbeatMetrics};
 use crate::invoke::{ComponentSource, Executor};
 
 /// `tracing`/OTel service name (spec SS12.7's `OTEL_SERVICE_NAME`
@@ -62,36 +66,110 @@ pub async fn run() -> Result<(), ExecutorError> {
 
     init_telemetry();
 
+    // Marks "the long-running process started trying to connect now" --
+    // `crate::probe::check_session`'s startup-grace window is measured
+    // from this, not from the probe file itself (which doesn't exist
+    // until the first successful connection).
+    if let Err(e) = probe::record_start(&cfg.executor_probe_file) {
+        warn!(error = %e, probe_file = ?cfg.executor_probe_file, "failed to record liveness probe start marker");
+    }
+
     let source = BucketComponentSource::from_cli(&cfg)?;
     let executor = Arc::new(Executor::new(&cfg, source)?);
+    let heartbeat_cfg = HeartbeatConfig::from_cli(&cfg);
+    let heartbeat_metrics = Arc::new(HeartbeatMetrics::default());
+    info!(
+        heartbeat_interval_secs = heartbeat_cfg.interval.as_secs(),
+        self_ping_enabled = heartbeat_cfg.self_ping_enabled,
+        heartbeat_enabled = heartbeat_cfg.enabled,
+        "host-api session liveness configured"
+    );
 
     let mut backoff = std::time::Duration::from_secs(1);
     let backoff_cap = std::time::Duration::from_secs(30);
+    let mut attempt: u32 = 0;
+    let mut disconnected_at: Option<Instant> = None;
     loop {
-        match connect_and_serve(&cfg, &executor).await {
+        attempt += 1;
+        match connect_and_serve(
+            &cfg,
+            &executor,
+            attempt,
+            heartbeat_cfg,
+            Arc::clone(&heartbeat_metrics),
+            disconnected_at,
+        )
+        .await
+        {
             Ok(()) => {
-                info!("host-api connection closed cleanly, reconnecting");
+                info!(attempt, "host-api connection closed cleanly, reconnecting");
                 backoff = std::time::Duration::from_secs(1);
             }
             Err(e) => {
-                warn!(error = %e, backoff_s = backoff.as_secs(), "host-api connection failed, retrying");
+                error!(
+                    error = %e,
+                    attempt,
+                    backoff_s = backoff.as_secs(),
+                    "host-api connection failed, retrying"
+                );
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(backoff_cap);
             }
         }
+        disconnected_at = Some(Instant::now());
+        heartbeat_metrics.record_reconnect();
     }
 }
 
+/// Dials the stage and runs one connection to completion (spec SS4.5).
+/// `attempt` is this process's monotonically increasing connection-attempt
+/// counter (1 on the very first dial, logged alongside the peer address so
+/// an operator can tell "first connect" from "the Nth reconnect" at a
+/// glance). `disconnected_at`, when set, is when the PREVIOUS connection
+/// ended -- used only to log how long the host-api link was down once this
+/// one's handshake completes (`crate::heartbeat::Heartbeat::on_connected`).
 async fn connect_and_serve<S: ComponentSource>(
     cfg: &CliConfig,
     executor: &Arc<Executor<S>>,
+    attempt: u32,
+    heartbeat_cfg: HeartbeatConfig,
+    heartbeat_metrics: Arc<HeartbeatMetrics>,
+    disconnected_at: Option<Instant>,
 ) -> Result<(), ExecutorError> {
     let io = tls::dial_stage(cfg).await?;
+    let peer = io
+        .get_ref()
+        .0
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| cfg.stage_host_api_addr.clone());
+    info!(peer = %peer, attempt, "host-api connecting");
+
     let hello = executor.hello(
         cfg.sandbox_gvisor,
         if cfg.sandbox_gvisor { "gvisor" } else { "runc" },
     );
-    wire::run_connection(io, hello, Arc::clone(executor)).await
+    let probe_file = cfg.executor_probe_file.clone();
+    let on_connected_peer = peer.clone();
+    let heartbeat = Heartbeat {
+        cfg: heartbeat_cfg,
+        metrics: heartbeat_metrics,
+        probe_file: probe_file.clone(),
+        on_connected: Some(Box::new(move || {
+            if let Some(since) = disconnected_at {
+                info!(
+                    peer = %on_connected_peer,
+                    attempt,
+                    outage_ms = since.elapsed().as_millis() as u64,
+                    "host-api reconnected"
+                );
+            }
+            if let Err(e) = probe::touch(&probe_file) {
+                warn!(error = %e, probe_file = ?probe_file, "failed to refresh liveness probe file on connect");
+            }
+        })),
+    };
+    wire::run_connection(io, hello, Arc::clone(executor), &peer, heartbeat).await
 }
 
 /// Installs this binary's `tracing` subscriber: JSON to stdout, level
@@ -150,6 +228,34 @@ pub async fn run_healthcheck() -> Result<(), ExecutorError> {
     let engine = engine::build_engine(&cfg)?;
     engine::build_linker(&engine)?;
     Ok(())
+}
+
+/// `--healthcheck=session [--max-age <secs>]`: checks `crate::probe`'s
+/// on-disk liveness file rather than building a wasmtime engine. This is
+/// the check that actually proves the long-running process's host-API
+/// session is alive (`run_healthcheck` above only proves the engine/linker
+/// still build -- it says nothing about whether `crate::run`'s dial loop
+/// is stuck on a half-open connection, the exact incident this subcommand
+/// exists to catch). Reads `EXECUTOR_PROBE_FILE`/`EXECUTOR_GRACE_SECONDS`
+/// directly from the environment rather than the full `CliConfig::parse`
+/// every other entry point uses: this is invoked as a brand new, short-
+/// lived process by Kubernetes' exec probe, sharing nothing with the
+/// long-running process but the filesystem and environment, and should not
+/// need `STAGE_HOST_API_ADDR`/mTLS material to be set just to check a
+/// file.
+pub async fn run_session_healthcheck(
+    max_age: Option<std::time::Duration>,
+) -> Result<(), ExecutorError> {
+    let probe_file = std::env::var("EXECUTOR_PROBE_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(probe::DEFAULT_PROBE_FILE_PATH));
+    let grace_secs = std::env::var("EXECUTOR_GRACE_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(probe::DEFAULT_GRACE_SECS);
+    let grace = std::time::Duration::from_secs(grace_secs);
+    let max_age = max_age.unwrap_or(grace);
+    probe::check_session(&probe_file, max_age, grace).map_err(ExecutorError::Config)
 }
 
 #[cfg(test)]
@@ -257,7 +363,15 @@ mod tests {
         cfg.host_api_ca_file = Some(ca_path.clone());
         let executor = Arc::new(Executor::new(&cfg, UnimplementedBucketSource)?);
 
-        connect_and_serve(&cfg, &executor).await?;
+        connect_and_serve(
+            &cfg,
+            &executor,
+            1,
+            crate::heartbeat::HeartbeatConfig::disabled(),
+            Arc::new(crate::heartbeat::HeartbeatMetrics::default()),
+            None,
+        )
+        .await?;
         stage_task.await?;
         let _ = std::fs::remove_file(&ca_path);
         Ok(())
