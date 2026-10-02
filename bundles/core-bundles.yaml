@@ -52,3 +52,16 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  # C#-toolchain feasibility spike (spec
+  # docs/superpowers/specs/2026-09-14-rust-data-plane-design.md S18 R13 / D35). Built by
+  # bundles/Dockerfile.core-bundles's csharp-bundle-builder stage; NOT covered by the
+  # byte-reproducible gate (scripts/verify-core-bundles-reproducible.sh) -- same status as
+  # pyping, see that script's own comment.
+  - app_id: waddles.core.example.csping
+    version: "1.0.0"
+    language: csharp
+    manifest_path: csping.manifest.yaml
+    artifact_path: csping.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
