@@ -46,9 +46,11 @@
 //!   the wrong tenant/community/app_id.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use penguin_bundle_host::wire::{
     read_frame, write_frame, CorrelationError, CorrelationTable, ErrorBody, ErrorCode, Frame,
@@ -58,11 +60,12 @@ use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use socket2::{SockRef, TcpKeepalive};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::capabilities::CapabilityHandler;
 use crate::config::CliConfig;
@@ -87,6 +90,8 @@ pub enum HostApiError {
     UnexpectedFrame(&'static str),
     #[error("peer reported error {code:?}: {message}")]
     PeerError { code: ErrorCode, message: String },
+    #[error("heartbeat timed out waiting for pong")]
+    HeartbeatTimeout,
 }
 
 fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, HostApiError> {
@@ -286,6 +291,56 @@ impl Connection {
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }
+
+    /// Sends `ping` and awaits `pong` within `timeout` -- the heartbeat
+    /// supervisor's ([`run_heartbeat`]) probe for the alpha 2026-10-02
+    /// incident this whole mechanism exists to catch: a rolled svc pod left
+    /// the executor bound to a terminated peer with no OS-level signal at
+    /// all, so the only reliable "is the peer actually still there" check
+    /// is a round trip on the wire protocol itself. On timeout the pending
+    /// registration is cancelled so it never leaks in the correlation
+    /// table.
+    pub async fn ping(&self, timeout: Duration) -> Result<(), HostApiError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(HostApiError::ConnectionUnavailable);
+        }
+        let id = self.ids.next_id();
+        let rx = self.pending.register(id)?;
+        self.send(Frame::new(id, Message::Ping))?;
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(frame)) => match frame.message {
+                Message::Pong => Ok(()),
+                _ => Err(HostApiError::UnexpectedFrame("expected pong")),
+            },
+            Ok(Err(_)) => Err(HostApiError::ConnectionUnavailable),
+            Err(_) => {
+                self.pending.cancel(id);
+                Err(HostApiError::HeartbeatTimeout)
+            }
+        }
+    }
+
+    /// Forcibly marks this connection closed -- used by [`run_heartbeat`]
+    /// when it declares a session dead so [`ConnectionRegistry::active`]
+    /// stops handing it out even before the read loop itself notices,
+    /// which for a true half-open socket (no FIN ever arrives) may never
+    /// happen on its own. The actual socket teardown happens when the
+    /// caller's `tokio::select!` racing this heartbeat against the read
+    /// loop drops the losing (read loop) future -- see `crate::host_api::
+    /// serve`.
+    pub(crate) fn mark_closed(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+}
+
+/// Test-only bare `Connection` construction (`DenyAllCapabilities`
+/// fallback, a writer end nothing ever drains) -- for `crate::http::health`'s
+/// readiness-transition tests, which need a `Connection` to register as
+/// `ConnectionRegistry::set_active` without driving a full handshake.
+#[cfg(test)]
+pub(crate) fn test_connection() -> Arc<Connection> {
+    let (tx, _rx) = mpsc::unbounded_channel();
+    Connection::new(tx, Arc::new(crate::capabilities::DenyAllCapabilities))
 }
 
 /// Completes the `hello`/`hello-ok` handshake as the stage side, then runs
@@ -443,6 +498,21 @@ where
                     let _ = connection.send(Frame::new(frame.id, Message::HostResult(reply)));
                 });
             }
+            // Bidirectional heartbeat (fix/executor-link-heartbeat): this
+            // stage drives its own `ping`/`pong` round trip via
+            // `run_heartbeat`, but also answers an executor-initiated
+            // `ping` rather than treating it as the fatal "unexpected
+            // frame" every other unhandled kind is below -- the executor
+            // side may run its own independent heartbeat (a separate
+            // change, on its own branch) and this stage must never close a
+            // perfectly healthy connection just because the executor
+            // happened to speak first.
+            Message::Ping => {
+                debug!("host-api heartbeat: received ping, replying pong");
+                if let Err(e) = connection.send(Frame::new(frame.id, Message::Pong)) {
+                    warn!(error = %e, "host-api failed to reply to ping");
+                }
+            }
             other => {
                 warn!(
                     ?other,
@@ -451,6 +521,73 @@ where
                 return Err(HostApiError::UnexpectedFrame(
                     "unexpected frame kind on stage side",
                 ));
+            }
+        }
+    }
+}
+
+/// Consecutive missed heartbeats before [`run_heartbeat`] declares a
+/// session dead (fix/executor-link-heartbeat, alpha 2026-10-02 incident).
+pub const HEARTBEAT_MISSED_LIMIT: u32 = 3;
+
+/// Heartbeat supervisor for one accepted executor session: sends `ping`
+/// every `interval` and requires `pong` back within that same interval.
+/// After [`HEARTBEAT_MISSED_LIMIT`] consecutive misses the session is
+/// declared dead -- loudly (`ERROR`, naming the peer and how long it's been
+/// since the last successful heartbeat in the rendered message, not just
+/// structured fields) -- and [`Connection::mark_closed`] is called so
+/// [`ConnectionRegistry::active`] stops handing this connection out. The
+/// caller (`crate::host_api::serve`) races this future against the read
+/// loop via `tokio::select!`; whichever finishes first wins, and dropping
+/// the other tears down the underlying socket.
+pub async fn run_heartbeat(
+    connection: Arc<Connection>,
+    peer: SocketAddr,
+    interval: Duration,
+    metrics: crate::telemetry::HostApiMetrics,
+) {
+    let mut missed: u32 = 0;
+    let mut last_success = Instant::now();
+    loop {
+        tokio::time::sleep(interval).await;
+        if connection.is_closed() {
+            debug!(%peer, "host-api heartbeat: connection already closed, stopping");
+            return;
+        }
+        debug!(%peer, "host-api heartbeat: sending ping");
+        match connection.ping(interval).await {
+            Ok(()) => {
+                if missed > 0 {
+                    info!(%peer, missed, "host-api heartbeat: pong received, session recovered");
+                }
+                missed = 0;
+                last_success = Instant::now();
+                debug!(%peer, "host-api heartbeat: pong received");
+            }
+            Err(e) => {
+                missed += 1;
+                let age_s = last_success.elapsed().as_secs();
+                if missed >= HEARTBEAT_MISSED_LIMIT {
+                    error!(
+                        %peer,
+                        missed,
+                        last_seen_age_s = age_s,
+                        error = %e,
+                        "host-api heartbeat timeout: dropping dead executor session {peer} \
+                         after {missed} consecutive missed heartbeats (last seen {age_s}s ago)"
+                    );
+                    metrics.heartbeat_timeouts_total.inc();
+                    connection.mark_closed();
+                    return;
+                }
+                warn!(
+                    %peer,
+                    missed,
+                    last_seen_age_s = age_s,
+                    error = %e,
+                    "host-api heartbeat missed ({missed}/{HEARTBEAT_MISSED_LIMIT}) for {peer}, \
+                     last seen {age_s}s ago"
+                );
             }
         }
     }
@@ -501,6 +638,19 @@ pub type ShutdownReceiver = oneshot::Receiver<()>;
 pub struct ConnectionRegistry {
     active: std::sync::Mutex<Option<Arc<Connection>>>,
     generation: AtomicU64,
+    /// When [`Self::active`] last transitioned from "some" to "none" --
+    /// `None` means either an executor is currently active, or none has
+    /// ever connected since this registry was created. Backs both
+    /// [`Self::duration_without_executor`] (the `/health` liveness-grace
+    /// check and `crate::spine`'s loud dead-letter log) and readiness
+    /// (`/healthz` is simply `active().is_some()`).
+    zero_since: Mutex<Option<Instant>>,
+    /// Set once, in production wiring (`crate::lib::try_start_host_api`),
+    /// to `telemetry::HostApiMetrics::dead_lettered_no_executor_total` --
+    /// `OnceLock` rather than a constructor parameter so the many existing
+    /// `ConnectionRegistry::new()` call sites across this crate's tests
+    /// don't all need updating for a metric they don't exercise.
+    dead_lettered_no_executor_total: std::sync::OnceLock<prometheus::IntCounter>,
 }
 
 impl ConnectionRegistry {
@@ -520,7 +670,44 @@ impl ConnectionRegistry {
     /// spec §6.3) rather than sending into a dead socket.
     pub fn active(&self) -> Option<Arc<Connection>> {
         let guard = self.active.lock().unwrap_or_else(|e| e.into_inner());
-        guard.as_ref().filter(|c| !c.is_closed()).map(Arc::clone)
+        let active = guard.as_ref().filter(|c| !c.is_closed()).map(Arc::clone);
+        let mut zero_since = self.zero_since.lock().unwrap_or_else(|e| e.into_inner());
+        if active.is_some() {
+            *zero_since = None;
+        } else {
+            zero_since.get_or_insert_with(Instant::now);
+        }
+        active
+    }
+
+    /// How long this registry has held zero live executor sessions --
+    /// `Duration::ZERO` while one is active. Fix/executor-link-heartbeat:
+    /// backs both `crate::spine::handle_delivered`'s loud dead-letter log
+    /// (names the outage duration in the rendered message, not just a
+    /// field) and `/health`'s liveness-grace check (fail liveness only
+    /// after `EXECUTOR_GRACE_SECONDS`, not on every transient reconnect).
+    pub fn duration_without_executor(&self) -> Duration {
+        if self.active().is_some() {
+            return Duration::ZERO;
+        }
+        let zero_since = self.zero_since.lock().unwrap_or_else(|e| e.into_inner());
+        zero_since.map(|t| t.elapsed()).unwrap_or(Duration::ZERO)
+    }
+
+    /// Wires the `dispatch_dead_lettered_no_executor_total` counter in --
+    /// called exactly once, from `crate::lib::try_start_host_api`.
+    pub fn set_dead_letter_metric(&self, counter: prometheus::IntCounter) {
+        let _ = self.dead_lettered_no_executor_total.set(counter);
+    }
+
+    /// Increments `dispatch_dead_lettered_no_executor_total` if the metric
+    /// has been wired (see [`Self::set_dead_letter_metric`]) -- a no-op
+    /// (never a panic) in the many tests that build a bare
+    /// `ConnectionRegistry::new()` without wiring telemetry.
+    pub fn record_dead_letter_no_executor(&self) {
+        if let Some(counter) = self.dead_lettered_no_executor_total.get() {
+            counter.inc();
+        }
     }
 }
 
@@ -536,6 +723,7 @@ pub async fn serve(
     registry: Arc<ConnectionRegistry>,
     fallback_capabilities: Arc<dyn CapabilityHandler>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
+    metrics: crate::telemetry::HostApiMetrics,
 ) -> Result<(), HostApiError> {
     let server_config = build_server_config(&cli)?;
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
@@ -548,6 +736,7 @@ pub async fn serve(
         memory_mb: 64,
         max_concurrent_calls: 32,
     };
+    let heartbeat_interval = cli.heartbeat_interval();
 
     loop {
         tokio::select! {
@@ -560,20 +749,58 @@ pub async fn serve(
                         continue;
                     }
                 };
+                // TCP keepalive (fix/executor-link-heartbeat, alpha
+                // 2026-10-02 incident): the application-level `ping`/`pong`
+                // heartbeat above is the primary detection mechanism, but
+                // OS-level keepalive is cheap defense in depth against the
+                // same class of half-open-socket failure for the window
+                // before the first heartbeat round trip completes. A
+                // failure to set it is logged, never fatal to accepting the
+                // connection.
+                if let Err(e) = SockRef::from(&tcp).set_tcp_keepalive(
+                    &TcpKeepalive::new()
+                        .with_time(heartbeat_interval)
+                        .with_interval(heartbeat_interval),
+                ) {
+                    warn!(%peer, error = %e, "host-api: failed to set TCP keepalive on accepted socket");
+                }
                 let acceptor = acceptor.clone();
                 let registry = Arc::clone(&registry);
                 let fallback_capabilities = Arc::clone(&fallback_capabilities);
                 let stage_name = "svc-process".to_string();
                 let expected_gvisor = cli.sandbox_gvisor;
                 let limits = limits.clone();
+                let metrics = metrics.clone();
                 tokio::spawn(async move {
                     match accept_and_handshake(tcp, &acceptor, &stage_name, limits, expected_gvisor, fallback_capabilities).await {
                         Ok((connection, read_loop)) => {
-                            debug!(%peer, "host-api connection established");
-                            registry.set_active(connection);
-                            if let Err(e) = read_loop.await {
-                                warn!(%peer, error = %e, "host-api connection closed");
+                            info!(%peer, "host-api connection established with executor {peer}");
+                            registry.set_active(Arc::clone(&connection));
+                            metrics.connected_executors.set(1);
+                            let heartbeat = run_heartbeat(
+                                Arc::clone(&connection),
+                                peer,
+                                heartbeat_interval,
+                                metrics.clone(),
+                            );
+                            tokio::pin!(read_loop);
+                            tokio::pin!(heartbeat);
+                            tokio::select! {
+                                res = &mut read_loop => {
+                                    if let Err(e) = res {
+                                        warn!(%peer, error = %e, "host-api connection closed");
+                                    }
+                                }
+                                _ = &mut heartbeat => {
+                                    warn!(%peer, "host-api connection dropped by heartbeat supervisor");
+                                }
                             }
+                            // Re-derive from the registry rather than
+                            // unconditionally zeroing: a newer connection
+                            // may already have replaced this one as
+                            // `active` by the time this task's select
+                            // resolves.
+                            metrics.connected_executors.set(registry.active().is_some() as i64);
                         }
                         Err(e) => warn!(%peer, error = %e, "host-api handshake failed"),
                     }
@@ -1050,6 +1277,190 @@ mod tests {
         assert!(registry.active().is_none());
     }
 
+    #[test]
+    fn connection_registry_duration_without_executor_grows_while_none_is_active() {
+        let registry = ConnectionRegistry::new();
+        // The first call establishes `zero_since` (the clock starts at the
+        // first observation, not at construction) -- a tiny, near-zero
+        // duration.
+        let first = registry.duration_without_executor();
+        assert!(first < Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(20));
+        let second = registry.duration_without_executor();
+        assert!(second > first);
+    }
+
+    #[tokio::test]
+    async fn connection_registry_resets_duration_once_an_executor_connects() {
+        let registry = ConnectionRegistry::new();
+        let _ = registry.duration_without_executor(); // establish zero_since
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(registry.duration_without_executor() > Duration::ZERO);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        registry.set_active(Connection::new(tx, Arc::new(DenyAllCapabilities)));
+        assert_eq!(registry.duration_without_executor(), Duration::ZERO);
+    }
+
+    #[test]
+    fn connection_registry_dead_letter_metric_is_a_noop_until_wired() {
+        // Must never panic: most tests build a bare `ConnectionRegistry::
+        // new()` without ever calling `set_dead_letter_metric`.
+        let registry = ConnectionRegistry::new();
+        registry.record_dead_letter_no_executor();
+    }
+
+    #[test]
+    fn connection_registry_dead_letter_metric_increments_once_wired() {
+        let registry = ConnectionRegistry::new();
+        let metrics = crate::telemetry::register_host_api_metrics(&prometheus::Registry::new());
+        registry.set_dead_letter_metric(metrics.dead_lettered_no_executor_total.clone());
+        registry.record_dead_letter_no_executor();
+        registry.record_dead_letter_no_executor();
+        assert_eq!(metrics.dead_lettered_no_executor_total.get(), 2);
+    }
+
+    /// `Message::Ping` sent by the executor (not just the stage-initiated
+    /// heartbeat) must be answered with `Pong`, not treated as the fatal
+    /// "unexpected frame" every other unhandled kind is -- a separate,
+    /// independent-branch change may give the executor its own heartbeat
+    /// that pings first.
+    #[tokio::test]
+    async fn stage_replies_pong_to_an_executor_initiated_ping() {
+        let (stage_io, mut executor_io) = tokio::io::duplex(4096);
+        let executor = tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(1, Message::Hello(hello_body("runc"))),
+            )
+            .await
+            .unwrap();
+            read_frame(&mut executor_io).await.unwrap(); // hello-ok
+            write_frame(&mut executor_io, &Frame::new(42, Message::Ping))
+                .await
+                .unwrap();
+            let pong = read_frame(&mut executor_io).await.unwrap();
+            assert!(matches!(pong.message, Message::Pong));
+            assert_eq!(pong.id, 42);
+        });
+        let (_connection, read_loop) = run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-process".to_string(),
+                protocol_version: 1,
+                limits: test_limits(),
+            },
+            false,
+            Arc::new(DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        let read_loop_handle = tokio::spawn(read_loop);
+        executor.await.expect("executor task");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), read_loop_handle).await;
+    }
+
+    /// `Connection::ping` succeeds end to end when the peer actually
+    /// answers `pong`.
+    #[tokio::test]
+    async fn connection_ping_succeeds_when_peer_replies_pong() {
+        let (stage_io, mut executor_io) = tokio::io::duplex(4096);
+        let executor = tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(1, Message::Hello(hello_body("runc"))),
+            )
+            .await
+            .unwrap();
+            read_frame(&mut executor_io).await.unwrap(); // hello-ok
+            let ping = read_frame(&mut executor_io).await.unwrap();
+            assert!(matches!(ping.message, Message::Ping));
+            write_frame(&mut executor_io, &Frame::new(ping.id, Message::Pong))
+                .await
+                .unwrap();
+        });
+        let (connection, read_loop) = run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-process".to_string(),
+                protocol_version: 1,
+                limits: test_limits(),
+            },
+            false,
+            Arc::new(DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+        connection
+            .ping(Duration::from_secs(2))
+            .await
+            .expect("ping succeeds when the peer replies pong");
+        executor.await.expect("executor task");
+    }
+
+    /// **regression: executor stuck on terminated svc pod after rollout
+    /// (alpha 2026-10-02).** A session whose peer goes silent after the
+    /// handshake (the same shape a half-open socket takes: frames queue,
+    /// nobody ever replies) must be dropped by [`run_heartbeat`] after
+    /// [`HEARTBEAT_MISSED_LIMIT`] consecutive missed heartbeats, marking
+    /// the connection closed and incrementing `host_api_heartbeat_
+    /// timeouts_total` -- loudly, not silently left "connected" forever.
+    #[tokio::test]
+    async fn run_heartbeat_drops_a_silent_session_after_missed_limit() {
+        let (stage_io, mut executor_io) = tokio::io::duplex(4096);
+        // Drives the handshake CONCURRENTLY with `run_connection` below
+        // (not inline, sequentially) -- awaiting the executor's own
+        // `hello`/`hello-ok` exchange before `run_connection` has even
+        // been called would deadlock: nothing would be reading `stage_io`
+        // yet to produce the `hello-ok` this task waits on.
+        let executor = tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(1, Message::Hello(hello_body("runc"))),
+            )
+            .await
+            .unwrap();
+            let hello_ok = read_frame(&mut executor_io).await.unwrap();
+            assert!(matches!(hello_ok.message, Message::HelloOk(_)));
+            // Goes silent from here on -- it never answers any `ping` the
+            // heartbeat supervisor sends, exactly like a half-open socket
+            // pointed at a terminated pod. Keeps `executor_io` alive
+            // (never dropped) for the rest of the test so the pipe stays
+            // open rather than EOF-ing the read loop.
+            std::future::pending::<()>().await;
+        });
+
+        let (connection, read_loop) = run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-process".to_string(),
+                protocol_version: 1,
+                limits: test_limits(),
+            },
+            false,
+            Arc::new(DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let metrics = crate::telemetry::register_host_api_metrics(&prometheus::Registry::new());
+        let peer: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        // Short interval so the test doesn't wait on the 5s production
+        // default three times over.
+        run_heartbeat(
+            Arc::clone(&connection),
+            peer,
+            Duration::from_millis(50),
+            metrics.clone(),
+        )
+        .await;
+
+        assert!(connection.is_closed());
+        assert_eq!(metrics.heartbeat_timeouts_total.get(), 1);
+        executor.abort();
+    }
+
     fn write_temp_pem(contents: &str, label: &str) -> std::path::PathBuf {
         use std::io::Write;
         let path = std::env::temp_dir().join(format!(
@@ -1272,6 +1683,7 @@ mod tests {
             Arc::clone(&registry),
             Arc::new(DenyAllCapabilities),
             shutdown_rx,
+            crate::telemetry::register_host_api_metrics(&prometheus::Registry::new()),
         ));
 
         // Give the listener a moment to bind before dialing it.

@@ -34,17 +34,30 @@ pub struct AppState {
     /// `true` once the action-stage dispatch loop
     /// (`crate::lib::try_start_dispatch`) is connected and actively
     /// reading -- defaults `true` (nothing to wait for) when
-    /// `ACTION_APP_ID` is unset. Backs `GET /readyz`.
-    /// regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+    /// `ACTION_APP_ID` is unset. Backs `GET /readyz` (combined with
+    /// `connections` below: readiness is loop-running AND
+    /// executor-connected). regression: drain loop exited on NOGROUP
+    /// (alpha 2026-10-02)
     pub consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
+    /// Fix/executor-link-heartbeat: `/health`/`/healthz`/`/readyz` read this
+    /// directly so liveness/readiness reflect whether an executor session is
+    /// actually live, not just "the HTTP server is answering" -- the alpha
+    /// 2026-10-02 incident this exists to catch left every pod
+    /// `Running`/`Ready` while silently dead-lettering everything.
+    pub connections: Arc<crate::host_api::ConnectionRegistry>,
 }
 
 impl AppState {
-    /// Builds the shared application state from a loaded [`Config`] and the
-    /// Prometheus [`prometheus::Registry`] created during telemetry init.
-    /// Registers this service's base request metrics against `metrics` --
-    /// see [`crate::telemetry::register_request_metrics`].
-    pub fn new(config: Config, metrics: prometheus::Registry) -> Self {
+    /// Builds the shared application state from a loaded [`Config`], the
+    /// Prometheus [`prometheus::Registry`] created during telemetry init,
+    /// and the host-API [`crate::host_api::ConnectionRegistry`]. Registers
+    /// this service's base request metrics against `metrics` -- see
+    /// [`crate::telemetry::register_request_metrics`].
+    pub fn new(
+        config: Config,
+        metrics: prometheus::Registry,
+        connections: Arc<crate::host_api::ConnectionRegistry>,
+    ) -> Self {
         let request_metrics = crate::telemetry::register_request_metrics(&metrics);
         Self {
             config: Arc::new(config),
@@ -52,6 +65,7 @@ impl AppState {
             request_metrics,
             started_at: Instant::now(),
             consumer_loop_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            connections,
         }
     }
 }
@@ -124,7 +138,11 @@ mod tests {
             discord_bot_token: None,
             db_reader_password: None,
         };
-        AppState::new(config, prometheus::Registry::new())
+        AppState::new(
+            config,
+            prometheus::Registry::new(),
+            Arc::new(crate::host_api::ConnectionRegistry::new()),
+        )
     }
 
     /// Drives a request through the full `router()` (middleware included)
@@ -133,6 +151,12 @@ mod tests {
     /// tests for the handler-level coverage.
     #[tokio::test]
     async fn router_serves_healthz_and_records_metrics() {
+        // regression: executor stuck on terminated svc pod after rollout
+        // (alpha 2026-10-02) -- `/healthz` is readiness and must be 503
+        // with zero executor sessions, not a bare 200; see `http::health`'s
+        // own transition tests for the full before/after coverage. The
+        // metrics-recording assertion below holds regardless of status
+        // code.
         let state = test_state();
         let response = router(state.clone())
             .oneshot(
@@ -143,7 +167,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         // The middleware recorded exactly this request into the shared
         // Prometheus registry.
         let rendered = crate::telemetry::render_metrics(&state.metrics).unwrap();

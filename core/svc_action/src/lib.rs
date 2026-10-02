@@ -170,9 +170,9 @@ where
     let changelog_consumer_metrics = telemetry::register_changelog_consumer_metrics(&prom_registry);
     // regression: drain loop exited on NOGROUP (alpha 2026-10-02)
     let drain_loop_metrics = telemetry::register_drain_loop_metrics(&prom_registry);
-
-    let state = http::AppState::new(config.clone(), prom_registry);
-    let consumer_loop_ready = Arc::clone(&state.consumer_loop_ready);
+    // fix/executor-link-heartbeat: `host_api_connected_executors`/
+    // `host_api_heartbeat_timeouts_total`/`dispatch_dead_lettered_no_executor_total`.
+    let host_api_metrics = telemetry::register_host_api_metrics(&prom_registry);
 
     let connections = try_start_host_api(
         &config.cli,
@@ -182,7 +182,11 @@ where
         Arc::clone(&kv_capabilities),
         egress_denied_total,
         license.clone(),
+        host_api_metrics,
     );
+
+    let state = http::AppState::new(config.clone(), prom_registry, Arc::clone(&connections));
+    let consumer_loop_ready = Arc::clone(&state.consumer_loop_ready);
     // Both bundle-selection sources run unconditionally, gated
     // independently (this module's top doc, dataplane scale design rev 4):
     // the legacy `ACTION_BUNDLE_*` env override never gates on the
@@ -467,6 +471,7 @@ async fn build_stage_capabilities(
 /// HTTP/metrics servers served alongside it -- the same graceful-
 /// degradation contract `core/svc_process`'s `try_start_spine_drain`
 /// applies to its own optional dependency.
+#[allow(clippy::too_many_arguments)]
 fn try_start_host_api(
     cli: &config::CliConfig,
     discord_bot_token: Option<config::Secret>,
@@ -475,8 +480,10 @@ fn try_start_host_api(
     kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     egress_denied_total: prometheus::IntCounterVec,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
+    metrics: telemetry::HostApiMetrics,
 ) -> Arc<host_api::ConnectionRegistry> {
     let registry = Arc::new(host_api::ConnectionRegistry::new());
+    registry.set_dead_letter_metric(metrics.dead_lettered_no_executor_total.clone());
     let cli = cli.clone();
     let registry_for_task = Arc::clone(&registry);
     tokio::spawn(async move {
@@ -496,7 +503,9 @@ fn try_start_host_api(
         )
         .await
         .unwrap_or_else(|| Arc::new(capabilities::DenyAllCapabilities));
-        if let Err(err) = host_api::serve(cli, registry_for_task, capabilities, shutdown_rx).await {
+        if let Err(err) =
+            host_api::serve(cli, registry_for_task, capabilities, shutdown_rx, metrics).await
+        {
             tracing::warn!(error = %err, "host-api listener unavailable; executor integration disabled");
         }
     });

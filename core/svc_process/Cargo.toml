@@ -62,6 +62,12 @@ path = "src/main.rs"
 # or `cargo deny check` fails closed on `unknown-git` (see that file).
 [dependencies]
 tokio = { version = "=1.53.1", features = ["full"] }
+# Host-API acceptor TCP keepalive (fix/executor-link-heartbeat, alpha
+# 2026-10-02 incident: a rolled svc pod left the executor's socket
+# half-open with no OS-level signal) -- already resolves to this exact
+# version transitively (tokio/rustls), pinned directly here so
+# `SockRef::set_tcp_keepalive` is available without bumping anything else.
+socket2 = { version = "=0.6.5", features = ["all"] }
 axum = "=0.8.9"
 tower = { version = "=0.5.3", features = ["util"] }
 tower-http = { version = "=0.7.1", features = ["trace", "cors"] }

@@ -102,6 +102,30 @@ fn platform_event_from_wire(wire: &serde_json::Value) -> Result<PlatformEvent, I
         .map_err(|e| InvokeError::MalformedPayload(format!("invalid platform-event: {e}")))
 }
 
+// regression: action envelope dropped event.source so discord relay had no origin channel (alpha 2026-10-02)
+/// Overwrites `event_out.source` with `inbound`'s own `event.source` --
+/// `source` identifies which inbound connection produced this entry
+/// (platform/account/channel) and is the ONLY place `svc_action::dispatch::
+/// invoke_dispatch` derives `origin_channel_id` from (host-controlled by
+/// design, never bundle-chosen -- see that function's doc and
+/// `svc_action::capabilities::handle_discord_relay`'s "the channel is never
+/// the bundle's to name"). `platform_event_from_wire` already hardcodes
+/// `source: null` on every bundle reply (its own doc: "never populated from
+/// bundle output"), so `event_out.source` reaching here is always `None` on
+/// the real invoke path today -- this is still the single place
+/// `handle_delivered` builds the next-stage envelope, so it unconditionally
+/// REPLACES whatever `event_out.source` holds (never merges, never trusts
+/// it) rather than relying solely on the wire layer -- defense in depth
+/// against a future wire-format change or a non-wire (builtin/synthetic)
+/// caller ever populating it. Before this fix `event_out.source` (always
+/// `None`) was carried straight onto the action envelope unchanged, so
+/// every Discord relay's origin channel was `None` and `svc_action` denied
+/// it with "discord relay requires an origin channel id" (a denial
+/// `svc_action` never logs).
+fn carry_inbound_source(event_out: &mut PlatformEvent, inbound: &PlatformEvent) {
+    event_out.source = inbound.source.clone();
+}
+
 /// Errors invoking the bundle's `transform` export over the host-API
 /// connection -- distinct from the bundle's own `result<option<
 /// platform-event>, unsupported-stage>` business-level return, which
@@ -541,7 +565,23 @@ async fn handle_delivered<S: SpineOps>(
     }
 
     let Some(connection) = deps.connections.active() else {
-        tracing::warn!(app_id = %deps.app_id, "no executor connection available, dead-lettering for redelivery");
+        // Escalated WARN -> ERROR (fix/executor-link-heartbeat, alpha
+        // 2026-10-02 incident: svc-process/svc-action were rolled and each
+        // bundle-executor stayed bound to its old, terminated pod; the new
+        // svc-process had zero executors and silently dead-lettered every
+        // `!ping` at WARN -- nobody noticed until a user reported it). The
+        // outage duration is named in the rendered message itself, not
+        // only a structured field, per the "over-log, never swallow
+        // errors" rule.
+        let app_id = &deps.app_id;
+        let no_executor_for_s = deps.connections.duration_without_executor().as_secs();
+        deps.connections.record_dead_letter_no_executor();
+        tracing::error!(
+            app_id = %app_id,
+            no_executor_for_s,
+            "no executor connection available for {no_executor_for_s}s (app_id {app_id}), \
+             dead-lettering for redelivery"
+        );
         let err = DlqError {
             kind: DlqErrorKind::ExecutorUnavailable,
             code: "EXECUTOR_UNAVAILABLE".to_string(),
@@ -680,6 +720,14 @@ async fn handle_delivered<S: SpineOps>(
     };
 
     let mut event_out = event_out;
+    tracing::debug!(
+        app_id = %deps.app_id,
+        platform = d.env.event.source.as_ref().map(|s| s.platform.as_str()).unwrap_or(""),
+        channel_id = d.env.event.source.as_ref().and_then(|s| s.channel_id.as_deref()).unwrap_or(""),
+        "carrying inbound event.source onto action-stage envelope"
+    );
+    carry_inbound_source(&mut event_out, &d.env.event);
+
     let decision = crate::builtins::resolve_cross_app_route(
         &mut event_out.payload,
         &d.env.tenant,
@@ -1052,6 +1100,134 @@ mod tests {
 
     fn test_ring() -> KeyRing {
         KeyRing::new(vec![("k1".to_string(), vec![9u8; 32])])
+    }
+
+    /// Like [`fixture_delivered`] but with a caller-supplied `event.source`
+    /// (`fixture_delivered` hardcodes `source: null`) -- used by the
+    /// `carry_inbound_source`/`handle_delivered` tests below that need a
+    /// real inbound `source` to assert gets carried onto the action
+    /// envelope.
+    fn fixture_delivered_with_source(
+        tenant: &str,
+        community: Option<&str>,
+        ring: &KeyRing,
+        kid: &str,
+        source: serde_json::Value,
+    ) -> Delivered {
+        let mac = penguin_spine::compute_binding_mac(
+            ring,
+            kid,
+            tenant,
+            community,
+            "00000000-0000-0000-0000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+            None,
+        )
+        .unwrap();
+        let community_segment = community.unwrap_or(penguin_spine::TENANT_WIDE_SEGMENT);
+        Delivered {
+            stream: format!("waddles:t:{tenant}:c:{community_segment}:src:discord:guild-A:events"),
+            entry_id: "1234567890-0".to_string(),
+            env: serde_json::from_value(serde_json::json!({
+                "schema_version": 2,
+                "tenant": tenant,
+                "community": community,
+                "app_id": "waddles.bot.commands.default",
+                "stage": "process",
+                "event": {
+                    "platform": "discord",
+                    "event_type": "chat.message",
+                    "actor": "some_user",
+                    "payload": {"text": "!ping"},
+                    "occurred_at": "2026-09-22T00:00:00.000Z",
+                    "source": source
+                },
+                "ts": "2026-09-22T00:00:00.000Z",
+                "target_app_id": null,
+                "workstream_id": "00000000-0000-0000-0000-000000000001",
+                "event_id": "00000000-0000-4000-8000-000000000002",
+                "session_id": null,
+                "trace": null,
+                "binding": {"kid": kid, "mac": mac}
+            }))
+            .unwrap(),
+            deliveries: 1,
+            group: "waddles.bot.commands.default".to_string(),
+        }
+    }
+
+    #[test]
+    // regression: action envelope dropped event.source so discord relay had no origin channel (alpha 2026-10-02)
+    fn carry_inbound_source_populates_a_none_bundle_source_from_the_inbound_envelope() {
+        let inbound = PlatformEvent {
+            platform: "discord".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: Some("some_user".to_string()),
+            payload: serde_json::Map::new(),
+            occurred_at: "2026-09-22T00:00:00.000Z".to_string(),
+            source: Some(penguin_spine::Source {
+                platform: "discord".to_string(),
+                account_id: "bot-123".to_string(),
+                channel_id: Some("origin-channel".to_string()),
+            }),
+        };
+        let mut event_out = PlatformEvent {
+            platform: "discord".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: Some("bot".to_string()),
+            payload: serde_json::from_value(serde_json::json!({"text": "pong"})).unwrap(),
+            occurred_at: "2026-09-22T00:00:01.000Z".to_string(),
+            source: None,
+        };
+
+        carry_inbound_source(&mut event_out, &inbound);
+
+        let source = event_out.source.expect("source carried from inbound");
+        assert_eq!(source.platform, "discord");
+        assert_eq!(source.account_id, "bot-123");
+        assert_eq!(source.channel_id.as_deref(), Some("origin-channel"));
+    }
+
+    #[test]
+    // regression: action envelope dropped event.source so discord relay had no origin channel (alpha 2026-10-02)
+    //
+    // Security property: even if a bundle's `transform` output somehow
+    // carried its OWN `source` (today impossible via the real wire path --
+    // `platform_event_from_wire` hardcodes `source: null` -- but this
+    // proves the host never trusts/merges one if it ever did), the inbound
+    // envelope's `source` unconditionally wins. This is what makes a
+    // bundle unable to pick its own Discord relay origin channel.
+    fn carry_inbound_source_overwrites_a_bundle_supplied_source_with_the_inbound_one() {
+        let inbound = PlatformEvent {
+            platform: "discord".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: Some("some_user".to_string()),
+            payload: serde_json::Map::new(),
+            occurred_at: "2026-09-22T00:00:00.000Z".to_string(),
+            source: Some(penguin_spine::Source {
+                platform: "discord".to_string(),
+                account_id: "bot-123".to_string(),
+                channel_id: Some("real-origin-channel".to_string()),
+            }),
+        };
+        let mut event_out = PlatformEvent {
+            platform: "discord".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: Some("bot".to_string()),
+            payload: serde_json::from_value(serde_json::json!({"text": "pong"})).unwrap(),
+            occurred_at: "2026-09-22T00:00:01.000Z".to_string(),
+            source: Some(penguin_spine::Source {
+                platform: "discord".to_string(),
+                account_id: "attacker-controlled".to_string(),
+                channel_id: Some("attacker-chosen-channel".to_string()),
+            }),
+        };
+
+        carry_inbound_source(&mut event_out, &inbound);
+
+        let source = event_out.source.expect("source present");
+        assert_eq!(source.account_id, "bot-123");
+        assert_eq!(source.channel_id.as_deref(), Some("real-origin-channel"));
     }
 
     #[test]
@@ -1752,6 +1928,59 @@ mod tests {
             appended[0].1.event.payload.get("text"),
             Some(&serde_json::json!("pong"))
         );
+    }
+
+    #[tokio::test]
+    // regression: action envelope dropped event.source so discord relay had no origin channel (alpha 2026-10-02)
+    //
+    // End-to-end version of `carry_inbound_source_populates_a_none_bundle_
+    // source_from_the_inbound_envelope` through the full `handle_delivered`
+    // path: the bundle's `transform` reply carries no `source` (the only
+    // shape possible through the real wire format -- `platform_event_from_
+    // wire` hardcodes it `null`), yet the action envelope `handle_delivered`
+    // appends still carries the INBOUND envelope's own `event.source` --
+    // proving `svc_action::dispatch::invoke_dispatch`'s `origin_channel_id`
+    // derivation (`env.event.source.channel_id`) will see a real channel
+    // for a Discord relay instead of `None`.
+    async fn handle_delivered_reply_carries_the_inbound_event_source_onto_the_action_envelope() {
+        let ring = test_ring();
+        let d = fixture_delivered_with_source(
+            "acme",
+            Some("main"),
+            &ring,
+            "k1",
+            serde_json::json!({
+                "platform": "discord",
+                "account_id": "bot-123",
+                "channel_id": "origin-channel"
+            }),
+        );
+        let reply = wire_platform_event(&PlatformEvent {
+            platform: "discord".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: Some("bot".to_string()),
+            payload: serde_json::from_value(serde_json::json!({"text": "pong"})).unwrap(),
+            occurred_at: "2026-09-22T00:00:01.000Z".to_string(),
+            source: None,
+        })
+        .unwrap();
+        let connections = connected_registry_with_fake_executor(reply).await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        let appended = deps.spine.appended.lock().unwrap();
+        assert_eq!(appended.len(), 1);
+        let source = appended[0]
+            .1
+            .event
+            .source
+            .as_ref()
+            .expect("inbound source carried onto the action envelope");
+        assert_eq!(source.platform, "discord");
+        assert_eq!(source.account_id, "bot-123");
+        assert_eq!(source.channel_id.as_deref(), Some("origin-channel"));
     }
 
     #[tokio::test]

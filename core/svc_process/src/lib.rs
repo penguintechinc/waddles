@@ -129,11 +129,14 @@ where
     let changelog_consumer_metrics = telemetry::register_changelog_consumer_metrics(&prom_registry);
     // regression: drain loop exited on NOGROUP (alpha 2026-10-02)
     let drain_loop_metrics = telemetry::register_drain_loop_metrics(&prom_registry);
+    // fix/executor-link-heartbeat: `host_api_connected_executors`/
+    // `host_api_heartbeat_timeouts_total`/`dispatch_dead_lettered_no_executor_total`.
+    let host_api_metrics = telemetry::register_host_api_metrics(&prom_registry);
 
-    let state = http::AppState::new(config.clone(), prom_registry);
+    let connections = try_start_host_api(&config.cli, host_api_metrics);
+
+    let state = http::AppState::new(config.clone(), prom_registry, Arc::clone(&connections));
     let consumer_loop_ready = Arc::clone(&state.consumer_loop_ready);
-
-    let connections = try_start_host_api(&config.cli);
     // Mutual exclusion, resolved ONCE at startup -- see
     // `resolve_multi_tenant_path_active`'s own doc for why this is not
     // re-evaluated per-tick for this specific dispatch decision (a live
@@ -204,8 +207,12 @@ where
 /// `DenyAllCapabilities`: the real, envelope-scoped capability set is
 /// supplied per-invoke by `crate::spine::handle_delivered` (see
 /// `crate::host_api`'s module doc), never fixed here.
-fn try_start_host_api(cli: &config::CliConfig) -> Arc<host_api::ConnectionRegistry> {
+fn try_start_host_api(
+    cli: &config::CliConfig,
+    metrics: telemetry::HostApiMetrics,
+) -> Arc<host_api::ConnectionRegistry> {
     let registry = Arc::new(host_api::ConnectionRegistry::new());
+    registry.set_dead_letter_metric(metrics.dead_lettered_no_executor_total.clone());
     let cli = cli.clone();
     let registry_for_task = Arc::clone(&registry);
     tokio::spawn(async move {
@@ -216,8 +223,14 @@ fn try_start_host_api(cli: &config::CliConfig) -> Arc<host_api::ConnectionRegist
         });
         let fallback_capabilities: Arc<dyn capabilities::CapabilityHandler> =
             Arc::new(capabilities::DenyAllCapabilities);
-        if let Err(err) =
-            host_api::serve(cli, registry_for_task, fallback_capabilities, shutdown_rx).await
+        if let Err(err) = host_api::serve(
+            cli,
+            registry_for_task,
+            fallback_capabilities,
+            shutdown_rx,
+            metrics,
+        )
+        .await
         {
             tracing::warn!(error = %err, "host-api listener unavailable; executor integration disabled");
         }
@@ -1562,7 +1575,10 @@ mod tests {
         // (`HostApiError::Config`) and logs a warning; this call must
         // still return the registry immediately either way.
         let cli = CliConfig::parse_from(["svc-process"]);
-        let registry = try_start_host_api(&cli);
+        let registry = try_start_host_api(
+            &cli,
+            telemetry::register_host_api_metrics(&prometheus::Registry::new()),
+        );
         assert!(registry.active().is_none());
     }
 
@@ -1585,7 +1601,11 @@ mod tests {
             envelope_binding_keys: None,
             db_reader_password: None,
         };
-        let state = crate::http::AppState::new(config, prometheus::Registry::new());
+        let state = crate::http::AppState::new(
+            config,
+            prometheus::Registry::new(),
+            Arc::new(host_api::ConnectionRegistry::new()),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
