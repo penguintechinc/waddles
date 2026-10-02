@@ -155,6 +155,7 @@ async fn connect_and_serve<S: ComponentSource>(
         cfg: heartbeat_cfg,
         metrics: heartbeat_metrics,
         probe_file: probe_file.clone(),
+        probe_grace: std::time::Duration::from_secs(cfg.executor_grace_secs),
         on_connected: Some(Box::new(move || {
             if let Some(since) = disconnected_at {
                 info!(

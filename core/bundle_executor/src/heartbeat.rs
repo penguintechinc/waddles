@@ -11,14 +11,30 @@
 //! if it had.
 //!
 //! This module gives it both: [`ActivityTracker`] records when the last
-//! frame arrived (any kind -- a `load`/`invoke`/`unload`/`ping` all count),
-//! and [`run_monitor`] races that timestamp against the wall clock,
-//! optionally sending this executor's own `ping` to generate traffic on an
-//! otherwise-idle-but-healthy connection, and returns
-//! [`crate::error::ExecutorError::SessionStale`] the moment the connection
-//! goes quiet for too long -- `crate::wire::run_connection` treats that
-//! exactly like any other fatal connection error: drop it, let
+//! frame arrived (any kind -- a `load`/`invoke`/`unload`/`ping` all count)
+//! AND whether the stage has ever sent its OWN `ping` (proof the peer
+//! actually heartbeats), and [`run_monitor`] races the activity timestamp
+//! against the wall clock, optionally sending this executor's own `ping`
+//! to generate traffic on an otherwise-idle-but-healthy connection, and
+//! returns [`crate::error::ExecutorError::SessionStale`] the moment an
+//! ARMED connection goes quiet for too long -- `crate::wire::run_connection`
+//! treats that exactly like any other fatal connection error: drop it, let
 //! `crate::run`'s existing exponential-backoff loop reconnect.
+//!
+//! **Arming (PR #529 review fix):** the frame-activity timeout only
+//! activates once this session has observed at least one stage-originated
+//! `ping`. Before the companion svc-side fix (`fix/executor-link-
+//! heartbeat`) lands, today's stage sends no periodic `ping` at all, so an
+//! idle-but-perfectly-healthy connection (no `load`/`invoke` traffic for a
+//! while) would otherwise look identical to a genuinely stalled one and get
+//! disconnected+reconnected roughly every `STALE_INTERVAL_MULTIPLIER *
+//! HEARTBEAT_INTERVAL` seconds -- constant churn, with in-flight messages
+//! dead-lettered on every reconnect window. Gating on "has the stage ever
+//! heartbeated" means: unarmed, this module relies solely on
+//! `crate::tls::dial_stage`'s TCP keepalive (OS-level, needs no
+//! wire-protocol cooperation); the moment the svc-side fix starts sending
+//! periodic `ping`, this session auto-arms and gets the full frame-level
+//! check too -- no flag flip, no redeploy of this crate required.
 //!
 //! A real half-open socket is *also* caught at the OS level by
 //! `crate::tls::dial_stage`'s TCP keepalive (belt and suspenders: keepalive
@@ -27,13 +43,13 @@
 //! is the second layer, and the one whose timeout is actually tunable per
 //! spec's `HEARTBEAT_INTERVAL`).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use penguin_bundle_host::wire::Message;
 use tokio::time::Instant;
-use tracing::{debug, error};
+use tracing::{debug, error, info, warn};
 
 use crate::config::CliConfig;
 use crate::error::ExecutorError;
@@ -62,14 +78,21 @@ pub const STALE_INTERVAL_MULTIPLIER: u32 = 3;
 #[derive(Debug)]
 pub struct ActivityTracker {
     last_activity: Mutex<Instant>,
+    /// Set once this connection has received a stage-originated `ping` --
+    /// see this module's doc comment on "Arming". Never cleared: once a
+    /// stage proves it heartbeats, this connection's stale-check stays
+    /// armed for the rest of its life.
+    server_ping_seen: AtomicBool,
 }
 
 impl ActivityTracker {
     /// Starts "now" -- a freshly dialed connection hasn't gone silent yet,
-    /// regardless of how long the dial itself took.
+    /// regardless of how long the dial itself took. Unarmed until the
+    /// first stage-originated `ping` arrives.
     pub fn new() -> Self {
         Self {
             last_activity: Mutex::new(Instant::now()),
+            server_ping_seen: AtomicBool::new(false),
         }
     }
 
@@ -81,6 +104,18 @@ impl ActivityTracker {
     /// How long it has been since the last recorded frame.
     pub fn age(&self) -> Duration {
         Instant::now().saturating_duration_since(*lock(&self.last_activity))
+    }
+
+    /// Records that the stage just sent its own `ping` -- proof it
+    /// heartbeats, arming [`run_monitor`]'s stale-frame-activity check.
+    pub fn mark_server_ping_seen(&self) {
+        self.server_ping_seen.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the stale-frame-activity check is armed yet (see this
+    /// module's doc comment on "Arming").
+    pub fn is_armed(&self) -> bool {
+        self.server_ping_seen.load(Ordering::Relaxed)
     }
 }
 
@@ -164,6 +199,12 @@ pub struct Heartbeat {
     pub cfg: HeartbeatConfig,
     pub metrics: Arc<HeartbeatMetrics>,
     pub probe_file: std::path::PathBuf,
+    /// How long a probe-file write may keep failing before `run_monitor`
+    /// escalates its log from WARN to ERROR (`EXECUTOR_GRACE_SECONDS` --
+    /// the same window `--healthcheck=session`'s default max age uses, so
+    /// "the log escalates to ERROR" and "the liveness probe would now be
+    /// failing too" line up).
+    pub probe_grace: Duration,
     /// Fired once, right after the `hello`/`hello-ok` handshake completes
     /// -- `crate::run` uses it to log the connect event (with how long the
     /// prior outage lasted) and to refresh the probe file immediately,
@@ -181,6 +222,7 @@ impl Heartbeat {
             cfg: HeartbeatConfig::disabled(),
             metrics: Arc::new(HeartbeatMetrics::default()),
             probe_file: std::path::PathBuf::from(crate::probe::DEFAULT_PROBE_FILE_PATH),
+            probe_grace: Duration::from_secs(crate::probe::DEFAULT_GRACE_SECS),
             on_connected: None,
         }
     }
@@ -197,8 +239,11 @@ pub async fn run_monitor(
     metrics: Arc<HeartbeatMetrics>,
     peer: String,
     probe_file: std::path::PathBuf,
+    probe_grace: Duration,
 ) -> ExecutorError {
     let stale_after = cfg.interval * STALE_INTERVAL_MULTIPLIER;
+    let mut logged_unarmed_notice = false;
+    let mut probe_failing_since: Option<Instant> = None;
     loop {
         tokio::time::sleep(cfg.interval).await;
 
@@ -220,30 +265,75 @@ pub async fn run_monitor(
             }
         }
 
-        let age = activity.age();
-        if age >= stale_after {
-            metrics.record_heartbeat_timeout();
-            // regression: executor stuck on terminated svc pod after rollout (alpha 2026-10-02)
-            error!(
+        // Arming gate (PR #529 review fix, this module's own doc comment
+        // on "Arming"): only an armed connection -- one that has proven
+        // the stage itself heartbeats -- can be declared stale on frame
+        // silence. Unarmed, TCP keepalive (`crate::tls::dial_stage`) is
+        // this connection's only stall detector; the probe file is still
+        // refreshed below either way (requirement: liveness must not fail
+        // on an idle-but-healthy link).
+        if activity.is_armed() {
+            let age = activity.age();
+            if age >= stale_after {
+                metrics.record_heartbeat_timeout();
+                // regression: executor stuck on terminated svc pod after rollout (alpha 2026-10-02)
+                error!(
+                    peer = %peer,
+                    last_seen_age_secs = age.as_secs(),
+                    stale_after_secs = stale_after.as_secs(),
+                    heartbeat_interval_secs = cfg.interval.as_secs(),
+                    "host-api session stalled: no frame received from the stage within \
+                     the stale threshold -- dropping this connection and reconnecting"
+                );
+                return ExecutorError::SessionStale {
+                    peer,
+                    age_secs: age.as_secs(),
+                };
+            }
+            debug!(peer = %peer, last_seen_age_secs = age.as_secs(), "host-api session heartbeat OK");
+        } else if !logged_unarmed_notice {
+            logged_unarmed_notice = true;
+            info!(
                 peer = %peer,
-                last_seen_age_secs = age.as_secs(),
-                stale_after_secs = stale_after.as_secs(),
-                heartbeat_interval_secs = cfg.interval.as_secs(),
-                "host-api session stalled: no frame received from the stage within \
-                 the stale threshold -- dropping this connection and reconnecting"
+                "stage does not heartbeat; stale detection relies on TCP keepalive"
             );
-            return ExecutorError::SessionStale {
-                peer,
-                age_secs: age.as_secs(),
-            };
         }
 
-        debug!(peer = %peer, last_seen_age_secs = age.as_secs(), "host-api session heartbeat OK");
-        if let Err(e) = crate::probe::touch(&probe_file) {
-            // Never fatal to the connection -- a probe-file write failure
-            // (e.g. a misconfigured read-only mount) should surface loudly
-            // in logs, not tear down an otherwise-healthy session.
-            debug!(peer = %peer, error = %e, probe_file = ?probe_file, "failed to refresh liveness probe file");
+        // Always refreshed while this loop is still running (i.e. the TCP
+        // connection is up), armed or not -- an idle-but-healthy link must
+        // never fail liveness just because the stale-frame-activity check
+        // hasn't armed yet.
+        match crate::probe::touch(&probe_file) {
+            Ok(()) => {
+                probe_failing_since = None;
+            }
+            Err(e) => {
+                // Loud by design (user rule: failures must be loud) -- a
+                // misconfigured mount silently degrading to WARN forever
+                // would eventually cause a liveness restart with nothing
+                // in the logs to explain it.
+                let since = *probe_failing_since.get_or_insert(Instant::now());
+                let elapsed = since.elapsed();
+                if elapsed >= probe_grace {
+                    error!(
+                        peer = %peer,
+                        error = %e,
+                        probe_file = ?probe_file,
+                        failing_for_secs = elapsed.as_secs(),
+                        grace_secs = probe_grace.as_secs(),
+                        "liveness probe file has failed to refresh past its grace period -- \
+                         a liveness restart may follow with no other explanation"
+                    );
+                } else {
+                    warn!(
+                        peer = %peer,
+                        error = %e,
+                        probe_file = ?probe_file,
+                        failing_for_secs = elapsed.as_secs(),
+                        "failed to refresh liveness probe file"
+                    );
+                }
+            }
         }
     }
 }
