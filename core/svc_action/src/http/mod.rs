@@ -151,12 +151,12 @@ mod tests {
     /// tests for the handler-level coverage.
     #[tokio::test]
     async fn router_serves_healthz_and_records_metrics() {
-        // regression: executor stuck on terminated svc pod after rollout
-        // (alpha 2026-10-02) -- `/healthz` is readiness and must be 503
-        // with zero executor sessions, not a bare 200; see `http::health`'s
-        // own transition tests for the full before/after coverage. The
-        // metrics-recording assertion below holds regardless of status
-        // code.
+        // regression: readiness gated on executor connection deadlocked
+        // rollouts (alpha 2026-10-02) -- `/healthz` (the container-level
+        // `--healthcheck` probe target) must stay `ok` with zero executor
+        // sessions; see `http::health`'s own transition tests for the full
+        // before/after coverage. The metrics-recording assertion below
+        // holds regardless of status code.
         let state = test_state();
         let response = router(state.clone())
             .oneshot(
@@ -167,7 +167,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status(), StatusCode::OK);
         // The middleware recorded exactly this request into the shared
         // Prometheus registry.
         let rendered = crate::telemetry::render_metrics(&state.metrics).unwrap();

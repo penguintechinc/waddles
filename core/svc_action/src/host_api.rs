@@ -677,6 +677,45 @@ impl ConnectionRegistry {
     }
 }
 
+/// Fixed cadence for [`run_zero_executor_watchdog`]'s periodic ERROR log --
+/// independent of `EXECUTOR_GRACE_SECONDS` (the outage threshold), which is
+/// configurable.
+const ZERO_EXECUTOR_WATCHDOG_PERIOD: Duration = Duration::from_secs(60);
+
+/// Logs loudly, on a fixed cadence (`period`), while the executor link has
+/// been down longer than `grace` -- regression: readiness gated on
+/// executor connection deadlocked rollouts (alpha 2026-10-02). Distinct
+/// from `crate::dispatch::handle_delivered`'s per-message dead-letter ERROR
+/// log: that one only fires when work is actually waiting to dispatch, so
+/// an idle stage with zero executors and nothing queued would otherwise go
+/// unlogged indefinitely. Runs for the lifetime of the process -- like
+/// `run_heartbeat`, it is not wired to `shutdown` and simply stops when the
+/// runtime does. `period` is a parameter (production wiring always passes
+/// [`ZERO_EXECUTOR_WATCHDOG_PERIOD`]) purely so tests can use a short tick
+/// instead of waiting out the real 60s cadence.
+pub async fn run_zero_executor_watchdog(
+    registry: Arc<ConnectionRegistry>,
+    grace: Duration,
+    period: Duration,
+) {
+    let mut interval = tokio::time::interval(period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        let outage = registry.duration_without_executor();
+        if outage >= grace {
+            let outage_s = outage.as_secs();
+            let grace_s = grace.as_secs();
+            tracing::error!(
+                no_executor_for_s = outage_s,
+                grace_s,
+                "no executor connection for {outage_s}s, past the {grace_s}s grace period -- \
+                 dispatch is dead-lettering all work for redelivery"
+            );
+        }
+    }
+}
+
 /// Binds `cli.host_api_port`, accepts connections in a loop, and registers
 /// each successfully-handshaken one as [`ConnectionRegistry`]'s active
 /// connection -- the production entry point `crate::lib::try_start_host_api`
@@ -703,6 +742,11 @@ pub async fn serve(
         max_concurrent_calls: 32,
     };
     let heartbeat_interval = cli.heartbeat_interval();
+    tokio::spawn(run_zero_executor_watchdog(
+        Arc::clone(&registry),
+        cli.executor_grace(),
+        ZERO_EXECUTOR_WATCHDOG_PERIOD,
+    ));
 
     loop {
         tokio::select! {
@@ -1722,6 +1766,75 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         registry.set_active(Connection::new(tx));
         assert_eq!(registry.duration_without_executor(), Duration::ZERO);
+    }
+
+    /// Minimal `tracing::Subscriber` that counts `ERROR`-level events --
+    /// just enough to assert [`run_zero_executor_watchdog`] actually logs,
+    /// without pulling in a test-only tracing-capture crate.
+    struct ErrorCountingSubscriber(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl tracing::Subscriber for ErrorCountingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() == tracing::Level::ERROR {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    // regression: readiness gated on executor connection deadlocked
+    // rollouts (alpha 2026-10-02) -- the periodic watchdog is the loud
+    // signal operators get for an idle stage sitting with zero executors
+    // past the grace period (item 3 of the fix: readiness/liveness no
+    // longer gate on executor presence, so this is the replacement
+    // visibility mechanism).
+    #[tokio::test]
+    async fn zero_executor_watchdog_logs_error_once_past_the_grace_period() {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _guard = tracing::subscriber::set_default(ErrorCountingSubscriber(Arc::clone(&count)));
+
+        let registry = Arc::new(ConnectionRegistry::new());
+        assert!(registry.active().is_none()); // establishes `zero_since`
+
+        let watchdog = tokio::spawn(run_zero_executor_watchdog(
+            Arc::clone(&registry),
+            Duration::from_millis(15),
+            Duration::from_millis(10),
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        watchdog.abort();
+
+        assert!(count.load(Ordering::SeqCst) >= 1);
+    }
+
+    /// The watchdog must stay silent while an executor is connected -- it
+    /// must never fire on a transient/healthy state.
+    #[tokio::test]
+    async fn zero_executor_watchdog_stays_silent_while_executor_connected() {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _guard = tracing::subscriber::set_default(ErrorCountingSubscriber(Arc::clone(&count)));
+
+        let registry = Arc::new(ConnectionRegistry::new());
+        registry.set_active(test_connection());
+
+        let watchdog = tokio::spawn(run_zero_executor_watchdog(
+            Arc::clone(&registry),
+            Duration::from_millis(5),
+            Duration::from_millis(10),
+        ));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        watchdog.abort();
+
+        assert_eq!(count.load(Ordering::SeqCst), 0);
     }
 
     #[test]

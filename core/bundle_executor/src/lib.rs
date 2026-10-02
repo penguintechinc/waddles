@@ -54,11 +54,80 @@ use crate::invoke::{ComponentSource, Executor};
 /// fallback).
 pub const SERVICE_NAME: &str = "bundle-executor";
 
+/// A tiny, dependency-free xorshift64* PRNG for jittering `crate::run`'s
+/// host-api reconnect backoff -- regression: readiness gated on executor
+/// connection deadlocked rollouts (alpha 2026-10-02): without jitter,
+/// every executor replica that lost its connection when a svc pod was
+/// replaced reconnects on the exact same exponential schedule, producing a
+/// thundering herd against the replacement pod the instant it comes up.
+/// Cryptographic randomness is not required -- jitter only needs to avoid
+/// a thundering herd, not resist an adversary -- so this mirrors
+/// `core/svc_action/src/retry.rs::Jitter` (same rationale: avoid adding a
+/// `rand` dependency to a crate that otherwise pins tightly) rather than
+/// pulling in a new crate.
+struct Jitter(std::sync::atomic::AtomicU64);
+
+impl Jitter {
+    /// Seeds from a mix of wall-clock nanos and this process's PID. Never
+    /// zero (xorshift's one fixed point) -- falls back to a fixed odd
+    /// constant if the clock read is exactly zero.
+    fn from_entropy() -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let seed = nanos ^ (u64::from(std::process::id()) << 32) ^ 0x9E37_79B9_7F4A_7C15;
+        Self(std::sync::atomic::AtomicU64::new(if seed == 0 {
+            0xDEAD_BEEF_CAFE_F00D
+        } else {
+            seed
+        }))
+    }
+
+    /// Deterministic constructor for tests.
+    #[cfg(test)]
+    fn seeded(seed: u64) -> Self {
+        Self(std::sync::atomic::AtomicU64::new(if seed == 0 {
+            1
+        } else {
+            seed
+        }))
+    }
+
+    fn next_u64(&self) -> u64 {
+        let mut x = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0.store(x, std::sync::atomic::Ordering::Relaxed);
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// Pseudo-random value in `0..=max` inclusive (`max = 0` always `0`).
+    fn uniform(&self, max: u64) -> u64 {
+        if max == 0 {
+            0
+        } else {
+            self.next_u64() % (max + 1)
+        }
+    }
+}
+
+/// Half-jitter applied to the reconnect backoff: `base/2 +
+/// uniform(0..=base/2)`. Keeps the exponential schedule's growth shape
+/// (so the backoff still ramps up on repeated failures) while randomizing
+/// enough across concurrently-reconnecting executor replicas to break a
+/// thundering herd.
+fn jittered_backoff(jitter: &Jitter, base: std::time::Duration) -> std::time::Duration {
+    let half_ms = u64::try_from(base.as_millis()).unwrap_or(u64::MAX) / 2;
+    std::time::Duration::from_millis(half_ms + jitter.uniform(half_ms))
+}
+
 /// Runs the executor: loads config, bootstraps telemetry, then dials the
 /// stage and services connections until the process is asked to stop.
-/// Reconnects with exponential backoff on any connection failure (spec
-/// SS4.5) rather than exiting -- a stage restart or network blip is not
-/// fatal.
+/// Reconnects with jittered exponential backoff (see [`jittered_backoff`])
+/// on any connection failure (spec SS4.5) rather than exiting -- a stage
+/// restart or network blip is not fatal.
 pub async fn run() -> Result<(), ExecutorError> {
     let cfg = <CliConfig as clap::Parser>::parse();
     cfg.validate()?;
@@ -89,6 +158,7 @@ pub async fn run() -> Result<(), ExecutorError> {
     let backoff_cap = std::time::Duration::from_secs(30);
     let mut attempt: u32 = 0;
     let mut disconnected_at: Option<Instant> = None;
+    let jitter = Jitter::from_entropy();
     loop {
         attempt += 1;
         match connect_and_serve(
@@ -106,13 +176,15 @@ pub async fn run() -> Result<(), ExecutorError> {
                 backoff = std::time::Duration::from_secs(1);
             }
             Err(e) => {
+                let sleep_for = jittered_backoff(&jitter, backoff);
                 error!(
                     error = %e,
                     attempt,
                     backoff_s = backoff.as_secs(),
+                    sleep_s = sleep_for.as_secs_f64(),
                     "host-api connection failed, retrying"
                 );
-                tokio::time::sleep(backoff).await;
+                tokio::time::sleep(sleep_for).await;
                 backoff = (backoff * 2).min(backoff_cap);
             }
         }
@@ -278,6 +350,55 @@ mod tests {
         // either way.
         init_telemetry();
         init_telemetry();
+    }
+
+    // regression: readiness gated on executor connection deadlocked
+    // rollouts (alpha 2026-10-02) -- `crate::run`'s reconnect backoff must
+    // be jittered so every executor replica reconnecting to a replaced svc
+    // pod doesn't hit it on the exact same schedule.
+    #[test]
+    fn jittered_backoff_stays_within_the_half_jitter_window() {
+        let jitter = Jitter::seeded(42);
+        let base = std::time::Duration::from_secs(8);
+        for _ in 0..100 {
+            let got = jittered_backoff(&jitter, base);
+            assert!(got >= base / 2, "{got:?} below half-jitter floor");
+            assert!(got <= base, "{got:?} above base ceiling");
+        }
+    }
+
+    #[test]
+    fn jittered_backoff_varies_across_successive_calls() {
+        // A fixed, non-jittered delay would return the exact same value on
+        // every call for a constant `base` -- jitter must actually vary it.
+        let jitter = Jitter::seeded(7);
+        let base = std::time::Duration::from_secs(4);
+        let samples: std::collections::HashSet<_> =
+            (0..20).map(|_| jittered_backoff(&jitter, base)).collect();
+        assert!(
+            samples.len() > 1,
+            "expected varying jittered delays, got a single repeated value"
+        );
+    }
+
+    #[test]
+    fn jittered_backoff_handles_zero_base_without_panicking() {
+        let jitter = Jitter::seeded(1);
+        assert_eq!(
+            jittered_backoff(&jitter, std::time::Duration::ZERO),
+            std::time::Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn jitter_seeded_zero_does_not_get_stuck_at_the_fixed_point() {
+        // xorshift64*'s one fixed point is state == 0; `Jitter::seeded(0)`
+        // must not silently produce an all-zero stream.
+        let jitter = Jitter::seeded(0);
+        let first = jitter.next_u64();
+        let second = jitter.next_u64();
+        assert_ne!(first, 0);
+        assert_ne!(first, second);
     }
 
     fn test_config_for(addr: std::net::SocketAddr) -> CliConfig {

@@ -164,11 +164,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn healthz_route_returns_503_with_no_executor() {
-        // regression: executor stuck on terminated svc pod after rollout
-        // (alpha 2026-10-02) -- readiness must be false the instant zero
-        // executor sessions are live; see `crate::http::health`'s own
-        // transition tests for the full before/after coverage.
+    async fn healthz_route_returns_ok_with_no_executor() {
+        // regression: readiness gated on executor connection deadlocked
+        // rollouts (alpha 2026-10-02) -- readiness must stay `ok` with zero
+        // executor sessions; see `crate::http::health`'s own transition
+        // tests for the full before/after coverage.
         let app = router(test_state());
         let resp = app
             .oneshot(
@@ -179,7 +179,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

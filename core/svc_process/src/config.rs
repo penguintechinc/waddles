@@ -155,12 +155,13 @@ pub struct CliConfig {
     /// dropped after `HEARTBEAT_MISSED_LIMIT` consecutive missed `pong`s.
     #[arg(long, env = "HEARTBEAT_INTERVAL_MS", default_value_t = 5000)]
     pub heartbeat_interval_ms: u64,
-    /// How long `/healthz`/`/health` tolerate zero live executor sessions
-    /// before liveness (not just readiness) fails -- readiness fails
-    /// immediately at zero sessions; liveness only after this grace period,
-    /// so Kubernetes restarts a pod stuck with no executor rather than
-    /// leaving it `Running`/`Ready`-looking forever (the alpha incident:
-    /// every pod showed healthy while silently dead-lettering everything).
+    /// Threshold for `crate::host_api::run_zero_executor_watchdog`'s
+    /// periodic ERROR log: how long zero live executor sessions must
+    /// persist before the watchdog starts logging loudly on its fixed
+    /// cadence. Deliberately NOT wired into `/healthz`/`/health` -- see
+    /// `rules/critical-rules.md` Observability and the regression noted on
+    /// those handlers: readiness gated on executor connection deadlocked
+    /// rollouts (alpha 2026-10-02).
     #[arg(long, env = "EXECUTOR_GRACE_SECONDS", default_value_t = 60)]
     pub executor_grace_seconds: u64,
 
