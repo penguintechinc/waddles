@@ -1,10 +1,16 @@
 # Core-bundle seeder -- post-install/post-upgrade hook Job that activates first-party
 # `waddles.core.*` App Bundles (hub_api/cli/seed_core_bundles.py) under the platform's SYSTEM
-# identity, no human global-admin approval. Runs AFTER templates/migrations-job.yaml (a
-# pre-install/pre-upgrade hook -- Helm always finishes the pre-* hook phase before starting the
-# post-* phase, so 0020-0026's tables are guaranteed to exist here with no explicit weight
-# ordering needed against that other Job) and independently of the hub-api Deployment's own
-# readiness -- this Job talks to Postgres/SeaweedFS/Valkey directly, never hub-api's HTTP API.
+# identity, no human global-admin approval. Runs AFTER templates/migrations-job.yaml, now
+# that both are post-install hooks (2026-10-01 user decision: the schema always comes from
+# that Job, fresh install included) -- ordering between them is by hook-weight within the
+# SAME post-install phase (migrate's SA/Secret at -10, migrate itself at -5,
+# seaweedfs-bucket-init at 1, this Job at 5), not by phase separation: Helm runs a phase's
+# hooks strictly by ascending weight, waiting for each to complete before the next starts,
+# so 0020-0026's tables are guaranteed to exist here. This Job ALSO waits on hub-api's own
+# `/ready` (initContainer below) even though it talks to Postgres/SeaweedFS/Valkey directly,
+# never hub-api's HTTP API -- the wait is for the schema-observation signal hub-api's
+# bootstrap exposes, which only flips true once this Job has already run, giving a second,
+# independent confirmation beyond hook-wait ordering alone.
 {{- if .Values.pipeline.coreBundleSeeder.enabled }}
 apiVersion: batch/v1
 kind: Job

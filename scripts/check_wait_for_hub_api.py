@@ -13,10 +13,15 @@ Exemptions (the only ones that may legitimately skip this initContainer):
   - hub-api itself (templates/hub-api.yaml) -- cannot wait on itself.
   - Infrastructure (Postgres/Valkey/SeaweedFS, templates/infrastructure/*) --
     hub-api depends on these, not the other way around.
-  - The auto-provision-keys and db-migrate Jobs -- both run as Helm hooks
-    strictly BEFORE hub-api's Deployment is even created (pre-install /
-    pre-upgrade), so hub-api cannot be "online" yet when they run; waiting on
-    it would deadlock the release.
+  - The auto-provision-keys and db-migrate Jobs -- db-migrate IS the thing
+    hub-api's own `/ready` waits ON (hub_api/bootstrap.py observes
+    `alembic_version`, never creates/alters it), so waiting on hub-api here
+    would be circular; auto-provision-keys is a pre-install/pre-upgrade hook
+    that always runs before hub-api's Deployment exists. (db-migrate itself
+    is now also post-install, per the 2026-10-01 user decision that the
+    schema always comes from this Job -- but it is still exempt from this
+    initContainer for the same circularity reason, not because of hook
+    timing.)
 
 Fails loudly (never masked) if zero candidate workloads are examined -- a
 scanner pointed at a moved/renamed chart path reporting "0 violations" is not

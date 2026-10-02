@@ -44,6 +44,14 @@ check-helm-hook-phases:
 check-wait-for-hub-api:
 	@python3 scripts/check_wait_for_hub_api.py
 
+# USER DECISION (2026-10-01, fix/chart-fresh-install-hooks): db-migrate now runs
+# post-install -- helm upgrade --install in alpha-deploy.sh must never pass
+# --wait/--atomic, or a fresh install deadlocks (Deployments wait on hub-api,
+# hub-api waits on db-migrate, db-migrate waits on Helm to stop waiting on
+# Deployments). See scripts/check_alpha_deploy_no_wait.py's module docstring.
+check-alpha-deploy-no-wait:
+	@python3 scripts/check_alpha_deploy_no_wait.py
+
 test:
 	@$(MAKE) test-unit
 

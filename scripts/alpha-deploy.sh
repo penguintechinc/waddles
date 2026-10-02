@@ -450,6 +450,22 @@ check_images_in_registry
 # and spire.enabled: false (the spire-auto-enroll post-upgrade hook Job
 # crash-loops on this cluster -- SPIRE server/agent not viable here), so
 # neither needs to be repeated via --set.
+#
+# DELIBERATELY NO --wait/--atomic on HELM_ARGS below (USER DECISION,
+# 2026-10-01, fix/chart-fresh-install-hooks) -- this is load-bearing, not an
+# oversight; do not add either flag here. db-migrate (templates/
+# migrations-job.yaml) now runs post-install, and every one of the 40 other
+# workloads in this chart (including hub-api itself, via its own `/ready`
+# readinessProbe) only becomes Ready AFTER that hook has run. With --wait (or
+# --atomic, which implies it), Helm blocks on every just-created Deployment
+# reaching Ready BEFORE it runs any post-install hook -- so a --wait install
+# would deadlock: Deployments waiting on hub-api, hub-api waiting on
+# db-migrate, db-migrate waiting on Helm to finish waiting on Deployments.
+# Without --wait, Helm creates the Deployment objects (pods scheduled, not
+# required to be Ready) and immediately proceeds to run the post-install hook
+# phase -- Step 3 below does the equivalent waiting explicitly and in the
+# correct order instead (db-migrate Job first, Deployment rollouts after),
+# which is race-free by construction.
 # ---------------------------------------------------------------------------
 helm lint "${HELM_CHART}" -f "${HELM_CHART}/values-alpha.yaml"
 

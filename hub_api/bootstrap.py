@@ -1,33 +1,37 @@
 """hub-api startup schema bootstrap (fix/chart-fresh-install-hooks, alpha 2026-10-01).
 
-Moves fresh-install schema creation out of a Helm pre-install hook (which
-raced the in-chart Postgres Deployment -- a plain/regular resource Helm only
-creates AFTER the entire pre-install hook phase finishes, so the old
-`db-migrate` hook always timed out against a database that did not exist
-yet) and into hub-api's own startup path, where it can actually observe
-Postgres coming up.
+USER DECISION (2026-10-01, supersedes the create_all()+stamp design this module
+originally shipped): the schema ALWAYS comes from the `db-migrate` Helm hook
+Job, fresh install included. `flask_core.models.db.metadata` only declares
+~14-21 of the 100+ tables the full Alembic migration chain creates (see
+`hub_api/tests/test_bootstrap_schema_drift.py`'s git history / this PR's
+description) -- `create_all()` on a fresh database therefore produced an
+incomplete schema, which the very next `helm upgrade` then failed loudly
+against (`run-alembic.sh`'s own required-table check: "migration completed
+with required tables missing: commands, platform_integrations"). This module
+never creates or stamps schema. It only OBSERVES Alembic's `alembic_version`
+table and reports what it sees:
 
-Honors backend-database.md rule #9 ("NO automatic Alembic migrations on
-startup -- manual or K8s Job only; `create_all()` is safe (idempotent)")
-precisely:
+  * No `alembic_version` table yet (truly empty database): logs INFO and
+    reports not-ready. Expected and routine on a fresh install between the
+    Namespace/Deployments being created and the `db-migrate` post-install
+    hook Job completing -- not an error.
+  * `alembic_version` exists but is behind the static revision-graph head:
+    logs ERROR (current vs head) and reports not-ready. An operator action
+    (`helm upgrade`, which fires the `db-migrate` pre-upgrade hook) is
+    required to advance it -- this module never runs a migration itself.
+  * At head: runs this service's idempotent first-run scripts (currently
+    none -- see `_run_first_run_scripts`), then reports ready.
 
-  * Fresh database (no `alembic_version` table yet): create the schema with
-    SQLAlchemy `Base.metadata.create_all()` (idempotent, rule #9 explicitly
-    allows this), then write the `alembic_version` row(s) directly ("stamp
-    head" -- pure bookkeeping, never executes a migration script body).
-  * Database exists but is behind head: NEVER migrated here. That stays the
-    `db-migrate` Helm hook Job's job alone, now `pre-upgrade` only (see
-    templates/migrations-job.yaml). This module only detects "behind" and
-    keeps hub-api's readiness false -- logged as an ERROR with current vs
-    head -- until an operator runs `helm upgrade` (which fires the hook) or
-    the schema otherwise advances.
-  * Database already at head: skip entirely, go ready.
+Either not-ready state is retried forever with capped exponential backoff --
+both are recoverable without a pod restart (the migrate Job finishing;
+an operator running `helm upgrade`), never treated as fatal.
 
-Concurrency: every hub-api replica calls `run_bootstrap_loop()` at startup.
-A Postgres session-level advisory lock (`pg_advisory_lock(BOOTSTRAP_LOCK_KEY)`)
-serializes the fresh-install race -- only one replica ever runs
-create_all()+stamp; the others block on the lock, then observe
-"already at head" once they acquire it in turn.
+Concurrency: every hub-api replica calls `run_bootstrap_loop()` at startup. A
+Postgres session-level advisory lock (`pg_advisory_lock(BOOTSTRAP_LOCK_KEY)`)
+serializes the read-and-maybe-run-first-run-scripts sequence across replicas,
+even though today's `_run_first_run_scripts` is a no-op -- the lock is the
+already-correct home for whatever lands there next.
 
 Deliberately does NOT execute `alembic/env.py` or `alembic.command.*`
 (upgrade/stamp/current): this process already has the REAL `flask_core`
@@ -39,9 +43,9 @@ that inside a long-lived process that already imported the real package
 risks corrupting `sys.modules` out from under every other module. Instead:
 `alembic.script.ScriptDirectory` is used directly (purely static parsing of
 `alembic/versions/*.py` revision graph -- never executes `env.py`) to compute
-the head revision id(s), and both the "current" read and the "stamp" write
-go through plain SQL against `alembic_version`, which is exactly the table
-`alembic stamp head` itself writes.
+the head revision id(s), and the "current" read goes through plain SQL
+against `alembic_version`, the exact table `alembic upgrade`/`alembic stamp`
+themselves maintain.
 """
 
 from __future__ import annotations
@@ -78,6 +82,7 @@ class BootstrapState(StrEnum):
 
     PENDING = "pending"
     WAITING_FOR_DB = "waiting_for_db"
+    WAITING_FOR_MIGRATION = "waiting_for_migration"
     SCHEMA_BEHIND = "schema_behind"
     READY = "ready"
     FAILED = "failed"
@@ -121,28 +126,31 @@ def _current_db_heads(conn: Any) -> tuple[str, ...]:
     return tuple(sorted(rows))
 
 
-def _stamp_heads(conn: Any, heads: tuple[str, ...]) -> None:
-    """Write alembic_version row(s) directly.
+def _run_first_run_scripts(engine: Engine) -> None:
+    """Idempotent, schema-at-head-only first-run steps -- currently none.
 
-    The exact bookkeeping `alembic stamp head` performs for a single-head
-    repo, without executing env.py to get there.
+    Extension point, run once the schema is confirmed at head and while the
+    advisory lock is still held (so a future addition here is automatically
+    serialized across replicas the same way the old create_all()+stamp path
+    was). Nothing lives here today: the admin-seed step
+    (`config/postgres/migrations/081_seed_default_hub_admin.sql`) ships as
+    part of the `db-migrate` Job's own migration chain, which now runs on
+    fresh install too (post-install hook, not just pre-upgrade) per the
+    2026-10-01 user decision -- so there is no longer a gap between "schema
+    exists" and "admin seeded" for this module to fill. Kept as an explicit
+    no-op (not simply omitted) so the next genuinely-idempotent first-run
+    requirement has an obvious, already-locked home instead of being bolted
+    onto `_sync_bootstrap_attempt` directly.
     """
-    conn.execute(
-        text(
-            "CREATE TABLE IF NOT EXISTS alembic_version ("
-            "version_num VARCHAR(32) NOT NULL, "
-            "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
-        )
-    )
-    conn.execute(text("DELETE FROM alembic_version"))
-    for head in heads:
-        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES (:v)"), {"v": head})
+    return
 
 
-def _sync_bootstrap_attempt(
-    engine: Engine, script_location: str, metadata: sqlalchemy.MetaData
-) -> tuple[BootstrapState, str]:
-    """One lock-guarded attempt. Runs on a worker thread (sync SQLAlchemy/psycopg2)."""
+def _sync_bootstrap_attempt(engine: Engine, script_location: str) -> tuple[BootstrapState, str]:
+    """One lock-guarded attempt. Runs on a worker thread (sync SQLAlchemy/psycopg2).
+
+    Never creates or alters schema -- only observes `alembic_version` and
+    reports what it sees. See module docstring for the three outcomes.
+    """
     heads = _script_heads(script_location)
 
     lock_conn = engine.connect()
@@ -153,31 +161,14 @@ def _sync_bootstrap_attempt(
             current = _current_db_heads(probe_conn)
 
         if not current:
-            # KNOWN GAP (fix/chart-fresh-install-hooks, 2026-10-01): metadata here is
-            # flask_core.models.db.metadata, which only carries tables that have a
-            # declared SQLAlchemy model (~14 tables: auth_role/auth_user/communities/
-            # hub_users/video_*/engagement_* -- see libs/flask_core/flask_core/models/).
-            # The majority of the schema (migrations/run-alembic.sh's own required-table
-            # check names `commands`/`platform_integrations`; alembic/versions/0001
-            # replays 96 legacy config/postgres/migrations/*.sql files; ~30 further
-            # Alembic revisions 0002-0030+ run raw `op.execute()` SQL with no
-            # corresponding model) is NOT represented in this metadata object at all.
-            # create_all() therefore does NOT reproduce a full migration-chain schema on
-            # a truly empty database -- see
-            # hub_api/tests/test_bootstrap_schema_drift.py, which asserts this gap
-            # directly against a real Postgres and documents it as a reportable defect
-            # in this design rather than silently shipping an incomplete schema. Flagged
-            # in the PR description; not fixed here (porting 100+ tables' worth of raw
-            # SQL into SQLAlchemy models is out of this fix's scope/budget).
-            with engine.begin() as create_conn:
-                metadata.create_all(bind=create_conn)
-                _stamp_heads(create_conn, heads)
             return (
-                BootstrapState.READY,
-                f"fresh install: schema created via create_all() + stamped head {heads!r}",
+                BootstrapState.WAITING_FOR_MIGRATION,
+                "fresh install: schema not created yet -- waiting for the db-migrate "
+                "Helm hook (post-install) to run `alembic upgrade head`",
             )
 
         if current == heads:
+            _run_first_run_scripts(engine)
             return BootstrapState.READY, f"schema already at head {heads!r}"
 
         return (
@@ -198,26 +189,23 @@ async def run_bootstrap_loop(
     logger: Any,
     *,
     script_location: str = DEFAULT_ALEMBIC_SCRIPT_LOCATION,
-    metadata: sqlalchemy.MetaData | None = None,
     initial_backoff_seconds: float = 1.0,
     max_backoff_seconds: float = 30.0,
 ) -> None:
     """Background task: retries with capped exponential backoff + jitter until READY.
 
-    Never raises/returns on WAITING_FOR_DB or SCHEMA_BEHIND -- both are
-    recoverable without a pod restart (Postgres finishing startup; an
-    operator running the migrate hook) so the loop just keeps polling,
-    DEBUG-logging each wait and ERROR-logging each confirmed "behind"
-    reading. Only an unexpected exception during the fresh-install
-    create_all()/stamp attempt is treated as fatal: logged with a full
-    traceback and re-raised, so the caller can exit non-zero and crashloop
-    visibly rather than serve a half-initialized schema.
+    Never raises/returns on WAITING_FOR_DB, WAITING_FOR_MIGRATION, or
+    SCHEMA_BEHIND -- all three are recoverable without a pod restart
+    (Postgres finishing startup; the db-migrate hook Job completing; an
+    operator running `helm upgrade`), so the loop just keeps polling.
+    WAITING_FOR_MIGRATION is routine on every fresh install (logged at INFO,
+    never ERROR -- it is not an operator-actionable condition, the hook Job
+    is already running). SCHEMA_BEHIND IS operator-actionable (logged at
+    ERROR with current vs head, per critical-rules.md Observability). Only an
+    unexpected exception during the attempt is treated as fatal: logged with
+    a full traceback and re-raised, so the caller can exit non-zero and
+    crashloop visibly rather than silently serve a stale/broken state.
     """
-    if metadata is None:
-        from flask_core.models import db as _models_db
-
-        metadata = _models_db.metadata
-
     sync_url = database_url.replace("postgresql://", "postgresql+psycopg2://", 1)
     engine = sqlalchemy.create_engine(sync_url, pool_pre_ping=True)
     backoff = initial_backoff_seconds
@@ -227,7 +215,7 @@ async def run_bootstrap_loop(
             attempt += 1
             try:
                 state, detail = await asyncio.to_thread(
-                    _sync_bootstrap_attempt, engine, script_location, metadata
+                    _sync_bootstrap_attempt, engine, script_location
                 )
             except OperationalError as exc:
                 status.state = BootstrapState.WAITING_FOR_DB
@@ -236,13 +224,13 @@ async def run_bootstrap_loop(
                     f"bootstrap: database not reachable yet (attempt {attempt}): {status.detail}",
                     extra={"action": "bootstrap_waiting_for_db", "attempt": attempt},
                 )
-            except Exception as exc:  # noqa: BLE001 -- fresh-install failure must crash visibly
+            except Exception as exc:  # noqa: BLE001 -- an unexpected failure must crash visibly
                 status.state = BootstrapState.FAILED
                 status.detail = str(exc)
                 logger.error(
-                    "bootstrap: unexpected error during schema bootstrap -- crashing so "
-                    f"the pod visibly crashloops instead of serving a half-initialized "
-                    f"schema: {exc}\n{traceback.format_exc()}",
+                    "bootstrap: unexpected error during schema check -- crashing so "
+                    f"the pod visibly crashloops instead of serving a stale status: "
+                    f"{exc}\n{traceback.format_exc()}",
                     extra={"action": "bootstrap_failed"},
                 )
                 raise
@@ -255,12 +243,20 @@ async def run_bootstrap_loop(
                         extra={"action": "bootstrap_ready"},
                     )
                     return
-                # SCHEMA_BEHIND -- always an ERROR, never silent, per critical-rules.md
-                # Observability: this is an actionable-by-an-operator condition.
-                logger.error(
-                    f"bootstrap: {detail}",
-                    extra={"action": "bootstrap_schema_behind", "attempt": attempt},
-                )
+                if state is BootstrapState.WAITING_FOR_MIGRATION:
+                    # Routine, expected on every fresh install -- INFO, not ERROR.
+                    logger.info(
+                        f"bootstrap: waiting for migrate job (fresh install): {detail}",
+                        extra={"action": "bootstrap_waiting_for_migration", "attempt": attempt},
+                    )
+                else:
+                    # SCHEMA_BEHIND -- always an ERROR, never silent, per
+                    # critical-rules.md Observability: this is an
+                    # actionable-by-an-operator condition.
+                    logger.error(
+                        f"bootstrap: {detail}",
+                        extra={"action": "bootstrap_schema_behind", "attempt": attempt},
+                    )
             # Jitter only -- not a security/crypto context, just backoff spread.
             sleep_for = min(backoff, max_backoff_seconds) * (0.8 + 0.4 * random.random())  # noqa: S311
             await asyncio.sleep(sleep_for)
