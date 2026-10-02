@@ -43,12 +43,18 @@ WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-COPY hub_api/app.py hub_api/config.py ./
+COPY hub_api/app.py hub_api/config.py hub_api/bootstrap.py ./
 COPY hub_api/blueprints ./blueprints
 COPY hub_api/routers ./routers
 COPY hub_api/openapi ./openapi
 COPY hub_api/services ./services
 COPY hub_api/grpc_internal ./grpc_internal
+# bootstrap.py's ScriptDirectory call only ever statically parses this
+# directory's revision/down_revision graph -- it never executes alembic/
+# env.py (see bootstrap.py's module docstring for why that matters in this
+# process). script.py.mako/alembic.ini/tests are revision-authoring/CI-only,
+# not needed at runtime.
+COPY alembic/versions ./alembic/versions
 
 EXPOSE 8204
 # Internal-only gRPC listener (waddles.hub.internal.v1) -- ClusterIP +

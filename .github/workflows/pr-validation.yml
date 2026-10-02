@@ -119,21 +119,56 @@ jobs:
       # pull_request events (uses the PR's own base ref automatically) and
       # passing it anyway produces a confusing "input parameter is ignored"
       # annotation on every run.
+      #
+      # Two outputs, not one: `core` is the actual migration surface (a PR
+      # touching only this could plausibly add a new revision); `any` adds
+      # `alembic/tests/**` test-helper changes (e.g. pg_docker.py) on top --
+      # those can never add a revision, but this job is still the right
+      # place to prove `alembic upgrade head` still runs clean against the
+      # helper's bootstrap. See gh-526: a PR touching only
+      # alembic/tests/pg_docker.py used to run the full
+      # downgrade/prior-base round trip under the single old `alembic`
+      # filter, and alembic_prior_base_revision.py's "no new revisions"
+      # case (now exit 2, was conflated with exit 1 -- a real error) failed
+      # the whole job for a change with no migration content.
       - name: Detect alembic changes
         uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4
         id: changes
         with:
           filters: |
-            alembic:
-              - 'alembic/**'
+            core:
+              - 'alembic/versions/**'
+              - 'alembic/env.py'
+              - 'alembic.ini'
+              - 'scripts/ci/alembic_prior_base_revision.py'
+            any:
+              - 'alembic/versions/**'
+              - 'alembic/env.py'
+              - 'alembic.ini'
+              - 'alembic/tests/**'
+              - 'scripts/ci/alembic_prior_base_revision.py'
 
+      # Always runs (pure Python, no Postgres/alembic/flask_core needed) --
+      # this is also what the "Unit test alembic_prior_base_revision.py"
+      # step below uses, independent of whether this PR touches alembic/**
+      # at all.
       - name: Set up Python
-        if: steps.changes.outputs.alembic == 'true'
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
           python-version: '3.13'
           cache: pip
           cache-dependency-path: hub_api/requirements.txt
+
+      # Regression coverage for the gh-526 gap: resolve_prior_base_revision's
+      # "no new revisions" (exit 2, benign) vs "ambiguous new revisions"
+      # (exit 1, real error) branches, exercised directly against
+      # constructed revision maps -- no git/subprocess/Postgres needed, so
+      # this runs unconditionally on every PR, not just alembic-touching ones.
+      - name: Unit test alembic_prior_base_revision.py
+        run: |
+          set -euo pipefail
+          pip install --disable-pip-version-check "pytest==9.1.1"
+          python3 -m pytest scripts/ci/tests/test_alembic_prior_base_revision.py -v
 
       # hub_api/requirements.txt is hash-pinned and carries sqlalchemy +
       # psycopg2-binary; alembic itself has no hash-pinned entry anywhere in
@@ -153,7 +188,7 @@ jobs:
       # dev venv used for verification had it pre-installed from unrelated
       # prior work, masking the gap.
       - name: Install migration dependencies
-        if: steps.changes.outputs.alembic == 'true'
+        if: steps.changes.outputs.any == 'true'
         run: |
           set -euo pipefail
           pip install --disable-pip-version-check --require-hashes -r hub_api/requirements.txt
@@ -176,7 +211,7 @@ jobs:
       # schema supports) so `alembic upgrade head` runs every migration this
       # PR could plausibly touch for real.
       - name: Bootstrap minimal FK schema + stamp pre-0020 baseline
-        if: steps.changes.outputs.alembic == 'true'
+        if: steps.changes.outputs.any == 'true'
         env:
           PGPASSWORD: testpass123
         run: |
@@ -201,6 +236,43 @@ jobs:
           );
           SQL
 
+      # Runs whenever any alembic-related file changed (`any`), including a
+      # test-helper-only PR (gh-526) that can never add a revision: proves
+      # `alembic upgrade head` runs clean from an empty-of-migrations DB and
+      # the DB actually advances, independent of whether there's a new
+      # revision to round-trip below. `alembic current`, not the upgrade
+      # command's own log output, is what proves it (this repo's
+      # alembic.ini pins `logger_root level = WARN`, which silently
+      # swallows alembic's default INFO-level "Running upgrade X -> Y"
+      # messages -- confirmed empty stdout/stderr from a real successful
+      # upgrade during this job's own development).
+      - name: alembic upgrade head from empty baseline
+        if: steps.changes.outputs.any == 'true'
+        env:
+          DATABASE_URL: postgresql://waddlebot:testpass123@localhost:5432/waddlebot
+        run: |
+          set -euo pipefail
+          python3 -m alembic stamp 0019_kick_app
+
+          echo "== upgrade head =="
+          python3 -m alembic upgrade head
+          current="$(python3 -m alembic current)"
+          heads="$(python3 -m alembic heads)"
+          head_count=$(printf '%s\n' "${heads}" | grep -c .)
+          if [ "${head_count}" -ne 1 ]; then
+            echo "::error::expected exactly 1 alembic head, found ${head_count}: ${heads}"
+            exit 1
+          fi
+          if [ -z "${current}" ]; then
+            echo "::error::alembic upgrade head completed without error, but \`alembic current\` reports no stamped revision -- the DB never actually advanced."
+            exit 1
+          fi
+          echo "DB now at: ${current}"
+
+      # Only meaningful when the migration surface itself changed (`core`) --
+      # a test-helper-only PR can never add a revision, so skip even
+      # attempting this (the script would just report exit 2 anyway).
+      #
       # `rev` is parsed out of PR-branch file content (a fork PR's own
       # migration file text) -- never spliced back into `${{ }}` template
       # expansion in a later step. Passed through GITHUB_OUTPUT only after
@@ -208,30 +280,48 @@ jobs:
       # repo has, so a crafted `revision = "..."` string with shell
       # metacharacters can never reach a later `run:` block as literal
       # script text.
+      #
+      # alembic_prior_base_revision.py exit codes: 0 = found it (stdout has
+      # the revision); 2 = no new revisions in this PR -- benign, e.g. this
+      # PR edited an existing migration's body without adding a new
+      # revision id; 1 = a real error (new revisions don't form a single
+      # linear stack) and must still fail the job -- `set -e` is
+      # deliberately suspended only around this one command so the exit
+      # code can be branched on, never masked with `|| true`.
       - name: Compute prior base revision
-        if: steps.changes.outputs.alembic == 'true'
+        if: steps.changes.outputs.core == 'true'
         id: base-rev
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
+          set +e
           rev=$(python3 scripts/ci/alembic_prior_base_revision.py --base-sha "${PR_BASE_SHA}")
+          status=$?
+          set -e
+
+          if [ "${status}" -eq 2 ]; then
+            echo "::notice::no new alembic/versions/*.py revisions in this PR -- skipping the downgrade/reapply round-trip (upgrade-head-from-empty above still ran)."
+            echo "has_new_revisions=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${status}" -ne 0 ]; then
+            echo "::error::alembic_prior_base_revision.py failed (exit ${status}): ${rev}"
+            exit "${status}"
+          fi
           if ! printf '%s' "${rev}" | grep -qE '^[0-9a-z_]+$'; then
             echo "::error::computed prior_base_revision '${rev}' doesn't match the expected [0-9a-z_]+ shape -- refusing to use it."
             exit 1
           fi
+          echo "has_new_revisions=true" >> "$GITHUB_OUTPUT"
           echo "prior_base_revision=${rev}" >> "$GITHUB_OUTPUT"
 
-      # Counts from `alembic history -r <base>:head` line count, not from
-      # grepping the upgrade command's own log output: this repo's
-      # alembic.ini pins `logger_root level = WARN`, which silently
-      # swallows alembic's default INFO-level "Running upgrade X -> Y"
-      # messages -- confirmed empty stdout/stderr from a real successful
-      # upgrade during this job's own development. `alembic current`
-      # (the DB's actual stamped revision) is what proves each step really
-      # executed, independent of that logging gap.
-      - name: alembic upgrade head -> downgrade to prior base -> upgrade head
-        if: steps.changes.outputs.alembic == 'true'
+      # Gated on has_new_revisions (the script's own finding), not just the
+      # `core` path filter -- a PR can touch alembic/versions/** without
+      # adding a new revision id (e.g. fixing a bug in an existing
+      # migration's body), in which case there's nothing to round-trip.
+      - name: alembic downgrade to prior base -> upgrade head (round-trip)
+        if: steps.base-rev.outputs.has_new_revisions == 'true'
         env:
           DATABASE_URL: postgresql://waddlebot:testpass123@localhost:5432/waddlebot
           PRIOR_BASE_REVISION: ${{ steps.base-rev.outputs.prior_base_revision }}
@@ -258,23 +348,6 @@ jobs:
             echo "::error::0 revisions between base ${base_rev} and head -- nothing for this gate to verify."
             exit 1
           fi
-
-          python3 -m alembic stamp 0019_kick_app
-
-          echo "== upgrade head (1st pass) =="
-          python3 -m alembic upgrade head
-          current_1=$(python3 -m alembic current)
-          head_1=$(python3 -m alembic heads)
-          head_count=$(printf '%s\n' "${head_1}" | grep -c .)
-          if [ "${head_count}" -ne 1 ]; then
-            echo "::error::expected exactly 1 alembic head, found ${head_count}: ${head_1}"
-            exit 1
-          fi
-          if [ -z "${current_1}" ]; then
-            echo "::error::alembic upgrade head completed without error, but \`alembic current\` reports no stamped revision -- the DB never actually advanced."
-            exit 1
-          fi
-          echo "DB now at: ${current_1}"
 
           echo "== downgrade to prior base revision ${base_rev} =="
           python3 -m alembic downgrade "${base_rev}"

@@ -41,6 +41,7 @@ from quart_schema import Info, QuartSchema
 
 from blueprints import register_blueprints
 from blueprints.service_jwt_bp import service_jwt_bp
+from bootstrap import BootstrapState, BootstrapStatus, run_bootstrap_loop
 from config import HubAPIConfig
 from grpc_internal.server import start_internal_grpc_server, stop_internal_grpc_server
 from openapi.routes import register_openapi_docs
@@ -221,10 +222,51 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
 
     app.before_request(bridge_session_cookie_to_bearer)
 
+    # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- bootstrap.py's schema
+    # check/fresh-install creation, exposed as a dedicated `/ready` route rather
+    # than folded into flask_core's shared `/healthz` (that blueprint is used by
+    # every service in this chart; gating it on hub-api-specific bootstrap state
+    # would need a flask_core change with a much bigger blast radius). The
+    # Deployment's readinessProbe points here (templates/hub-api.yaml);
+    # livenessProbe stays on flask_core's `/health`/`/healthz` so K8s never
+    # kills hub-api just because it's legitimately waiting on an operator-run
+    # migrate Job (BootstrapState.SCHEMA_BEHIND) -- only genuinely hung/crashed
+    # processes should be restarted.
+    bootstrap_status = BootstrapStatus()
+    app.config["BOOTSTRAP_STATUS"] = bootstrap_status
+
+    @app.route("/ready")
+    async def ready() -> tuple[dict[str, str], int]:
+        """K8s readinessProbe target -- 200 only once the schema is confirmed at head."""
+        code = 200 if bootstrap_status.is_ready else 503
+        return {
+            "status": bootstrap_status.state.value,
+            "detail": bootstrap_status.detail,
+        }, code
+
     @app.before_serving
     async def startup() -> None:
-        """Initialize the DAL, connect the rate limiter, bind reference tables."""
+        """Bootstrap the schema, initialize the DAL, connect the rate limiter.
+
+        Also binds reference tables.
+        """
         logger.system("Starting hub-api", action="startup", extra={"port": cfg.module_port})
+        # Fired as a background task, not awaited to completion: a fresh/behind
+        # schema can legitimately take longer than any reasonable startup
+        # timeout to resolve (waiting on Postgres, or on an operator running
+        # `helm upgrade`). hub-api must still come up and serve `/health`
+        # (liveness) immediately; only `/ready` (readiness) blocks on this.
+        # Skipped entirely for non-Postgres DATABASE_URLs (sqlite test/dev
+        # configs) -- bootstrap.py's advisory-lock/alembic_version mechanism is
+        # Postgres-only, matching the existing `cfg.database_url.startswith
+        # ("postgres")` gate a few lines below for the watermark job.
+        if cfg.database_url.startswith("postgres"):
+            app.config["BOOTSTRAP_TASK"] = asyncio.create_task(
+                run_bootstrap_loop(bootstrap_status, cfg.database_url, logger)
+            )
+        else:
+            bootstrap_status.state = BootstrapState.READY
+            bootstrap_status.detail = "non-Postgres DATABASE_URL -- bootstrap skipped"
         # Per-service EdDSA machine JWT issuance (flask_core.service_jwt,
         # feature/eddsa-machine-jwt) -- built from the `service-jwt-
         # signing-key` Secret (SERVICE_JWT_ACTIVE_KID/SERVICE_JWT_PRIVATE_
@@ -329,6 +371,14 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         shared lib from this PR). Failing to release the pool cleanly on
         shutdown must never crash the ASGI lifespan.
         """
+        bootstrap_task = app.config.get("BOOTSTRAP_TASK")
+        if bootstrap_task is not None:
+            bootstrap_task.cancel()
+            try:
+                await bootstrap_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(f"Error stopping bootstrap task on shutdown: {exc}")
         watermark_job = app.config.get("bundle_active_set_watermark_job")
         if watermark_job is not None:
             try:

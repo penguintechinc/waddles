@@ -49,7 +49,8 @@ spec:
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       initContainers:
-      {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waits on hub-api's own /ready.
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: svc-ingest
         # fix/alpha-helm-deploy -- core/svc_ingest/Dockerfile now exists; no longer the

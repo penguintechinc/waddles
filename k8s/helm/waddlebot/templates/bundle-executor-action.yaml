@@ -38,6 +38,10 @@ spec:
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waits on hub-api's own
+      # /ready before this pod's main container starts (see _helpers.tpl).
+      initContainers:
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: bundle-executor
         # Same image as templates/bundle-executor.yaml -- literally the same crate/binary,
