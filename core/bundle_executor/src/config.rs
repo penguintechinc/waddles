@@ -163,6 +163,49 @@ pub struct CliConfig {
     /// unbounded misconfiguration- or compromise-controlled data.
     #[arg(long, env = "BUNDLE_MAX_COMPONENT_BYTES", default_value_t = 33_554_432)]
     pub bundle_max_component_bytes: u64,
+
+    /// Interval between `crate::heartbeat`'s liveness checks (and, when
+    /// `EXECUTOR_SELF_PING_ENABLED` is set, this executor's own `ping`
+    /// frames). A connection is declared stale after
+    /// `heartbeat::STALE_INTERVAL_MULTIPLIER` silent intervals.
+    #[arg(long, env = "EXECUTOR_HEARTBEAT_INTERVAL_SECS", default_value_t = 5)]
+    pub executor_heartbeat_interval_secs: u64,
+
+    /// Kill switch for the whole stale-session monitor (`crate::heartbeat`),
+    /// in case it ever needs rolling back independently of a redeploy.
+    /// Default on -- this is the fix for the silent-half-open-connection
+    /// incident this PR exists to close.
+    #[arg(long, env = "EXECUTOR_HEARTBEAT_ENABLED", default_value_t = true)]
+    pub executor_heartbeat_enabled: bool,
+
+    /// Whether this executor ALSO sends its own `ping` to the stage on the
+    /// heartbeat interval, rather than only reacting to frames the stage
+    /// sends. Defaults to **false**: today's svc-process/svc-action
+    /// host-API read loop treats an unsolicited `ping` FROM the executor as
+    /// a fatal/unexpected frame and closes the connection -- flipping this
+    /// on before the companion fix (`fix/executor-link-heartbeat`, svc
+    /// side) lands would kill every healthy connection on its first
+    /// self-initiated heartbeat. Set to `true` once that PR is deployed.
+    #[arg(long, env = "EXECUTOR_SELF_PING_ENABLED", default_value_t = false)]
+    pub executor_self_ping_enabled: bool,
+
+    /// Where `crate::probe` atomically writes a timestamp whenever the
+    /// host-API session is healthy, and `--healthcheck=session` reads it
+    /// back from (spec: this process has no HTTP surface, so Kubernetes'
+    /// liveness/readiness probes exec this binary instead of hitting a
+    /// port).
+    #[arg(
+        long,
+        env = "EXECUTOR_PROBE_FILE",
+        default_value = "/tmp/executor-live"
+    )]
+    pub executor_probe_file: PathBuf,
+
+    /// `--healthcheck=session`'s default max age for the probe file (and
+    /// the startup-grace window before a still-missing file is treated as
+    /// a failure) when `--max-age` is not passed explicitly.
+    #[arg(long, env = "EXECUTOR_GRACE_SECONDS", default_value_t = 60)]
+    pub executor_grace_secs: u64,
 }
 
 impl CliConfig {
@@ -197,6 +240,11 @@ impl CliConfig {
             bundle_bucket_ca_file: None,
             bundle_fetch_timeout_s: 30,
             bundle_max_component_bytes: 33_554_432,
+            executor_heartbeat_interval_secs: 5,
+            executor_heartbeat_enabled: true,
+            executor_self_ping_enabled: false,
+            executor_probe_file: PathBuf::from("/tmp/executor-live"),
+            executor_grace_secs: 60,
         }
     }
 

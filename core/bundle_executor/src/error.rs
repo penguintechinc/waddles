@@ -80,6 +80,18 @@ pub enum ExecutorError {
     #[error("configuration error: {0}")]
     Config(String),
 
+    /// `crate::heartbeat`'s monitor saw no frame from the stage (including
+    /// the stage's own periodic `ping`, once `fix/executor-link-heartbeat`
+    /// lands) for `STALE_INTERVAL_MULTIPLIER` heartbeat intervals -- a
+    /// half-open TCP connection to a since-terminated stage pod looks
+    /// identical to a healthy one until something tries to use it
+    /// (regression: executor stuck on terminated svc pod after rollout,
+    /// alpha 2026-10-02). Fatal for the connection it occurred on, same as
+    /// any other `ExecutorError` from `run_connection` -- `crate::run`'s
+    /// existing backoff loop reconnects.
+    #[error("host-api session stalled: no frame from {peer} in {age_secs}s")]
+    SessionStale { peer: String, age_secs: u64 },
+
     /// `crate::bucket::BucketComponentSource`'s bucket GET failed: network
     /// error, non-200 status, missing/oversized `Content-Length`, or a
     /// malformed HTTP response from the bucket (spec SS7.6). Always

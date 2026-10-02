@@ -21,9 +21,10 @@ use penguin_bundle_host::wire::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::ExecutorError;
+use crate::heartbeat::{self, ActivityTracker, Heartbeat};
 
 /// What the caller (`crate::invoke`, or a test double) does for every kind
 /// of request the stage may send on this connection. `on_ping`/
@@ -101,6 +102,13 @@ pub struct Connection {
     ids: IdAllocator,
     pending: CorrelationTable,
     writer_tx: mpsc::UnboundedSender<Frame>,
+    /// When the last frame (any kind) arrived from the stage on this
+    /// connection -- `crate::heartbeat`'s half of the half-open-connection
+    /// fix. Always present (not optional): every `Connection`, test
+    /// doubles included, gets a working clock; only `run_connection`
+    /// decides whether anything actually watches it (`Heartbeat::cfg.
+    /// enabled`).
+    activity: Arc<ActivityTracker>,
 }
 
 impl Connection {
@@ -114,7 +122,15 @@ impl Connection {
             ids: IdAllocator::new(),
             pending: CorrelationTable::new(),
             writer_tx,
+            activity: Arc::new(ActivityTracker::new()),
         })
+    }
+
+    /// Clones the `Arc` so `crate::heartbeat::run_monitor` can watch this
+    /// connection's activity without holding a reference to the whole
+    /// `Connection`.
+    pub(crate) fn activity(&self) -> Arc<ActivityTracker> {
+        Arc::clone(&self.activity)
     }
 
     /// Sends `message` under a freshly allocated id and awaits the peer's
@@ -149,11 +165,19 @@ impl Connection {
 
 /// Dials nothing itself (the caller supplies an already-connected `io`,
 /// real TLS or an in-memory test duplex): completes the `hello`/
-/// `hello-ok` handshake, then runs the read loop until `shutdown`, EOF, or
-/// a fatal protocol error. Returns once the connection is done; the
-/// caller reconnects (spec SS4.5: "the executor reconnects with
-/// exponential backoff").
-pub async fn run_connection<S, H>(io: S, hello: HelloBody, handler: H) -> Result<(), ExecutorError>
+/// `hello-ok` handshake, then runs the read loop until `shutdown`, EOF, a
+/// fatal protocol error, OR -- `heartbeat.cfg.enabled` -- until
+/// `crate::heartbeat::run_monitor` decides the connection has gone silent
+/// too long (`ExecutorError::SessionStale`), whichever happens first.
+/// Returns once the connection is done; the caller reconnects (spec SS4.5:
+/// "the executor reconnects with exponential backoff").
+pub async fn run_connection<S, H>(
+    io: S,
+    hello: HelloBody,
+    handler: H,
+    peer: &str,
+    mut heartbeat: Heartbeat,
+) -> Result<(), ExecutorError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     H: RequestHandler,
@@ -235,6 +259,10 @@ where
         }
     };
     debug!(?limits, "host-api handshake complete");
+    info!(peer, "host-api connected");
+    if let Some(on_connected) = heartbeat.on_connected.take() {
+        on_connected();
+    }
 
     // If the read loop already ran to completion while delivering the
     // `hello-ok` reply (see the `loop_already_finished` comment above),
@@ -242,6 +270,29 @@ where
     // future again would panic ("future polled after completion").
     let result = match loop_already_finished {
         Some(result) => result,
+        None if heartbeat.cfg.enabled => {
+            // Races the read loop against `crate::heartbeat::run_monitor`:
+            // whichever notices the connection is done first wins. A clean
+            // `shutdown`/EOF/fatal protocol error surfaces exactly as
+            // before; a silently stalled connection (the half-open-socket
+            // incident this module exists to fix) now ALSO ends the
+            // connection instead of hanging forever with nothing watching.
+            let monitor_fut = heartbeat::run_monitor(
+                Arc::clone(&connection),
+                connection.activity(),
+                heartbeat.cfg,
+                Arc::clone(&heartbeat.metrics),
+                peer.to_string(),
+                heartbeat.probe_file.clone(),
+                heartbeat.probe_grace,
+            );
+            tokio::pin!(monitor_fut);
+            tokio::select! {
+                biased;
+                loop_result = &mut read_loop_fut => loop_result,
+                stale_err = &mut monitor_fut => Err(stale_err),
+            }
+        }
         None => read_loop_fut.await,
     };
     writer_task.abort();
@@ -266,9 +317,18 @@ where
 {
     loop {
         let frame = read_frame(reader).await?;
+        // `crate::heartbeat`'s half-open-connection fix: ANY frame kind
+        // counts as proof the stage is still alive on the other end,
+        // including the stage's own periodic `ping` (handled below) and,
+        // once this executor sends its own (`Message::Pong` in the arm
+        // just below), the reply to that.
+        connection.activity.touch();
         match frame.message {
-            // Replies to something this side initiated (hello, host-call).
-            Message::HelloOk(_) | Message::HostResult(_) => {
+            // Replies to something this side initiated (hello, host-call,
+            // or this executor's own heartbeat `ping` -- `Pong` carries no
+            // payload to correlate on besides the frame `id`, same as
+            // `HelloOk`/`HostResult`).
+            Message::HelloOk(_) | Message::HostResult(_) | Message::Pong => {
                 if let Err(CorrelationError::Unknown(id)) = connection.deliver(frame) {
                     warn!(id, "host-api reply matched no pending request, dropping");
                 }
@@ -336,6 +396,13 @@ where
                 });
             }
             Message::Ping => {
+                // Proof the stage itself heartbeats -- arms
+                // `crate::heartbeat::run_monitor`'s stale-frame-activity
+                // check (PR #529 review fix: before this, an idle-but-
+                // healthy link with a stage that never pings would get
+                // disconnected+reconnected roughly every 3 heartbeat
+                // intervals).
+                connection.activity.mark_server_ping_seen();
                 let (connection, handler) = (Arc::clone(connection), Arc::clone(handler));
                 tokio::spawn(async move {
                     handler.on_ping().await;
@@ -574,6 +641,8 @@ mod tests {
                     },
                 },
                 EchoHandlerRef(handler_for_conn),
+                "test-peer",
+                Heartbeat::disabled(),
             )
             .await
         });
@@ -636,6 +705,8 @@ mod tests {
                 EchoHandlerRef(std::sync::Arc::new(EchoHandler {
                     shutdown_seen: AtomicBool::new(false),
                 })),
+                "test-peer",
+                Heartbeat::disabled(),
             )
             .await
         });
@@ -705,6 +776,8 @@ mod tests {
                 EchoHandlerRef(std::sync::Arc::new(EchoHandler {
                     shutdown_seen: AtomicBool::new(false),
                 })),
+                "test-peer",
+                Heartbeat::disabled(),
             )
             .await
         });
@@ -738,6 +811,8 @@ mod tests {
                 EchoHandlerRef(std::sync::Arc::new(EchoHandler {
                     shutdown_seen: AtomicBool::new(false),
                 })),
+                "test-peer",
+                Heartbeat::disabled(),
             )
             .await
         });
@@ -783,6 +858,8 @@ mod tests {
                 EchoHandlerRef(std::sync::Arc::new(EchoHandler {
                     shutdown_seen: AtomicBool::new(false),
                 })),
+                "test-peer",
+                Heartbeat::disabled(),
             )
             .await
         });
@@ -819,6 +896,8 @@ mod tests {
                 EchoHandlerRef(std::sync::Arc::new(EchoHandler {
                     shutdown_seen: AtomicBool::new(false),
                 })),
+                "test-peer",
+                Heartbeat::disabled(),
             )
             .await
         });
@@ -853,6 +932,8 @@ mod tests {
                 EchoHandlerRef(std::sync::Arc::new(EchoHandler {
                     shutdown_seen: AtomicBool::new(false),
                 })),
+                "test-peer",
+                Heartbeat::disabled(),
             )
             .await
         });
@@ -960,7 +1041,14 @@ mod tests {
         }
 
         let executor = tokio::spawn(async move {
-            run_connection(executor_io, test_hello(), HandlerRef(handler_for_conn)).await
+            run_connection(
+                executor_io,
+                test_hello(),
+                HandlerRef(handler_for_conn),
+                "test-peer",
+                Heartbeat::disabled(),
+            )
+            .await
         });
 
         complete_handshake(&mut stage_io).await;
@@ -983,6 +1071,362 @@ mod tests {
         assert!(
             handler.disconnected.load(Ordering::SeqCst),
             "on_disconnect must fire once the connection ends"
+        );
+    }
+
+    /// Builds a `Heartbeat` for the tests below: short interval, a unique
+    /// scratch probe path per test, and `probe_grace` irrelevant to most of
+    /// them (default-sized, only the dedicated probe-failure test below
+    /// cares about its exact value).
+    fn test_heartbeat(metrics: &Arc<heartbeat::HeartbeatMetrics>, label: &str) -> Heartbeat {
+        Heartbeat {
+            cfg: heartbeat::HeartbeatConfig {
+                enabled: true,
+                interval: std::time::Duration::from_millis(10),
+                self_ping_enabled: false,
+            },
+            metrics: Arc::clone(metrics),
+            probe_file: std::env::temp_dir().join(format!(
+                "bundle-executor-test-heartbeat-{label}-probe-{}",
+                std::process::id()
+            )),
+            probe_grace: std::time::Duration::from_secs(60),
+            on_connected: None,
+        }
+    }
+
+    /// **Primary regression test (alpha 2026-10-02), post-arming (PR #529
+    /// review fix):** a peer that sends one `ping` (arming the stale check
+    /// -- proof it heartbeats) and then sends nothing else ever again --
+    /// simulating a half-open connection to a since-terminated stage pod
+    /// that nonetheless managed one heartbeat before dying -- must be
+    /// detected and dropped by `crate::heartbeat`'s monitor, not hang
+    /// `run_connection` forever.
+    #[tokio::test(start_paused = true)]
+    async fn an_armed_but_then_stalled_peer_is_detected_as_stale_and_disconnected() {
+        crate::init_test_tracing();
+        let (executor_io, mut stage_io) = tokio::io::duplex(4096);
+        let metrics = Arc::new(heartbeat::HeartbeatMetrics::default());
+        let heartbeat = test_heartbeat(&metrics, "stall");
+
+        let executor = tokio::spawn(async move {
+            run_connection(
+                executor_io,
+                test_hello(),
+                EchoHandlerRef(std::sync::Arc::new(EchoHandler {
+                    shutdown_seen: AtomicBool::new(false),
+                })),
+                "stalled-peer:1234",
+                heartbeat,
+            )
+            .await
+        });
+
+        complete_handshake(&mut stage_io).await;
+        // One `ping` arms the stale check, then the peer goes silent --
+        // exactly what a half-open socket to a terminated pod looks like
+        // from this side AFTER it managed one heartbeat.
+        write_frame(&mut stage_io, &Frame::new(1, Message::Ping))
+            .await
+            .expect("write arming ping");
+        let pong = read_frame(&mut stage_io).await.expect("pong reply");
+        assert!(matches!(pong.message, Message::Pong));
+
+        let result = executor.await.expect("executor task");
+        assert!(
+            matches!(result, Err(ExecutorError::SessionStale { .. })),
+            "an armed-then-silent connection must be declared stale, got {result:?}"
+        );
+        assert_eq!(
+            metrics.heartbeat_timeouts_total.load(Ordering::Relaxed),
+            1,
+            "exactly one heartbeat timeout must be recorded"
+        );
+        // `stage_io` must outlive the whole test -- dropping it earlier
+        // would itself close the duplex and confound "detected via
+        // heartbeat timeout" with "detected via EOF".
+        drop(stage_io);
+    }
+
+    /// **PR #529 review fix, the core regression:** a stage that NEVER
+    /// sends its own `ping` (today's production behavior, before the
+    /// companion `fix/executor-link-heartbeat` lands) must NOT have its
+    /// idle-but-healthy connection declared stale, reconnected, and have
+    /// in-flight messages dead-lettered every `STALE_INTERVAL_MULTIPLIER *
+    /// interval`. The connection survives well past that window with zero
+    /// heartbeat timeouts recorded, then shuts down cleanly.
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_connection_with_no_server_heartbeat_is_never_declared_stale() {
+        crate::init_test_tracing();
+        let (executor_io, mut stage_io) = tokio::io::duplex(4096);
+        let metrics = Arc::new(heartbeat::HeartbeatMetrics::default());
+        let heartbeat = test_heartbeat(&metrics, "idle-unarmed");
+
+        let executor = tokio::spawn(async move {
+            run_connection(
+                executor_io,
+                test_hello(),
+                EchoHandlerRef(std::sync::Arc::new(EchoHandler {
+                    shutdown_seen: AtomicBool::new(false),
+                })),
+                "quiet-but-healthy-peer:1234",
+                heartbeat,
+            )
+            .await
+        });
+
+        complete_handshake(&mut stage_io).await;
+        // Well past 3 * 10ms = 30ms (the old, now-wrong, unconditional
+        // stale threshold) with NO ping ever sent -- an unarmed connection
+        // must ride this out silently.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        write_frame(
+            &mut stage_io,
+            &Frame::new(1, Message::Shutdown(ShutdownBody { grace_ms: 10 })),
+        )
+        .await
+        .expect("write shutdown");
+
+        let result = executor.await.expect("executor task");
+        assert!(
+            result.is_ok(),
+            "an idle connection with no server heartbeat must never be reconnected, got {result:?}"
+        );
+        assert_eq!(
+            metrics.heartbeat_timeouts_total.load(Ordering::Relaxed),
+            0,
+            "an unarmed connection must never record a heartbeat timeout, regardless of idle time"
+        );
+    }
+
+    /// A connection that keeps receiving frames (even only the stage's own
+    /// `ping`s, never application traffic) must NOT be declared stale --
+    /// the monitor only reacts to genuine silence, not mere idleness.
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_receiving_periodic_pings_is_never_declared_stale() {
+        crate::init_test_tracing();
+        let (executor_io, mut stage_io) = tokio::io::duplex(4096);
+        let metrics = Arc::new(heartbeat::HeartbeatMetrics::default());
+        let heartbeat = test_heartbeat(&metrics, "healthy");
+
+        let executor = tokio::spawn(async move {
+            run_connection(
+                executor_io,
+                test_hello(),
+                EchoHandlerRef(std::sync::Arc::new(EchoHandler {
+                    shutdown_seen: AtomicBool::new(false),
+                })),
+                "healthy-peer:1234",
+                heartbeat,
+            )
+            .await
+        });
+
+        complete_handshake(&mut stage_io).await;
+        // Keeps the connection fed well past what would otherwise be the
+        // stale threshold (3 * 10ms = 30ms) before finally shutting down
+        // cleanly -- proving the monitor didn't fire a false positive.
+        for id in 1..=10u64 {
+            tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+            write_frame(&mut stage_io, &Frame::new(id, Message::Ping))
+                .await
+                .expect("write stage ping");
+            let pong = read_frame(&mut stage_io).await.expect("pong reply");
+            assert!(matches!(pong.message, Message::Pong));
+        }
+        write_frame(
+            &mut stage_io,
+            &Frame::new(100, Message::Shutdown(ShutdownBody { grace_ms: 10 })),
+        )
+        .await
+        .expect("write shutdown");
+
+        let result = executor.await.expect("executor task");
+        assert!(
+            result.is_ok(),
+            "a continuously fed connection must shut down cleanly, got {result:?}"
+        );
+        assert_eq!(
+            metrics.heartbeat_timeouts_total.load(Ordering::Relaxed),
+            0,
+            "a healthy connection must never record a heartbeat timeout"
+        );
+    }
+
+    /// `crate::heartbeat::HeartbeatMetrics::reconnects_total` is
+    /// `crate::run`'s own counter (incremented once per re-dial), but
+    /// `heartbeat_timeouts_total` must accumulate correctly across
+    /// multiple stale sessions sharing one `Arc<HeartbeatMetrics>` -- the
+    /// same `Arc` `crate::run`'s loop threads through every reconnect
+    /// attempt. Each iteration arms via one `ping` before going silent
+    /// (post PR #529 review fix, an unarmed connection is never stale).
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_timeout_metric_accumulates_across_successive_stale_connections() {
+        crate::init_test_tracing();
+        let metrics = Arc::new(heartbeat::HeartbeatMetrics::default());
+
+        for attempt in 0..2u32 {
+            let (executor_io, stage_io) = tokio::io::duplex(4096);
+            let mut stage_io = stage_io;
+            let heartbeat = test_heartbeat(&metrics, &format!("accumulate-{attempt}"));
+            let executor = tokio::spawn(async move {
+                run_connection(
+                    executor_io,
+                    test_hello(),
+                    EchoHandlerRef(std::sync::Arc::new(EchoHandler {
+                        shutdown_seen: AtomicBool::new(false),
+                    })),
+                    "flaky-peer:1234",
+                    heartbeat,
+                )
+                .await
+            });
+            complete_handshake(&mut stage_io).await;
+            write_frame(&mut stage_io, &Frame::new(1, Message::Ping))
+                .await
+                .expect("write arming ping");
+            let pong = read_frame(&mut stage_io).await.expect("pong reply");
+            assert!(matches!(pong.message, Message::Pong));
+
+            let result = executor.await.expect("executor task");
+            assert!(matches!(result, Err(ExecutorError::SessionStale { .. })));
+            metrics.record_reconnect();
+            drop(stage_io);
+        }
+
+        assert_eq!(
+            metrics.heartbeat_timeouts_total.load(Ordering::Relaxed),
+            2,
+            "two independent stale connections must both be counted"
+        );
+        assert_eq!(
+            metrics.reconnects_total.load(Ordering::Relaxed),
+            2,
+            "crate::run's reconnect counter must accumulate across attempts"
+        );
+    }
+
+    /// A minimal `tracing_subscriber::Layer` that records every event's
+    /// level and rendered `message` field -- just enough to assert
+    /// `crate::heartbeat::run_monitor`'s probe-file-failure logging
+    /// actually escalates from WARN to ERROR, not just that the right
+    /// `Result` comes back (user rule: failures must be loud, so the LOG
+    /// LEVEL itself is the behavior under test here, not a side effect).
+    struct CapturingLayer {
+        events: Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CapturingLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct MessageVisitor(String);
+            impl tracing::field::Visit for MessageVisitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            let mut visitor = MessageVisitor(String::new());
+            event.record(&mut visitor);
+            if let Ok(mut events) = self.events.lock() {
+                events.push((*event.metadata().level(), visitor.0));
+            }
+        }
+    }
+
+    /// **PR #529 review fix, requirement 3:** a probe-file write failure
+    /// must log at WARN while still within `probe_grace`, and escalate to
+    /// ERROR once it has been failing longer than `probe_grace` -- a
+    /// silent DEBUG log (the pre-fix behavior) would let a misconfigured
+    /// mount cause liveness restarts with nothing in the logs to explain
+    /// them.
+    #[tokio::test(start_paused = true)]
+    async fn probe_file_failure_logs_warn_then_escalates_to_error_past_grace() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CapturingLayer {
+            events: Arc::clone(&events),
+        });
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let (executor_io, mut stage_io) = tokio::io::duplex(4096);
+        let metrics = Arc::new(heartbeat::HeartbeatMetrics::default());
+        let mut heartbeat = test_heartbeat(&metrics, "probe-failure");
+        // A path under a directory that doesn't exist -- `probe::touch`'s
+        // `File::create` fails every single tick, deterministically, for
+        // as long as the connection stays open.
+        heartbeat.probe_file =
+            std::path::PathBuf::from("/nonexistent-bundle-executor-test-dir/executor-live");
+        heartbeat.probe_grace = std::time::Duration::from_millis(25);
+
+        let executor = tokio::spawn(async move {
+            run_connection(
+                executor_io,
+                test_hello(),
+                EchoHandlerRef(std::sync::Arc::new(EchoHandler {
+                    shutdown_seen: AtomicBool::new(false),
+                })),
+                "probe-failure-peer:1234",
+                heartbeat,
+            )
+            .await
+        });
+
+        complete_handshake(&mut stage_io).await;
+        // Arm via one ping so the test doesn't depend on arming semantics
+        // at all -- this test is purely about the probe-file log path,
+        // which runs every tick regardless of armed state.
+        write_frame(&mut stage_io, &Frame::new(1, Message::Ping))
+            .await
+            .expect("write arming ping");
+        let _ = read_frame(&mut stage_io).await.expect("pong reply");
+        // Keep it fed well past the stale threshold (3 * 10ms = 30ms) AND
+        // past probe_grace (25ms) so both a WARN (early ticks) and an
+        // ERROR (later ticks) have had the chance to fire, without the
+        // connection itself ever being declared stale.
+        for id in 2..=8u64 {
+            tokio::time::sleep(std::time::Duration::from_millis(8)).await;
+            write_frame(&mut stage_io, &Frame::new(id, Message::Ping))
+                .await
+                .expect("write keepalive ping");
+            let _ = read_frame(&mut stage_io).await.expect("pong reply");
+        }
+        write_frame(
+            &mut stage_io,
+            &Frame::new(100, Message::Shutdown(ShutdownBody { grace_ms: 10 })),
+        )
+        .await
+        .expect("write shutdown");
+        let result = executor.await.expect("executor task");
+        assert!(
+            result.is_ok(),
+            "probe-file failures must never be fatal to the connection, got {result:?}"
+        );
+
+        let captured = events.lock().expect("events lock").clone();
+        let warn_seen = captured.iter().any(|(level, msg)| {
+            *level == tracing::Level::WARN && msg.contains("failed to refresh liveness probe file")
+        });
+        let error_seen = captured.iter().any(|(level, msg)| {
+            *level == tracing::Level::ERROR
+                && msg.contains("liveness probe file has failed to refresh past its grace period")
+        });
+        assert!(
+            warn_seen,
+            "expected a WARN probe-failure log, got {captured:?}"
+        );
+        assert!(
+            error_seen,
+            "expected an ERROR probe-failure log once past grace, got {captured:?}"
         );
     }
 }
