@@ -138,40 +138,79 @@ where
     let state = http::AppState::new(config.clone(), prom_registry, Arc::clone(&connections));
     let consumer_loop_ready = Arc::clone(&state.consumer_loop_ready);
     // Mutual exclusion, resolved ONCE at startup -- see
-    // `resolve_multi_tenant_path_active`'s own doc for why this is not
+    // `resolve_multi_tenant_path_decision`'s own doc for why this is not
     // re-evaluated per-tick for this specific dispatch decision (a live
     // kill-switch flip mid-run still stops DB-driven work via
     // `changelog_consumer::run`'s own per-tick gate check, it just doesn't
     // fail OVER to the legacy loop without a pod restart).
-    if resolve_multi_tenant_path_active(&config).await {
-        if !config.cli.process_app_id.is_empty() {
-            tracing::info!(
-                process_app_id = %config.cli.process_app_id,
-                "multi-tenant changelog-consumer path active at startup; ignoring legacy \
-                 PROCESS_APP_ID/PROCESS_INGEST_* env selection (restart required to fall back)"
+    let decision = resolve_multi_tenant_path_decision(&config).await;
+    // Point (d) of the alpha fix (2026-10-02): the chart is removing the
+    // legacy env entirely, so a pod with neither path available must not
+    // quietly serve HTTP/metrics with no drain loop at all -- exit non-zero
+    // so Kubernetes crashloops it into visibility instead.
+    if no_data_plane_path_available(decision, &config.cli.process_app_id) {
+        tracing::error!(
+            ?decision,
+            "no data-plane path available at startup: multi-tenant changelog-consumer path \
+             inactive and PROCESS_APP_ID unset; exiting"
+        );
+        anyhow::bail!(
+            "no data-plane path available at startup (multi-tenant path inactive, \
+             PROCESS_APP_ID unset)"
+        );
+    }
+    match decision {
+        PathDecision::MultiTenant => {
+            if !config.cli.process_app_id.is_empty() {
+                tracing::info!(
+                    process_app_id = %config.cli.process_app_id,
+                    "startup path: multi-tenant changelog-consumer (DB_READER_PASSWORD \
+                     configured, kill-switches enabled); ignoring legacy PROCESS_APP_ID/ \
+                     PROCESS_INGEST_* env selection (restart required to fall back)"
+                );
+            } else {
+                tracing::info!(
+                    "startup path: multi-tenant changelog-consumer (DB_READER_PASSWORD \
+                     configured, kill-switches enabled)"
+                );
+            }
+            try_start_changelog_consumer(
+                &config,
+                connections,
+                bundle_loader_excluded_metric,
+                source_supervisor_metrics,
+                egress_denied_metric,
+                changelog_consumer_metrics,
             );
         }
-        try_start_changelog_consumer(
-            &config,
-            connections,
-            bundle_loader_excluded_metric,
-            source_supervisor_metrics,
-            egress_denied_metric,
-            changelog_consumer_metrics,
-        );
-    } else {
-        tracing::info!(
-            "multi-tenant changelog-consumer path inactive at startup (a kill-switch on, or \
-             DB_READER_PASSWORD not configured); using legacy \
-             PROCESS_APP_ID/PROCESS_INGEST_* env selection"
-        );
-        try_start_process_loop(
-            &config,
-            connections,
-            egress_denied_metric,
-            drain_loop_metrics,
-            consumer_loop_ready,
-        );
+        PathDecision::NoDbConfig => {
+            tracing::info!(
+                process_app_id = %config.cli.process_app_id,
+                "startup path: legacy PROCESS_APP_ID/PROCESS_INGEST_* env selection \
+                 (DB_READER_PASSWORD not configured)"
+            );
+            try_start_process_loop(
+                &config,
+                connections,
+                egress_denied_metric,
+                drain_loop_metrics,
+                consumer_loop_ready,
+            );
+        }
+        PathDecision::KillSwitchOn => {
+            tracing::warn!(
+                process_app_id = %config.cli.process_app_id,
+                "startup path: legacy PROCESS_APP_ID/PROCESS_INGEST_* env selection \
+                 (multi-tenant kill-switch is ON)"
+            );
+            try_start_process_loop(
+                &config,
+                connections,
+                egress_denied_metric,
+                drain_loop_metrics,
+                consumer_loop_ready,
+            );
+        }
     }
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
@@ -703,22 +742,49 @@ async fn wait_or_shutdown(
 /// racing against already-spawned consumer tasks could not cleanly
 /// guarantee.
 ///
-/// The multi-tenant path is active when [`multi_tenant_path_selected`]
-/// says so: `DB_READER_PASSWORD` set (no more `BUNDLE_SCOPE_TENANT_ID`/
-/// `BUNDLE_SCOPE_COMMUNITY_ID` gate -- this path serves EVERY tenant/
-/// community it finds, never a single configured scope) AND BOTH
-/// kill-switch gates report enabled (`license::DbBundleConfigGate` and
-/// `license::MultiTenantWatermarkGate`, each already the negated "is this
-/// path enabled" answer -- default `true` when unseen or the license
-/// server is unreachable). A malformed `LICENSE_SERVER_URL`/`POSTHOG_HOST`
-/// (the only way `license::build_license_client` itself can fail) is
-/// treated as "path inactive" -- the same fail-safe posture
-/// `try_start_changelog_consumer`'s own internal gate uses for the
-/// identical failure.
-async fn resolve_multi_tenant_path_active(config: &config::Config) -> bool {
-    let db_config_present = config.db_reader_password.is_some();
-    if !db_config_present {
-        return false;
+/// Outcome of [`resolve_multi_tenant_path_decision`] -- carries *why*, not
+/// just the boolean choice, so `run_with_shutdown`'s own startup log line
+/// states the reason (point (e) of the alpha fix, 2026-10-02:
+/// `rules/critical-rules.md` Observability -- "log at INFO which path was
+/// chosen and why").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathDecision {
+    /// `DB_READER_PASSWORD` configured and both kill-switch gates resolved
+    /// enabled -- including the fail-open case where the license client
+    /// itself couldn't be built (see this function's own doc).
+    MultiTenant,
+    /// `DB_READER_PASSWORD` unset/empty -- no DB path exists to select,
+    /// regardless of kill-switch state.
+    NoDbConfig,
+    /// `DB_READER_PASSWORD` configured, but a kill-switch gate resolved
+    /// genuinely disabled (a real, successfully-fetched flag value -- not
+    /// an error, not unseen).
+    KillSwitchOn,
+}
+
+/// The multi-tenant path is active when `DB_READER_PASSWORD` is set (no
+/// more `BUNDLE_SCOPE_TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID` gate -- this
+/// path serves EVERY tenant/community it finds, never a single configured
+/// scope) AND BOTH kill-switch gates report enabled (`license::
+/// DbBundleConfigGate` and `license::MultiTenantWatermarkGate`, each
+/// already the negated "is this path enabled" answer -- default `true`
+/// when unseen or the license server is unreachable).
+///
+/// **Regression fix (alpha 2026-10-02):** a malformed `LICENSE_SERVER_URL`/
+/// `POSTHOG_HOST` (the only way `license::build_license_client` itself can
+/// fail) used to be treated as "path inactive", silently forcing the
+/// legacy loop even with `DB_READER_PASSWORD` fully configured -- the
+/// *opposite* of this module's own documented fail-open contract ("unseen/
+/// unreachable defaults to enabled") and inconsistent with
+/// `core/svc_action`'s equivalent `flags::db_bundle_config_flag`/
+/// `multi_tenant_watermark_flag`, which already default to enabled on a
+/// `None` license client. A license-client build failure now resolves the
+/// SAME way an unreachable license server already does: kill-switch state
+/// unknown, defaulting to enabled, logged at WARN rather than silently
+/// flipping the startup decision.
+async fn resolve_multi_tenant_path_decision(config: &config::Config) -> PathDecision {
+    if config.db_reader_password.is_none() {
+        return PathDecision::NoDbConfig;
     }
 
     let gate_enabled = match license::build_license_client("waddles") {
@@ -729,27 +795,50 @@ async fn resolve_multi_tenant_path_active(config: &config::Config) -> bool {
             let multi_tenant_enabled = license::MultiTenantWatermarkGate::new(client)
                 .enabled()
                 .await;
+            if !db_bundle_config_enabled || !multi_tenant_enabled {
+                tracing::warn!(
+                    disable_db_bundle_config_active = !db_bundle_config_enabled,
+                    disable_multi_tenant_watermark_active = !multi_tenant_enabled,
+                    "multi-tenant kill-switch is ON; falling back to legacy \
+                     PROCESS_APP_ID/PROCESS_INGEST_* env selection"
+                );
+            }
             db_bundle_config_enabled && multi_tenant_enabled
         }
         Err(err) => {
             tracing::warn!(
                 error = %err,
-                "license client config invalid; treating multi-tenant changelog-consumer path as inactive at startup"
+                "license client config invalid at startup; multi-tenant kill-switch state \
+                 unknown, defaulting to DB-driven path ENABLED (fail-open, same contract as an \
+                 unreachable license server)"
             );
-            false
+            true
         }
     };
 
-    multi_tenant_path_selected(db_config_present, gate_enabled)
+    if multi_tenant_path_selected(true, gate_enabled) {
+        PathDecision::MultiTenant
+    } else {
+        PathDecision::KillSwitchOn
+    }
 }
 
-/// Pure boolean combination behind [`resolve_multi_tenant_path_active`] --
+/// Pure boolean combination behind [`resolve_multi_tenant_path_decision`] --
 /// split out so the "which path wins" decision is directly unit-testable
 /// with a fixed kill-switch-gate value, without needing a live/mocked
 /// `penguin_licensing::LicenseClient` round trip to force a "kill-switch
 /// ON" flag value (not achievable in a unit test against the real client).
 fn multi_tenant_path_selected(db_config_present: bool, gate_enabled: bool) -> bool {
     db_config_present && gate_enabled
+}
+
+/// Point (d) of the alpha fix (2026-10-02): true when this pod has no
+/// usable data-plane path at startup at all -- the multi-tenant path
+/// didn't select, AND the legacy `PROCESS_APP_ID` override is also unset.
+/// Pure and standalone so it's directly unit-testable without exercising
+/// `run_with_shutdown`'s full bind/serve/shutdown machinery.
+fn no_data_plane_path_available(decision: PathDecision, process_app_id: &str) -> bool {
+    !matches!(decision, PathDecision::MultiTenant) && process_app_id.is_empty()
 }
 
 /// Attempts to start the multi-tenant, change-log-driven active-bundle
@@ -787,21 +876,41 @@ fn try_start_changelog_consumer(
         return;
     };
 
-    let license_client = match license::build_license_client("waddles") {
-        Ok(c) => c,
+    // Regression fix (alpha 2026-10-02, see `resolve_multi_tenant_path_decision`'s
+    // doc for the full rationale): a license-client build failure here must
+    // fail OPEN (kill-switch state unknown, both gates default enabled) --
+    // `run_with_shutdown` already selected this path via that same
+    // fail-open contract, so silently bailing out here on a second,
+    // independent build attempt would contradict the very decision that
+    // routed execution to this function in the first place.
+    let (gate, bundle_egress_flag): (
+        Arc<dyn license::FeatureGate>,
+        Arc<dyn bundle_host_http::egress::FeatureFlag>,
+    ) = match license::build_license_client("waddles") {
+        Ok(license_client) => (
+            Arc::new(license::AllGate(vec![
+                Arc::new(license::DbBundleConfigGate::new(Arc::clone(
+                    &license_client,
+                ))),
+                Arc::new(license::MultiTenantWatermarkGate::new(Arc::clone(
+                    &license_client,
+                ))),
+            ])),
+            bundle_host_http::egress::boxed(license::BundleEgressFlag::new(license_client)),
+        ),
         Err(err) => {
-            tracing::warn!(error = %err, "license client config invalid; multi-tenant changelog consumer not started");
-            return;
+            tracing::warn!(
+                error = %err,
+                "license client config invalid; multi-tenant kill-switch state unknown, \
+                 defaulting to ENABLED (fail-open, DB_READER_PASSWORD already configured) -- \
+                 bundle-egress capability denied until a valid license config is set"
+            );
+            (
+                Arc::new(license::AllGate(Vec::new())),
+                bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(false)),
+            )
         }
     };
-    let gate: Arc<dyn license::FeatureGate> = Arc::new(license::AllGate(vec![
-        Arc::new(license::DbBundleConfigGate::new(Arc::clone(
-            &license_client,
-        ))),
-        Arc::new(license::MultiTenantWatermarkGate::new(Arc::clone(
-            &license_client,
-        ))),
-    ]));
     // Same `bundle_host_http::egress::EgressGuard` wiring as
     // `try_start_process_loop` (this crate's other, mutually-exclusive
     // startup path) -- see that function's own doc for the deny-by-default
@@ -810,7 +919,7 @@ fn try_start_changelog_consumer(
         &config.cli,
         capabilities::HttpEgressCatalog::new(),
         egress_denied_metric,
-        bundle_host_http::egress::boxed(license::BundleEgressFlag::new(license_client)),
+        bundle_egress_flag,
     ) else {
         tracing::warn!("cluster CIDR denylist re-parse failed after startup validation passed; DB-driven bundle loader/source-binding supervisor not started");
         return;
@@ -856,8 +965,17 @@ fn try_start_changelog_consumer(
         let db = match bundle_active_set::reader::connect(&reader_cfg, &password).await {
             Ok(db) => db,
             Err(err) => {
-                tracing::error!(error = %err, "db-reader connection failed; multi-tenant changelog consumer not started");
-                return;
+                // Point (c) of the alpha fix (2026-10-02): this path was
+                // SELECTED (`DB_READER_PASSWORD` configured, kill-switches
+                // enabled) -- a connect/auth/query failure here must fail
+                // loud (crashloop) rather than silently leaving the pod
+                // running with no drain loop and no indication why.
+                tracing::error!(
+                    error = %err,
+                    "db-reader connection failed for the selected multi-tenant \
+                     changelog-consumer path; exiting rather than silently falling back"
+                );
+                std::process::exit(1);
             }
         };
 
@@ -1045,13 +1163,20 @@ mod tests {
             // `run_with_shutdown` needs the bound port back out to hit it,
             // and `CliConfig::validate` rejects port 0 outright (see
             // config.rs) -- these ports are only used for the lifetime of
-            // this single test.
+            // this single test. `--process-app-id` is required since point
+            // (d) of the alpha fix (2026-10-02): a config with neither the
+            // DB path (`DB_READER_PASSWORD` unset here) nor a legacy
+            // `PROCESS_APP_ID` now fails `run_with_shutdown` fast, which
+            // would otherwise make this bind/serve/shutdown test fail for
+            // an unrelated reason.
             let cli = CliConfig::parse_from([
                 "svc-process",
                 "--http-port",
                 "18291",
                 "--metrics-port",
                 "18292",
+                "--process-app-id",
+                "waddles.test.binds-serves-and-stops",
             ]);
             let config = Config::from_cli(cli).expect("secrets are set");
             unsafe {
@@ -1281,11 +1406,14 @@ mod tests {
     /// this path serves every tenant/community it finds, never a single
     /// configured scope.
     #[tokio::test]
-    async fn resolve_multi_tenant_path_active_is_false_when_db_reader_password_unset() {
+    async fn resolve_multi_tenant_path_decision_is_no_db_config_when_db_reader_password_unset() {
         let cli = CliConfig::parse_from(["svc-process"]);
         let mut config = test_config(cli);
         config.db_reader_password = None;
-        assert!(!resolve_multi_tenant_path_active(&config).await);
+        assert_eq!(
+            resolve_multi_tenant_path_decision(&config).await,
+            PathDecision::NoDbConfig
+        );
     }
 
     /// Mutual-exclusion regression test, path-active half ("multi-tenant
@@ -1293,17 +1421,17 @@ mod tests {
     /// config present and both kill-switch flags never seen (this test's
     /// clean-env `license::build_license_client` call, same fail-closed-
     /// to-OFF cold-client contract every other license test in this crate
-    /// relies on) must resolve `true` -- proving `run_with_shutdown`'s
-    /// `if resolve_multi_tenant_path_active(...).await` branch is the one
-    /// taken, so `try_start_process_loop` (the legacy loop) is structurally
-    /// never called for this config, regardless of `process_app_id` being
-    /// set. The complementary "either kill-switch ON -> legacy runs" half
-    /// is `multi_tenant_path_selected`'s own `false` cases above -- forcing
-    /// a real `penguin_licensing::LicenseClient` to report a raw
-    /// kill-switch flag ON requires a live PostHog/license server this
-    /// crate's test suite deliberately never depends on.
+    /// relies on) must resolve [`PathDecision::MultiTenant`] -- proving
+    /// `run_with_shutdown`'s `PathDecision::MultiTenant` match arm is the
+    /// one taken, so `try_start_process_loop` (the legacy loop) is
+    /// structurally never called for this config, regardless of
+    /// `process_app_id` being set. The complementary "either kill-switch ON
+    /// -> legacy runs" half is `multi_tenant_path_selected`'s own `false`
+    /// cases above -- forcing a real `penguin_licensing::LicenseClient` to
+    /// report a raw kill-switch flag ON requires a live PostHog/license
+    /// server this crate's test suite deliberately never depends on.
     #[tokio::test]
-    async fn resolve_multi_tenant_path_active_is_true_when_db_config_present_and_kill_switches_unseen(
+    async fn resolve_multi_tenant_path_decision_is_multi_tenant_when_db_config_present_and_kill_switches_unseen(
     ) {
         let cli = CliConfig::parse_from([
             "svc-process",
@@ -1312,10 +1440,68 @@ mod tests {
         ]);
         let mut config = test_config(cli);
         config.db_reader_password = Some(crate::config::Secret::new("real-ro-password"));
-        assert!(
-            resolve_multi_tenant_path_active(&config).await,
+        assert_eq!(
+            resolve_multi_tenant_path_decision(&config).await,
+            PathDecision::MultiTenant,
             "DB config present + never-seen kill-switch flags must select the multi-tenant path"
         );
+    }
+
+    /// Regression test for the alpha 2026-10-02 bug this task fixes: a
+    /// license-client build failure (malformed `LICENSE_SERVER_URL`) with
+    /// `DB_READER_PASSWORD` configured must still resolve
+    /// [`PathDecision::MultiTenant`] (fail OPEN), not silently fall back to
+    /// the legacy loop the way this function used to.
+    // regression: multi-app path silently inactive, fell back to stale legacy env (alpha 2026-10-02)
+    #[tokio::test]
+    async fn resolve_multi_tenant_path_decision_fails_open_when_license_client_build_errors() {
+        // Guard dropped before the `.await` below (clippy `await_holding_lock`),
+        // same pattern as `run_with_shutdown_binds_serves_and_stops_on_signal`.
+        {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::set_var("LICENSE_SERVER_URL", "not a valid url");
+            }
+        }
+        let cli = CliConfig::parse_from(["svc-process"]);
+        let mut config = test_config(cli);
+        config.db_reader_password = Some(crate::config::Secret::new("real-ro-password"));
+        let decision = resolve_multi_tenant_path_decision(&config).await;
+        {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::remove_var("LICENSE_SERVER_URL");
+            }
+        }
+        assert_eq!(
+            decision,
+            PathDecision::MultiTenant,
+            "a license-client build error must fail OPEN (DB path enabled), never silently \
+             force the legacy path"
+        );
+    }
+
+    #[test]
+    fn no_data_plane_path_available_is_true_only_when_neither_path_exists() {
+        assert!(
+            !no_data_plane_path_available(PathDecision::MultiTenant, ""),
+            "multi-tenant path active -> always a usable path, regardless of PROCESS_APP_ID"
+        );
+        assert!(!no_data_plane_path_available(
+            PathDecision::NoDbConfig,
+            "waddles.bot.commands.default"
+        ));
+        assert!(!no_data_plane_path_available(
+            PathDecision::KillSwitchOn,
+            "waddles.bot.commands.default"
+        ));
+        assert!(
+            no_data_plane_path_available(PathDecision::NoDbConfig, ""),
+            "no DB config and no legacy PROCESS_APP_ID -> no usable path at all"
+        );
+        assert!(no_data_plane_path_available(PathDecision::KillSwitchOn, ""));
     }
 
     /// Security review fix regression test (carried forward): `db_reader_
