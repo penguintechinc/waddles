@@ -198,7 +198,14 @@ pub fn maybe_build_enforcement_envelope(
             actor: source.event.actor.clone(),
             payload,
             occurred_at: now.clone(),
-            source: None,
+            // regression: action envelope dropped event.source so discord relay had no origin channel (alpha 2026-10-02)
+            // Carries `source`'s own (host-controlled) `event.source`
+            // onto this synthetic envelope, same as `crate::spine::
+            // handle_delivered`'s ordinary process->action hop -- the
+            // enforcement action still needs a real origin channel to
+            // reply into, and this must never be hardcoded `None` or
+            // left for a (nonexistent, synthetic) bundle to supply.
+            source: source.event.source.clone(),
         },
         ts: now,
         target_app_id: None,
@@ -402,5 +409,33 @@ mod tests {
             Some(&serde_json::json!("c456"))
         );
         assert!(!synthetic.event.payload.contains_key("text"));
+    }
+
+    #[test]
+    // regression: action envelope dropped event.source so discord relay had no origin channel (alpha 2026-10-02)
+    //
+    // The synthetic enforcement envelope is ALSO an action-stage envelope
+    // (spec §4.2's moderation-enforcement built-in) and a Discord relay
+    // reply through it needs the same real origin channel as the ordinary
+    // process->action hop (`crate::spine::carry_inbound_source`) -- it must
+    // never hardcode `source: None` the way it did before this fix.
+    fn enforcement_stamp_carries_the_sources_own_event_source() {
+        let mut env = fixture_envelope();
+        env.event.source = Some(penguin_spine::Source {
+            platform: "discord".to_string(),
+            account_id: "bot-123".to_string(),
+            channel_id: Some("origin-channel".to_string()),
+        });
+        let stamp = serde_json::json!({"category": "spam", "score": 0.9, "timeout_s": 600, "warn_text": "stop", "action": "timeout+warn"});
+
+        let synthetic = maybe_build_enforcement_envelope(&env, Some(&stamp)).unwrap();
+
+        let source = synthetic
+            .event
+            .source
+            .expect("source carried from the originating envelope");
+        assert_eq!(source.platform, "discord");
+        assert_eq!(source.account_id, "bot-123");
+        assert_eq!(source.channel_id.as_deref(), Some("origin-channel"));
     }
 }
