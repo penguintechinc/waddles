@@ -194,8 +194,12 @@ spec:
         # valueFrom(waddlebot-bundle-reader/...) for this exact name is why a live
         # upgrade fails with "env[N].valueFrom: ... may not be specified when value is
         # not empty" (kubectl's merge-by-name deep-merges the old and new field sets).
+        # feature/bundle-reader-role -- default changed from "svc_process_ro" (never
+        # backed by any migration) to "waddles_bundle_reader" (alembic/versions/
+        # 0032_bundle_reader_role.py), the role name migrations 0025/0028 already
+        # grant SELECT to.
         - name: DB_READER_USER
-          value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderUser | default "svc_process_ro" | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.svcProcess.dbReaderUser | default "waddles_bundle_reader" | quote }}
         - name: DB_READER_PASSWORD
           valueFrom:
             secretKeyRef:

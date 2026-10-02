@@ -173,8 +173,12 @@ spec:
         # cluster already carrying the old revision needs one `helm upgrade
         # --force-replace` (Helm v4) to clear it; never reintroduce `valueFrom` for
         # this name afterward.
+        # feature/bundle-reader-role -- default changed from "svc_action_ro" (never
+        # backed by any migration) to "waddles_bundle_reader" (alembic/versions/
+        # 0032_bundle_reader_role.py), the role name migrations 0025/0028 already
+        # grant SELECT to.
         - name: DB_READER_USER
-          value: {{ .Values.pipeline.rustDataPlane.svcAction.dbReaderUser | default "svc_action_ro" | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.svcAction.dbReaderUser | default "waddles_bundle_reader" | quote }}
         - name: DB_READER_PASSWORD
           valueFrom:
             secretKeyRef:

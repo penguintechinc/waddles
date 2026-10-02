@@ -227,6 +227,17 @@ infrastructure:
       POSTGRES_DB: waddlebot
       POSTGRES_USER: waddlebot
       # POSTGRES_PASSWORD should be set via secrets
+    # waddles_bundle_reader (alembic/versions/0032_bundle_reader_role.py) --
+    # the Rust data-plane's real, now-provisioned RO role for the DB-driven
+    # multi-app active-bundle loader (core/svc_process, core/svc_action,
+    # core/bundle_active_set). Empty ("", never "REPLACE_ME"-prefixed) is
+    # treated as "unset" by templates/secrets.yaml's autoSecretValue lookup
+    # -- auto-generated in alpha/local, required (must be set here) in
+    # beta/gamma/production, same posture as postgresql.password above. An
+    # unset value is NOT graceful-degradation safe here the way bundle
+    # Migrator/RuntimePassword below are: it leaves the multi-app data-plane
+    # path disabled, so beta/prod must set a real value.
+    readerPassword: ""
     # Bundle app-schema roles (Phase 0, docs/superpowers/specs/2026-09-28-
     # bundle-db-capability-and-schemas.md Sec2) -- waddles_bundle_migrator
     # (DDL owner of app_core/app_community, hub-api only) and
@@ -1001,10 +1012,11 @@ pipeline:
       dbReaderPort: ""
       dbReaderName: ""
       # A distinct, SELECT-only Postgres role -- never infrastructure.postgresql.username
-      # (the primary read-write account). See core/bundle_active_set's crate-root doc for
-      # the exact GRANT statements this role needs; provisioning the role itself is a
-      # follow-up (not a Helm change) tracked outside this chart.
-      dbReaderUser: "svc_process_ro"
+      # (the primary read-write account). feature/bundle-reader-role: the role is now
+      # actually provisioned (alembic/versions/0032_bundle_reader_role.py), under the
+      # same name migrations 0025/0028 already grant SELECT to -- "svc_process_ro" was
+      # never backed by any migration.
+      dbReaderUser: "waddles_bundle_reader"
       # BUNDLE_SCOPE_TENANT_ID/BUNDLE_SCOPE_COMMUNITY_ID REMOVED (dataplane scale
       # design, multi-tenant change-log consumer): the loader now discovers and
       # serves every (tenant_id, community_id) scope in the database itself
@@ -1065,7 +1077,10 @@ pipeline:
       dbReaderHost: ""
       dbReaderPort: ""
       dbReaderName: ""
-      dbReaderUser: "svc_action_ro"
+      # feature/bundle-reader-role -- see svcProcess's identical field's own comment
+      # above: "svc_action_ro" was never backed by any migration, the role migrations
+      # 0025/0028 already grant SELECT to is "waddles_bundle_reader".
+      dbReaderUser: "waddles_bundle_reader"
       # BUNDLE_SCOPE_TENANT_ID/BUNDLE_SCOPE_COMMUNITY_ID REMOVED -- see
       # svcProcess's identical field's own comment above for the full rationale.
       bundleConfigPollSeconds: 300

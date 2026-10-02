@@ -285,15 +285,23 @@ pipeline:
       processBundleSidecarKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.json"
       # Multi-tenant, change-log-driven active-bundle loader (core/svc_process/
       # src/config.rs, core/bundle_active_set, core/svc_process/src/
-      # changelog_consumer.rs) -- the RO Postgres role (svc_process_ro) still
-      # isn't provisioned yet -- DB_READER_PASSWORD stays empty (templates/
-      # secrets.yaml default), which is `try_start_changelog_consumer`'s own
-      # independent disable gate (core/svc_process/src/lib.rs). So PROCESS_APP_ID/
-      # PROCESS_BUNDLE_* above remain this alpha e2e proof's sole bundle source,
-      # unaffected by this block, until that role exists. Only overriding the poll
-      # interval here (tunable per deployment) -- a shorter interval than the 300s
-      # chart default so a future alpha e2e proof of the hot-swap path itself
-      # doesn't need a multi-minute wait between DB writes and the loader noticing.
+      # changelog_consumer.rs) -- feature/bundle-reader-role: the RO Postgres
+      # role (waddles_bundle_reader, alembic/versions/0032_bundle_reader_role.py)
+      # is now provisioned, and templates/secrets.yaml auto-generates
+      # DB_READER_PASSWORD in alpha (same lookup-KEEP-then-generate policy as
+      # POSTGRES_PASSWORD), so `resolve_multi_tenant_path_active`
+      # (core/svc_process/src/lib.rs) now resolves true at startup (both
+      # kill-switch gates default enabled when unseen) and this DB-driven path
+      # becomes authoritative for this pod's whole lifetime -- mutual
+      # exclusion, not an add-on: the legacy single-app PROCESS_APP_ID/
+      # PROCESS_BUNDLE_* fields above never start once this path wins, they
+      # are left in place only as a documented fallback (unset
+      # DB_READER_PASSWORD reverts to them on the next restart). The
+      # multi-tenant path itself serves every app/tenant/community it finds
+      # in the DB (ping, pyping, later csping), not a single configured one.
+      # Only overriding the poll interval here (tunable per deployment) -- a
+      # shorter interval than the 300s chart default so hot-swap changes are
+      # noticed without a multi-minute wait.
       bundleConfigPollSeconds: 30
       resources:
         requests: { cpu: "100m", memory: "128Mi" }

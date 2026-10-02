@@ -465,6 +465,19 @@ Usage: {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
         name: {{ include "waddlebot.fullname" . }}-secrets
         key: BUNDLE_RUNTIME_PASSWORD
         optional: true
+  # waddles_bundle_reader (alembic/versions/0032_bundle_reader_role.py) --
+  # the SAME secret key svc-process-rust/svc-action-rust already read
+  # (templates/svc-process-rust.yaml, templates/svc-action-rust.yaml), never
+  # a second parallel credential. optional: true, matching BUNDLE_MIGRATOR_
+  # PASSWORD/BUNDLE_RUNTIME_PASSWORD above -- an unset value means the
+  # migration creates/leaves the role LOGIN with no usable password yet,
+  # never a migration failure.
+  - name: DB_READER_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: {{ include "waddlebot.fullname" . }}-secrets
+        key: DB_READER_PASSWORD
+        optional: true
   resources:
     requests:
       cpu: "50m"
