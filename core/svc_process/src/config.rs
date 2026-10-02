@@ -148,6 +148,21 @@ pub struct CliConfig {
     /// (spec SS7.3).
     #[arg(long, env = "EXECUTOR_CALL_TIMEOUT_MS", default_value_t = 2000)]
     pub executor_call_timeout_ms: u64,
+    /// Host-API heartbeat interval: how often the stage sends `ping` to
+    /// each connected executor session (fix/executor-link-heartbeat, alpha
+    /// 2026-10-02 incident: a rolled svc pod left the executor bound to a
+    /// terminated peer with no liveness signal at all). A session is
+    /// dropped after `HEARTBEAT_MISSED_LIMIT` consecutive missed `pong`s.
+    #[arg(long, env = "HEARTBEAT_INTERVAL_MS", default_value_t = 5000)]
+    pub heartbeat_interval_ms: u64,
+    /// How long `/healthz`/`/health` tolerate zero live executor sessions
+    /// before liveness (not just readiness) fails -- readiness fails
+    /// immediately at zero sessions; liveness only after this grace period,
+    /// so Kubernetes restarts a pod stuck with no executor rather than
+    /// leaving it `Running`/`Ready`-looking forever (the alpha incident:
+    /// every pod showed healthy while silently dead-lettering everything).
+    #[arg(long, env = "EXECUTOR_GRACE_SECONDS", default_value_t = 60)]
+    pub executor_grace_seconds: u64,
 
     /// Interim, env-driven substitute for the `GET /api/v1/distribution/
     /// bundles?stage=process` grant list (spec SS4.2/SS6.7) -- **TODO(M4+)**:
@@ -292,6 +307,18 @@ impl CliConfig {
                 reason: "must be set together".to_string(),
             });
         }
+        if self.heartbeat_interval_ms == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "heartbeat_interval_ms",
+                reason: "must be positive".to_string(),
+            });
+        }
+        if self.executor_grace_seconds == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "executor_grace_seconds",
+                reason: "must be positive".to_string(),
+            });
+        }
         let denylist = self.cluster_cidr_denylist()?;
         if denylist.is_empty() && !matches!(self.deployment_tier.as_str(), "alpha" | "local") {
             return Err(ConfigError::InvalidValue {
@@ -348,6 +375,18 @@ impl CliConfig {
         std::time::Duration::from_secs(
             (self.bundle_config_full_reconcile_minutes.max(1) as u64) * 60,
         )
+    }
+
+    /// [`Self::heartbeat_interval_ms`] as a [`std::time::Duration`] --
+    /// `validate` already rejects `0`, but this floors at 1ms anyway rather
+    /// than ever constructing a zero-length sleep/timeout.
+    pub fn heartbeat_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.heartbeat_interval_ms.max(1))
+    }
+
+    /// [`Self::executor_grace_seconds`] as a [`std::time::Duration`].
+    pub fn executor_grace(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.executor_grace_seconds.max(1))
     }
 }
 

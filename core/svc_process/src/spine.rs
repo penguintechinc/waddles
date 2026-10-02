@@ -565,7 +565,23 @@ async fn handle_delivered<S: SpineOps>(
     }
 
     let Some(connection) = deps.connections.active() else {
-        tracing::warn!(app_id = %deps.app_id, "no executor connection available, dead-lettering for redelivery");
+        // Escalated WARN -> ERROR (fix/executor-link-heartbeat, alpha
+        // 2026-10-02 incident: svc-process/svc-action were rolled and each
+        // bundle-executor stayed bound to its old, terminated pod; the new
+        // svc-process had zero executors and silently dead-lettered every
+        // `!ping` at WARN -- nobody noticed until a user reported it). The
+        // outage duration is named in the rendered message itself, not
+        // only a structured field, per the "over-log, never swallow
+        // errors" rule.
+        let app_id = &deps.app_id;
+        let no_executor_for_s = deps.connections.duration_without_executor().as_secs();
+        deps.connections.record_dead_letter_no_executor();
+        tracing::error!(
+            app_id = %app_id,
+            no_executor_for_s,
+            "no executor connection available for {no_executor_for_s}s (app_id {app_id}), \
+             dead-lettering for redelivery"
+        );
         let err = DlqError {
             kind: DlqErrorKind::ExecutorUnavailable,
             code: "EXECUTOR_UNAVAILABLE".to_string(),
