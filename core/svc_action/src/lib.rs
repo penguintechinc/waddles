@@ -709,12 +709,40 @@ fn try_start_changelog_consumer(
     let full_reconcile_interval = config.cli.full_reconcile_interval();
     let call_timeout_ms = config.cli.executor_call_timeout_ms;
 
+    let startup_log_flag = Arc::clone(&flag);
     tokio::spawn(async move {
+        // Point (e) of the alpha fix (2026-10-02): log at INFO/WARN which
+        // state the kill-switch resolved to before ever attempting to
+        // connect -- `DB_READER_PASSWORD` being configured only means this
+        // path is SELECTED, not that it will actually process anything.
+        if startup_log_flag.enabled().await {
+            tracing::info!(
+                "startup path: multi-tenant changelog-consumer enabled \
+                 (DB_READER_PASSWORD configured, kill-switches enabled)"
+            );
+        } else {
+            tracing::warn!(
+                "multi-tenant changelog-consumer kill-switch is ON at startup; connecting \
+                 anyway, but ticks will no-op until it flips off"
+            );
+        }
         let db = match bundle_active_set::reader::connect(&reader_cfg, &password).await {
             Ok(db) => db,
             Err(err) => {
-                tracing::error!(error = %err, "db-reader connection failed; multi-tenant changelog consumer not started");
-                return;
+                // Point (c) of the alpha fix (2026-10-02, `core/svc_process`'s
+                // identical fix for its own `try_start_changelog_consumer`):
+                // this path was SELECTED (`DB_READER_PASSWORD` configured) --
+                // a connect/auth/query failure here must fail loud
+                // (crashloop) rather than silently leaving the pod running
+                // with no multi-tenant changelog consumer and no indication
+                // why.
+                // regression: multi-app path silently inactive, fell back to stale legacy env (alpha 2026-10-02)
+                tracing::error!(
+                    error = %err,
+                    "db-reader connection failed for the selected multi-tenant \
+                     changelog-consumer path; exiting rather than silently falling back"
+                );
+                std::process::exit(1);
             }
         };
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
