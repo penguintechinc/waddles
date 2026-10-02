@@ -8,7 +8,9 @@
 # Toolchain versions match this repo's own proven CI recipe verbatim
 # (.github/workflows/rust-waddle-sdk-rs.yml's example-bundle-component job,
 # .github/workflows/python-waddle-sdk.yml) -- cargo-component 0.21.1, wasm-tools 1.259.0, Rust
-# 1.97.1, componentize-py==0.25.1.
+# 1.97.1, componentize-py==0.25.1. waddles.core.example.csping's csharp-bundle-builder stage
+# mirrors bundles/csharp/csping/Dockerfile's own pinned toolchain (.NET SDK 10.0.401,
+# componentize-dotnet 0.8.0-preview00011, NativeAOT-LLVM 10.0.0-rc.1.26306.1).
 
 # ---------------------------------------------------------------------------
 # Stage 1: waddles.core.example.ping (Rust) -> WASI 0.2 component
@@ -130,7 +132,70 @@ RUN componentize-py \
         -o pyping.wasm
 
 # ---------------------------------------------------------------------------
-# Stage 3: hub-api's own Python dependency set (+ wasm-tools CLI) -- mirrors
+# Stage 3: waddles.core.example.csping (C#) -> WASI 0.2 component
+#
+# Mirrors bundles/csharp/csping/Dockerfile verbatim (same pinned base, same WASI SDK pin,
+# same rootless builder user) -- that file is this bundle's own standalone build, documented
+# in full there; only the COPY sources differ (repo-root context here vs. that Dockerfile's
+# own COPY of wit/ + bundles/csharp/csping relative to repo root, already identical paths).
+#
+# Reproducibility: UNLIKE rust-bundle-builder above, this stage is NOT covered by
+# scripts/verify-core-bundles-reproducible.sh's byte-identity gate. componentize-dotnet's
+# NativeAOT-LLVM pipeline (clang/LLVM codegen, not rustc) has not been proven byte-identical
+# across two independent --no-cache builds -- SOURCE_DATE_EPOCH/TZ/LC_ALL are pinned below
+# defensively (same rationale as the other two stages), but that alone does not establish
+# reproducibility for an AOT/LLVM toolchain (parallel codegen ordering, embedded build paths
+# in NativeAOT metadata, etc. are unverified here). Treat this stage the same as
+# python-bundle-builder: intentionally excluded from the gate, not silently passing it. If a
+# future change proves two independent builds byte-identical, add it to
+# scripts/verify-core-bundles-reproducible.sh's check_artifact calls and drop this comment.
+# ---------------------------------------------------------------------------
+FROM mcr.microsoft.com/dotnet/sdk:10.0.401-noble@sha256:35d40304542c8689331f8cab17c65926cdf48fe711e289321d71924b230a7d29 AS csharp-bundle-builder
+
+# Non-root build user (rules/devops-containers.md Rootless Containers -- no exception needed,
+# same rationale as bundles/csharp/csping/Dockerfile's own builder stage: no genuine root
+# requirement).
+RUN groupadd --gid 10001 builder \
+    && useradd --uid 10001 --gid builder --create-home --home-dir /home/builder \
+       --shell /usr/sbin/nologin builder
+
+ENV HOME=/home/builder \
+    DOTNET_CLI_HOME=/home/builder \
+    NUGET_PACKAGES=/home/builder/.nuget/packages \
+    DOTNET_NOLOGO=1 \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1
+
+# Pinned, checksum-verified WASI SDK -- see bundles/csharp/csping/Dockerfile's own comment
+# block for why this is pre-seeded instead of left to NativeAOT-LLVM's on-demand fetch.
+ARG WASI_SDK_RELEASE=wasi-sdk-29
+ARG WASI_SDK_VERSION=29.0
+ARG WASI_SDK_SHA256=87d1d1a2879d139cdc624b968efad3d4a97b8078cdff95e63ac88ecafd1a0171
+RUN curl -fsSL -o /tmp/wasi-sdk.tar.gz \
+      "https://github.com/WebAssembly/wasi-sdk/releases/download/${WASI_SDK_RELEASE}/wasi-sdk-${WASI_SDK_VERSION}-x86_64-linux.tar.gz" \
+    && echo "${WASI_SDK_SHA256}  /tmp/wasi-sdk.tar.gz" | sha256sum -c - \
+    && mkdir -p "/home/builder/.wasi-sdk/wasi-sdk-${WASI_SDK_VERSION}" \
+    && tar -xzf /tmp/wasi-sdk.tar.gz --strip-components=1 \
+         -C "/home/builder/.wasi-sdk/wasi-sdk-${WASI_SDK_VERSION}" \
+    && rm /tmp/wasi-sdk.tar.gz \
+    && chown -R builder:builder /home/builder
+
+WORKDIR /repo
+COPY wit wit
+COPY bundles/csharp/csping bundles/csharp/csping
+RUN chown -R builder:builder /repo
+WORKDIR /repo/bundles/csharp/csping
+
+# Reproducibility pins (defensive -- see this stage's own header comment on why these alone
+# do not establish a proven-reproducible build for this toolchain, unlike the Rust stage).
+ENV SOURCE_DATE_EPOCH=1704067200 \
+    TZ=UTC \
+    LC_ALL=C.UTF-8
+
+USER builder
+RUN dotnet build -c Release
+
+# ---------------------------------------------------------------------------
+# Stage 4: hub-api's own Python dependency set (+ wasm-tools CLI) -- mirrors
 # hub_api/Dockerfile's builder stage verbatim, same pinned base per
 # devops-containers.md ("never a second pinned digest for the same tag").
 # ---------------------------------------------------------------------------
@@ -178,8 +243,10 @@ RUN mkdir -p /core-bundles
 COPY bundles/core-bundles.yaml /core-bundles/core-bundles.yaml
 COPY bundles/rust/ping/hub-manifest.yaml /core-bundles/ping.manifest.yaml
 COPY bundles/python/pyping/hub-manifest.yaml /core-bundles/pyping.manifest.yaml
+COPY bundles/csharp/csping/hub-manifest.yaml /core-bundles/csping.manifest.yaml
 COPY --from=rust-bundle-builder /repo/bundles/rust/ping/target/wasm32-wasip2/release/waddle_bundle_ping_rust.wasm /core-bundles/ping.wasm
 COPY --from=python-bundle-builder /repo/pyping.wasm /core-bundles/pyping.wasm
+COPY --from=csharp-bundle-builder /repo/bundles/csharp/csping/bin/Release/net10.0/wasi-wasm/publish/csping.wasm /core-bundles/csping.wasm
 
 ENV CORE_BUNDLES_DIR=/core-bundles
 
