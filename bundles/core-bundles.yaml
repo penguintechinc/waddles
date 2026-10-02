@@ -33,11 +33,26 @@ bundles:
   # 1.0.0 AND 1.0.1 are permanently retired -- fix/reproducible-core-bundles. app_versions is
   # immutable per (app_id, version); see bundles/rust/ping/hub-manifest.yaml's own comment for
   # the full story (1.0.1's build was never actually proven byte-reproducible -- no CI gate
-  # existed, and it depended on an unpinned on-demand rustup target install). 1.0.2 is the
+  # existed, and it depended on an unpinned on-demand rustup target install). 1.0.2 was the
   # first version built with the wasm32-wasip1 preinstall fix and a CI-enforced two-build
   # byte-identity gate (.github/workflows/core-bundles-reproducible.yml).
+  #
+  # 1.0.3 (fix/seeder-activate-tenant-wide, alpha 2026-10-02): adds a `discord` consumes rule
+  # (hub-manifest.yaml's own comment) -- 1.0.2's manifest never declared it, so this bundle
+  # would never auto-bind to alpha's real Discord ingest source even with tenant-wide
+  # activation fixed. app_versions.artifact_digest is immutable AND globally UNIQUE (migration
+  # 0022) -- a manifest-only change can never reuse 1.0.2's digest under a new version string,
+  # so Cargo.toml's own crate `[package] version` was also bumped (0.1.0 -> 0.1.1, see its own
+  # comment) purely to force cargo-component to embed a different package-version string in
+  # the rebuilt component, producing new bytes. NOT verified byte-level in this change (no
+  # wasm32-wasip1/cargo-component toolchain available to the agent that made this edit) --
+  # .github/workflows/core-bundles-reproducible.yml's two-build identity check proves 1.0.3 is
+  # reproducible against ITSELF, not that it differs from 1.0.2; if it does not,
+  # app_versions.artifact_digest's own UNIQUE constraint rejects the INSERT outright (a raw
+  # IntegrityError, caught by seed_core_bundles.py::_run()'s generic exception handler --
+  # logged with type+message, nonzero exit, never a silent success with stale manifest_json).
   - app_id: waddles.core.example.ping
-    version: "1.0.2"
+    version: "1.0.3"
     language: rust
     manifest_path: ping.manifest.yaml
     artifact_path: ping.wasm
