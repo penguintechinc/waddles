@@ -156,17 +156,28 @@ def migrated_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
             capture_output=True,
             check=True,
         )
+        # fix/no-empty-kept-secrets -- 0032_bundle_reader_role.py's upgrade() now
+        # refuses an empty DB_READER_PASSWORD (previously silently provisioned
+        # waddles_bundle_reader with no usable password). Most callers of this
+        # harness (every real-Postgres test outside alembic/tests/
+        # test_0032_bundle_reader_role.py itself) don't care about this role at
+        # all, so `setdefault` supplies a throwaway value here -- never a real
+        # credential, this container is destroyed at context-manager exit --
+        # while still letting a caller that DOES care (stages its own value in
+        # `os.environ` beforehand) override it, same as every other env var.
+        migration_env = {**os.environ, "DATABASE_URL": db.dsn}
+        migration_env.setdefault("DB_READER_PASSWORD", "pg-docker-harness-default-reader-pw")
         subprocess.run(  # noqa: S603 -- fixed argv, no shell
             [sys.executable, "-m", "alembic", "stamp", _STAMP_REVISION],
             cwd=REPO_ROOT,
-            env={**os.environ, "DATABASE_URL": db.dsn},
+            env=migration_env,
             capture_output=True,
             check=True,
         )
         upgrade = subprocess.run(  # noqa: S603 -- fixed argv, no shell
             [sys.executable, "-m", "alembic", "upgrade", "head"],
             cwd=REPO_ROOT,
-            env={**os.environ, "DATABASE_URL": db.dsn},
+            env=migration_env,
             capture_output=True,
             check=False,
         )
@@ -218,11 +229,19 @@ def empty_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
 
 
 def alembic_cli(*args: str, dsn: str) -> subprocess.CompletedProcess[str]:
-    """Run one `alembic` subcommand against `dsn`, repo root as cwd. Raises on nonzero exit."""
+    """Run one `alembic` subcommand against `dsn`, repo root as cwd. Raises on nonzero exit.
+
+    Same `DB_READER_PASSWORD` default as `migrated_postgres` above -- an
+    `upgrade`/`downgrade` round-trip that crosses 0032_bundle_reader_role.py
+    re-runs its (now fail-loud-on-empty) `upgrade()`, and most callers of this
+    helper don't stage their own value.
+    """
+    env = {**os.environ, "DATABASE_URL": dsn}
+    env.setdefault("DB_READER_PASSWORD", "pg-docker-harness-default-reader-pw")
     result = subprocess.run(  # noqa: S603 -- fixed argv, no shell
         [sys.executable, "-m", "alembic", *args],
         cwd=REPO_ROOT,
-        env={**os.environ, "DATABASE_URL": dsn},
+        env=env,
         capture_output=True,
         text=True,
         check=False,

@@ -188,7 +188,12 @@ class TestRefusesEmptyPassword:
     """
 
     def test_upgrade_raises_on_empty_reader_password(self) -> None:
-        os.environ.pop("DB_READER_PASSWORD", None)
+        # Explicitly "" (never just popped): pg_docker.migrated_postgres's
+        # subprocess env only `setdefault`s DB_READER_PASSWORD when the key is
+        # ABSENT from os.environ -- an explicit empty string must still win
+        # (the exact "existing-but-empty" shape this whole fix is about), so
+        # the subprocess really does inherit an empty value here.
+        os.environ["DB_READER_PASSWORD"] = ""
         try:
             with pytest.raises(RuntimeError, match="DB_READER_PASSWORD"):
                 with migrated_postgres("0032-bundle-reader-role-empty-pw"):
