@@ -439,6 +439,7 @@ def test_load_catalog_parses_the_real_repo_catalog() -> None:
     assert {e.app_id for e in entries} == {
         "waddles.core.example.ping",
         "waddles.core.example.pyping",
+        "waddles.core.example.csping",
     }
     for entry in entries:
         assert entry.activation_targets == (ActivationTarget(tenant_slug="global"),)
