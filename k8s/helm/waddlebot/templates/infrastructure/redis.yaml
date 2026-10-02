@@ -20,6 +20,17 @@ spec:
       app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
+      annotations:
+        # fix/valkey-cert-rollout-and-migrate-wait -- rolls the Valkey server pod when the
+        # desired valkey-tls identity/SANs change, even when the `-valkey-tls` Secret
+        # object itself is KEPT by name (templates/infrastructure/valkey-tls-secret.yaml's
+        # policy comment) -- without this the server kept serving its old leaf cert while
+        # regenerated clients trusted the new CA, failing every connection with
+        # `invalid peer certificate: BadSignature`.
+        # regression: valkey cert regenerated but server pod not rolled; clients BadSignature (alpha 2026-10-02)
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        checksum/valkey-tls: {{ include "waddlebot.valkeyTlsPodChecksum" . | quote }}
+        {{- end }}
       labels:
         app.kubernetes.io/name: redis
         app.kubernetes.io/instance: {{ .Release.Name }}
