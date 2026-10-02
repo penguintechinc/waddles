@@ -90,11 +90,17 @@ spec:
         - name: HOST_API_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcAction.hostApiPort | quote }}
         # fix/executor-link-heartbeat (alpha 2026-10-02 incident): how often
-        # this stage pings each connected executor session, and how long
-        # `/health` tolerates zero live sessions before liveness (not just
-        # readiness) fails -- see `core/svc_action/src/host_api.rs`.
+        # this stage pings each connected executor session -- see
+        # `core/svc_action/src/host_api.rs`.
         - name: HEARTBEAT_INTERVAL_MS
           value: {{ .Values.pipeline.rustDataPlane.svcAction.heartbeatIntervalMs | default 5000 | quote }}
+        # regression: readiness gated on executor connection deadlocked
+        # rollouts (alpha 2026-10-02) -- NO LONGER wired into `/readyz`/
+        # `/healthz`/`/health` (a bundle-executor dials this service
+        # through its ClusterIP Service, which only routes to Ready pods,
+        # so gating readiness/liveness on executor presence deadlocked
+        # rollouts). Now only the threshold for the periodic zero-executor
+        # ERROR log (`crate::host_api::run_zero_executor_watchdog`).
         - name: EXECUTOR_GRACE_SECONDS
           value: {{ .Values.pipeline.rustDataPlane.svcAction.executorGraceSeconds | default 60 | quote }}
         # Security review fix (PR #468, MEDIUM): the bundle `http` egress guard's
@@ -234,7 +240,10 @@ spec:
           # mistakenly wired here) reflects whether the action-stage
           # dispatch loop is actually connected and reading -- regression:
           # drain loop exited on NOGROUP while the pod stayed Ready forever
-          # (alpha 2026-10-02).
+          # (alpha 2026-10-02). Deliberately does NOT gate on executor
+          # presence -- see EXECUTOR_GRACE_SECONDS above (regression:
+          # readiness gated on executor connection deadlocked rollouts,
+          # alpha 2026-10-02).
           httpGet:
             path: /readyz
             port: http
