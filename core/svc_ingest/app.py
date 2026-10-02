@@ -104,6 +104,12 @@ from bundles.youtube_live_ingest import register_default_bundles as register_you
 from config import Config
 from eventsub import TwitchEventSubHandler
 from fanout import fan_out_event
+from identity_crypto import (
+    DekProvider,
+    HubApiDekProvider,
+    LocalDevDekProvider,
+    TtlCachedDekProvider,
+)
 from outbound_drain import DRAIN_SOCKET_TIMEOUT_S, TwitchOutboundDrain
 from receivers.discord_gateway import CONSUMES_TAG as DISCORD_CONSUMES_TAG
 from receivers.discord_gateway import DiscordGatewayReceiver
@@ -196,6 +202,34 @@ def _jwt_provider() -> str:
             expiration_hours=1,
         ),
     )
+
+
+def build_dek_provider(http_client: httpx.AsyncClient) -> DekProvider:
+    """Build this runner's identity-field `DekProvider`.
+
+    Production posture (`Config.INGEST_DEV_KEK` unset): `HubApiDekProvider`
+    -- hub-api-brokered, KMS-backed DEKs per the tenant-envelope-encryption
+    design (S5). **The server side of that broker endpoint does not exist
+    yet** (checked at implementation time -- no `tenant_encryption_keys`
+    keystore, no `/internal/v1/tenant-keys/*` blueprint); every call fails
+    closed with `DekUnavailableError` until it ships, which is the
+    documented gap this PR calls out, not a silent stub.
+
+    Dev/alpha fallback (`Config.INGEST_DEV_KEK` set): `LocalDevDekProvider`
+    -- real AES-256-GCM, HKDF-derived per-tenant DEK from a local KEK, so
+    local/alpha environments can exercise the full encryption path without
+    a live hub-api broker. Never the production mechanism.
+
+    Both are wrapped in `TtlCachedDekProvider` (10-minute TTL, matching the
+    design's hub-api-side cache) so a steady-state ingest loop does not
+    call the broker on every event.
+    """
+    inner: DekProvider
+    if Config.INGEST_DEV_KEK:
+        inner = LocalDevDekProvider(env_var="INGEST_DEV_KEK")
+    else:
+        inner = HubApiDekProvider(http_client, Config.HUB_API_URL, _jwt_provider)
+    return TtlCachedDekProvider(inner)
 
 
 def _register_discord_receiver(
@@ -621,7 +655,10 @@ async def startup() -> None:
         max_backoff_s=Config.MAX_BACKOFF_S,
     )
     runner = IngestRunner(
-        poller=poller, redis_client=redis_client, tenant_slug=Config.RUNNER_TENANT_SLUG
+        poller=poller,
+        redis_client=redis_client,
+        tenant_slug=Config.RUNNER_TENANT_SLUG,
+        dek_provider=build_dek_provider(http_client),
     )
 
     app.config["http_client"] = http_client

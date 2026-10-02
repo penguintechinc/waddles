@@ -18,6 +18,8 @@ import fakeredis
 import httpx
 import pytest
 
+from identity_crypto import DekProvider
+
 
 @pytest.fixture
 def redis_server() -> fakeredis.FakeServer:
@@ -29,6 +31,27 @@ async def redis_client(redis_server: fakeredis.FakeServer) -> Any:
     client = fakeredis.FakeAsyncRedis(decode_responses=True, server=redis_server)
     yield client
     await client.aclose()
+
+
+class _FakeDekProvider:
+    """Deterministic in-memory `DekProvider` for tests -- one fixed 32-byte DEK per tenant.
+
+    Real AES-256-GCM keys (not a no-op/mock of the crypto itself), just a
+    trivial resolution rule (`tenant_id` bytes, zero-padded) standing in
+    for the hub-api broker call so runner tests exercise real encryption.
+    """
+
+    def __init__(self, *, version: int = 1) -> None:
+        self.version = version
+
+    async def get_dek(self, tenant_id: str, *, dek_version: int | None = None) -> tuple[bytes, int]:
+        key = tenant_id.encode("utf-8").ljust(32, b"\0")[:32]
+        return key, dek_version if dek_version is not None else self.version
+
+
+@pytest.fixture
+def dek_provider() -> DekProvider:
+    return _FakeDekProvider()
 
 
 @pytest.fixture
