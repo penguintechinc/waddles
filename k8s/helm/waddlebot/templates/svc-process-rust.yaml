@@ -30,6 +30,14 @@ spec:
       app.kubernetes.io/component: svc-process-rust
   template:
     metadata:
+      annotations:
+        # fix/cert-regen-on-identity-change -- rolls every pod when the desired
+        # host-api-tls identity/SANs change, even though the Secret object itself is
+        # reused by name when kept (see templates/host-api-tls-secret.yaml's policy
+        # comment); derived from identity+SANs only, never key material.
+        {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+        checksum/host-api-tls: {{ include "waddlebot.hostApiTlsPodChecksum" . | quote }}
+        {{- end }}
       labels:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: svc-process-rust
