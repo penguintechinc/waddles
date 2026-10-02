@@ -28,8 +28,10 @@ spec:
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      initContainers:
-      {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- no initContainers: hub-api
+      # bootstraps its own schema in-process at startup (hub_api/bootstrap.py), gated on
+      # its own `/ready` readinessProbe below rather than a pre-run initContainer. hub-api
+      # is the one Deployment in this chart that never waits on itself.
       containers:
       - name: hub-api
         # fix/alpha-helm-deploy -- hub_api/Dockerfile (Python 3.13 + Quart control-plane
@@ -188,8 +190,13 @@ spec:
           timeoutSeconds: 5
           failureThreshold: 3
         readinessProbe:
+          # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- /ready (hub_api/app.py),
+          # not /health: gated on BootstrapStatus.is_ready so K8s never routes traffic to
+          # hub-api until the schema is confirmed at head. livenessProbe stays on
+          # flask_core's /health above -- a schema that's legitimately SCHEMA_BEHIND
+          # (waiting on an operator-run migrate hook) must not get this pod killed.
           httpGet:
-            path: /health
+            path: /ready
             port: http
           initialDelaySeconds: 10
           periodSeconds: 5

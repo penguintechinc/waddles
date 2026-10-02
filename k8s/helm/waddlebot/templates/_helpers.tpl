@@ -402,89 +402,109 @@ cert-manager.io/issuer: {{ .Values.ingress.certManager.issuer.name }}
 {{- end }}
 
 {{/*
-DB Migration initContainer
-Runs database migrations before the application container starts.
-Uses advisory locking to handle concurrent pod startup safely.
+fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waddlebot.dbMigrateInitContainer
+(ran the migrations image as a per-pod initContainer on hub-api/svc-process-rust/
+svc-action-rust, including the CWE-798 PR #256 INITIAL_ADMIN_EMAIL/PASSWORD seed step)
+REMOVED. hub-api now bootstraps its own schema at startup (hub_api/bootstrap.py); every
+other pod that needs the schema waits on hub-api's own `/ready` instead
+(waddlebot.waitForHubApiInitContainer below) rather than each independently re-running
+migrations against the same advisory lock. The migrations image itself still exists and
+still runs the full migration directory + the admin-seed step -- now ONLY via
+templates/migrations-job.yaml's pre-upgrade hook, never per-pod.
 
-Also carries INITIAL_ADMIN_EMAIL/INITIAL_ADMIN_PASSWORD (PR #256,
-CWE-798): this is the chart's one shared init path, mirroring
-docker-compose.yml's db-migrations service, which is the actual live
-first-run super-admin bootstrap trigger (config/postgres/migrations/
-081_seed_default_hub_admin.sql via run-migrations.sh) --
-admin/hub_module/backend's own adminBootstrap.js is a forward-compatible
-fallback for if SKIP_DB_INIT is ever unset, not the primary path. Both
-keys default to "" in templates/secrets.yaml; empty/unset means no admin
-account is created (fail closed) -- exactly the desired default for
-beta/gamma/production until an operator sets them.
-Usage: {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
+KNOWN GAP this removal surfaces (reported, not fixed here -- see PR description): the
+INITIAL_ADMIN_EMAIL/INITIAL_ADMIN_PASSWORD seed step lived inside the migrations image's
+run path, which a fresh install no longer runs at all (hub-api's create_all()+stamp
+bootstrap never executes config/postgres/migrations/081_seed_default_hub_admin.sql or any
+other raw-SQL migration body). A fresh install therefore gets no seeded admin account
+until the first `helm upgrade` actually fires the pre-upgrade migrate hook.
 */}}
-{{- define "waddlebot.dbMigrateInitContainer" -}}
-{{- $registry := .Values.global.imageRegistry | default "" }}
-{{- $repository := .Values.modules.migrations.image | default "waddlebot-migrations" }}
-{{- $tag := .Values.global.imageTag }}
-- name: db-migrate
-  {{- if $registry }}
-  image: "{{ $registry }}/{{ $repository }}:{{ $tag }}"
-  {{- else }}
-  image: "{{ $repository }}:{{ $tag }}"
-  {{- end }}
-  imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+
+{{/*
+Wait-for-hub-api initContainer -- every non-hub-api, non-infrastructure pod in this chart
+(Deployments and Jobs alike) waits on hub-api's own `/ready` endpoint before its main
+container starts, since hub-api is now the one place that creates/validates the schema
+(hub_api/bootstrap.py) and every other service depends on it being there first. Infra
+(Postgres/Valkey/SeaweedFS) and hub-api itself are the only exceptions -- hub-api cannot
+wait on itself, and infra has no schema dependency to wait for.
+
+Requires N consecutive successful reads (not just one) before exiting 0, so a pod isn't
+released the instant hub-api's readiness flips (which could still be mid-rollout/
+restarting) -- see waitForHubApi.stableChecks/stableIntervalSeconds in values.yaml.
+Exponential backoff (capped) between failed attempts, DEBUG-logged, so a slow hub-api
+start doesn't spam logs at full speed. Pinned to the same python:3.13-slim-bookworm
+digest hub-api's own Dockerfile already uses (Debian-only base per
+devops-containers.md -- curlimages/curl and similar lightweight options are Alpine-based
+and excluded on that basis) -- stdlib `urllib.request` only, no extra dependency.
+Usage: {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
+*/}}
+{{- define "waddlebot.waitForHubApiInitContainer" -}}
+{{- $url := printf "http://%s-hub-api-v3.%s.svc.cluster.local:%v/ready" (include "waddlebot.fullname" .) .Values.namespace .Values.pipeline.hubApi.port }}
+- name: wait-for-hub-api
+  image: "{{ .Values.waitForHubApi.image }}"
+  imagePullPolicy: IfNotPresent
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
   env:
-  - name: DATABASE_URL
-    valueFrom:
-      secretKeyRef:
-        name: {{ include "waddlebot.fullname" . }}-secrets
-        key: DATABASE_URL
-  - name: INITIAL_ADMIN_EMAIL
-    valueFrom:
-      secretKeyRef:
-        name: {{ include "waddlebot.fullname" . }}-secrets
-        key: INITIAL_ADMIN_EMAIL
-        optional: true
-  - name: INITIAL_ADMIN_PASSWORD
-    valueFrom:
-      secretKeyRef:
-        name: {{ include "waddlebot.fullname" . }}-secrets
-        key: INITIAL_ADMIN_PASSWORD
-        optional: true
-  # Bundle app-schema roles (alembic/versions/0030_bundle_app_schemas.py) --
-  # this initContainer is the actual consumer: the migration bridges these
-  # into CREATE/ALTER ROLE ... PASSWORD statements for waddles_bundle_migrator/
-  # waddles_bundle_runtime. optional: true, matching INITIAL_ADMIN_* above --
-  # an unset value means the migration creates/leaves each role LOGIN with
-  # no usable password yet, never a migration failure.
-  - name: BUNDLE_MIGRATOR_PASSWORD
-    valueFrom:
-      secretKeyRef:
-        name: {{ include "waddlebot.fullname" . }}-secrets
-        key: BUNDLE_MIGRATOR_PASSWORD
-        optional: true
-  - name: BUNDLE_RUNTIME_PASSWORD
-    valueFrom:
-      secretKeyRef:
-        name: {{ include "waddlebot.fullname" . }}-secrets
-        key: BUNDLE_RUNTIME_PASSWORD
-        optional: true
-  # waddles_bundle_reader (alembic/versions/0032_bundle_reader_role.py) --
-  # the SAME secret key svc-process-rust/svc-action-rust already read
-  # (templates/svc-process-rust.yaml, templates/svc-action-rust.yaml), never
-  # a second parallel credential. optional: true, matching BUNDLE_MIGRATOR_
-  # PASSWORD/BUNDLE_RUNTIME_PASSWORD above -- an unset value means the
-  # migration creates/leaves the role LOGIN with no usable password yet,
-  # never a migration failure.
-  - name: DB_READER_PASSWORD
-    valueFrom:
-      secretKeyRef:
-        name: {{ include "waddlebot.fullname" . }}-secrets
-        key: DB_READER_PASSWORD
-        optional: true
+  - name: HUB_API_READY_URL
+    value: {{ $url | quote }}
+  - name: STABLE_CHECKS
+    value: {{ .Values.waitForHubApi.stableChecks | quote }}
+  - name: STABLE_INTERVAL_SECONDS
+    value: {{ .Values.waitForHubApi.stableIntervalSeconds | quote }}
+  - name: MAX_BACKOFF_SECONDS
+    value: {{ .Values.waitForHubApi.maxBackoffSeconds | quote }}
+  command: ["python3", "-c"]
+  args:
+    - |
+      import os, time, random, sys, urllib.request, urllib.error
+
+      url = os.environ["HUB_API_READY_URL"]
+      need = int(os.environ["STABLE_CHECKS"])
+      interval = float(os.environ["STABLE_INTERVAL_SECONDS"])
+      max_backoff = float(os.environ["MAX_BACKOFF_SECONDS"])
+
+      def debug(msg):
+          print(f"DEBUG wait-for-hub-api: {msg}", file=sys.stderr, flush=True)
+
+      consecutive = 0
+      backoff = 1.0
+      attempt = 0
+      while consecutive < need:
+          attempt += 1
+          try:
+              with urllib.request.urlopen(url, timeout=3) as resp:
+                  ok = resp.status == 200
+          except (urllib.error.URLError, OSError) as exc:
+              ok = False
+              debug(f"attempt {attempt} failed: {exc}")
+          if ok:
+              consecutive += 1
+              backoff = 1.0
+              debug(f"attempt {attempt} ok ({consecutive}/{need} consecutive)")
+              if consecutive < need:
+                  time.sleep(interval)
+          else:
+              consecutive = 0
+              sleep_for = min(backoff, max_backoff) * (0.8 + 0.4 * random.random())
+              debug(f"attempt {attempt} not ready, backing off {sleep_for:.1f}s")
+              time.sleep(sleep_for)
+              backoff = min(backoff * 2, max_backoff)
+      print(f"wait-for-hub-api: hub-api stable after {attempt} attempt(s)")
   resources:
     requests:
-      cpu: "50m"
-      memory: "64Mi"
+      cpu: "25m"
+      memory: "32Mi"
     limits:
-      cpu: "200m"
-      memory: "128Mi"
+      cpu: "100m"
+      memory: "64Mi"
 {{- end }}
 
 {{/*

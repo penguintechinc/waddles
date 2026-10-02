@@ -178,5 +178,53 @@ class TestSeederPlatformConnections:
         assert "discord" in connections.get("value", "")
 
 
+class TestDbMigrateJobReceivesReaderPassword:
+    """fix/chart-fresh-install-hooks (#526) replaced the per-pod dbMigrateInitContainer
+
+    with a dedicated post-install/pre-upgrade hook Job (templates/migrations-job.yaml)
+    fed by its own minimal hook Secret (templates/secrets.yaml's `-db-migrate-secret`),
+    never `waddlebot-secrets` directly. `alembic/versions/0032_bundle_reader_role.py`
+    still reads `DB_READER_PASSWORD` via `os.environ.get` inside that same Job, so the
+    dedicated hook Secret must carry the key too -- asserting against `waddlebot-secrets`
+    alone (as the chart's OTHER *_PASSWORD keys for this role would suggest) would pass
+    even if the Job itself never actually received it.
+    """
+
+    def test_db_migrate_secret_carries_non_empty_reader_password(
+        self, rendered_docs: list[dict[str, Any]]
+    ) -> None:
+        hook_secrets = [
+            doc
+            for doc in rendered_docs
+            if doc.get("kind") == "Secret"
+            and doc.get("metadata", {}).get("name", "").endswith("-db-migrate-secret")
+        ]
+        assert hook_secrets, "no *-db-migrate-secret Secret found in rendered manifest"
+        value = (hook_secrets[0].get("stringData") or {}).get("DB_READER_PASSWORD")
+        assert value, (
+            "DB_READER_PASSWORD missing/empty on the db-migrate hook Secret -- "
+            "0032_bundle_reader_role.py's migration would run with no password"
+        )
+
+        jobs = [
+            doc
+            for doc in rendered_docs
+            if doc.get("kind") == "Job"
+            and doc.get("metadata", {}).get("name", "").endswith("-db-migrate")
+        ]
+        assert jobs, "no *-db-migrate Job found in rendered manifest"
+        containers = jobs[0].get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+        assert containers, "db-migrate Job has no containers"
+        env_from_secrets = {
+            ref.get("secretRef", {}).get("name")
+            for ref in containers[0].get("envFrom", []) or []
+            if "secretRef" in ref
+        }
+        assert hook_secrets[0]["metadata"]["name"] in env_from_secrets, (
+            "db-migrate Job's envFrom does not reference the Secret carrying "
+            "DB_READER_PASSWORD -- the password would never reach the migration process"
+        )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

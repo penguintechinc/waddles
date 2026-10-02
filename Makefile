@@ -35,6 +35,23 @@ check-docs:
 check-bundle-dal:
 	@bash scripts/check-bundle-dal-imports.sh
 
+# fix/chart-fresh-install-hooks (alpha 2026-10-01) -- regression gates for the
+# fresh-install hook-ordering bug (migrate ran pre-install before postgres
+# existed) and its fix (every non-hub-api workload waits on hub-api's /ready).
+check-helm-hook-phases:
+	@python3 scripts/check_helm_hook_phases.py
+
+check-wait-for-hub-api:
+	@python3 scripts/check_wait_for_hub_api.py
+
+# USER DECISION (2026-10-01, fix/chart-fresh-install-hooks): db-migrate now runs
+# post-install -- helm upgrade --install in alpha-deploy.sh must never pass
+# --wait/--atomic, or a fresh install deadlocks (Deployments wait on hub-api,
+# hub-api waits on db-migrate, db-migrate waits on Helm to stop waiting on
+# Deployments). See scripts/check_alpha_deploy_no_wait.py's module docstring.
+check-alpha-deploy-no-wait:
+	@python3 scripts/check_alpha_deploy_no_wait.py
+
 test:
 	@$(MAKE) test-unit
 

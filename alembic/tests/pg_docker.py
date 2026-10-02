@@ -181,6 +181,42 @@ def migrated_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
         )
 
 
+@contextmanager
+def empty_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
+    """Start a genuinely empty Postgres 17 container (no bootstrap SQL, no stamp, no
+    migrations) -- used only by `hub_api/tests/test_bootstrap_schema_drift.py` to measure
+    what `hub_api/bootstrap.py`'s `create_all()` path alone produces on a truly fresh
+    database, as opposed to `migrated_postgres()`'s full Alembic-chain result above.
+    """
+    container = f"waddles-migtest-{name_suffix}"
+    port = _free_port()
+    db = PgTestDatabase(
+        host="127.0.0.1", port=port, user="waddlebot", password="testpass123", dbname="waddlebot"
+    )
+    subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        ["docker", "rm", "-f", container], capture_output=True, check=False
+    )
+    subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        [
+            "docker", "run", "-d", "--name", container,
+            "-e", f"POSTGRES_USER={db.user}",
+            "-e", f"POSTGRES_PASSWORD={db.password}",
+            "-e", f"POSTGRES_DB={db.dbname}",
+            "-p", f"{port}:5432",
+            "postgres:17-bookworm",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    try:
+        _wait_ready(container, db.user, db.dbname)
+        yield db
+    finally:
+        subprocess.run(  # noqa: S603 -- fixed argv, no shell
+            ["docker", "rm", "-f", container], capture_output=True, check=False
+        )
+
+
 def alembic_cli(*args: str, dsn: str) -> subprocess.CompletedProcess[str]:
     """Run one `alembic` subcommand against `dsn`, repo root as cwd. Raises on nonzero exit."""
     result = subprocess.run(  # noqa: S603 -- fixed argv, no shell

@@ -113,6 +113,14 @@ tracing-subscriber = { version = "=0.3.23", default-features = false, features =
 # its own dependency tree (nom/der-parser/asn1-rs/oid-registry/ring/
 # data-encoding) pulls any of them in.
 x509-parser = "=0.18.1"
+# TCP keepalive on the host-API socket (`crate::tls::dial_stage`) -- catches
+# a half-open connection to a since-terminated stage pod (regression:
+# executor stuck on terminated svc pod after rollout, alpha 2026-10-02) at
+# the OS level, independent of any wire-protocol cooperation from the
+# stage. Already present transitively (via tokio) at this exact version per
+# this crate's own committed Cargo.lock -- pinning it directly adds no new
+# version to the dependency tree. No networking/HTTP dependency of its own.
+socket2 = { version = "=0.6.5", features = ["all"] }
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }

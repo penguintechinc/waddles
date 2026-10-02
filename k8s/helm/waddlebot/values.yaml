@@ -2194,6 +2194,17 @@ securityContext:
     drop:
       - ALL
 
+# fix/chart-fresh-install-hooks (alpha 2026-10-01) -- shared wait-for-hub-api
+# initContainer config (waddlebot.waitForHubApiInitContainer, _helpers.tpl), applied to
+# every non-hub-api, non-infrastructure Deployment/Job in this chart. Image pinned to the
+# exact digest hub_api/Dockerfile's own FROM line already uses (Debian-only per
+# devops-containers.md; no new image to track/scan).
+waitForHubApi:
+  image: "python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26"
+  stableChecks: 3
+  stableIntervalSeconds: 5
+  maxBackoffSeconds: 30
+
 # Monitoring & Observability
 monitoring:
   prometheus:
