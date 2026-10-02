@@ -53,7 +53,13 @@ spec:
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.pipeline.rustDataPlane.svcAction.imageRepository | default "svc-action-rust") "imageTag" .Values.global.imageTag) }}"
         # Hardcoded Always -- see templates/svc-process-rust.yaml's comment on this same line
         # for the node-image-cache rationale (identical here).
-        imagePullPolicy: Always
+        # feature/ci-chart-kind-e2e -- Always is right for real alpha (mutable
+        # tag reuse staleness, see comment above/nearby), but wrong whenever
+        # global.imagePullPolicy is explicitly "Never" (kind/CI, air-gapped,
+        # `kind load`-ed images only) -- Always would force a real registry
+        # pull attempt that can never succeed there. "Never" itself carries no
+        # staleness risk to guard against (no pull happens at all either way).
+        imagePullPolicy: {{ eq .Values.global.imagePullPolicy "Never" | ternary "Never" "Always" }}
         # Pinned to the Rust image's own `appuser` (uid 10001, core/svc_action/
         # Dockerfile.rust), not the chart-wide .Values.securityContext (uid 1000) the
         # Python placeholder templates use -- same pattern as templates/svc-streaming.yaml.

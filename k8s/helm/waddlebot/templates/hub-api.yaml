@@ -43,7 +43,13 @@ spec:
         # kept serving a pre-fix image with a `ModuleNotFoundError: penguin_dal` crash for
         # hours after a same-tag push carried the fix). hub-api iterates against the same
         # mutable `alpha` tag those Rust services do, so it needs the same guarantee.
-        imagePullPolicy: Always
+        # feature/ci-chart-kind-e2e -- Always is right for real alpha (mutable
+        # tag reuse staleness, see comment above/nearby), but wrong whenever
+        # global.imagePullPolicy is explicitly "Never" (kind/CI, air-gapped,
+        # `kind load`-ed images only) -- Always would force a real registry
+        # pull attempt that can never succeed there. "Never" itself carries no
+        # staleness risk to guard against (no pull happens at all either way).
+        imagePullPolicy: {{ eq .Values.global.imagePullPolicy "Never" | ternary "Never" "Always" }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
         ports:

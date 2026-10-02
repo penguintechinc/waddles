@@ -1,0 +1,439 @@
+name: Helm Chart Kind E2E
+
+# Real install + upgrade of k8s/helm/waddlebot on an ephemeral kind cluster.
+# `helm lint`/`helm template` (pr-validation.yml) cannot see: hook-phase
+# ordering against a real API server, missing binaries inside hook images,
+# whether a generated cert/secret survives an upgrade, or live-object
+# strategic-merge/immutable-field conflicts. This workflow exists because
+# five such bugs (gh-473, gh-477, gh-471, gh-479, gh-478) reached live alpha
+# with lint/template green the whole time.
+
+on:
+  pull_request:
+    paths:
+      - "k8s/helm/**"
+      - "hub_api/Dockerfile"
+      - "migrations/Dockerfile"
+      - "bundles/Dockerfile.core-bundles"
+      - "core/svc_ingest/Dockerfile.rust"
+      - "core/svc_process/Dockerfile.rust"
+      - "core/svc_action/Dockerfile.rust"
+      - "scripts/alpha-deploy.sh"
+      - ".github/workflows/helm-chart-e2e.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helm-chart-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  KIND_VERSION: "v0.30.0"
+  KIND_NODE_IMAGE: "kindest/node@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a" # v1.34.0
+  CHART_DIR: "k8s/helm/waddlebot"
+  NAMESPACE: "waddlebot"
+  HELM_TIMEOUT: "5m"
+  # Pinned to the v1.16.5 tag commit (GPG-signature-verified against cilium/cilium),
+  # checksum-verified below -- kind ships kindnet, not Cilium, so every
+  # CiliumNetworkPolicy the chart renders (security.md Kubernetes Network
+  # Security: mandatory, every product) needs its CRD registered or `helm
+  # install` fails with "no matches for kind CiliumNetworkPolicy" before a
+  # single pod is even scheduled. CRD-only (no cilium-agent) is sufficient here:
+  # this workflow validates install/upgrade/hook lifecycle, not policy enforcement.
+  CILIUM_CRD_COMMIT: "ad6882773c5f89feda9c295276707f01de269296"
+  CILIUM_CRD_SHA256: "60606cb4060a25a2131461773939714d1c0dbd910273449e68d0caf39927249c"
+
+jobs:
+  lint-workflow:
+    name: zizmor + actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: actionlint
+        run: |
+          set -euo pipefail
+          docker run --rm -v "${PWD}:/repo" -w /repo \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            -color .github/workflows/helm-chart-e2e.yml
+      - name: zizmor
+        run: |
+          set -euo pipefail
+          pipx install zizmor==1.9.0
+          zizmor --persona=pedantic .github/workflows/helm-chart-e2e.yml
+
+  chart-e2e:
+    name: kind install/upgrade
+    runs-on: ubuntu-latest
+    needs: lint-workflow
+    timeout-minutes: 40
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install kind (checksum-verified)
+        run: |
+          set -euo pipefail
+          # ubuntu-latest images ship a pre-installed /usr/local/bin/kind owned by
+          # root; downloading straight to that path lets curl overwrite the file's
+          # *content* (world-writable dir) but a plain `chmod` on it then fails with
+          # "Operation not permitted" since the runner user isn't the file's owner.
+          # Download + verify to a runner-owned temp path, install with sudo instead.
+          curl -fsSL -o "${RUNNER_TEMP}/kind" \
+            "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  ${RUNNER_TEMP}/kind" | sha256sum -c -
+          sudo install -m 0755 -o root -g root "${RUNNER_TEMP}/kind" /usr/local/bin/kind
+          rm -f "${RUNNER_TEMP}/kind"
+          kind version
+
+      - name: Create kind cluster
+        run: |
+          set -euo pipefail
+          kind create cluster --name waddlebot-e2e --image "${KIND_NODE_IMAGE}" --wait 120s
+
+      - name: Install CiliumNetworkPolicy CRD (kind has no Cilium CNI)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml" \
+            "https://raw.githubusercontent.com/cilium/cilium/${CILIUM_CRD_COMMIT}/pkg/k8s/apis/cilium.io/client/crds/v2/ciliumnetworkpolicies.yaml"
+          echo "${CILIUM_CRD_SHA256}  ${RUNNER_TEMP}/ciliumnetworkpolicies.yaml" | sha256sum -c -
+          kubectl apply -f "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml"
+          rm -f "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml"
+
+      - name: Build + kind-load images
+        run: |
+          set -euo pipefail
+          # Build context per Dockerfile's own COPY paths, not a blanket root/subdir
+          # guess: hub_api/Dockerfile COPYs "hub_api/..." + "libs/flask_core" (root
+          # context); svc_ingest's Dockerfile.rust COPYs "Cargo.toml"/"src" bare (its
+          # own dir); svc_process/svc_action COPY "svc_process/..." + sibling
+          # "bundle_active_set"/"bundle_host_http" (the shared "core" dir, one level up).
+          declare -a IMAGES=(
+            "waddlebot-migrations:ci:migrations/Dockerfile:."
+            "hub-api:ci:hub_api/Dockerfile:."  # chart default repository is bare "hub-api" (templates/hub-api.yaml waddlebot.legacyModuleImage helper), not "waddlebot-hub-api"
+            "core-bundle-seeder:ci:bundles/Dockerfile.core-bundles:."
+            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:core/svc_ingest"
+            "svc-process-rust:ci:core/svc_process/Dockerfile.rust:core"
+            "svc-action-rust:ci:core/svc_action/Dockerfile.rust:core"
+          )
+          built=0
+          for entry in "${IMAGES[@]}"; do
+            IFS=":" read -r name tag dockerfile context <<< "${entry}"
+            echo "::group::build ${name}:${tag}"
+            docker build -f "${dockerfile}" -t "${name}:${tag}" "${context}"
+            kind load docker-image "${name}:${tag}" --name waddlebot-e2e
+            built=$((built + 1))
+            echo "::endgroup::"
+          done
+          echo "images built and loaded: ${built}"
+          if [ "${built}" -eq 0 ]; then
+            echo "::error::zero images built - denominator check failed"
+            exit 1
+          fi
+
+      - name: Install Helm v4
+        run: |
+          set -euo pipefail
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod +x get_helm.sh
+          DESIRED_VERSION=v4.3.0 ./get_helm.sh
+          rm -f get_helm.sh
+          helm version
+
+      - name: Create dummy platform-credentials secret
+        run: |
+          set -euo pipefail
+          kubectl create namespace "${NAMESPACE}"
+          # DUMMY, obviously-fake values -- never real tokens. Proves the chart's
+          # lookup-then-generate-or-require path against a pre-existing operator
+          # secret (gh-478), and that Discord/Twitch connectors degrade instead
+          # of crashlooping the release when auth fails (see values-ci.yaml).
+          kubectl create secret generic waddlebot-platform-credentials \
+            --namespace "${NAMESPACE}" \
+            --from-literal=DISCORD_BOT_TOKEN="ci-dummy-discord-bot-token-never-real" \
+            --from-literal=TWITCH_OAUTH_TOKEN="oauth:ci-dummy-twitch-irc-token-never-real"
+
+      - name: helm dependency build
+        run: helm dependency build "${CHART_DIR}"
+
+      - name: helm install (fresh cluster)
+        id: install
+        run: |
+          set -euo pipefail
+          helm install waddlebot "${CHART_DIR}" \
+            --namespace "${NAMESPACE}" \
+            -f "${CHART_DIR}/values-alpha.yaml" \
+            -f "${CHART_DIR}/values-ci.yaml" \
+            --wait --timeout "${HELM_TIMEOUT}"
+          status=$(helm status waddlebot -n "${NAMESPACE}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["status"])')
+          echo "release status: ${status}"
+          [ "${status}" = "deployed" ] || { echo "::error::release not deployed after install"; exit 1; }
+
+      - name: Assert hook Jobs succeeded + pods Ready
+        run: |
+          set -euo pipefail
+          hooks=$(kubectl get jobs -n "${NAMESPACE}" -o json)
+          hook_count=$(echo "${hooks}" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["items"]))')
+          echo "hook/job count examined: ${hook_count}"
+          [ "${hook_count}" -gt 0 ] || { echo "::error::zero Jobs examined - denominator check failed"; exit 1; }
+          echo "${hooks}" | python3 -c '
+          import json, sys
+          d = json.load(sys.stdin)
+          failed = [j["metadata"]["name"] for j in d["items"] if j.get("status", {}).get("failed")]
+          incomplete = [j["metadata"]["name"] for j in d["items"] if not j.get("status", {}).get("succeeded")]
+          if failed or incomplete:
+              print(f"::error::failed jobs={failed} incomplete jobs={incomplete}")
+              sys.exit(1)
+          '
+          pods=$(kubectl get pods -n "${NAMESPACE}" -o json)
+          pod_count=$(echo "${pods}" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["items"]))')
+          echo "pod count examined: ${pod_count}"
+          [ "${pod_count}" -gt 0 ] || { echo "::error::zero pods examined - denominator check failed"; exit 1; }
+          not_ready=$(kubectl get pods -n "${NAMESPACE}" -o json | python3 -c '
+          import json, sys
+          d = json.load(sys.stdin)
+          bad = []
+          for p in d["items"]:
+              if p["status"].get("phase") == "Succeeded":
+                  continue
+              conds = {c["type"]: c["status"] for c in p["status"].get("conditions", [])}
+              if conds.get("Ready") != "True":
+                  bad.append(p["metadata"]["name"])
+          print(",".join(bad))
+          ')
+          if [ -n "${not_ready}" ]; then
+            echo "::error::pods not Ready: ${not_ready}"
+            exit 1
+          fi
+          echo "all ${pod_count} pods Ready or Completed; all ${hook_count} hook Jobs succeeded"
+
+      - name: Snapshot Secret hashes (pre-upgrade)
+        run: |
+          set -euo pipefail
+          kubectl get secrets -n "${NAMESPACE}" -o json > /tmp/secrets-before.json
+          count=$(python3 -c 'import json; d=json.load(open("/tmp/secrets-before.json")); print(len(d["items"]))')
+          echo "secrets examined (pre-upgrade snapshot): ${count}"
+          [ "${count}" -gt 0 ] || { echo "::error::zero secrets examined - denominator check failed"; exit 1; }
+          python3 -c '
+          import json, hashlib
+          d = json.load(open("/tmp/secrets-before.json"))
+          out = {}
+          for s in d["items"]:
+              name = s["metadata"]["name"]
+              rv = s["metadata"]["resourceVersion"]
+              blob = json.dumps(s.get("data", {}), sort_keys=True).encode()
+              out[name] = {"resourceVersion": rv, "sha256": hashlib.sha256(blob).hexdigest()}
+          json.dump(out, open("/tmp/secret-hashes-before.json", "w"))
+          '
+          rm -f /tmp/secrets-before.json  # never persist raw Secret data as an artifact
+
+      - name: helm upgrade (same chart, no-op)
+        run: |
+          set -euo pipefail
+          helm upgrade waddlebot "${CHART_DIR}" \
+            --namespace "${NAMESPACE}" \
+            -f "${CHART_DIR}/values-alpha.yaml" \
+            -f "${CHART_DIR}/values-ci.yaml" \
+            --wait --timeout "${HELM_TIMEOUT}"
+          status=$(helm status waddlebot -n "${NAMESPACE}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["status"])')
+          [ "${status}" = "deployed" ] || { echo "::error::release not deployed after same-chart upgrade"; exit 1; }
+
+      - name: Assert Secrets unchanged after same-chart upgrade
+        run: |
+          set -euo pipefail
+          kubectl get secrets -n "${NAMESPACE}" -o json > /tmp/secrets-after.json
+          count=$(python3 -c 'import json; d=json.load(open("/tmp/secrets-after.json")); print(len(d["items"]))')
+          echo "secrets examined (post-upgrade): ${count}"
+          [ "${count}" -gt 0 ] || { echo "::error::zero secrets examined - denominator check failed"; exit 1; }
+          python3 -c '
+          import json, hashlib, sys
+          before = json.load(open("/tmp/secret-hashes-before.json"))
+          after_raw = json.load(open("/tmp/secrets-after.json"))
+          compared = 0
+          changed = []
+          for s in after_raw["items"]:
+              name = s["metadata"]["name"]
+              if name not in before:
+                  continue  # new secret introduced by upgrade - not a regression signal here
+              compared += 1
+              blob = json.dumps(s.get("data", {}), sort_keys=True).encode()
+              digest = hashlib.sha256(blob).hexdigest()
+              if digest != before[name]["sha256"]:
+                  changed.append(name)
+          print(f"secrets compared: {compared}")
+          if compared == 0:
+              print("::error::zero secrets compared - denominator check failed")
+              sys.exit(1)
+          # waddlebot-platform-credentials MUST NEVER change on a no-op upgrade (gh-478)
+          if "waddlebot-platform-credentials" not in [s["metadata"]["name"] for s in after_raw["items"]]:
+              print("::error::waddlebot-platform-credentials missing after upgrade")
+              sys.exit(1)
+          if changed:
+              print(f"::error::secrets changed on no-op upgrade: {changed}")
+              sys.exit(1)
+          print(f"all {compared} compared secrets unchanged (hash-equal), including waddlebot-platform-credentials")
+          '
+          rm -f /tmp/secrets-after.json /tmp/secret-hashes-before.json
+
+      - name: Verify alembic head + seeder Job
+        run: |
+          set -euo pipefail
+          migrate_job=$(kubectl get jobs -n "${NAMESPACE}" -l app.kubernetes.io/component=db-migrate -o jsonpath='{.items[0].status.succeeded}' 2>/dev/null || echo "")
+          seeder_job=$(kubectl get jobs -n "${NAMESPACE}" -l app.kubernetes.io/component=core-bundle-seeder -o jsonpath='{.items[0].status.succeeded}' 2>/dev/null || echo "")
+          echo "migrations job succeeded flag: ${migrate_job:-<not found>}"
+          echo "seeder job succeeded flag: ${seeder_job:-<not found>}"
+          [ "${migrate_job}" = "1" ] || { echo "::error::migrations hook Job did not report succeeded"; exit 1; }
+          [ "${seeder_job}" = "1" ] || { echo "::error::core-bundle-seeder hook Job did not report succeeded"; exit 1; }
+
+      - name: Dump events/describe on failure
+        if: failure()
+        run: |
+          kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp || true
+          for p in $(kubectl get pods -n "${NAMESPACE}" -o name); do
+            kubectl describe "${p}" -n "${NAMESPACE}" || true
+          done
+          # Never dump Secret data.
+
+      - name: Delete namespace (reset for upgrade-path test)
+        if: always()
+        run: kubectl delete namespace "${NAMESPACE}" --wait=true || true
+
+  upgrade-path-e2e:
+    name: kind upgrade-path (merge-base -> PR)
+    runs-on: ubuntu-latest
+    needs: chart-e2e
+    timeout-minutes: 40
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Determine merge-base ref
+        id: mergebase
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git fetch origin "${BASE_REF}" --depth=200
+          base_sha=$(git merge-base HEAD "origin/${BASE_REF}")
+          echo "base_sha=${base_sha}" >> "${GITHUB_OUTPUT}"
+          echo "merge-base: ${base_sha}"
+
+      - name: Checkout base chart into temp dir
+        env:
+          BASE_SHA: ${{ steps.mergebase.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          # BASE_SHA is the output of `git merge-base` above (a 40-hex-char commit SHA),
+          # never raw untrusted PR content -- still passed via env, never interpolated
+          # directly into the script, per template-injection hardening.
+          mkdir -p /tmp/base-chart
+          git worktree add --detach /tmp/base-chart "${BASE_SHA}"
+
+      - name: Install kind (checksum-verified)
+        run: |
+          set -euo pipefail
+          # See identical step in the chart-e2e job above for why this installs via
+          # a runner-owned temp path + sudo instead of a direct chmod in-place.
+          curl -fsSL -o "${RUNNER_TEMP}/kind" \
+            "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  ${RUNNER_TEMP}/kind" | sha256sum -c -
+          sudo install -m 0755 -o root -g root "${RUNNER_TEMP}/kind" /usr/local/bin/kind
+          rm -f "${RUNNER_TEMP}/kind"
+
+      - name: Install Helm v4
+        run: |
+          set -euo pipefail
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod +x get_helm.sh
+          DESIRED_VERSION=v4.3.0 ./get_helm.sh
+          rm -f get_helm.sh
+
+      - name: Create kind cluster
+        run: kind create cluster --name waddlebot-upgrade --image "${KIND_NODE_IMAGE}" --wait 120s
+
+      - name: Install CiliumNetworkPolicy CRD (kind has no Cilium CNI)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml" \
+            "https://raw.githubusercontent.com/cilium/cilium/${CILIUM_CRD_COMMIT}/pkg/k8s/apis/cilium.io/client/crds/v2/ciliumnetworkpolicies.yaml"
+          echo "${CILIUM_CRD_SHA256}  ${RUNNER_TEMP}/ciliumnetworkpolicies.yaml" | sha256sum -c -
+          kubectl apply -f "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml"
+          rm -f "${RUNNER_TEMP}/ciliumnetworkpolicies.yaml"
+
+      - name: Build + kind-load images (PR ref; base ref reuses same tags)
+        run: |
+          set -euo pipefail
+          # Build context per Dockerfile's own COPY paths, not a blanket root/subdir
+          # guess: hub_api/Dockerfile COPYs "hub_api/..." + "libs/flask_core" (root
+          # context); svc_ingest's Dockerfile.rust COPYs "Cargo.toml"/"src" bare (its
+          # own dir); svc_process/svc_action COPY "svc_process/..." + sibling
+          # "bundle_active_set"/"bundle_host_http" (the shared "core" dir, one level up).
+          declare -a IMAGES=(
+            "waddlebot-migrations:ci:migrations/Dockerfile:."
+            "hub-api:ci:hub_api/Dockerfile:."  # chart default repository is bare "hub-api" (templates/hub-api.yaml waddlebot.legacyModuleImage helper), not "waddlebot-hub-api"
+            "core-bundle-seeder:ci:bundles/Dockerfile.core-bundles:."
+            "svc-ingest-rust:ci:core/svc_ingest/Dockerfile.rust:core/svc_ingest"
+            "svc-process-rust:ci:core/svc_process/Dockerfile.rust:core"
+            "svc-action-rust:ci:core/svc_action/Dockerfile.rust:core"
+          )
+          built=0
+          for entry in "${IMAGES[@]}"; do
+            IFS=":" read -r name tag dockerfile context <<< "${entry}"
+            docker build -f "${dockerfile}" -t "${name}:${tag}" "${context}"
+            kind load docker-image "${name}:${tag}" --name waddlebot-upgrade
+            built=$((built + 1))
+          done
+          echo "images built and loaded: ${built}"
+          [ "${built}" -gt 0 ] || { echo "::error::zero images built"; exit 1; }
+
+      - name: helm install base ref chart
+        run: |
+          set -euo pipefail
+          kubectl create namespace "${NAMESPACE}"
+          kubectl create secret generic waddlebot-platform-credentials \
+            --namespace "${NAMESPACE}" \
+            --from-literal=DISCORD_BOT_TOKEN="ci-dummy-discord-bot-token-never-real" \
+            --from-literal=TWITCH_OAUTH_TOKEN="oauth:ci-dummy-twitch-irc-token-never-real"
+          helm dependency build "/tmp/base-chart/${CHART_DIR}"
+          helm install waddlebot "/tmp/base-chart/${CHART_DIR}" \
+            --namespace "${NAMESPACE}" \
+            -f "/tmp/base-chart/${CHART_DIR}/values-alpha.yaml" \
+            -f "${CHART_DIR}/values-ci.yaml" \
+            --wait --timeout "${HELM_TIMEOUT}"
+
+      - name: helm upgrade to PR chart
+        run: |
+          set -euo pipefail
+          helm dependency build "${CHART_DIR}"
+          helm upgrade waddlebot "${CHART_DIR}" \
+            --namespace "${NAMESPACE}" \
+            -f "${CHART_DIR}/values-alpha.yaml" \
+            -f "${CHART_DIR}/values-ci.yaml" \
+            --wait --timeout "${HELM_TIMEOUT}"
+          status=$(helm status waddlebot -n "${NAMESPACE}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["status"])')
+          echo "release status after upgrade-path: ${status}"
+          [ "${status}" = "deployed" ] || { echo "::error::release not deployed after base->PR upgrade"; exit 1; }
+
+      - name: Dump events/describe on failure
+        if: failure()
+        run: |
+          kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp || true
+          for p in $(kubectl get pods -n "${NAMESPACE}" -o name); do
+            kubectl describe "${p}" -n "${NAMESPACE}" || true
+          done
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kind delete cluster --name waddlebot-upgrade || true
+          git worktree remove /tmp/base-chart --force || true
