@@ -105,12 +105,15 @@ spec:
         {{- include "waddlebot.hostApiTlsClientEnv" . | nindent 8 }}
         {{- end }}
         startupProbe:
+          # fix/alpha-deploy-executor-and-failfast -- see templates/bundle-executor.yaml's
+          # identical comment on this same probe for the full rationale (same binary, same
+          # cold-compile workload): failureThreshold bumped from 12 (62s) to 65 (~5.5min).
           exec:
             command: ["/app/bundle-executor", "--healthcheck"]
-          initialDelaySeconds: 2
+          initialDelaySeconds: 5
           periodSeconds: 5
           timeoutSeconds: 5
-          failureThreshold: 12
+          failureThreshold: 65
         livenessProbe:
           exec:
             command: ["/app/bundle-executor", "--healthcheck=session", "--max-age", "60"]

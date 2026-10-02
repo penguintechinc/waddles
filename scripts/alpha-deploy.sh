@@ -69,11 +69,26 @@
 # --skip-build   Reuse whatever is already pushed under the current HEAD's
 #                sha8 tag (skips the build+push step).
 #
-# Requires: docker (with buildx), kubectl, helm. Kube context must be
+# Requires: docker (with buildx), kubectl, helm, jq. Kube context must be
 # local-alpha or microk8s (validated below; KUBE_CONTEXT set to anything
 # else is rejected before any build/push/helm step). bash 3.2 compatible (no
 # associative arrays, no `mapfile`, no `&>>`) -- macOS ships bash 3.2 as
 # /bin/bash and this script must run there unmodified.
+#
+# fix/alpha-deploy-executor-and-failfast -- two independent bugs fixed:
+#   1. bundle-executor (core/bundle_executor/Dockerfile.rust) was never in
+#      SERVICES -- both bundle-executor Deployments (bundle-executor,
+#      bundle-executor-action) ran a stale, hand-pushed mutable `:alpha` tag
+#      forever. Now built+pushed every run, SHA8-tagged like every other
+#      live image (values-alpha.yaml's bundleExecutor.image.tag is left
+#      unset so it falls through to global.imageTag).
+#   2. This script exited 0 on real failures: the Deployment rollout loop
+#      only ever logged `err` and kept going, and nothing checked the live
+#      `helm upgrade --install` actually left the release in `deployed`
+#      status. Both now propagate a non-zero exit -- see the rollout loop
+#      and the post-upgrade `helm status` check below. The deliberate
+#      no-`--wait` design (see the HELM_ARGS comment below) is UNCHANGED --
+#      this is explicit post-hoc verification, not `--wait`/`--atomic`.
 
 set -euo pipefail
 
@@ -214,7 +229,7 @@ info "Deploying release SHA ${SHA} (tag ${SHA8}) to context ${KUBE_CONTEXT}, nam
 # than the per-commit SHA8 (same pattern as bundleExecutor's own comment:
 # "built locally + pushed to the local registry ... same as every other
 # alpha-only module image") -- see service_image_tag below.
-readonly SERVICES="hub-api hub-webui waddlebot-migrations svc-ingest svc-process svc-action waddlebot-egress-proxy core-bundle-seeder reputation-module svc-presentation svc-streaming"
+readonly SERVICES="hub-api hub-webui waddlebot-migrations svc-ingest svc-process svc-action waddlebot-egress-proxy core-bundle-seeder reputation-module svc-presentation svc-streaming bundle-executor"
 
 service_dockerfile() {
     case "$1" in
@@ -229,13 +244,20 @@ service_dockerfile() {
         reputation-module) echo "core/reputation_module/Dockerfile" ;;
         svc-presentation) echo "core/svc_presentation/Dockerfile" ;;
         svc-streaming) echo "core/svc_streaming/Dockerfile.rust" ;;
+        # fix/alpha-deploy-executor-and-failfast -- core/bundle_executor/Dockerfile.rust
+        # now exists; this crate backs BOTH the bundle-executor and bundle-executor-action
+        # Deployments (same image, dialed at two different stages via env only -- see
+        # k8s/helm/waddlebot/templates/bundle-executor-action.yaml's own header comment).
+        bundle-executor) echo "core/bundle_executor/Dockerfile.rust" ;;
         *) err "unknown service: $1"; exit 1 ;;
     esac
 }
 
 service_context() {
     case "$1" in
-        hub-api|hub-webui|waddlebot-migrations|core-bundle-seeder|reputation-module|svc-presentation) echo "." ;;
+        # bundle-executor's Dockerfile COPYs core/bundle_executor AND wit/ from the repo
+        # root (see its own header comment) -- same "." context as hub-api et al.
+        hub-api|hub-webui|waddlebot-migrations|core-bundle-seeder|reputation-module|svc-presentation|bundle-executor) echo "." ;;
         svc-ingest) echo "core/svc_ingest" ;;
         svc-process|svc-action|waddlebot-egress-proxy) echo "core" ;;
         svc-streaming) echo "core/svc_streaming" ;;
@@ -257,8 +279,11 @@ service_image_repo() {
 
 # Image tag: every service tags with this run's commit SHA8 except the
 # alpha-only local modules values-alpha.yaml pins to a static "alpha" tag
-# (reputation-module, svc-presentation, svc-streaming, and bundleExecutor --
-# bundle-executor has no build step here yet, see scripts/deploy-alpha.sh).
+# (reputation-module, svc-presentation, svc-streaming). fix/alpha-deploy-
+# executor-and-failfast: bundle-executor is deliberately NOT in this list --
+# it now gets the same per-commit SHA8 tag as every other live data-plane
+# image (values-alpha.yaml's bundleExecutor.image.tag is unset), closing the
+# stale-mutable-`:alpha`-tag bug this fix addresses.
 service_image_tag() {
     case "$1" in
         reputation-module|svc-presentation|svc-streaming) echo "alpha" ;;
@@ -484,6 +509,27 @@ info "helm upgrade --install (live)"
 helm "${HELM_ARGS[@]}"
 
 # ---------------------------------------------------------------------------
+# fix/alpha-deploy-executor-and-failfast -- `helm upgrade --install` above can
+# return 0 while still leaving the release in a non-"deployed" status (e.g. a
+# post-upgrade hook failure pins it FAILED -- see mem0 "spire-auto-enroll"
+# incident). Fail loudly here instead of silently continuing into Step 3 as
+# if the upgrade had actually succeeded. This is explicit post-hoc
+# verification, NOT `--wait`/`--atomic` on HELM_ARGS above (still forbidden,
+# still enforced by scripts/check_alpha_deploy_no_wait.py) -- it runs AFTER
+# the hook phase has already completed, so it cannot deadlock the fresh-
+# install hook ordering that --wait would.
+# ---------------------------------------------------------------------------
+info "Verifying helm release status"
+HELM_STATUS_JSON="$(helm status "${RELEASE}" --kube-context "${KUBE_CONTEXT}" -n "${NAMESPACE}" -o json)"
+HELM_RELEASE_STATUS="$(printf '%s' "${HELM_STATUS_JSON}" | jq -r '.info.status')"
+HELM_RELEASE_REVISION="$(printf '%s' "${HELM_STATUS_JSON}" | jq -r '.version')"
+if [[ "${HELM_RELEASE_STATUS}" != "deployed" ]]; then
+    err "helm release ${RELEASE} is not 'deployed' after upgrade (status=${HELM_RELEASE_STATUS}, revision=${HELM_RELEASE_REVISION})"
+    exit 1
+fi
+info "helm release ${RELEASE} is 'deployed' at revision ${HELM_RELEASE_REVISION}"
+
+# ---------------------------------------------------------------------------
 # Step 3: wait for the pre-upgrade migrations Job, then every Deployment.
 # ---------------------------------------------------------------------------
 info "Waiting for db-migrate Job"
@@ -495,10 +541,26 @@ kubectl --context "${KUBE_CONTEXT}" wait --for=condition=complete \
     }
 
 info "Waiting for Deployments"
+# fix/alpha-deploy-executor-and-failfast -- previously `|| err ...` only logged and kept
+# going, so a Deployment that never rolled out cleanly still left the script exiting 0.
+# Every failure is now collected and the script exits non-zero after checking the rest
+# (so one bad rollout doesn't hide a second one), listing every failed Deployment.
+ROLLOUT_FAILURES=""
 for d in $(kubectl --context "${KUBE_CONTEXT}" get deployments -n "${NAMESPACE}" -o jsonpath='{.items[*].metadata.name}'); do
-    kubectl --context "${KUBE_CONTEXT}" rollout status "deployment/${d}" -n "${NAMESPACE}" --timeout=180s \
-        || err "deployment/${d} did not roll out cleanly"
+    if ! kubectl --context "${KUBE_CONTEXT}" rollout status "deployment/${d}" -n "${NAMESPACE}" --timeout=180s; then
+        err "deployment/${d} did not roll out cleanly"
+        ROLLOUT_FAILURES="${ROLLOUT_FAILURES}${d}
+"
+    fi
 done
+
+if [[ -n "${ROLLOUT_FAILURES}" ]]; then
+    err "The following Deployment(s) did not roll out cleanly:"
+    printf '%s' "${ROLLOUT_FAILURES}" | while IFS= read -r f; do
+        [[ -n "${f}" ]] && err "  - ${f}"
+    done
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Step 4: re-run the core-bundle-seeder Job (helm's post-upgrade hook already

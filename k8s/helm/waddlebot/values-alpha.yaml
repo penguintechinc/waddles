@@ -251,73 +251,49 @@ pipeline:
         limits: { cpu: "500m", memory: "512Mi" }
     svcProcess:
       replicas: 1
-      # Superseded migration 083's discord/twitch demo app_id with the minimal
-      # waddles.core.example.ping bundle (PRIOR DEPLOY STATE: MinIO bucket
-      # waddles-bundles, DB-registered, digest below) -- the actual bundle this alpha
-      # cluster's e2e proof exercises end-to-end today.
-      processAppId: "waddles.core.example.ping"
-      # fix/svc-action-bundle-executor-alpha-wiring -- real Discord ingest routing.
-      # svc-ingest-rust's Discord gateway receiver is genuinely live in this cluster
-      # (DISCORD_BOT_TOKEN set, core/svc_ingest/src/ingest/discord.rs connected --
-      # confirmed via its own "connected" platform=discord log lines) and normalizes
-      # into `Scope::source_stream("discord", source_id(guild_id))`
-      # (core/svc_ingest/src/ingest/discord.rs::source_id: "dg-{guild_id}", "dg-dm" for
-      # a DM). `dg-474965105759748096` is the real guild the bot is already joined to
-      # ("Club Penguinz", #waddlebot-test channel id 1311210594011054151) -- discovered
-      # via `GET /users/@me/guilds` against the cluster's own DISCORD_BOT_TOKEN, never
-      # hardcoded/invented. Routing is guild-wide (source_id has no channel component),
-      # so `!ping` in ANY channel of that guild reaches this bundle, not just
-      # #waddlebot-test.
+      # fix/alpha-deploy-executor-and-failfast -- the legacy single-app env
+      # (processAppId, processIngestPlatform/SourceId, processBundleDigest/
+      # Version/ComponentKey/SidecarKey, including the stale pinned
+      # waddles.core.example.ping 1.0.0 digest sha256:4d24eedf...) is REMOVED
+      # here. The DB-driven multi-tenant active-bundle loader below
+      # (feature/bundle-reader-role, waddles_bundle_reader RO Postgres role)
+      # is the sole bundle-selection path in this cluster now -- it serves
+      # every app/tenant/community it finds in the DB (ping, pyping, later
+      # csping) rather than one hardcoded app_id/digest, and core/svc_process/
+      # src/lib.rs's mutual-exclusion rule means the legacy fields never ran
+      # anyway once DB_READER_PASSWORD was provisioned. Leaving them unset
+      # here (chart default: "", templates/svc-process-rust.yaml now omits
+      # these env vars entirely when unset) closes the regression risk of a
+      # stale digest silently winning back over the DB path on a future
+      # `helm upgrade` if the DB-driven path is ever disabled.
       #
-      # Supersedes this same field's prior `twitch`/`e2e-proof` value, the hermetic
-      # relay e2e proof's synthetic ingest source (Twitch live is impossible here --
-      # ~/.twitch.token is app creds, not a live bot session) -- that proof's evidence
-      # (Valkey `waddles:transport:irc:twitch:outbound` entry + `action_dispatch_log`
-      # row id 4, status=success) was captured before this switch and remains valid;
-      # switching the single svc-process-rust replica's live grant afterward doesn't
-      # retract it. See the Discord round-trip honest-assessment note below for why a
-      # real `!ping` here still won't produce a `pong` back in Discord.
-      processIngestPlatform: "discord"
-      processIngestSourceId: "dg-474965105759748096"
-      processBundleDigest: "sha256:4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7"
-      processBundleVersion: "1.0.0"
-      processBundleComponentKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.wasm"
-      processBundleSidecarKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.json"
       # Multi-tenant, change-log-driven active-bundle loader (core/svc_process/
       # src/config.rs, core/bundle_active_set, core/svc_process/src/
       # changelog_consumer.rs) -- feature/bundle-reader-role: the RO Postgres
       # role (waddles_bundle_reader, alembic/versions/0032_bundle_reader_role.py)
-      # is now provisioned, and templates/secrets.yaml auto-generates
+      # is provisioned, and templates/secrets.yaml auto-generates
       # DB_READER_PASSWORD in alpha (same lookup-KEEP-then-generate policy as
       # POSTGRES_PASSWORD), so `resolve_multi_tenant_path_active`
-      # (core/svc_process/src/lib.rs) now resolves true at startup (both
+      # (core/svc_process/src/lib.rs) resolves true at startup (both
       # kill-switch gates default enabled when unseen) and this DB-driven path
-      # becomes authoritative for this pod's whole lifetime -- mutual
-      # exclusion, not an add-on: the legacy single-app PROCESS_APP_ID/
-      # PROCESS_BUNDLE_* fields above never start once this path wins, they
-      # are left in place only as a documented fallback (unset
-      # DB_READER_PASSWORD reverts to them on the next restart). The
-      # multi-tenant path itself serves every app/tenant/community it finds
-      # in the DB (ping, pyping, later csping), not a single configured one.
-      # Only overriding the poll interval here (tunable per deployment) -- a
-      # shorter interval than the 300s chart default so hot-swap changes are
-      # noticed without a multi-minute wait.
+      # is authoritative for this pod's whole lifetime. Only overriding the
+      # poll interval here (tunable per deployment) -- a shorter interval than
+      # the 300s chart default so hot-swap changes are noticed without a
+      # multi-minute wait.
       bundleConfigPollSeconds: 30
       resources:
         requests: { cpu: "100m", memory: "128Mi" }
         limits: { cpu: "500m", memory: "512Mi" }
     svcAction:
       replicas: 1
-      actionAppId: "waddles.core.example.ping"
       envelopeBindingActiveKid: "e2e1"
-      # fix/svc-action-bundle-executor-alpha-wiring -- ACTION_BUNDLE_* (core/svc_action/
-      # src/config.rs, #366): the SAME ping.wasm component as svcProcess.processBundle*
-      # above -- one bundle implements both ProcessStage::transform (detects `!ping`) and
-      # ActionStage::dispatch (relays the `pong`), spec SS7.6.
-      actionBundleDigest: "sha256:4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7"
-      actionBundleVersion: "1.0.0"
-      actionBundleComponentKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.wasm"
-      actionBundleSidecarKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.json"
+      # fix/alpha-deploy-executor-and-failfast -- see svcProcess's identical
+      # comment above: the legacy actionAppId/actionBundleDigest/Version/
+      # ComponentKey/SidecarKey fields (including the same stale pinned
+      # sha256:4d24eedf... digest) are REMOVED here. The DB-driven active-
+      # bundle loader below (same RO role/mechanism as svcProcess) is the sole
+      # path; templates/svc-action-rust.yaml now omits these env vars entirely
+      # when unset.
       # Multi-tenant changelog consumer -- see svcProcess's identical comment above.
       bundleConfigPollSeconds: 30
       resources:
@@ -346,18 +322,26 @@ pipeline:
       # waddlebot-secrets). Prevents regression if values.yaml defaults diverge.
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
+      # fix/alpha-deploy-executor-and-failfast -- bumped from 64Mi/256Mi: pods
+      # were OOMKilled compiling a 21MB CPython component plus a .NET
+      # component via Cranelift (JIT-compiles fresh on every `load`, no
+      # .cwasm cache yet -- see bundle-executor.yaml's precompile-cache
+      # comment). CPU limit kept generous (mandatory per standards, never
+      # unbounded) rather than removed.
       resources:
-        requests: { cpu: "100m", memory: "64Mi" }
-        limits: { cpu: "500m", memory: "256Mi" }
+        requests: { cpu: "500m", memory: "1Gi" }
+        limits: { cpu: "2000m", memory: "2560Mi" }
     # fix/svc-action-bundle-executor-alpha-wiring -- second, independent executor for the
     # action stage (default stageTarget=svc-action-rust already matches, no override
     # needed). See values.yaml's own comment on this block for why a second pod is
     # required rather than re-pointing the one above.
     bundleExecutorAction:
       replicas: 1
+      # fix/alpha-deploy-executor-and-failfast -- same OOM fix and rationale
+      # as bundleExecutor.resources above (identical compile workload).
       resources:
-        requests: { cpu: "100m", memory: "64Mi" }
-        limits: { cpu: "500m", memory: "256Mi" }
+        requests: { cpu: "500m", memory: "1Gi" }
+        limits: { cpu: "2000m", memory: "2560Mi" }
 
 presentation:
   image:
@@ -378,13 +362,20 @@ streaming:
     tag: "alpha"
 
 # feature/e2e-helm-rust-dataplane -- bundle-executor built locally + pushed to the local
-# registry (no Dockerfile/CI image exists for this crate yet -- see
-# pipeline.rustDataPlane.bundleExecutor's KNOWN GAPS comment in values.yaml), same pattern
-# as every other alpha-only module image.
+# registry, same pattern as every other alpha module image. fix/alpha-deploy-executor-
+# and-failfast: core/bundle_executor/Dockerfile.rust now exists and scripts/
+# alpha-deploy.sh builds+pushes it -- tag is intentionally left unset (not a static
+# "alpha") so the bundle-executor.yaml/bundle-executor-action.yaml templates' `.Values.
+# bundleExecutor.image.tag | default .Values.global.imageTag` falls through to the
+# per-commit SHA8 alpha-deploy.sh sets via `--set global.imageTag`, same as every other
+# SHA-tagged alpha image. This closes the stale-mutable-tag bug where both executor
+# Deployments kept running a build from before the live object_store bucket wiring
+# landed (bundle-executor.yaml's own imagePullPolicy comment) because nothing ever
+# rebuilt/pushed a new `:alpha` tag for this image.
 bundleExecutor:
   image:
     repository: "localhost:32000/waddlebot/bundle-executor"
-    tag: "alpha"
+    tag: ""
 
 # Reputation service (Issue #310) -- built locally, pushed to the local
 # registry (no CI image for it yet), same as every other alpha module.

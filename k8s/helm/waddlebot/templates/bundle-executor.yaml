@@ -155,12 +155,17 @@ spec:
         {{- include "waddlebot.hostApiTlsClientEnv" . | nindent 8 }}
         {{- end }}
         startupProbe:
+          # fix/alpha-deploy-executor-and-failfast -- failureThreshold bumped from 12
+          # (62s total) to 65 (~5.5min total: 5 + 5*65) -- a cold `load` JIT-compiling a
+          # 21MB CPython component plus a .NET component via Cranelift (no .cwasm cache
+          # yet, see precompile-cache's own comment) was measured exceeding the old 62s
+          # budget and getting killed/restarted before compilation ever finished.
           exec:
             command: ["/app/bundle-executor", "--healthcheck"]
-          initialDelaySeconds: 2
+          initialDelaySeconds: 5
           periodSeconds: 5
           timeoutSeconds: 5
-          failureThreshold: 12
+          failureThreshold: 65
         livenessProbe:
           exec:
             command: ["/app/bundle-executor", "--healthcheck=session", "--max-age", "60"]

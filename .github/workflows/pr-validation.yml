@@ -577,3 +577,18 @@ jobs:
       # the prune, unlike docker's own cache store).
       - name: alpha-deploy.sh registry build-cache regression test
         run: bash scripts/ci/tests/test_alpha_deploy_build_cache.sh
+
+      # fix/alpha-deploy-executor-and-failfast -- alpha-deploy.sh could exit 0
+      # on a real deploy failure: the Deployment rollout-status loop only
+      # logged `err` and kept going, and nothing checked that `helm upgrade
+      # --install` actually left the release `deployed`. Both now propagate a
+      # non-zero exit -- see this test's own header for the full rationale.
+      - name: alpha-deploy.sh failure-propagation regression test
+        run: bash scripts/ci/tests/test_alpha_deploy_failure_propagation.sh
+
+      # fix/alpha-deploy-executor-and-failfast -- real `helm template` render
+      # assertions (not stubbed) for the bundle-executor OOM-fix resources,
+      # startupProbe cold-compile budget, SHA-tagged image, and the removal
+      # of the legacy single-bundle env from svc-process-rust/svc-action-rust.
+      - name: alpha render -- bundle-executor + legacy-env regression test
+        run: bash scripts/ci/tests/test_alpha_render_bundle_executor.sh
