@@ -128,6 +128,35 @@ fi
 readonly KUBE_CONTEXT
 
 # ---------------------------------------------------------------------------
+# fix/chart-fresh-install-hooks (alpha 2026-10-01) -- create/adopt the
+# namespace BEFORE the platform-credentials preflight below. The chart itself
+# owns the Namespace object (templates/namespace.yaml); after a full wipe
+# (cluster reset, `kubectl delete namespace waddlebot`) the namespace does not
+# exist yet, so the credentials Secret could never be pre-created either --
+# the preflight below would always fail with no way to satisfy it, since
+# `kubectl create secret -n waddlebot` itself requires the namespace to
+# already exist. Idempotent: a no-op if the namespace is already there.
+#
+# Adoption labels/annotations (app.kubernetes.io/managed-by=Helm,
+# meta.helm.sh/release-name, meta.helm.sh/release-namespace) match exactly
+# what Helm itself stamps on a resource it creates -- without them, the
+# chart's own `helm install` would fail later with "already exists and
+# cannot be imported" (a non-Helm-owned Namespace object), which is the
+# standard Helm workaround for "let Helm manage a resource something else
+# created first" (https://helm.sh/docs/howto/charts_tips_and_tricks/
+# #tell-helm-not-to-uninstall-a-resource).
+# ---------------------------------------------------------------------------
+if ! kubectl --context "${KUBE_CONTEXT}" get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+    info "Namespace ${NAMESPACE} does not exist yet -- creating it (Helm-adopted) before the credentials preflight"
+    kubectl --context "${KUBE_CONTEXT}" create namespace "${NAMESPACE}"
+    kubectl --context "${KUBE_CONTEXT}" label namespace "${NAMESPACE}" \
+        app.kubernetes.io/managed-by=Helm --overwrite
+    kubectl --context "${KUBE_CONTEXT}" annotate namespace "${NAMESPACE}" \
+        meta.helm.sh/release-name="${RELEASE}" \
+        meta.helm.sh/release-namespace="${NAMESPACE}" --overwrite
+fi
+
+# ---------------------------------------------------------------------------
 # fix/helm-platform-credentials preflight -- externally-issued platform
 # credentials (Discord bot token, Twitch OAuth token, etc.) live ONLY in
 # waddlebot-platform-credentials, a Secret this chart never renders or

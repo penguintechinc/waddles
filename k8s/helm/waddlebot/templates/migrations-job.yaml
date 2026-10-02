@@ -1,10 +1,19 @@
-# v3.0.x Task T10 (v3 demo) — pre-install/pre-upgrade Helm hook Job that applies
-# config/postgres/migrations/*.sql to completion BEFORE any pipeline Deployment's pods are
-# scheduled. Complements (does not replace) the per-pod waddlebot.dbMigrateInitContainer
-# already used by svc-ingest/svc-process/svc-action/hub-api/svc-core (_helpers.tpl) — that
-# initContainer guards against schema drift if a pod restarts mid-rollout; this Job is what
-# actually applies the migration directory to a clean cluster before the demo's Deployments
-# come up in the first place, without N pods racing the same advisory lock at once.
+# fix/chart-fresh-install-hooks (alpha 2026-10-01) -- "pre-upgrade" ONLY Helm hook Job:
+# applies config/postgres/migrations/*.sql / alembic/versions/*.py to an EXISTING database
+# on `helm upgrade`. Fresh installs no longer use this Job at all -- hub-api's own startup
+# (hub_api/bootstrap.py) creates the schema via SQLAlchemy create_all()+stamp under an
+# advisory lock the first time it runs against an empty database (backend-database.md rule
+# #9: "NO automatic Alembic migrations on startup... create_all() is safe"), which is why
+# "pre-install" was removed from this Job's hook annotation rather than reordered -- running
+# it pre-install always raced the in-chart Postgres Deployment, a plain/regular resource
+# Helm only creates AFTER the whole pre-install hook phase finishes ("Database not ready
+# after 60s", confirmed on alpha 2026-10-01).
+#
+# v3.0.x Task T10 (v3 demo) history: originally ran config/postgres/migrations/*.sql to
+# completion before any pipeline Deployment's pods were scheduled. Every other
+# Deployment/Job in this chart that needs the schema now waits on hub-api's own `/ready`
+# endpoint instead (waddlebot.waitForHubApiInitContainer, _helpers.tpl) rather than racing
+# this Job or re-running migrations itself per-pod.
 #
 # T8 landed on release/v3.0.X: migrations now run through
 # config/postgres/migrations/083_discord_twitch_demo_convergence.sql (seeds both
@@ -23,7 +32,7 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: db-migrate
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook": pre-upgrade
     "helm.sh/hook-weight": "-5"
     # fix/helm-hook-rbac-ordering -- serviceAccountName below is now the dedicated
     # {{ include "waddlebot.fullname" . }}-db-migrate hook SA (migrations-job-rbac.yaml,

@@ -77,3 +77,10 @@ redis==8.1.0
 # (spec D28's normative role x table x privilege matrix, migrations
 # 0020-0021 render GRANT/REVOKE SQL from it).
 PyYAML>=6.0.2,<7.0.0
+# fix/chart-fresh-install-hooks (alpha 2026-10-01) -- bootstrap.py (hub-api's
+# own startup schema check: create_all+stamp on fresh install, Alembic
+# current-vs-heads comparison otherwise) imports alembic directly, not just
+# transitively via flask_core. Pinned to the exact same resolved version
+# flask_core's own requirements.txt already locks (1.19.1) so the image
+# never carries two different alembic versions.
+alembic==1.19.1

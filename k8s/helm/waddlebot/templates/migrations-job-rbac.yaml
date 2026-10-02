@@ -15,6 +15,22 @@
 # runs `alembic upgrade head` against Postgres using credentials mounted from
 # waddlebot-secrets via envFrom. automountServiceAccountToken is disabled to match
 # (no token this Job could ever use).
+#
+# fix/chart-fresh-install-hooks (alpha 2026-10-01) -- "pre-upgrade" ONLY, not
+# "pre-install,pre-upgrade": in-chart Postgres (templates/infrastructure/postgres.yaml)
+# is a plain/regular resource, which Helm only creates AFTER the entire pre-install hook
+# phase finishes. A pre-install migrations-job.yaml Job therefore always ran against a
+# Postgres that did not exist yet on a true fresh install ("Database not ready after
+# 60s", confirmed on alpha 2026-10-01) -- every prior fix here only repaired THIS SA's
+# ordering relative to the Job, never the Job's phase relative to Postgres itself.
+#
+# Fresh-install schema creation moved into hub-api's own startup path instead
+# (hub_api/bootstrap.py: create_all() + stamp head under a Postgres advisory
+# lock, per backend-database.md rule #9 -- "NO automatic Alembic migrations on
+# startup... create_all() is safe"). This Job/SA now exist ONLY for upgrades,
+# where Postgres (and its data) already exists -- "pre-install" is removed
+# entirely rather than reordered, since there is no install-time scenario left
+# where this Job should run at all.
 {{- if .Values.pipeline.migrationsJob.enabled }}
 apiVersion: v1
 kind: ServiceAccount
@@ -25,7 +41,7 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: db-migrate
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook": pre-upgrade
     "helm.sh/hook-weight": "-10"
     "helm.sh/hook-delete-policy": before-hook-creation
 automountServiceAccountToken: false

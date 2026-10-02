@@ -35,6 +35,15 @@ check-docs:
 check-bundle-dal:
 	@bash scripts/check-bundle-dal-imports.sh
 
+# fix/chart-fresh-install-hooks (alpha 2026-10-01) -- regression gates for the
+# fresh-install hook-ordering bug (migrate ran pre-install before postgres
+# existed) and its fix (every non-hub-api workload waits on hub-api's /ready).
+check-helm-hook-phases:
+	@python3 scripts/check_helm_hook_phases.py
+
+check-wait-for-hub-api:
+	@python3 scripts/check_wait_for_hub_api.py
+
 test:
 	@$(MAKE) test-unit
 

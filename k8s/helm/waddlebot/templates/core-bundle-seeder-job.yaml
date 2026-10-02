@@ -44,6 +44,10 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waits on hub-api's own
+      # /ready before this pod's main container starts (see _helpers.tpl).
+      initContainers:
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: core-bundle-seeder
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "core-bundle-seeder" "imageTag" .Values.global.imageTag) }}"
