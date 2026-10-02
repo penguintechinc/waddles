@@ -355,6 +355,74 @@ pub fn register_changelog_consumer_metrics(
     }
 }
 
+/// Prometheus handles for the legacy single-consumer drain loop's
+/// connect/self-heal retry (`crate::lib::try_start_process_loop`) --
+/// regression: drain loop exited on NOGROUP (alpha 2026-10-02).
+#[derive(Clone)]
+pub struct DrainLoopMetrics {
+    /// Total spine connect attempts, labeled by loop name -- every retry
+    /// increments this, so a flat line means the loop is stuck retrying
+    /// (or never started).
+    pub spine_connect_attempts_total: prometheus::IntCounterVec,
+    /// 1 while the drain loop is connected and actively reading, 0 while
+    /// down/retrying, labeled by loop name.
+    pub consumer_loop_running: prometheus::IntGaugeVec,
+    /// Total times `crate::spine::ensure_consumer_group` actually created a
+    /// (previously-missing) consumer group -- a `BUSYGROUP` (already
+    /// existed) never increments this.
+    pub consumer_group_created_total: prometheus::IntCounterVec,
+}
+
+/// Registers [`DrainLoopMetrics`] against `registry`. Must be called
+/// exactly once per `registry` -- see
+/// [`register_bundle_loader_excluded_metrics`]'s identical constraint.
+pub fn register_drain_loop_metrics(registry: &prometheus::Registry) -> DrainLoopMetrics {
+    let spine_connect_attempts_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_spine_connect_attempts_total",
+            "Total spine connect attempts made by a drain loop's connect-retry wrapper, \
+             labeled by loop",
+        ),
+        &["loop"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(spine_connect_attempts_total.clone()))
+        .expect("register svc_process_spine_connect_attempts_total");
+
+    let consumer_loop_running = prometheus::IntGaugeVec::new(
+        prometheus::Opts::new(
+            "svc_process_consumer_loop_running",
+            "1 while a drain loop is connected and actively reading, 0 while down/retrying, \
+             labeled by loop",
+        ),
+        &["loop"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(consumer_loop_running.clone()))
+        .expect("register svc_process_consumer_loop_running");
+
+    let consumer_group_created_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_consumer_group_created_total",
+            "Total times a Valkey consumer group was newly created (XGROUP CREATE, not \
+             BUSYGROUP) by the self-heal/startup provisioning step, labeled by loop",
+        ),
+        &["loop"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(consumer_group_created_total.clone()))
+        .expect("register svc_process_consumer_group_created_total");
+
+    DrainLoopMetrics {
+        spine_connect_attempts_total,
+        consumer_loop_running,
+        consumer_group_created_total,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,6 +501,31 @@ mod tests {
         let registry = prometheus::Registry::new();
         let rendered = render_metrics(&registry).expect("empty registry still encodes");
         assert!(rendered.is_empty());
+    }
+
+    // regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+    #[test]
+    fn register_drain_loop_metrics_produces_the_expected_series() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_drain_loop_metrics(&registry);
+        metrics
+            .spine_connect_attempts_total
+            .with_label_values(&["legacy"])
+            .inc();
+        metrics
+            .consumer_loop_running
+            .with_label_values(&["legacy"])
+            .set(1);
+        metrics
+            .consumer_group_created_total
+            .with_label_values(&["legacy"])
+            .inc();
+
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_process_spine_connect_attempts_total"));
+        assert!(rendered.contains("svc_process_consumer_loop_running"));
+        assert!(rendered.contains("svc_process_consumer_group_created_total"));
+        assert!(rendered.contains(r#"loop="legacy""#));
     }
 
     #[test]

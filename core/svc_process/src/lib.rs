@@ -127,8 +127,11 @@ where
     // starts.
     let egress_denied_metric = telemetry::register_egress_metrics(&prom_registry);
     let changelog_consumer_metrics = telemetry::register_changelog_consumer_metrics(&prom_registry);
+    // regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+    let drain_loop_metrics = telemetry::register_drain_loop_metrics(&prom_registry);
 
     let state = http::AppState::new(config.clone(), prom_registry);
+    let consumer_loop_ready = Arc::clone(&state.consumer_loop_ready);
 
     let connections = try_start_host_api(&config.cli);
     // Mutual exclusion, resolved ONCE at startup -- see
@@ -159,7 +162,13 @@ where
              DB_READER_PASSWORD not configured); using legacy \
              PROCESS_APP_ID/PROCESS_INGEST_* env selection"
         );
-        try_start_process_loop(&config, connections, egress_denied_metric);
+        try_start_process_loop(
+            &config,
+            connections,
+            egress_denied_metric,
+            drain_loop_metrics,
+            consumer_loop_ready,
+        );
     }
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
@@ -393,6 +402,8 @@ fn try_start_process_loop(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
     egress_denied_metric: prometheus::IntCounterVec,
+    drain_loop_metrics: telemetry::DrainLoopMetrics,
+    consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
 ) {
     if config.cli.process_app_id.is_empty() {
         tracing::info!(
@@ -498,48 +509,164 @@ fn try_start_process_loop(
         // fatal to the process loop -- every `kv` host-call then sees
         // `not_implemented` instead (`connect_kv`'s doc).
         let kv_conn = connect_kv(&spine_cfg).await;
-        let deps = spine::ProcessDeps {
-            app_id: app_id.clone(),
-            digest: cli.process_bundle_digest.clone(),
-            version: cli.process_bundle_version.clone(),
-            component_key: cli.process_bundle_component_key.clone(),
-            sidecar_key: cli.process_bundle_sidecar_key.clone(),
-            key_ring,
-            connections,
-            call_timeout_ms: cli.executor_call_timeout_ms,
-            load_state: Arc::new(spine::LoadState::new()),
-            approved_targets,
-            consumer_id: spine_cfg.consumer_id.clone(),
-            spine: match penguin_spine::SpineClient::connect(spine_cfg.clone(), metrics.clone())
-                .await
+
+        let (outer_shutdown_tx, mut outer_shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            let _ = outer_shutdown_tx.send(());
+        });
+
+        // Capped exponential backoff between (re)connect attempts, same cap
+        // as `crate::source_supervisor`'s own retry loop -- never a one-shot
+        // connect/drain. Self-heals NOGROUP by (re)provisioning every
+        // granted stream's consumer group before each attempt: on a fresh
+        // Valkey nothing else in this legacy, env-driven path ever creates
+        // it. regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+        const BACKOFF_MAX: Duration = Duration::from_secs(30);
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            drain_loop_metrics
+                .spine_connect_attempts_total
+                .with_label_values(&["legacy"])
+                .inc();
+
+            for grant in &grants {
+                match spine::ensure_consumer_group(&spine_cfg, &grant.stream, &app_id).await {
+                    Ok(true) => {
+                        drain_loop_metrics
+                            .consumer_group_created_total
+                            .with_label_values(&["legacy"])
+                            .inc();
+                        tracing::info!(stream = %grant.stream, group = %app_id, "consumer group created");
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        tracing::warn!(stream = %grant.stream, group = %app_id, error = %err, "ensure consumer group failed, will retry");
+                    }
+                }
+            }
+
+            let spine_client = match penguin_spine::SpineClient::connect(
+                spine_cfg.clone(),
+                metrics.clone(),
+            )
+            .await
             {
                 Ok(c) => c,
                 Err(err) => {
-                    tracing::error!(error = %err, "spine client connect failed; process loop not started");
+                    consumer_loop_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+                    drain_loop_metrics
+                        .consumer_loop_running
+                        .with_label_values(&["legacy"])
+                        .set(0);
+                    tracing::error!(error = %err, attempt, "spine client connect failed, retrying");
+                    if wait_or_shutdown(
+                        &mut outer_shutdown_rx,
+                        backoff_for_attempt(attempt, BACKOFF_MAX),
+                    )
+                    .await
+                    {
+                        return;
+                    }
+                    continue;
+                }
+            };
+
+            let deps = spine::ProcessDeps {
+                app_id: app_id.clone(),
+                digest: cli.process_bundle_digest.clone(),
+                version: cli.process_bundle_version.clone(),
+                component_key: cli.process_bundle_component_key.clone(),
+                sidecar_key: cli.process_bundle_sidecar_key.clone(),
+                key_ring: key_ring.clone(),
+                connections: Arc::clone(&connections),
+                call_timeout_ms: cli.executor_call_timeout_ms,
+                load_state: Arc::new(spine::LoadState::new()),
+                approved_targets: approved_targets.clone(),
+                consumer_id: spine_cfg.consumer_id.clone(),
+                spine: spine_client,
+                metrics: metrics.clone(),
+                license: Arc::clone(&license_gate),
+                kv_conn: kv_conn.clone(),
+                // The legacy, single-bundle, env-driven path has no
+                // active-set snapshot at all (no DB row, no consent record)
+                // -- `kv` denies by default here, always
+                // (`bundle_host_kv::authorize`'s own module doc: "undeclared
+                // means denied").
+                kv_capabilities: Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+                egress: Arc::clone(&egress),
+            };
+
+            let (inner_tx, inner_rx) = tokio::sync::oneshot::channel();
+            let run_fut = spine::run(spine_cfg.clone(), grants.clone(), deps, inner_rx);
+            tokio::pin!(run_fut);
+
+            consumer_loop_ready.store(true, std::sync::atomic::Ordering::Relaxed);
+            drain_loop_metrics
+                .consumer_loop_running
+                .with_label_values(&["legacy"])
+                .set(1);
+
+            tokio::select! {
+                _ = &mut outer_shutdown_rx => {
+                    let _ = inner_tx.send(());
+                    let _ = run_fut.await;
+                    consumer_loop_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+                    drain_loop_metrics
+                        .consumer_loop_running
+                        .with_label_values(&["legacy"])
+                        .set(0);
                     return;
                 }
-            },
-            metrics,
-            license: license_gate,
-            kv_conn,
-            // The legacy, single-bundle, env-driven path has no active-set
-            // snapshot at all (no DB row, no consent record) -- `kv`
-            // denies by default here, always (`bundle_host_kv::authorize`'s
-            // own module doc: "undeclared means denied").
-            kv_capabilities: Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
-            egress,
-        };
-
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            shutdown_signal().await;
-            let _ = shutdown_tx.send(());
-        });
-
-        if let Err(err) = spine::run(spine_cfg, grants, deps, shutdown_rx).await {
-            tracing::error!(error = %err, "process-stage drain loop exited");
+                result = &mut run_fut => {
+                    consumer_loop_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+                    drain_loop_metrics
+                        .consumer_loop_running
+                        .with_label_values(&["legacy"])
+                        .set(0);
+                    match result {
+                        // Only reachable via the shutdown branch above in
+                        // practice (`spine::run` returns `Ok(())` only when
+                        // its own `shutdown` receiver resolves).
+                        Ok(()) => return,
+                        Err(err) if spine::is_nogroup_error(&err) => {
+                            tracing::warn!(attempt, "process-stage drain loop: consumer group not yet provisioned (NOGROUP), self-healing and retrying");
+                        }
+                        Err(err) => {
+                            tracing::error!(error = %err, attempt, "process-stage drain loop exited, retrying");
+                        }
+                    }
+                    if wait_or_shutdown(&mut outer_shutdown_rx, backoff_for_attempt(attempt, BACKOFF_MAX)).await {
+                        return;
+                    }
+                }
+            }
         }
     });
+}
+
+/// Capped exponential backoff: 1s, 2s, 4s, 8s, 16s, then `max` thereafter.
+/// Shared by [`try_start_process_loop`]'s connect/self-heal retry loop.
+fn backoff_for_attempt(attempt: u32, max: Duration) -> Duration {
+    let secs = 1u64
+        .checked_shl(attempt.saturating_sub(1).min(16))
+        .unwrap_or(u64::MAX);
+    Duration::from_secs(secs).min(max)
+}
+
+/// Sleeps for `dur`, or returns early (reporting `true`) if `shutdown`
+/// resolves first -- same shape as `crate::source_supervisor::
+/// wait_or_shutdown`, duplicated here since that one is private to its own
+/// module (the two retry loops share no other state).
+async fn wait_or_shutdown(
+    shutdown: &mut tokio::sync::oneshot::Receiver<()>,
+    dur: Duration,
+) -> bool {
+    tokio::select! {
+        _ = shutdown => true,
+        () = tokio::time::sleep(dur) => false,
+    }
 }
 
 /// Resolves, ONCE at startup, whether the multi-tenant, change-log-driven
@@ -1230,6 +1357,21 @@ mod tests {
         .expect("valid metric definition")
     }
 
+    /// A standalone, unregistered [`telemetry::DrainLoopMetrics`] for
+    /// `try_start_process_loop` tests -- same rationale as
+    /// [`test_egress_denied_metric`]. regression: drain loop exited on
+    /// NOGROUP (alpha 2026-10-02)
+    fn test_drain_loop_metrics() -> telemetry::DrainLoopMetrics {
+        telemetry::register_drain_loop_metrics(&prometheus::Registry::new())
+    }
+
+    /// A fresh, defaulted-`true` readiness flag for `try_start_process_loop`
+    /// tests -- see `http::AppState::consumer_loop_ready`'s doc for the
+    /// default rationale.
+    fn test_consumer_loop_ready() -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::new(std::sync::atomic::AtomicBool::new(true))
+    }
+
     /// A standalone, unregistered [`telemetry::SourceBindingSupervisorMetrics`]
     /// -- same rationale as [`test_excluded_metric`].
     fn test_source_supervisor_metrics() -> telemetry::SourceBindingSupervisorMetrics {
@@ -1262,6 +1404,8 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             test_egress_denied_metric(),
+            test_drain_loop_metrics(),
+            test_consumer_loop_ready(),
         );
     }
 
@@ -1278,6 +1422,8 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             test_egress_denied_metric(),
+            test_drain_loop_metrics(),
+            test_consumer_loop_ready(),
         );
     }
 
@@ -1294,6 +1440,8 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             test_egress_denied_metric(),
+            test_drain_loop_metrics(),
+            test_consumer_loop_ready(),
         );
     }
 
@@ -1320,6 +1468,8 @@ mod tests {
             &config,
             Arc::new(host_api::ConnectionRegistry::new()),
             test_egress_denied_metric(),
+            test_drain_loop_metrics(),
+            test_consumer_loop_ready(),
         );
     }
 
@@ -1353,6 +1503,8 @@ mod tests {
                 &config,
                 Arc::new(host_api::ConnectionRegistry::new()),
                 test_egress_denied_metric(),
+                test_drain_loop_metrics(),
+                test_consumer_loop_ready(),
             );
             unsafe {
                 std::env::remove_var("VALKEY_URL");
@@ -1393,6 +1545,8 @@ mod tests {
                 &config,
                 Arc::new(host_api::ConnectionRegistry::new()),
                 test_egress_denied_metric(),
+                test_drain_loop_metrics(),
+                test_consumer_loop_ready(),
             );
             unsafe {
                 std::env::remove_var("VALKEY_URL");

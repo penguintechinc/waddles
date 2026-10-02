@@ -31,6 +31,13 @@ pub struct AppState {
     pub metrics: Arc<prometheus::Registry>,
     pub request_metrics: RequestMetrics,
     pub started_at: Instant,
+    /// `true` once the legacy single-consumer drain loop
+    /// (`crate::lib::try_start_process_loop`) is connected and actively
+    /// reading -- defaults `true` (nothing to wait for) when
+    /// `PROCESS_APP_ID` is unset, so an un-configured loop never blocks
+    /// readiness. Backs `GET /healthz`'s `consumer_loop` dependency.
+    /// regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+    pub consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
@@ -47,6 +54,7 @@ impl AppState {
             metrics: Arc::new(metrics),
             request_metrics,
             started_at: Instant::now(),
+            consumer_loop_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 }

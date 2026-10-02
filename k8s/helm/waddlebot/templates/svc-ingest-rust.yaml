@@ -160,8 +160,14 @@ spec:
           timeoutSeconds: 5
           failureThreshold: 3
         readinessProbe:
+          # /readyz (not /healthz, which is a bare always-ok liveness probe
+          # mistakenly wired here) reflects whether every enabled receiver
+          # (Discord gateway, Twitch IRC) has actually connected to the
+          # spine -- regression: a one-shot valkey probe used to leave this
+          # pod Running 1/1 forever with both receivers permanently
+          # disabled (alpha 2026-10-02).
           httpGet:
-            path: /healthz
+            path: /readyz
             port: http
           initialDelaySeconds: 5
           periodSeconds: 5

@@ -291,9 +291,98 @@ pub fn register_changelog_consumer_metrics(
     }
 }
 
+/// Prometheus handles for the action-stage dispatch loop's connect/
+/// self-heal retry (`crate::lib::try_start_dispatch`) -- regression: drain
+/// loop exited on NOGROUP (alpha 2026-10-02), same bug class as
+/// `core/svc_process`.
+#[derive(Clone)]
+pub struct DrainLoopMetrics {
+    /// Total spine connect attempts, labeled by loop name.
+    pub spine_connect_attempts_total: prometheus::IntCounterVec,
+    /// 1 while the dispatch loop is connected and actively reading, 0
+    /// while down/retrying, labeled by loop name.
+    pub consumer_loop_running: prometheus::IntGaugeVec,
+    /// Total times `crate::dispatch::ensure_consumer_group` actually
+    /// created a (previously-missing) consumer group -- `BUSYGROUP` never
+    /// increments this.
+    pub consumer_group_created_total: prometheus::IntCounterVec,
+}
+
+/// Registers [`DrainLoopMetrics`] against `registry`. Must be called
+/// exactly once per `registry`.
+pub fn register_drain_loop_metrics(registry: &prometheus::Registry) -> DrainLoopMetrics {
+    let spine_connect_attempts_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_action_spine_connect_attempts_total",
+            "Total spine connect attempts made by a dispatch loop's connect-retry wrapper, \
+             labeled by loop",
+        ),
+        &["loop"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(spine_connect_attempts_total.clone()))
+        .expect("register svc_action_spine_connect_attempts_total");
+
+    let consumer_loop_running = prometheus::IntGaugeVec::new(
+        prometheus::Opts::new(
+            "svc_action_consumer_loop_running",
+            "1 while the dispatch loop is connected and actively reading, 0 while \
+             down/retrying, labeled by loop",
+        ),
+        &["loop"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(consumer_loop_running.clone()))
+        .expect("register svc_action_consumer_loop_running");
+
+    let consumer_group_created_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_action_consumer_group_created_total",
+            "Total times a Valkey consumer group was newly created (XGROUP CREATE, not \
+             BUSYGROUP) by the self-heal/startup provisioning step, labeled by loop",
+        ),
+        &["loop"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(consumer_group_created_total.clone()))
+        .expect("register svc_action_consumer_group_created_total");
+
+    DrainLoopMetrics {
+        spine_connect_attempts_total,
+        consumer_loop_running,
+        consumer_group_created_total,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+    #[test]
+    fn register_drain_loop_metrics_produces_the_expected_series() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_drain_loop_metrics(&registry);
+        metrics
+            .spine_connect_attempts_total
+            .with_label_values(&["dispatch"])
+            .inc();
+        metrics
+            .consumer_loop_running
+            .with_label_values(&["dispatch"])
+            .set(1);
+        metrics
+            .consumer_group_created_total
+            .with_label_values(&["dispatch"])
+            .inc();
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_action_spine_connect_attempts_total"));
+        assert!(rendered.contains("svc_action_consumer_loop_running"));
+        assert!(rendered.contains("svc_action_consumer_group_created_total"));
+    }
 
     #[test]
     fn register_request_metrics_produces_a_non_empty_exposition() {

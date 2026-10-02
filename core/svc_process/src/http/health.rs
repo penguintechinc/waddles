@@ -53,11 +53,22 @@ pub struct ReadinessBody {
 }
 
 /// `GET /healthz` -- readiness: reports whether configured dependencies
-/// (Postgres, Valkey) look present. Neither is actually dialed here --
-/// SeaORM/spine connection wiring is `// TODO(M4)`, blocked on M2's
-/// executor/compiler and `penguin-spine` landing in parallel.
-pub async fn readiness(State(state): State<AppState>) -> Json<ReadinessBody> {
+/// (Postgres, Valkey) look present, plus whether the legacy single-consumer
+/// drain loop (`crate::lib::try_start_process_loop`) is actually connected
+/// and reading, when configured (`PROCESS_APP_ID` set). Postgres/Valkey are
+/// still only a presence check, not dialed here -- SeaORM connection wiring
+/// is `// TODO(M4)`. The consumer-loop entry IS a live check: `503` while
+/// it's configured but not yet (re)connected, never a bare presence check
+/// -- regression: drain loop exited on NOGROUP while the pod stayed Ready
+/// forever (alpha 2026-10-02).
+pub async fn readiness(
+    State(state): State<AppState>,
+) -> (axum::http::StatusCode, Json<ReadinessBody>) {
     let cfg = &state.config.cli;
+    let consumer_loop_configured = !cfg.process_app_id.is_empty();
+    let consumer_loop_running = state
+        .consumer_loop_ready
+        .load(std::sync::atomic::Ordering::Relaxed);
     let dependencies = vec![
         DependencyStatus {
             name: "database",
@@ -74,11 +85,31 @@ pub async fn readiness(State(state): State<AppState>) -> Json<ReadinessBody> {
             configured: !cfg.hub_api_url.is_empty(),
             detail: cfg.hub_api_url.clone(),
         },
+        DependencyStatus {
+            name: "consumer_loop",
+            configured: consumer_loop_configured,
+            detail: if !consumer_loop_configured {
+                "not configured".to_string()
+            } else if consumer_loop_running {
+                "running".to_string()
+            } else {
+                "not running".to_string()
+            },
+        },
     ];
-    Json(ReadinessBody {
-        status: "ok",
-        dependencies,
-    })
+    let ready = !consumer_loop_configured || consumer_loop_running;
+    let code = if ready {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        code,
+        Json(ReadinessBody {
+            status: if ready { "ok" } else { "degraded" },
+            dependencies,
+        }),
+    )
 }
 
 /// `GET /metrics` (secondary router, `METRICS_PORT`) -- Prometheus text
@@ -114,10 +145,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readiness_reports_three_dependencies() {
-        let Json(body) = readiness(State(test_state())).await;
+    async fn readiness_reports_four_dependencies() {
+        let (code, Json(body)) = readiness(State(test_state())).await;
+        assert_eq!(code, axum::http::StatusCode::OK);
         assert_eq!(body.status, "ok");
-        assert_eq!(body.dependencies.len(), 3);
+        assert_eq!(body.dependencies.len(), 4);
         let db = body
             .dependencies
             .iter()
@@ -125,6 +157,75 @@ mod tests {
             .unwrap();
         assert!(db.configured);
         assert_eq!(db.detail, "localhost:5432/waddlebot");
+    }
+
+    // regression: drain loop exited on NOGROUP while the pod stayed Ready
+    // forever (alpha 2026-10-02)
+    #[tokio::test]
+    async fn readiness_is_ok_when_process_app_id_is_unset() {
+        let (code, Json(body)) = readiness(State(test_state())).await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        let consumer_loop = body
+            .dependencies
+            .iter()
+            .find(|d| d.name == "consumer_loop")
+            .unwrap();
+        assert!(!consumer_loop.configured);
+    }
+
+    // regression: drain loop exited on NOGROUP while the pod stayed Ready
+    // forever (alpha 2026-10-02)
+    #[tokio::test]
+    async fn readiness_is_503_when_the_consumer_loop_is_configured_but_not_running() {
+        let mut cli = CliConfig::parse_from(["svc-process"]);
+        cli.process_app_id = "waddles.core.example.ping".to_string();
+        let config = Config {
+            cli,
+            db_password: Secret::new("x"),
+            cache_password: None,
+            service_api_key: Secret::new("x"),
+            envelope_binding_keys: None,
+            db_reader_password: None,
+        };
+        let state = AppState::new(config, prometheus::Registry::new());
+        state
+            .consumer_loop_ready
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        let (code, Json(body)) = readiness(State(state)).await;
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "degraded");
+        let consumer_loop = body
+            .dependencies
+            .iter()
+            .find(|d| d.name == "consumer_loop")
+            .unwrap();
+        assert!(consumer_loop.configured);
+        assert_eq!(consumer_loop.detail, "not running");
+    }
+
+    // regression: drain loop exited on NOGROUP while the pod stayed Ready
+    // forever (alpha 2026-10-02)
+    #[tokio::test]
+    async fn readiness_is_ok_once_the_configured_consumer_loop_is_running() {
+        let mut cli = CliConfig::parse_from(["svc-process"]);
+        cli.process_app_id = "waddles.core.example.ping".to_string();
+        let config = Config {
+            cli,
+            db_password: Secret::new("x"),
+            cache_password: None,
+            service_api_key: Secret::new("x"),
+            envelope_binding_keys: None,
+            db_reader_password: None,
+        };
+        let state = AppState::new(config, prometheus::Registry::new());
+        state
+            .consumer_loop_ready
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let (code, Json(body)) = readiness(State(state)).await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert_eq!(body.status, "ok");
     }
 
     #[tokio::test]

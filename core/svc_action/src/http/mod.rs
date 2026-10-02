@@ -31,6 +31,12 @@ pub struct AppState {
     pub metrics: Arc<prometheus::Registry>,
     pub request_metrics: RequestMetrics,
     pub started_at: Instant,
+    /// `true` once the action-stage dispatch loop
+    /// (`crate::lib::try_start_dispatch`) is connected and actively
+    /// reading -- defaults `true` (nothing to wait for) when
+    /// `ACTION_APP_ID` is unset. Backs `GET /readyz`.
+    /// regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+    pub consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
@@ -45,6 +51,7 @@ impl AppState {
             metrics: Arc::new(metrics),
             request_metrics,
             started_at: Instant::now(),
+            consumer_loop_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 }
@@ -80,6 +87,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::health))
         .route("/healthz", get(health::healthz))
+        .route("/readyz", get(health::readyz))
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(
             state,

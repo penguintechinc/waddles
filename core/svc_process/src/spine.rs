@@ -794,10 +794,204 @@ pub async fn run(
     drain_loop(reader, deps, shutdown).await
 }
 
+/// Builds a raw `redis::Client` for `cfg`'s transport -- the same
+/// connection-building logic as `core/svc_ingest/src/outbound.rs::
+/// build_redis_client` (that module's own doc explains why this is
+/// duplicated rather than imported: `penguin_spine`'s own equivalent is
+/// `pub(crate)` to that crate). Used only by [`ensure_consumer_group`]: a
+/// raw `XGROUP CREATE` is outside `SpineClient`'s/`GroupReader`'s own
+/// Streams-only surface.
+fn build_raw_client(cfg: &SpineConfig) -> Result<redis::Client, redis::RedisError> {
+    let base: redis::ConnectionInfo =
+        redis::IntoConnectionInfo::into_connection_info(cfg.valkey_url.as_str())?;
+    let mut settings = base.redis_settings().clone();
+    if let Some(username) = &cfg.valkey_username {
+        settings = settings.set_username(username);
+    }
+    if let Some(password) = &cfg.valkey_password {
+        settings = settings.set_password(password);
+    }
+    let info = base.set_redis_settings(settings);
+
+    if cfg.security_transport_tls {
+        crate::host_api::ensure_crypto_provider_installed();
+        let root_cert = std::fs::read(&cfg.valkey_ca_file).ok();
+        redis::Client::build_with_tls(
+            info,
+            redis::TlsCertificates {
+                client_tls: None,
+                root_cert,
+            },
+        )
+    } else {
+        redis::Client::open(info)
+    }
+}
+
+/// Idempotently ensures `group` exists on `stream` via `XGROUP CREATE
+/// <stream> <group> $ MKSTREAM` -- `BUSYGROUP` (the group already exists)
+/// is treated as success, never an error. On a fresh Valkey (no persisted
+/// state), nothing else in this crate's env-driven legacy single-consumer
+/// path (`crate::lib::try_start_process_loop`) ever creates the consumer
+/// group, unlike the DB-driven multi-tenant path where hub-api is expected
+/// to provision it out of band (`crate::source_supervisor`'s module doc) --
+/// so that loop self-provisions here, both once at startup and again as the
+/// self-heal step whenever a [`is_nogroup_error`] error surfaces mid-drain.
+///
+/// Returns `Ok(true)` if the group was newly created, `Ok(false)` if it
+/// already existed (`BUSYGROUP`) -- callers use this to drive a
+/// `consumer_group_created_total` counter without double-counting an
+/// already-provisioned group on every retry.
+///
+/// regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+pub(crate) async fn ensure_consumer_group(
+    cfg: &SpineConfig,
+    stream: &str,
+    group: &str,
+) -> Result<bool, SpineError> {
+    let client = build_raw_client(cfg)?;
+    let mut conn = client.get_multiplexed_async_connection().await?;
+    let result: Result<(), redis::RedisError> = redis::cmd("XGROUP")
+        .arg("CREATE")
+        .arg(stream)
+        .arg(group)
+        .arg("$")
+        .arg("MKSTREAM")
+        .query_async(&mut conn)
+        .await;
+    match result {
+        Ok(()) => Ok(true),
+        Err(e) if e.code() == Some("BUSYGROUP") => Ok(false),
+        Err(e) => Err(SpineError::from(e)),
+    }
+}
+
+/// `true` when `err` is Valkey's `NOGROUP` reply -- matches on
+/// [`redis::RedisError::code`] (the raw server-reported error code) rather
+/// than a substring match on the full `Display` text, same rationale as
+/// `crate::source_supervisor::is_nogroup_error`'s identical check (kept as
+/// a separate copy there -- see that module's own doc for why).
+pub(crate) fn is_nogroup_error(err: &SpineError) -> bool {
+    matches!(err, SpineError::Redis(e) if e.code() == Some("NOGROUP"))
+}
+
+/// Test-only helpers for exercising [`ensure_consumer_group`] against a
+/// real local Valkey/Redis instance when one happens to be reachable (dev
+/// box / CI service container on the default port) -- skipped gracefully
+/// (never a failure) when nothing answers, so `cargo test` stays green on a
+/// machine with no Valkey running. Mirrors the "use a real dependency when
+/// available, skip honestly when not" posture this crate has no
+/// `testcontainers` harness for yet.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::SpineConfig;
+
+    /// A `SpineConfig` pointing at `127.0.0.1:6379` (plaintext, no auth) --
+    /// `Some` only if something actually answers `PING` there.
+    pub(crate) fn local_valkey_config() -> Option<SpineConfig> {
+        let client = redis::Client::open("redis://127.0.0.1:6379/").ok()?;
+        let mut conn = client.get_connection().ok()?;
+        let _: String = redis::cmd("PING").query(&mut conn).ok()?;
+        Some(SpineConfig {
+            valkey_url: "redis://127.0.0.1:6379/".to_string(),
+            valkey_username: None,
+            valkey_password: None,
+            valkey_ca_file: std::path::PathBuf::from("/nonexistent-ca.crt"),
+            security_transport_tls: false,
+            security_transport_auth: false,
+            consumer_id: "test-consumer".to_string(),
+            stream_maxlen: 1_000,
+            read_count: 16,
+            block_ms: 200,
+            claim_idle_ms: 30_000,
+            claim_interval_ms: 15_000,
+            stats_interval_ms: 10_000,
+            pel_alert: 5_000,
+            dlq_maxlen: 1_000,
+            max_deliveries: 5,
+            drain_socket_timeout_s: 5,
+            relay_block_timeout_s: 5,
+        })
+    }
+
+    /// A process-unique key suffix (nanosecond timestamp) so parallel test
+    /// runs against a shared, real Valkey instance never collide.
+    pub(crate) fn unique_key(prefix: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("waddles:test:{prefix}:{nanos}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    // regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+    #[test]
+    fn is_nogroup_error_matches_on_the_redis_error_code_not_message_wording() {
+        let err = SpineError::Redis(redis::make_extension_error(
+            "NOGROUP".to_string(),
+            Some(
+                "No such key 'waddles:t:global:c:_tenant:src:twitch:tw-x:events' or consumer \
+                 group 'waddles.core.example.ping' in XREADGROUP with GROUP option"
+                    .to_string(),
+            ),
+        ));
+        assert!(is_nogroup_error(&err));
+
+        let err_different_wording = SpineError::Redis(redis::make_extension_error(
+            "NOGROUP".to_string(),
+            Some("a totally different detail string".to_string()),
+        ));
+        assert!(is_nogroup_error(&err_different_wording));
+    }
+
+    #[test]
+    fn is_nogroup_error_rejects_a_different_redis_error_code() {
+        let err = SpineError::Redis(redis::make_extension_error(
+            "WRONGTYPE".to_string(),
+            Some("Operation against a key holding the wrong kind of value".to_string()),
+        ));
+        assert!(!is_nogroup_error(&err));
+    }
+
+    #[test]
+    fn is_nogroup_error_rejects_a_non_redis_spine_error() {
+        let err = SpineError::Config("unrelated config error".to_string());
+        assert!(!is_nogroup_error(&err));
+    }
+
+    // regression: drain loop exited on NOGROUP (alpha 2026-10-02) -- proves
+    // `ensure_consumer_group` self-heals on a fresh Valkey (no group, no
+    // stream) rather than ever surfacing NOGROUP to the drain loop.
+    #[tokio::test]
+    async fn ensure_consumer_group_creates_the_group_and_stream_on_a_fresh_valkey() {
+        let Some(cfg) = test_support::local_valkey_config() else {
+            eprintln!("skipping: no local Valkey reachable at 127.0.0.1:6379");
+            return;
+        };
+        let stream = test_support::unique_key("ensure-group-stream");
+        let group = test_support::unique_key("ensure-group-group");
+
+        let created = ensure_consumer_group(&cfg, &stream, &group)
+            .await
+            .expect("first create succeeds");
+        assert!(created, "group did not exist yet, must report created=true");
+
+        // Idempotent: BUSYGROUP on the second call must be Ok(false), never
+        // an error.
+        let created_again = ensure_consumer_group(&cfg, &stream, &group)
+            .await
+            .expect("second create (BUSYGROUP) must not error");
+        assert!(
+            !created_again,
+            "group already existed, must report created=false"
+        );
+    }
 
     fn fixture_delivered(
         tenant: &str,

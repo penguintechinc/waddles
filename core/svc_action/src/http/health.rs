@@ -35,6 +35,41 @@ pub async fn healthz() -> Json<HealthzBody> {
     Json(HealthzBody { status: "ok" })
 }
 
+/// `GET /readyz` response body.
+#[derive(Debug, Serialize)]
+pub struct ReadyBody {
+    pub status: &'static str,
+    pub configured: bool,
+    pub running: bool,
+}
+
+/// `GET /readyz` -- real Kubernetes readiness: `503` while the action-stage
+/// dispatch loop (`crate::lib::try_start_dispatch`) is configured
+/// (`ACTION_APP_ID` set) but not yet (re)connected and reading. Unlike
+/// `/healthz` (always `ok`, the liveness target), this is the endpoint the
+/// readinessProbe must point at -- regression: drain loop exited on NOGROUP
+/// while the pod stayed Ready forever (alpha 2026-10-02).
+pub async fn readyz(State(state): State<AppState>) -> (axum::http::StatusCode, Json<ReadyBody>) {
+    let configured = !state.config.cli.action_app_id.is_empty();
+    let running = state
+        .consumer_loop_ready
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let ok = !configured || running;
+    let code = if ok {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        code,
+        Json(ReadyBody {
+            status: if ok { "ok" } else { "degraded" },
+            configured,
+            running,
+        }),
+    )
+}
+
 /// Per-dependency configuration status reported by the rich `/health`
 /// endpoint.
 #[derive(Debug, Serialize)]
@@ -95,6 +130,59 @@ mod tests {
             db_reader_password: None,
         };
         AppState::new(config, prometheus::Registry::new())
+    }
+
+    // regression: drain loop exited on NOGROUP while the pod stayed Ready
+    // forever (alpha 2026-10-02)
+    #[tokio::test]
+    async fn readyz_is_ok_when_action_app_id_is_unset() {
+        let (code, Json(body)) = readyz(State(test_state())).await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert!(!body.configured);
+    }
+
+    // regression: drain loop exited on NOGROUP while the pod stayed Ready
+    // forever (alpha 2026-10-02)
+    #[tokio::test]
+    async fn readyz_is_503_when_configured_but_not_running() {
+        let mut cli = CliConfig::parse_from(["svc-action"]);
+        cli.action_app_id = "waddles.core.example.ping".to_string();
+        let config = Config {
+            cli,
+            db_password: Secret::new("x"),
+            envelope_binding_keys: None,
+            discord_bot_token: None,
+            db_reader_password: None,
+        };
+        let state = AppState::new(config, prometheus::Registry::new());
+        state
+            .consumer_loop_ready
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let (code, Json(body)) = readyz(State(state)).await;
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.configured);
+        assert!(!body.running);
+    }
+
+    // regression: drain loop exited on NOGROUP while the pod stayed Ready
+    // forever (alpha 2026-10-02)
+    #[tokio::test]
+    async fn readyz_is_ok_once_the_configured_loop_is_running() {
+        let mut cli = CliConfig::parse_from(["svc-action"]);
+        cli.action_app_id = "waddles.core.example.ping".to_string();
+        let config = Config {
+            cli,
+            db_password: Secret::new("x"),
+            envelope_binding_keys: None,
+            discord_bot_token: None,
+            db_reader_password: None,
+        };
+        let state = AppState::new(config, prometheus::Registry::new());
+        state
+            .consumer_loop_ready
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let (code, Json(_body)) = readyz(State(state)).await;
+        assert_eq!(code, axum::http::StatusCode::OK);
     }
 
     #[tokio::test]
