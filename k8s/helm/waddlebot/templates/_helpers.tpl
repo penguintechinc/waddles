@@ -708,6 +708,84 @@ what identity is actually baked into it. Mirrors templates/host-api-tls-secret.y
 {{- end }}
 
 {{/*
+fix/cert-regen-on-identity-change -- the exact SAN list every host-api-tls provisioning
+path (alpha/local genSignedCert in templates/host-api-tls-secret.yaml, cert-manager's
+Certificate in templates/host-api-tls-certificate.yaml) must carry, centralized so the two
+paths and the stale-cert detector below can never drift apart. Returned sorted + comma-
+joined: a stable hash input for waddlebot.hostApiTlsSansSha256, and directly
+`splitList ","`-able back into a real list for genSignedCert's dnsNames argument.
+*/}}
+{{- define "waddlebot.hostApiTlsDesiredDnsNames" -}}
+{{- $fullname := include "waddlebot.fullname" . -}}
+{{- $ns := .Values.namespace -}}
+{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-bundle-executor" $fullname) (printf "*.%s.svc.cluster.local" $ns) | sortAlpha | join "," -}}
+{{- end }}
+
+{{/* sha256 of waddlebot.hostApiTlsDesiredDnsNames -- the waddlebot.io/cert-sans-sha256
+annotation value host-api-tls-secret.yaml writes/compares, and half of
+waddlebot.hostApiTlsPodChecksum's input. */}}
+{{- define "waddlebot.hostApiTlsSansSha256" -}}
+{{- include "waddlebot.hostApiTlsDesiredDnsNames" . | sha256sum -}}
+{{- end }}
+
+{{/*
+fix/cert-regen-on-identity-change -- true only when an existing (lookup result) TLS Secret
+is COMPLETE (waddlebot.tlsSecretComplete) AND its waddlebot.io/cert-identity /
+waddlebot.io/cert-sans-sha256 annotations byte-for-byte match the identity/SANs this
+render currently wants. A missing annotation (Secret pre-dates this fix) or a mismatched
+one (desired identity/SANs changed since the Secret was minted -- e.g.
+fix/chart-host-api-stage-identity's CN pin) both count as NOT matching: this is the exact
+gap that let alpha's `waddlebot-host-api-tls` Secret, minted under the OLD `waddlebot` CN,
+be kept forever after the executors started requiring the new pinned identity.
+
+Args (dict): existing (lookup result), identity (string), sansSha256 (string).
+
+# regression: kept host-api cert with stale CN after identity pin change (alpha 2026-10-02)
+*/}}
+{{- define "waddlebot.tlsSecretIdentityMatches" -}}
+{{- $existing := .existing -}}
+{{- if include "waddlebot.tlsSecretComplete" (dict "existing" $existing) -}}
+{{- $annotations := dict -}}
+{{- if and $existing $existing.metadata -}}
+{{- $annotations = $existing.metadata.annotations | default dict -}}
+{{- end -}}
+{{- if and (eq (get $annotations "waddlebot.io/cert-identity") .identity) (eq (get $annotations "waddlebot.io/cert-sans-sha256") .sansSha256) -}}
+true
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+fix/cert-regen-on-identity-change -- true only when an existing Secret is COMPLETE but
+stale (waddlebot.tlsSecretIdentityMatches is false) AND global.deploymentTier is outside
+alpha/local (canGenerate false) -- the exact condition templates/host-api-tls-secret.yaml
+and templates/infrastructure/valkey-tls-secret.yaml both `fail` rendering on. Kept as its
+own testable boolean (rather than only inline in those templates' `if`/`else if` chains)
+so tests/test_cert_regen_on_identity_change_render.py can assert the regenerate-vs-fail
+decision directly via templates/debug-helper-probe.yaml, without triggering the real
+`fail` call (which would abort the whole render).
+
+Args (dict): existing, identity, sansSha256 (same as waddlebot.tlsSecretIdentityMatches),
+canGenerate (bool-ish -- global.deploymentTier is alpha/local).
+*/}}
+{{- define "waddlebot.tlsSecretStaleFailsClosed" -}}
+{{- $existing := .existing -}}
+{{- $isComplete := include "waddlebot.tlsSecretComplete" (dict "existing" $existing) -}}
+{{- $matches := include "waddlebot.tlsSecretIdentityMatches" (dict "existing" $existing "identity" .identity "sansSha256" .sansSha256) -}}
+{{- if and $existing $isComplete (not $matches) (not .canGenerate) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/* checksum/host-api-tls pod-template annotation value -- derived from the desired
+identity+SANs ONLY, never key material, so an identity/SAN change rolls every consumer pod
+(svc-process-rust, svc-action-rust, bundle-executor, bundle-executor-action) even though
+the Secret object itself is reused by name when kept. */}}
+{{- define "waddlebot.hostApiTlsPodChecksum" -}}
+{{- printf "%s|%s" (include "waddlebot.hostApiStageIdentity" .) (include "waddlebot.hostApiTlsSansSha256" .) | sha256sum -}}
+{{- end }}
+
+{{/*
 fix/valkey-tls-alpha -- Valkey (infra-redis) TLS helpers. Server-auth-only TLS (no client
 cert/key needed by any consumer, see global.valkeyTls's values.yaml comment): the server
 (templates/infrastructure/redis.yaml) mounts the full Secret (ca.crt/tls.crt/tls.key), the
@@ -735,6 +813,23 @@ check) would wrongly stay false on the generate path. Gate on the enabled flag a
 {{- if .Values.infrastructure.redis.tls.enabled -}}
 true
 {{- end -}}
+{{- end }}
+
+{{/*
+fix/cert-regen-on-identity-change -- valkey-tls counterpart of
+waddlebot.hostApiTlsDesiredDnsNames/SansSha256 above, same rationale: centralizes the
+exact SAN list templates/infrastructure/valkey-tls-secret.yaml's genSignedCert path must
+carry so the stale-cert detector (waddlebot.tlsSecretIdentityMatches) can never drift from
+what that template actually mints.
+*/}}
+{{- define "waddlebot.valkeyTlsDesiredDnsNames" -}}
+{{- $svcName := .Values.infrastructure.redis.service.name -}}
+{{- $ns := .Values.namespace -}}
+{{- list $svcName (printf "%s.%s" $svcName $ns) (printf "%s.%s.svc" $svcName $ns) (printf "%s.%s.svc.cluster.local" $svcName $ns) | sortAlpha | join "," -}}
+{{- end }}
+
+{{- define "waddlebot.valkeyTlsSansSha256" -}}
+{{- include "waddlebot.valkeyTlsDesiredDnsNames" . | sha256sum -}}
 {{- end }}
 
 {{/*

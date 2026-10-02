@@ -27,11 +27,14 @@ spec:
   usages:
     - server auth
     - client auth
+  # fix/cert-regen-on-identity-change -- sourced from the same
+  # waddlebot.hostApiTlsDesiredDnsNames helper templates/host-api-tls-secret.yaml's
+  # genSignedCert path uses, so the cert-manager and alpha/local-generate provisioning
+  # paths can never drift apart on SANs either.
   dnsNames:
-    - {{ include "waddlebot.fullname" . }}-svc-process-rust
-    - {{ include "waddlebot.fullname" . }}-svc-action-rust
-    - {{ include "waddlebot.fullname" . }}-bundle-executor
-    - "*.{{ .Values.namespace }}.svc.cluster.local"
+    {{- range include "waddlebot.hostApiTlsDesiredDnsNames" . | splitList "," }}
+    - {{ . | quote }}
+    {{- end }}
   issuerRef:
     name: {{ .Values.global.hostApiTls.certManager.issuerName }}
     kind: {{ .Values.global.hostApiTls.certManager.issuerKind | default "ClusterIssuer" }}
