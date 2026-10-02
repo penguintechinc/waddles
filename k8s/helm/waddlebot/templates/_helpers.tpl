@@ -833,6 +833,26 @@ what that template actually mints.
 {{- end }}
 
 {{/*
+fix/valkey-cert-rollout-and-migrate-wait -- the pod-template `checksum/valkey-tls`
+annotation every Valkey-TLS workload (the server in templates/infrastructure/redis.yaml,
+plus every client Deployment/Job mounting the CA via waddlebot.valkeyTlsCaVolumeMount:
+hub-api, svc-ingest-rust, svc-process-rust, svc-action-rust, core-bundle-seeder-job) must
+carry, mirroring waddlebot.hostApiTlsPodChecksum's identity-input (never key-material-input)
+design: derived from the SAME desired identity ($svcName, templates/infrastructure/
+valkey-tls-secret.yaml's $desiredIdentity) + SANs hash this file's
+waddlebot.tlsSecretIdentityMatches compares against. Because every consumer calls this one
+helper with the same two inputs, the server and every client always compute the identical
+checksum value and roll together on any identity/SAN change -- regardless of whether the
+`{{ fullname }}-valkey-tls` Secret itself was KEPT (same object, no new resourceVersion) or
+regenerated, closing the gap where #541 added the drift *detection*
+(waddlebot.tlsSecretIdentityMatches) but no template actually rolled a pod on it.
+# regression: valkey cert regenerated but server pod not rolled; clients BadSignature (alpha 2026-10-02)
+*/}}
+{{- define "waddlebot.valkeyTlsPodChecksum" -}}
+{{- printf "%s|%s" .Values.infrastructure.redis.service.name (include "waddlebot.valkeyTlsSansSha256" .) | sha256sum -}}
+{{- end }}
+
+{{/*
 fix/helm-alpha-self-provisioning -- lookup-then-generate-or-require for a single key
 inside the monolithic waddlebot-secrets Secret (templates/secrets.yaml). Mirrors
 templates/auto-provisioned-secrets.yaml's KEEP-vs-GENERATE policy but at per-key

@@ -34,6 +34,15 @@ spec:
   activeDeadlineSeconds: 300
   template:
     metadata:
+      annotations:
+        # fix/valkey-cert-rollout-and-migrate-wait -- see templates/infrastructure/
+        # redis.yaml's identical annotation comment; this Job's pod is re-created on
+        # every post-install/post-upgrade hook run regardless, but carries the same
+        # checksum for render-test parity with the other valkey-ca mounting workloads.
+        # regression: valkey cert regenerated but server pod not rolled; clients BadSignature (alpha 2026-10-02)
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        checksum/valkey-tls: {{ include "waddlebot.valkeyTlsPodChecksum" . | quote }}
+        {{- end }}
       labels:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: core-bundle-seeder

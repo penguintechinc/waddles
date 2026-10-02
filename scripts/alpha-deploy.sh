@@ -69,6 +69,18 @@
 # --skip-build   Reuse whatever is already pushed under the current HEAD's
 #                sha8 tag (skips the build+push step).
 #
+# fix/valkey-cert-rollout-and-migrate-wait -- if you pipe this script's
+# output (e.g. `scripts/alpha-deploy.sh | tee /tmp/alpha-deploy.log`), the
+# exit code `$?` an outer caller/CI step reads back is `tee`'s, not this
+# script's -- `set -euo pipefail` ABOVE only governs pipelines *inside* this
+# script, it cannot reach back into an invoking shell's own pipeline. An
+# agent run observed exactly this: a real failure here was masked by a
+# green `tee` exit. Either invoke it as
+# `bash -o pipefail -c 'scripts/alpha-deploy.sh | tee /tmp/alpha-deploy.log'`
+# (or check `${PIPESTATUS[0]}` right after the pipe), or redirect instead of
+# piping: `scripts/alpha-deploy.sh >/tmp/alpha-deploy.log 2>&1` preserves
+# this script's own exit code with no extra flag.
+#
 # Requires: docker (with buildx), kubectl, helm, jq. Kube context must be
 # local-alpha or microk8s (validated below; KUBE_CONTEXT set to anything
 # else is rejected before any build/push/helm step). bash 3.2 compatible (no
@@ -530,16 +542,33 @@ fi
 info "helm release ${RELEASE} is 'deployed' at revision ${HELM_RELEASE_REVISION}"
 
 # ---------------------------------------------------------------------------
-# Step 3: wait for the pre-upgrade migrations Job, then every Deployment.
-# ---------------------------------------------------------------------------
-info "Waiting for db-migrate Job"
-kubectl --context "${KUBE_CONTEXT}" wait --for=condition=complete \
-    "job/${RELEASE}-db-migrate" -n "${NAMESPACE}" --timeout=180s || {
-        err "db-migrate Job did not complete"
-        kubectl --context "${KUBE_CONTEXT}" logs -n "${NAMESPACE}" "job/${RELEASE}-db-migrate" --tail=50
-        exit 1
-    }
-
+# Step 3: every Deployment. (No separate db-migrate Job wait -- see below.)
+#
+# fix/valkey-cert-rollout-and-migrate-wait -- previously waited here with
+# `kubectl wait --for=condition=complete job/${RELEASE}-db-migrate`, which
+# intermittently failed with `jobs.batch "waddlebot-db-migrate" not found`
+# even when migrations succeeded. Root cause: migrations-job.yaml's
+# `helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded` deletes
+# the Job object as part of the SAME synchronous hook phase that
+# `helm upgrade --install` above already waited on -- by the time this
+# script resumes, a successful Job is already gone, so `kubectl wait` races
+# an object Helm itself just deleted.
+#
+# This is consistent with the #526 (fix/chart-fresh-install-hooks) design:
+# Helm hooks are a synchronous barrier -- `helm upgrade --install` does not
+# return until db-migrate (helm.sh/hook: post-install,pre-upgrade) has
+# finished, and a hook failure leaves the release in a non-"deployed" status
+# (or makes the `helm upgrade` command itself exit non-zero). The
+# "Verifying helm release status" check immediately above this comment
+# already fails loudly in that case, BEFORE this script ever reaches Step 3
+# -- so it is already the authoritative, race-free confirmation that
+# db-migrate succeeded; a second, separate `kubectl wait` on the (likely
+# already-deleted) Job object added no additional guarantee, only a flaky
+# false-negative. Deliberately not retaining the Job past hook-succeeded
+# (e.g. dropping `hook-succeeded` from the delete-policy) to make the old
+# wait work again -- that would be a chart change, out of scope for this
+# script-only fix, and would leave a stale db-migrate Job object sitting in
+# the namespace between upgrades for no behavioral benefit.
 info "Waiting for Deployments"
 # fix/alpha-deploy-executor-and-failfast -- previously `|| err ...` only logged and kept
 # going, so a Deployment that never rolled out cleanly still left the script exiting 0.
