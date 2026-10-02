@@ -14,15 +14,16 @@ from pathlib import Path
 
 import pytest
 
-from flask_core.valkey_tls import DEFAULT_CA_FILE, _warned_missing_ca, build_tls_kwargs
+import flask_core.valkey_tls as valkey_tls
+from flask_core.valkey_tls import DEFAULT_CA_FILE, build_tls_kwargs
 
 
 @pytest.fixture(autouse=True)
-def _reset_warned_cache():
-    """Each test gets a clean module-level warn-once set."""
-    _warned_missing_ca.clear()
+def _reset_warned_flag():
+    """Each test gets a clean module-level warn-once flag."""
+    valkey_tls._warned_missing_ca = False
     yield
-    _warned_missing_ca.clear()
+    valkey_tls._warned_missing_ca = False
 
 
 def test_plain_redis_url_gets_no_tls_kwargs():
@@ -76,7 +77,7 @@ def test_rediss_url_falls_back_to_default_ca_path_constant(monkeypatch: pytest.M
     assert DEFAULT_CA_FILE == "/etc/waddles/ca/valkey-ca.crt"
 
 
-def test_missing_ca_file_logs_one_warning_with_credentials_redacted(
+def test_missing_ca_file_logs_one_warning_with_no_credentials_or_url_content(
     caplog: pytest.LogCaptureFixture, tmp_path: Path
 ):
     missing = tmp_path / "does-not-exist.crt"
@@ -89,5 +90,10 @@ def test_missing_ca_file_logs_one_warning_with_credentials_redacted(
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert len(warnings) == 1
     rendered = warnings[0].getMessage()
+    # No part of the URL (host, credentials, or otherwise) is ever
+    # interpolated into the log line -- CodeQL's clear-text-logging query
+    # treats any derivative of a credential-bearing URL as tainted
+    # regardless of redaction logic, so the only safe fix is zero
+    # interpolation of URL-derived content.
     assert "s3cret" not in rendered
-    assert "valkey:6380" in rendered
+    assert "valkey:6380" not in rendered
