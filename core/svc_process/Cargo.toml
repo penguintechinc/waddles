@@ -192,6 +192,14 @@ regex = "=1.13.1"
 # `HubClientMinter` adapter. Same-repo path dependency (not penguin-libs):
 # this proto contract is owned by this repo, not penguin-libs.
 hub_client = { path = "../hub_client", version = "=0.1.0" }
+# `src/pii_tokenize.rs`'s `sanitize_mint_key` (sec review 2026-10-03): hashes
+# the raw handle out of a `handle:<raw username>` fallback mint key before
+# it can ever reach a `TokenizeError`/log line -- never the raw value.
+# Already resolved transitively at this exact version (sha2 0.10.9, via
+# `penguin-spine`/`rustls`'s own dependency graph); pinned directly here so
+# this module's use of it doesn't depend on that staying true. Same pin
+# `core/svc_ingest`/`core/svc_action`/`core/bundle_compiler` use.
+sha2 = "=0.10.9"
 
 [dev-dependencies]
 http-body-util = "=0.1.3"
