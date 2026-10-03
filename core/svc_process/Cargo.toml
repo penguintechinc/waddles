@@ -183,6 +183,15 @@ bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
 # purpose -- already resolves transitively (reqwest), pinned directly here
 # so this promotion adds no new version to the dependency graph.
 futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
+# Inbound PII-tokenization pre-dispatch pass (`src/pii_tokenize.rs`):
+# Discord structured-mention / Twitch-IRC handle-mention scanning in
+# free-text chat payloads. Same pin `core/bundle_compiler` already uses.
+regex = "=1.13.1"
+# `waddles.hub.internal.v1.IdentityService.MintEphemeralPseudonyms` client
+# (feature/hub-api-internal-grpc foundation) -- `src/pii_tokenize.rs`'s
+# `HubClientMinter` adapter. Same-repo path dependency (not penguin-libs):
+# this proto contract is owned by this repo, not penguin-libs.
+hub_client = { path = "../hub_client", version = "=0.1.0" }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"

@@ -147,6 +147,17 @@ bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
 # specific to this repo's own bundle-host wire shapes, not a penguin-libs
 # crate.
 bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
+# Outbound PII-detokenization pass (`src/capabilities.rs`'s
+# `detokenize_text`/`with_detokenize`) -- the egress half of the PII
+# boundary whose inbound half is `core/svc_process`'s own `pii_tokenize`
+# dependency on `hub_client`. Same-repo path dependency, same rationale as
+# `bundle-active-set` above.
+egress_detokenizer = { path = "../egress_detokenizer", version = "=0.1.0" }
+# `waddles.hub.internal.v1.IdentityService.ResolveDisplayNames` client,
+# needed directly (not just transitively via `egress_detokenizer`) so
+# `crate::lib`'s startup wiring can construct the real
+# `egress_detokenizer::HubClientResolver`.
+hub_client = { path = "../hub_client", version = "=0.1.0" }
 
 [dev-dependencies]
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks

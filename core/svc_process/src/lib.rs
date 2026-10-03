@@ -47,6 +47,7 @@ pub mod hop;
 pub mod host_api;
 pub mod http;
 pub mod license;
+pub mod pii_tokenize;
 pub mod source_supervisor;
 pub mod spine;
 pub mod telemetry;
@@ -522,8 +523,14 @@ fn try_start_process_loop(
             return;
         }
     };
-    let license_gate: Arc<dyn license::FeatureGate> =
-        Arc::new(license::LicenseFeatureGate::new(license_client));
+    let license_gate: Arc<dyn license::FeatureGate> = Arc::new(license::LicenseFeatureGate::new(
+        Arc::clone(&license_client),
+    ));
+    // Opt-out kill-switch for the inbound PII-tokenization pre-dispatch
+    // pass (`crate::pii_tokenize`) -- default ENABLED, see
+    // `license::PiiTokenizationGate`'s own doc.
+    let pii_gate: Arc<dyn license::FeatureGate> =
+        Arc::new(license::PiiTokenizationGate::new(license_client));
 
     // The `http` bundle capability's shared egress guard (`crate::
     // capabilities::StageCapabilities::egress`) -- one per process, built
@@ -673,6 +680,11 @@ fn try_start_process_loop(
                 // means denied").
                 kv_capabilities: Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
                 egress: Arc::clone(&egress),
+                pii_gate: Arc::clone(&pii_gate),
+                // TODO(M4+): same honest gap as `build_source_supervisor_deps`
+                // -- see `pii_gate`'s doc above. Fail-closed dead-letters
+                // every entry until a real `hub_client::HubClient` is wired.
+                pii_minter: None,
             };
 
             let (inner_tx, inner_rx) = tokio::sync::oneshot::channel();
@@ -909,9 +921,10 @@ fn try_start_changelog_consumer(
     // fail-open contract, so silently bailing out here on a second,
     // independent build attempt would contradict the very decision that
     // routed execution to this function in the first place.
-    let (gate, bundle_egress_flag): (
+    let (gate, bundle_egress_flag, pii_gate): (
         Arc<dyn license::FeatureGate>,
         Arc<dyn bundle_host_http::egress::FeatureFlag>,
+        Arc<dyn license::FeatureGate>,
     ) = match license::build_license_client("waddles") {
         Ok(license_client) => (
             Arc::new(license::AllGate(vec![
@@ -922,7 +935,10 @@ fn try_start_changelog_consumer(
                     &license_client,
                 ))),
             ])),
-            bundle_host_http::egress::boxed(license::BundleEgressFlag::new(license_client)),
+            bundle_host_http::egress::boxed(license::BundleEgressFlag::new(Arc::clone(
+                &license_client,
+            ))),
+            Arc::new(license::PiiTokenizationGate::new(license_client)),
         ),
         Err(err) => {
             tracing::warn!(
@@ -934,6 +950,13 @@ fn try_start_changelog_consumer(
             (
                 Arc::new(license::AllGate(Vec::new())),
                 bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(false)),
+                // PII tokenization is a hard security invariant, never
+                // fail-open on an unrelated license-client build error --
+                // unlike `gate`/`bundle_egress_flag` above (feature
+                // availability), an unknown kill-switch state here must
+                // still resolve to "tokenization enabled" (the safe
+                // default), which `AllGate(Vec::new())` already gives.
+                Arc::new(license::AllGate(Vec::new())),
             )
         }
     };
@@ -992,6 +1015,14 @@ fn try_start_changelog_consumer(
         Arc::clone(&kv_capabilities),
         Arc::clone(&egress),
         Arc::clone(&active_digests),
+        Arc::clone(&pii_gate),
+        // TODO(M4+): wire a real `hub_client::HubClient` connection here
+        // (env-driven endpoint/service_auth config, mirroring
+        // `connect_kv`'s graceful-degradation style) -- until then, PII
+        // tokenization's fail-closed path (`spine::handle_delivered`)
+        // dead-letters every entry rather than ever forwarding raw PII,
+        // which is the correct, safe default (see `pii_gate`'s own doc).
+        None,
     );
 
     // Fail loud, never silent (user requirement): this path is only ever
@@ -1071,6 +1102,7 @@ fn try_start_changelog_consumer(
 /// `crate::changelog_consumer`). `egress` is cloned into every spawned
 /// binding consumer's own `ProcessDeps` -- see `crate::spine::
 /// ProcessDeps::egress`'s doc.
+#[allow(clippy::too_many_arguments)]
 fn build_source_supervisor_deps(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
@@ -1078,6 +1110,8 @@ fn build_source_supervisor_deps(
     kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     egress: Arc<bundle_host_http::egress::EgressGuard>,
     active_digests: Arc<active_digests::ActiveDigests>,
+    pii_gate: Arc<dyn license::FeatureGate>,
+    pii_minter: Option<Arc<dyn pii_tokenize::IdentityMinter>>,
 ) -> Option<source_supervisor::SupervisorDeps> {
     let Some(keys_raw) = config.envelope_binding_keys.as_ref() else {
         tracing::warn!(
@@ -1119,6 +1153,8 @@ fn build_source_supervisor_deps(
         kv_capabilities,
         egress,
         active_digests,
+        pii_gate,
+        pii_minter,
     })
 }
 
@@ -1273,6 +1309,8 @@ mod tests {
             Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
             test_egress_guard(),
             Arc::new(active_digests::ActiveDigests::new()),
+            Arc::new(license::test_support::FixedGate(true)),
+            None,
         )
         .is_none());
     }
@@ -1297,6 +1335,8 @@ mod tests {
             Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
             test_egress_guard(),
             Arc::new(active_digests::ActiveDigests::new()),
+            Arc::new(license::test_support::FixedGate(true)),
+            None,
         );
         // SAFETY: serialized by ENV_LOCK above.
         unsafe {

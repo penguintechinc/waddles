@@ -307,6 +307,21 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Multiplex
     /// other unimplemented-seam capability's fail-closed default in
     /// [`Self::handle`]).
     db: Option<DbWiring>,
+    /// `None` until [`Self::with_detokenize`] is called -- every relay send
+    /// then falls back to showing the raw `{user:<token>}` placeholder it
+    /// received from the bundle (the degraded, but never-PII-leaking,
+    /// fallback -- see that method's doc).
+    detokenize: Option<DetokenizeWiring>,
+}
+
+/// The outbound PII-detokenization dependency: a live resolver over
+/// `waddles.hub.internal.v1.IdentityService.ResolveDisplayNames`
+/// (`core/egress_detokenizer::HubClientResolver`), plus the opt-out
+/// kill-switch gate (`crate::flags::DISABLE_PII_DETOKENIZATION_FLAG`).
+#[derive(Clone)]
+struct DetokenizeWiring {
+    resolver: Arc<dyn egress_detokenizer::DisplayNameResolver>,
+    gate: Arc<dyn crate::flags::FeatureFlag>,
 }
 
 impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
@@ -327,7 +342,24 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             discord: None,
             kv: None,
             db: None,
+            detokenize: None,
         }
+    }
+
+    /// Enables the outbound PII-detokenization pass for every `relay` host
+    /// call this connection answers -- builder-style so existing
+    /// `StageCapabilities::new` call sites (including every current test)
+    /// are unaffected and so a deployment whose `hub_client::HubClient`
+    /// connection failed to open at startup can still construct every
+    /// other capability (same graceful-degradation pattern as
+    /// [`Self::with_discord`]/[`Self::with_kv`]).
+    pub fn with_detokenize(
+        mut self,
+        resolver: Arc<dyn egress_detokenizer::DisplayNameResolver>,
+        gate: Arc<dyn crate::flags::FeatureFlag>,
+    ) -> Self {
+        self.detokenize = Some(DetokenizeWiring { resolver, gate });
+        self
     }
 
     /// Enables the `kv` capability over `backend` (production:
@@ -384,6 +416,29 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             bot_token,
         });
         self
+    }
+
+    /// Substitutes every `{user:<token>}` placeholder in `text` with its
+    /// resolved, `sink`-escaped display name (`egress_detokenizer::
+    /// detokenize_resolving`) -- the PII boundary's outbound half. Returns
+    /// `text` unchanged (tokens still visible, never raw PII -- see
+    /// [`Self::with_detokenize`]'s doc) when no resolver is configured yet,
+    /// or when the opt-out kill-switch is ON.
+    async fn detokenize_text(
+        &self,
+        tenant: &str,
+        text: &str,
+        sink: egress_detokenizer::Sink,
+    ) -> String {
+        let Some(wiring) = &self.detokenize else {
+            return text.to_string();
+        };
+        if !wiring.gate.enabled().await {
+            return text.to_string();
+        }
+        egress_detokenizer::detokenize_resolving(text, tenant, wiring.resolver.as_ref(), sink)
+            .await
+            .text
     }
 
     async fn handle_relay(
@@ -460,8 +515,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 )
             })?;
 
+        let text = self
+            .detokenize_text(&scope.tenant, text, egress_detokenizer::Sink::Twitch)
+            .await;
         let channel = sanitize_irc_component(channel);
-        let text = sanitize_irc_component(text);
+        let text = sanitize_irc_component(&text);
         if channel.is_empty() || text.is_empty() {
             return Err(denied(
                 "invalid_args",
@@ -539,6 +597,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 "discord relay origin channel id is not a valid snowflake",
             ));
         }
+
+        let text = self
+            .detokenize_text(&scope.tenant, text, egress_detokenizer::Sink::Discord)
+            .await;
+        let text = text.as_str();
 
         // Spec §8.2 steps 6-7's SSRF-pinning discipline, reused here even
         // though `discord.com` is a compiled-in host rather than a
@@ -1728,6 +1791,140 @@ mod tests {
         assert_eq!(parsed["text"], "hi");
     }
 
+    /// Minimal [`egress_detokenizer::DisplayNameResolver`] test fixture:
+    /// resolves every token in `self.0` to its mapped name, nothing else.
+    struct FixtureResolver(std::collections::HashMap<String, String>);
+
+    impl egress_detokenizer::DisplayNameResolver for FixtureResolver {
+        fn resolve_many<'a>(
+            &'a self,
+            _tenant_id: &'a str,
+            tokens: Vec<String>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            std::collections::HashMap<String, String>,
+                            egress_detokenizer::DetokenizeError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            let map = self.0.clone();
+            Box::pin(async move {
+                Ok(tokens
+                    .into_iter()
+                    .filter_map(|t| map.get(&t).cloned().map(|n| (t, n)))
+                    .collect())
+            })
+        }
+    }
+
+    /// PII boundary hard invariant: a Twitch relay send with detokenization
+    /// wired and enabled substitutes the token with the resolved display
+    /// name before the message is queued -- a user never sees a raw
+    /// `{user:<token>}` placeholder in chat.
+    #[tokio::test]
+    async fn relay_send_detokenizes_the_token_before_queuing_when_wired_and_enabled() {
+        let resolver: Arc<dyn egress_detokenizer::DisplayNameResolver> = Arc::new(FixtureResolver(
+            [("abc-1".to_string(), "CoolStreamer".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let gate: Arc<dyn FeatureFlag> = Arc::new(crate::flags::StaticFlag(true));
+        let caps = caps(FakeRelayQueue::default()).with_detokenize(resolver, gate);
+        let result = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "message_json": "{\"channel\":\"#somechannel\",\"text\":\"hi {user:abc-1}\"}"}),
+                ),
+            )
+            .await
+            .expect("relay send succeeds");
+        assert_eq!(result["queued"], serde_json::json!(true));
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
+        assert_eq!(parsed["text"], "hi CoolStreamer");
+        assert!(!parsed["text"].as_str().unwrap().contains("abc-1"));
+    }
+
+    /// Fail-safe-empty regression: an unresolved token (resolver has no
+    /// entry for it) substitutes the neutral label, never the raw token.
+    #[tokio::test]
+    async fn relay_send_detokenizes_an_unresolved_token_to_the_neutral_label() {
+        let resolver: Arc<dyn egress_detokenizer::DisplayNameResolver> =
+            Arc::new(FixtureResolver(std::collections::HashMap::new()));
+        let gate: Arc<dyn FeatureFlag> = Arc::new(crate::flags::StaticFlag(true));
+        let caps = caps(FakeRelayQueue::default()).with_detokenize(resolver, gate);
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "twitch", "message_json": "{\"channel\":\"#somechannel\",\"text\":\"hi {user:missing}\"}"}),
+            ),
+        )
+        .await
+        .expect("relay send succeeds");
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
+        assert_eq!(
+            parsed["text"],
+            format!("hi {}", egress_detokenizer::NEUTRAL_LABEL)
+        );
+    }
+
+    /// Kill-switch + not-configured-yet regression: with no resolver wired
+    /// at all, a relay send falls back to showing the raw token -- the
+    /// degraded, but never-PII-leaking, fallback (`detokenize_text`'s doc).
+    #[tokio::test]
+    async fn relay_send_passes_the_raw_token_through_when_detokenize_is_not_configured() {
+        let caps = caps(FakeRelayQueue::default());
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "twitch", "message_json": "{\"channel\":\"#somechannel\",\"text\":\"hi {user:abc-1}\"}"}),
+            ),
+        )
+        .await
+        .expect("relay send succeeds");
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
+        assert_eq!(parsed["text"], "hi {user:abc-1}");
+    }
+
+    /// Kill-switch regression: wired but disabled (gate OFF) behaves
+    /// identically to not-configured-at-all -- raw token passes through.
+    #[tokio::test]
+    async fn relay_send_passes_the_raw_token_through_when_the_kill_switch_is_on() {
+        let resolver: Arc<dyn egress_detokenizer::DisplayNameResolver> = Arc::new(FixtureResolver(
+            [("abc-1".to_string(), "CoolStreamer".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let gate: Arc<dyn FeatureFlag> = Arc::new(crate::flags::StaticFlag(false));
+        let caps = caps(FakeRelayQueue::default()).with_detokenize(resolver, gate);
+        caps.handle(
+            &scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "twitch", "message_json": "{\"channel\":\"#somechannel\",\"text\":\"hi {user:abc-1}\"}"}),
+            ),
+        )
+        .await
+        .expect("relay send succeeds");
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
+        assert_eq!(parsed["text"], "hi {user:abc-1}");
+    }
+
     /// Regression coverage for the CRITICAL usage-metering finding:
     /// `UsageBatcher::record_relay_call` was never called anywhere in this
     /// crate. A successful relay send must record one host-call-by-kind
@@ -1928,6 +2125,45 @@ mod tests {
         let body = req.body.as_ref().expect("body present");
         let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
         assert_eq!(parsed["content"], "pong");
+    }
+
+    /// PII boundary hard invariant, Discord sink: a resolved display name
+    /// containing Discord markdown control characters is escaped so it
+    /// can't smuggle a mention/formatting out of its position in the
+    /// rendered content.
+    #[tokio::test]
+    async fn relay_send_discord_detokenizes_and_escapes_the_resolved_name() {
+        let transport = Arc::new(FakeDiscordTransport::default());
+        let resolver: Arc<dyn egress_detokenizer::DisplayNameResolver> = Arc::new(FixtureResolver(
+            [("abc-1".to_string(), "@everyone".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let gate: Arc<dyn FeatureFlag> = Arc::new(crate::flags::StaticFlag(true));
+        let caps = caps(FakeRelayQueue::default())
+            .with_discord(
+                transport.clone(),
+                crate::config::Secret::new("test-bot-token"),
+            )
+            .with_detokenize(resolver, gate);
+
+        caps.handle(
+            &discord_scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider": "discord", "message_json": r#"{"text":"hi {user:abc-1}"}"#}),
+            ),
+        )
+        .await
+        .expect("discord relay send succeeds");
+
+        let requests = transport.requests.lock().unwrap();
+        let body = requests[0].body.as_ref().expect("body present");
+        let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
+        let content = parsed["content"].as_str().unwrap();
+        assert_eq!(content, "hi \\@everyone");
+        assert!(!content.contains("abc-1"));
     }
 
     /// A bundle-supplied `channel` in `message_json` is silently ignored for

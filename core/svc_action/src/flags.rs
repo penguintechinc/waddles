@@ -231,6 +231,44 @@ pub fn multi_tenant_watermark_flag(
     }
 }
 
+/// Opt-out kill-switch for the outbound PII-detokenization pass
+/// (`egress_detokenizer`, wired into `crate::capabilities::
+/// StageCapabilities::handle_relay`/`handle_discord_relay`) -- same
+/// opt-out-kill-switch shape as [`DISABLE_DB_BUNDLE_CONFIG_FLAG`]:
+/// detokenization is a core platform mechanism, not a licensed feature, so
+/// unseen/OFF/license-server-unreachable must leave it ENABLED (the
+/// default -- real display names, not opaque tokens, appear in chat/
+/// overlay output). ON opts back OUT of it: every relay send shows the raw
+/// `{user:<token>}` placeholder it received from the bundle rather than a
+/// resolved name -- never raw PII either way, since nothing upstream of
+/// this pass ever holds raw PII (`core/svc_process`'s inbound tokenization
+/// pass already stripped it) -- a documented, deliberate degraded-UX
+/// tradeoff, never the default.
+pub const DISABLE_PII_DETOKENIZATION_FLAG: &str = "waddles.core.disable-pii-detokenization";
+
+/// Production [`FeatureFlag`] for [`DISABLE_PII_DETOKENIZATION_FLAG`] --
+/// same bypass-aware negation shape as [`DisableDbBundleConfigFlag`] (see
+/// that type's own doc for the full bypass-awareness rationale, identical
+/// here).
+pub struct DisablePiiDetokenizationFlag(Arc<penguin_licensing::LicenseClient>);
+
+impl DisablePiiDetokenizationFlag {
+    pub fn new(client: Arc<penguin_licensing::LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureFlag for DisablePiiDetokenizationFlag {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            if self.0.bypass_active() {
+                return true;
+            }
+            !self.0.flag_enabled(DISABLE_PII_DETOKENIZATION_FLAG).await
+        })
+    }
+}
+
 /// Combines multiple [`FeatureFlag`]s with logical AND, short-circuiting on
 /// the first `false`.
 pub struct AllFlags(pub Vec<Arc<dyn FeatureFlag>>);
@@ -350,6 +388,30 @@ mod tests {
         assert_eq!(
             DISABLE_MULTI_TENANT_WATERMARK_FLAG,
             "waddles.core.disable-multi-tenant-watermark"
+        );
+    }
+
+    #[test]
+    fn disable_pii_detokenization_flag_matches_the_product_flag_key_convention() {
+        assert_eq!(
+            DISABLE_PII_DETOKENIZATION_FLAG,
+            "waddles.core.disable-pii-detokenization"
+        );
+    }
+
+    /// Same hard invariant as the DB-bundle-config kill-switch regression
+    /// test above: a never-seen flag must leave outbound detokenization
+    /// ENABLED -- real display names, not raw tokens, appear by default.
+    #[tokio::test]
+    async fn disable_pii_detokenization_flag_defaults_enabled_when_never_seen() {
+        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-pii-detok-default")
+            .expect("default LicenseConfig::new never fails");
+        let client = penguin_licensing::LicenseClient::new(cfg)
+            .expect("LicenseClient::new with a valid default config never fails");
+        let flag = DisablePiiDetokenizationFlag::new(client);
+        assert!(
+            flag.enabled().await,
+            "an unseen kill-switch flag must leave PII detokenization enabled"
         );
     }
 
