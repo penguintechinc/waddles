@@ -13,10 +13,11 @@
 //! `invoke`. `core/bundle_executor/src/tls.rs` is the client-TLS mirror of
 //! [`build_server_config`] below.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use penguin_bundle_host::wire::{
@@ -597,20 +598,54 @@ pub type ShutdownReceiver = oneshot::Receiver<()>;
 /// Registry of currently-live executor connections this stage can dispatch
 /// `invoke`/`load` requests over. `EXECUTOR_STAGE_CONNECTIONS` (spec §6.6)
 /// describes spreading invocations across many connections from one
-/// executor replica; this M3 landing keeps the single most-recently
-/// connected one active (correct for the common one-executor-replica
-/// deployment; TODO(M3+) is round-robin across all held connections).
+/// executor replica -- identical shape to
+/// `core/svc_process::host_api::ConnectionRegistry`.
+///
+/// **Regression: svc reported zero executors while holding a live session
+/// after reconnect (alpha 2026-10-03).** The previous design kept a single
+/// `Mutex<Option<Arc<Connection>>>` "active" slot, overwritten wholesale by
+/// every newly accepted connection (`set_active`). That is a race the
+/// moment more than one connection is ever in flight for the same stage:
+/// if connection B supersedes connection A in the slot and then B itself
+/// closes quickly (a duplicate dial, a transient reconnect race, or simply
+/// the older connection B replaced), `active()` reports "no executor" --
+/// `duration_without_executor` climbs and the watchdog dead-letters
+/// everything -- even though connection A is still fully alive, still
+/// answering heartbeats, and simply no longer reachable through the slot.
+/// Observed live on alpha: `svc-process` held a connection established at
+/// 02:09:22 from 10.1.0.33 for the next ~10 minutes (confirmed by that
+/// pod's own `connection closed` log only at the 02:20 restart), yet
+/// logged "no executor connection" every 60s the entire time. `svc-action`
+/// exhibited the identical pattern.
+///
+/// The fix: every live session is tracked in `sessions`, keyed by a unique
+/// per-connection id allocated in [`Self::register`] -- never by peer
+/// address (NAT/fast-reconnect can collide there) and never collapsed into
+/// a single slot a dead connection can occupy while a live one goes
+/// unregistered. Teardown ([`Self::remove`]) removes only its own id, so a
+/// session's close can never clear another session's registration. The
+/// connected-executor count is the live map size ([`Self::live_count`]).
+/// [`Self::active`] picks a live session to dispatch over -- **newest wins**
+/// (highest allocated id still reporting `!is_closed()`), preserving this
+/// landing's prior single-executor-replica behavior; TODO(M3+) is
+/// round-robin across all held connections once a replica legitimately
+/// holds more than one. The zero-executor watchdog and `/health` readiness
+/// both read through `active`/`live_count`, so they observe exactly the
+/// same live set dispatch does.
 #[derive(Default)]
 pub struct ConnectionRegistry {
-    active: std::sync::Mutex<Option<Arc<Connection>>>,
-    generation: AtomicU64,
+    /// Every session this stage currently holds a connection object for
+    /// (live or not-yet-pruned-closed), keyed by the id `register` handed
+    /// back to the accept task that owns it.
+    sessions: Mutex<HashMap<u64, Arc<Connection>>>,
+    next_id: AtomicU64,
     /// When [`Self::active`] last transitioned from "some" to "none" --
     /// `None` means either an executor is currently active, or none has
     /// ever connected since this registry was created. Backs both
     /// [`Self::duration_without_executor`] (the `/health` liveness-grace
     /// check and `crate::dispatch`'s loud dead-letter log) and readiness
     /// (`/healthz` is simply `active().is_some()`).
-    zero_since: std::sync::Mutex<Option<Instant>>,
+    zero_since: Mutex<Option<Instant>>,
     /// Set once, in production wiring (`crate::try_start_host_api`), to
     /// `telemetry::HostApiMetrics::dead_lettered_no_executor_total` --
     /// `OnceLock` rather than a constructor parameter so the many existing
@@ -624,19 +659,68 @@ impl ConnectionRegistry {
         Self::default()
     }
 
-    /// Registers a newly-handshaken connection as the active one.
-    pub fn set_active(&self, conn: Arc<Connection>) {
-        *self.active.lock().unwrap_or_else(|e| e.into_inner()) = Some(conn);
-        self.generation.fetch_add(1, Ordering::Relaxed);
+    /// Registers a newly-handshaken connection as a live session and
+    /// returns the id its owning accept task must pass back to
+    /// [`Self::remove`] on teardown -- the only correct way to drop a
+    /// session, since removing by id can never disturb any other session.
+    pub fn register(&self, conn: Arc<Connection>) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, conn);
+        id
     }
 
-    /// Returns the current active connection, if it is still open. A
-    /// closed connection is treated as absent so callers fail over to
-    /// "no executor available" (`error.kind = "executor_unavailable"`,
-    /// spec §6.3) rather than sending into a dead socket.
+    /// Back-compat convenience for tests that only need *a* live session
+    /// present and don't care about its id -- production teardown always
+    /// goes through [`Self::register`] paired with [`Self::remove`].
+    pub fn set_active(&self, conn: Arc<Connection>) {
+        self.register(conn);
+    }
+
+    /// Removes exactly session `id` -- a no-op if it was already removed or
+    /// never existed. Never touches any other session, including one that
+    /// has since superseded it as [`Self::active`]'s pick (the alpha
+    /// 2026-10-03 bug this type exists to prevent).
+    pub fn remove(&self, id: u64) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
+    }
+
+    /// Prunes closed sessions from the map and returns the remaining live
+    /// ones. Shared by [`Self::active`] and [`Self::live_count`] so both
+    /// observe exactly the same live set on every call.
+    fn prune_and_snapshot(&self) -> Vec<(u64, Arc<Connection>)> {
+        let mut guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        guard.retain(|_, conn| !conn.is_closed());
+        guard
+            .iter()
+            .map(|(id, conn)| (*id, Arc::clone(conn)))
+            .collect()
+    }
+
+    /// Number of sessions currently reporting a live (non-closed)
+    /// connection -- the correct `connected_executors` gauge value,
+    /// replacing the old `registry.active().is_some() as i64` which could
+    /// read 0 while other live sessions existed outside the single slot.
+    pub fn live_count(&self) -> usize {
+        self.prune_and_snapshot().len()
+    }
+
+    /// Returns a live session to dispatch over, or `None` if none remain.
+    /// Selection is "newest live session wins" (see the type doc) -- a
+    /// closed connection is never returned, so callers fail over to "no
+    /// executor available" (`error.kind = "executor_unavailable"`, spec
+    /// §6.3) rather than sending into a dead socket.
     pub fn active(&self) -> Option<Arc<Connection>> {
-        let guard = self.active.lock().unwrap_or_else(|e| e.into_inner());
-        let active = guard.as_ref().filter(|c| !c.is_closed()).map(Arc::clone);
+        let live = self.prune_and_snapshot();
+        let active = live
+            .into_iter()
+            .max_by_key(|(id, _)| *id)
+            .map(|(_, conn)| conn);
         let mut zero_since = self.zero_since.lock().unwrap_or_else(|e| e.into_inner());
         if active.is_some() {
             *zero_since = None;
@@ -784,8 +868,14 @@ pub async fn serve(
                     match accept_and_handshake(tcp, &acceptor, &stage_name, limits, expected_gvisor, capabilities).await {
                         Ok((connection, read_loop)) => {
                             info!(%peer, "host-api connection established with executor {peer}");
-                            registry.set_active(Arc::clone(&connection));
-                            metrics.connected_executors.set(1);
+                            // Own id, not a slot overwrite (regression:
+                            // alpha 2026-10-03 -- see `ConnectionRegistry`'s
+                            // doc): this session's own teardown below
+                            // removes only `session_id`, so it can never
+                            // clear a different, still-live session's
+                            // registration out from under it.
+                            let session_id = registry.register(Arc::clone(&connection));
+                            metrics.connected_executors.set(registry.live_count() as i64);
                             let heartbeat = run_heartbeat(
                                 Arc::clone(&connection),
                                 peer,
@@ -804,7 +894,8 @@ pub async fn serve(
                                     warn!(%peer, "host-api connection dropped by heartbeat supervisor");
                                 }
                             }
-                            metrics.connected_executors.set(registry.active().is_some() as i64);
+                            registry.remove(session_id);
+                            metrics.connected_executors.set(registry.live_count() as i64);
                         }
                         Err(e) => warn!(%peer, error = %e, "host-api handshake failed"),
                     }
@@ -1766,6 +1857,127 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         registry.set_active(Connection::new(tx));
         assert_eq!(registry.duration_without_executor(), Duration::ZERO);
+    }
+
+    // regression: svc reported zero executors while holding a live session
+    // after reconnect (alpha 2026-10-03) -- the following four tests
+    // exercise the `ConnectionRegistry` map-of-sessions fix directly: a
+    // superseding/closed session must never clear a different, still-live
+    // session's registration.
+
+    /// (a) Session A connects, B connects, A closes: B must still be
+    /// registered, `live_count` must read 1, and `active` (dispatch's
+    /// session pick) must be B -- never `None`.
+    #[tokio::test]
+    async fn registry_keeps_a_live_session_when_a_different_one_is_removed() {
+        let registry = ConnectionRegistry::new();
+        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        let conn_a = Connection::new(tx_a);
+        let id_a = registry.register(Arc::clone(&conn_a));
+
+        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        let conn_b = Connection::new(tx_b);
+        registry.register(Arc::clone(&conn_b));
+
+        // A's own teardown removes only its own id.
+        conn_a.mark_closed();
+        registry.remove(id_a);
+
+        assert_eq!(registry.live_count(), 1);
+        let active = registry.active().expect("B is still live");
+        assert!(Arc::ptr_eq(&active, &conn_b), "dispatch must use B");
+    }
+
+    /// (b) A connects, then drops abruptly (no FIN -- it simply never
+    /// answers `ping`): the heartbeat supervisor must declare it dead
+    /// (`mark_closed`) within [`HEARTBEAT_MISSED_LIMIT`] misses, pruning it
+    /// to `live_count() == 0`, and the zero-executor watchdog must then
+    /// fire `ERROR`.
+    #[tokio::test]
+    async fn heartbeat_drops_a_silent_session_and_watchdog_errors() {
+        // Dropping the receiver end closes the channel, so every `ping`'s
+        // `send` fails immediately -- simulating a half-open peer that
+        // never replies, without waiting out real per-ping timeouts.
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        let conn = Connection::new(tx);
+        let registry = Arc::new(ConnectionRegistry::new());
+        let id = registry.register(Arc::clone(&conn));
+        assert_eq!(registry.live_count(), 1);
+
+        let metrics = crate::telemetry::register_host_api_metrics(&prometheus::Registry::new());
+        run_heartbeat(
+            Arc::clone(&conn),
+            "127.0.0.1:1".parse().unwrap(),
+            Duration::from_millis(5),
+            metrics,
+        )
+        .await;
+        assert!(conn.is_closed(), "heartbeat must mark the session closed");
+
+        // The owning accept task's teardown removes its own id once the
+        // heartbeat future wins the `tokio::select!` race.
+        registry.remove(id);
+        assert_eq!(registry.live_count(), 0);
+
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let _guard = tracing::subscriber::set_default(ErrorCountingSubscriber(Arc::clone(&count)));
+        let watchdog = tokio::spawn(run_zero_executor_watchdog(
+            Arc::clone(&registry),
+            Duration::from_millis(5),
+            Duration::from_millis(5),
+        ));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        watchdog.abort();
+        assert!(count.load(Ordering::SeqCst) >= 1);
+    }
+
+    /// (c) Two concurrent live sessions: selection is stable -- the newest
+    /// (highest-id) session is picked, and repeated calls to `active()`
+    /// keep returning the same one while both remain live.
+    #[tokio::test]
+    async fn registry_selection_is_stable_across_two_concurrent_sessions() {
+        let registry = ConnectionRegistry::new();
+        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        let conn_a = Connection::new(tx_a);
+        registry.register(Arc::clone(&conn_a));
+
+        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        let conn_b = Connection::new(tx_b);
+        registry.register(Arc::clone(&conn_b));
+
+        assert_eq!(registry.live_count(), 2);
+        let first = registry.active().expect("a live session exists");
+        let second = registry.active().expect("a live session exists");
+        assert!(Arc::ptr_eq(&first, &conn_b), "newest session (B) must win");
+        assert!(
+            Arc::ptr_eq(&second, &conn_b),
+            "selection must be stable across repeated calls while both remain live"
+        );
+    }
+
+    /// (d) The exact alpha 2026-10-03 sequence -- connect, close, reconnect
+    /// -- must leave `live_count() == 1`, with the reconnected session as
+    /// `active`. Before the fix, the single-slot registry could be left
+    /// pointing at the closed first connection with nothing to replace it.
+    #[tokio::test]
+    async fn registry_connect_close_reconnect_leaves_count_one() {
+        let registry = ConnectionRegistry::new();
+
+        let (tx1, _rx1) = mpsc::unbounded_channel();
+        let conn1 = Connection::new(tx1);
+        let id1 = registry.register(Arc::clone(&conn1));
+        conn1.mark_closed();
+        registry.remove(id1);
+        assert_eq!(registry.live_count(), 0);
+
+        let (tx2, _rx2) = mpsc::unbounded_channel();
+        let conn2 = Connection::new(tx2);
+        registry.register(Arc::clone(&conn2));
+
+        assert_eq!(registry.live_count(), 1);
+        let active = registry.active().expect("the reconnected session is live");
+        assert!(Arc::ptr_eq(&active, &conn2));
     }
 
     /// Minimal `tracing::Subscriber` that counts `ERROR`-level events --
