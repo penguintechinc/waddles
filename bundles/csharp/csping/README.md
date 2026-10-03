@@ -1,6 +1,6 @@
 # csping (C#)
 
-The C#-toolchain feasibility spike bundle (spec
+Originally the C#-toolchain feasibility spike bundle (spec
 `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md` S18 R13 /
 D35). `!csping` -> `pong (c#)`, origin-routed exactly like
 `bundles/rust/ping` and `bundles/python/pyping`: a minimal, real
@@ -9,10 +9,22 @@ can build a conformant `waddle:bundle/stage@1.0.0` component that the real
 executor (`core/bundle_executor`) loads and runs end to end
 (`core/bundle_executor/tests/csharp_bundle_integration.rs`).
 
-This is a spike artifact, not a Tier 1 SDK. There is no `waddle-sdk-dotnet`
-package; the bundle is written directly against `wit-bindgen`'s generated
-bindings, same relationship `bundles/rust/ping` has to hand-rolled
-`wit_bindgen::generate!` output before `waddle-sdk-rs` existed.
+**2026-10-03: ported onto `sdk/waddle-sdk-cs`.** This bundle's business
+logic (`CspingLogic.cs`/`CspingDispatch.cs`) is now written against the
+shared C# SDK's `WaddleProcessStage`/`WaddleActionStage` base classes,
+`ChatCommand`/`ChatReplyPayload`, and `ReplyHelper` -- replacing the
+original hand-rolled `System.Text.Json.Nodes` payload parsing and manual
+wit-bindgen `Relay.Push`/`Relay.Error` tag switch (still visible in git
+history). `!csping`/`pong (c#)` behavior, the `bundle.yaml`/
+`hub-manifest.yaml` `app_id`/`version`, and the wasm export/import surface
+are all unchanged -- this was an internal implementation refactor, not a
+behavior or manifest change. It is now the second bundle built on the SDK
+after `bundles/csharp/superpenguin-roll`; see `sdk/waddle-sdk-cs/README.md`
+"Writing a bundle" and `sdk/waddle-sdk-cs/AUTHORING.md` for the canonical
+steps to author a new one. Below is kept as-recorded toolchain/spike
+history -- the build facts, exports/imports, and performance numbers are
+unaffected by the SDK port (same `componentize-dotnet`/NativeAOT-LLVM
+pins, same WIT world, same compiled output shape).
 
 ## Toolchain versions (as built and verified)
 
@@ -211,17 +223,20 @@ re-measured before drawing a final conclusion either way.
   export error, not a runtime failure. Any `CSharpBuilder` recipe must set
   this unconditionally for this world, not leave it to bundle authors to
   discover.
-- **JSON handling avoided reflection entirely** (`System.Text.Json.Nodes.
-  JsonNode`/`JsonObject`, not `JsonSerializer.Deserialize<T>()`)
-  specifically to sidestep NativeAOT trimming/reflection restrictions
-  without needing a source-generated `JsonSerializerContext`. A real
-  `waddle-sdk-dotnet` handling arbitrary bundle-author payload shapes
-  would need to mandate source-generated `JsonSerializerContext` (`System.
-  Text.Json.Serialization.JsonSourceGenerationOptions`) for any payload
-  POCOs, exactly as `general.md`/NativeAOT's own reflection-free
-  requirement dictates — reflection-based `JsonSerializer` calls are
-  either trimmed away (silent data loss) or throw at runtime depending on
-  trimming warnings a bundle author is unlikely to notice at build time.
+- **JSON handling (historical, pre-SDK-port):** the spike's original
+  hand-rolled implementation avoided reflection entirely
+  (`System.Text.Json.Nodes.JsonNode`/`JsonObject`, not
+  `JsonSerializer.Deserialize<T>()`) specifically to sidestep NativeAOT
+  trimming/reflection restrictions without needing a source-generated
+  `JsonSerializerContext`. **`waddle-sdk-cs` now exists and does exactly
+  this**: `WaddleSdk.Json.WaddleSdkJsonContext` is a source-generated
+  `JsonSerializerContext` (`System.Text.Json.Serialization.
+  JsonSourceGenerationOptions`) covering the SDK's own payload POCOs
+  (`ChatMessagePayload`/`ChatReplyPayload`/`RelayMessagePayload`), and this
+  bundle's current `CspingLogic.cs`/`CspingDispatch.cs` use it exclusively
+  — no reflection-based `JsonSerializer` call remains in this bundle's own
+  code, exactly as `general.md`/NativeAOT's own reflection-free requirement
+  dictates.
 
 ## What a `CSharpBuilder` (`core/bundle_compiler`) would need
 

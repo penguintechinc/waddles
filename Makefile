@@ -1,7 +1,7 @@
 .PHONY: dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
-        verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll \
+        verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
         build-superpenguin-roll-bundle test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc
 
@@ -108,13 +108,19 @@ run-ai-local: ## Run ai_interaction_module container locally (standalone, 1 work
 	  -p 8005:8005 \
 	  waddlebot/ai-interaction:local
 
-# C#-toolchain spike (spec S18 R13): rebuilds bundles/csharp/csping from
-# source in its pinned, checksum-verified, rootless Dockerfile and asserts
-# byte-identical output against the committed
+# C#-toolchain spike (spec S18 R13), now ported onto waddle-sdk-cs: rebuilds
+# bundles/csharp/csping from source in its pinned, checksum-verified,
+# rootless Dockerfile and asserts byte-identical output against the committed
 # core/bundle_executor/tests/fixtures/csping.wasm + .sha256 -- makes that
 # committed binary auditable instead of a trust-me blob.
 verify-csping-fixture:
 	@bash scripts/verify-csping-fixture.sh
+
+# csping: ported onto waddle-sdk-cs (bundles/csharp/csping/CspingLogic.cs/
+# CspingDispatch.cs) -- xUnit tests run in the same pinned containerized
+# .NET SDK image as every other C# build in this repo.
+test-csping:
+	@bash scripts/test-csping.sh
 
 # waddle-sdk-cs: shared C# SDK for Waddles app bundles (sdk/waddle-sdk-cs) --
 # xUnit tests run in the same pinned containerized .NET SDK image as every
