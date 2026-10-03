@@ -137,6 +137,23 @@ spec:
         {{- end }}
         - name: HUB_API_URL
           value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+        # feature/hub-grpc-env-wiring (closes #569's startup seam) -- core/hub_client::
+        # HubClient needs hub-api's internal gRPC endpoint (TLS mandatory, see
+        # hub_api/grpc_internal/server.py) and its machine-JWT bootstrap endpoint
+        # (hub_api/blueprints/service_jwt_bp.py POST /internal/service-token). Both
+        # default to hub-api's own in-cluster Service, computed here rather than
+        # requiring a per-environment override (see values.yaml's own comment on this
+        # key, incl. the KNOWN GAP note on hub-api's TLS wiring + hub_client's CA trust).
+        - name: HUB_API_GRPC_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+        - name: SERVICE_JWT_TOKEN_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "http://%s-hub-api-v3:%v/internal/service-token" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.port) | quote }}
+        # Matches the audience-scoped projected token this pod already mounts via
+        # waddlebot.serviceJwtBootstrapVolume(Mount) below -- NOT the generic default
+        # k8s SA token path (wrong audience, hub-api's TokenReview call would reject
+        # it with "missing required audience").
+        - name: SERVICE_JWT_SA_TOKEN_PATH
+          value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
         - name: DB_PASSWORD
           valueFrom:
             secretKeyRef:
