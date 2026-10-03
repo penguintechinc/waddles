@@ -46,6 +46,7 @@ use penguin_spine::{
     SpineConfig, SpineError, SpineMetrics, Stage, StageEnvelope,
 };
 
+use crate::active_digests::ActiveDigests;
 use crate::builtins::RouteDecision;
 use crate::capabilities::{CapabilityHandler, StageCapabilities};
 use crate::hop::KeyRing;
@@ -316,6 +317,19 @@ fn error_code_to_dlq_kind(code: ErrorCode) -> DlqErrorKind {
 /// success or `unsupported_stage` alike); an `InvokeError` covers every
 /// case that never produced one (host-api failure, guest trap, malformed
 /// reply payload).
+///
+/// Guards every outbound `Invoke` (the shared helper both the legacy and
+/// multi-tenant `ProcessDeps::digest_source` paths funnel through) against
+/// a NON-EMPTY but malformed digest ever reaching the wire -- an empty
+/// digest remains a legitimate, deliberately-unloaded sentinel for
+/// `DigestSource::Static` (see that variant's own doc: the executor's own
+/// `UNKNOWN_BUNDLE` reply is the intended signal there), but anything
+/// non-empty must already be canonical (`sha256:<64-hex>`) by the time it
+/// gets here -- `DigestSource::Active` never calls this with anything else
+/// (its own `debug_assert` already covers that path); this is the single
+/// chokepoint catching a regression in EITHER caller.
+/// regression: multi-tenant consumers invoked with empty legacy digest,
+/// UnknownBundle (alpha 2026-10-03)
 pub async fn invoke_transform(
     conn: &Connection,
     app_id: &str,
@@ -325,6 +339,10 @@ pub async fn invoke_transform(
     trace: Option<TraceContext>,
     capabilities: Arc<dyn CapabilityHandler>,
 ) -> Result<TransformOutcome, InvokeError> {
+    debug_assert!(
+        digest.is_empty() || bundle_active_set::canonical_digest(digest).as_deref() == Ok(digest),
+        "invoke digest {digest:?} must be either the legacy empty sentinel or already canonical"
+    );
     let payload =
         wire_platform_event(event).map_err(|e| InvokeError::MalformedPayload(e.to_string()))?;
     let reply = conn
@@ -430,23 +448,88 @@ impl SpineOps for SpineClient {
     }
 }
 
+/// Where a [`ProcessDeps`]'s invoke/load digest comes from -- the fix for
+/// the regression named below: the DB-driven multi-tenant path
+/// (`crate::source_supervisor::run_binding_consumer`) used to build every
+/// per-binding consumer's `ProcessDeps` with a fixed, permanently-empty
+/// `digest: String::new()` (bundle load/unload is `crate::
+/// changelog_consumer`'s job, never this consumer's own -- see
+/// `crate::source_supervisor`'s module doc), so every single invoke on
+/// that path hit the executor's real `UNKNOWN_BUNDLE` no matter what was
+/// actually loaded.
+///
+/// regression: multi-tenant consumers invoked with empty legacy digest,
+/// UnknownBundle (alpha 2026-10-03)
+pub enum DigestSource {
+    /// The legacy, single-bundle-per-pod, env-configured path
+    /// (`crate::lib::try_start_process_loop`'s `PROCESS_BUNDLE_DIGEST`) --
+    /// UNCHANGED behavior from before this fix. Empty disables nothing by
+    /// itself: an empty digest is simply sent as-is and the executor
+    /// reports `UNKNOWN_BUNDLE`, mapped to `DlqErrorKind::BundleError`
+    /// like any other unloaded-bundle invoke -- the same "caller's
+    /// responsibility until the poll client lands" scope `svc_action::
+    /// dispatch::ensure_loaded`'s doc comment documents for its own
+    /// crate. This variant must never be selected by the multi-tenant
+    /// path (`crate::source_supervisor`'s own doc: "never fall back to
+    /// legacy env on the multi-tenant path").
+    Static(String),
+    /// The DB-driven multi-tenant path: the CURRENT canonical digest for
+    /// this consumer's own `(tenant_id, community_id, app_id)` scope, read
+    /// fresh from `crate::changelog_consumer`'s shared [`ActiveDigests`]
+    /// map on every single invoke -- never a value captured once at spawn
+    /// time, so a hot-swapped bundle takes effect on the very next message
+    /// with no consumer restart. [`DigestSource::current`] returns `None`
+    /// when this scope has no active digest right now (never seen,
+    /// unloaded, or its scope is currently failing to resolve); callers
+    /// MUST dead-letter rather than ever invoke with an empty digest.
+    Active {
+        scope: bundle_active_set::AppScope,
+        digests: Arc<ActiveDigests>,
+    },
+}
+
+impl DigestSource {
+    /// Resolves the digest to `load`/`invoke` with right now. See each
+    /// variant's own doc for what `None`/empty means.
+    fn current(&self) -> Option<String> {
+        match self {
+            DigestSource::Static(d) => Some(d.clone()),
+            DigestSource::Active { scope, digests } => {
+                let digest = digests.get(scope)?;
+                // Defense in depth, not the primary guarantee: a canonical,
+                // non-empty digest is already enforced at the DB-read
+                // boundary (`bundle_active_set::canonical_digest`, applied
+                // before `crate::changelog_consumer` ever calls
+                // `ActiveDigests::set`) -- this exists purely to catch a
+                // future regression that reintroduces a bare-hex or empty
+                // digest into that map before it ever reaches the wire.
+                debug_assert!(
+                    !digest.is_empty(),
+                    "ActiveDigests must never hold an empty digest for a scope"
+                );
+                debug_assert_eq!(
+                    bundle_active_set::canonical_digest(&digest).as_deref(),
+                    Ok(digest.as_str()),
+                    "ActiveDigests digest {digest:?} must already be canonical (sha256:<64-hex>)"
+                );
+                Some(digest)
+            }
+        }
+    }
+}
+
 /// Everything [`handle_delivered`] needs beyond the entry itself --
 /// bundled so `drain_batch`/`drain_loop`/`run` don't carry an
 /// ever-growing parameter list. Mirrors `svc_action::dispatch::
 /// DispatchDeps`'s shape.
 pub struct ProcessDeps<S: SpineOps> {
     pub app_id: String,
-    /// Interim substitute for the distribution poll's resolved digest
-    /// (spec §6.7) -- `crate::lib::try_start_process_loop`'s
-    /// `PROCESS_BUNDLE_DIGEST`. Empty disables nothing by itself: an
-    /// empty digest is simply sent as-is and the executor reports
-    /// `UNKNOWN_BUNDLE`, mapped to `DlqErrorKind::BundleError` like any
-    /// other unloaded-bundle invoke -- the same "caller's responsibility
-    /// until the poll client lands" scope `svc_action::dispatch::
-    /// ensure_loaded`'s doc comment documents for its own crate. Sent via
+    /// See [`DigestSource`]'s own doc -- replaces the former fixed
+    /// `digest: String` field (regression: multi-tenant consumers invoked
+    /// with empty legacy digest, UnknownBundle, alpha 2026-10-03). Sent via
     /// [`ensure_loaded`] before the first invoke that needs it -- see
     /// [`ProcessDeps::load_state`].
-    pub digest: String,
+    pub digest_source: DigestSource,
     /// `PROCESS_BUNDLE_VERSION` -- the `load` frame's `version` field
     /// (spec §6.6). Distinct from `digest`: the executor's `loaded` reply
     /// echoes both back, and hot-swap reconciliation (TODO(M4+)) keys off
@@ -519,14 +602,14 @@ pub struct ProcessDeps<S: SpineOps> {
 /// matching `svc_action::dispatch::handle_delivered`'s identical
 /// error-handling shape.
 ///
-/// Sends [`ensure_loaded`] for [`ProcessDeps::digest`] before the first
-/// `transform` invoke that needs it (cached per connection by
-/// [`ProcessDeps::load_state`], see that type's doc for why) -- this is
-/// what actually makes the executor hold the configured bundle at all;
-/// without it every invoke would hit `UNKNOWN_BUNDLE` because nothing
-/// upstream of this loop ever sends `load` (bug fix: previously the only
-/// callers of `PROCESS_BUNDLE_*` were this crate's own default-value unit
-/// tests).
+/// Sends [`ensure_loaded`] for the resolved digest ([`DigestSource`])
+/// before the first `transform` invoke that needs it (cached per
+/// connection by [`ProcessDeps::load_state`], see that type's doc for why)
+/// -- this is what actually makes the executor hold the configured bundle
+/// at all; without it every invoke would hit `UNKNOWN_BUNDLE` because
+/// nothing upstream of this loop ever sends `load` (bug fix: previously
+/// the only callers of `PROCESS_BUNDLE_*` were this crate's own
+/// default-value unit tests).
 ///
 /// **Not yet wired here (documented, not silently skipped):** the
 /// content-moderation gate (`crate::builtins::run_moderation_gate`, an
@@ -558,11 +641,39 @@ async fn handle_delivered<S: SpineOps>(
             code: "TENANT_BOUNDARY".to_string(),
             message: reason.to_string(),
             detail: None,
-            artifact_digest: Some(deps.digest.clone()),
+            artifact_digest: deps.digest_source.current(),
             consumer_id: deps.consumer_id.clone(),
         };
         return deps.spine.dead_letter(d, &err).await;
     }
+
+    // Resolve the digest to load/invoke with BEFORE ever checking for an
+    // executor connection -- "if no active digest is known for an app when
+    // a message arrives, log ERROR and dead-letter for redelivery; never
+    // invoke with an empty digest" (regression: multi-tenant consumers
+    // invoked with empty legacy digest, UnknownBundle, alpha 2026-10-03).
+    // `DigestSource::Static` always resolves (possibly to an intentionally
+    // empty string, unchanged legacy behavior -- see that variant's own
+    // doc); only `DigestSource::Active` with no entry for this scope yields
+    // `None` here.
+    let Some(digest) = deps.digest_source.current() else {
+        tracing::error!(
+            app_id = %deps.app_id,
+            tenant = %d.env.tenant,
+            community = ?d.env.community,
+            "no active bundle digest known for this app's scope; dead-lettering for redelivery"
+        );
+        let err = DlqError {
+            kind: DlqErrorKind::BundleError,
+            code: "NO_ACTIVE_DIGEST".to_string(),
+            message: "no active bundle digest known for this (tenant, community, app) scope"
+                .to_string(),
+            detail: None,
+            artifact_digest: None,
+            consumer_id: deps.consumer_id.clone(),
+        };
+        return deps.spine.dead_letter(d, &err).await;
+    };
 
     let Some(connection) = deps.connections.active() else {
         // Escalated WARN -> ERROR (fix/executor-link-heartbeat, alpha
@@ -587,7 +698,7 @@ async fn handle_delivered<S: SpineOps>(
             code: "EXECUTOR_UNAVAILABLE".to_string(),
             message: "no active host-api connection".to_string(),
             detail: None,
-            artifact_digest: Some(deps.digest.clone()),
+            artifact_digest: Some(digest.clone()),
             consumer_id: deps.consumer_id.clone(),
         };
         return deps.spine.dead_letter(d, &err).await;
@@ -595,26 +706,31 @@ async fn handle_delivered<S: SpineOps>(
 
     // Send `load` at most once per (connection, digest) -- see
     // `LoadState`'s doc. An empty digest means no bundle is configured yet
-    // (`PROCESS_BUNDLE_DIGEST` unset): skip straight to invoking, exactly
-    // as before this fix, so the executor's own `UNKNOWN_BUNDLE` reply
-    // still drives the existing `BundleError` DLQ path below.
-    if !deps.digest.is_empty() && !deps.load_state.is_loaded_on(&connection, &deps.digest) {
+    // (legacy `PROCESS_BUNDLE_DIGEST` unset -- never possible on the
+    // multi-tenant path, see [`DigestSource::current`]'s doc): skip
+    // straight to invoking, exactly as before this fix, so the executor's
+    // own `UNKNOWN_BUNDLE` reply still drives the existing `BundleError`
+    // DLQ path below.
+    if !digest.is_empty() && !deps.load_state.is_loaded_on(&connection, &digest) {
         // `(0, 0)`: this interim, env-configured single-app-per-pod path
         // predates the numeric `(tenant_id, community_id)` scoping
-        // `bundle_active_set` introduced (TODO(M4+) real distribution poll,
-        // see `ProcessDeps::digest`'s own doc) -- it has no real tenant row
-        // to resolve, only `d.env.tenant`/`d.env.community` STRING slugs
+        // `bundle_active_set` introduced -- it has no real tenant row to
+        // resolve, only `d.env.tenant`/`d.env.community` STRING slugs
         // (Valkey stream naming, a different identifier space entirely).
         // `(0, 0)` is a reserved sentinel (`bundle_active_set` tenant ids
         // start at 1 in every real schema row) naming "no real DB scope",
-        // never confusable with a genuine tenant.
+        // never confusable with a genuine tenant. The multi-tenant
+        // `DigestSource::Active` path's OWN scope is a different concern
+        // entirely (which digest to use) -- `ensure_loaded`'s own
+        // `tenant_id`/`community_id` parameters here are the bundle
+        // executor's load-scoping, unrelated to which digest was resolved.
         if let Err(e) = ensure_loaded(
             &connection,
             0,
             0,
             &deps.app_id,
             &deps.version,
-            &deps.digest,
+            &digest,
             &deps.component_key,
             &deps.sidecar_key,
             LoadLimits {
@@ -624,19 +740,19 @@ async fn handle_delivered<S: SpineOps>(
         )
         .await
         {
-            tracing::error!(app_id = %deps.app_id, digest = %deps.digest, error = %e, "bundle load failed, dead-lettering");
+            tracing::error!(app_id = %deps.app_id, digest = %digest, error = %e, "bundle load failed, dead-lettering");
             let err = DlqError {
                 kind: DlqErrorKind::BundleError,
                 code: "LOAD_FAILED".to_string(),
                 message: e.to_string(),
                 detail: None,
-                artifact_digest: Some(deps.digest.clone()),
+                artifact_digest: Some(digest.clone()),
                 consumer_id: deps.consumer_id.clone(),
             };
             return deps.spine.dead_letter(d, &err).await;
         }
         deps.load_state
-            .mark_loaded(Arc::clone(&connection), deps.digest.clone());
+            .mark_loaded(Arc::clone(&connection), digest.clone());
     }
 
     // Per-invoke capability scope (see `crate::host_api`/`crate::
@@ -666,7 +782,7 @@ async fn handle_delivered<S: SpineOps>(
     let outcome = invoke_transform(
         &connection,
         &deps.app_id,
-        &deps.digest,
+        &digest,
         &d.env.event,
         deps.call_timeout_ms,
         trace,
@@ -682,18 +798,18 @@ async fn handle_delivered<S: SpineOps>(
             // bundle (alpha 2026-10-03)): `message` IS the digest the
             // executor echoed back for `UnknownBundle`
             // (`bundle_executor::invoke::on_invoke`'s `error_body`), so an
-            // empty/unresolved `deps.digest` renders as an empty-looking
-            // `message=""` field with nothing to grep on. Log
-            // `deps.digest`'s own prefix explicitly so this is diagnosable
-            // even when `message` is empty.
-            let digest_prefix = bundle_active_set::digest_prefix(&deps.digest);
+            // empty/unresolved digest renders as an empty-looking
+            // `message=""` field with nothing to grep on. Log the resolved
+            // `digest`'s own prefix explicitly so this is diagnosable even
+            // when `message` is empty.
+            let digest_prefix = bundle_active_set::digest_prefix(&digest);
             tracing::error!(app_id = %deps.app_id, ?code, digest_prefix, %message, "transform invoke failed, dead-lettering");
             let err = DlqError {
                 kind,
                 code: format!("{code:?}"),
                 message,
                 detail: None,
-                artifact_digest: Some(deps.digest.clone()),
+                artifact_digest: Some(digest.clone()),
                 consumer_id: deps.consumer_id.clone(),
             };
             return deps.spine.dead_letter(d, &err).await;
@@ -705,7 +821,7 @@ async fn handle_delivered<S: SpineOps>(
                 code: "INVOKE_FAILED".to_string(),
                 message: e.to_string(),
                 detail: None,
-                artifact_digest: Some(deps.digest.clone()),
+                artifact_digest: Some(digest.clone()),
                 consumer_id: deps.consumer_id.clone(),
             };
             return deps.spine.dead_letter(d, &err).await;
@@ -717,7 +833,7 @@ async fn handle_delivered<S: SpineOps>(
                 code: "UNSUPPORTED_STAGE".to_string(),
                 message: "bundle does not implement process-stage.transform".to_string(),
                 detail: None,
-                artifact_digest: Some(deps.digest.clone()),
+                artifact_digest: Some(digest.clone()),
                 consumer_id: deps.consumer_id.clone(),
             };
             return deps.spine.dead_letter(d, &err).await;
@@ -1438,14 +1554,15 @@ mod tests {
         let metrics = Arc::new(RecordingSpineMetrics::default());
         let deps = ProcessDeps {
             app_id: "waddles.bot.commands.default".to_string(),
-            // Empty by default -- see `ProcessDeps::digest`'s doc: an empty
-            // digest skips `ensure_loaded` entirely, which is what every
-            // pre-existing test in this module (fixed before this fix's
-            // `Load` call was added) already assumes of its fake executor
-            // (`connected_registry_with_fake_executor` answers exactly one
-            // `invoke`, no `load`). Tests exercising `ensure_loaded` itself
-            // set `digest`/`component_key`/`sidecar_key` explicitly.
-            digest: String::new(),
+            // Empty `Static` by default -- see `DigestSource::Static`'s
+            // doc: an empty digest skips `ensure_loaded` entirely, which is
+            // what every pre-existing test in this module (fixed before
+            // this fix's `Load` call was added) already assumes of its fake
+            // executor (`connected_registry_with_fake_executor` answers
+            // exactly one `invoke`, no `load`). Tests exercising
+            // `ensure_loaded` itself set `digest_source`/`component_key`/
+            // `sidecar_key` explicitly.
+            digest_source: DigestSource::Static(String::new()),
             version: "1".to_string(),
             component_key: String::new(),
             sidecar_key: String::new(),
@@ -1532,6 +1649,127 @@ mod tests {
         let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
         assert_eq!(dead_lettered.len(), 1);
         assert_eq!(dead_lettered[0].1, DlqErrorKind::ExecutorUnavailable);
+    }
+
+    fn test_scope(app_id: &str) -> bundle_active_set::AppScope {
+        (1, 0, app_id.to_string())
+    }
+
+    // regression: multi-tenant consumers invoked with empty legacy digest,
+    // UnknownBundle (alpha 2026-10-03)
+    //
+    // The DB-driven multi-tenant path must invoke with the active set's own
+    // canonical digest for this consumer's scope, never the legacy
+    // env-configured (and, pre-fix, permanently empty) `Static` value.
+    #[tokio::test]
+    async fn handle_delivered_active_digest_source_invokes_with_the_scopes_active_digest() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let active_digest = format!("sha256:{}", "a".repeat(64));
+        let (connections, load_count, last_load) =
+            connected_registry_with_fake_executor_expecting_load_first(serde_json::json!(null), 1)
+                .await;
+        let digests = Arc::new(ActiveDigests::new());
+        digests.set(
+            test_scope("waddles.bot.commands.default"),
+            active_digest.clone(),
+        );
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.digest_source = DigestSource::Active {
+            scope: test_scope("waddles.bot.commands.default"),
+            digests,
+        };
+        deps.component_key = "k".to_string();
+        deps.sidecar_key = "s".to_string();
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert_eq!(load_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let load_body = last_load.lock().unwrap().clone().unwrap();
+        assert_eq!(load_body.digest, active_digest);
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+    }
+
+    // regression: multi-tenant consumers invoked with empty legacy digest,
+    // UnknownBundle (alpha 2026-10-03)
+    //
+    // A hot-swap (`ActiveDigests::set` called again for the same scope,
+    // exactly what `changelog_consumer::apply_active_set` does on a bundle
+    // version bump) must be reflected on the VERY NEXT `DigestSource::
+    // current` call -- no consumer restart, no new `ProcessDeps`, no new
+    // `LoadState` -- proving the exact mechanism `handle_delivered` relies
+    // on every single invoke (the end-to-end executor-wire proof that a
+    // freshly-active digest reaches `load`/`invoke` is
+    // `handle_delivered_active_digest_source_invokes_with_the_scopes_active_digest`
+    // above).
+    #[test]
+    fn digest_source_active_current_reflects_a_hot_swap_immediately() {
+        let scope = test_scope("waddles.a");
+        let digest_v1 = format!("sha256:{}", "1".repeat(64));
+        let digest_v2 = format!("sha256:{}", "2".repeat(64));
+        let digests = Arc::new(ActiveDigests::new());
+        digests.set(scope.clone(), digest_v1.clone());
+        let source = DigestSource::Active {
+            scope: scope.clone(),
+            digests: Arc::clone(&digests),
+        };
+        assert_eq!(source.current(), Some(digest_v1));
+
+        // Hot-swap: the changelog consumer loads a new digest for the same
+        // scope -- the already-constructed `DigestSource` (never rebuilt)
+        // must resolve it on its very next call.
+        digests.set(scope, digest_v2.clone());
+        assert_eq!(source.current(), Some(digest_v2));
+    }
+
+    // regression: multi-tenant consumers invoked with empty legacy digest,
+    // UnknownBundle (alpha 2026-10-03)
+    //
+    // No active digest known for this scope (never loaded, unloaded, or the
+    // scope is currently failing to resolve) must dead-letter for
+    // redelivery with NO invoke ever sent -- never fall back to an empty
+    // digest. The connection registry here has NO active connection at all;
+    // if `handle_delivered` ever tried to invoke, it would panic on
+    // `deps.connections.active()` returning `None` before reaching the
+    // executor, proving this path returns before even checking for a
+    // connection.
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_when_no_active_digest_is_known_for_the_scope() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let digests = Arc::new(ActiveDigests::new());
+        // Deliberately never `set` for this scope -- "unknown app".
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
+        deps.digest_source = DigestSource::Active {
+            scope: test_scope("waddles.bot.commands.default"),
+            digests,
+        };
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, DlqErrorKind::BundleError);
+    }
+
+    // regression: multi-tenant consumers invoked with empty legacy digest,
+    // UnknownBundle (alpha 2026-10-03) -- `DigestSource::Active::current`'s
+    // own debug_assert must fire for an empty digest ever smuggled into
+    // `ActiveDigests` (defense in depth; `bundle_active_set::canonical_
+    // digest` already prevents this at the DB-read boundary in production).
+    #[test]
+    #[should_panic(expected = "must never hold an empty digest")]
+    fn digest_source_active_current_panics_on_an_empty_active_digest_in_debug_builds() {
+        let digests = Arc::new(ActiveDigests::new());
+        digests.set(test_scope("waddles.a"), String::new());
+        let source = DigestSource::Active {
+            scope: test_scope("waddles.a"),
+            digests,
+        };
+        let _ = source.current();
     }
 
     /// Drives a fake executor over an in-memory duplex: completes the
@@ -1740,8 +1978,9 @@ mod tests {
                 .await;
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, connections);
-        deps.digest =
+        let digest =
             "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string();
+        deps.digest_source = DigestSource::Static(digest.clone());
         deps.version = "3".to_string();
         deps.component_key = "bundles/waddles.bot.commands.default/3/deadbeef.wasm".to_string();
         deps.sidecar_key = "bundles/waddles.bot.commands.default/3/deadbeef.json".to_string();
@@ -1760,7 +1999,7 @@ mod tests {
             .expect("load must have been observed");
         assert_eq!(load_body.app_id, deps.app_id);
         assert_eq!(load_body.version, "3");
-        assert_eq!(load_body.digest, deps.digest);
+        assert_eq!(load_body.digest, digest);
         assert_eq!(load_body.component_key, deps.component_key);
         assert_eq!(load_body.sidecar_key, deps.sidecar_key);
 
@@ -1784,7 +2023,7 @@ mod tests {
                 .await;
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, connections);
-        deps.digest = "sha256:00".to_string();
+        deps.digest_source = DigestSource::Static(format!("sha256:{}", "0".repeat(64)));
         deps.component_key = "k".to_string();
         deps.sidecar_key = "s".to_string();
 
@@ -1874,7 +2113,7 @@ mod tests {
         let d = fixture_delivered("acme", Some("main"), &ring, "k1");
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, registry);
-        deps.digest = "sha256:00".to_string();
+        deps.digest_source = DigestSource::Static(format!("sha256:{}", "0".repeat(64)));
         deps.component_key = "k".to_string();
         deps.sidecar_key = "s".to_string();
 

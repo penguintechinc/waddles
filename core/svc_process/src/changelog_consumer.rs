@@ -36,6 +36,7 @@ use bundle_active_set::{
 };
 use sea_orm::DatabaseConnection;
 
+use crate::active_digests::ActiveDigests;
 use crate::bundle_loader::BundleSink;
 use crate::license::FeatureGate;
 use crate::source_supervisor::{self, ConsumerSupervisor, ResolvedBinding, RunningConsumers};
@@ -168,6 +169,18 @@ pub struct ConsumerState {
     /// [`FULL_SEND_DEBOUNCE`]'s reconnect-storm coalescing
     /// (`bundle_active_set::should_send_full_sync`).
     last_full_send: Option<Instant>,
+    /// The shared, concurrently-readable `(tenant_id, community_id,
+    /// app_id)` -> digest map every spawned `source_supervisor::
+    /// run_binding_consumer` task reads from (`crate::spine::DigestSource::
+    /// Active`) -- kept in lock-step with `loaded` at the exact same
+    /// `apply_active_set` call sites. Defaults to a fresh, empty, private
+    /// instance (`ConsumerState::new`/`initial_state`); [`run`] immediately
+    /// overwrites it with the externally shared instance `crate::lib`
+    /// also threads into `source_supervisor::SupervisorDeps`, before this
+    /// state is ever applied against -- see [`run`]'s own doc.
+    /// regression: multi-tenant consumers invoked with empty legacy digest,
+    /// UnknownBundle (alpha 2026-10-03).
+    active_digests: Arc<ActiveDigests>,
 }
 
 impl ConsumerState {
@@ -196,6 +209,7 @@ impl ConsumerState {
             // explicitly via `initial_state` or by setting this field.
             pending_full_sync: None,
             last_full_send: None,
+            active_digests: Arc::new(ActiveDigests::new()),
         }
     }
 
@@ -219,6 +233,11 @@ impl ConsumerState {
     #[cfg(test)]
     fn loaded(&self) -> &HashMap<AppScope, String> {
         &self.loaded
+    }
+
+    #[cfg(test)]
+    fn active_digests(&self) -> &ActiveDigests {
+        &self.active_digests
     }
 
     #[cfg(test)]
@@ -276,6 +295,7 @@ pub async fn initial_state(
         // `run`'s own doc).
         pending_full_sync: Some(FullSyncReason::Startup),
         last_full_send: None,
+        active_digests: Arc::new(ActiveDigests::new()),
     })
 }
 
@@ -448,6 +468,10 @@ async fn apply_active_set(
                     .with_label_values(&["success"])
                     .inc();
                 state.loaded.insert(scope.clone(), row.digest.clone());
+                // Lock-step with `state.loaded` above -- see `ActiveDigests`'s
+                // own doc. regression: multi-tenant consumers invoked with
+                // empty legacy digest, UnknownBundle (alpha 2026-10-03).
+                state.active_digests.set(scope.clone(), row.digest.clone());
             }
             Err(err) => {
                 tracing::error!(
@@ -474,6 +498,9 @@ async fn apply_active_set(
                     "changelog consumer: unloaded"
                 );
                 state.loaded.remove(scope);
+                // Lock-step with `state.loaded` above -- see `ActiveDigests`'s
+                // own doc.
+                state.active_digests.remove(scope);
             }
             Err(err) => {
                 tracing::warn!(
@@ -974,6 +1001,14 @@ pub async fn run(
     binding_metrics: crate::telemetry::SourceBindingSupervisorMetrics,
     metrics: ChangelogConsumerMetrics,
     consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
+    // The SAME instance `crate::lib::try_start_changelog_consumer` also
+    // threads into `source_supervisor::SupervisorDeps` -- overwrites
+    // `initial_state`'s own fresh, private default the moment `state` is
+    // constructed, before the very first `apply_active_set` call (`initial_
+    // state` itself never applies anything). regression: multi-tenant
+    // consumers invoked with empty legacy digest, UnknownBundle (alpha
+    // 2026-10-03).
+    active_digests: Arc<ActiveDigests>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
     consumer_loop_ready.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1018,6 +1053,7 @@ pub async fn run(
             }
         }
     };
+    state.active_digests = active_digests;
     consumer_loop_ready.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let mut poll_tick = tokio::time::interval(poll_interval);
@@ -1544,6 +1580,14 @@ mod tests {
             state.loaded().get(&(1, 0, "waddles.a".to_string())),
             Some(&digest)
         );
+        // regression: multi-tenant consumers invoked with empty legacy
+        // digest, UnknownBundle (alpha 2026-10-03) -- `active_digests` (the
+        // map every spawned per-binding consumer actually invokes against)
+        // must be kept in lock-step with `state.loaded` on every load.
+        assert_eq!(
+            state.active_digests().get(&(1, 0, "waddles.a".to_string())),
+            Some(digest.clone())
+        );
         assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
     }
 
@@ -1948,6 +1992,9 @@ mod tests {
         state
             .loaded
             .insert((1, 0, "waddles.a".to_string()), "sha256:00".to_string());
+        state
+            .active_digests
+            .set((1, 0, "waddles.a".to_string()), "sha256:00".to_string());
         state.scope_last_success.insert((1, 0), Instant::now());
         // Guarantee the 30ms test-only staleness bound has elapsed --
         // deterministic via a real (short) sleep, never clock subtraction.
@@ -1975,6 +2022,15 @@ mod tests {
             sink.calls(),
             vec!["unload:waddles.a:sha256:00".to_string()],
             "eviction must drive an unload through apply_active_set's diff"
+        );
+        // regression: multi-tenant consumers invoked with empty legacy
+        // digest, UnknownBundle (alpha 2026-10-03) -- an unload must clear
+        // `active_digests` in lock-step with `state.loaded`, so a
+        // still-running per-binding consumer for this scope dead-letters
+        // (never invokes stale) on its very next message.
+        assert_eq!(
+            state.active_digests().get(&(1, 0, "waddles.a".to_string())),
+            None
         );
     }
 
@@ -2501,6 +2557,7 @@ mod tests {
                 test_binding_metrics(),
                 test_changelog_metrics(),
                 Arc::clone(&consumer_loop_ready),
+                Arc::new(ActiveDigests::new()),
                 shutdown_rx,
             ),
         )
