@@ -35,6 +35,11 @@ convention = "google"
 # (`get_tenant_context()` always non-None after `tenant_middleware` already
 # ran) as the `community_*.py` glob above.
 "blueprints/v1/guild_pairing.py" = ["S101"]
+# Bar Citizen Twitch bot-install flow (migration 0034) -- same
+# tenant_middleware postcondition assert (`get_tenant_context()` always
+# non-None after `tenant_middleware` already ran) as the `guild_pairing.py`
+# entry above.
+"blueprints/v1/tenant_twitch_install.py" = ["S101"]
 # Bot module (M5): DTO/service-dataclass field names are deliberately
 # camelCase to byte-match admin/hub_module/frontend/src/services/api.js's
 # frozen /api/v1 JSON contract (soEnabled, platformUsername, createdAt,
