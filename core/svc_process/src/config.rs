@@ -306,6 +306,16 @@ pub struct CliConfig {
         default_value = "/var/run/secrets/kubernetes.io/serviceaccount/token"
     )]
     pub service_jwt_sa_token_path: String,
+    /// Path to the PEM CA bundle that signed hub-api's internal gRPC server
+    /// cert (`k8s/helm/waddlebot/templates/hub-api-grpc-tls-secret.yaml`'s
+    /// `ca.crt`, mounted by `templates/svc-process-rust.yaml`), passed as
+    /// `core/hub_client::HubClient::connect`'s `ca_cert_path`. Empty (the
+    /// default) falls back to `connect`'s system/webpki trust store --
+    /// never correct against this chart's self-signed internal CA, but
+    /// kept as the permissive default for tests/local runs that dial a
+    /// publicly-rooted endpoint instead.
+    #[arg(long, env = "HUB_API_GRPC_CA_FILE", default_value = "")]
+    pub hub_api_grpc_ca_file: String,
 }
 
 impl CliConfig {

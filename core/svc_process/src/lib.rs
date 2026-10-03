@@ -116,6 +116,11 @@ async fn build_hub_client(
         cli.service_jwt_token_endpoint.clone(),
         cli.service_jwt_sa_token_path.clone(),
         HUB_IDENTITY_MINT_SCOPE,
+        // fix/hub-grpc-tls-and-ca-trust (PR #570 review blocker 2) -- empty
+        // means "fall back to system/webpki roots", which this chart's
+        // self-signed internal CA is never part of; HUB_API_GRPC_CA_FILE
+        // is the real path in every deployed environment.
+        (!cli.hub_api_grpc_ca_file.is_empty()).then_some(cli.hub_api_grpc_ca_file.as_str()),
     )
     .await
     {
