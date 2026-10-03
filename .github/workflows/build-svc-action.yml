@@ -123,6 +123,14 @@ jobs:
         with:
           context: ${{ env.BUILD_CONTEXT }}
           file: ${{ env.MODULE_PATH }}/Dockerfile.rust
+          # `hub_client`'s build.rs compiles the repo-root `proto/` tree
+          # (checked-in source of truth shared with Python) -- that
+          # directory is a sibling of `core/` (BUILD_CONTEXT), not inside
+          # it, so it must be supplied as a named additional build
+          # context (relative to the workflow's checkout root) rather
+          # than COPY'd from the primary `core/` context.
+          build-contexts: |
+            proto=proto
           push: true
           platforms: ${{ matrix.platform }}
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ matrix.suffix }}
@@ -153,6 +161,14 @@ jobs:
         with:
           context: ${{ env.BUILD_CONTEXT }}
           file: ${{ env.MODULE_PATH }}/Dockerfile.rust
+          # `hub_client`'s build.rs compiles the repo-root `proto/` tree
+          # (checked-in source of truth shared with Python) -- that
+          # directory is a sibling of `core/` (BUILD_CONTEXT), not inside
+          # it, so it must be supplied as a named additional build
+          # context (relative to the workflow's checkout root) rather
+          # than COPY'd from the primary `core/` context.
+          build-contexts: |
+            proto=proto
           push: false
           load: true
           platforms: linux/amd64
