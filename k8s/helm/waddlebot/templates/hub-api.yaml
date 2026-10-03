@@ -113,6 +113,11 @@ spec:
           value: {{ .Values.pipeline.hubApi.port | quote }}
         - name: GRPC_PORT
           value: {{ .Values.pipeline.hubApi.grpcPort | quote }}
+        # fix/hub-grpc-tls-and-ca-trust (PR #570 review blocker 1) -- without these,
+        # hub_api/grpc_internal/server.py::_load_server_credentials raises KeyError on
+        # os.environ["GRPC_TLS_CERT_PATH"]/["GRPC_TLS_KEY_PATH"] and the internal gRPC
+        # listener never starts (TLS is mandatory there, no insecureDev escape hatch).
+        {{- include "waddlebot.hubApiGrpcTlsServerEnv" . | nindent 8 }}
         # ONE-WAY AI kill-switch (hub_api/config.py's WADDLES_AI_ENABLED) --
         # lets this Deployment run with no Ollama/model backend reachable;
         # never grants access on its own, see values.yaml's own comment.
@@ -220,6 +225,7 @@ spec:
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
+        {{- include "waddlebot.hubApiGrpcTlsVolumeMount" . | nindent 8 }}
       volumes:
       - name: logs
         emptyDir: {}
@@ -228,6 +234,7 @@ spec:
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       {{- end }}
+      {{- include "waddlebot.hubApiGrpcTlsVolume" . | nindent 6 }}
 ---
 apiVersion: v1
 kind: Service

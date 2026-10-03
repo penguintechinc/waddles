@@ -653,6 +653,85 @@ true
 {{- end }}
 
 {{/*
+fix/hub-grpc-tls-and-ca-trust -- hub-api's internal gRPC listener (`hub_api/grpc_internal/
+server.py`, TLS mandatory, no insecureDev escape hatch unlike the flask_core grpc_tls.py
+servers the waddlebot.grpcTls* helpers above serve) gets its OWN identity cert/Secret
+(templates/hub-api-grpc-tls-secret.yaml), mirroring templates/infrastructure/
+valkey-tls-secret.yaml's lookup/generate/require policy exactly (not repeated here) rather
+than reusing the shared `{{ fullname }}-grpc-tls` Secret, which has no alpha/local
+auto-generate fallback and would leave hub-api's mandatory-TLS gRPC server unable to start
+in alpha at all. SAN is the hub-api gRPC Service's own DNS name
+(`{{ fullname }}-hub-api-v3`) so `core/hub_client::HubClient::connect` can verify it by
+hostname with no wildcard. Gated on pipeline.hubApi.enabled alone (like
+waddlebot.hostApiTlsMaterialAvailable) -- the Secret template guarantees real material
+whenever hub-api itself is enabled.
+*/}}
+
+{{- define "waddlebot.hubApiGrpcTlsDesiredDnsNames" -}}
+{{- $svcName := printf "%s-hub-api-v3" (include "waddlebot.fullname" .) -}}
+{{- $ns := .Values.namespace -}}
+{{- list $svcName (printf "%s.%s" $svcName $ns) (printf "%s.%s.svc" $svcName $ns) (printf "%s.%s.svc.cluster.local" $svcName $ns) | sortAlpha | join "," -}}
+{{- end }}
+
+{{- define "waddlebot.hubApiGrpcTlsSansSha256" -}}
+{{- include "waddlebot.hubApiGrpcTlsDesiredDnsNames" . | sha256sum -}}
+{{- end }}
+
+{{- define "waddlebot.hubApiGrpcTlsMaterialAvailable" -}}
+{{- if .Values.pipeline.hubApi.enabled -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/* Server-role env for hub-api's own container -- matches hub_api/grpc_internal/
+server.py::_load_server_credentials exactly (GRPC_TLS_CERT_PATH/GRPC_TLS_KEY_PATH only;
+GRPC_TLS_CLIENT_CA_PATH stays unset -- client-cert verification is an opt-in SPIFFE/mTLS
+end state, see that function's own docstring). */}}
+{{- define "waddlebot.hubApiGrpcTlsServerEnv" -}}
+- name: GRPC_TLS_CERT_PATH
+  value: /etc/waddlebot/hub-api-grpc-tls/tls.crt
+- name: GRPC_TLS_KEY_PATH
+  value: /etc/waddlebot/hub-api-grpc-tls/tls.key
+{{- end }}
+
+{{- define "waddlebot.hubApiGrpcTlsVolume" -}}
+- name: hub-api-grpc-tls
+  secret:
+    secretName: {{ include "waddlebot.fullname" . }}-hub-api-grpc-tls
+    defaultMode: 0440
+{{- end }}
+
+{{- define "waddlebot.hubApiGrpcTlsVolumeMount" -}}
+- name: hub-api-grpc-tls
+  mountPath: /etc/waddlebot/hub-api-grpc-tls
+  readOnly: true
+{{- end }}
+
+{{/* Client-role CA-only mount for core/hub_client's Rust callers (svc-process-rust,
+svc-action-rust) -- never the server's own tls.crt/tls.key, only the ca.crt that signed
+hub-api's gRPC server cert, consumed by HubClient::connect's HUB_API_GRPC_CA_FILE. */}}
+{{- define "waddlebot.hubApiGrpcCaEnv" -}}
+- name: HUB_API_GRPC_CA_FILE
+  value: /etc/waddlebot/hub-api-grpc-ca/ca.crt
+{{- end }}
+
+{{- define "waddlebot.hubApiGrpcCaVolume" -}}
+- name: hub-api-grpc-ca
+  secret:
+    secretName: {{ include "waddlebot.fullname" . }}-hub-api-grpc-tls
+    items:
+      - key: ca.crt
+        path: ca.crt
+    defaultMode: 0440
+{{- end }}
+
+{{- define "waddlebot.hubApiGrpcCaVolumeMount" -}}
+- name: hub-api-grpc-ca
+  mountPath: /etc/waddlebot/hub-api-grpc-ca
+  readOnly: true
+{{- end }}
+
+{{/*
 fix/chart-host-api-stage-identity -- the single source of truth for the host-api-tls
 identity cert's CN (and `HOST_API_STAGE_IDENTITY`), read together with this file's
 waddlebot.hostApiTls* helpers above and templates/host-api-tls-secret.yaml's/

@@ -26,7 +26,11 @@ tonic-prost = "=0.14.6"
 prost = "=0.14.4"
 tower = { version = "=0.5.3", features = ["util", "retry", "timeout"] }
 tracing = "=0.1.44"
-thiserror = "=2.0.21"
+# fix/hub-grpc-tls-and-ca-trust -- was pinned to =2.0.21, the sole outlier among every
+# other core/* crate's =2.0.20 (see e.g. core/service_auth, core/svc_action), which made
+# this crate entirely unbuildable (Cargo can't unify two different exact pins of the same
+# semver-compatible crate) the moment it gained its service_auth path dependency.
+thiserror = "=2.0.20"
 async-trait = "=0.1.89"
 # Machine-JWT bootstrap + injection (feature/eddsa-machine-jwt) -- see
 # module docs in src/lib.rs for why this crate depends on it directly
@@ -35,6 +39,15 @@ service_auth = { path = "../service_auth", version = "=0.1.0" }
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+# CA-trust test only (fix/hub-grpc-tls-and-ca-trust) -- exercises a real local TLS
+# handshake proving the loaded CA trusts a cert it signed and rejects one it didn't,
+# same versions core/bundle_executor/Cargo.toml and core/svc_action/Cargo.toml already
+# pin (rcgen generates throwaway test PKI, no committed key material; rustls/tokio-rustls/
+# rustls-pki-types match tonic's own tls-ring rustls line so there's one resolved version).
+rcgen = "=0.14.10"
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "tls12"] }
+tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
+rustls-pki-types = "=1.15.1"
 
 [profile.release]
 opt-level = 3
