@@ -132,6 +132,55 @@ RUN componentize-py \
         -o pyping.wasm
 
 # ---------------------------------------------------------------------------
+# Stage 2b: waddles.core.example.{eightball,roll,lurk,count} (Python) -> WASI 0.2 components
+#
+# PR batch 1 (2026-10-03) of first-party token-safe command bundles -- same base image,
+# componentize-py version, and reproducible-build env pins as python-bundle-builder above (see
+# that stage's own comment for the full per-variable rationale); consolidated into one stage
+# rather than four separate `FROM` stages purely to avoid re-installing componentize-py and
+# re-declaring the same ENV block four times -- each bundle still gets its own `-p` source dir
+# and its own `componentize-py componentize` invocation, so the four .wasm outputs are fully
+# independent artifacts, not a shared component.
+# ---------------------------------------------------------------------------
+FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS python-batch1-builder
+
+RUN pip install --no-cache-dir componentize-py==0.25.1
+
+WORKDIR /repo
+COPY wit wit
+COPY sdk/waddle-sdk/src sdk/waddle-sdk/src
+COPY bundles/python/eightball/src bundles/python/eightball/src
+COPY bundles/python/roll/src bundles/python/roll/src
+COPY bundles/python/lurk/src bundles/python/lurk/src
+COPY bundles/python/count/src bundles/python/count/src
+
+ENV PYTHONHASHSEED=0 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    SOURCE_DATE_EPOCH=1704067200 \
+    TZ=UTC \
+    LC_ALL=C.UTF-8
+RUN componentize-py \
+        -d wit/waddle-bundle -w stage \
+        componentize -p sdk/waddle-sdk/src -p bundles/python/eightball/src \
+        waddle_sdk._component_entry \
+        -o eightball.wasm
+RUN componentize-py \
+        -d wit/waddle-bundle -w stage \
+        componentize -p sdk/waddle-sdk/src -p bundles/python/roll/src \
+        waddle_sdk._component_entry \
+        -o roll.wasm
+RUN componentize-py \
+        -d wit/waddle-bundle -w stage \
+        componentize -p sdk/waddle-sdk/src -p bundles/python/lurk/src \
+        waddle_sdk._component_entry \
+        -o lurk.wasm
+RUN componentize-py \
+        -d wit/waddle-bundle -w stage \
+        componentize -p sdk/waddle-sdk/src -p bundles/python/count/src \
+        waddle_sdk._component_entry \
+        -o count.wasm
+
+# ---------------------------------------------------------------------------
 # Stage 3: waddles.core.example.csping (C#) -> WASI 0.2 component
 #
 # Mirrors bundles/csharp/csping/Dockerfile verbatim (same pinned base, same WASI SDK pin,
@@ -244,9 +293,17 @@ COPY bundles/core-bundles.yaml /core-bundles/core-bundles.yaml
 COPY bundles/rust/ping/hub-manifest.yaml /core-bundles/ping.manifest.yaml
 COPY bundles/python/pyping/hub-manifest.yaml /core-bundles/pyping.manifest.yaml
 COPY bundles/csharp/csping/hub-manifest.yaml /core-bundles/csping.manifest.yaml
+COPY bundles/python/eightball/hub-manifest.yaml /core-bundles/eightball.manifest.yaml
+COPY bundles/python/roll/hub-manifest.yaml /core-bundles/roll.manifest.yaml
+COPY bundles/python/lurk/hub-manifest.yaml /core-bundles/lurk.manifest.yaml
+COPY bundles/python/count/hub-manifest.yaml /core-bundles/count.manifest.yaml
 COPY --from=rust-bundle-builder /repo/bundles/rust/ping/target/wasm32-wasip2/release/waddle_bundle_ping_rust.wasm /core-bundles/ping.wasm
 COPY --from=python-bundle-builder /repo/pyping.wasm /core-bundles/pyping.wasm
 COPY --from=csharp-bundle-builder /repo/bundles/csharp/csping/bin/Release/net10.0/wasi-wasm/publish/csping.wasm /core-bundles/csping.wasm
+COPY --from=python-batch1-builder /repo/eightball.wasm /core-bundles/eightball.wasm
+COPY --from=python-batch1-builder /repo/roll.wasm /core-bundles/roll.wasm
+COPY --from=python-batch1-builder /repo/lurk.wasm /core-bundles/lurk.wasm
+COPY --from=python-batch1-builder /repo/count.wasm /core-bundles/count.wasm
 
 ENV CORE_BUNDLES_DIR=/core-bundles
 

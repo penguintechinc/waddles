@@ -80,3 +80,44 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  # Batch 1 of first-party Python command bundles (2026-10-03, token-safe set -- relay/kv
+  # only, no handle echoed back, so these ship ahead of the PII-tokenization pipeline
+  # #427/#429). Each declares its own PostHog flag (waddles.command-<name>, defaulted OFF
+  # per critical-rules.md Feature Flags) inside `transform()` via
+  # waddle_sdk.flask_core.feature_flags.feature_enabled -- a tenant-wide activation here
+  # only installs the bundle, it does not itself make the bundle respond; the flag must
+  # also be turned on in PostHog before any of these four produce a reply.
+  - app_id: waddles.core.example.eightball
+    version: "1.0.0"
+    language: python
+    manifest_path: eightball.manifest.yaml
+    artifact_path: eightball.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.roll
+    version: "1.0.0"
+    language: python
+    manifest_path: roll.manifest.yaml
+    artifact_path: roll.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  # First Python core bundles to declare the `storage.kv` permission (lurk, count) --
+  # see hub_api/services/bundle_approval_service.py::KV_PERMISSION_ID.
+  - app_id: waddles.core.example.lurk
+    version: "1.0.0"
+    language: python
+    manifest_path: lurk.manifest.yaml
+    artifact_path: lurk.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.count
+    version: "1.0.0"
+    language: python
+    manifest_path: count.manifest.yaml
+    artifact_path: count.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null

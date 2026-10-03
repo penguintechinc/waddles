@@ -1,0 +1,13 @@
+[project]
+name = "waddle-bundle-eightball"
+version = "1.0.0"
+description = "`!8ball <question>` -> a random canned answer, relayed back to the caller's own origin platform. Relay only, no kv/db state. Python equivalent of bundles/python/pyping, modeled on its hand-built (not bundle_compiler-routed) structure."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
