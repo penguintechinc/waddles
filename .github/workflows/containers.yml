@@ -34,6 +34,11 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # TEMPORARY amd64-only (user-approved 2026-10-03). Re-enable arm64 near
+  # release / for the mixed-arch Minisforum alpha cluster by setting
+  # BUILD_PLATFORMS=linux/amd64,linux/arm64 (this is the single toggle --
+  # every build-*.yml workflow that builds images keys off the same name).
+  BUILD_PLATFORMS: linux/amd64
 
 jobs:
   # Determine version and tag suffix
@@ -44,6 +49,8 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       suffix: ${{ steps.version.outputs.suffix }}
       is_release: ${{ steps.version.outputs.is_release }}
+      multi_arch: ${{ steps.version.outputs.multi_arch }}
+      matrix_exclude: ${{ steps.version.outputs.matrix_exclude }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -87,6 +94,18 @@ jobs:
             echo "suffix=-alpha" >> $GITHUB_OUTPUT
             echo "is_release=false" >> $GITHUB_OUTPUT
             echo "Building ALPHA: v${VERSION}-alpha"
+          fi
+
+          # Derive the matrix exclude list + multi_arch flag from the single
+          # BUILD_PLATFORMS toggle (env, top of file). A comma means more
+          # than one platform is requested -- restore arm64 by flipping that
+          # one value back to "linux/amd64,linux/arm64".
+          if [[ "${BUILD_PLATFORMS}" == *,* ]]; then
+            echo "multi_arch=true" >> $GITHUB_OUTPUT
+            echo "matrix_exclude=[]" >> $GITHUB_OUTPUT
+          else
+            echo "multi_arch=false" >> $GITHUB_OUTPUT
+            echo 'matrix_exclude=[{"platform":"linux/arm64"}]' >> $GITHUB_OUTPUT
           fi
 
   # Detect changed modules
@@ -492,6 +511,10 @@ jobs:
             dockerfile: ./services/action-serverless/Dockerfile
             context: .
             port: 0
+        # Matches every include entry with platform: linux/arm64 regardless
+        # of module -- pruned to [] when BUILD_PLATFORMS has >1 entry. See
+        # the toggle's comment at the top of this file.
+        exclude: ${{ fromJSON(needs.determine-version.outputs.matrix_exclude) }}
 
     steps:
       - name: Checkout code
@@ -521,6 +544,35 @@ jobs:
           PLATFORM_SUFFIX=$(echo "${{ matrix.platform }}" | sed 's|linux/||')
           echo "suffix=${PLATFORM_SUFFIX}" >> $GITHUB_OUTPUT
 
+      # Single-platform builds (BUILD_PLATFORMS has no comma) skip this
+      # module's merge-manifests entry entirely, so this step must also
+      # publish the plain (and, on release, :latest) tag that job would
+      # otherwise create -- a single-arch build ends up pushing a normal
+      # image, never a manifest list. (No-op for build-pr, which never
+      # pushes -- push: false there regardless of this tag list.)
+      - name: Compute image tags
+        id: tags
+        if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}
+          VERSION: ${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
+          IS_RELEASE: ${{ needs.determine-version.outputs.is_release }}
+          MULTI_ARCH: ${{ needs.determine-version.outputs.multi_arch }}
+          ARCH_SUFFIX: ${{ steps.platform-suffix.outputs.suffix }}
+        run: |
+          TAGS="${IMAGE}:${VERSION}-${ARCH_SUFFIX}"
+          if [ "${MULTI_ARCH}" != "true" ]; then
+            TAGS=$(printf '%s\n%s' "$TAGS" "${IMAGE}:${VERSION}")
+            if [ "${IS_RELEASE}" = "true" ]; then
+              TAGS=$(printf '%s\n%s' "$TAGS" "${IMAGE}:latest")
+            fi
+          fi
+          {
+            echo "list<<TAGEOF"
+            echo "${TAGS}"
+            echo "TAGEOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push Docker image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
@@ -529,7 +581,7 @@ jobs:
           file: ${{ matrix.dockerfile }}
           push: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           load: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && matrix.platform == 'linux/amd64' }}
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ steps.platform-suffix.outputs.suffix }}
+          tags: ${{ steps.tags.outputs.list }}
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=${{ matrix.module }}-${{ steps.platform-suffix.outputs.suffix }}
           cache-to: type=gha,mode=max,scope=${{ matrix.module }}-${{ steps.platform-suffix.outputs.suffix }}
@@ -851,6 +903,10 @@ jobs:
             dockerfile: ./services/action-serverless/Dockerfile
             context: .
             port: 0
+        # Matches every include entry with platform: linux/arm64 regardless
+        # of module -- pruned to [] when BUILD_PLATFORMS has >1 entry. See
+        # the toggle's comment at the top of this file.
+        exclude: ${{ fromJSON(needs.determine-version.outputs.matrix_exclude) }}
 
     steps:
       - name: Checkout code
@@ -880,6 +936,35 @@ jobs:
           PLATFORM_SUFFIX=$(echo "${{ matrix.platform }}" | sed 's|linux/||')
           echo "suffix=${PLATFORM_SUFFIX}" >> $GITHUB_OUTPUT
 
+      # Single-platform builds (BUILD_PLATFORMS has no comma) skip this
+      # module's merge-manifests entry entirely, so this step must also
+      # publish the plain (and, on release, :latest) tag that job would
+      # otherwise create -- a single-arch build ends up pushing a normal
+      # image, never a manifest list. (No-op for build-pr, which never
+      # pushes -- push: false there regardless of this tag list.)
+      - name: Compute image tags
+        id: tags
+        if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}
+          VERSION: ${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
+          IS_RELEASE: ${{ needs.determine-version.outputs.is_release }}
+          MULTI_ARCH: ${{ needs.determine-version.outputs.multi_arch }}
+          ARCH_SUFFIX: ${{ steps.platform-suffix.outputs.suffix }}
+        run: |
+          TAGS="${IMAGE}:${VERSION}-${ARCH_SUFFIX}"
+          if [ "${MULTI_ARCH}" != "true" ]; then
+            TAGS=$(printf '%s\n%s' "$TAGS" "${IMAGE}:${VERSION}")
+            if [ "${IS_RELEASE}" = "true" ]; then
+              TAGS=$(printf '%s\n%s' "$TAGS" "${IMAGE}:latest")
+            fi
+          fi
+          {
+            echo "list<<TAGEOF"
+            echo "${TAGS}"
+            echo "TAGEOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push Docker image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
@@ -888,7 +973,7 @@ jobs:
           file: ${{ matrix.dockerfile }}
           push: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           load: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && matrix.platform == 'linux/amd64' }}
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ steps.platform-suffix.outputs.suffix }}
+          tags: ${{ steps.tags.outputs.list }}
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=${{ matrix.module }}-${{ steps.platform-suffix.outputs.suffix }}
           cache-to: type=gha,mode=max,scope=${{ matrix.module }}-${{ steps.platform-suffix.outputs.suffix }}
@@ -940,9 +1025,13 @@ jobs:
     name: Merge ${{ matrix.module }} Manifest
     runs-on: ubuntu-latest
     needs: [determine-version, detect-changes, build-platform]
+    # No-ops cleanly when BUILD_PLATFORMS is amd64-only -- build-platform's
+    # "Compute image tags" step already pushed the plain/:latest tags
+    # directly per module in that case, so there is nothing to merge.
     if: >
       github.event_name != 'pull_request' &&
       github.event_name != 'merge_group' &&
+      needs.determine-version.outputs.multi_arch == 'true' &&
       (needs.detect-changes.outputs.router == 'true' ||
       needs.detect-changes.outputs.marketplace == 'true' ||
       needs.detect-changes.outputs.migrations == 'true' ||
@@ -1034,7 +1123,13 @@ jobs:
     name: Security Scan
     runs-on: ubuntu-latest
     needs: [determine-version, detect-changes, merge-manifests]
-    if: always() && needs.merge-manifests.result == 'success'
+    # merge-manifests is intentionally skipped (not failed) when
+    # BUILD_PLATFORMS is amd64-only -- the plain tag this scans still
+    # exists (pushed directly by build-platform in that case), so tolerate
+    # "skipped" the same as "success".
+    if: >
+      always() &&
+      (needs.merge-manifests.result == 'success' || needs.merge-manifests.result == 'skipped')
     continue-on-error: true
     strategy:
       fail-fast: false
@@ -1106,7 +1201,13 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     needs: [determine-version, merge-manifests]
-    if: needs.determine-version.outputs.is_release == 'true'
+    # always() so a skipped merge-manifests (BUILD_PLATFORMS amd64-only)
+    # doesn't implicitly block this job -- release tags still get created,
+    # pointing at the plain tags build-platform pushed directly.
+    if: >
+      always() &&
+      needs.determine-version.outputs.is_release == 'true' &&
+      (needs.merge-manifests.result == 'success' || needs.merge-manifests.result == 'skipped')
     permissions:
       contents: write
     steps:
