@@ -6,6 +6,7 @@ on:
     paths:
       - 'core/svc_process/**'
       - 'core/bundle_host_kv/**'
+      - 'core/hub_client/**'
       - '.github/workflows/rust-svc-process.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
@@ -13,6 +14,7 @@ on:
     paths:
       - 'core/svc_process/**'
       - 'core/bundle_host_kv/**'
+      - 'core/hub_client/**'
   workflow_dispatch:
 
 permissions:
@@ -30,3 +32,6 @@ jobs:
       # coverage ratio the same way svc_streaming's binary entrypoint is,
       # per its own module doc comment ("thin binary entrypoint").
       coverage_ignore_regex: 'main\.rs'
+      # hub_client's build.rs (tonic-prost-build) needs protoc.
+      extra_apt_packages: protobuf-compiler
+      extra_apt_reason: 'for hub_client (protoc, tonic-prost-build)'

@@ -47,6 +47,7 @@ pub mod hop;
 pub mod host_api;
 pub mod http;
 pub mod license;
+pub mod pii_tokenize;
 pub mod source_supervisor;
 pub mod spine;
 pub mod telemetry;
@@ -63,6 +64,77 @@ use crate::license::FeatureGate;
 /// target and the resource `service.name` when `OTEL_SERVICE_NAME` is
 /// unset.
 pub const SERVICE_NAME: &str = "svc-process";
+
+/// hub-api internal gRPC scope this service requests when bootstrapping its
+/// machine JWT (`hub_api/grpc_internal/servicers.py::REQUIRED_SCOPES`) --
+/// `MintEphemeralPseudonyms` only; this service never calls
+/// `ResolveDisplayNames`/`GetStreamDek`.
+const HUB_IDENTITY_MINT_SCOPE: &str = "identity:ephemeral:mint";
+
+/// Builds and connects the shared `hub_client::HubClient` the inbound
+/// PII-tokenization pass (`crate::pii_tokenize`) needs, or `Ok(None)` when
+/// `tokenization_enabled` is `false` (the opt-out kill-switch is ON) -- no
+/// client is needed in that case, and `crate::spine::ProcessDeps::
+/// pii_minter` stays `None`, taking this crate's existing
+/// "disabled-gate-short-circuits-before-the-minter-is-consulted" path
+/// (`spine::handle_delivered`'s own doc).
+///
+/// **Fail loud, never silent dead-letter (user requirement).** See
+/// [`run_with_shutdown`]'s call site for the full rationale: when
+/// `tokenization_enabled` is `true` but `HUB_API_GRPC_ENDPOINT`/
+/// `SERVICE_JWT_TOKEN_ENDPOINT` are unset, or the initial connect attempt
+/// fails, this returns `Err` so the caller can exit non-zero instead of
+/// starting a pod that dead-letters every inbound event. This check is
+/// **startup-only** -- a transient gRPC failure after a successful connect
+/// here still degrades to `pii_tokenize::tokenize_event`'s existing
+/// fail-closed dead-letter path (`hub_client::HubClient`'s own circuit
+/// breaker/retries already bound how long such a blip affects any one
+/// call), never a process exit.
+async fn build_hub_client(
+    cli: &config::CliConfig,
+    tokenization_enabled: bool,
+) -> anyhow::Result<Option<Arc<hub_client::HubClient>>> {
+    if !tokenization_enabled {
+        tracing::info!(
+            "waddles.core.disable-pii-tokenization kill-switch is ON; hub_client not \
+             connected (no minter configured -- tokenize_event is never reached while the \
+             gate reports disabled)"
+        );
+        return Ok(None);
+    }
+    if cli.hub_api_grpc_endpoint.is_empty() || cli.service_jwt_token_endpoint.is_empty() {
+        anyhow::bail!(
+            "PII tokenization is enabled (the default) but HUB_API_GRPC_ENDPOINT/\
+             SERVICE_JWT_TOKEN_ENDPOINT is unset; refusing to start and silently dead-letter \
+             every inbound event -- set both env vars, or set the \
+             waddles.core.disable-pii-tokenization kill-switch for a deployment without a \
+             working hub_client connection yet"
+        );
+    }
+    match hub_client::HubClient::connect(
+        cli.hub_api_grpc_endpoint.clone(),
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+        HUB_IDENTITY_MINT_SCOPE,
+    )
+    .await
+    {
+        Ok(client) => {
+            tracing::info!(
+                endpoint = %cli.hub_api_grpc_endpoint,
+                "hub_client connected; inbound PII tokenization is live"
+            );
+            Ok(Some(Arc::new(client)))
+        }
+        Err(err) => Err(anyhow::anyhow!(
+            "PII tokenization is enabled but connecting to hub-api's internal gRPC endpoint \
+             {:?} failed: {err}; refusing to start and silently dead-letter every inbound \
+             event -- fix the endpoint/credentials, or set the \
+             waddles.core.disable-pii-tokenization kill-switch",
+            cli.hub_api_grpc_endpoint
+        )),
+    }
+}
 
 /// Runs the service: loads config, bootstraps telemetry, builds the
 /// control-plane + metrics routers, starts the host-API mTLS listener and
@@ -160,6 +232,33 @@ where
              PROCESS_APP_ID unset)"
         );
     }
+
+    // PII tokenization's hub_client startup wiring -- closes the
+    // `TODO(M4+)` seam `build_source_supervisor_deps`/the legacy
+    // `try_start_process_loop` used to leave as `pii_minter: None`.
+    // Resolved ONCE here, before either drain-loop path starts below, and
+    // shared by whichever one `decision` selects. See
+    // [`build_hub_client`]'s own doc for the fail-loud contract.
+    let pii_tokenization_enabled = match license::build_license_client("waddles") {
+        Ok(client) => license::PiiTokenizationGate::new(client).enabled().await,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "license client config invalid; PII tokenization kill-switch state unknown, \
+                 defaulting to ENABLED (fail-open, the safe default -- see \
+                 license::PiiTokenizationGate's own doc)"
+            );
+            true
+        }
+    };
+    let hub_minter: Option<Arc<dyn pii_tokenize::IdentityMinter>> =
+        build_hub_client(&config.cli, pii_tokenization_enabled)
+            .await?
+            .map(|client| {
+                Arc::new(pii_tokenize::HubClientMinter(client))
+                    as Arc<dyn pii_tokenize::IdentityMinter>
+            });
+
     match decision {
         PathDecision::MultiTenant => {
             state
@@ -206,6 +305,7 @@ where
                 egress_denied_metric,
                 changelog_consumer_metrics,
                 Arc::clone(&consumer_loop_ready),
+                hub_minter.clone(),
             );
         }
         PathDecision::NoDbConfig => {
@@ -220,6 +320,7 @@ where
                 egress_denied_metric,
                 drain_loop_metrics,
                 consumer_loop_ready,
+                hub_minter.clone(),
             );
         }
         PathDecision::KillSwitchOn => {
@@ -234,6 +335,7 @@ where
                 egress_denied_metric,
                 drain_loop_metrics,
                 consumer_loop_ready,
+                hub_minter,
             );
         }
     }
@@ -481,6 +583,7 @@ fn try_start_process_loop(
     egress_denied_metric: prometheus::IntCounterVec,
     drain_loop_metrics: telemetry::DrainLoopMetrics,
     consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
+    hub_minter: Option<Arc<dyn pii_tokenize::IdentityMinter>>,
 ) {
     if config.cli.process_app_id.is_empty() {
         tracing::info!(
@@ -522,8 +625,14 @@ fn try_start_process_loop(
             return;
         }
     };
-    let license_gate: Arc<dyn license::FeatureGate> =
-        Arc::new(license::LicenseFeatureGate::new(license_client));
+    let license_gate: Arc<dyn license::FeatureGate> = Arc::new(license::LicenseFeatureGate::new(
+        Arc::clone(&license_client),
+    ));
+    // Opt-out kill-switch for the inbound PII-tokenization pre-dispatch
+    // pass (`crate::pii_tokenize`) -- default ENABLED, see
+    // `license::PiiTokenizationGate`'s own doc.
+    let pii_gate: Arc<dyn license::FeatureGate> =
+        Arc::new(license::PiiTokenizationGate::new(license_client));
 
     // The `http` bundle capability's shared egress guard (`crate::
     // capabilities::StageCapabilities::egress`) -- one per process, built
@@ -673,6 +782,14 @@ fn try_start_process_loop(
                 // means denied").
                 kv_capabilities: Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
                 egress: Arc::clone(&egress),
+                pii_gate: Arc::clone(&pii_gate),
+                // `crate::build_hub_client`'s connected `HubClientMinter`,
+                // or `None` when the opt-out kill-switch is ON --
+                // `run_with_shutdown` resolves this once, before either
+                // drain-loop path starts (fail-loud if tokenization is
+                // enabled and the connect failed), and passes it down
+                // unconditionally from here.
+                pii_minter: hub_minter.clone(),
             };
 
             let (inner_tx, inner_rx) = tokio::sync::oneshot::channel();
@@ -886,6 +1003,7 @@ fn no_data_plane_path_available(decision: PathDecision, process_app_id: &str) ->
 /// either disables ONLY the supervisor (`changelog_consumer::run` is
 /// called with `spawner: None`); bundle load/unload needs neither and
 /// still starts.
+#[allow(clippy::too_many_arguments)]
 fn try_start_changelog_consumer(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
@@ -894,6 +1012,7 @@ fn try_start_changelog_consumer(
     egress_denied_metric: prometheus::IntCounterVec,
     changelog_consumer_metrics: telemetry::ChangelogConsumerMetrics,
     consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
+    hub_minter: Option<Arc<dyn pii_tokenize::IdentityMinter>>,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
@@ -909,9 +1028,10 @@ fn try_start_changelog_consumer(
     // fail-open contract, so silently bailing out here on a second,
     // independent build attempt would contradict the very decision that
     // routed execution to this function in the first place.
-    let (gate, bundle_egress_flag): (
+    let (gate, bundle_egress_flag, pii_gate): (
         Arc<dyn license::FeatureGate>,
         Arc<dyn bundle_host_http::egress::FeatureFlag>,
+        Arc<dyn license::FeatureGate>,
     ) = match license::build_license_client("waddles") {
         Ok(license_client) => (
             Arc::new(license::AllGate(vec![
@@ -922,7 +1042,10 @@ fn try_start_changelog_consumer(
                     &license_client,
                 ))),
             ])),
-            bundle_host_http::egress::boxed(license::BundleEgressFlag::new(license_client)),
+            bundle_host_http::egress::boxed(license::BundleEgressFlag::new(Arc::clone(
+                &license_client,
+            ))),
+            Arc::new(license::PiiTokenizationGate::new(license_client)),
         ),
         Err(err) => {
             tracing::warn!(
@@ -934,6 +1057,13 @@ fn try_start_changelog_consumer(
             (
                 Arc::new(license::AllGate(Vec::new())),
                 bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(false)),
+                // PII tokenization is a hard security invariant, never
+                // fail-open on an unrelated license-client build error --
+                // unlike `gate`/`bundle_egress_flag` above (feature
+                // availability), an unknown kill-switch state here must
+                // still resolve to "tokenization enabled" (the safe
+                // default), which `AllGate(Vec::new())` already gives.
+                Arc::new(license::AllGate(Vec::new())),
             )
         }
     };
@@ -992,6 +1122,12 @@ fn try_start_changelog_consumer(
         Arc::clone(&kv_capabilities),
         Arc::clone(&egress),
         Arc::clone(&active_digests),
+        Arc::clone(&pii_gate),
+        // `crate::build_hub_client`'s connected `HubClientMinter`, or
+        // `None` when the opt-out kill-switch is ON -- `run_with_shutdown`
+        // resolves this once, before either drain-loop path starts
+        // (fail-loud if tokenization is enabled and the connect failed).
+        hub_minter,
     );
 
     // Fail loud, never silent (user requirement): this path is only ever
@@ -1071,6 +1207,7 @@ fn try_start_changelog_consumer(
 /// `crate::changelog_consumer`). `egress` is cloned into every spawned
 /// binding consumer's own `ProcessDeps` -- see `crate::spine::
 /// ProcessDeps::egress`'s doc.
+#[allow(clippy::too_many_arguments)]
 fn build_source_supervisor_deps(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
@@ -1078,6 +1215,8 @@ fn build_source_supervisor_deps(
     kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     egress: Arc<bundle_host_http::egress::EgressGuard>,
     active_digests: Arc<active_digests::ActiveDigests>,
+    pii_gate: Arc<dyn license::FeatureGate>,
+    pii_minter: Option<Arc<dyn pii_tokenize::IdentityMinter>>,
 ) -> Option<source_supervisor::SupervisorDeps> {
     let Some(keys_raw) = config.envelope_binding_keys.as_ref() else {
         tracing::warn!(
@@ -1119,6 +1258,8 @@ fn build_source_supervisor_deps(
         kv_capabilities,
         egress,
         active_digests,
+        pii_gate,
+        pii_minter,
     })
 }
 
@@ -1191,6 +1332,25 @@ mod tests {
 
     #[tokio::test]
     async fn run_with_shutdown_binds_serves_and_stops_on_signal() {
+        // `build_license_client("waddles")`'s hardcoded self-domain bypass
+        // (`license::BYPASS_DOMAIN`'s doc) makes PII tokenization report
+        // ENABLED unconditionally for this service, test included -- so
+        // `run_with_shutdown`'s `build_hub_client` call needs a real,
+        // connectable `HUB_API_GRPC_ENDPOINT` or it fails loud (by design)
+        // before ever reaching the bind/serve logic this test exercises.
+        // `HubClient::connect` only needs a listening TCP peer (it doesn't
+        // perform the actual gRPC handshake until the first RPC) -- a bare
+        // accept-and-drop loop is enough.
+        let hub_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral port for the fake hub-api listener");
+        let hub_addr = hub_listener.local_addr().expect("local_addr");
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = hub_listener.accept().await {
+                std::mem::forget(sock);
+            }
+        });
+
         // Guard is dropped before the first `.await` below (clippy
         // `await_holding_lock`) -- the env vars only need to be set long
         // enough for `Config::from_cli` to copy them into `Secret`s.
@@ -1219,6 +1379,10 @@ mod tests {
                 "18292",
                 "--process-app-id",
                 "waddles.test.binds-serves-and-stops",
+                "--hub-api-grpc-endpoint",
+                &format!("http://{hub_addr}"),
+                "--service-jwt-token-endpoint",
+                &format!("http://{hub_addr}/internal/service-token"),
             ]);
             let config = Config::from_cli(cli).expect("secrets are set");
             unsafe {
@@ -1273,6 +1437,8 @@ mod tests {
             Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
             test_egress_guard(),
             Arc::new(active_digests::ActiveDigests::new()),
+            Arc::new(license::test_support::FixedGate(true)),
+            None,
         )
         .is_none());
     }
@@ -1297,6 +1463,8 @@ mod tests {
             Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
             test_egress_guard(),
             Arc::new(active_digests::ActiveDigests::new()),
+            Arc::new(license::test_support::FixedGate(true)),
+            None,
         );
         // SAFETY: serialized by ENV_LOCK above.
         unsafe {
@@ -1569,6 +1737,7 @@ mod tests {
             test_egress_denied_metric(),
             test_changelog_consumer_metrics(),
             test_consumer_loop_ready(),
+            None,
         );
     }
 
@@ -1650,6 +1819,7 @@ mod tests {
             test_egress_denied_metric(),
             test_drain_loop_metrics(),
             test_consumer_loop_ready(),
+            None,
         );
     }
 
@@ -1668,6 +1838,7 @@ mod tests {
             test_egress_denied_metric(),
             test_drain_loop_metrics(),
             test_consumer_loop_ready(),
+            None,
         );
     }
 
@@ -1686,6 +1857,7 @@ mod tests {
             test_egress_denied_metric(),
             test_drain_loop_metrics(),
             test_consumer_loop_ready(),
+            None,
         );
     }
 
@@ -1714,6 +1886,7 @@ mod tests {
             test_egress_denied_metric(),
             test_drain_loop_metrics(),
             test_consumer_loop_ready(),
+            None,
         );
     }
 
@@ -1749,6 +1922,7 @@ mod tests {
                 test_egress_denied_metric(),
                 test_drain_loop_metrics(),
                 test_consumer_loop_ready(),
+                None,
             );
             unsafe {
                 std::env::remove_var("VALKEY_URL");
@@ -1791,6 +1965,7 @@ mod tests {
                 test_egress_denied_metric(),
                 test_drain_loop_metrics(),
                 test_consumer_loop_ready(),
+                None,
             );
             unsafe {
                 std::env::remove_var("VALKEY_URL");
@@ -1816,6 +1991,64 @@ mod tests {
     #[test]
     fn service_name_matches_binary_name() {
         assert_eq!(SERVICE_NAME, "svc-process");
+    }
+
+    /// Kill-switch ON (`tokenization_enabled: false`) -- no `HUB_API_GRPC_
+    /// ENDPOINT` needed at all, no client connected, and no error: the
+    /// opt-out path never touches the network.
+    #[tokio::test]
+    async fn build_hub_client_returns_none_when_tokenization_disabled() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        let result = build_hub_client(&cli, false).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    /// Fail-loud regression test (user requirement): tokenization enabled
+    /// but `HUB_API_GRPC_ENDPOINT`/`SERVICE_JWT_TOKEN_ENDPOINT` are unset
+    /// (both default to `""`, `CliConfig::parse_from`'s default) must
+    /// return `Err` -- asserted via this testable startup path, never a
+    /// real `std::process::exit` in-test. `run_with_shutdown` propagates
+    /// this `Err` via `?`, which is what actually crashloops the pod.
+    #[tokio::test]
+    async fn build_hub_client_fails_loud_when_enabled_and_endpoint_unset() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert_eq!(cli.hub_api_grpc_endpoint, "");
+        assert_eq!(cli.service_jwt_token_endpoint, "");
+        let err = match build_hub_client(&cli, true).await {
+            Ok(_) => panic!("enabled tokenization with no endpoint configured must fail loud"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("HUB_API_GRPC_ENDPOINT"));
+    }
+
+    /// Fail-loud regression test: tokenization enabled, both endpoints
+    /// configured, but nothing is listening on the configured gRPC
+    /// endpoint (an ephemeral port bound then immediately dropped,
+    /// guaranteeing a prompt connection-refused rather than a hang) --
+    /// `HubClient::connect`'s initial connect attempt fails, and
+    /// `build_hub_client` must surface that as `Err`, never silently start
+    /// with no minter configured.
+    #[tokio::test]
+    async fn build_hub_client_fails_loud_when_enabled_and_endpoint_unreachable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral port");
+        let addr = listener.local_addr().expect("local_addr");
+        drop(listener); // nothing listening now -- connection refused
+
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--hub-api-grpc-endpoint",
+            &format!("http://{addr}"),
+            "--service-jwt-token-endpoint",
+            &format!("http://{addr}/internal/service-token"),
+        ]);
+        let err = match build_hub_client(&cli, true).await {
+            Ok(_) => panic!("an unreachable hub-api gRPC endpoint must fail loud at startup"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("hub-api"));
     }
 
     #[tokio::test]

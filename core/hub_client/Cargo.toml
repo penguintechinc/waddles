@@ -26,10 +26,10 @@ tonic-prost = "=0.14.6"
 prost = "=0.14.4"
 tower = { version = "=0.5.3", features = ["util", "retry", "timeout"] }
 tracing = "=0.1.44"
-# fix/hub-grpc-tls-and-ca-trust -- was pinned to =2.0.21, the sole outlier among every
-# other core/* crate's =2.0.20 (see e.g. core/service_auth, core/svc_action), which made
-# this crate entirely unbuildable (Cargo can't unify two different exact pins of the same
-# semver-compatible crate) the moment it gained its service_auth path dependency.
+# =2.0.20 (not =2.0.21): matches every other crate in this repo that now
+# depends on this one as a path dependency (svc_process/svc_action's own
+# pin, and their `bundle-active-set`/`bundle-host-*` siblings) -- a single
+# dependency graph can only resolve one version of a crate.
 thiserror = "=2.0.20"
 async-trait = "=0.1.89"
 # Machine-JWT bootstrap + injection (feature/eddsa-machine-jwt) -- see

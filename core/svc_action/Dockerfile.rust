@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # svc-action (Rust) -- Waddles ACTION pipeline stage-runner.
 #
 # Named `Dockerfile.rust` (not `Dockerfile`) while the Python alpha at this
@@ -35,9 +36,13 @@ FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcb
 # comment for the RUSTSEC-2023-0071 rationale). rustls itself still
 # resolves to `ring` here (unaffected), but `aws-lc-sys` now needs `cmake`
 # regardless.
+# protobuf-compiler (protoc) is required by `hub_client`'s build.rs
+# (tonic-prost-build, compiling `proto/waddles/hub/internal/v1/*.proto`) --
+# `egress_detokenizer` (outbound PII-detokenization) depends on `hub_client`.
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
         cmake=3.25.1-1 build-essential=12.9 ca-certificates=20250419~deb12u1 \
+        protobuf-compiler=3.21.12-3+deb12u1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -48,6 +53,16 @@ COPY bundle_host_kv ./bundle_host_kv
 COPY bundle_host_db ./bundle_host_db
 COPY bundle_host_http ./bundle_host_http
 COPY egress_assertion ./egress_assertion
+COPY hub_client ./hub_client
+COPY egress_detokenizer ./egress_detokenizer
+COPY service_auth ./service_auth
+# `hub_client`'s build.rs resolves protos at `CARGO_MANIFEST_DIR/../../
+# proto` -- for `/build/hub_client`, that's `/proto` (image root, NOT
+# under `/build`). The repo-root `proto/` tree is a sibling of `core/`
+# (this Dockerfile's build context), so it's supplied as the separately
+# named `proto` build context (see build-svc-action.yml's `build-contexts`)
+# rather than COPY'd from `.`.
+COPY --from=proto . /proto
 WORKDIR /build/svc_action
 RUN cargo build --release --locked
 
