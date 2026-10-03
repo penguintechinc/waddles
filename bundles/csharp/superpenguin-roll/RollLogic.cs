@@ -38,12 +38,28 @@ namespace WaddleBundleSuperpenguinRoll;
 /// (svc-process/svc-action) while the real backend lands --
 /// <see cref="CooldownGuard.TryAcquire"/> degrades gracefully in that case
 /// (cooldown simply is not enforced yet), so this bundle still functions.
+///
+/// Gated behind the PostHog flag <see cref="FlagKey"/>, defaulted OFF
+/// (`rules/critical-rules.md` Feature Flags &amp; License Tiers) -- checked
+/// AFTER the command match, same ordering as the Python batch-1 bundles
+/// (`bundles/python/roll/src/app.py`'s own docstring: "command match first,
+/// flag check second"), and before the cooldown acquire so a disabled flag
+/// never consumes a user's cooldown slot.
 /// </summary>
 public sealed class RollLogic : WaddleProcessStage
 {
     internal const string CommandPrefix = "!";
     private const uint CooldownSeconds = 180;
     private const string PointTypeName = "points";
+
+    /// <summary>
+    /// Distinct from the first-party Python `bundles/python/roll` bundle's own
+    /// `waddles.command-roll` flag -- that is an unrelated NdM dice command
+    /// that also answers to `!roll`; naming this key `-superpenguin-roll`
+    /// keeps the two !roll-shaped features independently toggleable so
+    /// turning one on never silently activates the other.
+    /// </summary>
+    internal const string FlagKey = "waddles.command-superpenguin-roll";
 
     /// <summary>Index 0..5 == dice value 1..6 on a double.</summary>
     private static readonly int[] Prizes = [40, 160, 360, 640, 1000, 1440];
@@ -53,6 +69,11 @@ public sealed class RollLogic : WaddleProcessStage
     {
         var command = ChatCommand.TryParse(@event.PayloadJson, CommandPrefix);
         if (command is null || !command.IsAny("roll", "dice"))
+        {
+            return null;
+        }
+
+        if (!host.Flags.Enabled(FlagKey, false))
         {
             return null;
         }
