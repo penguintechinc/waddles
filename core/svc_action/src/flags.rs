@@ -269,6 +269,21 @@ impl FeatureFlag for DisablePiiDetokenizationFlag {
     }
 }
 
+/// Builds the [`FeatureFlag`] `crate::lib::build_hub_client`/
+/// `crate::capabilities::StageCapabilities::with_detokenize`'s call site
+/// gate on: [`DisablePiiDetokenizationFlag`] over a real client, or a fixed
+/// "detokenization enabled" answer when no license client is available at
+/// all -- mirrors [`db_bundle_config_flag`]/[`multi_tenant_watermark_flag`]'s
+/// identical `None`-branch rationale.
+pub fn pii_detokenization_flag(
+    license: &Option<Arc<penguin_licensing::LicenseClient>>,
+) -> Arc<dyn FeatureFlag> {
+    match license {
+        Some(client) => boxed(DisablePiiDetokenizationFlag::new(Arc::clone(client))),
+        None => boxed(StaticFlag(true)),
+    }
+}
+
 /// Combines multiple [`FeatureFlag`]s with logical AND, short-circuiting on
 /// the first `false`.
 pub struct AllFlags(pub Vec<Arc<dyn FeatureFlag>>);
@@ -419,6 +434,28 @@ mod tests {
     async fn multi_tenant_watermark_flag_defaults_enabled_when_no_license_client_is_available() {
         let flag = multi_tenant_watermark_flag(&None);
         assert!(flag.enabled().await);
+    }
+
+    #[tokio::test]
+    async fn pii_detokenization_flag_defaults_enabled_when_no_license_client_is_available() {
+        let flag = pii_detokenization_flag(&None);
+        assert!(flag.enabled().await);
+    }
+
+    /// `Some(client)` branch: wraps a real client in
+    /// `DisablePiiDetokenizationFlag` rather than the `None` fallback's
+    /// fixed `StaticFlag(true)`.
+    #[tokio::test]
+    async fn pii_detokenization_flag_wraps_a_real_client_when_available() {
+        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-pii-detok-some")
+            .expect("default LicenseConfig::new never fails");
+        let client = penguin_licensing::LicenseClient::new(cfg)
+            .expect("LicenseClient::new with a valid default config never fails");
+        let flag = pii_detokenization_flag(&Some(client));
+        assert!(
+            flag.enabled().await,
+            "an unseen kill-switch flag must leave PII detokenization enabled"
+        );
     }
 
     /// `Some(client)` branch: wraps a real client in
