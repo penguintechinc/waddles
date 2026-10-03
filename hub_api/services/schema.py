@@ -2258,8 +2258,6 @@ def bind_marketplace_billing_tables(dal: Any, *, migrate: bool = False) -> None:
         )
 
 
-
-
 def bind_lifecycle_tables(dal: Any, *, migrate: bool = False) -> None:
     """Define `app_catalog` / `app_tenant_availability` / `app_activations` (App Bundle 3-tier).
 
@@ -2799,5 +2797,64 @@ def bind_loyalty_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("created_at", "datetime"),
         Field("fulfilled_at", "datetime"),
         Field("fulfilled_by", "integer"),
+        migrate=migrate,
+    )
+
+
+def bind_bar_citizen_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Define the Bar Citizen guild-pairing + role-sync group's own tables (migration 0034).
+
+    Schema is owned by `alembic/versions/0034_bar_citizen_guild_pairing.py`
+    (raw SQL, not this process -- `backend-database.md`: "NO automatic
+    Alembic migrations on startup") -- `migrate=False` in production,
+    this function only maps pydal onto the already-migrated tables, same
+    split every other `bind_*` function in this file follows.
+    `flask_core.models.guild_pairing` mirrors the same columns
+    column-for-column for SQLAlchemy-side FK resolution; this is the
+    pydal-side mapping the service layer (`services/guild_pairing.py`,
+    `services/credential_resolver.py`) actually queries through.
+
+    Depends on `bind_auth_tables()` for `tenants`/`communities`/
+    `hub_users` (this group's FK targets), same dependency-first pattern
+    `bind_platform_tables()` uses. Idempotent per-DAL-instance guard.
+    """
+    if "tenant_platform_credentials" in dal.tables:
+        return
+
+    bind_auth_tables(dal, migrate=migrate)
+
+    dal.define_table(
+        "tenant_platform_credentials",
+        Field("tenant_id", "integer", notnull=True),
+        Field("platform", "string", length=50, notnull=True),
+        Field("credentials_ciphertext", "text", notnull=True),
+        Field("key_ref", "string", length=255),
+        Field("installed_by_user_id", "integer"),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+
+    dal.define_table(
+        "guild_tenant_pairings",
+        Field("community_id", "integer", notnull=True),
+        Field("discord_guild_id", "string", length=255, notnull=True),
+        Field("direction", "string", length=20, notnull=True),
+        Field("sync_enabled", "boolean", notnull=True, default=False),
+        Field("role_name_prefix", "string", length=50, notnull=True),
+        Field("created_by_user_id", "integer"),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+
+    dal.define_table(
+        "community_role_sync_bindings",
+        Field("pairing_id", "integer", notnull=True),
+        Field("sync_scope", "string", length=20, notnull=True),
+        Field("subscriber_tier", "integer"),
+        Field("discord_role_id", "string", length=255, notnull=True),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
         migrate=migrate,
     )

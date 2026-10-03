@@ -88,6 +88,7 @@ from services.schema import (
     bind_ai_routing_tables,
     bind_app_bundle_tables,
     bind_auth_tables,
+    bind_bar_citizen_tables,
     bind_community_authz_tables,
     bind_github_sync_tables,
     bind_lifecycle_tables,
@@ -790,6 +791,49 @@ def community_db(tenant_db: Any, monkeypatch: Any) -> Any:
 def service_key_headers() -> dict[str, str]:
     """`X-Service-Key` header matching `community_db`'s `SERVICE_API_KEY`."""
     return {"X-Service-Key": SERVICE_API_KEY}
+
+
+@pytest.fixture
+def bar_citizen_db(tmp_path: Any) -> Any:
+    """File-backed pydal DB for the Bar Citizen guild-pairing/role-sync group (migration 0034).
+
+    Additive fixture (`hub_api/PORTING.md`: new groups add their own
+    `bind_<group>_tables()` call rather than editing an existing fixture)
+    -- `bind_auth_tables()` for `tenants`/`communities`/`hub_users`, then
+    `bind_bar_citizen_tables()` on top, same layering `ai_routing_db`/
+    `overlay_db` use. Seeds one regular tenant + one global tenant + one
+    community under the regular tenant, so both `CredentialResolver` lanes
+    (tenant 0 / tenant N) and `community_in_tenant()` tenant-isolation
+    checks are exercisable without each test re-seeding rows.
+
+    Yields `(dal, community_id, tenant_id, global_tenant_id)`.
+    """
+    async_dal = AsyncDAL(f"sqlite://{tmp_path / 'bar_citizen_test.db'}", pool_size=1)
+    dal = async_dal.dal
+    dal.define_table(
+        "tenants",
+        Field("slug", unique=True),
+        Field("display_name"),
+        Field("logo_url"),
+        Field("is_global", "boolean", default=False),
+        Field("is_active", "boolean", default=True),
+        Field("config", "json"),
+    )
+    bind_auth_tables(dal, migrate=True)
+    bind_bar_citizen_tables(dal, migrate=True)
+
+    tenant_id = dal.tenants.insert(
+        slug=TENANT_SLUG, display_name="Acme Corp", is_active=True, is_global=False
+    )
+    global_tenant_id = dal.tenants.insert(
+        slug=GLOBAL_TENANT_SLUG, display_name="Global", is_active=True, is_global=True
+    )
+    community_id = dal.communities.insert(name="test-community", tenant_id=tenant_id)
+    dal.commit()
+    for table_name in dal.tables:
+        dal(dal[table_name]).count()
+    yield dal, community_id, tenant_id, global_tenant_id
+    dal.close()
 
 
 #: Matches `flask_core.auth.DEFAULT_TENANT_SLUG` -- the always-visible global catalog tenant.

@@ -30,6 +30,11 @@ convention = "google"
 # `get_tenant_context()` -- the pattern every ported controller group
 # was documented to repeat (see platform.py's own per-file-ignore above).
 "blueprints/v1/community_*.py" = ["S101"]
+# Bar Citizen guild-pairing/role-sync group (migration 0034) -- same
+# `_feature_gate_and_tenant_check()` tenant_middleware postcondition assert
+# (`get_tenant_context()` always non-None after `tenant_middleware` already
+# ran) as the `community_*.py` glob above.
+"blueprints/v1/guild_pairing.py" = ["S101"]
 # Bot module (M5): DTO/service-dataclass field names are deliberately
 # camelCase to byte-match admin/hub_module/frontend/src/services/api.js's
 # frozen /api/v1 JSON contract (soEnabled, platformUsername, createdAt,
