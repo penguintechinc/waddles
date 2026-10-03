@@ -1181,6 +1181,118 @@ mod tests {
         Ok(())
     }
 
+    /// regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    /// emptied svc-action dispatch digest (alpha 2026-10-03). `app_versions`
+    /// can hold an older, now-inactive version row sharing the EXACT same
+    /// `artifact_digest` as the currently-active version (#537 dropped the
+    /// global digest-unique constraint, allowing manifest-only re-releases
+    /// that don't change the artifact at all) -- `read_active_set` must
+    /// still resolve to the ACTIVE `version_id`'s own row (never confuse the
+    /// two just because their digests match), and the result must carry a
+    /// real, non-empty canonical digest.
+    #[tokio::test]
+    async fn read_active_set_resolves_the_active_version_even_when_an_inactive_sibling_version_shares_its_digest(
+    ) -> Result<(), ActiveSetError> {
+        let shared_digest = "2".repeat(64);
+        // `app_active_versions` points at version_id 20 (the newer "1.0.3")
+        // -- version_id 10 ("1.0.2", the old, now-inactive version sharing
+        // the same digest) is never referenced from the active row at all,
+        // so the second query (`Id.is_in(version_ids)`) only ever fetches
+        // version_id 20 in production; this fixture exercises that exact
+        // join, not a hypothetical where both ids leak through.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "ping".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 20,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 20,
+                app_id: "ping".to_string(),
+                version: "1.0.3".to_string(),
+                artifact_digest: Some(shared_digest.clone()),
+                scan_status: "scanned".to_string(),
+                component_key: None,
+                sidecar_key: None,
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 2,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "ping".to_string(),
+                version: "1.0.3".to_string(),
+                superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
+            }]])
+            .into_connection();
+
+        let result = read_active_set(&db, 1, 0, None).await?;
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].version, "1.0.3");
+        assert_eq!(result.rows[0].digest, format!("sha256:{shared_digest}"));
+        assert!(!result.rows[0].digest.is_empty());
+        assert!(result.excluded.is_empty());
+        Ok(())
+    }
+
+    /// Same scenario, driven directly through [`assemble_active_set`] with
+    /// BOTH version rows present in `versions_by_id` (the inactive 1.0.2
+    /// sibling included, simulating a future caller that over-fetches) --
+    /// proves the join keys strictly on `active.version_id`, never
+    /// incidentally matching the OTHER row just because it shares a digest.
+    #[test]
+    fn assemble_active_set_keys_strictly_on_version_id_not_on_a_shared_digest() {
+        let shared_digest = "3".repeat(64);
+        let active_rows = vec![app_active_versions::Model {
+            app_id: "ping".to_string(),
+            tenant_id: 1,
+            community_id: 0,
+            version_id: 20,
+        }];
+        let mut versions_by_id = std::collections::HashMap::new();
+        versions_by_id.insert(
+            10,
+            app_versions::Model {
+                id: 10,
+                app_id: "ping".to_string(),
+                version: "1.0.2".to_string(),
+                artifact_digest: Some(shared_digest.clone()),
+                scan_status: "scanned".to_string(),
+                component_key: None,
+                sidecar_key: None,
+            },
+        );
+        versions_by_id.insert(
+            20,
+            app_versions::Model {
+                id: 20,
+                app_id: "ping".to_string(),
+                version: "1.0.3".to_string(),
+                artifact_digest: Some(shared_digest.clone()),
+                scan_status: "scanned".to_string(),
+                component_key: None,
+                sidecar_key: None,
+            },
+        );
+        let approval_rows = vec![app_install_approvals::Model {
+            id: 2,
+            tenant_id: 1,
+            community_id: None,
+            app_id: "ping".to_string(),
+            version: "1.0.3".to_string(),
+            superseded_by: None,
+            summary_json: sea_orm::JsonValue::Null,
+        }];
+
+        let result = assemble_active_set(&active_rows, &versions_by_id, &approval_rows);
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].version, "1.0.3");
+        assert_eq!(result.rows[0].digest, format!("sha256:{shared_digest}"));
+    }
+
     /// An `artifact_digest` that is neither bare 64-hex nor `sha256:<64
     /// hex>` must exclude the row (fail loud, never load a bundle the
     /// executor is guaranteed to reject) rather than pass a malformed value

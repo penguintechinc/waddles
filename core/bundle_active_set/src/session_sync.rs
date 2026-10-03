@@ -289,6 +289,34 @@ mod tests {
         assert!(plan.is_empty());
     }
 
+    /// regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    /// emptied svc-action dispatch digest (alpha 2026-10-03). A version
+    /// swap for the SAME scope that keeps the SAME digest (a manifest-only
+    /// re-release, #537 dropped the global digest-unique constraint that
+    /// used to make this impossible) must produce neither a `Load` NOR an
+    /// `Unload` for that scope on any live session -- the scope never
+    /// leaves `active` (`plan_sessions`'s own `to_unload` loop only fires
+    /// when a key drops out of `active` entirely, never on a digest
+    /// comparison), so the already-loaded entry must be left untouched,
+    /// never transiently cleared.
+    #[test]
+    fn plan_sessions_keeps_the_entry_across_a_version_swap_that_keeps_the_same_digest() {
+        let mut loaded = SessionLoaded::new();
+        loaded.mark_loaded(1, scope("ping"), "sha256:shared".to_string());
+        // "ping" is still active, same digest, just a newer version string
+        // (the row's own `version` field isn't modeled in this generic
+        // `Row` fixture -- `digest_of` is the only field `plan_sessions`
+        // itself ever reads).
+        let mut active = HashMap::new();
+        active.insert(scope("ping"), row("sha256:shared"));
+
+        let plan = plan_sessions(&loaded, &active, &[1], digest_of);
+        assert!(
+            plan.is_empty(),
+            "a same-digest version swap must be a total no-op, got {plan:?}"
+        );
+    }
+
     /// A session holding a STALE digest for an active scope gets a `Load`
     /// for the new digest (never a separate `Unload` first -- the
     /// executor's own `on_load` overwrites, same contract as the

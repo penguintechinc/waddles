@@ -65,7 +65,42 @@ impl ActiveDigests {
     /// called by `apply_active_set` on every successful `load`, in
     /// lock-step with `ConsumerState::loaded`'s own insert for the same
     /// scope.
+    ///
+    /// **Defense in depth: an empty `digest` is refused, never stored.**
+    /// `bundle_active_set::query::canonical_digest` already guarantees every
+    /// `ActiveBundleRow::digest` this crate's own writer (`apply_active_set`)
+    /// passes here is non-empty -- but that guarantee is enforced upstream
+    /// by a `debug_assert!` (compiled out in the release profile alpha
+    /// actually runs), so this is the one runtime backstop against an
+    /// empty digest ever becoming "current" for a scope and flowing on to
+    /// `crate::dispatch::handle_delivered`'s invoke call, bypassing its own
+    /// `NO_ACTIVE_DIGEST` guard (which only catches a missing entry, not an
+    /// empty one). regression: same-digest manifest-only release (ping
+    /// 1.0.2/1.0.3) emptied svc-action dispatch digest (alpha 2026-10-03)
     pub fn set(&self, scope: AppScope, digest: String) {
+        if digest.is_empty() {
+            tracing::error!(
+                tenant_id = scope.0,
+                community_id = scope.1,
+                app_id = %scope.2,
+                "ActiveDigests::set called with an empty digest; refusing to store it \
+                 -- an empty digest must never become \"current\" for dispatch"
+            );
+            return;
+        }
+        self.inner
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(scope, digest);
+    }
+
+    /// Test-only adversarial seam: forces `scope`'s entry to an empty
+    /// digest, bypassing [`Self::set`]'s own non-empty guard -- used to
+    /// prove `crate::dispatch::handle_delivered`'s `NO_ACTIVE_DIGEST` guard
+    /// independently catches an empty digest even if this map's own writer
+    /// guard were ever bypassed (defense in depth, not an either/or).
+    #[cfg(test)]
+    pub fn force_set_for_test(&self, scope: AppScope, digest: String) {
         self.inner
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -247,6 +282,29 @@ mod tests {
         digests.set(scope("waddles.a"), "sha256:aa".to_string());
         digests.remove(&scope("waddles.a"));
         assert_eq!(digests.get(&scope("waddles.a")), None);
+    }
+
+    /// regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    /// emptied svc-action dispatch digest (alpha 2026-10-03) -- `set` must
+    /// never store an empty digest, on a brand-new scope...
+    #[test]
+    fn set_refuses_an_empty_digest_on_a_new_scope() {
+        let digests = ActiveDigests::new();
+        digests.set(scope("waddles.a"), String::new());
+        assert_eq!(digests.get(&scope("waddles.a")), None);
+    }
+
+    /// ...nor may it clobber an already-stored valid digest with an empty
+    /// one (the exact shape a buggy caller racing a hot-swap could trigger).
+    #[test]
+    fn set_refuses_an_empty_digest_and_leaves_the_prior_value_intact() {
+        let digests = ActiveDigests::new();
+        digests.set(scope("waddles.a"), "sha256:aa".to_string());
+        digests.set(scope("waddles.a"), String::new());
+        assert_eq!(
+            digests.get(&scope("waddles.a")),
+            Some("sha256:aa".to_string())
+        );
     }
 
     #[test]

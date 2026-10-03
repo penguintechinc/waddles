@@ -95,6 +95,29 @@ impl DigestSource {
         }
     }
 
+    /// Like [`Self::current`], but additionally treats an `Active`-path
+    /// digest that resolved to an empty string the same as "no active
+    /// digest known" (`None`) -- the one call [`handle_delivered`]'s own
+    /// `NO_ACTIVE_DIGEST` guard must use, never [`Self::current`] directly,
+    /// so that guard can never be bypassed by an empty-but-`Some` digest
+    /// (regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    /// emptied svc-action dispatch digest -- `digest_prefix=""` reached
+    /// `invoke_dispatch` and failed non-retryably as `UnknownBundle` instead
+    /// of dead-lettering pre-flight, alpha 2026-10-03).
+    ///
+    /// `DigestSource::Static`'s own intentionally-empty "no bundle
+    /// configured yet" sentinel is deliberately left untouched here (see
+    /// that variant's own doc) -- only the multi-tenant `Active` path's
+    /// "never invoke with an empty digest" invariant is enforced, since an
+    /// empty `ActiveDigests` entry is never valid under any circumstance
+    /// (unlike `Static`'s legacy env-unset case).
+    fn usable_digest(&self) -> Option<String> {
+        match self {
+            DigestSource::Active { .. } => self.current().filter(|d| !d.is_empty()),
+            DigestSource::Static(_) => self.current(),
+        }
+    }
+
     /// The live executor session (if any) that should serve this `digest` --
     /// `DigestSource::Static` has no per-session tracking at all (the
     /// legacy, single-bundle-per-pod path predates multi-session executors)
@@ -571,7 +594,7 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
     // (possibly to an intentionally empty string, unchanged legacy
     // behavior); only `DigestSource::Active` with no entry for this scope
     // yields `None` here.
-    let Some(digest) = deps.digest_source.current() else {
+    let Some(digest) = deps.digest_source.usable_digest() else {
         tracing::error!(
             app_id = %deps.app_id,
             tenant = %d.env.tenant,
@@ -938,6 +961,67 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use crate::hop::BoundaryReason;
+
+    // regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    // emptied svc-action dispatch digest (alpha 2026-10-03)
+    mod digest_source_usable_digest {
+        use super::*;
+
+        #[test]
+        fn active_with_no_entry_is_none() {
+            let src = DigestSource::Active {
+                scope: (1, 0, "waddles.a".to_string()),
+                digests: Arc::new(ActiveDigests::new()),
+                sessions: Arc::new(LoadedSessions::new()),
+            };
+            assert_eq!(src.usable_digest(), None);
+        }
+
+        #[test]
+        fn active_with_a_real_digest_returns_it() {
+            let digests = Arc::new(ActiveDigests::new());
+            let scope = (1, 0, "waddles.a".to_string());
+            digests.set(scope.clone(), "sha256:aa".to_string());
+            let src = DigestSource::Active {
+                scope,
+                digests,
+                sessions: Arc::new(LoadedSessions::new()),
+            };
+            assert_eq!(src.usable_digest(), Some("sha256:aa".to_string()));
+        }
+
+        /// The exact bypass this fix closes: an `Active` entry that somehow
+        /// resolved to an empty string must be treated identically to "no
+        /// entry at all" -- never passed through as a `Some("")` that
+        /// `handle_delivered`'s `None`-only guard would have let through.
+        #[test]
+        fn active_with_an_empty_digest_is_treated_as_none() {
+            let digests = Arc::new(ActiveDigests::new());
+            let scope = (1, 0, "waddles.a".to_string());
+            digests.force_set_for_test(scope.clone(), String::new());
+            let src = DigestSource::Active {
+                scope,
+                digests,
+                sessions: Arc::new(LoadedSessions::new()),
+            };
+            assert_eq!(src.usable_digest(), None);
+        }
+
+        /// `Static`'s own intentionally-empty "no bundle configured" legacy
+        /// sentinel is unchanged by this fix -- only the multi-tenant
+        /// `Active` path's empty-digest invariant is enforced.
+        #[test]
+        fn static_with_an_empty_digest_is_unchanged_legacy_behavior() {
+            let src = DigestSource::Static(String::new());
+            assert_eq!(src.usable_digest(), Some(String::new()));
+        }
+
+        #[test]
+        fn static_with_a_real_digest_returns_it() {
+            let src = DigestSource::Static("sha256:aa".to_string());
+            assert_eq!(src.usable_digest(), Some("sha256:aa".to_string()));
+        }
+    }
 
     // regression: drain loop exited on NOGROUP (alpha 2026-10-02)
     #[test]
@@ -1518,6 +1602,50 @@ mod tests {
         deps.digest_source = DigestSource::Active {
             scope: (1, 0, "waddles.bot.commands.default".to_string()),
             digests: Arc::new(ActiveDigests::new()),
+            sessions: Arc::new(LoadedSessions::new()),
+        };
+
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 0);
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, penguin_spine::DlqErrorKind::BundleError);
+        assert_eq!(dead_lettered[0].2, deps.consumer_id);
+    }
+
+    /// regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    /// emptied svc-action dispatch digest (alpha 2026-10-03). An `Active`
+    /// scope whose `ActiveDigests` entry somehow resolves to an empty
+    /// string (adversarial seam: `ActiveDigests::set`'s own non-empty guard
+    /// is a SEPARATE layer -- this proves `handle_delivered` independently
+    /// never invokes with it) must be treated exactly like "no active
+    /// digest known": `NO_ACTIVE_DIGEST`, dead-lettered BEFORE ever reaching
+    /// `invoke_dispatch` -- never the `digest_prefix=""` / `UnknownBundle`
+    /// non-retryable failure the live alpha incident recorded.
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_no_active_digest_when_the_resolved_digest_is_empty() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
+
+        // A connection IS live (proving the empty-digest guard fires before
+        // ANY connection/session resolution is even attempted, not just
+        // before invoke) -- unlike the "no entry at all" test above, which
+        // uses no executor.
+        let connections = connected_registry_with_fake_executor(
+            serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+        )
+        .await;
+        let scope = (1, 0, "waddles.bot.commands.default".to_string());
+        let digests = Arc::new(ActiveDigests::new());
+        digests.force_set_for_test(scope.clone(), String::new());
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.digest_source = DigestSource::Active {
+            scope,
+            digests,
             sessions: Arc::new(LoadedSessions::new()),
         };
 

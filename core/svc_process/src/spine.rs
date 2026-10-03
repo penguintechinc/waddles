@@ -500,9 +500,14 @@ impl DigestSource {
                 // non-empty digest is already enforced at the DB-read
                 // boundary (`bundle_active_set::canonical_digest`, applied
                 // before `crate::changelog_consumer` ever calls
-                // `ActiveDigests::set`) -- this exists purely to catch a
-                // future regression that reintroduces a bare-hex or empty
-                // digest into that map before it ever reaches the wire.
+                // `ActiveDigests::set`) AND at `ActiveDigests::set` itself
+                // (which now refuses to store an empty digest at all) --
+                // this `debug_assert` exists purely to catch a future
+                // regression that reintroduces a bare-hex or empty digest
+                // into that map before it ever reaches the wire. It is
+                // compiled OUT in the release profile this service actually
+                // runs, which is exactly why [`Self::usable_digest`] below
+                // is the one callers must use for the real runtime gate.
                 debug_assert!(
                     !digest.is_empty(),
                     "ActiveDigests must never hold an empty digest for a scope"
@@ -514,6 +519,34 @@ impl DigestSource {
                 );
                 Some(digest)
             }
+        }
+    }
+
+    /// Like [`Self::current`], but additionally treats an `Active`-path
+    /// digest that resolved to an empty string the same as "no active
+    /// digest known" (`None`) -- the one call [`handle_delivered`]'s own
+    /// `NO_ACTIVE_DIGEST` guard must use, never [`Self::current`] directly,
+    /// so that guard can never be bypassed by an empty-but-`Some` digest in
+    /// the release profile (where the `debug_assert`s above are compiled
+    /// out). Direct port of `core/svc_action/src/dispatch.rs::DigestSource::
+    /// usable_digest`'s identical fix -- see that function's own doc for the
+    /// full rationale, including why `Static`'s own intentionally-empty
+    /// legacy sentinel is left untouched here.
+    ///
+    /// regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    /// emptied svc-action dispatch digest (alpha 2026-10-03)
+    ///
+    /// **Deliberately does NOT call [`Self::current`] for the `Active`
+    /// case** -- `current`'s own `debug_assert`s would PANIC on an empty
+    /// digest in debug/test builds rather than letting this function
+    /// gracefully treat it as `None`, which would defeat the very guard
+    /// this function exists to provide. Reads `digests.get(scope)` directly
+    /// instead; the format-canonicalization assertion remains `current`'s
+    /// job for its own (non-empty-digest) callers.
+    fn usable_digest(&self) -> Option<String> {
+        match self {
+            DigestSource::Active { scope, digests } => digests.get(scope).filter(|d| !d.is_empty()),
+            DigestSource::Static(_) => self.current(),
         }
     }
 }
@@ -656,7 +689,7 @@ async fn handle_delivered<S: SpineOps>(
     // empty string, unchanged legacy behavior -- see that variant's own
     // doc); only `DigestSource::Active` with no entry for this scope yields
     // `None` here.
-    let Some(digest) = deps.digest_source.current() else {
+    let Some(digest) = deps.digest_source.usable_digest() else {
         tracing::error!(
             app_id = %deps.app_id,
             tenant = %d.env.tenant,
@@ -1759,17 +1792,51 @@ mod tests {
     // UnknownBundle (alpha 2026-10-03) -- `DigestSource::Active::current`'s
     // own debug_assert must fire for an empty digest ever smuggled into
     // `ActiveDigests` (defense in depth; `bundle_active_set::canonical_
-    // digest` already prevents this at the DB-read boundary in production).
+    // digest` already prevents this at the DB-read boundary in production,
+    // and `ActiveDigests::set`'s own non-empty guard is now a SECOND layer
+    // -- `force_set_for_test` bypasses both to exercise this third,
+    // release-profile-compiled-out layer in isolation).
     #[test]
     #[should_panic(expected = "must never hold an empty digest")]
     fn digest_source_active_current_panics_on_an_empty_active_digest_in_debug_builds() {
         let digests = Arc::new(ActiveDigests::new());
-        digests.set(test_scope("waddles.a"), String::new());
+        digests.force_set_for_test(test_scope("waddles.a"), String::new());
         let source = DigestSource::Active {
             scope: test_scope("waddles.a"),
             digests,
         };
         let _ = source.current();
+    }
+
+    // regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    // emptied svc-action dispatch digest (alpha 2026-10-03). The RELEASE
+    // profile this service actually runs compiles out the `debug_assert`
+    // above -- `usable_digest` is the real runtime gate, and must treat an
+    // empty `Active` digest exactly like "no active digest known", with NO
+    // invoke ever attempted.
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_no_active_digest_when_the_resolved_digest_is_empty() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let digests = Arc::new(ActiveDigests::new());
+        digests.force_set_for_test(test_scope("waddles.bot.commands.default"), String::new());
+        let spine = FakeSpineOps::default();
+        // No executor connection at all -- if `handle_delivered` ever tried
+        // to invoke, it would fail before reaching the executor, proving
+        // this path returns before even checking for a connection (same
+        // shape as `handle_delivered_dead_letters_when_no_active_digest_is_
+        // known_for_the_scope` above).
+        let mut deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
+        deps.digest_source = DigestSource::Active {
+            scope: test_scope("waddles.bot.commands.default"),
+            digests,
+        };
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, DlqErrorKind::BundleError);
     }
 
     /// Drives a fake executor over an in-memory duplex: completes the

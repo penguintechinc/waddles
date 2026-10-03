@@ -59,7 +59,34 @@ impl ActiveDigests {
     /// called by `apply_active_set` on every successful `load`, in
     /// lock-step with `ConsumerState::loaded`'s own insert for the same
     /// scope.
+    ///
+    /// **Defense in depth: an empty `digest` is refused, never stored.**
+    /// Direct port of `core/svc_action/src/active_digests.rs::set`'s
+    /// identical fix -- see that function's own doc for the full rationale.
+    /// regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    /// emptied svc-action dispatch digest (alpha 2026-10-03)
     pub fn set(&self, scope: AppScope, digest: String) {
+        if digest.is_empty() {
+            tracing::error!(
+                tenant_id = scope.0,
+                community_id = scope.1,
+                app_id = %scope.2,
+                "ActiveDigests::set called with an empty digest; refusing to store it \
+                 -- an empty digest must never become \"current\" for dispatch"
+            );
+            return;
+        }
+        self.inner
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(scope, digest);
+    }
+
+    /// Test-only adversarial seam: forces `scope`'s entry to an empty
+    /// digest, bypassing [`Self::set`]'s own non-empty guard -- see
+    /// `core/svc_action/src/active_digests.rs`'s identical test helper.
+    #[cfg(test)]
+    pub fn force_set_for_test(&self, scope: AppScope, digest: String) {
         self.inner
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -130,6 +157,26 @@ mod tests {
         digests.set(scope("waddles.a"), "sha256:aa".to_string());
         digests.remove(&scope("waddles.a"));
         assert_eq!(digests.get(&scope("waddles.a")), None);
+    }
+
+    /// regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    /// emptied svc-action dispatch digest (alpha 2026-10-03)
+    #[test]
+    fn set_refuses_an_empty_digest_on_a_new_scope() {
+        let digests = ActiveDigests::new();
+        digests.set(scope("waddles.a"), String::new());
+        assert_eq!(digests.get(&scope("waddles.a")), None);
+    }
+
+    #[test]
+    fn set_refuses_an_empty_digest_and_leaves_the_prior_value_intact() {
+        let digests = ActiveDigests::new();
+        digests.set(scope("waddles.a"), "sha256:aa".to_string());
+        digests.set(scope("waddles.a"), String::new());
+        assert_eq!(
+            digests.get(&scope("waddles.a")),
+            Some("sha256:aa".to_string())
+        );
     }
 
     #[test]
