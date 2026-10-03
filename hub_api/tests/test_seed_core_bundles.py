@@ -493,6 +493,14 @@ def test_load_catalog_parses_the_real_repo_catalog() -> None:
         # activate_tenant_wide()).
         assert entry.activation_targets == (ActivationTarget(tenant_slug="global"),)
 
+    # regression: csping 1.0.0 is permanently retired (fix/csping-version-bump) -- alpha's
+    # app_versions already had a 1.0.0 row published from the pre-#573 Dockerfile.core-bundles
+    # (missing the `COPY sdk/waddle-sdk-cs` layer), and #573's fix changed the compiled
+    # csping.wasm for that same nominal version, so re-seeding 1.0.0 now 409s as
+    # digest_conflict. 1.0.1 is the first version built from the corrected Dockerfile.
+    versions_by_app_id = {e.app_id: e.version for e in entries}
+    assert versions_by_app_id["waddles.core.example.csping"] == "1.0.1"
+
 
 def test_load_catalog_defaults_a_missing_activation_targets_to_global(tmp_path: Path) -> None:
     catalog_path = tmp_path / "catalog.yaml"

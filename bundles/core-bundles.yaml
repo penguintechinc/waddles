@@ -72,8 +72,15 @@ bundles:
   # bundles/Dockerfile.core-bundles's csharp-bundle-builder stage; NOT covered by the
   # byte-reproducible gate (scripts/verify-core-bundles-reproducible.sh) -- same status as
   # pyping, see that script's own comment.
+  # 1.0.0 is permanently retired -- fix/csping-version-bump. alpha's app_versions already has
+  # a 1.0.0 row published from the pre-#573 Dockerfile.core-bundles (missing the
+  # `COPY sdk/waddle-sdk-cs` layer this bundle depends on); #573's fix changed the compiled
+  # csping.wasm for the same nominal version, and app_versions enforces an immutable digest
+  # per (app_id, version), so re-seeding 1.0.0 now 409s as digest_conflict. 1.0.1 is the first
+  # version built from the corrected Dockerfile. Mirrors
+  # bundles/rust/ping/hub-manifest.yaml's own 1.0.0/1.0.1 retirement comment.
   - app_id: waddles.core.example.csping
-    version: "1.0.0"
+    version: "1.0.1"
     language: csharp
     manifest_path: csping.manifest.yaml
     artifact_path: csping.wasm
