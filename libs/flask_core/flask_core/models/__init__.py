@@ -21,8 +21,11 @@ from flask_core.models.engagement import (
     PollVote,
 )
 from flask_core.models.guild_pairing import (
+    CommunityConnectionAccess,
     CommunityRoleSyncBinding,
     GuildTenantPairing,
+    PlatformConnection,
+    TenantPlatformApp,
     TenantPlatformCredential,
 )
 from flask_core.models.hub_user import HubUser
@@ -44,6 +47,7 @@ __all__ = [
     'Community',
     'CommunityCallParticipant',
     'CommunityCallRoom',
+    'CommunityConnectionAccess',
     'CommunityForm',
     'CommunityPoll',
     'CommunityRoleSyncBinding',
@@ -52,10 +56,12 @@ __all__ = [
     'FormSubmission',
     'GuildTenantPairing',
     'HubUser',
+    'PlatformConnection',
     'PollOption',
     'PollVote',
     'Role',
     'Tenant',
+    'TenantPlatformApp',
     'TenantPlatformCredential',
     'User',
     'VideoFeatureUsage',
