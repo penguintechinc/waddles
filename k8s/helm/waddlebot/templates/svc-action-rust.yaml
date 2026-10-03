@@ -148,6 +148,15 @@ spec:
         # it with "missing required audience").
         - name: SERVICE_JWT_SA_TOKEN_PATH
           value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+        # fix/pii-tokenization-env-override -- plain env off-switch, independent of the
+        # waddles.core.disable-pii-detokenization PostHog kill-switch (unusable in an
+        # environment with no in-cluster PostHog, e.g. alpha). Only rendered when
+        # pipeline.piiTokenization.enabled is false (see values.yaml's own comment);
+        # omitted entirely otherwise, so the default PostHog-gated behavior is unchanged.
+        {{- if not .Values.pipeline.piiTokenization.enabled }}
+        - name: PII_DETOKENIZATION_ENABLED
+          value: "false"
+        {{- end }}
         - name: DB_PASSWORD
           valueFrom:
             secretKeyRef:

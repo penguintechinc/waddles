@@ -352,6 +352,16 @@ pipeline:
         requests: { cpu: "500m", memory: "1Gi" }
         limits: { cpu: "2000m", memory: "2560Mi" }
 
+  # TEMP: re-enable once hub-api service_jwt issuer + internal gRPC listener
+  # are wired (see fix/hub-api-grpc-issuer). PII tokenization disabled so the
+  # data plane can start. Renders PII_TOKENIZATION_ENABLED=false on
+  # svc-process-rust and PII_DETOKENIZATION_ENABLED=false on svc-action-rust
+  # (see values.yaml's own comment on pipeline.piiTokenization for the full
+  # rationale) -- the PostHog kill-switch alone can't be set here (no
+  # in-cluster PostHog in alpha).
+  piiTokenization:
+    enabled: false
+
 presentation:
   image:
     repository: "localhost:32000/waddlebot/svc-presentation"

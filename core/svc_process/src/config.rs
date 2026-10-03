@@ -316,6 +316,26 @@ pub struct CliConfig {
     /// publicly-rooted endpoint instead.
     #[arg(long, env = "HUB_API_GRPC_CA_FILE", default_value = "")]
     pub hub_api_grpc_ca_file: String,
+
+    /// Plain env/values off-switch for inbound PII tokenization
+    /// (`crate::build_hub_client`'s gate), independent of the
+    /// `waddles.core.disable-pii-tokenization` PostHog kill-switch --
+    /// `rules/critical-rules.md` Feature Flags & License Tiers' opt-out
+    /// kill-switch principle ("keeps unseen-flags-OFF without stranding
+    /// air-gapped deploys"). PostHog alone can't be toggled in an
+    /// environment with no in-cluster PostHog (e.g. alpha), which would
+    /// otherwise strand that deployment behind the fail-loud gate whenever
+    /// hub-api's internal gRPC isn't reachable yet. `None` (unset, the
+    /// default) leaves the existing PostHog-gated, default-ENABLED,
+    /// fail-loud-when-unreachable behavior completely unchanged --
+    /// `Some(false)` is the only value this crate's startup gate treats
+    /// specially (see [`crate::run_with_shutdown`]'s call site): tokenization
+    /// runs disabled, `hub_client` is never connected, and startup never
+    /// fails loud. This is an explicit, loudly-logged operator escape hatch
+    /// for dev/air-gapped deployments -- never a silent bypass, and never the
+    /// default in a production tenant.
+    #[arg(long, env = "PII_TOKENIZATION_ENABLED")]
+    pub pii_tokenization_enabled_override: Option<bool>,
 }
 
 impl CliConfig {

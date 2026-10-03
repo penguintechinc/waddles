@@ -172,6 +172,44 @@ async fn build_hub_client(
     }
 }
 
+/// Resolves whether outbound PII detokenization is enabled for this startup.
+///
+/// [`config::CliConfig::pii_detokenization_enabled_override`]'s explicit
+/// `Some(false)` (`PII_DETOKENIZATION_ENABLED=false`) short-circuits to
+/// disabled *before* the `waddles.core.disable-pii-detokenization` PostHog
+/// kill-switch is ever consulted -- field-for-field mirror of
+/// `core/svc_process::resolve_pii_tokenization_enabled`'s identical
+/// rationale (plain env/values off-switch, independent of PostHog, for an
+/// environment with no in-cluster PostHog that would otherwise be stranded
+/// behind [`build_hub_client`]'s fail-loud gate). Any other override state
+/// (`Some(true)` or unset/`None`) falls through unchanged to the existing
+/// PostHog-gated, default-ENABLED behavior -- **this override only ever
+/// disables, never force-enables past the PostHog kill-switch**.
+///
+/// **SECURITY: an explicit, loudly-logged operator escape hatch, never a
+/// silent bypass.** Disabling detokenization means every relay send shows
+/// the raw `{user:<token>}` placeholder instead of a resolved display name
+/// -- a documented, deliberate degraded-UX tradeoff for dev/air-gapped
+/// deployments, never the default in a production tenant.
+async fn resolve_pii_detokenization_enabled(
+    cli: &config::CliConfig,
+    license: &Option<Arc<penguin_licensing::LicenseClient>>,
+) -> bool {
+    if cli.pii_detokenization_enabled_override == Some(false) {
+        tracing::warn!(
+            "PII_DETOKENIZATION_ENABLED=false env override set; outbound PII detokenization is \
+             DISABLED by explicit operator override, NOT the \
+             waddles.core.disable-pii-detokenization PostHog kill-switch -- hub-api's internal \
+             gRPC will not be contacted and startup will not fail loud. This is an operational \
+             escape hatch for dev/air-gapped deployments and must never be set in a production \
+             tenant: every relay send will show the raw {{user:<token>}} placeholder instead of \
+             a resolved display name."
+        );
+        return false;
+    }
+    flags::pii_detokenization_flag(license).enabled().await
+}
+
 /// Runs the service: loads config, bootstraps telemetry, builds the
 /// control-plane + metrics routers, and serves both until SIGINT/SIGTERM is
 /// received.
@@ -273,7 +311,8 @@ where
     // leave unwired): resolved ONCE here, before the host-API listener
     // starts below. See [`build_hub_client`]'s own doc for the fail-loud
     // contract.
-    let pii_detokenization_enabled = flags::pii_detokenization_flag(&license).enabled().await;
+    let pii_detokenization_enabled =
+        resolve_pii_detokenization_enabled(&config.cli, &license).await;
     let hub_client_conn = build_hub_client(&config.cli, pii_detokenization_enabled).await?;
 
     let connections = try_start_host_api(
@@ -2238,6 +2277,34 @@ mod tests {
             .await
             .expect("env_bundle_loader_loop must return promptly once shutdown resolves")
             .expect("loader task must not panic");
+    }
+
+    /// `PII_DETOKENIZATION_ENABLED=false` env override: disabled before the
+    /// PostHog kill-switch is ever consulted -- no license client needed
+    /// (passed `&None` here), no network touched.
+    #[tokio::test]
+    async fn resolve_pii_detokenization_enabled_honors_explicit_env_disable() {
+        let cli = CliConfig::parse_from([
+            "svc-action",
+            "--pii-detokenization-enabled-override",
+            "false",
+        ]);
+        assert_eq!(cli.pii_detokenization_enabled_override, Some(false));
+        assert!(!resolve_pii_detokenization_enabled(&cli, &None).await);
+    }
+
+    /// Env override unset (`None`, `CliConfig::parse_from`'s default): falls
+    /// through unchanged to `flags::pii_detokenization_flag`'s existing
+    /// `None`-license-client fallback, which reports ENABLED (the safe
+    /// default -- `flags::pii_detokenization_flag_defaults_enabled_when_
+    /// no_license_client_is_available` in `flags.rs` covers that fallback
+    /// directly; this test is the integration point proving this crate's
+    /// gate actually reaches it).
+    #[tokio::test]
+    async fn resolve_pii_detokenization_enabled_defers_to_posthog_gate_when_override_unset() {
+        let cli = CliConfig::parse_from(["svc-action"]);
+        assert_eq!(cli.pii_detokenization_enabled_override, None);
+        assert!(resolve_pii_detokenization_enabled(&cli, &None).await);
     }
 
     /// Kill-switch ON (`detokenization_enabled: false`) -- no
