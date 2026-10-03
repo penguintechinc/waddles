@@ -95,6 +95,117 @@ impl ActiveDigests {
     }
 }
 
+/// Shared, concurrently-readable per-SESSION loaded-bundle tracker --
+/// `crate::changelog_consumer::ConsumerState`'s `Arc`-shared counterpart to
+/// `bundle_active_set::SessionLoaded<AppScope>`, read by every spawned
+/// `dispatch_supervisor::run_app_consumer` task to pick a live executor
+/// session that actually has the target digest loaded
+/// (`crate::dispatch::DigestSource::Active`'s own doc), never just
+/// whichever connection `ConnectionRegistry::active()` happens to call
+/// "newest".
+///
+/// Direct port of the per-session half of `bundle_active_set::session_sync`
+/// wired for svc-action's own dispatch path -- `crate::changelog_consumer`
+/// is the sole writer (via `apply_active_set`, in lock-step with
+/// `ActiveDigests` above at the exact same call sites); every spawned
+/// dispatch consumer task is a reader only.
+///
+/// regression: bundles loaded only onto a terminating executor during
+/// rollout; live executor got none (alpha 2026-10-03)
+#[derive(Default)]
+pub struct LoadedSessions {
+    inner: RwLock<bundle_active_set::SessionLoaded<AppScope>>,
+}
+
+impl LoadedSessions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records `digest` as loaded for `scope` on `session` -- called by
+    /// `apply_active_set` after a successful `Load` wire call to that
+    /// specific session, in lock-step with `ConsumerState`'s own bookkeeping.
+    pub fn mark_loaded(
+        &self,
+        session: bundle_active_set::SessionId,
+        scope: AppScope,
+        digest: String,
+    ) {
+        self.inner
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_loaded(session, scope, digest);
+    }
+
+    /// Clears `scope`'s entry for `session` -- called after a successful
+    /// `Unload` wire call to that specific session.
+    pub fn mark_unloaded(&self, session: bundle_active_set::SessionId, scope: &AppScope) {
+        self.inner
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_unloaded(session, scope);
+    }
+
+    /// A session has been removed from the host-API registry -- drops ALL
+    /// of its loaded-state at once. See
+    /// `bundle_active_set::SessionLoaded::on_session_removed`'s own doc.
+    pub fn on_session_removed(
+        &self,
+        session: bundle_active_set::SessionId,
+    ) -> HashMap<AppScope, String> {
+        self.inner
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .on_session_removed(session)
+    }
+
+    /// Number of live sessions that currently have `scope` loaded (any
+    /// digest) -- `0` is the fail-closed "no live executor can serve this
+    /// bundle" state callers must log as ERROR and keep retrying.
+    pub fn loaded_count(&self, scope: &AppScope) -> usize {
+        self.inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .loaded_count(scope)
+    }
+
+    /// Total `(session, scope)` pairs currently tracked -- backs the
+    /// `bundles_loaded` gauge (fan-out visibility, not just presence).
+    pub fn total_entries(&self) -> usize {
+        self.inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .total_entries()
+    }
+
+    /// The live session (if any) that has `scope` loaded at exactly
+    /// `digest`, preferring newest -- the exact lookup
+    /// `crate::dispatch::handle_delivered` performs on every single
+    /// delivered entry before ever invoking. `None` means no live session
+    /// can serve this digest right now; callers MUST dead-letter
+    /// (`NO_LOADED_EXECUTOR`), never fall back to `ConnectionRegistry::
+    /// active()` alone (the alpha 2026-10-03 failure mode).
+    pub fn pick_session_with_digest(
+        &self,
+        scope: &AppScope,
+        digest: &str,
+    ) -> Option<bundle_active_set::SessionId> {
+        bundle_active_set::pick_session_with_digest(
+            &self.inner.read().unwrap_or_else(|e| e.into_inner()),
+            scope,
+            digest,
+        )
+    }
+
+    /// A read-only snapshot (clone) of the full per-session loaded-state --
+    /// used by `apply_active_set` to compute `bundle_active_set::
+    /// plan_sessions`/`any_session_diverged` against a stable view for the
+    /// duration of one tick, independent of concurrent dispatch-side reads.
+    pub fn snapshot(&self) -> bundle_active_set::SessionLoaded<AppScope> {
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +259,90 @@ mod tests {
         assert_eq!(digests.get(&scope_a), Some("sha256:aa".to_string()));
         assert_eq!(digests.get(&scope_b), Some("sha256:bb".to_string()));
         assert_eq!(digests.len(), 2);
+    }
+
+    /// regression: bundles loaded only onto a terminating executor during
+    /// rollout; live executor got none (alpha 2026-10-03)
+    mod loaded_sessions {
+        use super::*;
+
+        #[test]
+        fn mark_loaded_then_pick_session_with_digest_round_trips() {
+            let sessions = LoadedSessions::new();
+            sessions.mark_loaded(1, scope("waddles.a"), "sha256:aa".to_string());
+            assert_eq!(
+                sessions.pick_session_with_digest(&scope("waddles.a"), "sha256:aa"),
+                Some(1)
+            );
+        }
+
+        #[test]
+        fn pick_session_with_digest_prefers_newest_among_sessions_holding_the_digest() {
+            let sessions = LoadedSessions::new();
+            sessions.mark_loaded(1, scope("waddles.a"), "sha256:aa".to_string());
+            sessions.mark_loaded(3, scope("waddles.a"), "sha256:aa".to_string());
+            // Session 5 is newer overall but holds a DIFFERENT digest -- must
+            // never be picked for a dispatch targeting "sha256:aa".
+            sessions.mark_loaded(5, scope("waddles.a"), "sha256:other".to_string());
+            assert_eq!(
+                sessions.pick_session_with_digest(&scope("waddles.a"), "sha256:aa"),
+                Some(3)
+            );
+        }
+
+        #[test]
+        fn pick_session_with_digest_returns_none_when_nothing_holds_it() {
+            let sessions = LoadedSessions::new();
+            assert_eq!(
+                sessions.pick_session_with_digest(&scope("waddles.a"), "sha256:aa"),
+                None
+            );
+        }
+
+        #[test]
+        fn on_session_removed_drops_only_that_session() {
+            let sessions = LoadedSessions::new();
+            sessions.mark_loaded(1, scope("waddles.a"), "sha256:aa".to_string());
+            sessions.mark_loaded(2, scope("waddles.a"), "sha256:aa".to_string());
+            let dropped = sessions.on_session_removed(1);
+            assert_eq!(
+                dropped.get(&scope("waddles.a")),
+                Some(&"sha256:aa".to_string())
+            );
+            assert_eq!(sessions.loaded_count(&scope("waddles.a")), 1);
+            assert_eq!(
+                sessions.pick_session_with_digest(&scope("waddles.a"), "sha256:aa"),
+                Some(2)
+            );
+        }
+
+        #[test]
+        fn loaded_count_reflects_how_many_sessions_hold_a_scope() {
+            let sessions = LoadedSessions::new();
+            assert_eq!(sessions.loaded_count(&scope("waddles.a")), 0);
+            sessions.mark_loaded(1, scope("waddles.a"), "sha256:aa".to_string());
+            assert_eq!(sessions.loaded_count(&scope("waddles.a")), 1);
+            sessions.mark_unloaded(1, &scope("waddles.a"));
+            assert_eq!(sessions.loaded_count(&scope("waddles.a")), 0);
+        }
+
+        #[test]
+        fn snapshot_reflects_a_stable_clone_of_the_current_state() {
+            let sessions = LoadedSessions::new();
+            sessions.mark_loaded(1, scope("waddles.a"), "sha256:aa".to_string());
+            let snap = sessions.snapshot();
+            assert_eq!(snap.digest_for(1, &scope("waddles.a")), Some("sha256:aa"));
+            sessions.mark_loaded(1, scope("waddles.a"), "sha256:bb".to_string());
+            // The snapshot taken before the second write must stay frozen.
+            assert_eq!(snap.digest_for(1, &scope("waddles.a")), Some("sha256:aa"));
+        }
+
+        #[test]
+        fn total_entries_counts_every_session_scope_pair() {
+            let sessions = LoadedSessions::new();
+            sessions.mark_loaded(1, scope("waddles.a"), "sha256:aa".to_string());
+            sessions.mark_loaded(2, scope("waddles.a"), "sha256:aa".to_string());
+            assert_eq!(sessions.total_entries(), 2);
+        }
     }
 }

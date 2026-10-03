@@ -710,6 +710,33 @@ impl ConnectionRegistry {
         self.prune_and_snapshot().len()
     }
 
+    /// Every currently-live session's id -- the per-session bundle-sync fix
+    /// (regression: bundles loaded only onto a terminating executor during
+    /// rollout; live executor got none, alpha 2026-10-03) drives `Load`/
+    /// `Unload` at EVERY id this returns, never just [`Self::active`]'s
+    /// single "newest" pick.
+    pub fn live_session_ids(&self) -> Vec<u64> {
+        self.prune_and_snapshot()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// The live connection for exactly `id`, or `None` if it was never
+    /// registered, already removed, or has since reported closed -- the
+    /// per-session dispatch target [`crate::bundle_loader::RegistrySink`]
+    /// resolves against for every `Load`/`Unload` call, and the lookup
+    /// `crate::dispatch::handle_delivered` performs once `bundle_active_set::
+    /// pick_session_with_digest` (via `crate::active_digests::LoadedSessions`)
+    /// names a target session.
+    pub fn get(&self, id: u64) -> Option<Arc<Connection>> {
+        let guard = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .get(&id)
+            .filter(|conn| !conn.is_closed())
+            .map(Arc::clone)
+    }
+
     /// Returns a live session to dispatch over, or `None` if none remain.
     /// Selection is "newest live session wins" (see the type doc) -- a
     /// closed connection is never returned, so callers fail over to "no
@@ -1978,6 +2005,47 @@ mod tests {
         assert_eq!(registry.live_count(), 1);
         let active = registry.active().expect("the reconnected session is live");
         assert!(Arc::ptr_eq(&active, &conn2));
+    }
+
+    /// `live_session_ids` reports EVERY live session's id, not just the
+    /// single "newest" `active()` would pick -- the per-session bundle-sync
+    /// fix's actual fan-out target (regression: bundles loaded only onto a
+    /// terminating executor during rollout; live executor got none, alpha
+    /// 2026-10-03).
+    #[tokio::test]
+    async fn live_session_ids_reports_every_live_session_not_just_the_newest() {
+        let registry = ConnectionRegistry::new();
+        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        let id_a = registry.register(Connection::new(tx_a));
+        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        let id_b = registry.register(Connection::new(tx_b));
+
+        let mut ids = registry.live_session_ids();
+        ids.sort_unstable();
+        let mut expected = vec![id_a, id_b];
+        expected.sort_unstable();
+        assert_eq!(ids, expected);
+    }
+
+    /// `get` resolves a live session's connection by id, and fails closed
+    /// (`None`) for an id that was never registered, already removed, or
+    /// has since closed -- the exact lookup
+    /// `bundle_loader::RegistrySink` performs on every `Load`/`Unload`.
+    #[tokio::test]
+    async fn get_resolves_a_live_session_and_fails_closed_otherwise() {
+        let registry = ConnectionRegistry::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let conn = Connection::new(tx);
+        let id = registry.register(Arc::clone(&conn));
+
+        assert!(Arc::ptr_eq(&registry.get(id).expect("live session"), &conn));
+        assert!(registry.get(id + 1).is_none(), "never-registered id");
+
+        conn.mark_closed();
+        assert!(
+            registry.get(id).is_none(),
+            "a closed session must never be resolved, even before pruning"
+        );
     }
 
     /// Minimal `tracing::Subscriber` that counts `ERROR`-level events --
