@@ -109,6 +109,15 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
 
     dal.define_table(
         "hub_users",
+        # `uuid` (migration 0034_hub_users_identity_uuid): the real-user
+        # identity `{user:<uuid>}` data-plane tokenization (PR #429) and the
+        # egress detokenizer (PR #427, `internal_identity_service.py`,
+        # feature-checked on `"uuid" in dal.hub_users.fields`) both require
+        # -- Postgres-side is `UUID NOT NULL UNIQUE DEFAULT
+        # gen_random_uuid()`; bound here as `string` (not a pydal-native
+        # `uuid` type) to stay portable to the sqlite test backend, which
+        # has no UUID column type of its own.
+        Field("uuid", "string", length=36, notnull=True, unique=True),
         Field("display_name", "string", length=255),
         Field("username", "string", length=255),
         Field("email", "string", length=255),
