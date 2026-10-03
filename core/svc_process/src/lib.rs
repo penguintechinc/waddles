@@ -165,12 +165,32 @@ where
             state
                 .multi_tenant_consumer_configured
                 .store(true, std::sync::atomic::Ordering::Relaxed);
-            if !config.cli.process_app_id.is_empty() {
-                tracing::info!(
-                    process_app_id = %config.cli.process_app_id,
+            // regression: legacy ping consumer competed in the same consumer group as the
+            // multi-tenant one; ping intermittently UnknownBundle (alpha 2026-10-03).
+            // Multi-tenant is selected -- `try_start_process_loop` (legacy drain loop,
+            // which is what actually joins a consumer group on PROCESS_APP_ID) is never
+            // called below, regardless of which legacy env vars are set. WARN (not INFO)
+            // because a stale/leftover legacy env on this pod is itself the alpha
+            // incident's root cause -- an operator needs to see this every pod restart,
+            // not just once.
+            let ignored_legacy_env: Vec<&str> = [
+                (!config.cli.process_app_id.is_empty()).then_some("PROCESS_APP_ID"),
+                (!config.cli.process_ingest_platform.is_empty())
+                    .then_some("PROCESS_INGEST_PLATFORM"),
+                (!config.cli.process_ingest_source_id.is_empty())
+                    .then_some("PROCESS_INGEST_SOURCE_ID"),
+                (!config.cli.process_bundle_digest.is_empty()).then_some("PROCESS_BUNDLE_DIGEST"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            if !ignored_legacy_env.is_empty() {
+                tracing::warn!(
+                    ignored_legacy_env = ignored_legacy_env.join(","),
                     "startup path: multi-tenant changelog-consumer (DB_READER_PASSWORD \
-                     configured, kill-switches enabled); ignoring legacy PROCESS_APP_ID/ \
-                     PROCESS_INGEST_* env selection (restart required to fall back)"
+                     configured, kill-switches enabled); legacy single-app env present but \
+                     IGNORED -- the legacy drain loop will not start (restart with \
+                     DB_READER_PASSWORD unset to fall back to it)"
                 );
             } else {
                 tracing::info!(

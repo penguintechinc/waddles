@@ -24,9 +24,11 @@
 //! multi-bundle/hot-swap distribution reconciliation
 //! (`crate::distribution`'s module doc).
 //!
-//! **Bundle-selection sources (dataplane scale design rev 4, multi-tenant,
+//! **Bundle-*loading* sources (dataplane scale design rev 4, multi-tenant,
 //! 2026-09-28).** Two sources run side by side, neither exclusive of the
-//! other:
+//! other -- both only ever `load`/`unload` bundles onto an executor
+//! connection, neither reads from a Valkey stream, so there is no consumer
+//! group for them to collide on:
 //!
 //! - **Multi-tenant, change-log-driven active-bundle loader**
 //!   (`crate::changelog_consumer`, `core/bundle_active_set`,
@@ -44,6 +46,16 @@
 //!   statically configured bundle directly over the host-API connection,
 //!   independent of any external service. Runs unconditionally alongside
 //!   the DB-driven loader above; the two are gated independently.
+//!
+//! **Dispatch (stream-consumer) sources are a SEPARATE, strictly
+//! mutually-exclusive decision** ([`resolve_multi_tenant_path_decision`],
+//! `run_with_shutdown`) -- unlike the bundle-*loading* sources above, both
+//! the legacy [`try_start_dispatch`] loop and
+//! [`try_start_changelog_consumer`]'s multi-tenant `dispatch_spawner` read
+//! from the action stream via a named consumer group; running both for the
+//! same `app_id` splits one group's deliveries between two consumers
+//! (regression: `waddles.core.example.ping`, alpha 2026-10-03). Exactly one
+//! of the two ever starts per pod.
 //!
 //! The now-retired `GET /api/v1/distribution/bundles?stage=action` poll
 //! (spec §6.7) that used to be a third source has been removed -- superseded
@@ -194,33 +206,91 @@ where
     let state = http::AppState::new(config.clone(), prom_registry, Arc::clone(&connections));
     let consumer_loop_ready = Arc::clone(&state.consumer_loop_ready);
     let changelog_consumer_ready = Arc::clone(&state.changelog_consumer_ready);
-    // Both bundle-selection sources run unconditionally, gated
-    // independently (this module's top doc, dataplane scale design rev 4):
-    // the legacy `ACTION_BUNDLE_*` env override never gates on the
-    // multi-tenant DB path's own state. `resolve_db_path_active`/
-    // `try_start_db_bundle_loader` (single-tenant, mutual-exclusion) are
-    // retired -- superseded by `try_start_changelog_consumer`'s multi-tenant
-    // discovery of every `(tenant_id, community_id)` scope in the database.
+    // The legacy `ACTION_BUNDLE_*` env bundle-override loader is NOT a
+    // stream consumer (it only sends `load` for a statically configured
+    // digest directly over the host-API connection -- no Valkey consumer
+    // group involved) -- unlike the dispatch path below, it is safe to run
+    // unconditionally alongside the DB-driven loader (this module's top
+    // doc); nothing here changes that.
     try_start_env_bundle_loader(&config.cli, Arc::clone(&connections));
-    try_start_changelog_consumer(
-        &config,
-        Arc::clone(&connections),
-        license.clone(),
-        bundle_loader_excluded_metric,
-        Arc::clone(&kv_capabilities),
-        changelog_consumer_metrics,
-        dispatch_supervisor_metrics,
-        Arc::clone(&usage),
-        changelog_consumer_ready,
-    );
-    try_start_dispatch(
-        &config,
-        connections,
-        usage,
-        license,
-        drain_loop_metrics,
-        consumer_loop_ready,
-    );
+    // regression: legacy ping consumer competed in the same consumer group as the
+    // multi-tenant one; ping intermittently UnknownBundle (alpha 2026-10-03).
+    //
+    // The legacy single-app dispatch loop ([`try_start_dispatch`]) and the
+    // multi-tenant dispatch-consumer supervisor ([`try_start_changelog_consumer`]'s
+    // `dispatch_spawner`, added by #550) both join a consumer group on the
+    // SAME action stream whenever `ACTION_APP_ID` happens to match an
+    // app_id the DB-driven path also serves (exactly what alpha hit for
+    // `waddles.core.example.ping`): two independent consumers split one
+    // group's deliveries, so the legacy one dead-letters every entry it
+    // receives (its own `Static` digest is empty, `UnknownBundle`). The
+    // crate's top-doc "two sources run side by side, neither exclusive"
+    // description predates #550's dispatch supervisor and only ever applied
+    // to bundle *loading* (the env-override loader above, which has no
+    // consumer group to collide on) -- it was never a safe description of
+    // the *dispatch* path once a second dispatch consumer existed. Resolved
+    // ONCE at startup, same convention as `core/svc_process`'s
+    // `resolve_multi_tenant_path_decision`: a live kill-switch flip mid-run
+    // still stops DB-driven dispatch via `changelog_consumer::run`'s own
+    // per-tick gate check, it just doesn't fail OVER to the legacy loop
+    // without a pod restart.
+    let path_decision = resolve_multi_tenant_path_decision(&config, &license).await;
+    match path_decision {
+        PathDecision::MultiTenant => {
+            if !config.cli.action_app_id.is_empty() {
+                tracing::warn!(
+                    ignored_legacy_env = "ACTION_APP_ID",
+                    "startup path: multi-tenant changelog-consumer (DB_READER_PASSWORD \
+                     configured, kill-switches enabled); legacy ACTION_APP_ID present but \
+                     IGNORED -- the legacy dispatch loop will not start (restart with \
+                     DB_READER_PASSWORD unset to fall back to it)"
+                );
+            } else {
+                tracing::info!(
+                    "startup path: multi-tenant changelog-consumer (DB_READER_PASSWORD \
+                     configured, kill-switches enabled)"
+                );
+            }
+            // Nothing to wait for on the legacy path when it never starts.
+            consumer_loop_ready.store(true, std::sync::atomic::Ordering::Relaxed);
+            try_start_changelog_consumer(
+                &config,
+                Arc::clone(&connections),
+                license.clone(),
+                bundle_loader_excluded_metric,
+                Arc::clone(&kv_capabilities),
+                changelog_consumer_metrics,
+                dispatch_supervisor_metrics,
+                Arc::clone(&usage),
+                changelog_consumer_ready,
+            );
+        }
+        PathDecision::NoDbConfig | PathDecision::KillSwitchOn => {
+            if matches!(path_decision, PathDecision::KillSwitchOn) {
+                tracing::warn!(
+                    action_app_id = %config.cli.action_app_id,
+                    "startup path: legacy ACTION_APP_ID dispatch (multi-tenant kill-switch is \
+                     ON)"
+                );
+            } else {
+                tracing::info!(
+                    action_app_id = %config.cli.action_app_id,
+                    "startup path: legacy ACTION_APP_ID dispatch (DB_READER_PASSWORD not \
+                     configured)"
+                );
+            }
+            // Nothing to wait for on the multi-tenant path when it never starts.
+            changelog_consumer_ready.store(true, std::sync::atomic::Ordering::Relaxed);
+            try_start_dispatch(
+                &config,
+                Arc::clone(&connections),
+                Arc::clone(&usage),
+                license.clone(),
+                drain_loop_metrics,
+                consumer_loop_ready,
+            );
+        }
+    }
 
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
     let metrics_addr = SocketAddr::new(config.cli.bind_addr, config.cli.metrics_port);
@@ -662,21 +732,71 @@ async fn env_bundle_loader_loop(
     }
 }
 
+/// Outcome of [`resolve_multi_tenant_path_decision`] -- carries *why*, not
+/// just the boolean choice, same shape as `core/svc_process`'s own
+/// `PathDecision` (`run_with_shutdown`'s startup log line states the reason).
+/// Dispatch (the stream-consumer side, [`try_start_dispatch`] vs.
+/// [`try_start_changelog_consumer`]'s `dispatch_spawner`) is strictly
+/// mutually exclusive on this decision -- see `run_with_shutdown`'s own
+/// regression comment on why ("legacy ping consumer competed in the same
+/// consumer group", alpha 2026-10-03). The legacy `ACTION_BUNDLE_*` env
+/// bundle loader ([`try_start_env_bundle_loader`]) is unaffected: it has no
+/// consumer group to collide on, and keeps running regardless of this
+/// decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathDecision {
+    /// `DB_READER_PASSWORD` configured and both kill-switch gates resolved
+    /// enabled.
+    MultiTenant,
+    /// `DB_READER_PASSWORD` unset/empty -- no DB path exists to select,
+    /// regardless of kill-switch state.
+    NoDbConfig,
+    /// `DB_READER_PASSWORD` configured, but a kill-switch gate resolved
+    /// genuinely disabled.
+    KillSwitchOn,
+}
+
+/// Resolves, once at startup, whether the multi-tenant dispatch path or the
+/// legacy `ACTION_APP_ID` dispatch path is authoritative for this pod --
+/// mirrors `core/svc_process::resolve_multi_tenant_path_decision` exactly
+/// (same two kill-switch flags, same fail-open-on-no-license-client
+/// posture via `flags::db_bundle_config_flag`/`multi_tenant_watermark_flag`,
+/// each already defaulting to `StaticFlag(true)` when `license` is `None`).
+async fn resolve_multi_tenant_path_decision(
+    config: &config::Config,
+    license: &Option<Arc<penguin_licensing::LicenseClient>>,
+) -> PathDecision {
+    if config.db_reader_password.is_none() {
+        return PathDecision::NoDbConfig;
+    }
+    let flag: Arc<dyn flags::FeatureFlag> = Arc::new(flags::AllFlags(vec![
+        flags::db_bundle_config_flag(license),
+        flags::multi_tenant_watermark_flag(license),
+    ]));
+    if flag.enabled().await {
+        PathDecision::MultiTenant
+    } else {
+        PathDecision::KillSwitchOn
+    }
+}
+
 /// Attempts to start the multi-tenant, change-log-driven active-bundle
 /// loader (`crate::changelog_consumer`, dataplane scale design rev 4,
-/// §7/§8 step 2). One reason this never starts, logged and not an error --
-/// `DB_READER_PASSWORD` unset (the RO account hasn't been provisioned yet
-/// in this environment). Either way, the existing `ACTION_APP_ID`/
-/// `ACTION_BUNDLE_*` env selection remains the sole other source (the
-/// former `crate::distribution` catalog poll was retired 2026-09-27); this
-/// loader only supplements it once actually configured, and is
-/// additionally gated per-tick on BOTH `waddles.core.disable-db-bundle-config`
-/// and `waddles.core.disable-multi-tenant-watermark` (each already the
-/// negated "is this path enabled" answer, enabled by default, combined via
-/// `flags::AllFlags`) inside `changelog_consumer::run` regardless of
-/// whether this function's own startup gate passes. Reuses the
-/// already-built, already-refreshing `license` client (`run_with_shutdown`'s
-/// own `build_license_client` call) rather than constructing a second one.
+/// §7/§8 step 2) -- `run_with_shutdown` only calls this when
+/// [`resolve_multi_tenant_path_decision`] returned [`PathDecision::MultiTenant`];
+/// the legacy `ACTION_APP_ID` dispatch loop ([`try_start_dispatch`]) is never
+/// started in that case (strict mutual exclusion, this module's top doc).
+/// The legacy `ACTION_BUNDLE_*` env override ([`try_start_env_bundle_loader`])
+/// remains the sole other bundle-*loading* source -- unaffected by this
+/// decision, see that function's own doc for why. This loader's DB-driven
+/// bundle load/unload is additionally gated per-tick on BOTH
+/// `waddles.core.disable-db-bundle-config` and
+/// `waddles.core.disable-multi-tenant-watermark` inside
+/// `changelog_consumer::run`, a defense-in-depth recheck of the same two
+/// flags this function's caller already resolved once at startup. Reuses
+/// the already-built, already-refreshing `license` client
+/// (`run_with_shutdown`'s own `build_license_client` call) rather than
+/// constructing a second one.
 ///
 /// **`BUNDLE_SCOPE_TENANT_ID`/`BUNDLE_SCOPE_COMMUNITY_ID` REMOVED**
 /// (dataplane scale design, user requirement: "every svc_process/
@@ -696,11 +816,12 @@ fn try_start_changelog_consumer(
     usage: Arc<Mutex<usage::UsageBatcher>>,
     // regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
     // Independent from `try_start_dispatch`'s own `consumer_loop_ready` --
-    // this path runs unconditionally alongside the dispatch loop (this
-    // function's own doc), not mutually exclusively, so the two must never
-    // share one flag. Defaults `true` (nothing to wait for) when this path
-    // isn't even selected (`DB_READER_PASSWORD` unset) -- same "unconfigured
-    // never blocks readiness" convention `consumer_loop_ready` already uses.
+    // callers now call at most one of this function / `try_start_dispatch`
+    // per pod ([`PathDecision`]'s doc), but the two readiness flags still
+    // must never collapse into one: `run_with_shutdown` explicitly
+    // pre-stores `true` on whichever flag belongs to the path that never
+    // starts, so neither health check hangs waiting on a loop that was
+    // never going to run.
     changelog_consumer_ready: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
@@ -908,10 +1029,16 @@ fn try_start_changelog_consumer(
 /// bundle assigned yet), or `penguin_spine::SpineConfig::from_env()`/
 /// `ENVELOPE_BINDING_KEYS` parsing failing (missing/invalid required
 /// config -- hop verification must never silently fail open, so a missing
-/// keyring disables the loop rather than starting it unverified). Runs
-/// unconditionally alongside whichever bundle-selection path
-/// `run_with_shutdown` chose (this module's top doc) -- this is the
-/// consumer loop, not a bundle-selection path itself.
+/// keyring disables the loop rather than starting it unverified).
+/// `run_with_shutdown` only calls this when
+/// [`resolve_multi_tenant_path_decision`] did NOT select
+/// [`PathDecision::MultiTenant`] -- strictly mutually exclusive with
+/// [`try_start_changelog_consumer`]'s `dispatch_spawner` (regression: both
+/// joined the same consumer group on the action stream when `ACTION_APP_ID`
+/// matched a DB-driven app_id, alpha 2026-10-03). The legacy
+/// `ACTION_BUNDLE_*` env bundle *loader* ([`try_start_env_bundle_loader`])
+/// is a separate, non-consumer mechanism and still runs regardless of this
+/// decision.
 fn try_start_dispatch(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
@@ -1620,6 +1747,70 @@ mod tests {
             test_dispatch_supervisor_metrics(),
             usage,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+    }
+
+    // regression: legacy ping consumer competed in the same consumer group as the
+    // multi-tenant one; ping intermittently UnknownBundle (alpha 2026-10-03)
+    //
+    // `resolve_multi_tenant_path_decision`'s two outcomes below are what
+    // `run_with_shutdown`'s `match` branches on to decide which ONE of
+    // `try_start_dispatch` (legacy)/`try_start_changelog_consumer`
+    // (multi-tenant) ever runs -- the match itself makes calling both
+    // structurally impossible, so these decision-function tests are the
+    // actual mutual-exclusion regression coverage (same shape as
+    // `core/svc_process`'s identical pair of tests for its own
+    // `resolve_multi_tenant_path_decision`).
+
+    /// Mutual-exclusion regression test, missing-config half: `DB_READER_
+    /// PASSWORD` absent must resolve to the legacy path without even
+    /// constructing a license client, regardless of `ACTION_APP_ID`.
+    #[tokio::test]
+    async fn resolve_multi_tenant_path_decision_is_no_db_config_when_db_reader_password_unset() {
+        let cli =
+            CliConfig::parse_from(["svc-action", "--action-app-id", "waddles.core.example.ping"]);
+        let config = Config {
+            cli,
+            db_password: Secret::new("test-password"),
+            envelope_binding_keys: None,
+            discord_bot_token: None,
+            db_reader_password: None,
+        };
+        assert_eq!(
+            resolve_multi_tenant_path_decision(&config, &None).await,
+            PathDecision::NoDbConfig
+        );
+    }
+
+    /// Mutual-exclusion regression test, path-active half: DB config
+    /// present and no license client (fail-open, same cold-client contract
+    /// `flags::db_bundle_config_flag`/`multi_tenant_watermark_flag` already
+    /// document) resolves [`PathDecision::MultiTenant`] -- proving
+    /// `run_with_shutdown`'s `PathDecision::MultiTenant` match arm is the
+    /// one taken, so `try_start_dispatch` (the legacy consumer that
+    /// competed with the multi-tenant dispatch-consumer supervisor in the
+    /// alpha incident) is structurally never called for this config,
+    /// regardless of `ACTION_APP_ID` being set to the exact app_id the
+    /// DB-driven path also serves. The complementary "kill-switch ON ->
+    /// legacy runs" half requires a live PostHog/license server this
+    /// crate's test suite deliberately never depends on (same documented
+    /// gap as `core/svc_process`'s equivalent test).
+    #[tokio::test]
+    async fn resolve_multi_tenant_path_decision_is_multi_tenant_when_db_config_present_and_kill_switches_unseen(
+    ) {
+        let cli =
+            CliConfig::parse_from(["svc-action", "--action-app-id", "waddles.core.example.ping"]);
+        let config = Config {
+            cli,
+            db_password: Secret::new("test-password"),
+            envelope_binding_keys: None,
+            discord_bot_token: None,
+            db_reader_password: Some(Secret::new("real-ro-password")),
+        };
+        assert_eq!(
+            resolve_multi_tenant_path_decision(&config, &None).await,
+            PathDecision::MultiTenant,
+            "DB config present + no license client (fail-open) must select the multi-tenant path"
         );
     }
 

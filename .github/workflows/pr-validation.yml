@@ -619,6 +619,13 @@ jobs:
       - name: alpha render -- bundle-executor + legacy-env regression test
         run: bash scripts/ci/tests/test_alpha_render_bundle_executor.sh
 
+      # fix/legacy-path-mutually-exclusive -- the check above hard-requires a
+      # bundle-executor Deployment (alpha-only); this covers the bare render
+      # (base values.yaml defaults) and every other topology, none of which
+      # reach that executor-gated assertion.
+      - name: bare + beta/gamma/production render -- legacy single-app env regression test
+        run: bash scripts/ci/tests/test_no_legacy_single_app_env.sh
+
       # regression: all-digit short SHA rendered as %!s(int64=...) image tag
       # (alpha 2026-10-03) -- `--set global.imageTag=35604387` type-infers the
       # all-digit value as an int64, and every chart template building
