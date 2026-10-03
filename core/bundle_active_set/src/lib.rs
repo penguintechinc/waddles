@@ -63,6 +63,7 @@ pub mod bindings;
 pub mod changelog;
 pub mod diff;
 pub mod entities;
+pub mod full_sync;
 pub mod multi_tenant;
 pub mod query;
 pub mod reader;
@@ -74,6 +75,7 @@ pub use changelog::{
     read_safe_seq_watermark, ChangeLogTracker, ChangeRow, SafeSeqWatermark,
 };
 pub use diff::{plan, plan_scoped, DiffPlan, ScopedDiffPlan};
+pub use full_sync::{digest_prefix, loaded_state_diverged, should_send_full_sync, FullSyncReason};
 pub use multi_tenant::{
     read_active_set_all, read_source_bindings_all, scoped_active_rows, tenant_active_app_counts,
     AppScope, ScopeKey,

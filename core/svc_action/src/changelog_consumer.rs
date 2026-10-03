@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bundle_active_set::{ActiveSetRead, AppScope, ChangeLogTracker, ScopeKey};
+use bundle_active_set::{ActiveSetRead, AppScope, ChangeLogTracker, FullSyncReason, ScopeKey};
 use sea_orm::DatabaseConnection;
 
 use crate::bundle_loader::BundleSink;
@@ -54,6 +54,16 @@ use crate::telemetry::ChangelogConsumerMetrics;
 const SCOPE_STALE_EVICTION_BOUND: Duration = Duration::from_secs(3600);
 #[cfg(test)]
 const SCOPE_STALE_EVICTION_BOUND: Duration = Duration::from_millis(30);
+
+/// How long [`run`]'s loop coalesces repeated full-send triggers into a
+/// single forced full authoritative active-set read -- see
+/// `core/svc_process/src/changelog_consumer.rs`'s identical constant for the
+/// full rationale. regression: loads waited for 15-min full reconcile after
+/// startup/reconnect, UnknownBundle (alpha 2026-10-03)
+#[cfg(not(test))]
+const FULL_SEND_DEBOUNCE: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const FULL_SEND_DEBOUNCE: Duration = Duration::from_millis(20);
 
 /// Whether a scope that just failed its active-set re-read has been failing
 /// for longer than `bound` since its last success -- pure, no I/O; see
@@ -115,6 +125,15 @@ pub struct ConsumerState {
     /// in [`run_incremental_tick`] never fires; the heuristic gap fallback
     /// remains the sole detector.
     retention_supported: bool,
+    /// A forced full authoritative active-set send this consumer still owes
+    /// -- see `core/svc_process/src/changelog_consumer.rs`'s identical
+    /// field for the full rationale. regression: loads waited for 15-min
+    /// full reconcile after startup/reconnect, UnknownBundle (alpha
+    /// 2026-10-03).
+    pending_full_sync: Option<FullSyncReason>,
+    /// When the last forced full send actually ran -- the basis for
+    /// [`FULL_SEND_DEBOUNCE`]'s reconnect-storm coalescing.
+    last_full_send: Option<Instant>,
 }
 
 impl ConsumerState {
@@ -130,7 +149,22 @@ impl ConsumerState {
             tracker: ChangeLogTracker::new(initial_seq),
             scope_last_success: HashMap::new(),
             retention_supported: true,
+            // Deliberately `None` -- see `core/svc_process/src/
+            // changelog_consumer.rs`'s identical ctor for why.
+            pending_full_sync: None,
+            last_full_send: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_pending_full_sync(mut self, reason: FullSyncReason) -> Self {
+        self.pending_full_sync = Some(reason);
+        self
+    }
+
+    #[cfg(test)]
+    fn pending_full_sync(&self) -> Option<FullSyncReason> {
+        self.pending_full_sync
     }
 
     #[cfg(test)]
@@ -180,6 +214,8 @@ pub async fn initial_state(
         tracker: ChangeLogTracker::new(safe_seq),
         scope_last_success,
         retention_supported,
+        pending_full_sync: Some(FullSyncReason::Startup),
+        last_full_send: None,
     })
 }
 
@@ -189,11 +225,14 @@ pub async fn initial_state(
 /// correctness bug), diffs against `state.loaded`, and drives the resulting
 /// `Load`/`Unload` calls through `sink` -- shared by both
 /// [`run_incremental_tick`] and [`run_full_reconcile`].
+#[allow(clippy::too_many_arguments)]
 async fn apply_active_set(
     state: &mut ConsumerState,
     sink: Option<&dyn BundleSink>,
     excluded_metric: &prometheus::IntCounterVec,
     kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
+    metrics: &ChangelogConsumerMetrics,
+    full_sync_reason: Option<FullSyncReason>,
 ) {
     let active = bundle_active_set::scoped_active_rows(&state.by_scope);
     // Mirrors `crate::bundle_loader::run_tick`'s identical refresh (PR #425
@@ -218,6 +257,24 @@ async fn apply_active_set(
     }
 
     let plan = bundle_active_set::plan_scoped(&state.loaded, &active);
+
+    if let Some(reason) = full_sync_reason {
+        // Over-log by design (user rule: never silent). regression: loads
+        // waited for 15-min full reconcile after startup/reconnect,
+        // UnknownBundle (alpha 2026-10-03).
+        tracing::info!(
+            reason = %reason,
+            active_count = active.len(),
+            to_load = plan.to_load.len(),
+            to_unload = plan.to_unload.len(),
+            "changelog consumer: forcing a full authoritative active-set send"
+        );
+        metrics
+            .bundle_full_sync_total
+            .with_label_values(&[reason.as_str()])
+            .inc();
+    }
+
     let Some(sink) = sink else {
         if !plan.is_empty() {
             tracing::debug!(
@@ -230,21 +287,35 @@ async fn apply_active_set(
     };
 
     for (scope, row) in &plan.to_load {
+        let load_start = Instant::now();
         match sink.load(scope.0, scope.1, row).await {
             Ok(()) => {
                 tracing::info!(
                     tenant_id = scope.0, community_id = scope.1,
-                    app_id = %row.app_id, digest = %row.digest,
+                    app_id = %row.app_id, version = %row.version,
+                    digest_prefix = %bundle_active_set::digest_prefix(&row.digest),
+                    duration_ms = load_start.elapsed().as_millis() as u64,
                     "changelog consumer: loaded"
                 );
+                metrics
+                    .bundle_loads_total
+                    .with_label_values(&["success"])
+                    .inc();
                 state.loaded.insert(scope.clone(), row.digest.clone());
             }
             Err(err) => {
-                tracing::warn!(
+                tracing::error!(
                     tenant_id = scope.0, community_id = scope.1,
-                    app_id = %row.app_id, digest = %row.digest, error = %err,
+                    app_id = %row.app_id, version = %row.version,
+                    digest_prefix = %bundle_active_set::digest_prefix(&row.digest),
+                    duration_ms = load_start.elapsed().as_millis() as u64,
+                    error = %err,
                     "changelog consumer: load failed, will retry next tick"
                 );
+                metrics
+                    .bundle_loads_total
+                    .with_label_values(&["failure"])
+                    .inc();
             }
         }
     }
@@ -267,6 +338,7 @@ async fn apply_active_set(
             }
         }
     }
+    metrics.bundles_loaded.set(state.loaded.len() as i64);
 }
 
 fn update_tenant_gauges(state: &ConsumerState, metrics: &ChangelogConsumerMetrics) {
@@ -322,7 +394,34 @@ pub async fn run_incremental_tick(
         };
     let safe_seq = watermark.safe_seq;
     metrics.changelog_lag.set(state.tracker.lag(safe_seq));
+    let active_count = bundle_active_set::scoped_active_rows(&state.by_scope).len();
+    tracing::debug!(
+        safe_seq,
+        last_seq = state.tracker.last_seq(),
+        active_count,
+        loaded_count = state.loaded.len(),
+        "changelog consumer: poll tick"
+    );
     if safe_seq <= state.tracker.last_seq() {
+        // The watermark hasn't moved, but a reconnect (or any other
+        // out-of-band event) may have cleared `state.loaded` without
+        // anything in the DB actually changing -- see
+        // `core/svc_process/src/changelog_consumer.rs`'s identical check
+        // for the full rationale. regression: loads waited for 15-min full
+        // reconcile after startup/reconnect, UnknownBundle (alpha
+        // 2026-10-03).
+        if bundle_active_set::loaded_state_diverged(&state.by_scope, &state.loaded) {
+            apply_active_set(
+                state,
+                sink,
+                excluded_metric,
+                kv_capabilities,
+                metrics,
+                Some(FullSyncReason::Diverged),
+            )
+            .await;
+            update_tenant_gauges(state, metrics);
+        }
         return;
     }
 
@@ -339,7 +438,16 @@ pub async fn run_incremental_tick(
              (min_retained_seq); forcing a full reconcile instead of a partial apply"
         );
         metrics.changelog_retention_exceeded_total.inc();
-        run_full_reconcile(db, state, sink, excluded_metric, metrics, kv_capabilities).await;
+        run_full_reconcile(
+            db,
+            state,
+            sink,
+            excluded_metric,
+            metrics,
+            kv_capabilities,
+            FullSyncReason::Reconcile,
+        )
+        .await;
         state.tracker.advance(safe_seq);
         metrics.changelog_lag.set(state.tracker.lag(safe_seq));
         return;
@@ -366,7 +474,16 @@ pub async fn run_incremental_tick(
                  after falling behind); forcing a full reconcile instead of a partial apply"
             );
             metrics.changelog_gap_detected_total.inc();
-            run_full_reconcile(db, state, sink, excluded_metric, metrics, kv_capabilities).await;
+            run_full_reconcile(
+                db,
+                state,
+                sink,
+                excluded_metric,
+                metrics,
+                kv_capabilities,
+                FullSyncReason::Reconcile,
+            )
+            .await;
             state.tracker.advance(safe_seq);
             metrics.changelog_lag.set(state.tracker.lag(safe_seq));
             return;
@@ -434,7 +551,7 @@ pub async fn run_incremental_tick(
     state.tracker.advance(new_last_seq);
     metrics.changelog_lag.set(state.tracker.lag(safe_seq));
 
-    apply_active_set(state, sink, excluded_metric, kv_capabilities).await;
+    apply_active_set(state, sink, excluded_metric, kv_capabilities, metrics, None).await;
     update_tenant_gauges(state, metrics);
     metrics
         .reconcile_duration_seconds
@@ -448,6 +565,7 @@ pub async fn run_incremental_tick(
 /// any change-log defect to one interval, independent of the change-log's
 /// own correctness. Timed into
 /// [`ChangelogConsumerMetrics::reconcile_duration_seconds`].
+#[allow(clippy::too_many_arguments)]
 pub async fn run_full_reconcile(
     db: &DatabaseConnection,
     state: &mut ConsumerState,
@@ -455,6 +573,7 @@ pub async fn run_full_reconcile(
     excluded_metric: &prometheus::IntCounterVec,
     metrics: &ChangelogConsumerMetrics,
     kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
+    reason: FullSyncReason,
 ) {
     let start = Instant::now();
     match bundle_active_set::read_active_set_all(db).await {
@@ -473,12 +592,59 @@ pub async fn run_full_reconcile(
         }
     }
 
-    apply_active_set(state, sink, excluded_metric, kv_capabilities).await;
+    apply_active_set(
+        state,
+        sink,
+        excluded_metric,
+        kv_capabilities,
+        metrics,
+        Some(reason),
+    )
+    .await;
     update_tenant_gauges(state, metrics);
 
     metrics
         .reconcile_duration_seconds
         .observe(start.elapsed().as_secs_f64());
+}
+
+/// Attempts the forced full send `state.pending_full_sync` names (if any),
+/// coalesced against `state.last_full_send` by `debounce` -- see
+/// `core/svc_process/src/changelog_consumer.rs`'s identical function for the
+/// full rationale. regression: loads waited for 15-min full reconcile after
+/// startup/reconnect, UnknownBundle (alpha 2026-10-03).
+#[allow(clippy::too_many_arguments)]
+pub async fn drain_pending_full_sync(
+    db: &DatabaseConnection,
+    state: &mut ConsumerState,
+    sink: Option<&dyn BundleSink>,
+    excluded_metric: &prometheus::IntCounterVec,
+    metrics: &ChangelogConsumerMetrics,
+    kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
+    now: Instant,
+    debounce: Duration,
+) {
+    let Some(reason) = state.pending_full_sync else {
+        return;
+    };
+    if sink.is_none() {
+        return;
+    }
+    if !bundle_active_set::should_send_full_sync(state.last_full_send, now, debounce) {
+        return;
+    }
+    run_full_reconcile(
+        db,
+        state,
+        sink,
+        excluded_metric,
+        metrics,
+        kv_capabilities,
+        reason,
+    )
+    .await;
+    state.last_full_send = Some(now);
+    state.pending_full_sync = None;
 }
 
 /// How long [`run`] keeps retrying [`initial_state`] with capped backoff
@@ -601,6 +767,28 @@ pub async fn run(
     // PR #406). `None`: no connection observed yet.
     let mut last_connection_id: Option<usize> = None;
 
+    // `initial_state` already set `state.pending_full_sync` to
+    // `FullSyncReason::Startup` -- see `core/svc_process/src/
+    // changelog_consumer.rs`'s identical prelude for the full rationale.
+    {
+        let active_connection = connections.active();
+        let sink = active_connection.map(|connection| crate::bundle_loader::ExecutorSink {
+            connection,
+            call_timeout_ms,
+        });
+        drain_pending_full_sync(
+            &db,
+            &mut state,
+            sink.as_ref().map(|s| s as &dyn BundleSink),
+            &excluded_metric,
+            &metrics,
+            &kv_capabilities,
+            Instant::now(),
+            FULL_SEND_DEBOUNCE,
+        )
+        .await;
+    }
+
     loop {
         let active_connection = connections.active();
         if detect_new_connection(active_connection.as_ref(), &mut last_connection_id) {
@@ -610,6 +798,7 @@ pub async fn run(
                  registry on every disconnect)"
             );
             state.loaded.clear();
+            state.pending_full_sync = Some(FullSyncReason::Reconnect);
             metrics.executor_reconnect_detected_total.inc();
         }
         let sink = active_connection.map(|connection| crate::bundle_loader::ExecutorSink {
@@ -617,6 +806,21 @@ pub async fn run(
             call_timeout_ms,
         });
         let sink_ref = sink.as_ref().map(|s| s as &dyn BundleSink);
+
+        // "Don't wait for the watermark or the full-reconcile timer" --
+        // regression: loads waited for 15-min full reconcile after
+        // startup/reconnect, UnknownBundle (alpha 2026-10-03).
+        drain_pending_full_sync(
+            &db,
+            &mut state,
+            sink_ref,
+            &excluded_metric,
+            &metrics,
+            &kv_capabilities,
+            Instant::now(),
+            FULL_SEND_DEBOUNCE,
+        )
+        .await;
 
         tokio::select! {
             _ = &mut shutdown => return,
@@ -633,7 +837,10 @@ pub async fn run(
                 if !flag.enabled().await {
                     continue;
                 }
-                run_full_reconcile(&db, &mut state, sink_ref, &excluded_metric, &metrics, &kv_capabilities).await;
+                run_full_reconcile(
+                    &db, &mut state, sink_ref, &excluded_metric, &metrics, &kv_capabilities,
+                    FullSyncReason::Reconcile,
+                ).await;
             }
         }
     }
@@ -1203,6 +1410,7 @@ mod tests {
             &test_excluded_metric(),
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
+            FullSyncReason::Reconcile,
         )
         .await;
         assert_eq!(
@@ -1320,6 +1528,306 @@ mod tests {
             changelog_consumer_ready.load(std::sync::atomic::Ordering::Relaxed),
             "regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02) -- \
              readiness must flip true once the initial active-set read succeeds"
+        );
+    }
+
+    // --- Immediate full-sync regression (alpha 2026-10-03) -------------
+    // regression: loads waited for 15-min full reconcile after
+    // startup/reconnect, UnknownBundle (alpha 2026-10-03)
+    // See `core/svc_process/src/changelog_consumer.rs`'s identical test
+    // suite for the full rationale behind each test below.
+
+    #[derive(Default)]
+    struct FailingSink;
+    impl BundleSink for FailingSink {
+        fn load<'a>(
+            &'a self,
+            _tenant_id: i32,
+            _community_id: i32,
+            _row: &'a bundle_active_set::ActiveBundleRow,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(), crate::dispatch::InvokeError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move { Err(crate::dispatch::InvokeError::NoExecutor) })
+        }
+        fn unload<'a>(
+            &'a self,
+            _tenant_id: i32,
+            _community_id: i32,
+            _app_id: &'a str,
+            _digest: &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(), crate::dispatch::InvokeError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move { Err(crate::dispatch::InvokeError::NoExecutor) })
+        }
+    }
+
+    fn by_scope_with_one_active_app(digest: &str) -> HashMap<ScopeKey, ActiveSetRead> {
+        let mut by_scope = HashMap::new();
+        by_scope.insert(
+            (1, 0),
+            ActiveSetRead {
+                rows: vec![bundle_active_set::ActiveBundleRow {
+                    app_id: "waddles.a".to_string(),
+                    version: "1".to_string(),
+                    digest: digest.to_string(),
+                    component_key: "k".to_string(),
+                    sidecar_key: "s".to_string(),
+                    declared_capabilities: Vec::new(),
+                }],
+                excluded: Vec::new(),
+                degraded: Vec::new(),
+            },
+        );
+        by_scope
+    }
+
+    #[tokio::test]
+    async fn initial_state_seeds_a_pending_startup_full_sync() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![retention_probe_row_supported()]])
+            .append_query_results([vec![watermark_row(0)]])
+            .append_query_results([
+                Vec::<bundle_active_set::entities::app_active_versions::Model>::new(),
+            ])
+            .into_connection();
+        let state = initial_state(&db)
+            .await
+            .expect("initial_state must succeed");
+        assert_eq!(
+            state.pending_full_sync(),
+            Some(FullSyncReason::Startup),
+            "a freshly-started consumer must owe an immediate full send"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_pending_full_sync_sends_immediately_on_startup() {
+        let digest = format!("sha256:{}", "1".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.a", &digest)]])
+            .append_query_results([vec![approval_row(1, "waddles.a")]])
+            .into_connection();
+        let mut state = ConsumerState::new(0).with_pending_full_sync(FullSyncReason::Startup);
+        let sink = FakeSink::default();
+        let metrics = test_changelog_metrics();
+        drain_pending_full_sync(
+            &db,
+            &mut state,
+            Some(&sink as &dyn BundleSink),
+            &test_excluded_metric(),
+            &metrics,
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            Instant::now(),
+            Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+        assert_eq!(state.pending_full_sync(), None);
+        assert_eq!(
+            metrics
+                .bundle_full_sync_total
+                .with_label_values(&["startup"])
+                .get(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_pending_full_sync_leaves_the_flag_pending_with_no_sink_yet() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let mut state = ConsumerState::new(0).with_pending_full_sync(FullSyncReason::Startup);
+        drain_pending_full_sync(
+            &db,
+            &mut state,
+            None,
+            &test_excluded_metric(),
+            &test_changelog_metrics(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            Instant::now(),
+            Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(
+            state.pending_full_sync(),
+            Some(FullSyncReason::Startup),
+            "no connection yet -- must retry on a later iteration, never drop silently"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_pending_full_sync_coalesces_a_reconnect_storm_then_sends_again_after_debounce() {
+        let digest_a = format!("sha256:{}", "2".repeat(64));
+        let digest_b = format!("sha256:{}", "3".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.a", &digest_a)]])
+            .append_query_results([vec![approval_row(1, "waddles.a")]])
+            .append_query_results([vec![active_row("waddles.b", 1, 0, 11)]])
+            .append_query_results([vec![version_row(11, "waddles.b", &digest_b)]])
+            .append_query_results([vec![approval_row(1, "waddles.b")]])
+            .into_connection();
+        let mut state = ConsumerState::new(0).with_pending_full_sync(FullSyncReason::Reconnect);
+        let sink = FakeSink::default();
+        let metrics = test_changelog_metrics();
+        let debounce = Duration::from_millis(20);
+        let t0 = Instant::now();
+
+        drain_pending_full_sync(
+            &db,
+            &mut state,
+            Some(&sink as &dyn BundleSink),
+            &test_excluded_metric(),
+            &metrics,
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            t0,
+            debounce,
+        )
+        .await;
+        assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest_a}")]);
+
+        state.pending_full_sync = Some(FullSyncReason::Reconnect);
+        drain_pending_full_sync(
+            &db,
+            &mut state,
+            Some(&sink as &dyn BundleSink),
+            &test_excluded_metric(),
+            &metrics,
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            t0 + Duration::from_millis(5),
+            debounce,
+        )
+        .await;
+        assert_eq!(
+            sink.calls(),
+            vec![format!("load:waddles.a:{digest_a}")],
+            "a reconnect within the debounce window must be coalesced, not re-sent"
+        );
+        assert_eq!(state.pending_full_sync(), Some(FullSyncReason::Reconnect));
+
+        drain_pending_full_sync(
+            &db,
+            &mut state,
+            Some(&sink as &dyn BundleSink),
+            &test_excluded_metric(),
+            &metrics,
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            t0 + Duration::from_millis(25),
+            debounce,
+        )
+        .await;
+        assert_eq!(
+            sink.calls(),
+            vec![
+                format!("load:waddles.a:{digest_a}"),
+                format!("load:waddles.b:{digest_b}"),
+                format!("unload:waddles.a:{digest_a}"),
+            ],
+            "once the debounce window elapses the coalesced reconnect must still be honored"
+        );
+        assert_eq!(state.pending_full_sync(), None);
+        assert_eq!(
+            metrics
+                .bundle_full_sync_total
+                .with_label_values(&["reconnect"])
+                .get(),
+            2,
+            "exactly two full sends must have happened, never three"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_incremental_tick_sends_full_sync_when_loaded_state_diverged_but_watermark_unchanged(
+    ) {
+        let digest = format!("sha256:{}", "4".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![watermark_row(100)]])
+            .into_connection();
+        let mut state = ConsumerState::new(100);
+        state.by_scope = by_scope_with_one_active_app(&digest);
+        let sink = FakeSink::default();
+        let metrics = test_changelog_metrics();
+        run_incremental_tick(
+            &db,
+            &mut state,
+            Some(&sink as &dyn BundleSink),
+            &test_excluded_metric(),
+            &metrics,
+            &bundle_host_kv::CapabilitySnapshot::new(),
+        )
+        .await;
+        assert_eq!(state.last_seq(), 100);
+        assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+        assert_eq!(
+            state.loaded().get(&(1, 0, "waddles.a".to_string())),
+            Some(&digest)
+        );
+        assert_eq!(
+            metrics
+                .bundle_full_sync_total
+                .with_label_values(&["diverged"])
+                .get(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn run_incremental_tick_retries_a_failed_load_on_the_next_tick() {
+        let digest = format!("sha256:{}", "6".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![watermark_row(100)]])
+            .append_query_results([vec![watermark_row(100)]])
+            .into_connection();
+        let mut state = ConsumerState::new(100);
+        state.by_scope = by_scope_with_one_active_app(&digest);
+        let metrics = test_changelog_metrics();
+
+        let failing_sink = FailingSink;
+        run_incremental_tick(
+            &db,
+            &mut state,
+            Some(&failing_sink as &dyn BundleSink),
+            &test_excluded_metric(),
+            &metrics,
+            &bundle_host_kv::CapabilitySnapshot::new(),
+        )
+        .await;
+        assert!(state.loaded().is_empty());
+        assert_eq!(
+            metrics
+                .bundle_loads_total
+                .with_label_values(&["failure"])
+                .get(),
+            1
+        );
+
+        let sink = FakeSink::default();
+        run_incremental_tick(
+            &db,
+            &mut state,
+            Some(&sink as &dyn BundleSink),
+            &test_excluded_metric(),
+            &metrics,
+            &bundle_host_kv::CapabilitySnapshot::new(),
+        )
+        .await;
+        assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+        assert_eq!(
+            metrics
+                .bundle_loads_total
+                .with_label_values(&["success"])
+                .get(),
+            1
         );
     }
 }

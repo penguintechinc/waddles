@@ -298,6 +298,17 @@ pub struct ChangelogConsumerMetrics {
     /// own `loaded` bookkeeping in lockstep and resends the full
     /// authoritative active set.
     pub executor_reconnect_detected_total: prometheus::IntCounter,
+    /// Per-bundle `Load` outcomes, labeled by `result` (`"success"`/
+    /// `"failure"`) -- regression: loads waited for 15-min full reconcile
+    /// after startup/reconnect, UnknownBundle (alpha 2026-10-03).
+    pub bundle_loads_total: prometheus::IntCounterVec,
+    /// Forced full authoritative active-set sends, labeled by `reason`
+    /// (`"startup"`/`"reconnect"`/`"reconcile"`/`"diverged"`) -- see
+    /// `bundle_active_set::FullSyncReason`.
+    pub bundle_full_sync_total: prometheus::IntCounterVec,
+    /// Current count of `AppScope`s this consumer believes are loaded on
+    /// the connected executor, refreshed after every apply.
+    pub bundles_loaded: prometheus::IntGauge,
 }
 
 /// Registers [`ChangelogConsumerMetrics`] against `registry`. Must be
@@ -396,6 +407,40 @@ pub fn register_changelog_consumer_metrics(
         .register(Box::new(executor_reconnect_detected_total.clone()))
         .expect("register svc_process_executor_reconnect_detected_total");
 
+    let bundle_loads_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_bundle_loads_total",
+            "Per-bundle Load outcomes, by result (success/failure)",
+        ),
+        &["result"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(bundle_loads_total.clone()))
+        .expect("register svc_process_bundle_loads_total");
+
+    let bundle_full_sync_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_bundle_full_sync_total",
+            "Forced full authoritative active-set sends, by reason \
+             (startup/reconnect/reconcile/diverged)",
+        ),
+        &["reason"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(bundle_full_sync_total.clone()))
+        .expect("register svc_process_bundle_full_sync_total");
+
+    let bundles_loaded = prometheus::IntGauge::new(
+        "svc_process_bundles_loaded",
+        "Current count of AppScopes this consumer believes are loaded on the connected executor",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(bundles_loaded.clone()))
+        .expect("register svc_process_bundles_loaded");
+
     ChangelogConsumerMetrics {
         applied_scopes_total,
         scope_failures_total,
@@ -406,6 +451,9 @@ pub fn register_changelog_consumer_metrics(
         changelog_gap_detected_total,
         changelog_retention_exceeded_total,
         executor_reconnect_detected_total,
+        bundle_loads_total,
+        bundle_full_sync_total,
+        bundles_loaded,
     }
 }
 
@@ -529,9 +577,21 @@ mod tests {
         metrics.changelog_gap_detected_total.inc();
         metrics.changelog_retention_exceeded_total.inc();
         metrics.executor_reconnect_detected_total.inc();
+        metrics
+            .bundle_loads_total
+            .with_label_values(&["success"])
+            .inc();
+        metrics
+            .bundle_full_sync_total
+            .with_label_values(&["startup"])
+            .inc();
+        metrics.bundles_loaded.set(3);
 
         let rendered = render_metrics(&registry).expect("registry with metrics must encode");
         assert!(rendered.contains("svc_process_changelog_applied_scopes_total 1"));
+        assert!(rendered.contains(r#"result="success""#));
+        assert!(rendered.contains(r#"reason="startup""#));
+        assert!(rendered.contains("svc_process_bundles_loaded 3"));
         assert!(rendered.contains(r#"reason="read_failed""#));
         assert!(rendered.contains("svc_process_changelog_lag 42"));
         assert!(rendered.contains("svc_process_changelog_reconcile_duration_seconds"));
