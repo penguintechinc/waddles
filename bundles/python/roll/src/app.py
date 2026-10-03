@@ -1,9 +1,11 @@
 """`!roll [NdM]` -> a bounds-validated dice roll, relayed to the caller's own origin platform.
 
 Token-safe (PR batch 1, 2026-10-03): relay only, no kv/db state, never echoes
-another user's handle. Modeled on `bundles/python/pyping`'s hand-built
-structure (see that module's own docstring for the `_entry_wiring.py`
-caveat).
+another user's handle, and never logs `event.actor` either -- ahead of the
+PII-tokenization pipeline (#427/#429), `event.actor` may currently be a raw
+username rather than an opaque token. Modeled on `bundles/python/pyping`'s
+hand-built structure (see that module's own docstring for the
+`_entry_wiring.py` caveat).
 
 Gated behind the PostHog flag ``waddles.command-roll`` -- see
 `bundles/python/eightball/src/app.py`'s own docstring for the flag-gate
@@ -86,7 +88,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         rolls = [random.randint(1, sides) for _ in range(count)]  # noqa: S311 - a game, not crypto
         reply_text = f"\U0001f3b2 rolls {rolls} (total {sum(rolls)})"
 
-    log.info("roll.transform matched", actor=event.actor, platform=event.platform)
+    log.info("roll.transform matched", platform=event.platform)
     return PlatformEvent(
         platform=event.platform,
         event_type=event.event_type,

@@ -1,8 +1,10 @@
 """`!8ball <question>` -> a random canned answer, relayed to the caller's own origin platform.
 
 Token-safe (PR batch 1, 2026-10-03): relay only, no kv/db state, never echoes
-another user's handle -- safe to ship ahead of the PII-tokenization pipeline
-(#427/#429). Modeled on `bundles/python/pyping`'s hand-built structure (same
+another user's handle, and never logs `event.actor` either -- safe to ship
+ahead of the PII-tokenization pipeline (#427/#429), which means `event.actor`
+may currently be a raw username rather than an opaque token. Modeled on
+`bundles/python/pyping`'s hand-built structure (same
 caveat: routed through a hand-authored `_entry_wiring.py`, not
 `bundle_compiler`, which is still stubbed).
 
@@ -78,7 +80,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         return None
 
     answer = random.choice(ANSWERS)  # noqa: S311 - a game reply, not a security decision
-    log.info("eightball.transform matched", actor=event.actor, platform=event.platform)
+    log.info("eightball.transform matched", platform=event.platform)
 
     return PlatformEvent(
         platform=event.platform,

@@ -122,3 +122,14 @@ def test_dispatch_raises_when_channel_id_is_missing(fake_host) -> None:
     with pytest.raises(ValueError, match="channel_id"):
         _run(dispatch(envelope, {}, http_client=None))
     assert fake_host.relay_calls == []
+
+
+def test_transform_and_dispatch_never_log_the_raw_actor(fake_host) -> None:
+    _run(transform(_sample_event("!8ball")))
+    envelope = _sample_envelope("twitch", "\U0001f3b1 It is certain.")
+    _run(dispatch(envelope, {}, http_client=None))
+
+    for _level, message, fields_json in fake_host.log_calls:
+        assert "viewer-1" not in message
+        assert "viewer-1" not in fields_json
+        assert "actor" not in json.loads(fields_json)

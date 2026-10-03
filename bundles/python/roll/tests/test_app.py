@@ -120,3 +120,27 @@ def test_dispatch_raises_when_channel_id_is_missing(fake_host) -> None:
     with pytest.raises(ValueError, match="channel_id"):
         _run(dispatch(envelope, {}, http_client=None))
     assert fake_host == []
+
+
+def test_transform_and_dispatch_never_log_the_raw_actor(monkeypatch: pytest.MonkeyPatch) -> None:
+    log_calls: list[tuple[int, str, str]] = []
+    flags_mod = types.SimpleNamespace(enabled=lambda key, default_value: True)
+    relay_mod = types.SimpleNamespace(push=lambda provider, msg: None)
+    log_mod = types.SimpleNamespace(
+        Level={"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3},
+        write=lambda lvl, msg, fields_json: log_calls.append((lvl, msg, fields_json)),
+    )
+    fake_wit_world = types.ModuleType("wit_world")
+    fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
+        flags=flags_mod, relay=relay_mod, log=log_mod
+    )
+    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
+
+    _run(transform(_sample_event("!roll")))
+    envelope = _sample_envelope("twitch", "\U0001f3b2 rolls [7] (total 7)")
+    _run(dispatch(envelope, {}, http_client=None))
+
+    for _level, message, fields_json in log_calls:
+        assert "viewer-1" not in message
+        assert "viewer-1" not in fields_json
+        assert "actor" not in json.loads(fields_json)

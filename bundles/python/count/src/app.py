@@ -1,9 +1,13 @@
 """`!count` -> a per-(community, caller) kv-backed self counter, incremented and relayed.
 
-Token-safe (PR batch 1, 2026-10-03): the kv key is built from the envelope's
-own opaque `actor`/`community` fields, never a raw username -- see
-`bundles/python/lurk/src/app.py`'s own docstring for the same PII-tokenization
-rationale, shared verbatim here.
+PII note (2026-10-03): the tokenization pipeline (#429) is NOT merged yet, so
+`event.actor` may currently be a RAW USERNAME, not an opaque token. This
+bundle never stores or logs that raw value -- `_kv_key()` hashes
+`(community, actor)` into a non-reversible pseudonym before it ever reaches
+`kv`, and no log line below includes `actor`. See
+`bundles/python/lurk/src/app.py`'s own docstring for the same rationale,
+shared verbatim here. Once #429 lands, `actor` becomes an opaque token and
+this same hashing remains correct (and harmless) to keep.
 
 Declares the `storage.kv` permission -- see `lurk`'s own docstring for why
 it must be present in both `bundle.yaml` and `hub-manifest.yaml`.
@@ -22,6 +26,7 @@ rationale and ordering.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from waddle_sdk import kv, log, relay
@@ -47,7 +52,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
-    log.info("count.transform matched", actor=event.actor)
+    log.info("count.transform matched")
     return PlatformEvent(
         platform=event.platform,
         event_type=event.event_type,
@@ -71,8 +76,16 @@ class DispatchResult:
 
 
 def _kv_key(community: str | None, actor: str | None) -> str:
-    """Per-(community, caller) key, scoped by the envelope's own opaque fields, never a username."""
-    return f"count:{community or 'tenant'}:{actor or 'anonymous'}"
+    """Per-(community, caller) key, hashed so a raw `actor` username is never stored in `kv`.
+
+    `actor` may still be a raw username (tokenization pipeline #429 not yet
+    merged) -- SHA-256 the `(community, actor)` pair into a non-reversible
+    pseudonym so the stored key never contains PII, today or after #429.
+    """
+    pseudonym = hashlib.sha256(
+        f"{community or 'tenant'}:{actor or 'anonymous'}".encode()
+    ).hexdigest()
+    return f"count:{pseudonym}"
 
 
 async def dispatch(
