@@ -459,7 +459,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install check dependencies
-        run: pip install --no-cache-dir pyyaml==6.0.2 pytest==9.1.1
+        run: pip install --no-cache-dir pyyaml==6.0.2 pytest==9.1.1 cryptography==50.0.1
 
       # fix/preexisting-test-failures: k8s/helm/waddlebot/tests/ (34 helm-template
       # assertion tests, incl. TestSeederPlatformConnections's
