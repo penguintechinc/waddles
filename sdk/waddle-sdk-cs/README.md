@@ -1,5 +1,8 @@
 # waddle-sdk-cs
 
+See `AUTHORING.md` for the condensed per-bundle checklist (SuperPenguin C#
+port batch) -- this file has the full rationale and code samples.
+
 Tier-1(spike) C# SDK for Waddles app bundles: typed, reflection-free
 (NativeAOT-LLVM/`wasi-wasm`-safe) helpers over the `waddle:bundle/stage@1.0.0`
 WIT world (`wit/waddle-bundle/stage.wit`). Model: `sdk/waddle-sdk-rs` (a
