@@ -49,7 +49,7 @@ spec:
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: svc-streaming
-        image: "{{ .Values.streaming.image.repository }}:{{ .Values.streaming.image.tag | default .Values.global.imageTag }}"
+        image: "{{ .Values.streaming.image.repository }}:{{ .Values.streaming.image.tag | default .Values.global.imageTag | toString }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         # Pinned to the Rust image's own `appuser` (uid 10001), not the chart-wide
         # `.Values.securityContext` (uid 1000) every Python-base placeholder uses.

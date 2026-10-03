@@ -106,7 +106,7 @@ spec:
         # never drift apart again.
         {{- $registry := .Values.global.imageRegistry | default "" }}
         {{- $repository := .Values.modules.migrations.image | default "waddlebot-migrations" }}
-        {{- $tag := .Values.global.imageTag }}
+        {{- $tag := .Values.global.imageTag | toString }}
         {{- if $registry }}
         image: "{{ $registry }}/{{ $repository }}:{{ $tag }}"
         {{- else }}

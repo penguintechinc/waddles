@@ -426,7 +426,7 @@ check_images_in_registry() {
     if ! rendered="$(helm template "${RELEASE}" "${HELM_CHART}" \
         --kube-version 1.30.0 \
         --values "${HELM_CHART}/values-alpha.yaml" \
-        --set "global.imageTag=${SHA8}" 2>&1)"; then
+        --set-string "global.imageTag=${SHA8}" 2>&1)"; then
         err "helm template failed while collecting the preflight image list:"
         echo "${rendered}" >&2
         exit 1
@@ -511,7 +511,7 @@ HELM_ARGS=(
     --kube-context "${KUBE_CONTEXT}"
     --namespace "${NAMESPACE}" --create-namespace
     --values "${HELM_CHART}/values-alpha.yaml"
-    --set "global.imageTag=${SHA8}"
+    --set-string "global.imageTag=${SHA8}"
 )
 
 info "helm upgrade --dry-run validation"

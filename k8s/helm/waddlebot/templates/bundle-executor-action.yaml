@@ -54,7 +54,7 @@ spec:
       - name: bundle-executor
         # Same image as templates/bundle-executor.yaml -- literally the same crate/binary,
         # pointed at a different stage purely via env vars below.
-        image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag }}"
+        image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag | toString }}"
         imagePullPolicy: Always
         securityContext:
           runAsNonRoot: true
