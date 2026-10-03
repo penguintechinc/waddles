@@ -479,8 +479,18 @@ def test_load_catalog_parses_the_real_repo_catalog() -> None:
         "waddles.core.example.ping",
         "waddles.core.example.pyping",
         "waddles.core.example.csping",
+        # PR batch 1 (2026-10-03): token-safe Python command bundles -- relay/kv only, no
+        # handle echoed back, so these ship ahead of the PII-tokenization pipeline #427/#429.
+        "waddles.core.example.eightball",
+        "waddles.core.example.roll",
+        "waddles.core.example.lurk",
+        "waddles.core.example.count",
     }
     for entry in entries:
+        # ActivationTarget(tenant_slug="global") defaults community_id=None -- every real
+        # catalog entry activates tenant-wide, never scoped to one community (seeder.
+        # ActivationTarget's own docstring: community_id=None is NOT a skip, see
+        # activate_tenant_wide()).
         assert entry.activation_targets == (ActivationTarget(tenant_slug="global"),)
 
 
