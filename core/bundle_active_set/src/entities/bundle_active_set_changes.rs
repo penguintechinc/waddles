@@ -30,8 +30,16 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub seq: i64,
-    pub tenant_id: i32,
-    pub community_id: i32,
+    // regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+    // Same class of entity-vs-DDL mismatch found while auditing every
+    // reader column against migration 0028: `tenant_id`/`community_id`
+    // are declared `INTEGER` with NO `NOT NULL` (migration docstring:
+    // "absent -> NULL, e.g. `app_versions`, which is not tenant-scoped") --
+    // a non-tenant-scoped change row (any `app_versions` publish) decodes
+    // a SQL NULL into these columns and would crash the same way the
+    // watermark `id` did. `Option<i32>` matches the real nullability.
+    pub tenant_id: Option<i32>,
+    pub community_id: Option<i32>,
     pub entity: String,
     pub entity_id: String,
     pub op: String,

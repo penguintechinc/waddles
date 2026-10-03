@@ -187,6 +187,7 @@ where
 
     let state = http::AppState::new(config.clone(), prom_registry, Arc::clone(&connections));
     let consumer_loop_ready = Arc::clone(&state.consumer_loop_ready);
+    let changelog_consumer_ready = Arc::clone(&state.changelog_consumer_ready);
     // Both bundle-selection sources run unconditionally, gated
     // independently (this module's top doc, dataplane scale design rev 4):
     // the legacy `ACTION_BUNDLE_*` env override never gates on the
@@ -202,6 +203,7 @@ where
         bundle_loader_excluded_metric,
         Arc::clone(&kv_capabilities),
         changelog_consumer_metrics,
+        changelog_consumer_ready,
     );
     try_start_dispatch(
         &config,
@@ -679,11 +681,20 @@ fn try_start_changelog_consumer(
     excluded_metric: prometheus::IntCounterVec,
     kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     changelog_consumer_metrics: telemetry::ChangelogConsumerMetrics,
+    // regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+    // Independent from `try_start_dispatch`'s own `consumer_loop_ready` --
+    // this path runs unconditionally alongside the dispatch loop (this
+    // function's own doc), not mutually exclusively, so the two must never
+    // share one flag. Defaults `true` (nothing to wait for) when this path
+    // isn't even selected (`DB_READER_PASSWORD` unset) -- same "unconfigured
+    // never blocks readiness" convention `consumer_loop_ready` already uses.
+    changelog_consumer_ready: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
             "DB_READER_PASSWORD not set; multi-tenant changelog consumer not started (env selection remains authoritative)"
         );
+        changelog_consumer_ready.store(true, std::sync::atomic::Ordering::Relaxed);
         return;
     };
 
@@ -710,6 +721,11 @@ fn try_start_changelog_consumer(
     let call_timeout_ms = config.cli.executor_call_timeout_ms;
 
     let startup_log_flag = Arc::clone(&flag);
+    // Fail loud, never silent (user requirement): this path is selected
+    // (`DB_READER_PASSWORD` configured) -- readiness must gate on it from
+    // the very first instant, not just once `changelog_consumer::run`
+    // reaches its own retry loop.
+    changelog_consumer_ready.store(false, std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(async move {
         // Point (e) of the alpha fix (2026-10-02): log at INFO/WARN which
         // state the kill-switch resolved to before ever attempting to
@@ -760,6 +776,7 @@ fn try_start_changelog_consumer(
             excluded_metric,
             changelog_consumer_metrics,
             kv_capabilities,
+            changelog_consumer_ready,
             shutdown_rx,
         )
         .await;
@@ -1481,6 +1498,7 @@ mod tests {
             test_excluded_metric(),
             Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
             test_changelog_consumer_metrics(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
     }
 

@@ -31,8 +31,15 @@ use sea_orm::entity::prelude::*;
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "bundle_active_set_watermark")]
 pub struct Model {
+    // regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+    // `id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1)` (migration
+    // 0028_bundle_active_set_changelog.py) -- `i32` here decodes against
+    // Postgres `INT4`, which sqlx rejects against the real `INT2` column
+    // ("mismatched types; Rust type core::option::Option<i32> ... is not
+    // compatible with SQL type INT2"), crashing the consumer's initial
+    // full active-set read on every startup.
     #[sea_orm(primary_key, auto_increment = false)]
-    pub id: i32,
+    pub id: i16,
     pub safe_seq: i64,
     pub min_retained_seq: i64,
     pub computed_at: DateTimeUtc,

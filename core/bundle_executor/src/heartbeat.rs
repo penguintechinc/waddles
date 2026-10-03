@@ -59,8 +59,38 @@ use crate::wire::Connection;
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 5;
 
 /// A connection is declared stale after this many consecutive silent
-/// heartbeat intervals (spec: "On no frame for 3 intervals").
-pub const STALE_INTERVAL_MULTIPLIER: u32 = 3;
+/// heartbeat intervals.
+///
+/// regression: executor link dropped every ~20s by heartbeat mismatch (alpha 2026-10-02)
+///
+/// **Not `3` (spec's original "on no frame for 3 intervals") -- that value
+/// made this side strictly LESS patient than the svc side's own give-up
+/// threshold, so this side always lost the race on ordinary jitter.** The
+/// svc-side heartbeat supervisor (`core/svc_process`'s and `core/svc_action`'s
+/// own `host_api::run_heartbeat`, `HEARTBEAT_MISSED_LIMIT = 3`) runs a loop
+/// of `sleep(interval)` THEN `ping(interval)` (await a `pong` within
+/// `interval`) per attempt -- a single missed round can cost up to
+/// `2 * interval` before `missed` increments, so svc's own worst-case time
+/// to declare a session dead is `HEARTBEAT_MISSED_LIMIT * 2 * interval =
+/// 6 * interval` (30s at the shared 5s default), not `3 * interval` (15s)
+/// the old value here assumed. With this side's `stale_after` set to only
+/// `3 * interval` (15s), an ordinary round-trip delay anywhere in the
+/// 15-30s range -- well within what svc itself still tolerates -- made
+/// THIS side unilaterally declare `SessionStale` and hard-drop the TCP
+/// connection (no TLS `close_notify`, since `run_connection`'s cleanup
+/// `abort()`s the writer task rather than shutting it down gracefully) --
+/// exactly the ~20s connect/drop/reconnect churn observed in the alpha
+/// 2026-10-02 incident, with svc-side logs showing "peer closed connection
+/// without sending TLS close_notify" because the EXECUTOR, not svc, was the
+/// one hanging up. `7` (one interval of margin past svc's own `6 *
+/// interval` worst case) makes svc's own heartbeat supervisor -- the side
+/// whose drop is loudly `ERROR`-logged with a timeout metric -- reliably
+/// the first and only side to ever declare a session dead; this side's
+/// check becomes a true backstop for a genuinely silent peer, never a
+/// competing, trigger-happier one. If `HEARTBEAT_MISSED_LIMIT`/the ping
+/// timeout on the svc side ever changes, this constant must be revisited
+/// to stay `>` svc's new worst case.
+pub const STALE_INTERVAL_MULTIPLIER: u32 = 7;
 
 /// Timestamp of the last frame this connection received from the stage,
 /// shared between `crate::wire`'s read loop (the writer) and

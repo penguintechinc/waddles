@@ -161,6 +161,9 @@ where
     }
     match decision {
         PathDecision::MultiTenant => {
+            state
+                .multi_tenant_consumer_configured
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             if !config.cli.process_app_id.is_empty() {
                 tracing::info!(
                     process_app_id = %config.cli.process_app_id,
@@ -181,6 +184,7 @@ where
                 source_supervisor_metrics,
                 egress_denied_metric,
                 changelog_consumer_metrics,
+                Arc::clone(&consumer_loop_ready),
             );
         }
         PathDecision::NoDbConfig => {
@@ -868,6 +872,7 @@ fn try_start_changelog_consumer(
     source_supervisor_metrics: telemetry::SourceBindingSupervisorMetrics,
     egress_denied_metric: prometheus::IntCounterVec,
     changelog_consumer_metrics: telemetry::ChangelogConsumerMetrics,
+    consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
@@ -961,6 +966,11 @@ fn try_start_changelog_consumer(
         Arc::clone(&egress),
     );
 
+    // Fail loud, never silent (user requirement): this path is only ever
+    // entered once `PathDecision::MultiTenant` is selected, so readiness
+    // must gate on it from the very first instant, not just once
+    // `changelog_consumer::run` reaches its own retry loop.
+    consumer_loop_ready.store(false, std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(async move {
         let db = match bundle_active_set::reader::connect(&reader_cfg, &password).await {
             Ok(db) => db,
@@ -1015,6 +1025,7 @@ fn try_start_changelog_consumer(
             kv_capabilities,
             source_supervisor_metrics,
             changelog_consumer_metrics,
+            consumer_loop_ready,
             shutdown_rx,
         )
         .await;
@@ -1524,6 +1535,7 @@ mod tests {
             test_source_supervisor_metrics(),
             test_egress_denied_metric(),
             test_changelog_consumer_metrics(),
+            test_consumer_loop_ready(),
         );
     }
 
