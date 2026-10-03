@@ -146,6 +146,12 @@ pub struct SupervisorDeps {
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::egress`'s doc.
     pub egress: Arc<bundle_host_http::egress::EgressGuard>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::pii_gate`'s doc.
+    pub pii_gate: Arc<dyn FeatureGate>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::pii_minter`'s doc.
+    pub pii_minter: Option<Arc<dyn crate::pii_tokenize::IdentityMinter>>,
     /// The SAME `Arc<ActiveDigests>` instance `crate::changelog_consumer`
     /// writes to on every `load`/`unload` (`ConsumerState::active_digests`)
     /// -- shared (never copied) into every spawned binding consumer's own
@@ -293,6 +299,8 @@ async fn run_binding_consumer(
             kv_conn: deps.kv_conn.clone(),
             kv_capabilities: Arc::clone(&deps.kv_capabilities),
             egress: Arc::clone(&deps.egress),
+            pii_gate: Arc::clone(&deps.pii_gate),
+            pii_minter: deps.pii_minter.clone(),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();
