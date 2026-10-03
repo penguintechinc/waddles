@@ -36,6 +36,13 @@ tables:
   - app_source_bindings
   - app_global_installs
   - bundle_tenant_availability
+  # #500/#499 Sec3.0: multi-tenant guild<->community pairing (migration 0038)
+  - tenant_platform_credentials
+  - guild_tenant_pairings
+  - community_channel_bindings
+  - managed_roles
+  - v_guild_routing
+  - v_managed_roles_active
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -409,3 +416,160 @@ grants:
   - role: migration_runner
     table: bundle_tenant_availability
     privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # tenant_platform_credentials (#500): hub_api only. The data plane
+  # never reads bot credentials off a table -- it resolves them through
+  # hub-api's own internal credential-resolution path (fail-closed for
+  # any non-global tenant with no app configured), never a direct grant.
+  - role: hub_api
+    table: tenant_platform_credentials
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: tenant_platform_credentials
+    privileges: []
+  - role: svc_ingest
+    table: tenant_platform_credentials
+    privileges: []
+  - role: svc_process
+    table: tenant_platform_credentials
+    privileges: []
+  - role: svc_action
+    table: tenant_platform_credentials
+    privileges: []
+  - role: svc_streaming
+    table: tenant_platform_credentials
+    privileges: []
+  - role: webui
+    table: tenant_platform_credentials
+    privileges: []
+  - role: migration_runner
+    table: tenant_platform_credentials
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # guild_tenant_pairings: hub_api owns writes; data plane reads routing
+  # through v_guild_routing / v_managed_roles_active below, not this table.
+  - role: hub_api
+    table: guild_tenant_pairings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: guild_tenant_pairings
+    privileges: []
+  - role: svc_ingest
+    table: guild_tenant_pairings
+    privileges: []
+  - role: svc_process
+    table: guild_tenant_pairings
+    privileges: []
+  - role: svc_action
+    table: guild_tenant_pairings
+    privileges: []
+  - role: svc_streaming
+    table: guild_tenant_pairings
+    privileges: []
+  - role: webui
+    table: guild_tenant_pairings
+    privileges: []
+  - role: migration_runner
+    table: guild_tenant_pairings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: community_channel_bindings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: community_channel_bindings
+    privileges: []
+  - role: svc_ingest
+    table: community_channel_bindings
+    privileges: []
+  - role: svc_process
+    table: community_channel_bindings
+    privileges: []
+  - role: svc_action
+    table: community_channel_bindings
+    privileges: []
+  - role: svc_streaming
+    table: community_channel_bindings
+    privileges: []
+  - role: webui
+    table: community_channel_bindings
+    privileges: []
+  - role: migration_runner
+    table: community_channel_bindings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: managed_roles
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: managed_roles
+    privileges: []
+  - role: svc_ingest
+    table: managed_roles
+    privileges: []
+  - role: svc_process
+    table: managed_roles
+    privileges: []
+  - role: svc_action
+    table: managed_roles
+    privileges: []
+  - role: svc_streaming
+    table: managed_roles
+    privileges: []
+  - role: webui
+    table: managed_roles
+    privileges: []
+  - role: migration_runner
+    table: managed_roles
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # RO views: the data plane's only read path for routing/role-ownership.
+  - role: hub_api
+    table: v_guild_routing
+    privileges: [SELECT]
+  - role: waddles_publisher
+    table: v_guild_routing
+    privileges: []
+  - role: svc_ingest
+    table: v_guild_routing
+    privileges: [SELECT]
+  - role: svc_process
+    table: v_guild_routing
+    privileges: []
+  - role: svc_action
+    table: v_guild_routing
+    privileges: [SELECT]
+  - role: svc_streaming
+    table: v_guild_routing
+    privileges: []
+  - role: webui
+    table: v_guild_routing
+    privileges: []
+  - role: migration_runner
+    table: v_guild_routing
+    privileges: []
+
+  - role: hub_api
+    table: v_managed_roles_active
+    privileges: [SELECT]
+  - role: waddles_publisher
+    table: v_managed_roles_active
+    privileges: []
+  - role: svc_ingest
+    table: v_managed_roles_active
+    privileges: [SELECT]
+  - role: svc_process
+    table: v_managed_roles_active
+    privileges: []
+  - role: svc_action
+    table: v_managed_roles_active
+    privileges: [SELECT]
+  - role: svc_streaming
+    table: v_managed_roles_active
+    privileges: []
+  - role: webui
+    table: v_managed_roles_active
+    privileges: []
+  - role: migration_runner
+    table: v_managed_roles_active
+    privileges: []
