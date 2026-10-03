@@ -130,6 +130,26 @@ global:
     # set this explicitly to the matching CN/URI SAN, or the render fails closed.
     stageIdentity: ""
 
+  # fix/hub-grpc-tls-and-ca-trust (PR #570 review blockers 1/2) -- TLS material for
+  # hub-api's internal gRPC listener (hub_api/grpc_internal/server.py, mandatory TLS, no
+  # insecureDev escape hatch). SEPARATE from global.grpcTls (the core-data/core-identity/
+  # interactive-productivity/action-serverless identity) -- hub-api needs its own
+  # alpha/local auto-generate fallback (templates/hub-api-grpc-tls-secret.yaml), which
+  # global.grpcTls's static-only Secret doesn't have. Also the CA core/hub_client::
+  # HubClient::connect trusts via HUB_API_GRPC_CA_FILE (svc-process-rust/svc-action-rust).
+  # NEVER a literal cert/key in git in any environment; populate via --set-file or an
+  # out-of-git values override / ExternalSecret.
+  hubApiGrpcTls:
+    ca:
+      crt: ""
+    tls:
+      crt: ""
+      key: ""
+    # true delegates provisioning of the <fullname>-hub-api-grpc-tls Secret to an
+    # out-of-band ExternalSecret/SealedSecret controller instead of failing the render on
+    # beta/gamma/production. Alpha/local ignore this flag entirely (auto-generated instead).
+    externalSecret: false
+
   # fix/valkey-tls-alpha -- TLS material for the Valkey (infra-redis) cache/streams
   # listener. `penguin_spine::SpineConfig::validate()` (core/svc_process, core/svc_action,
   # core/svc_ingest) fails closed when SECURITY_TRANSPORT_TLS=true (the default -- never

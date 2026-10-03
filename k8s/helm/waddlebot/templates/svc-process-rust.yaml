@@ -276,6 +276,13 @@ spec:
           # 1m) -- bounds the blast radius of any change-log defect to one
           # interval, independent of the change-log's own correctness.
           value: {{ .Values.pipeline.rustDataPlane.svcProcess.bundleConfigFullReconcileMinutes | default 15 | quote }}
+        {{- if .Values.pipeline.hubApi.enabled }}
+        # fix/hub-grpc-tls-and-ca-trust (PR #570 review blocker 2) -- the CA that signed
+        # hub-api's internal gRPC server cert, so core/hub_client::HubClient::connect can
+        # verify it (rustls client root store) instead of trusting only system/webpki
+        # roots, which never includes this chart's self-signed/internal CA.
+        {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
+        {{- end }}
         livenessProbe:
           httpGet:
             path: /health
@@ -303,6 +310,9 @@ spec:
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsVolumeMount" . | nindent 8 }}
         {{- end }}
+        {{- if .Values.pipeline.hubApi.enabled }}
+        {{- include "waddlebot.hubApiGrpcCaVolumeMount" . | nindent 8 }}
+        {{- end }}
         {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
       volumes:
       - name: tmp
@@ -313,6 +323,9 @@ spec:
       {{- end }}
       {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
+      {{- end }}
+      {{- if .Values.pipeline.hubApi.enabled }}
+      {{- include "waddlebot.hubApiGrpcCaVolume" . | nindent 6 }}
       {{- end }}
 ---
 apiVersion: v1
