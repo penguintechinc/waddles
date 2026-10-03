@@ -40,6 +40,19 @@ pub struct AppState {
     /// executor-connected). regression: drain loop exited on NOGROUP
     /// (alpha 2026-10-02)
     pub consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
+    /// `true` once `crate::lib::run_with_shutdown` has selected the
+    /// multi-tenant, change-log-driven consumer path
+    /// (`crate::changelog_consumer::run`) -- set once, synchronously, before
+    /// the HTTP server starts serving, so `GET /healthz` can gate on
+    /// `consumer_loop_ready` for THIS path too, not just the legacy
+    /// `PROCESS_APP_ID` one. Defaults `false` (nothing to wait for) exactly
+    /// like `consumer_loop_ready`'s own "unconfigured never blocks
+    /// readiness" convention.
+    // regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+    // -- readiness previously had no signal at all for this path (`GET
+    // /healthz` only ever checked `PROCESS_APP_ID`, which the multi-tenant
+    // path doesn't set), so the pod stayed `Ready` with no consumer running.
+    pub multi_tenant_consumer_configured: Arc<std::sync::atomic::AtomicBool>,
     /// Fix/executor-link-heartbeat: `/health`/`/healthz` read this directly
     /// so liveness/readiness reflect whether an executor session is
     /// actually live, not just "the HTTP server is answering" -- the alpha
@@ -69,6 +82,7 @@ impl AppState {
             request_metrics,
             started_at: Instant::now(),
             consumer_loop_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            multi_tenant_consumer_configured: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             connections,
         }
     }

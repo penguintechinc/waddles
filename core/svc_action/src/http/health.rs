@@ -89,7 +89,14 @@ pub async fn readyz(State(state): State<AppState>) -> (axum::http::StatusCode, J
         .consumer_loop_ready
         .load(std::sync::atomic::Ordering::Relaxed);
     let executor_connected = state.connections.active().is_some();
-    let ok = !configured || running;
+    // regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+    // -- the multi-tenant changelog consumer runs unconditionally
+    // alongside the legacy dispatch loop (never mutually exclusive), so it
+    // gates readiness independently via its own flag.
+    let changelog_consumer_ready = state
+        .changelog_consumer_ready
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let ok = (!configured || running) && changelog_consumer_ready;
     let code = if ok {
         axum::http::StatusCode::OK
     } else {

@@ -166,6 +166,14 @@ rcgen = "=0.14.10"
 # test -- Cargo unifies this with the main `sea-orm` dependency's features
 # for test builds only, never linked into the release binary.
 sea-orm = { version = "=2.0.2", default-features = false, features = ["mock"] }
+# Test-only: the REAL executor-side client (`bundle_executor::wire`/
+# `bundle_executor::heartbeat`), not a hand-rolled stand-in -- drives
+# `src/host_api.rs`'s heartbeat-contract integration test against this
+# crate's own real `run_connection`/`run_heartbeat` svc-side code over an
+# in-memory duplex, so the test actually exercises both real implementations
+# of the PR #529/#530 heartbeat contract, not a simulation of one side.
+# regression: executor link dropped every ~20s by heartbeat mismatch (alpha 2026-10-02)
+bundle-executor = { path = "../bundle_executor", version = "=0.1.0" }
 
 [profile.release]
 opt-level = 3

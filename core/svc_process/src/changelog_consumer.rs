@@ -553,10 +553,15 @@ pub async fn run_incremental_tick(
     // tracker advance on a failure and to attribute a staleness check to
     // the right scope.
     let mut first_seq_for_scope: HashMap<ScopeKey, i64> = HashMap::new();
+    // regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+    // `ChangeRow::scope_key()` skips non-tenant-scoped rows (`tenant_id IS
+    // NULL`, e.g. an `app_versions` change) -- there is no scope to bound a
+    // partial advance against for those; the periodic full reconcile picks
+    // them up instead (see `bundle_active_set::changelog`'s module doc).
     for c in &changes {
-        first_seq_for_scope
-            .entry((c.tenant_id, c.community_id))
-            .or_insert(c.seq);
+        if let Some(key) = c.scope_key() {
+            first_seq_for_scope.entry(key).or_insert(c.seq);
+        }
     }
     let scopes = bundle_active_set::affected_scopes(&changes);
 
@@ -724,10 +729,61 @@ pub async fn run_full_reconcile(
         .observe(start.elapsed().as_secs_f64());
 }
 
+/// How long [`run`] keeps retrying [`initial_state`] with capped backoff
+/// before giving up and exiting the process (regression: a startup decode
+/// failure used to log one ERROR and silently return, leaving the pod
+/// `Ready` with no consumer at all and no crashloop signal -- alpha
+/// 2026-10-02, see this module's own `run` doc).
+#[cfg(not(test))]
+const INITIAL_STATE_RETRY_GRACE: Duration = Duration::from_secs(120);
+#[cfg(test)]
+const INITIAL_STATE_RETRY_GRACE: Duration = Duration::from_millis(50);
+
+/// Capped backoff ceiling between `initial_state` retry attempts -- same
+/// cap `crate::lib::try_start_process_loop`'s own connect retry uses.
+const INITIAL_STATE_RETRY_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// What [`run`]'s retry loop should do after one more failed
+/// [`initial_state`] attempt -- pure, no I/O, so the grace-period/backoff
+/// decision is unit-testable without ever exercising the real
+/// `std::process::exit` [`run`] calls on [`RetryDecision::GiveUp`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryDecision {
+    /// Sleep this long (or until shutdown) before the next attempt.
+    Retry(Duration),
+    /// `elapsed >= grace` -- the caller must exit, never loop again.
+    GiveUp,
+}
+
+/// Decides [`RetryDecision`] for attempt number `attempt` (1-based) after
+/// `elapsed` time has passed since the first attempt.
+fn decide_retry(
+    attempt: u32,
+    elapsed: Duration,
+    grace: Duration,
+    backoff_max: Duration,
+) -> RetryDecision {
+    if elapsed >= grace {
+        RetryDecision::GiveUp
+    } else {
+        RetryDecision::Retry(crate::backoff_for_attempt(attempt, backoff_max))
+    }
+}
+
 /// The live interval/shutdown loop `crate::lib::try_start_changelog_consumer`
 /// spawns: incremental ticks on `poll_interval`, a full reconcile on
 /// `full_reconcile_interval`, and a graceful `source_supervisor::stop_all`
 /// on shutdown so a pod termination never abandons a running consumer.
+///
+/// `consumer_loop_ready` (regression: watermark id INT2 vs i32 decode killed
+/// active-set consumer, alpha 2026-10-02): held `false` for as long as the
+/// initial full active-set read keeps failing, so `/healthz` reports
+/// `degraded` instead of silently staying `Ready` with no consumer -- fail
+/// loud, never silent (user requirement). Retries with capped exponential
+/// backoff, logging an ERROR with the rendered error per attempt; if
+/// [`INITIAL_STATE_RETRY_GRACE`] elapses without success, this process
+/// exits non-zero so Kubernetes restarts it visibly rather than leaving an
+/// unrecoverable pod running indefinitely.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     db: DatabaseConnection,
@@ -741,15 +797,52 @@ pub async fn run(
     kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     binding_metrics: crate::telemetry::SourceBindingSupervisorMetrics,
     metrics: ChangelogConsumerMetrics,
+    consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
-    let mut state = match initial_state(&db).await {
-        Ok(s) => s,
-        Err(err) => {
-            tracing::error!(error = %err, "changelog consumer: initial full active-set read failed; not starting");
-            return;
+    consumer_loop_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+    let retry_started_at = Instant::now();
+    let mut attempt: u32 = 0;
+    let mut state = loop {
+        attempt += 1;
+        match initial_state(&db).await {
+            Ok(s) => break s,
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    attempt,
+                    elapsed_secs = retry_started_at.elapsed().as_secs(),
+                    "changelog consumer: initial full active-set read failed; retrying"
+                );
+                let decision = decide_retry(
+                    attempt,
+                    retry_started_at.elapsed(),
+                    INITIAL_STATE_RETRY_GRACE,
+                    INITIAL_STATE_RETRY_BACKOFF_MAX,
+                );
+                let backoff = match decision {
+                    RetryDecision::GiveUp => {
+                        tracing::error!(
+                            attempts = attempt,
+                            grace_secs = INITIAL_STATE_RETRY_GRACE.as_secs(),
+                            "changelog consumer: initial full active-set read still failing after \
+                             the retry grace period; exiting so Kubernetes restarts this pod"
+                        );
+                        std::process::exit(1);
+                    }
+                    RetryDecision::Retry(backoff) => backoff,
+                };
+                if crate::wait_or_shutdown(&mut shutdown, backoff).await {
+                    tracing::info!(
+                        "changelog consumer: shutdown received while retrying initial \
+                         active-set read; exiting without starting"
+                    );
+                    return;
+                }
+            }
         }
     };
+    consumer_loop_ready.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let mut poll_tick = tokio::time::interval(poll_interval);
     poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -833,6 +926,47 @@ mod tests {
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::Mutex as StdMutex;
 
+    /// regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+    /// Below the grace period, every attempt gets a `Retry` with the same
+    /// backoff `crate::backoff_for_attempt` would return directly -- never
+    /// `GiveUp` early.
+    #[test]
+    fn decide_retry_retries_with_capped_backoff_before_the_grace_period_elapses() {
+        let grace = Duration::from_secs(120);
+        let backoff_max = Duration::from_secs(30);
+        assert_eq!(
+            decide_retry(1, Duration::from_secs(0), grace, backoff_max),
+            RetryDecision::Retry(Duration::from_secs(1))
+        );
+        assert_eq!(
+            decide_retry(3, Duration::from_secs(10), grace, backoff_max),
+            RetryDecision::Retry(Duration::from_secs(4))
+        );
+        assert_eq!(
+            decide_retry(10, Duration::from_secs(100), grace, backoff_max),
+            RetryDecision::Retry(backoff_max),
+            "backoff is capped at backoff_max, never grows unbounded"
+        );
+    }
+
+    /// regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+    /// At or past the grace period, the decision is `GiveUp` -- `run`'s
+    /// caller then exits non-zero instead of retrying forever.
+    #[test]
+    fn decide_retry_gives_up_once_the_grace_period_has_elapsed() {
+        let grace = Duration::from_secs(120);
+        let backoff_max = Duration::from_secs(30);
+        assert_eq!(
+            decide_retry(50, grace, grace, backoff_max),
+            RetryDecision::GiveUp,
+            "exactly at the grace boundary must give up, not retry one more time"
+        );
+        assert_eq!(
+            decide_retry(50, Duration::from_secs(121), grace, backoff_max),
+            RetryDecision::GiveUp
+        );
+    }
+
     fn active_row(
         app_id: &str,
         tenant_id: i32,
@@ -909,8 +1043,8 @@ mod tests {
     ) -> bundle_active_set::entities::bundle_active_set_changes::Model {
         bundle_active_set::entities::bundle_active_set_changes::Model {
             seq,
-            tenant_id,
-            community_id,
+            tenant_id: Some(tenant_id),
+            community_id: Some(community_id),
             entity: "app_active_versions".to_string(),
             entity_id: "waddles.a".to_string(),
             op: "upsert".to_string(),

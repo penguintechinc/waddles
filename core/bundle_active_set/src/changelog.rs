@@ -29,7 +29,8 @@ use crate::entities::{bundle_active_set_changes, bundle_active_set_watermark};
 use crate::query::ActiveSetError;
 
 /// The single watermark row's `id` (dataplane scale design §7: "one row").
-const WATERMARK_ROW_ID: i32 = 1;
+// regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+const WATERMARK_ROW_ID: i16 = 1;
 
 /// The primary's published `safe_seq` horizon AND `min_retained_seq` (hub-api
 /// migration `0026_bundle_active_set_changelog`, waddles PR #397, requires
@@ -141,11 +142,29 @@ pub async fn read_safe_seq(conn: &DatabaseConnection) -> Result<i64, ActiveSetEr
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChangeRow {
     pub seq: i64,
-    pub tenant_id: i32,
-    pub community_id: i32,
+    /// `None` for a non-tenant-scoped change (e.g. an `app_versions`
+    /// publish -- that table has no `tenant_id` column, so the trigger logs
+    /// `NULL`; see `crate::entities::bundle_active_set_changes`'s doc).
+    pub tenant_id: Option<i32>,
+    pub community_id: Option<i32>,
     pub entity: String,
     pub entity_id: String,
     pub op: String,
+}
+
+impl ChangeRow {
+    /// Resolves this row's `(tenant_id, community_id)` [`crate::ScopeKey`],
+    /// or `None` when the row isn't tenant-scoped at all (`tenant_id IS
+    /// NULL`) -- there is no scope to incrementally re-read in that case;
+    /// the periodic full reconcile is what actually picks up an
+    /// `app_versions` change (see this module's own doc). A present
+    /// `tenant_id` with a `NULL` `community_id` resolves to the `0`
+    /// tenant-wide sentinel, matching `app_active_versions.community_id`'s
+    /// own convention.
+    pub fn scope_key(&self) -> Option<(i32, i32)> {
+        self.tenant_id
+            .map(|tenant_id| (tenant_id, self.community_id.unwrap_or(0)))
+    }
 }
 
 impl From<bundle_active_set_changes::Model> for ChangeRow {
@@ -190,7 +209,7 @@ pub async fn read_changes(
 pub fn affected_scopes(changes: &[ChangeRow]) -> Vec<(i32, i32)> {
     changes
         .iter()
-        .map(|c| (c.tenant_id, c.community_id))
+        .filter_map(ChangeRow::scope_key)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -269,6 +288,17 @@ mod tests {
     }
 
     fn change_row(seq: i64, tenant_id: i32, community_id: i32) -> bundle_active_set_changes::Model {
+        change_row_scoped(seq, Some(tenant_id), Some(community_id))
+    }
+
+    /// Like [`change_row`] but allows a `NULL` `tenant_id`/`community_id`,
+    /// exactly as a real `app_versions` change row reads (migration 0028's
+    /// trigger logs `NULL` for a table with no `tenant_id` column).
+    fn change_row_scoped(
+        seq: i64,
+        tenant_id: Option<i32>,
+        community_id: Option<i32>,
+    ) -> bundle_active_set_changes::Model {
         bundle_active_set_changes::Model {
             seq,
             tenant_id,
@@ -410,8 +440,48 @@ mod tests {
         let changes = read_changes(&db, 10, 12).await?;
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0].seq, 11);
-        assert_eq!(changes[1].tenant_id, 2);
+        assert_eq!(changes[1].tenant_id, Some(2));
         Ok(())
+    }
+
+    /// regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+    /// A `NULL` `tenant_id`/`community_id` row (real shape of an
+    /// `app_versions` change, migration 0028) must decode without error --
+    /// before the `Option<i32>` fix this crashed the same way the
+    /// watermark `id` INT2 mismatch did.
+    #[tokio::test]
+    async fn read_changes_decodes_a_non_tenant_scoped_row_without_error(
+    ) -> Result<(), ActiveSetError> {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![change_row_scoped(20, None, None)]])
+            .into_connection();
+        let changes = read_changes(&db, 10, 20).await?;
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].tenant_id, None);
+        assert_eq!(changes[0].community_id, None);
+        assert_eq!(
+            changes[0].scope_key(),
+            None,
+            "a non-tenant-scoped row has no scope to incrementally re-read"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn affected_scopes_skips_non_tenant_scoped_rows() {
+        let changes = vec![
+            change_row(1, 1, 0),
+            change_row_scoped(2, None, None),
+            change_row_scoped(3, Some(1), None),
+        ]
+        .into_iter()
+        .map(ChangeRow::from)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            affected_scopes(&changes),
+            vec![(1, 0)],
+            "a NULL tenant_id row contributes no scope; NULL community_id resolves to the 0 sentinel"
+        );
     }
 
     #[test]

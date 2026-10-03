@@ -95,7 +95,14 @@ pub async fn readiness(
     State(state): State<AppState>,
 ) -> (axum::http::StatusCode, Json<ReadinessBody>) {
     let cfg = &state.config.cli;
-    let consumer_loop_configured = !cfg.process_app_id.is_empty();
+    // regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+    // -- the multi-tenant changelog-consumer path doesn't set
+    // `PROCESS_APP_ID`, so `consumer_loop_configured` must also consider
+    // `multi_tenant_consumer_configured` or this check never gates on it.
+    let consumer_loop_configured = !cfg.process_app_id.is_empty()
+        || state
+            .multi_tenant_consumer_configured
+            .load(std::sync::atomic::Ordering::Relaxed);
     let consumer_loop_running = state
         .consumer_loop_ready
         .load(std::sync::atomic::Ordering::Relaxed);

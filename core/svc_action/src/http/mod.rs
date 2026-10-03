@@ -39,6 +39,19 @@ pub struct AppState {
     /// executor-connected). regression: drain loop exited on NOGROUP
     /// (alpha 2026-10-02)
     pub consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
+    /// `true` once the multi-tenant changelog consumer
+    /// (`crate::changelog_consumer::run`) has completed its initial full
+    /// active-set read -- independent of `consumer_loop_ready` (this path
+    /// runs unconditionally alongside the legacy dispatch loop, never
+    /// mutually exclusive with it, see `try_start_changelog_consumer`'s own
+    /// doc). Defaults `false`; `try_start_changelog_consumer` flips it to
+    /// `true` immediately if `DB_READER_PASSWORD` is unset (nothing to wait
+    /// for), or once `initial_state` succeeds otherwise.
+    // regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+    // -- `GET /readyz` previously had no signal at all for this path (only
+    // ever checked `ACTION_APP_ID`), so the pod stayed `Ready` with no
+    // changelog consumer running after a startup decode failure.
+    pub changelog_consumer_ready: Arc<std::sync::atomic::AtomicBool>,
     /// Fix/executor-link-heartbeat: `/health`/`/healthz`/`/readyz` read this
     /// directly so liveness/readiness reflect whether an executor session is
     /// actually live, not just "the HTTP server is answering" -- the alpha
@@ -59,12 +72,20 @@ impl AppState {
         connections: Arc<crate::host_api::ConnectionRegistry>,
     ) -> Self {
         let request_metrics = crate::telemetry::register_request_metrics(&metrics);
+        // `changelog_consumer_ready` starts `true` (nothing to wait for)
+        // unless `DB_READER_PASSWORD` is actually configured -- matches
+        // `try_start_changelog_consumer`'s own early-return branch, which
+        // sets it `true` explicitly for the same "not configured" case.
+        let changelog_consumer_configured = config.db_reader_password.is_some();
         Self {
             config: Arc::new(config),
             metrics: Arc::new(metrics),
             request_metrics,
             started_at: Instant::now(),
             consumer_loop_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            changelog_consumer_ready: Arc::new(std::sync::atomic::AtomicBool::new(
+                !changelog_consumer_configured,
+            )),
             connections,
         }
     }
