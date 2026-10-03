@@ -141,6 +141,54 @@ async fn build_hub_client(
     }
 }
 
+/// Resolves whether inbound PII tokenization is enabled for this startup.
+///
+/// [`config::CliConfig::pii_tokenization_enabled_override`]'s explicit
+/// `Some(false)` (`PII_TOKENIZATION_ENABLED=false`) short-circuits to
+/// disabled *before* the `waddles.core.disable-pii-tokenization` PostHog
+/// kill-switch is ever consulted -- a plain env/values off-switch,
+/// independent of PostHog, for an environment with no in-cluster PostHog
+/// (e.g. alpha) that would otherwise be stranded behind
+/// [`build_hub_client`]'s fail-loud gate whenever hub-api's internal gRPC
+/// isn't reachable yet (`rules/critical-rules.md` Feature Flags & License
+/// Tiers' opt-out kill-switch principle: "keeps unseen-flags-OFF without
+/// stranding air-gapped deploys"). Any other override state (`Some(true)`
+/// or unset/`None`) falls through unchanged to the existing PostHog-gated,
+/// default-ENABLED, fail-open-to-ENABLED-on-license-error behavior --
+/// **this override only ever disables, never force-enables past the
+/// PostHog kill-switch**, so the production kill-switch path is untouched.
+///
+/// **SECURITY: an explicit, loudly-logged operator escape hatch, never a
+/// silent bypass.** Disabling tokenization means every inbound event
+/// reaches a bundle with raw platform usernames/handles/display names --
+/// acceptable only as a deliberate, documented dev/air-gapped tradeoff,
+/// never the default in a production tenant.
+async fn resolve_pii_tokenization_enabled(cli: &config::CliConfig) -> bool {
+    if cli.pii_tokenization_enabled_override == Some(false) {
+        tracing::warn!(
+            "PII_TOKENIZATION_ENABLED=false env override set; inbound PII tokenization is \
+             DISABLED by explicit operator override, NOT the waddles.core.disable-pii-tokenization \
+             PostHog kill-switch -- hub-api's internal gRPC will not be contacted and startup \
+             will not fail loud. This is an operational escape hatch for dev/air-gapped \
+             deployments and must never be set in a production tenant: inbound events will \
+             reach bundles with raw platform usernames/handles/display names, unescaped."
+        );
+        return false;
+    }
+    match license::build_license_client("waddles") {
+        Ok(client) => license::PiiTokenizationGate::new(client).enabled().await,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "license client config invalid; PII tokenization kill-switch state unknown, \
+                 defaulting to ENABLED (fail-open, the safe default -- see \
+                 license::PiiTokenizationGate's own doc)"
+            );
+            true
+        }
+    }
+}
+
 /// Runs the service: loads config, bootstraps telemetry, builds the
 /// control-plane + metrics routers, starts the host-API mTLS listener and
 /// the process-stage drain loop (see [`try_start_host_api`]/
@@ -243,19 +291,11 @@ where
     // `try_start_process_loop` used to leave as `pii_minter: None`.
     // Resolved ONCE here, before either drain-loop path starts below, and
     // shared by whichever one `decision` selects. See
-    // [`build_hub_client`]'s own doc for the fail-loud contract.
-    let pii_tokenization_enabled = match license::build_license_client("waddles") {
-        Ok(client) => license::PiiTokenizationGate::new(client).enabled().await,
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                "license client config invalid; PII tokenization kill-switch state unknown, \
-                 defaulting to ENABLED (fail-open, the safe default -- see \
-                 license::PiiTokenizationGate's own doc)"
-            );
-            true
-        }
-    };
+    // [`build_hub_client`]'s own doc for the fail-loud contract, and
+    // [`resolve_pii_tokenization_enabled`]'s own doc for the
+    // PII_TOKENIZATION_ENABLED env override evaluated before the PostHog
+    // kill-switch.
+    let pii_tokenization_enabled = resolve_pii_tokenization_enabled(&config.cli).await;
     let hub_minter: Option<Arc<dyn pii_tokenize::IdentityMinter>> =
         build_hub_client(&config.cli, pii_tokenization_enabled)
             .await?
@@ -1996,6 +2036,34 @@ mod tests {
     #[test]
     fn service_name_matches_binary_name() {
         assert_eq!(SERVICE_NAME, "svc-process");
+    }
+
+    /// `PII_TOKENIZATION_ENABLED=false` env override: disabled before the
+    /// PostHog kill-switch is ever consulted -- no license client is built,
+    /// no network touched, and the result is `false` regardless of what the
+    /// (never-called) PostHog flag would have reported.
+    #[tokio::test]
+    async fn resolve_pii_tokenization_enabled_honors_explicit_env_disable() {
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--pii-tokenization-enabled-override",
+            "false",
+        ]);
+        assert_eq!(cli.pii_tokenization_enabled_override, Some(false));
+        assert!(!resolve_pii_tokenization_enabled(&cli).await);
+    }
+
+    /// Env override unset (`None`, `CliConfig::parse_from`'s default): falls
+    /// through unchanged to the existing PostHog-gated path, which reports
+    /// ENABLED here (a cold/never-refreshed license client's own
+    /// fail-closed-to-OFF semantics on the underlying
+    /// `disable-pii-tokenization` flag negate to "tokenization enabled" --
+    /// `license::PiiTokenizationGate`'s own doc/tests).
+    #[tokio::test]
+    async fn resolve_pii_tokenization_enabled_defers_to_posthog_gate_when_override_unset() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert_eq!(cli.pii_tokenization_enabled_override, None);
+        assert!(resolve_pii_tokenization_enabled(&cli).await);
     }
 
     /// Kill-switch ON (`tokenization_enabled: false`) -- no `HUB_API_GRPC_

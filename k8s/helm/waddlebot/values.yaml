@@ -1267,6 +1267,28 @@ pipeline:
           cpu: "1000m"
           memory: "512Mi"
 
+  # fix/pii-tokenization-env-override -- plain env/values off-switch for PII
+  # tokenization/detokenization, independent of PostHog
+  # (`waddles.core.disable-pii-tokenization`/`disable-pii-detokenization`).
+  # The PostHog kill-switch alone can't be set in an environment with no
+  # in-cluster PostHog (e.g. alpha), stranding that deployment behind
+  # `core/svc_process`/`core/svc_action`'s fail-loud `build_hub_client` gate
+  # whenever hub-api's internal gRPC isn't reachable yet -- see
+  # `rules/critical-rules.md` Feature Flags & License Tiers' opt-out
+  # kill-switch principle ("keeps unseen-flags-OFF without stranding
+  # air-gapped deploys"). `true` (the default) renders no override env var
+  # on either Rust stage, so `core/svc_process`/`core/svc_action`'s own
+  # PostHog-gated, default-ENABLED, fail-loud-when-unreachable behavior is
+  # unchanged. `false` renders `PII_TOKENIZATION_ENABLED=false` on
+  # svc-process-rust and `PII_DETOKENIZATION_ENABLED=false` on
+  # svc-action-rust -- both gates short-circuit to disabled (no hub_client
+  # connect attempt, no fail-loud exit) and log a WARN naming the override.
+  # SECURITY: this is an explicit, loudly-logged operator escape hatch for
+  # dev/air-gapped deployments, never a silent bypass -- it must never be the
+  # default in a production tenant.
+  piiTokenization:
+    enabled: true
+
 # v3.0.x — svc-presentation (8th container, 4th stage-runner). Music overlay + per-community
 # OBS browser-source surfaces. Own image placeholder (core/svc_presentation/ builds with
 # CI once Dockerfile is wired). Image repository structure allows alpha local registry +

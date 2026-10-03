@@ -230,6 +230,12 @@ RUN curl -fsSL -o /tmp/wasi-sdk.tar.gz \
 
 WORKDIR /repo
 COPY wit wit
+# fix/pii-tokenization-env-override -- csping.csproj's ProjectReference
+# (`../../../sdk/waddle-sdk-cs/waddle-sdk-cs.csproj`) needs this sibling
+# checked out too; missing it fails `dotnet build` with CS0246 (matches
+# bundles/csharp/csping/Dockerfile's own builder stage, which already copies
+# it -- this stage had drifted from that sibling).
+COPY sdk/waddle-sdk-cs sdk/waddle-sdk-cs
 COPY bundles/csharp/csping bundles/csharp/csping
 RUN chown -R builder:builder /repo
 WORKDIR /repo/bundles/csharp/csping

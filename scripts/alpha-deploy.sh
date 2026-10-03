@@ -303,6 +303,20 @@ service_image_tag() {
     esac
 }
 
+# fix/pii-tokenization-env-override -- svc-process/svc-action's Dockerfile.rust
+# (`COPY --from=proto . /proto`) needs the repo-root proto/ tree passed as a
+# named `proto` build context so `hub_client`'s build.rs (tonic-prost-build)
+# can compile `proto/waddles/hub/internal/v1/*.proto` -- CI already does this
+# (build-svc-process.yml/build-svc-action.yml's `build-contexts: proto=proto`);
+# this local build loop was missing the equivalent `--build-context` flag,
+# so a local alpha build failed with "proto: not found"/a missing COPY source.
+service_build_context_args() {
+    case "$1" in
+        svc-process|svc-action) echo "--build-context proto=proto" ;;
+        *) echo "" ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # resolve-433 -- idempotent buildx builder for the registry-backed cache.
 #
@@ -357,8 +371,12 @@ if [[ "${SKIP_BUILD}" != "true" ]]; then
         img="${REGISTRY}/${repo}:${tag}"
         dockerfile="$(service_dockerfile "${svc}")"
         context="$(service_context "${svc}")"
+        extra_build_context_args="$(service_build_context_args "${svc}")"
         cache_ref="${REGISTRY}/buildcache/${repo}"
         info "Building ${img} (${dockerfile}), cache ${cache_ref}"
+        # shellcheck disable=SC2086 # extra_build_context_args is either empty or a
+        # fixed, space-free "--build-context proto=proto" literal -- intentional
+        # word-splitting, never user/env-controlled content.
         docker buildx build --builder "${CACHE_BUILDER}" --pull=false \
             --cache-from "type=registry,ref=${cache_ref}" \
             --cache-to "type=registry,ref=${cache_ref},mode=max,image-manifest=true,oci-mediatypes=true" \
@@ -366,6 +384,7 @@ if [[ "${SKIP_BUILD}" != "true" ]]; then
             -f "${dockerfile}" \
             -t "${img}" \
             --label "org.opencontainers.image.revision=${SHA}" \
+            ${extra_build_context_args} \
             "${context}"
 
         info "Pushing ${img}"

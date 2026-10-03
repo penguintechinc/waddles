@@ -358,6 +358,23 @@ pub struct CliConfig {
     /// publicly-rooted endpoint instead.
     #[arg(long, env = "HUB_API_GRPC_CA_FILE", default_value = "")]
     pub hub_api_grpc_ca_file: String,
+
+    /// Plain env/values off-switch for outbound PII detokenization
+    /// (`crate::build_hub_client`'s gate), independent of the
+    /// `waddles.core.disable-pii-detokenization` PostHog kill-switch --
+    /// field-for-field mirror of `core/svc_process::config::CliConfig::
+    /// pii_tokenization_enabled_override`'s identical rationale (same env
+    /// var naming convention, `PII_DETOKENIZATION_ENABLED` for this
+    /// service's detokenization pass). `None` (unset, the default) leaves
+    /// the existing PostHog-gated, default-ENABLED, fail-loud-when-
+    /// unreachable behavior unchanged; `Some(false)` is the only value this
+    /// crate's startup gate treats specially (see [`crate::run_with_shutdown`]'s
+    /// call site): detokenization runs disabled, `hub_client` is never
+    /// connected, and startup never fails loud. Explicit, loudly-logged
+    /// operator escape hatch for dev/air-gapped deployments -- never a
+    /// silent bypass, never the default in a production tenant.
+    #[arg(long, env = "PII_DETOKENIZATION_ENABLED")]
+    pub pii_detokenization_enabled_override: Option<bool>,
 }
 
 impl CliConfig {
