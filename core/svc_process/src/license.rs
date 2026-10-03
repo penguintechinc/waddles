@@ -254,6 +254,40 @@ impl FeatureGate for BundleDbCapabilityGate {
     }
 }
 
+/// Opt-out kill-switch for the inbound PII-tokenization pre-dispatch pass
+/// (`crate::pii_tokenize`, `rules/critical-rules.md` PII Tokenization) --
+/// same opt-out-kill-switch shape as [`DISABLE_DB_BUNDLE_CONFIG_FLAG`]:
+/// tokenization is a core platform mechanism, not a licensed feature, so
+/// unseen/OFF/license-server-unreachable must leave it ENABLED (the safe
+/// default -- a raw platform username/login must never reach a bundle),
+/// and this flag exists only to opt back OUT of it for a deployment whose
+/// hub-api internal gRPC endpoint is genuinely unreachable (e.g. air-gapped)
+/// and which has accepted the resulting PII exposure to bundles as a
+/// documented, deliberate operational tradeoff -- never the default.
+pub const DISABLE_PII_TOKENIZATION_FLAG: &str = "waddles.core.disable-pii-tokenization";
+
+/// Production [`FeatureGate`] for [`DISABLE_PII_TOKENIZATION_FLAG`] -- same
+/// bypass-aware negation shape as [`DbBundleConfigGate`] (see that type's
+/// own doc for the full bypass-awareness rationale, identical here).
+pub struct PiiTokenizationGate(Arc<LicenseClient>);
+
+impl PiiTokenizationGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for PiiTokenizationGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            if self.0.bypass_active() {
+                return true;
+            }
+            !self.0.flag_enabled(DISABLE_PII_TOKENIZATION_FLAG).await
+        })
+    }
+}
+
 /// PenguinTech/Waddles-owned bypass suffix -- the sole license/flag
 /// bypass lever, and it must be a hardcoded source-level constant, never
 /// an env var, CLI flag, or Helm-templated value (`rules/critical-
@@ -440,6 +474,54 @@ mod tests {
         assert_eq!(
             DISABLE_DB_BUNDLE_CONFIG_FLAG,
             "waddles.core.disable-db-bundle-config"
+        );
+    }
+
+    #[test]
+    fn disable_pii_tokenization_flag_matches_the_product_flag_key_convention() {
+        assert_eq!(
+            DISABLE_PII_TOKENIZATION_FLAG,
+            "waddles.core.disable-pii-tokenization"
+        );
+    }
+
+    /// Same hard invariant as `db_bundle_config_gate_defaults_enabled_for_a_
+    /// never_seen_kill_switch_flag`, applied to the PII-tokenization
+    /// kill-switch: a never-seen flag (every fresh deployment's starting
+    /// state) must leave tokenization ENABLED -- raw PII must never reach a
+    /// bundle by default.
+    #[tokio::test]
+    async fn pii_tokenization_gate_defaults_enabled_for_a_never_seen_kill_switch_flag() {
+        let cfg =
+            LicenseConfig::new("waddles-test-pii-tokenization-default").expect("valid defaults");
+        let client = LicenseClient::new(cfg).expect("client construction");
+        let gate = PiiTokenizationGate::new(client);
+        assert!(
+            gate.enabled().await,
+            "an unseen kill-switch flag must leave PII tokenization enabled"
+        );
+    }
+
+    /// Bypass-awareness regression test, identical rationale to
+    /// `db_bundle_config_gate_stays_enabled_under_the_hardcoded_domain_
+    /// bypass`: a bypassed client's `flag_enabled` reads `true` for ANY
+    /// key, so a naive negation would report tokenization DISABLED for
+    /// every PenguinTech-owned deployment -- the opposite of the intended
+    /// "every feature unlocked" bypass meaning.
+    #[tokio::test]
+    async fn pii_tokenization_gate_stays_enabled_under_the_hardcoded_domain_bypass() {
+        let client = {
+            let _guard = ENV_LOCK.lock().unwrap();
+            build_license_client("waddles-test-pii-tokenization-bypass").expect("valid defaults")
+        };
+        assert!(
+            client.bypass_active(),
+            "sanity check: this client must actually be bypassed"
+        );
+        let gate = PiiTokenizationGate::new(client);
+        assert!(
+            gate.enabled().await,
+            "bypass must leave PII tokenization enabled, not disabled"
         );
     }
 

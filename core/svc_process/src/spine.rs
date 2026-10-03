@@ -625,6 +625,22 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `http` capability (see that struct's doc for why this is a
     /// singleton, not scope-implicit like every other capability).
     pub egress: Arc<bundle_host_http::egress::EgressGuard>,
+    /// Gates the inbound PII-tokenization pre-dispatch pass
+    /// (`crate::pii_tokenize`) on `waddles.core.disable-pii-tokenization`
+    /// (opt-out kill-switch, default ENABLED -- `crate::license::
+    /// PiiTokenizationGate`). OFF (the default) means tokenization runs;
+    /// ON means this stage falls back to the pre-tokenization legacy
+    /// behavior (raw PII reaches the bundle) -- an explicit, documented
+    /// operational tradeoff, never the default.
+    pub pii_gate: Arc<dyn FeatureGate>,
+    /// `None` until a real `hub_client::HubClient` connection is wired at
+    /// startup (`crate::lib::build_hub_minter`) -- when [`pii_gate`] is
+    /// enabled (the default) and this is `None`, [`handle_delivered`]
+    /// fails closed (dead-letters) rather than ever forwarding raw PII,
+    /// exactly as if a configured minter's RPC call had failed.
+    ///
+    /// [`pii_gate`]: ProcessDeps::pii_gate
+    pub pii_minter: Option<Arc<dyn crate::pii_tokenize::IdentityMinter>>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -679,6 +695,68 @@ async fn handle_delivered<S: SpineOps>(
         };
         return deps.spine.dead_letter(d, &err).await;
     }
+
+    // PII boundary hard invariant (`rules/critical-rules.md` PII
+    // Tokenization): a bundle's `transform` must never see a raw platform
+    // username/login/display-name/mention -- run strictly after hop
+    // verification and strictly before `invoke_transform` below. Fails
+    // closed: any resolution failure (hub-api unreachable, circuit open,
+    // no minter configured) dead-letters the entry for redelivery rather
+    // than ever forwarding the raw event.
+    let tokenized_event: PlatformEvent = if deps.pii_gate.enabled().await {
+        match &deps.pii_minter {
+            Some(minter) => {
+                match crate::pii_tokenize::tokenize_event(
+                    &d.env.event,
+                    &d.env.tenant,
+                    minter.as_ref(),
+                )
+                .await
+                {
+                    Ok(tokenized) => tokenized,
+                    Err(reason) => {
+                        tracing::error!(
+                            app_id = %d.env.app_id,
+                            tenant = %d.env.tenant,
+                            error = %reason,
+                            "PII tokenization failed; dead-lettering (fail-closed, never \
+                             forwarding raw PII to a bundle)"
+                        );
+                        let err = DlqError {
+                            kind: DlqErrorKind::BundleError,
+                            code: "PII_TOKENIZE_FAILED".to_string(),
+                            message: reason.to_string(),
+                            detail: None,
+                            artifact_digest: deps.digest_source.current(),
+                            consumer_id: deps.consumer_id.clone(),
+                        };
+                        return deps.spine.dead_letter(d, &err).await;
+                    }
+                }
+            }
+            None => {
+                tracing::error!(
+                    app_id = %d.env.app_id,
+                    tenant = %d.env.tenant,
+                    "PII tokenization is enabled but no hub identity client is configured; \
+                     dead-lettering (fail-closed, never forwarding raw PII to a bundle)"
+                );
+                let err = DlqError {
+                    kind: DlqErrorKind::BundleError,
+                    code: "PII_RESOLVER_UNAVAILABLE".to_string(),
+                    message: "no hub_client identity minter configured".to_string(),
+                    detail: None,
+                    artifact_digest: deps.digest_source.current(),
+                    consumer_id: deps.consumer_id.clone(),
+                };
+                return deps.spine.dead_letter(d, &err).await;
+            }
+        }
+    } else {
+        // Kill-switch ON: documented, explicit opt-out -- legacy
+        // pre-tokenization behavior (raw PII reaches the bundle).
+        d.env.event.clone()
+    };
 
     // Resolve the digest to load/invoke with BEFORE ever checking for an
     // executor connection -- "if no active digest is known for an app when
@@ -816,7 +894,7 @@ async fn handle_delivered<S: SpineOps>(
         &connection,
         &deps.app_id,
         &digest,
-        &d.env.event,
+        &tokenized_event,
         deps.call_timeout_ms,
         trace,
         capabilities,
@@ -1642,6 +1720,14 @@ mod tests {
                 .unwrap(),
                 bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(true)),
             )),
+            // OFF by default so every pre-existing test's `invoke_transform`
+            // assertion (built against the raw, un-tokenized fixture event)
+            // is unaffected -- same "ON/OFF fixture convention" as
+            // `license` above. Dedicated `pii_tokenize_*` tests below
+            // override both fields directly to exercise the gate's actual
+            // ON behavior.
+            pii_gate: Arc::new(crate::license::test_support::FixedGate(false)),
+            pii_minter: None,
         };
         (deps, metrics)
     }
@@ -1682,6 +1768,132 @@ mod tests {
         let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
         assert_eq!(dead_lettered.len(), 1);
         assert_eq!(dead_lettered[0].1, DlqErrorKind::ExecutorUnavailable);
+    }
+
+    /// A minimal [`crate::pii_tokenize::IdentityMinter`] test fixture:
+    /// always succeeds, minting `"tok-<platform_user_id>"` for every item.
+    struct FixtureMinter;
+
+    impl crate::pii_tokenize::IdentityMinter for FixtureMinter {
+        fn mint_many<'a>(
+            &'a self,
+            _tenant_id: &'a str,
+            items: Vec<crate::pii_tokenize::MintItem>,
+        ) -> crate::pii_tokenize::MintResult<'a> {
+            Box::pin(async move {
+                Ok(items
+                    .into_iter()
+                    .map(|i| {
+                        (
+                            i.platform_user_id.clone(),
+                            format!("tok-{}", i.platform_user_id),
+                        )
+                    })
+                    .collect())
+            })
+        }
+    }
+
+    /// Always fails -- simulates hub-api being unreachable.
+    struct FixtureFailMinter;
+
+    impl crate::pii_tokenize::IdentityMinter for FixtureFailMinter {
+        fn mint_many<'a>(
+            &'a self,
+            _tenant_id: &'a str,
+            _items: Vec<crate::pii_tokenize::MintItem>,
+        ) -> crate::pii_tokenize::MintResult<'a> {
+            Box::pin(async move {
+                Err(crate::pii_tokenize::TokenizeError::ResolutionUnavailable(
+                    "simulated hub-api outage".to_string(),
+                ))
+            })
+        }
+    }
+
+    /// PII boundary hard invariant wiring test: when the kill-switch is
+    /// disabled (tokenization ON, the default) and a minter is configured,
+    /// `handle_delivered` reaches `invoke_transform` successfully (acked,
+    /// never dead-lettered) -- the actual "only a token, never raw PII"
+    /// substitution guarantee is proven exhaustively by
+    /// `crate::pii_tokenize`'s own unit tests; this test proves the wiring
+    /// reaches that code path rather than bypassing it.
+    #[tokio::test]
+    async fn handle_delivered_tokenizes_then_invokes_transform_when_pii_gate_enabled() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let connections = connected_registry_with_fake_executor(serde_json::json!(null)).await;
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.pii_gate = Arc::new(crate::license::test_support::FixedGate(true));
+        deps.pii_minter = Some(Arc::new(FixtureMinter));
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+    }
+
+    /// Fail-closed regression test: PII tokenization enabled but no
+    /// `hub_client` minter configured yet (the honest startup-wiring gap,
+    /// see `crate::source_supervisor::SupervisorDeps::pii_minter`'s doc)
+    /// must dead-letter, never fall through to `invoke_transform` with raw
+    /// PII.
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_when_pii_gate_enabled_and_no_minter_configured() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
+        deps.pii_gate = Arc::new(crate::license::test_support::FixedGate(true));
+        deps.pii_minter = None;
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert!(deps.spine.acked.lock().unwrap().is_empty());
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, DlqErrorKind::BundleError);
+    }
+
+    /// Fail-closed regression test: a minter that fails (hub-api
+    /// unreachable/circuit open) must dead-letter the entry rather than
+    /// ever forwarding the raw, un-tokenized event.
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_when_minter_fails() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
+        deps.pii_gate = Arc::new(crate::license::test_support::FixedGate(true));
+        deps.pii_minter = Some(Arc::new(FixtureFailMinter));
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert!(deps.spine.acked.lock().unwrap().is_empty());
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, DlqErrorKind::BundleError);
+    }
+
+    /// Kill-switch regression test: with the opt-out flag ON (tokenization
+    /// disabled), `handle_delivered` falls back to the legacy
+    /// pre-tokenization behavior even with no minter configured at all --
+    /// proving the kill-switch is a genuine escape hatch, not dead code.
+    #[tokio::test]
+    async fn handle_delivered_skips_tokenization_when_kill_switch_is_on() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let connections = connected_registry_with_fake_executor(serde_json::json!(null)).await;
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.pii_gate = Arc::new(crate::license::test_support::FixedGate(false));
+        deps.pii_minter = None;
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
     }
 
     fn test_scope(app_id: &str) -> bundle_active_set::AppScope {
