@@ -318,6 +318,36 @@ pub struct CliConfig {
         default_value_t = 15
     )]
     pub bundle_config_full_reconcile_minutes: i64,
+
+    /// hub-api's internal gRPC endpoint (`waddles.hub.internal.v1`,
+    /// `core/hub_client::HubClient::connect`'s `endpoint`), e.g.
+    /// `https://waddlebot-hub-api-v3:50204`. Empty (the default) means "not
+    /// configured" -- [`crate::build_hub_client`] fails loud at startup
+    /// rather than starting and silently showing the neutral label for
+    /// every egress send when PII detokenization is enabled and this is
+    /// unset (user requirement: "fail loud, not silent degraded-UX").
+    /// Field shape mirrors `core/svc_process::config::CliConfig`'s
+    /// identical addition -- same env var names across both services.
+    #[arg(long, env = "HUB_API_GRPC_ENDPOINT", default_value = "")]
+    pub hub_api_grpc_endpoint: String,
+    /// hub-api's machine-JWT bootstrap endpoint
+    /// (`hub_api/blueprints/service_jwt_bp.py`'s `POST /internal/
+    /// service-token`, `service_auth::MachineJwtClient`'s `token_endpoint`),
+    /// e.g. `http://waddlebot-hub-api-v3:8204/internal/service-token`.
+    /// Empty (the default) means "not configured" -- same fail-loud
+    /// contract as [`Self::hub_api_grpc_endpoint`].
+    #[arg(long, env = "SERVICE_JWT_TOKEN_ENDPOINT", default_value = "")]
+    pub service_jwt_token_endpoint: String,
+    /// Path to this pod's projected Kubernetes ServiceAccount token, read
+    /// by [`service_auth::MachineJwtClient`] to bootstrap a machine JWT --
+    /// same default every other machine-JWT bootstrap in this repo uses
+    /// (`libs/flask_core/flask_core/service_jwt.py`).
+    #[arg(
+        long,
+        env = "SERVICE_JWT_SA_TOKEN_PATH",
+        default_value = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    )]
+    pub service_jwt_sa_token_path: String,
 }
 
 impl CliConfig {
