@@ -43,20 +43,24 @@ file sealed class FakeRelayClient : IRelayClient
     public void Push(string provider, string messageJson) => Pushes.Add((provider, messageJson));
 }
 
-file sealed class FakeHost(IKvClient kv, IRelayClient relay) : IWaddleHost
+file sealed class FakeHost(IKvClient kv, IRelayClient relay, bool flagsEnabled = true) : IWaddleHost
 {
     public BundleContextInfo Context { get; } = new("tenant-1", null, "waddles.integrations.superpenguin.roll", "waddles.integrations.superpenguin", "1.0.0", "msg-1", "{}");
     public IKvClient Kv { get; } = kv;
     public IDbClient Db => throw new NotSupportedException("!roll needs no db -- see RollLogic's own doc comment");
     public IRelayClient Relay { get; } = relay;
     public IHttpClient Http => throw new NotSupportedException("!roll needs no http");
-    public IFlagsClient Flags { get; } = new NoopFlags();
+    public IFlagsClient Flags { get; } = new NoopFlags(flagsEnabled);
     public ILogClient Log { get; } = new NoopLog();
     public IClockClient Clock { get; } = new FixedClock();
 
-    private sealed class NoopFlags : IFlagsClient
+    // `flagsEnabled` defaults to true so every pre-existing behavioral test
+    // above exercises the shipped-and-turned-on state without touching every
+    // call site -- `RollLogicTransformTests` below adds the dedicated
+    // flag-disabled coverage.
+    private sealed class NoopFlags(bool enabled) : IFlagsClient
     {
-        public bool Enabled(string key, bool defaultValue) => defaultValue;
+        public bool Enabled(string key, bool defaultValue) => enabled;
         public string Tier() => "free";
     }
 
@@ -184,6 +188,30 @@ public class RollLogicTransformTests
         // unenforced) rather than failing the whole command.
         var host = new FakeHost(new DenyingKvClient(), new FakeRelayClient());
         Assert.NotNull(new RollLogic().Run(ChatEvent("!roll"), host));
+    }
+
+    [Theory]
+    [InlineData("!roll")]
+    [InlineData("!dice")]
+    public void no_reply_when_the_posthog_flag_is_disabled(string commandText)
+    {
+        var host = new FakeHost(new FakeKvClient(), new FakeRelayClient(), flagsEnabled: false);
+        Assert.Null(new RollLogic().Run(ChatEvent(commandText), host));
+    }
+
+    [Fact]
+    public void a_disabled_flag_never_consumes_the_cooldown_slot()
+    {
+        // The flag check must run before CooldownGuard.TryAcquire -- a
+        // disabled flag should not burn the user's cooldown window, so a
+        // later flag-enabled call still gets a reply.
+        var kv = new FakeKvClient();
+        var disabledHost = new FakeHost(kv, new FakeRelayClient(), flagsEnabled: false);
+        var enabledHost = new FakeHost(kv, new FakeRelayClient(), flagsEnabled: true);
+        var logic = new RollLogic();
+
+        Assert.Null(logic.Run(ChatEvent("!roll"), disabledHost));
+        Assert.NotNull(logic.Run(ChatEvent("!roll"), enabledHost));
     }
 }
 

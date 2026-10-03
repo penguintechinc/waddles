@@ -72,3 +72,36 @@ make test-superpenguin-roll
 # or:
 bash scripts/test-superpenguin-roll.sh
 ```
+
+## Feature flag
+
+Gated behind the PostHog flag `waddles.command-superpenguin-roll`, defaulted
+OFF (`rules/critical-rules.md` Feature Flags & License Tiers), checked in
+`RollLogic.Transform` after the command match and before the cooldown
+acquire -- see `RollLogic.cs`'s own doc comment. Deliberately a different key
+from the unrelated first-party `bundles/python/roll` bundle's
+`waddles.command-roll` (a different NdM dice command that also answers to
+`!roll`) so the two are independently toggleable.
+
+## Activation (intentionally NOT in `bundles/core-bundles.yaml`)
+
+This is third-party-attributed content (`provider: thirdparty`,
+`app_id: waddles.integrations.superpenguin.roll`), not a
+`waddles.core.*` bundle -- `hub_api/cli/seed_core_bundles.py`'s
+`_guard_core_namespace` HARD-refuses (non-zero exit) any catalog entry
+outside `services.vendor_bundle_authz.CORE_NAMESPACE_PREFIX`
+("waddles.core."), by deliberate design: "vendor bundles must never be
+seedable, no matter what a (compromised or mistaken) catalog file says"
+(that module's own docstring, Justin's 2026-09-27 vendor-separation ruling --
+a vendor SUBMITS, only a GLOBAL ADMIN APPROVES). Adding this `app_id` to
+`bundles/core-bundles.yaml` would either break the core-bundle-seeder Job
+outright or require weakening that guard -- neither is acceptable.
+
+Until a dedicated third-party/vendor-content activation path exists, publish
+and activate this bundle the same way any vendor submission is onboarded:
+`POST /apps/{app_id}/versions` (the standard `bundle_version_service.py` /
+`bundle_component_validator.py` pipeline this bundle's component already
+passes) followed by a `platform:admin`-scoped
+`POST /apps/{app_id}/versions/{version}/approve`. No Helm hook currently
+automates this for `waddles.integrations.*` bundles -- tracked as follow-up
+work, not done here.
