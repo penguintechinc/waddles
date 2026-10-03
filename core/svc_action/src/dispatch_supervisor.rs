@@ -46,7 +46,7 @@ use sea_orm::DatabaseConnection;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::active_digests::ActiveDigests;
+use crate::active_digests::{ActiveDigests, LoadedSessions};
 use crate::dispatch::{self, DigestSource, DispatchDeps, RetryPolicy};
 use crate::flags::FeatureFlag;
 use crate::hop::KeyRing;
@@ -136,6 +136,16 @@ pub struct SupervisorDeps {
     /// had no multi-tenant dispatch consumers; replies never sent after
     /// legacy env removal (alpha 2026-10-03).
     pub active_digests: Arc<ActiveDigests>,
+    /// The SAME `Arc<LoadedSessions>` instance `crate::changelog_consumer`
+    /// writes to on every per-session `load`/`unload` -- shared (never
+    /// copied) into every spawned consumer's own `DispatchDeps::
+    /// digest_source` (`DigestSource::Active`) so `crate::dispatch::
+    /// handle_delivered` can pick a live session that actually has the
+    /// target digest loaded, never just whichever connection `
+    /// ConnectionRegistry::active()` calls "newest". regression: bundles
+    /// loaded only onto a terminating executor during rollout; live
+    /// executor got none (alpha 2026-10-03).
+    pub loaded_sessions: Arc<LoadedSessions>,
 }
 
 /// A running per-app dispatch consumer: a shutdown signal plus the
@@ -249,6 +259,7 @@ async fn run_app_consumer(
             digest_source: DigestSource::Active {
                 scope: (target.tenant_id, target.community_id, target.app_id.clone()),
                 digests: Arc::clone(&deps.active_digests),
+                sessions: Arc::clone(&deps.loaded_sessions),
             },
             // No DB-sourced per-bundle config exists yet for this stage
             // (`crate::lib::resolve_initial_bundle`'s identical legacy

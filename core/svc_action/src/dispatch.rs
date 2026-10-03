@@ -36,7 +36,7 @@ use penguin_spine::{
 };
 use serde::Deserialize;
 
-use crate::active_digests::ActiveDigests;
+use crate::active_digests::{ActiveDigests, LoadedSessions};
 use crate::capabilities::InvokeScope;
 use crate::hop::KeyRing;
 use crate::host_api::{Connection, ConnectionRegistry, HostApiError};
@@ -70,9 +70,18 @@ pub enum DigestSource {
     ///
     /// regression: svc-action had no multi-tenant dispatch consumers;
     /// replies never sent after legacy env removal (alpha 2026-10-03)
+    ///
+    /// `sessions` is the per-session counterpart `crate::changelog_consumer`
+    /// writes to in lock-step with `digests` -- [`DigestSource::session_for`]
+    /// uses it to pick a live executor session that actually has the
+    /// resolved digest loaded, never just whichever connection
+    /// `ConnectionRegistry::active()` calls "newest" (regression: bundles
+    /// loaded only onto a terminating executor during rollout; live
+    /// executor got none, alpha 2026-10-03).
     Active {
         scope: bundle_active_set::AppScope,
         digests: Arc<ActiveDigests>,
+        sessions: Arc<LoadedSessions>,
     },
 }
 
@@ -82,7 +91,25 @@ impl DigestSource {
     fn current(&self) -> Option<String> {
         match self {
             DigestSource::Static(d) => Some(d.clone()),
-            DigestSource::Active { scope, digests } => digests.get(scope),
+            DigestSource::Active { scope, digests, .. } => digests.get(scope),
+        }
+    }
+
+    /// The live executor session (if any) that should serve this `digest` --
+    /// `DigestSource::Static` has no per-session tracking at all (the
+    /// legacy, single-bundle-per-pod path predates multi-session executors)
+    /// so it is not resolvable here; `handle_delivered` falls back to
+    /// `ConnectionRegistry::active()` for that variant only, unchanged from
+    /// before this fix. `DigestSource::Active` MUST use this instead of
+    /// `ConnectionRegistry::active()` -- picking a live session that merely
+    /// happens to be newest, without checking it actually has `digest`
+    /// loaded, is exactly the alpha 2026-10-03 failure mode.
+    fn session_for_digest(&self, digest: &str) -> Option<bundle_active_set::SessionId> {
+        match self {
+            DigestSource::Static(_) => None,
+            DigestSource::Active {
+                scope, sessions, ..
+            } => sessions.pick_session_with_digest(scope, digest),
         }
     }
 }
@@ -563,7 +590,52 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
         return deps.spine.dead_letter(d, &err).await;
     };
 
-    let Some(connection) = deps.connections.active() else {
+    // Pick the executor session to invoke on. `DigestSource::Active` MUST
+    // pick a live session that actually has `digest` loaded
+    // (`bundle_active_set::pick_session_with_digest`, via `DigestSource::
+    // session_for_digest`), never just whichever connection
+    // `ConnectionRegistry::active()` calls "newest" -- that is exactly the
+    // alpha 2026-10-03 failure mode (a rolling pod's about-to-terminate
+    // executor session briefly "newest", so every invoke routed there and
+    // got `UnknownBundle`/silence while the real live executor held
+    // everything). `DigestSource::Static` has no per-session tracking at all
+    // (the legacy, single-bundle-per-pod path predates multi-session
+    // executors) and keeps the unchanged `ConnectionRegistry::active()`
+    // fallback.
+    let no_loaded_session = matches!(deps.digest_source, DigestSource::Active { .. })
+        && deps.digest_source.session_for_digest(&digest).is_none();
+    let connection = if no_loaded_session {
+        None
+    } else {
+        match deps.digest_source.session_for_digest(&digest) {
+            Some(session_id) => deps.connections.get(session_id),
+            None => deps.connections.active(),
+        }
+    };
+
+    let Some(connection) = connection else {
+        if no_loaded_session {
+            // Fail-closed, distinct from "no executor at all" below: at
+            // least one executor is connected, but none of them has this
+            // exact digest loaded right now -- never invoke a session that
+            // lacks the bundle (regression: bundles loaded only onto a
+            // terminating executor during rollout; live executor got none,
+            // alpha 2026-10-03).
+            tracing::error!(
+                app_id = %deps.app_id,
+                digest_prefix = %bundle_active_set::digest_prefix(&digest),
+                "no live executor session has this bundle's digest loaded; dead-lettering for redelivery"
+            );
+            let err = penguin_spine::DlqError {
+                kind: penguin_spine::DlqErrorKind::ExecutorUnavailable,
+                code: "NO_LOADED_EXECUTOR".to_string(),
+                message: "no live executor session has the target digest loaded".to_string(),
+                detail: None,
+                artifact_digest: Some(digest.clone()),
+                consumer_id: deps.consumer_id.clone(),
+            };
+            return deps.spine.dead_letter(d, &err).await;
+        }
         // Escalated WARN -> ERROR (fix/executor-link-heartbeat, alpha
         // 2026-10-02 incident: svc-process/svc-action were rolled and each
         // bundle-executor stayed bound to its old, terminated pod; the new
@@ -600,10 +672,10 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
     // error) is distinct from the bundle's own classified
     // retryable/non-retryable outcome; this landing records it as a
     // non-retryable attempt (detail names the invoke failure) rather than
-    // a separate DLQ path -- `deps.connections.active()` above already
-    // catches the "no executor at all" case before ever entering this
-    // loop, which is the one infra failure worth a distinct DLQ kind at
-    // this stage's current scope.
+    // a separate DLQ path -- the connection resolution above already
+    // catches the "no executor at all"/"no session has this digest" cases
+    // before ever entering this loop, which is the one infra failure worth
+    // a distinct DLQ kind at this stage's current scope.
     let (record, _attempts) = dispatch_with_retry(
         |_attempt| async {
             match invoke_dispatch(
@@ -1446,6 +1518,7 @@ mod tests {
         deps.digest_source = DigestSource::Active {
             scope: (1, 0, "waddles.bot.commands.default".to_string()),
             digests: Arc::new(ActiveDigests::new()),
+            sessions: Arc::new(LoadedSessions::new()),
         };
 
         handle_delivered(&d, &stream_key, &deps).await.unwrap();
@@ -1455,6 +1528,49 @@ mod tests {
         assert_eq!(dead_lettered.len(), 1);
         assert_eq!(dead_lettered[0].1, penguin_spine::DlqErrorKind::BundleError);
         assert_eq!(dead_lettered[0].2, deps.consumer_id);
+    }
+
+    /// Fail-closed requirement: at least one executor is connected, but no
+    /// live session has this scope's active digest loaded -- must
+    /// dead-letter `NO_LOADED_EXECUTOR`, never fall back to `ConnectionRegistry::
+    /// active()` and invoke a session that lacks the bundle (regression:
+    /// bundles loaded only onto a terminating executor during rollout; live
+    /// executor got none, alpha 2026-10-03).
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_no_loaded_executor_when_no_session_has_the_digest() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
+
+        // A connection IS live (unlike the "no executor at all" test above),
+        // but `sessions` has nothing loaded for this scope/digest at all.
+        let connections = connected_registry_with_fake_executor(
+            serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+        )
+        .await;
+        let digests = Arc::new(ActiveDigests::new());
+        digests.set(
+            (1, 0, "waddles.bot.commands.default".to_string()),
+            "sha256:aa".to_string(),
+        );
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.digest_source = DigestSource::Active {
+            scope: (1, 0, "waddles.bot.commands.default".to_string()),
+            digests,
+            sessions: Arc::new(LoadedSessions::new()),
+        };
+
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 0);
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(
+            dead_lettered[0].1,
+            penguin_spine::DlqErrorKind::ExecutorUnavailable
+        );
     }
 
     // regression: svc-action had no multi-tenant dispatch consumers; replies
@@ -1470,16 +1586,27 @@ mod tests {
             serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
         )
         .await;
+        let scope = (1, 0, "waddles.bot.commands.default".to_string());
         let digests = Arc::new(ActiveDigests::new());
-        digests.set(
-            (1, 0, "waddles.bot.commands.default".to_string()),
-            "sha256:aa".to_string(),
-        );
+        digests.set(scope.clone(), "sha256:aa".to_string());
+        // `pick_session_with_digest` must find the fake executor's session
+        // holding exactly this digest -- never fall back to `ConnectionRegistry::
+        // active()` alone (regression: bundles loaded only onto a
+        // terminating executor during rollout; live executor got none,
+        // alpha 2026-10-03).
+        let sessions = Arc::new(LoadedSessions::new());
+        let session_id = connections
+            .live_session_ids()
+            .into_iter()
+            .next()
+            .expect("the fake executor registered exactly one live session");
+        sessions.mark_loaded(session_id, scope.clone(), "sha256:aa".to_string());
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, connections);
         deps.digest_source = DigestSource::Active {
-            scope: (1, 0, "waddles.bot.commands.default".to_string()),
+            scope,
             digests,
+            sessions,
         };
 
         handle_delivered(&d, &stream_key, &deps).await.unwrap();

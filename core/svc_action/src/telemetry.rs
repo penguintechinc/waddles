@@ -292,9 +292,16 @@ pub struct ChangelogConsumerMetrics {
     /// (`"startup"`/`"reconnect"`/`"reconcile"`/`"diverged"`) -- see
     /// `bundle_active_set::FullSyncReason`.
     pub bundle_full_sync_total: prometheus::IntCounterVec,
-    /// Current count of `AppScope`s this consumer believes are loaded on
-    /// the connected executor, refreshed after every apply.
+    /// Current count of `(session, AppScope)` pairs this consumer believes
+    /// are loaded across every live executor session, refreshed after every
+    /// apply -- per-session fix (alpha 2026-10-03): a bundle loaded on two
+    /// live sessions now counts twice, surfacing fan-out, not just presence.
     pub bundles_loaded: prometheus::IntGauge,
+    /// An active bundle found loaded on ZERO live executor sessions after a
+    /// sync -- fail-closed, never silent: regression: bundles loaded only
+    /// onto a terminating executor during rollout; live executor got none
+    /// (alpha 2026-10-03).
+    pub bundle_zero_session_total: prometheus::IntCounter,
 }
 
 /// Registers [`ChangelogConsumerMetrics`] against `registry`. Must be
@@ -427,6 +434,15 @@ pub fn register_changelog_consumer_metrics(
         .register(Box::new(bundles_loaded.clone()))
         .expect("register svc_action_bundles_loaded");
 
+    let bundle_zero_session_total = prometheus::IntCounter::new(
+        "svc_action_bundle_zero_session_total",
+        "An active bundle found loaded on zero live executor sessions after a sync (fail-closed)",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(bundle_zero_session_total.clone()))
+        .expect("register svc_action_bundle_zero_session_total");
+
     ChangelogConsumerMetrics {
         applied_scopes_total,
         scope_failures_total,
@@ -440,6 +456,7 @@ pub fn register_changelog_consumer_metrics(
         bundle_loads_total,
         bundle_full_sync_total,
         bundles_loaded,
+        bundle_zero_session_total,
     }
 }
 
@@ -613,6 +630,7 @@ mod tests {
             .with_label_values(&["startup"])
             .inc();
         metrics.bundles_loaded.set(3);
+        metrics.bundle_zero_session_total.inc();
 
         let rendered = render_metrics(&registry).expect("registry with metrics must encode");
         assert!(rendered.contains("svc_action_changelog_applied_scopes_total 1"));
@@ -627,6 +645,7 @@ mod tests {
         assert!(rendered.contains("svc_action_changelog_gap_detected_total 1"));
         assert!(rendered.contains("svc_action_changelog_retention_exceeded_total 1"));
         assert!(rendered.contains("svc_action_executor_reconnect_detected_total 1"));
+        assert!(rendered.contains("svc_action_bundle_zero_session_total 1"));
     }
 
     #[test]

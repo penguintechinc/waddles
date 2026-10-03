@@ -822,6 +822,13 @@ fn try_start_changelog_consumer(
         // this is a supplementary capability, not the selected path itself
         // (unlike the RO `db` connect above, which crashloops).
         let active_digests = Arc::new(active_digests::ActiveDigests::new());
+        // regression: bundles loaded only onto a terminating executor during
+        // rollout; live executor got none (alpha 2026-10-03). Shared the same
+        // way as `active_digests` above -- `crate::changelog_consumer::run`
+        // overwrites `state.loaded` with this exact instance so every spawned
+        // dispatch consumer's `DigestSource::Active` sees the same
+        // per-session loaded-state the changelog consumer writes to.
+        let loaded_sessions = Arc::new(active_digests::LoadedSessions::new());
         let dispatch_spawner: Option<Arc<dyn dispatch_supervisor::ConsumerSupervisor>> =
             match (dispatch_key_ring, dispatch_spine_cfg) {
                 (Some(key_ring), Some(spine_cfg)) => {
@@ -841,6 +848,7 @@ fn try_start_changelog_consumer(
                                 metrics: Arc::new(penguin_spine::NoopMetrics),
                                 rust_data_plane,
                                 active_digests: Arc::clone(&active_digests),
+                                loaded_sessions: Arc::clone(&loaded_sessions),
                             });
                             Some(Arc::new(dispatch_supervisor::SpineConsumerSupervisor {
                                 deps,
@@ -886,6 +894,7 @@ fn try_start_changelog_consumer(
             kv_capabilities,
             changelog_consumer_ready,
             active_digests,
+            loaded_sessions,
             shutdown_rx,
         )
         .await;

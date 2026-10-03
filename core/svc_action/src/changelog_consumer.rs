@@ -39,8 +39,8 @@ use bundle_active_set::{
 };
 use sea_orm::DatabaseConnection;
 
-use crate::active_digests::ActiveDigests;
-use crate::bundle_loader::BundleSink;
+use crate::active_digests::{ActiveDigests, LoadedSessions};
+use crate::bundle_loader::SessionBundleSink;
 use crate::dispatch_supervisor::{self, ConsumerSupervisor, DispatchTarget, RunningConsumers};
 use crate::flags::FeatureFlag;
 use crate::telemetry::{ChangelogConsumerMetrics, DispatchSupervisorMetrics};
@@ -91,23 +91,37 @@ fn should_stop_consumers(currently_enabled: bool, were_enabled: bool) -> bool {
     !currently_enabled && were_enabled
 }
 
-/// Detects a NEW executor connection becoming active, by pointer identity --
-/// see `core/svc_process/src/changelog_consumer.rs`'s identical function for
-/// the full rationale (item 4, gh security review on PR #406).
-fn detect_new_connection<T>(
-    current: Option<&Arc<T>>,
-    last_connection_id: &mut Option<usize>,
-) -> bool {
-    let current_id = current.map(|c| Arc::as_ptr(c) as usize);
-    let changed = match (current_id, *last_connection_id) {
-        (Some(cur), Some(last)) => cur != last,
-        (Some(_), None) => true,
-        (None, _) => false,
-    };
-    if let Some(id) = current_id {
-        *last_connection_id = Some(id);
+/// What changed in the live host-API session set between two ticks --
+/// `added` (sessions this loop has never synced) and `removed` (sessions
+/// that silently dropped out, e.g. the host-API registry pruning a closed
+/// connection). Direct port of `core/svc_process/src/changelog_consumer.rs`'s
+/// identical type/function -- **replaces the retired `detect_new_connection`'s
+/// single pointer-identity slot** (item 4, gh security review on PR #406):
+/// that design could only ever track ONE connection at a time, so during a
+/// rollout -- when the OLD pod's executor session can briefly outlive the
+/// NEW pod's -- it saw only "the connection changed" and reset ALL
+/// loaded-state globally, with no way to react when the OLD session
+/// specifically disappeared moments later (regression: bundles loaded only
+/// onto a terminating executor during rollout; live executor got none,
+/// alpha 2026-10-03). A set diff naturally reports BOTH sessions as distinct
+/// `added` events and, independently, the old one's later `removed` event.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SessionDiff {
+    pub added: Vec<bundle_active_set::SessionId>,
+    pub removed: Vec<bundle_active_set::SessionId>,
+}
+
+/// Diffs `known` (every session this loop has already accounted for) against
+/// `live` (the host-API `ConnectionRegistry`'s current live set) -- pure (no
+/// I/O), so directly unit-testable.
+pub(crate) fn diff_sessions(
+    known: &std::collections::HashSet<bundle_active_set::SessionId>,
+    live: &std::collections::HashSet<bundle_active_set::SessionId>,
+) -> SessionDiff {
+    SessionDiff {
+        added: live.difference(known).copied().collect(),
+        removed: known.difference(live).copied().collect(),
     }
-    changed
 }
 
 /// All state one running consumer instance carries across ticks --
@@ -115,10 +129,21 @@ fn detect_new_connection<T>(
 /// subsequent [`run_incremental_tick`]/[`run_full_reconcile`] call.
 pub struct ConsumerState {
     by_scope: HashMap<ScopeKey, ActiveSetRead>,
-    /// `AppScope` (`(tenant_id, community_id, app_id)`) -> the digest this
-    /// consumer has already told the executor to load for that exact scope
-    /// -- never collapsed onto `app_id` alone (see this module's own doc).
-    loaded: HashMap<AppScope, String>,
+    /// Per-SESSION record of what this consumer has already told each live
+    /// executor session to load, keyed by `AppScope` (`(tenant_id,
+    /// community_id, app_id)`) within each session -- **never collapsed onto
+    /// `app_id` alone** (see this module's own doc), and **never a single
+    /// flat map shared across sessions** (regression: bundles loaded only
+    /// onto a terminating executor during rollout; live executor got none,
+    /// alpha 2026-10-03): a rolling pod's old executor session can briefly
+    /// outrank the new, live one, and a flat "whichever one is active" view
+    /// believes a bundle is loaded somewhere even after the session that
+    /// actually received it has died. `Arc`-shared (like `active_digests`
+    /// below) so `crate::dispatch::handle_delivered` can pick a live session
+    /// that actually has the target digest loaded, never just whichever
+    /// connection `ConnectionRegistry::active()` calls "newest". See
+    /// `bundle_active_set::session_sync`'s own module doc.
+    loaded: Arc<LoadedSessions>,
     /// Cached tenant slug/community name per `(tenant_id, community_id)`
     /// scope -- `crate::dispatch_supervisor::DispatchTarget`'s own stream
     /// key needs the resolved slug/name, never the raw numeric ids. See
@@ -173,7 +198,7 @@ impl ConsumerState {
     pub fn new(initial_seq: i64) -> Self {
         Self {
             by_scope: HashMap::new(),
-            loaded: HashMap::new(),
+            loaded: Arc::new(LoadedSessions::new()),
             resolved_scopes: HashMap::new(),
             running_consumers: HashMap::new(),
             tracker: ChangeLogTracker::new(initial_seq),
@@ -205,8 +230,8 @@ impl ConsumerState {
     }
 
     #[cfg(test)]
-    fn loaded(&self) -> &HashMap<AppScope, String> {
-        &self.loaded
+    fn loaded(&self) -> bundle_active_set::SessionLoaded<AppScope> {
+        self.loaded.snapshot()
     }
 
     #[cfg(test)]
@@ -251,7 +276,7 @@ pub async fn initial_state(
     let scope_last_success = by_scope.keys().map(|s| (*s, Instant::now())).collect();
     Ok(ConsumerState {
         by_scope,
-        loaded: HashMap::new(),
+        loaded: Arc::new(LoadedSessions::new()),
         resolved_scopes: HashMap::new(),
         running_consumers: HashMap::new(),
         tracker: ChangeLogTracker::new(safe_seq),
@@ -349,13 +374,22 @@ fn build_dispatch_targets(
 /// Flattens `state.by_scope` scope-preservingly (`bundle_active_set::
 /// scoped_active_rows` -- never collapsing two scopes' independently-active
 /// digests for the same `app_id` onto one slot, the retired multi-tenant
-/// correctness bug), diffs against `state.loaded`, and drives the resulting
-/// `Load`/`Unload` calls through `sink` -- shared by both
-/// [`run_incremental_tick`] and [`run_full_reconcile`].
+/// correctness bug), diffs against `state.loaded` across EVERY
+/// `live_sessions` entry, and drives the resulting `Load`/`Unload` calls
+/// through `sink` -- shared by both [`run_incremental_tick`] and
+/// [`run_full_reconcile`].
+///
+/// **Per-session, not "the active connection"** (regression: bundles loaded
+/// only onto a terminating executor during rollout; live executor got none,
+/// alpha 2026-10-03): a full sync sends `Load` for every active bundle to
+/// EVERY live session that lacks it, via `bundle_active_set::plan_sessions`
+/// -- never just whichever single session `ConnectionRegistry::active()`
+/// would have picked.
 #[allow(clippy::too_many_arguments)]
 async fn apply_active_set(
     state: &mut ConsumerState,
-    sink: Option<&dyn BundleSink>,
+    sink: Option<&dyn SessionBundleSink>,
+    live_sessions: &[bundle_active_set::SessionId],
     excluded_metric: &prometheus::IntCounterVec,
     kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
     metrics: &ChangelogConsumerMetrics,
@@ -383,7 +417,10 @@ async fn apply_active_set(
         }
     }
 
-    let plan = bundle_active_set::plan_scoped(&state.loaded, &active);
+    let loaded_snapshot = state.loaded.snapshot();
+    let plan = bundle_active_set::plan_sessions(&loaded_snapshot, &active, live_sessions, |row| {
+        row.digest.as_str()
+    });
 
     if let Some(reason) = full_sync_reason {
         // Over-log by design (user rule: never silent). regression: loads
@@ -413,11 +450,12 @@ async fn apply_active_set(
         return;
     };
 
-    for (scope, row) in &plan.to_load {
+    for (session, scope, row) in &plan.to_load {
         let load_start = Instant::now();
-        match sink.load(scope.0, scope.1, row).await {
+        match sink.load(*session, scope.0, scope.1, row).await {
             Ok(()) => {
                 tracing::info!(
+                    session = *session,
                     tenant_id = scope.0, community_id = scope.1,
                     app_id = %row.app_id, version = %row.version,
                     digest_prefix = %bundle_active_set::digest_prefix(&row.digest),
@@ -428,7 +466,9 @@ async fn apply_active_set(
                     .bundle_loads_total
                     .with_label_values(&["success"])
                     .inc();
-                state.loaded.insert(scope.clone(), row.digest.clone());
+                state
+                    .loaded
+                    .mark_loaded(*session, scope.clone(), row.digest.clone());
                 // Lock-step with `state.loaded` above -- see
                 // `ActiveDigests`'s own doc. regression: svc-action had no
                 // multi-tenant dispatch consumers; replies never sent after
@@ -436,13 +476,19 @@ async fn apply_active_set(
                 state.active_digests.set(scope.clone(), row.digest.clone());
             }
             Err(err) => {
+                // Per-session failure (e.g. a connection reset mid-load,
+                // alpha 2026-10-03's exact failure mode) leaves this
+                // specific session "not loaded" for this scope -- it is
+                // retried next tick, never silently assumed loaded just
+                // because another session succeeded this same tick.
                 tracing::error!(
+                    session = *session,
                     tenant_id = scope.0, community_id = scope.1,
                     app_id = %row.app_id, version = %row.version,
                     digest_prefix = %bundle_active_set::digest_prefix(&row.digest),
                     duration_ms = load_start.elapsed().as_millis() as u64,
                     error = %err,
-                    "changelog consumer: load failed, will retry next tick"
+                    "changelog consumer: load failed for this session, will retry next tick"
                 );
                 metrics
                     .bundle_loads_total
@@ -451,29 +497,57 @@ async fn apply_active_set(
             }
         }
     }
-    for (scope, digest) in &plan.to_unload {
-        match sink.unload(scope.0, scope.1, &scope.2, digest).await {
+    for (session, scope, digest) in &plan.to_unload {
+        match sink
+            .unload(*session, scope.0, scope.1, &scope.2, digest)
+            .await
+        {
             Ok(()) => {
                 tracing::info!(
+                    session = *session,
                     tenant_id = scope.0, community_id = scope.1,
                     app_id = %scope.2, digest,
                     "changelog consumer: unloaded"
                 );
-                state.loaded.remove(scope);
-                // Lock-step with `state.loaded` above -- see
+                state.loaded.mark_unloaded(*session, scope);
+                // Only clear the canonical active digest once NO live
+                // session holds this scope loaded anymore -- see
                 // `ActiveDigests`'s own doc.
-                state.active_digests.remove(scope);
+                if state.loaded.loaded_count(scope) == 0 {
+                    state.active_digests.remove(scope);
+                }
             }
             Err(err) => {
                 tracing::warn!(
+                    session = *session,
                     tenant_id = scope.0, community_id = scope.1,
                     app_id = %scope.2, digest, error = %err,
-                    "changelog consumer: unload failed, will retry next tick"
+                    "changelog consumer: unload failed for this session, will retry next tick"
                 );
             }
         }
     }
-    metrics.bundles_loaded.set(state.loaded.len() as i64);
+
+    // Fail-closed, never silent (regression: bundles loaded only onto a
+    // terminating executor during rollout; live executor got none, alpha
+    // 2026-10-03): an active bundle loaded on ZERO live sessions after this
+    // sync is a real outage for every request targeting it -- log loudly and
+    // keep retrying next tick, rather than letting it go unnoticed until a
+    // user report surfaces it.
+    for scope in active.keys() {
+        if state.loaded.loaded_count(scope) == 0 && !live_sessions.is_empty() {
+            tracing::error!(
+                tenant_id = scope.0, community_id = scope.1, app_id = %scope.2,
+                live_sessions = live_sessions.len(),
+                "changelog consumer: bundle is active but loaded on ZERO live executor \
+                 sessions; dispatch will dead-letter this scope until the next successful sync"
+            );
+            metrics.bundle_zero_session_total.inc();
+        }
+    }
+    metrics
+        .bundles_loaded
+        .set(state.loaded.total_entries() as i64);
 }
 
 fn update_tenant_gauges(state: &ConsumerState, metrics: &ChangelogConsumerMetrics) {
@@ -514,7 +588,8 @@ fn update_tenant_gauges(state: &ConsumerState, metrics: &ChangelogConsumerMetric
 pub async fn run_incremental_tick(
     db: &DatabaseConnection,
     state: &mut ConsumerState,
-    sink: Option<&dyn BundleSink>,
+    sink: Option<&dyn SessionBundleSink>,
+    live_sessions: &[bundle_active_set::SessionId],
     spawner: Option<&dyn ConsumerSupervisor>,
     excluded_metric: &prometheus::IntCounterVec,
     dispatch_metrics: &DispatchSupervisorMetrics,
@@ -537,7 +612,7 @@ pub async fn run_incremental_tick(
         safe_seq,
         last_seq = state.tracker.last_seq(),
         active_count,
-        loaded_count = state.loaded.len(),
+        loaded_count = state.loaded.total_entries(),
         "changelog consumer: poll tick"
     );
     if safe_seq <= state.tracker.last_seq() {
@@ -547,11 +622,16 @@ pub async fn run_incremental_tick(
         // `core/svc_process/src/changelog_consumer.rs`'s identical check
         // for the full rationale. regression: loads waited for 15-min full
         // reconcile after startup/reconnect, UnknownBundle (alpha
-        // 2026-10-03).
-        if bundle_active_set::loaded_state_diverged(&state.by_scope, &state.loaded) {
+        // 2026-10-03). Per-session: a single out-of-sync live session is
+        // enough to force a resync, even if another live session is already
+        // correct.
+        let loaded_snapshot = state.loaded.snapshot();
+        if bundle_active_set::any_session_diverged(&state.by_scope, &loaded_snapshot, live_sessions)
+        {
             apply_active_set(
                 state,
                 sink,
+                live_sessions,
                 excluded_metric,
                 kv_capabilities,
                 metrics,
@@ -580,6 +660,7 @@ pub async fn run_incremental_tick(
             db,
             state,
             sink,
+            live_sessions,
             spawner,
             excluded_metric,
             dispatch_metrics,
@@ -618,6 +699,7 @@ pub async fn run_incremental_tick(
                 db,
                 state,
                 sink,
+                live_sessions,
                 spawner,
                 excluded_metric,
                 dispatch_metrics,
@@ -696,7 +778,16 @@ pub async fn run_incremental_tick(
     state.tracker.advance(new_last_seq);
     metrics.changelog_lag.set(state.tracker.lag(safe_seq));
 
-    apply_active_set(state, sink, excluded_metric, kv_capabilities, metrics, None).await;
+    apply_active_set(
+        state,
+        sink,
+        live_sessions,
+        excluded_metric,
+        kv_capabilities,
+        metrics,
+        None,
+    )
+    .await;
     update_tenant_gauges(state, metrics);
 
     if let Some(spawner) = spawner {
@@ -726,7 +817,8 @@ pub async fn run_incremental_tick(
 pub async fn run_full_reconcile(
     db: &DatabaseConnection,
     state: &mut ConsumerState,
-    sink: Option<&dyn BundleSink>,
+    sink: Option<&dyn SessionBundleSink>,
+    live_sessions: &[bundle_active_set::SessionId],
     spawner: Option<&dyn ConsumerSupervisor>,
     excluded_metric: &prometheus::IntCounterVec,
     dispatch_metrics: &DispatchSupervisorMetrics,
@@ -769,6 +861,7 @@ pub async fn run_full_reconcile(
     apply_active_set(
         state,
         sink,
+        live_sessions,
         excluded_metric,
         kv_capabilities,
         metrics,
@@ -791,7 +884,8 @@ pub async fn run_full_reconcile(
 pub async fn drain_pending_full_sync(
     db: &DatabaseConnection,
     state: &mut ConsumerState,
-    sink: Option<&dyn BundleSink>,
+    sink: Option<&dyn SessionBundleSink>,
+    live_sessions: &[bundle_active_set::SessionId],
     spawner: Option<&dyn ConsumerSupervisor>,
     excluded_metric: &prometheus::IntCounterVec,
     dispatch_metrics: &DispatchSupervisorMetrics,
@@ -803,7 +897,7 @@ pub async fn drain_pending_full_sync(
     let Some(reason) = state.pending_full_sync else {
         return;
     };
-    if sink.is_none() {
+    if sink.is_none() || live_sessions.is_empty() {
         return;
     }
     if !bundle_active_set::should_send_full_sync(state.last_full_send, now, debounce) {
@@ -813,6 +907,7 @@ pub async fn drain_pending_full_sync(
         db,
         state,
         sink,
+        live_sessions,
         spawner,
         excluded_metric,
         dispatch_metrics,
@@ -896,6 +991,13 @@ pub async fn run(
     // regression: svc-action had no multi-tenant dispatch consumers;
     // replies never sent after legacy env removal (alpha 2026-10-03).
     active_digests: Arc<ActiveDigests>,
+    // The SAME instance `crate::lib::try_start_changelog_consumer` also
+    // threads into `dispatch_supervisor::SupervisorDeps`/`DigestSource::
+    // Active` -- overwrites `initial_state`'s own fresh, private default,
+    // exactly like `active_digests` above. regression: bundles loaded only
+    // onto a terminating executor during rollout; live executor got none
+    // (alpha 2026-10-03).
+    loaded_sessions: Arc<LoadedSessions>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
     changelog_consumer_ready.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -941,6 +1043,7 @@ pub async fn run(
         }
     };
     state.active_digests = active_digests;
+    state.loaded = loaded_sessions;
     changelog_consumer_ready.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let mut poll_tick = tokio::time::interval(poll_interval);
@@ -951,9 +1054,13 @@ pub async fn run(
     // reconcile -- skip `reconcile_tick`'s own immediate first fire.
     reconcile_tick.tick().await;
 
-    // See `detect_new_connection`'s own doc (item 4, gh security review on
-    // PR #406). `None`: no connection observed yet.
-    let mut last_connection_id: Option<usize> = None;
+    // Every session this loop has already accounted for (added or removed)
+    // as of the last iteration -- the per-session replacement for the
+    // retired `detect_new_connection`'s single pointer-identity slot. See
+    // `diff_sessions`'s own doc for why a SET diff against the host-API
+    // session registry, not a single "most recent connection" pointer, is
+    // required.
+    let mut known_sessions: std::collections::HashSet<bundle_active_set::SessionId>;
     // Mirrors `core/svc_process/src/changelog_consumer.rs`'s identical
     // tracking: `dispatch_supervisor::stop_all` must run exactly once on the
     // kill-switch ON->OFF transition, never on every already-disabled tick.
@@ -965,16 +1072,20 @@ pub async fn run(
     // `initial_state` already set `state.pending_full_sync` to
     // `FullSyncReason::Startup` -- see `core/svc_process/src/
     // changelog_consumer.rs`'s identical prelude for the full rationale.
+    // A no-op (flag stays pending) if no connection exists yet -- the loop's
+    // own per-iteration call below retries it as soon as one appears.
     {
-        let active_connection = connections.active();
-        let sink = active_connection.map(|connection| crate::bundle_loader::ExecutorSink {
-            connection,
+        let live_sessions = connections.live_session_ids();
+        known_sessions = live_sessions.iter().copied().collect();
+        let sink = (!live_sessions.is_empty()).then(|| crate::bundle_loader::RegistrySink {
+            registry: Arc::clone(&connections),
             call_timeout_ms,
         });
         drain_pending_full_sync(
             &db,
             &mut state,
-            sink.as_ref().map(|s| s as &dyn BundleSink),
+            sink.as_ref().map(|s| s as &dyn SessionBundleSink),
+            &live_sessions,
             spawner.as_deref(),
             &excluded_metric,
             &dispatch_metrics,
@@ -987,22 +1098,50 @@ pub async fn run(
     }
 
     loop {
-        let active_connection = connections.active();
-        if detect_new_connection(active_connection.as_ref(), &mut last_connection_id) {
+        let live_sessions = connections.live_session_ids();
+        let live_set: std::collections::HashSet<bundle_active_set::SessionId> =
+            live_sessions.iter().copied().collect();
+        let diff = diff_sessions(&known_sessions, &live_set);
+
+        // A session REMOVED from the registry (closed, reconnect, or
+        // termination) -- drop ITS loaded-state only, never another
+        // session's (regression: bundles loaded only onto a terminating
+        // executor during rollout; live executor got none, alpha
+        // 2026-10-03: nothing used to react to a session disappearing at
+        // all, so a dead session's now-meaningless entries suppressed a
+        // resend onto the survivor forever).
+        for session in &diff.removed {
+            let dropped = state.loaded.on_session_removed(*session);
+            if !dropped.is_empty() {
+                tracing::warn!(
+                    session = *session,
+                    dropped_count = dropped.len(),
+                    "changelog consumer: executor session removed; dropped its loaded-state, \
+                     the next sync will resync any surviving session that still needs these bundles"
+                );
+            }
+        }
+        // A session ADDED -- forces a full sync (never only resetting state
+        // and waiting for the watermark/reconcile timer, same "don't wait"
+        // requirement `FullSyncReason::Reconnect` already covers). Unlike
+        // the retired single-pointer design, this is additive: an existing,
+        // already-synced live session is left completely alone.
+        if !diff.added.is_empty() {
             tracing::info!(
-                "changelog consumer: detected a new executor connection; resetting loaded-state \
-                 so the full authoritative active set is resent (the executor wipes its own \
-                 registry on every disconnect)"
+                added = ?diff.added,
+                "changelog consumer: new executor session(s) detected; forcing a full sync onto \
+                 every live session that needs it"
             );
-            state.loaded.clear();
             state.pending_full_sync = Some(FullSyncReason::Reconnect);
             metrics.executor_reconnect_detected_total.inc();
         }
-        let sink = active_connection.map(|connection| crate::bundle_loader::ExecutorSink {
-            connection,
+        known_sessions = live_set;
+
+        let sink = (!live_sessions.is_empty()).then(|| crate::bundle_loader::RegistrySink {
+            registry: Arc::clone(&connections),
             call_timeout_ms,
         });
-        let sink_ref = sink.as_ref().map(|s| s as &dyn BundleSink);
+        let sink_ref = sink.as_ref().map(|s| s as &dyn SessionBundleSink);
 
         // "Don't wait for the watermark or the full-reconcile timer" --
         // regression: loads waited for 15-min full reconcile after
@@ -1011,6 +1150,7 @@ pub async fn run(
             &db,
             &mut state,
             sink_ref,
+            &live_sessions,
             spawner.as_deref(),
             &excluded_metric,
             &dispatch_metrics,
@@ -1042,7 +1182,7 @@ pub async fn run(
                     continue;
                 }
                 run_incremental_tick(
-                    &db, &mut state, sink_ref, spawner.as_deref(), &excluded_metric,
+                    &db, &mut state, sink_ref, &live_sessions, spawner.as_deref(), &excluded_metric,
                     &dispatch_metrics, &metrics, &kv_capabilities,
                 ).await;
             }
@@ -1051,7 +1191,7 @@ pub async fn run(
                     continue;
                 }
                 run_full_reconcile(
-                    &db, &mut state, sink_ref, spawner.as_deref(), &excluded_metric,
+                    &db, &mut state, sink_ref, &live_sessions, spawner.as_deref(), &excluded_metric,
                     &dispatch_metrics, &metrics, &kv_capabilities,
                     FullSyncReason::Reconcile,
                 ).await;
@@ -1187,9 +1327,10 @@ mod tests {
             self.calls.lock().unwrap().clone()
         }
     }
-    impl BundleSink for FakeSink {
+    impl SessionBundleSink for FakeSink {
         fn load<'a>(
             &'a self,
+            session: bundle_active_set::SessionId,
             _tenant_id: i32,
             _community_id: i32,
             row: &'a bundle_active_set::ActiveBundleRow,
@@ -1204,12 +1345,13 @@ mod tests {
                 self.calls
                     .lock()
                     .unwrap()
-                    .push(format!("load:{}:{}", row.app_id, row.digest));
+                    .push(format!("load:{session}:{}:{}", row.app_id, row.digest));
                 Ok(())
             })
         }
         fn unload<'a>(
             &'a self,
+            session: bundle_active_set::SessionId,
             _tenant_id: i32,
             _community_id: i32,
             app_id: &'a str,
@@ -1221,7 +1363,7 @@ mod tests {
                     + 'a,
             >,
         > {
-            let call = format!("unload:{app_id}:{digest}");
+            let call = format!("unload:{session}:{app_id}:{digest}");
             Box::pin(async move {
                 self.calls.lock().unwrap().push(call);
                 Ok(())
@@ -1317,7 +1459,8 @@ mod tests {
         run_incremental_tick(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -1341,7 +1484,8 @@ mod tests {
         run_incremental_tick(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -1368,7 +1512,8 @@ mod tests {
         run_incremental_tick(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -1382,10 +1527,12 @@ mod tests {
             "must advance to safe_seq, not max(seq)"
         );
         assert_eq!(
-            state.loaded().get(&(1, 0, "waddles.a".to_string())),
-            Some(&digest)
+            state
+                .loaded()
+                .digest_for(1, &(1, 0, "waddles.a".to_string())),
+            Some(digest.as_str())
         );
-        assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+        assert_eq!(sink.calls(), vec![format!("load:1:waddles.a:{digest}")]);
         // Lock-step with `state.loaded` -- regression: svc-action had no
         // multi-tenant dispatch consumers; replies never sent after legacy
         // env removal (alpha 2026-10-03).
@@ -1454,7 +1601,8 @@ mod tests {
         run_incremental_tick(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             Some(&spawner),
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -1485,7 +1633,8 @@ mod tests {
         run_incremental_tick(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             Some(&spawner),
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -1524,7 +1673,8 @@ mod tests {
         run_incremental_tick(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -1537,7 +1687,7 @@ mod tests {
             150,
             "exactly-at-floor must still advance to safe_seq via the normal incremental path"
         );
-        assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+        assert_eq!(sink.calls(), vec![format!("load:1:waddles.a:{digest}")]);
         assert_eq!(
             metrics.changelog_retention_exceeded_total.get(),
             0,
@@ -1559,7 +1709,8 @@ mod tests {
         run_incremental_tick(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -1585,7 +1736,8 @@ mod tests {
         run_incremental_tick(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -1618,7 +1770,8 @@ mod tests {
         run_incremental_tick(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -1628,8 +1781,10 @@ mod tests {
         .await;
         assert_eq!(state.last_seq(), 101);
         assert_eq!(
-            state.loaded().get(&(1, 0, "waddles.a".to_string())),
-            Some(&digest)
+            state
+                .loaded()
+                .digest_for(1, &(1, 0, "waddles.a".to_string())),
+            Some(digest.as_str())
         );
     }
 
@@ -1659,7 +1814,7 @@ mod tests {
         );
         state
             .loaded
-            .insert((1, 0, "waddles.a".to_string()), "sha256:00".to_string());
+            .mark_loaded(1, (1, 0, "waddles.a".to_string()), "sha256:00".to_string());
         state.scope_last_success.insert((1, 0), Instant::now());
         tokio::time::sleep(Duration::from_millis(60)).await;
 
@@ -1667,7 +1822,8 @@ mod tests {
         run_incremental_tick(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -1677,7 +1833,10 @@ mod tests {
         .await;
 
         assert_eq!(state.by_scope_len(), 0);
-        assert_eq!(sink.calls(), vec!["unload:waddles.a:sha256:00".to_string()]);
+        assert_eq!(
+            sink.calls(),
+            vec!["unload:1:waddles.a:sha256:00".to_string()]
+        );
     }
 
     /// Primary retention regression (hub-api migration `0026`/PR #397):
@@ -1697,7 +1856,8 @@ mod tests {
         run_incremental_tick(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -1709,7 +1869,7 @@ mod tests {
         assert_eq!(state.last_seq(), 200);
         assert_eq!(metrics.changelog_retention_exceeded_total.get(), 1);
         assert_eq!(metrics.changelog_gap_detected_total.get(), 0);
-        assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+        assert_eq!(sink.calls(), vec![format!("load:1:waddles.a:{digest}")]);
     }
 
     /// Retention-gap regression (Gemini review on PR #397): see
@@ -1730,7 +1890,8 @@ mod tests {
         run_incremental_tick(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -1741,7 +1902,7 @@ mod tests {
 
         assert_eq!(state.last_seq(), 150);
         assert_eq!(metrics.changelog_gap_detected_total.get(), 1);
-        assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+        assert_eq!(sink.calls(), vec![format!("load:1:waddles.a:{digest}")]);
     }
 
     #[tokio::test]
@@ -1757,7 +1918,8 @@ mod tests {
         run_full_reconcile(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -1767,9 +1929,283 @@ mod tests {
         )
         .await;
         assert_eq!(
-            state.loaded().get(&(1, 0, "waddles.a".to_string())),
-            Some(&digest)
+            state
+                .loaded()
+                .digest_for(1, &(1, 0, "waddles.a".to_string())),
+            Some(digest.as_str())
         );
+    }
+
+    /// **Fix requirement 1 (shared helper, `bundle_active_set::session_sync`
+    /// wired end to end):** two live sessions, neither has anything loaded --
+    /// a full reconcile must `Load` the one active bundle onto BOTH, never
+    /// just the newest. regression: bundles loaded only onto a terminating
+    /// executor during rollout; live executor got none (alpha 2026-10-03)
+    #[tokio::test]
+    async fn run_full_reconcile_loads_every_active_bundle_onto_every_live_session() {
+        let digest = format!("sha256:{}", "7".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.a", &digest)]])
+            .append_query_results([vec![approval_row(1, "waddles.a")]])
+            .into_connection();
+        let mut state = ConsumerState::new(0);
+        let sink = FakeSink::default();
+        run_full_reconcile(
+            &db,
+            &mut state,
+            Some(&sink as &dyn SessionBundleSink),
+            &[1, 2],
+            None,
+            &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
+            &test_changelog_metrics(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            FullSyncReason::Reconcile,
+        )
+        .await;
+        let mut calls = sink.calls();
+        calls.sort_unstable();
+        assert_eq!(
+            calls,
+            vec![
+                format!("load:1:waddles.a:{digest}"),
+                format!("load:2:waddles.a:{digest}"),
+            ],
+            "both live sessions must receive Load, not just the newest"
+        );
+        assert_eq!(
+            state
+                .loaded()
+                .digest_for(1, &(1, 0, "waddles.a".to_string())),
+            Some(digest.as_str())
+        );
+        assert_eq!(
+            state
+                .loaded()
+                .digest_for(2, &(1, 0, "waddles.a".to_string())),
+            Some(digest.as_str())
+        );
+    }
+
+    /// A sink that fails every `load`/`unload` call targeting one specific
+    /// session id -- models a session dying mid-tick (connection reset),
+    /// while every other session succeeds normally.
+    #[derive(Default)]
+    struct DiesForSessionSink {
+        calls: StdMutex<Vec<String>>,
+        dies_for: bundle_active_set::SessionId,
+    }
+    impl DiesForSessionSink {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+    impl SessionBundleSink for DiesForSessionSink {
+        fn load<'a>(
+            &'a self,
+            session: bundle_active_set::SessionId,
+            _tenant_id: i32,
+            _community_id: i32,
+            row: &'a bundle_active_set::ActiveBundleRow,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(), crate::dispatch::InvokeError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("load:{session}:{}:{}", row.app_id, row.digest));
+            let fail = session == self.dies_for;
+            Box::pin(async move {
+                if fail {
+                    Err(crate::dispatch::InvokeError::NoExecutor)
+                } else {
+                    Ok(())
+                }
+            })
+        }
+        fn unload<'a>(
+            &'a self,
+            _session: bundle_active_set::SessionId,
+            _tenant_id: i32,
+            _community_id: i32,
+            _app_id: &'a str,
+            _digest: &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(), crate::dispatch::InvokeError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move { Ok(()) })
+        }
+    }
+
+    /// **Regression (alpha 2026-10-03): the OLD (about-to-terminate) session
+    /// dying mid-load must never cost the live session anything.** Session 2
+    /// (newer, dying) fails its load; session 1 (the live one) must still
+    /// end up holding the bundle after this tick.
+    #[tokio::test]
+    async fn run_full_reconcile_leaves_the_survivor_fully_loaded_when_the_other_session_dies_mid_load(
+    ) {
+        let digest = format!("sha256:{}", "6".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.a", &digest)]])
+            .append_query_results([vec![approval_row(1, "waddles.a")]])
+            .into_connection();
+        let mut state = ConsumerState::new(0);
+        let sink = DiesForSessionSink {
+            dies_for: 2,
+            ..Default::default()
+        };
+        run_full_reconcile(
+            &db,
+            &mut state,
+            Some(&sink as &dyn SessionBundleSink),
+            &[1, 2],
+            None,
+            &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
+            &test_changelog_metrics(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            FullSyncReason::Reconcile,
+        )
+        .await;
+        assert_eq!(
+            state
+                .loaded()
+                .digest_for(1, &(1, 0, "waddles.a".to_string())),
+            Some(digest.as_str()),
+            "the live session must still hold the bundle regardless of the other session's failure"
+        );
+        assert_eq!(
+            state
+                .loaded()
+                .digest_for(2, &(1, 0, "waddles.a".to_string())),
+            None,
+            "the failed session must never be recorded as loaded"
+        );
+        assert_eq!(
+            sink.calls().len(),
+            2,
+            "both sessions must have been attempted, got {:?}",
+            sink.calls()
+        );
+    }
+
+    /// Fail-closed requirement 2: an active bundle loaded on ZERO live
+    /// sessions after a sync increments `bundle_zero_session_total` and is
+    /// logged -- never silently left for a user report to surface.
+    #[tokio::test]
+    async fn run_full_reconcile_increments_the_zero_session_metric_when_every_session_fails() {
+        let digest = format!("sha256:{}", "5".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.a", &digest)]])
+            .append_query_results([vec![approval_row(1, "waddles.a")]])
+            .into_connection();
+        let mut state = ConsumerState::new(0);
+        let sink = FailingSink;
+        let metrics = test_changelog_metrics();
+        run_full_reconcile(
+            &db,
+            &mut state,
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
+            None,
+            &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
+            &metrics,
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            FullSyncReason::Reconcile,
+        )
+        .await;
+        assert_eq!(
+            metrics.bundle_zero_session_total.get(),
+            1,
+            "an active bundle loaded nowhere must increment the fail-closed metric"
+        );
+    }
+
+    /// **The exact alpha 2026-10-03 sequence, end to end through
+    /// `run_full_reconcile`:** the old (terminating) pod's session (2) joins
+    /// alongside the new live session (1); both receive every active bundle.
+    /// Session 2 then disappears from the live set (closed) -- `run`'s own
+    /// session-removal handling (`LoadedSessions::on_session_removed`) drops
+    /// its state, and the live session (1) is proven to already hold
+    /// everything with zero further intervention.
+    ///
+    /// regression: bundles loaded only onto a terminating executor during
+    /// rollout; live executor got none (alpha 2026-10-03)
+    #[tokio::test]
+    async fn alpha_2026_10_03_sequence_through_run_full_reconcile() {
+        let digest_ping = format!("sha256:{}", "1".repeat(64));
+        let digest_csping = format!("sha256:{}", "2".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![
+                active_row("ping", 1, 0, 10),
+                active_row("csping", 1, 0, 11),
+            ]])
+            .append_query_results([vec![
+                version_row(10, "ping", &digest_ping),
+                version_row(11, "csping", &digest_csping),
+            ]])
+            .append_query_results([vec![approval_row(1, "ping"), approval_row(1, "csping")]])
+            .into_connection();
+        let mut state = ConsumerState::new(0);
+        let sink = FakeSink::default();
+        run_full_reconcile(
+            &db,
+            &mut state,
+            Some(&sink as &dyn SessionBundleSink),
+            &[1, 2],
+            None,
+            &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
+            &test_changelog_metrics(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            FullSyncReason::Reconcile,
+        )
+        .await;
+        for app in ["ping", "csping"] {
+            for session in [1u64, 2u64] {
+                assert!(
+                    state
+                        .loaded()
+                        .digest_for(session, &(1, 0, app.to_string()))
+                        .is_some(),
+                    "session {session} must hold {app} after the initial sync"
+                );
+            }
+        }
+
+        // Session 2 (the old, terminating pod) is removed from the registry.
+        let dropped = state.loaded.on_session_removed(2);
+        assert_eq!(dropped.len(), 2, "session 2 had both bundles loaded");
+
+        // The live session (1) still holds everything -- zero manual
+        // intervention required, proving the fix for the alpha incident
+        // where the live executor ended up holding nothing at all.
+        for app in ["ping", "csping"] {
+            assert_eq!(
+                state.loaded().digest_for(1, &(1, 0, app.to_string())),
+                Some(if app == "ping" {
+                    digest_ping.as_str()
+                } else {
+                    digest_csping.as_str()
+                })
+            );
+            assert!(state
+                .loaded()
+                .digest_for(2, &(1, 0, app.to_string()))
+                .is_none());
+        }
     }
 
     #[test]
@@ -1780,19 +2216,52 @@ mod tests {
         assert!(!should_stop_consumers(true, false));
     }
 
-    /// See `core/svc_process/src/changelog_consumer.rs`'s identical test.
+    /// Item 4 (gh security review on PR #406), per-session fix (regression:
+    /// bundles loaded only onto a terminating executor during rollout; live
+    /// executor got none, alpha 2026-10-03): a session present in `live` but
+    /// not `known` is `added`; one in `known` but not `live` is `removed`; a
+    /// session in both is neither. See `core/svc_process/src/
+    /// changelog_consumer.rs`'s identical test suite.
     #[test]
-    fn detect_new_connection_fires_only_on_a_genuine_identity_change() {
-        let mut last = None;
-        let a = Arc::new(());
-        let b = Arc::new(());
+    fn diff_sessions_reports_additions_and_removals_independently() {
+        let known: std::collections::HashSet<bundle_active_set::SessionId> =
+            [1, 2].into_iter().collect();
+        let live: std::collections::HashSet<bundle_active_set::SessionId> =
+            [2, 3].into_iter().collect();
+        let mut diff = diff_sessions(&known, &live);
+        diff.added.sort_unstable();
+        diff.removed.sort_unstable();
+        assert_eq!(diff.added, vec![3]);
+        assert_eq!(diff.removed, vec![1]);
+    }
 
-        assert!(detect_new_connection(Some(&a), &mut last));
-        assert!(!detect_new_connection(Some(&a), &mut last));
-        assert!(detect_new_connection(Some(&b), &mut last));
-        assert!(!detect_new_connection(Some(&b), &mut last));
-        assert!(!detect_new_connection(Option::<&Arc<()>>::None, &mut last));
-        assert!(detect_new_connection(Some(&a), &mut last));
+    /// **The exact alpha 2026-10-03 shape:** the old pod's session (2)
+    /// connects in the SAME tick the new pod's session (1) is already known
+    /// -- both are reported, and 2's later disappearance is a separate,
+    /// independent `removed` event on a later diff, never confused with
+    /// session 1 (which was never touched).
+    #[test]
+    fn diff_sessions_handles_a_rollout_overlap_then_the_old_sessions_removal() {
+        let known: std::collections::HashSet<bundle_active_set::SessionId> =
+            [1].into_iter().collect();
+        let live_both: std::collections::HashSet<bundle_active_set::SessionId> =
+            [1, 2].into_iter().collect();
+        let diff = diff_sessions(&known, &live_both);
+        assert_eq!(diff.added, vec![2]);
+        assert!(diff.removed.is_empty());
+
+        let live_after_old_dies: std::collections::HashSet<bundle_active_set::SessionId> =
+            [1].into_iter().collect();
+        let diff2 = diff_sessions(&live_both, &live_after_old_dies);
+        assert!(diff2.added.is_empty());
+        assert_eq!(diff2.removed, vec![2]);
+    }
+
+    #[test]
+    fn diff_sessions_is_empty_when_nothing_changed() {
+        let s: std::collections::HashSet<bundle_active_set::SessionId> =
+            [1, 2].into_iter().collect();
+        assert_eq!(diff_sessions(&s, &s), SessionDiff::default());
     }
 
     #[test]
@@ -1872,6 +2341,7 @@ mod tests {
                 Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
                 Arc::clone(&changelog_consumer_ready),
                 Arc::new(ActiveDigests::new()),
+                Arc::new(LoadedSessions::new()),
                 shutdown_rx,
             ),
         )
@@ -1895,9 +2365,10 @@ mod tests {
 
     #[derive(Default)]
     struct FailingSink;
-    impl BundleSink for FailingSink {
+    impl SessionBundleSink for FailingSink {
         fn load<'a>(
             &'a self,
+            _session: bundle_active_set::SessionId,
             _tenant_id: i32,
             _community_id: i32,
             _row: &'a bundle_active_set::ActiveBundleRow,
@@ -1912,6 +2383,7 @@ mod tests {
         }
         fn unload<'a>(
             &'a self,
+            _session: bundle_active_set::SessionId,
             _tenant_id: i32,
             _community_id: i32,
             _app_id: &'a str,
@@ -1980,7 +2452,8 @@ mod tests {
         drain_pending_full_sync(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -1990,7 +2463,7 @@ mod tests {
             Duration::from_millis(20),
         )
         .await;
-        assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+        assert_eq!(sink.calls(), vec![format!("load:1:waddles.a:{digest}")]);
         assert_eq!(state.pending_full_sync(), None);
         assert_eq!(
             metrics
@@ -2009,6 +2482,7 @@ mod tests {
             &db,
             &mut state,
             None,
+            &[],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -2046,7 +2520,8 @@ mod tests {
         drain_pending_full_sync(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -2056,13 +2531,14 @@ mod tests {
             debounce,
         )
         .await;
-        assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest_a}")]);
+        assert_eq!(sink.calls(), vec![format!("load:1:waddles.a:{digest_a}")]);
 
         state.pending_full_sync = Some(FullSyncReason::Reconnect);
         drain_pending_full_sync(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -2074,7 +2550,7 @@ mod tests {
         .await;
         assert_eq!(
             sink.calls(),
-            vec![format!("load:waddles.a:{digest_a}")],
+            vec![format!("load:1:waddles.a:{digest_a}")],
             "a reconnect within the debounce window must be coalesced, not re-sent"
         );
         assert_eq!(state.pending_full_sync(), Some(FullSyncReason::Reconnect));
@@ -2082,7 +2558,8 @@ mod tests {
         drain_pending_full_sync(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -2095,9 +2572,9 @@ mod tests {
         assert_eq!(
             sink.calls(),
             vec![
-                format!("load:waddles.a:{digest_a}"),
-                format!("load:waddles.b:{digest_b}"),
-                format!("unload:waddles.a:{digest_a}"),
+                format!("load:1:waddles.a:{digest_a}"),
+                format!("load:1:waddles.b:{digest_b}"),
+                format!("unload:1:waddles.a:{digest_a}"),
             ],
             "once the debounce window elapses the coalesced reconnect must still be honored"
         );
@@ -2126,7 +2603,8 @@ mod tests {
         run_incremental_tick(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -2135,10 +2613,12 @@ mod tests {
         )
         .await;
         assert_eq!(state.last_seq(), 100);
-        assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+        assert_eq!(sink.calls(), vec![format!("load:1:waddles.a:{digest}")]);
         assert_eq!(
-            state.loaded().get(&(1, 0, "waddles.a".to_string())),
-            Some(&digest)
+            state
+                .loaded()
+                .digest_for(1, &(1, 0, "waddles.a".to_string())),
+            Some(digest.as_str())
         );
         assert_eq!(
             metrics
@@ -2164,7 +2644,8 @@ mod tests {
         run_incremental_tick(
             &db,
             &mut state,
-            Some(&failing_sink as &dyn BundleSink),
+            Some(&failing_sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -2185,7 +2666,8 @@ mod tests {
         run_incremental_tick(
             &db,
             &mut state,
-            Some(&sink as &dyn BundleSink),
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
             None,
             &test_excluded_metric(),
             &test_dispatch_supervisor_metrics(),
@@ -2193,7 +2675,7 @@ mod tests {
             &bundle_host_kv::CapabilitySnapshot::new(),
         )
         .await;
-        assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+        assert_eq!(sink.calls(), vec![format!("load:1:waddles.a:{digest}")]);
         assert_eq!(
             metrics
                 .bundle_loads_total
