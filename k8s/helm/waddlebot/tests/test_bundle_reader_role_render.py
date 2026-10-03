@@ -18,7 +18,9 @@ against the real rendered manifest text -- not a hand-read of the templates
    literal `value:`.
 3. The core-bundle-seeder Job's `CORE_BUNDLES_PLATFORM_CONNECTIONS` env var
    is present and carries the alpha Discord ingest source
-   (`values-alpha.yaml`'s `processIngestPlatform`/`processIngestSourceId`).
+   (`values-alpha.yaml`'s `pipeline.coreBundleSeeder.platformConnections` --
+   moved here from rustDataPlane.svcProcess's legacy processIngestPlatform/
+   processIngestSourceId fields, which PR #538 removed from alpha).
 
 Zero rendered documents, or zero matching containers, is a hard failure
 here, never a silent pass (critical-rules.md Verification Integrity) -- a

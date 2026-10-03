@@ -14,13 +14,19 @@
 #      building them is wasted work;
 #   3. still builds the live Rust svc-ingest/svc-process/svc-action stages
 #      (core/svc_{ingest,process,action}/Dockerfile.rust) -- this fix must
-#      never regress the actual live data-plane build.
+#      never regress the actual live data-plane build;
+#   4. builds bundle-executor from core/bundle_executor/Dockerfile.rust with
+#      the "." (repo-root) context -- fix/alpha-deploy-executor-and-failfast
+#      (#538) added bundle-executor to SERVICES, backing both the
+#      bundle-executor and bundle-executor-action Deployments.
 #
 # docker/helm/kubectl/curl are all stubbed -- no real registry, cluster, or
 # build ever runs. The real SERVICES loop and service_dockerfile/
 # service_context/service_image_repo functions in the script under test are
 # NOT stubbed -- this test exercises them directly via the logged `docker
-# build` invocations.
+# buildx build` invocations (resolve-433's registry-backed buildx cache
+# replaced the script's plain `docker build` call with `docker buildx
+# build`).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../" && pwd)"
@@ -92,7 +98,7 @@ PATH="$STUB_DIR:$PATH" bash "$SCRIPT_UNDER_TEST" > "$OUT_FILE" 2>&1 || {
 
 assert_built() {
     local label="$1" pattern="$2"
-    if grep -q "STUB-CALLED docker build .*-f $pattern " "$LOG_FILE"; then
+    if grep -q "STUB-CALLED docker buildx build .*-f $pattern " "$LOG_FILE"; then
         echo "  - $label built ($pattern)"
         cases_passed=$((cases_passed + 1))
     else
@@ -103,7 +109,7 @@ assert_built() {
 
 assert_not_built() {
     local label="$1" pattern="$2"
-    if grep -q "STUB-CALLED docker build .*-f $pattern " "$LOG_FILE"; then
+    if grep -q "STUB-CALLED docker buildx build .*-f $pattern " "$LOG_FILE"; then
         echo "  x $label WAS built (expected absent: -f $pattern)"
         cases_failed=$((cases_failed + 1))
     else
@@ -114,7 +120,7 @@ assert_not_built() {
 
 echo "Test: waddlebot-egress-proxy is built from the core/ context"
 assert_built "waddlebot-egress-proxy" "core/egress_proxy/Dockerfile.rust"
-if grep -qE "STUB-CALLED docker build .*-t localhost:32000/waddlebot/waddlebot-egress-proxy:" "$LOG_FILE"; then
+if grep -qE "STUB-CALLED docker buildx build .*-t localhost:32000/waddlebot/waddlebot-egress-proxy:" "$LOG_FILE"; then
     echo "  - tagged under the egressProxy.image repo name"
     cases_passed=$((cases_passed + 1))
 else
@@ -133,6 +139,17 @@ echo "Test: live Rust svc-ingest/svc-process/svc-action are still built"
 assert_built "svc-ingest (rust)" "core/svc_ingest/Dockerfile.rust"
 assert_built "svc-process (rust)" "core/svc_process/Dockerfile.rust"
 assert_built "svc-action (rust)" "core/svc_action/Dockerfile.rust"
+
+echo ""
+echo "Test: bundle-executor is built from the repo-root context (#538)"
+assert_built "bundle-executor" "core/bundle_executor/Dockerfile.rust"
+if grep -qE "STUB-CALLED docker buildx build .*-t localhost:32000/waddlebot/bundle-executor:" "$LOG_FILE"; then
+    echo "  - tagged under the bundle-executor repo name"
+    cases_passed=$((cases_passed + 1))
+else
+    echo "  x not tagged under localhost:32000/waddlebot/bundle-executor"
+    cases_failed=$((cases_failed + 1))
+fi
 
 echo ""
 total_cases=$((cases_passed + cases_failed))

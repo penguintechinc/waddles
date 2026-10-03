@@ -174,6 +174,15 @@ pipeline:
   # (vs the measurement's sqlite fixture) and OTel SDK overhead not present in the probe.
   coreBundleSeeder:
     enabled: true
+    # fix/preexisting-test-failures: the alpha Discord ingest source, moved here from
+    # rustDataPlane.svcProcess's legacy processIngestPlatform/processIngestSourceId
+    # (removed by PR #538 -- see rustDataPlane.svcProcess comment above). Activation
+    # and bindings for the alpha Discord community still require this seeded here,
+    # independent of svc-process's DB-driven bundle path.
+    platformConnections:
+      - platform: "discord"
+        sourceId: "dg-474965105759748096"
+        label: "svc-ingest platform connection"
     # fix/seeder-memory (not yet merged as of this branch's base): 64Mi/128Mi was
     # the real OOMKilled cause in CI's kind install (gh PR #480), overriding the
     # base chart's 512Mi limit -- Helm merges this file over the chart default,

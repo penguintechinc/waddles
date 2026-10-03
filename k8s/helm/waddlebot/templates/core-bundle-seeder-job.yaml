@@ -134,19 +134,27 @@ spec:
         {{- end }}
         # Platform connections (services/ingest_source_service.py::ensure_ingest_source(),
         # NO credentials/tokens stored -- see hub_api/cli/seed_core_bundles.py's own module
-        # docstring) -- built from the SAME values already wired to svc-ingest's Discord guild
-        # (templates/svc-process-rust.yaml's processIngestPlatform/processIngestSourceId env),
-        # never a second, hand-maintained copy of the guild id. Omitted entirely (no env var)
-        # when that value isn't set, so the seeder falls back to `bundles/core-bundles.yaml`'s
+        # docstring) -- sourced from the seeder's OWN dedicated
+        # pipeline.coreBundleSeeder.platformConnections value (fix/preexisting-test-failures),
+        # never from rustDataPlane.svcProcess's legacy processIngestPlatform/processIngestSourceId
+        # fields (removed from alpha by PR #538 now that the DB-driven multi-tenant
+        # active-bundle loader is the sole bundle-selection path there -- see
+        # values-alpha.yaml's rustDataPlane.svcProcess comment). Keeping the seeder's ingest
+        # sources on their own value means this Job still registers them even when
+        # svc-process's legacy single-app env is intentionally empty. Omitted entirely (no env
+        # var) when the list is empty, so the seeder falls back to `bundles/core-bundles.yaml`'s
         # own (empty by default) static `platform_connections:` list.
-        {{- if .Values.pipeline.rustDataPlane.svcProcess.processIngestSourceId }}
-        {{- $connections := list (dict
-              "tenant_slug" (.Values.pipeline.coreBundleSeeder.defaultTenantSlug | default "global")
-              "community_id" nil
-              "platform" .Values.pipeline.rustDataPlane.svcProcess.processIngestPlatform
-              "source_id" .Values.pipeline.rustDataPlane.svcProcess.processIngestSourceId
-              "label" "svc-ingest platform connection"
+        {{- if .Values.pipeline.coreBundleSeeder.platformConnections }}
+        {{- $connections := list }}
+        {{- range .Values.pipeline.coreBundleSeeder.platformConnections }}
+        {{- $connections = append $connections (dict
+              "tenant_slug" (.tenantSlug | default $.Values.pipeline.coreBundleSeeder.defaultTenantSlug | default "global")
+              "community_id" (.communityId | default nil)
+              "platform" .platform
+              "source_id" .sourceId
+              "label" (.label | default (printf "%s platform connection" .platform))
             ) }}
+        {{- end }}
         - name: CORE_BUNDLES_PLATFORM_CONNECTIONS
           value: {{ toJson $connections | quote }}
         {{- end }}

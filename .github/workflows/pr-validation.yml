@@ -459,7 +459,17 @@ jobs:
           python-version: '3.13'
 
       - name: Install check dependencies
-        run: pip install --no-cache-dir pyyaml==6.0.2
+        run: pip install --no-cache-dir pyyaml==6.0.2 pytest==9.1.1 cryptography==50.0.1
+
+      # fix/preexisting-test-failures: k8s/helm/waddlebot/tests/ (34 helm-template
+      # assertion tests, incl. TestSeederPlatformConnections's
+      # CORE_BUNDLES_PLATFORM_CONNECTIONS check) was never wired into any CI job --
+      # it could regress silently with nothing failing. Running it directly as
+      # `pytest <dir>` (no `|| true`/continue-on-error) means a 0-tests-collected
+      # state (e.g. the dir gets moved/renamed) fails this step with pytest's own
+      # exit code 5, never a silent pass -- critical-rules.md Verification Integrity.
+      - name: Helm chart template tests (pytest)
+        run: python3 -m pytest k8s/helm/waddlebot/tests/ -v
 
       # fix/helm-hook-rbac-ordering -- helm.sh/hook-annotated Jobs run BEFORE any
       # regular (non-hook) chart resource. A pre-install/pre-upgrade Job whose
@@ -586,6 +596,13 @@ jobs:
       # the prune, unlike docker's own cache store).
       - name: alpha-deploy.sh registry build-cache regression test
         run: bash scripts/ci/tests/test_alpha_deploy_build_cache.sh
+
+      # fix/preexisting-test-failures: this test existed but was never wired into
+      # any CI job, so its egress-proxy/bundle-executor build-list coverage could
+      # silently drift with nothing failing (exactly the Dockerfile-path drift
+      # this test was written to catch).
+      - name: alpha-deploy.sh service build-list regression test
+        run: bash scripts/ci/tests/test_alpha_deploy_service_build_list.sh
 
       # fix/alpha-deploy-executor-and-failfast -- alpha-deploy.sh could exit 0
       # on a real deploy failure: the Deployment rollout-status loop only
