@@ -86,7 +86,7 @@ Usage: {{ include "waddlebot.image" (dict "image" .Values.modules.router "global
 {{- define "waddlebot.image" -}}
 {{- $registry := .global.imageRegistry | default "" }}
 {{- $repository := .image.repository | required "image.repository is required" }}
-{{- $tag := .image.tag | default .defaultTag | default "latest" }}
+{{- $tag := .image.tag | default .defaultTag | default "latest" | toString }}
 {{- if $registry }}
 {{- printf "%s/%s:%s" $registry $repository $tag }}
 {{- else }}
@@ -195,7 +195,7 @@ Usage: {{ include "waddlebot.moduleImage" (dict "root" . "module" "router" "tag"
 {{- define "waddlebot.moduleImage" -}}
 {{- $registry := .root.Values.global.imageRegistry | default "" }}
 {{- $repository := .module | required "module name is required" }}
-{{- $tag := .tag | default .root.Chart.AppVersion | default "latest" }}
+{{- $tag := .tag | default .root.Chart.AppVersion | default "latest" | toString }}
 {{- if $registry }}
 {{- printf "%s/%s:%s" $registry $repository $tag }}
 {{- else }}
@@ -212,7 +212,7 @@ Usage: {{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "action-
 {{- define "waddlebot.legacyModuleImage" -}}
 {{- $registry := .root.Values.global.imageRegistry | default "" }}
 {{- $repository := .module | required "module name is required" }}
-{{- $tag := .imageTag | default .root.Values.global.imageTag | default "latest" }}
+{{- $tag := .imageTag | default .root.Values.global.imageTag | default "latest" | toString }}
 {{- if $registry }}
 {{- printf "%s/%s:%s" $registry $repository $tag }}
 {{- else }}

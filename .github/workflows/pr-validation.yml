@@ -618,3 +618,14 @@ jobs:
       # of the legacy single-bundle env from svc-process-rust/svc-action-rust.
       - name: alpha render -- bundle-executor + legacy-env regression test
         run: bash scripts/ci/tests/test_alpha_render_bundle_executor.sh
+
+      # regression: all-digit short SHA rendered as %!s(int64=...) image tag
+      # (alpha 2026-10-03) -- `--set global.imageTag=35604387` type-infers the
+      # all-digit value as an int64, and every chart template building
+      # `repo:tag` via Go's `printf "%s"` rendered the corrupted
+      # `%!s(int64=35604387)` instead of the tag. Fixed via `--set-string` in
+      # every deploy script/workflow plus `| toString` on every chart-side tag
+      # build; this asserts both the old `--set` call style and the fixed
+      # `--set-string` style render a clean tag with no `%!` anywhere.
+      - name: alpha render -- all-digit short SHA image tag regression test
+        run: bash scripts/ci/tests/test_image_tag_all_digit_sha.sh

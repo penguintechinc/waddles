@@ -72,7 +72,7 @@ jobs:
             --namespace "$NAMESPACE" \
             --create-namespace \
             --set global.imageRegistry="ghcr.io/${REPO_OWNER}/${REPO_NAME}" \
-            --set global.imageTag="$COMMIT_SHA" \
+            --set-string global.imageTag="$COMMIT_SHA" \
             --set global.imagePullPolicy=Always \
             --timeout 15m \
             --wait

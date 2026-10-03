@@ -24,5 +24,5 @@ echo "Test: alpha render -- bundle-executor resources/probes/image-tag/legacy-en
 helm template waddlebot "$REPO_ROOT/k8s/helm/waddlebot" \
     --values "$REPO_ROOT/k8s/helm/waddlebot/values-alpha.yaml" \
     --kube-version 1.30.0 \
-    --set "global.imageTag=${FAKE_SHA}" \
+    --set-string "global.imageTag=${FAKE_SHA}" \
     | python3 "$CHECKER" "$FAKE_SHA"

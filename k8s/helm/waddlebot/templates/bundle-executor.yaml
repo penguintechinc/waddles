@@ -91,7 +91,7 @@ spec:
         # concatenation) -- same pattern as .Values.streaming.image/.Values.reputation.image
         # (see those templates' own image lines); using the waddlebot.image helper here
         # would double-prefix alpha's already-registry-qualified repository value.
-        image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag }}"
+        image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag | toString }}"
         # Hardcoded Always -- see templates/svc-process-rust.yaml's comment on this same
         # line for the node-image-cache rationale (identical here). Proven stale in this
         # exact deploy: the running pod was serving invoke.rs's UnimplementedBucketSource

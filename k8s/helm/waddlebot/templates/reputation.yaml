@@ -41,7 +41,7 @@ spec:
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: reputation
-        image: "{{ .Values.reputation.image.repository }}:{{ .Values.reputation.image.tag | default .Values.global.imageTag }}"
+        image: "{{ .Values.reputation.image.repository }}:{{ .Values.reputation.image.tag | default .Values.global.imageTag | toString }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
