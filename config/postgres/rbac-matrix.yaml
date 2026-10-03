@@ -36,6 +36,9 @@ tables:
   - app_source_bindings
   - app_global_installs
   - bundle_tenant_availability
+  - tenant_platform_credentials
+  - guild_tenant_pairings
+  - community_role_sync_bindings
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -408,4 +411,83 @@ grants:
     privileges: []
   - role: migration_runner
     table: bundle_tenant_availability
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # Bar Citizen guild-pairing + role-sync schema (migration
+  # 0034_bar_citizen_guild_pairing). hub_api is the sole writer -- these
+  # are hub-api-owned control-plane tables; no data-plane service reads
+  # them directly yet.
+  - role: hub_api
+    table: tenant_platform_credentials
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: tenant_platform_credentials
+    privileges: []
+  - role: svc_ingest
+    table: tenant_platform_credentials
+    privileges: []
+  - role: svc_process
+    table: tenant_platform_credentials
+    privileges: []
+  - role: svc_action
+    table: tenant_platform_credentials
+    privileges: []
+  - role: svc_streaming
+    table: tenant_platform_credentials
+    privileges: []
+  - role: webui
+    table: tenant_platform_credentials
+    privileges: []
+  - role: migration_runner
+    table: tenant_platform_credentials
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: guild_tenant_pairings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: guild_tenant_pairings
+    privileges: []
+  - role: svc_ingest
+    table: guild_tenant_pairings
+    privileges: []
+  - role: svc_process
+    table: guild_tenant_pairings
+    privileges: []
+  - role: svc_action
+    table: guild_tenant_pairings
+    privileges: []
+  - role: svc_streaming
+    table: guild_tenant_pairings
+    privileges: []
+  - role: webui
+    table: guild_tenant_pairings
+    privileges: []
+  - role: migration_runner
+    table: guild_tenant_pairings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: community_role_sync_bindings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: community_role_sync_bindings
+    privileges: []
+  - role: svc_ingest
+    table: community_role_sync_bindings
+    privileges: []
+  - role: svc_process
+    table: community_role_sync_bindings
+    privileges: []
+  - role: svc_action
+    table: community_role_sync_bindings
+    privileges: []
+  - role: svc_streaming
+    table: community_role_sync_bindings
+    privileges: []
+  - role: webui
+    table: community_role_sync_bindings
+    privileges: []
+  - role: migration_runner
+    table: community_role_sync_bindings
     privileges: [SELECT, INSERT, UPDATE, DELETE]
