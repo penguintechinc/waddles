@@ -36,6 +36,7 @@
 //! (`src/main.rs`) so integration tests under `tests/` can exercise the
 //! router and config loader directly instead of spawning a subprocess.
 
+pub mod active_digests;
 pub mod builtins;
 pub mod bundle_loader;
 pub mod capabilities;
@@ -631,7 +632,7 @@ fn try_start_process_loop(
 
             let deps = spine::ProcessDeps {
                 app_id: app_id.clone(),
-                digest: cli.process_bundle_digest.clone(),
+                digest_source: spine::DigestSource::Static(cli.process_bundle_digest.clone()),
                 version: cli.process_bundle_version.clone(),
                 component_key: cli.process_bundle_component_key.clone(),
                 sidecar_key: cli.process_bundle_sidecar_key.clone(),
@@ -958,12 +959,19 @@ fn try_start_changelog_consumer(
     // stays synchronous/no-I/O per its own doc) and filled in there before
     // the spawner is actually constructed.
     let kv_capabilities = Arc::new(bundle_host_kv::CapabilitySnapshot::new());
+    // Shared with `changelog_consumer::run` below (the sole writer, via
+    // `apply_active_set`) -- every per-binding consumer `supervisor_deps`
+    // spawns reads from this SAME instance (`DigestSource::Active`).
+    // regression: multi-tenant consumers invoked with empty legacy digest,
+    // UnknownBundle (alpha 2026-10-03).
+    let active_digests = Arc::new(active_digests::ActiveDigests::new());
     let supervisor_deps = build_source_supervisor_deps(
         config,
         Arc::clone(&connections),
         Arc::clone(&gate),
         Arc::clone(&kv_capabilities),
         Arc::clone(&egress),
+        Arc::clone(&active_digests),
     );
 
     // Fail loud, never silent (user requirement): this path is only ever
@@ -1026,6 +1034,7 @@ fn try_start_changelog_consumer(
             source_supervisor_metrics,
             changelog_consumer_metrics,
             consumer_loop_ready,
+            active_digests,
             shutdown_rx,
         )
         .await;
@@ -1048,6 +1057,7 @@ fn build_source_supervisor_deps(
     gate: Arc<dyn license::FeatureGate>,
     kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     egress: Arc<bundle_host_http::egress::EgressGuard>,
+    active_digests: Arc<active_digests::ActiveDigests>,
 ) -> Option<source_supervisor::SupervisorDeps> {
     let Some(keys_raw) = config.envelope_binding_keys.as_ref() else {
         tracing::warn!(
@@ -1088,6 +1098,7 @@ fn build_source_supervisor_deps(
         kv_conn: None,
         kv_capabilities,
         egress,
+        active_digests,
     })
 }
 
@@ -1241,6 +1252,7 @@ mod tests {
             gate,
             Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
             test_egress_guard(),
+            Arc::new(active_digests::ActiveDigests::new()),
         )
         .is_none());
     }
@@ -1264,6 +1276,7 @@ mod tests {
             gate,
             Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
             test_egress_guard(),
+            Arc::new(active_digests::ActiveDigests::new()),
         );
         // SAFETY: serialized by ENV_LOCK above.
         unsafe {
