@@ -206,6 +206,54 @@ pub fn register_bundle_loader_excluded_metrics(
     excluded_total
 }
 
+/// Prometheus handles for `crate::dispatch_supervisor` (the multi-tenant,
+/// per-app dispatch-consumer supervisor -- regression: svc-action had no
+/// multi-tenant dispatch consumers; replies never sent after legacy env
+/// removal, alpha 2026-10-03). Direct port of `core/svc_process::telemetry::
+/// SourceBindingSupervisorMetrics` under this stage's own metric names.
+#[derive(Clone)]
+pub struct DispatchSupervisorMetrics {
+    /// Number of per-`(tenant_id, community_id, app_id)` dispatch consumer
+    /// tasks currently running -- `dispatch_consumers_running`, readiness
+    /// counts the consumer loops being alive, not just executor presence
+    /// (PR #528/#534).
+    pub active_consumers: prometheus::IntGauge,
+    /// Dispatch consumer spawn/stop transitions, labeled by `action`.
+    pub consumer_transitions_total: prometheus::IntCounterVec,
+}
+
+/// Registers [`DispatchSupervisorMetrics`] against `registry`. Must be
+/// called exactly once per `registry`.
+pub fn register_dispatch_supervisor_metrics(
+    registry: &prometheus::Registry,
+) -> DispatchSupervisorMetrics {
+    let active_consumers = prometheus::IntGauge::new(
+        "svc_action_dispatch_consumers_running",
+        "Number of per-(tenant_id, community_id, app_id) multi-tenant dispatch consumer tasks currently running",
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(active_consumers.clone()))
+        .expect("register svc_action_dispatch_consumers_running");
+
+    let consumer_transitions_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_action_dispatch_consumer_transitions_total",
+            "Dispatch consumer spawn/stop transitions, labeled by action",
+        ),
+        &["action"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(consumer_transitions_total.clone()))
+        .expect("register svc_action_dispatch_consumer_transitions_total");
+
+    DispatchSupervisorMetrics {
+        active_consumers,
+        consumer_transitions_total,
+    }
+}
+
 /// Prometheus handles for `crate::changelog_consumer` (dataplane scale
 /// design rev 4, §7/§8 step 2 -- multi-tenant, change-log-driven active-set
 /// loader). Direct port of `core/svc_process::telemetry::

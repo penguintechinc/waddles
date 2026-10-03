@@ -34,12 +34,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bundle_active_set::{ActiveSetRead, AppScope, ChangeLogTracker, FullSyncReason, ScopeKey};
+use bundle_active_set::{
+    ActiveSetRead, AppScope, ChangeLogTracker, FullSyncReason, ResolvedScope, ScopeKey,
+};
 use sea_orm::DatabaseConnection;
 
+use crate::active_digests::ActiveDigests;
 use crate::bundle_loader::BundleSink;
+use crate::dispatch_supervisor::{self, ConsumerSupervisor, DispatchTarget, RunningConsumers};
 use crate::flags::FeatureFlag;
-use crate::telemetry::ChangelogConsumerMetrics;
+use crate::telemetry::{ChangelogConsumerMetrics, DispatchSupervisorMetrics};
 
 /// How long a scope may keep failing its active-set re-read before this
 /// consumer gives up on its last-known-good rows and evicts them (fail
@@ -76,13 +80,13 @@ fn is_scope_stale(last_success: Option<Instant>, now: Instant, bound: Duration) 
     }
 }
 
-/// Whether `run`'s loop should stop consumers this tick -- true only on the
-/// enabled->disabled transition (Gemini review on PR #396, HIGH). This
-/// stage has no per-binding consumers of its own to stop (unlike
-/// svc_process's `source_supervisor`), so this is currently unused for a
-/// live side effect, but kept symmetric with svc_process and available for
-/// this stage's own future per-tenant consumers.
-#[allow(dead_code)]
+/// Whether `run`'s loop should stop dispatch consumers this tick -- true
+/// only on the enabled->disabled transition (Gemini review on PR #396,
+/// HIGH), never on every already-disabled tick. Now exercised for a real
+/// side effect by `run`'s own kill-switch branch (`crate::
+/// dispatch_supervisor::stop_all`) -- regression: svc-action had no
+/// multi-tenant dispatch consumers; replies never sent after legacy env
+/// removal (alpha 2026-10-03).
 fn should_stop_consumers(currently_enabled: bool, were_enabled: bool) -> bool {
     !currently_enabled && were_enabled
 }
@@ -115,6 +119,18 @@ pub struct ConsumerState {
     /// consumer has already told the executor to load for that exact scope
     /// -- never collapsed onto `app_id` alone (see this module's own doc).
     loaded: HashMap<AppScope, String>,
+    /// Cached tenant slug/community name per `(tenant_id, community_id)`
+    /// scope -- `crate::dispatch_supervisor::DispatchTarget`'s own stream
+    /// key needs the resolved slug/name, never the raw numeric ids. See
+    /// `resolve_scope_cached`'s own doc for the fail-closed-per-scope
+    /// contract.
+    resolved_scopes: HashMap<ScopeKey, ResolvedScope>,
+    /// The multi-tenant per-app dispatch consumers this instance currently
+    /// has running -- `crate::dispatch_supervisor::reconcile`'s own
+    /// bookkeeping, held across ticks exactly like `loaded` above.
+    /// regression: svc-action had no multi-tenant dispatch consumers;
+    /// replies never sent after legacy env removal (alpha 2026-10-03).
+    running_consumers: RunningConsumers,
     tracker: ChangeLogTracker,
     /// Last time each scope's active-set re-read succeeded -- the basis for
     /// [`SCOPE_STALE_EVICTION_BOUND`]'s fail-closed eviction.
@@ -134,6 +150,18 @@ pub struct ConsumerState {
     /// When the last forced full send actually ran -- the basis for
     /// [`FULL_SEND_DEBOUNCE`]'s reconnect-storm coalescing.
     last_full_send: Option<Instant>,
+    /// The shared, concurrently-readable `(tenant_id, community_id,
+    /// app_id)` -> digest map every spawned `dispatch_supervisor::
+    /// run_app_consumer` task reads from (`dispatch::DigestSource::
+    /// Active`) -- kept in lock-step with `loaded` at the exact same
+    /// `apply_active_set` call sites. Defaults to a fresh, empty, private
+    /// instance (`ConsumerState::new`/`initial_state`); [`run`] immediately
+    /// overwrites it with the externally shared instance `crate::lib` also
+    /// threads into `dispatch_supervisor::SupervisorDeps`, before this
+    /// state is ever applied against. regression: svc-action had no
+    /// multi-tenant dispatch consumers; replies never sent after legacy env
+    /// removal (alpha 2026-10-03).
+    active_digests: Arc<ActiveDigests>,
 }
 
 impl ConsumerState {
@@ -146,6 +174,8 @@ impl ConsumerState {
         Self {
             by_scope: HashMap::new(),
             loaded: HashMap::new(),
+            resolved_scopes: HashMap::new(),
+            running_consumers: HashMap::new(),
             tracker: ChangeLogTracker::new(initial_seq),
             scope_last_success: HashMap::new(),
             retention_supported: true,
@@ -153,6 +183,7 @@ impl ConsumerState {
             // changelog_consumer.rs`'s identical ctor for why.
             pending_full_sync: None,
             last_full_send: None,
+            active_digests: Arc::new(ActiveDigests::new()),
         }
     }
 
@@ -187,6 +218,16 @@ impl ConsumerState {
     fn by_scope_len(&self) -> usize {
         self.by_scope.len()
     }
+
+    #[cfg(test)]
+    fn running_len(&self) -> usize {
+        self.running_consumers.len()
+    }
+
+    #[cfg(test)]
+    fn active_digests(&self) -> &ActiveDigests {
+        &self.active_digests
+    }
 }
 
 /// The "on start, full active-set read for ALL tenants/communities"
@@ -211,12 +252,98 @@ pub async fn initial_state(
     Ok(ConsumerState {
         by_scope,
         loaded: HashMap::new(),
+        resolved_scopes: HashMap::new(),
+        running_consumers: HashMap::new(),
         tracker: ChangeLogTracker::new(safe_seq),
         scope_last_success,
         retention_supported,
         pending_full_sync: Some(FullSyncReason::Startup),
         last_full_send: None,
+        active_digests: Arc::new(ActiveDigests::new()),
     })
+}
+
+/// Resolves and caches the tenant slug/community name for `scope`, reusing
+/// an already-cached entry when present. A resolution failure (missing row,
+/// cross-tenant community id, or a query error) is reported to the caller
+/// as `None` -- **fail-closed, per-scope**: that scope's dispatch target is
+/// simply left out of this tick's `dispatch_supervisor::reconcile` target
+/// list (never a hardcoded/guessed scope, never an aborted tick). Direct
+/// port of `core/svc_process/src/changelog_consumer.rs`'s identical
+/// function.
+async fn resolve_scope_cached<'a>(
+    db: &DatabaseConnection,
+    cache: &'a mut HashMap<ScopeKey, ResolvedScope>,
+    scope: ScopeKey,
+    metrics: &ChangelogConsumerMetrics,
+) -> Option<&'a ResolvedScope> {
+    if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(scope) {
+        match bundle_active_set::resolve_scope(db, scope.0, scope.1).await {
+            Ok(Some(resolved)) => {
+                entry.insert(resolved);
+            }
+            Ok(None) => {
+                tracing::error!(
+                    tenant_id = scope.0,
+                    community_id = scope.1,
+                    "changelog consumer: tenant/community scope could not be resolved (missing \
+                     row, or cross-tenant community id); skipping this scope's dispatch target \
+                     this tick"
+                );
+                metrics
+                    .scope_failures_total
+                    .with_label_values(&["resolve_failed"])
+                    .inc();
+                return None;
+            }
+            Err(err) => {
+                tracing::error!(
+                    tenant_id = scope.0,
+                    community_id = scope.1,
+                    error = %err,
+                    "changelog consumer: scope resolution query failed; skipping this scope's \
+                     dispatch target this tick"
+                );
+                metrics
+                    .scope_failures_total
+                    .with_label_values(&["resolve_failed"])
+                    .inc();
+                return None;
+            }
+        }
+    }
+    cache.get(&scope)
+}
+
+/// Builds the flat [`DispatchTarget`] list `dispatch_supervisor::reconcile`
+/// consumes: one target per currently-active `(tenant_id, community_id,
+/// app_id)` scope (`bundle_active_set::scoped_active_rows`'s own keys) that
+/// also has a resolved tenant slug/community name cached. A scope with no
+/// resolved slug/name (resolution failed or was never attempted) or that is
+/// no longer active at all contributes NO target, which `dispatch_
+/// supervisor::reconcile` correctly reads as "stop its running consumer"
+/// (fail-closed) -- unlike `core/svc_process`'s `app_source_bindings`-driven
+/// equivalent, this stage has no separate bindings table: the target set IS
+/// the active bundle set itself.
+fn build_dispatch_targets(
+    active: &HashMap<AppScope, bundle_active_set::ActiveBundleRow>,
+    resolved_scopes: &HashMap<ScopeKey, ResolvedScope>,
+) -> Vec<DispatchTarget> {
+    let mut targets = Vec::new();
+    for (tenant_id, community_id, app_id) in active.keys() {
+        let scope_key: ScopeKey = (*tenant_id, *community_id);
+        let Some(resolved) = resolved_scopes.get(&scope_key) else {
+            continue;
+        };
+        targets.push(DispatchTarget {
+            tenant_id: *tenant_id,
+            community_id: *community_id,
+            tenant_slug: resolved.tenant_slug.clone(),
+            community_name: resolved.community_name.clone(),
+            app_id: app_id.clone(),
+        });
+    }
+    targets
 }
 
 /// Flattens `state.by_scope` scope-preservingly (`bundle_active_set::
@@ -302,6 +429,11 @@ async fn apply_active_set(
                     .with_label_values(&["success"])
                     .inc();
                 state.loaded.insert(scope.clone(), row.digest.clone());
+                // Lock-step with `state.loaded` above -- see
+                // `ActiveDigests`'s own doc. regression: svc-action had no
+                // multi-tenant dispatch consumers; replies never sent after
+                // legacy env removal (alpha 2026-10-03).
+                state.active_digests.set(scope.clone(), row.digest.clone());
             }
             Err(err) => {
                 tracing::error!(
@@ -328,6 +460,9 @@ async fn apply_active_set(
                     "changelog consumer: unloaded"
                 );
                 state.loaded.remove(scope);
+                // Lock-step with `state.loaded` above -- see
+                // `ActiveDigests`'s own doc.
+                state.active_digests.remove(scope);
             }
             Err(err) => {
                 tracing::warn!(
@@ -375,11 +510,14 @@ fn update_tenant_gauges(state: &ConsumerState, metrics: &ChangelogConsumerMetric
 /// `last_seq + 1` -- remains the sole detector until upgraded. Either path
 /// short-circuits to a full multi-tenant reconcile instead of a partial
 /// apply, resetting the tracker to `safe_seq`.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_incremental_tick(
     db: &DatabaseConnection,
     state: &mut ConsumerState,
     sink: Option<&dyn BundleSink>,
+    spawner: Option<&dyn ConsumerSupervisor>,
     excluded_metric: &prometheus::IntCounterVec,
+    dispatch_metrics: &DispatchSupervisorMetrics,
     metrics: &ChangelogConsumerMetrics,
     kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
 ) {
@@ -442,7 +580,9 @@ pub async fn run_incremental_tick(
             db,
             state,
             sink,
+            spawner,
             excluded_metric,
+            dispatch_metrics,
             metrics,
             kv_capabilities,
             FullSyncReason::Reconcile,
@@ -478,7 +618,9 @@ pub async fn run_incremental_tick(
                 db,
                 state,
                 sink,
+                spawner,
                 excluded_metric,
+                dispatch_metrics,
                 metrics,
                 kv_capabilities,
                 FullSyncReason::Reconcile,
@@ -542,6 +684,9 @@ pub async fn run_incremental_tick(
                 }
             }
         }
+        if spawner.is_some() {
+            let _ = resolve_scope_cached(db, &mut state.resolved_scopes, *scope, metrics).await;
+        }
     }
 
     let new_last_seq = match min_failure_seq {
@@ -553,6 +698,18 @@ pub async fn run_incremental_tick(
 
     apply_active_set(state, sink, excluded_metric, kv_capabilities, metrics, None).await;
     update_tenant_gauges(state, metrics);
+
+    if let Some(spawner) = spawner {
+        let active = bundle_active_set::scoped_active_rows(&state.by_scope);
+        let targets = build_dispatch_targets(&active, &state.resolved_scopes);
+        dispatch_supervisor::reconcile(
+            &mut state.running_consumers,
+            &targets,
+            spawner,
+            dispatch_metrics,
+        )
+        .await;
+    }
     metrics
         .reconcile_duration_seconds
         .observe(start.elapsed().as_secs_f64());
@@ -570,7 +727,9 @@ pub async fn run_full_reconcile(
     db: &DatabaseConnection,
     state: &mut ConsumerState,
     sink: Option<&dyn BundleSink>,
+    spawner: Option<&dyn ConsumerSupervisor>,
     excluded_metric: &prometheus::IntCounterVec,
+    dispatch_metrics: &DispatchSupervisorMetrics,
     metrics: &ChangelogConsumerMetrics,
     kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
     reason: FullSyncReason,
@@ -590,6 +749,21 @@ pub async fn run_full_reconcile(
                 .observe(start.elapsed().as_secs_f64());
             return;
         }
+    }
+
+    if let Some(spawner) = spawner {
+        for scope in state.by_scope.keys().copied().collect::<Vec<_>>() {
+            let _ = resolve_scope_cached(db, &mut state.resolved_scopes, scope, metrics).await;
+        }
+        let active = bundle_active_set::scoped_active_rows(&state.by_scope);
+        let targets = build_dispatch_targets(&active, &state.resolved_scopes);
+        dispatch_supervisor::reconcile(
+            &mut state.running_consumers,
+            &targets,
+            spawner,
+            dispatch_metrics,
+        )
+        .await;
     }
 
     apply_active_set(
@@ -618,7 +792,9 @@ pub async fn drain_pending_full_sync(
     db: &DatabaseConnection,
     state: &mut ConsumerState,
     sink: Option<&dyn BundleSink>,
+    spawner: Option<&dyn ConsumerSupervisor>,
     excluded_metric: &prometheus::IntCounterVec,
+    dispatch_metrics: &DispatchSupervisorMetrics,
     metrics: &ChangelogConsumerMetrics,
     kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
     now: Instant,
@@ -637,7 +813,9 @@ pub async fn drain_pending_full_sync(
         db,
         state,
         sink,
+        spawner,
         excluded_metric,
+        dispatch_metrics,
         metrics,
         kv_capabilities,
         reason,
@@ -705,10 +883,19 @@ pub async fn run(
     call_timeout_ms: u64,
     flag: Arc<dyn FeatureFlag>,
     connections: Arc<crate::host_api::ConnectionRegistry>,
+    spawner: Option<Arc<dyn ConsumerSupervisor>>,
     excluded_metric: prometheus::IntCounterVec,
+    dispatch_metrics: DispatchSupervisorMetrics,
     metrics: ChangelogConsumerMetrics,
     kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     changelog_consumer_ready: Arc<std::sync::atomic::AtomicBool>,
+    // The SAME instance `crate::lib::try_start_changelog_consumer` also
+    // threads into `dispatch_supervisor::SupervisorDeps` -- overwrites
+    // `initial_state`'s own fresh, private default the moment `state` is
+    // constructed, before the very first `apply_active_set` call.
+    // regression: svc-action had no multi-tenant dispatch consumers;
+    // replies never sent after legacy env removal (alpha 2026-10-03).
+    active_digests: Arc<ActiveDigests>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
     changelog_consumer_ready.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -753,6 +940,7 @@ pub async fn run(
             }
         }
     };
+    state.active_digests = active_digests;
     changelog_consumer_ready.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let mut poll_tick = tokio::time::interval(poll_interval);
@@ -766,6 +954,13 @@ pub async fn run(
     // See `detect_new_connection`'s own doc (item 4, gh security review on
     // PR #406). `None`: no connection observed yet.
     let mut last_connection_id: Option<usize> = None;
+    // Mirrors `core/svc_process/src/changelog_consumer.rs`'s identical
+    // tracking: `dispatch_supervisor::stop_all` must run exactly once on the
+    // kill-switch ON->OFF transition, never on every already-disabled tick.
+    // Starts `true`: `initial_state` above always performs its full read
+    // regardless of the gate, so the very first disabled tick is a genuine
+    // transition worth acting on.
+    let mut consumers_were_enabled = true;
 
     // `initial_state` already set `state.pending_full_sync` to
     // `FullSyncReason::Startup` -- see `core/svc_process/src/
@@ -780,7 +975,9 @@ pub async fn run(
             &db,
             &mut state,
             sink.as_ref().map(|s| s as &dyn BundleSink),
+            spawner.as_deref(),
             &excluded_metric,
+            &dispatch_metrics,
             &metrics,
             &kv_capabilities,
             Instant::now(),
@@ -814,7 +1011,9 @@ pub async fn run(
             &db,
             &mut state,
             sink_ref,
+            spawner.as_deref(),
             &excluded_metric,
+            &dispatch_metrics,
             &metrics,
             &kv_capabilities,
             Instant::now(),
@@ -823,22 +1022,37 @@ pub async fn run(
         .await;
 
         tokio::select! {
-            _ = &mut shutdown => return,
+            _ = &mut shutdown => {
+                dispatch_supervisor::stop_all(&mut state.running_consumers, &dispatch_metrics).await;
+                return;
+            }
             _ = poll_tick.tick() => {
-                if !flag.enabled().await {
+                let enabled = flag.enabled().await;
+                if should_stop_consumers(enabled, consumers_were_enabled) {
+                    tracing::debug!(
+                        "multi-tenant changelog consumer disabled (kill-switch on); stopping all dispatch consumers"
+                    );
+                    dispatch_supervisor::stop_all(&mut state.running_consumers, &dispatch_metrics).await;
+                }
+                consumers_were_enabled = enabled;
+                if !enabled {
                     tracing::debug!(
                         "multi-tenant changelog consumer disabled (kill-switch on); skipping tick"
                     );
                     continue;
                 }
-                run_incremental_tick(&db, &mut state, sink_ref, &excluded_metric, &metrics, &kv_capabilities).await;
+                run_incremental_tick(
+                    &db, &mut state, sink_ref, spawner.as_deref(), &excluded_metric,
+                    &dispatch_metrics, &metrics, &kv_capabilities,
+                ).await;
             }
             _ = reconcile_tick.tick() => {
                 if !flag.enabled().await {
                     continue;
                 }
                 run_full_reconcile(
-                    &db, &mut state, sink_ref, &excluded_metric, &metrics, &kv_capabilities,
+                    &db, &mut state, sink_ref, spawner.as_deref(), &excluded_metric,
+                    &dispatch_metrics, &metrics, &kv_capabilities,
                     FullSyncReason::Reconcile,
                 ).await;
             }
@@ -1019,6 +1233,10 @@ mod tests {
         crate::telemetry::register_changelog_consumer_metrics(&prometheus::Registry::new())
     }
 
+    fn test_dispatch_supervisor_metrics() -> DispatchSupervisorMetrics {
+        crate::telemetry::register_dispatch_supervisor_metrics(&prometheus::Registry::new())
+    }
+
     fn test_excluded_metric() -> prometheus::IntCounterVec {
         prometheus::IntCounterVec::new(
             prometheus::Opts::new("test_excluded_total", "test"),
@@ -1100,7 +1318,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
         )
@@ -1122,7 +1342,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
         )
@@ -1147,7 +1369,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
         )
@@ -1162,6 +1386,119 @@ mod tests {
             Some(&digest)
         );
         assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+        // Lock-step with `state.loaded` -- regression: svc-action had no
+        // multi-tenant dispatch consumers; replies never sent after legacy
+        // env removal (alpha 2026-10-03).
+        assert_eq!(
+            state.active_digests().get(&(1, 0, "waddles.a".to_string())),
+            Some(digest)
+        );
+    }
+
+    /// Records every `spawn`/`stop` call it receives -- used to prove
+    /// `run_incremental_tick`/`run_full_reconcile` actually wire
+    /// `dispatch_supervisor::reconcile` against the current active set,
+    /// without any live Valkey/host-API/DB dependency for the spawned
+    /// consumer task itself. regression: svc-action had no multi-tenant
+    /// dispatch consumers; replies never sent after legacy env removal
+    /// (alpha 2026-10-03).
+    #[derive(Default)]
+    struct RecordingDispatchSupervisor {
+        calls: StdMutex<Vec<String>>,
+    }
+
+    impl RecordingDispatchSupervisor {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl ConsumerSupervisor for RecordingDispatchSupervisor {
+        fn spawn(&self, target: &DispatchTarget) -> dispatch_supervisor::RunningConsumer {
+            self.calls.lock().unwrap().push(format!(
+                "spawn:{}:{}:{}",
+                target.tenant_id, target.community_id, target.app_id
+            ));
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let handle = tokio::spawn(async move {
+                let _ = rx.await;
+            });
+            dispatch_supervisor::RunningConsumer {
+                shutdown: tx,
+                handle,
+            }
+        }
+    }
+
+    fn tenant_row(id: i32, slug: &str) -> bundle_active_set::entities::tenants::Model {
+        bundle_active_set::entities::tenants::Model {
+            id,
+            slug: slug.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_incremental_tick_reconciles_a_dispatch_consumer_for_a_newly_active_scope() {
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![watermark_row(150)]])
+            .append_query_results([vec![change_row(101, 1, 0)]])
+            .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.a", &digest)]])
+            .append_query_results([vec![approval_row(1, "waddles.a")]])
+            .append_query_results([vec![tenant_row(1, "acme")]])
+            .into_connection();
+        let mut state = ConsumerState::new(100);
+        let sink = FakeSink::default();
+        let spawner = RecordingDispatchSupervisor::default();
+        run_incremental_tick(
+            &db,
+            &mut state,
+            Some(&sink as &dyn BundleSink),
+            Some(&spawner),
+            &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
+            &test_changelog_metrics(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
+        )
+        .await;
+
+        assert_eq!(spawner.calls(), vec!["spawn:1:0:waddles.a".to_string()]);
+        assert_eq!(state.running_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_incremental_tick_skips_the_dispatch_target_when_scope_resolution_fails() {
+        let digest = format!("sha256:{}", "e".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![watermark_row(150)]])
+            .append_query_results([vec![change_row(101, 1, 0)]])
+            .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.a", &digest)]])
+            .append_query_results([vec![approval_row(1, "waddles.a")]])
+            // No tenant row -- `resolve_scope` returns `Ok(None)`, fail-closed.
+            .append_query_results([Vec::<bundle_active_set::entities::tenants::Model>::new()])
+            .into_connection();
+        let mut state = ConsumerState::new(100);
+        let sink = FakeSink::default();
+        let spawner = RecordingDispatchSupervisor::default();
+        run_incremental_tick(
+            &db,
+            &mut state,
+            Some(&sink as &dyn BundleSink),
+            Some(&spawner),
+            &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
+            &test_changelog_metrics(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
+        )
+        .await;
+
+        assert!(
+            spawner.calls().is_empty(),
+            "fail-closed: no resolved scope, no dispatch target"
+        );
+        assert_eq!(state.running_len(), 0);
     }
 
     /// Boundary proof for the PRIMARY retention check: `last_seq + 1 ==
@@ -1188,7 +1525,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
         )
@@ -1221,7 +1560,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
         )
@@ -1245,7 +1586,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
         )
@@ -1276,7 +1619,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
         )
@@ -1323,7 +1668,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
         )
@@ -1351,7 +1698,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
         )
@@ -1382,7 +1731,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
         )
@@ -1407,7 +1758,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
             FullSyncReason::Reconcile,
@@ -1512,10 +1865,13 @@ mod tests {
                 2000,
                 flag,
                 Arc::new(crate::host_api::ConnectionRegistry::new()),
+                None,
                 excluded_metric,
+                test_dispatch_supervisor_metrics(),
                 metrics,
                 Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
                 Arc::clone(&changelog_consumer_ready),
+                Arc::new(ActiveDigests::new()),
                 shutdown_rx,
             ),
         )
@@ -1625,7 +1981,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
             Instant::now(),
@@ -1651,7 +2009,9 @@ mod tests {
             &db,
             &mut state,
             None,
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
             Instant::now(),
@@ -1687,7 +2047,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
             t0,
@@ -1701,7 +2063,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
             t0 + Duration::from_millis(5),
@@ -1719,7 +2083,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
             t0 + Duration::from_millis(25),
@@ -1761,7 +2127,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
         )
@@ -1797,7 +2165,9 @@ mod tests {
             &db,
             &mut state,
             Some(&failing_sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
         )
@@ -1816,7 +2186,9 @@ mod tests {
             &db,
             &mut state,
             Some(&sink as &dyn BundleSink),
+            None,
             &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
         )
