@@ -540,10 +540,27 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
             .await
             {
                 Ok(p) => interpret_dispatch_payload(&p, "irc_relay"),
-                Err(e) => AttemptOutcome::NonRetryable {
-                    http_status: None,
-                    detail: format!("invoke failed: {e}"),
-                },
+                Err(e) => {
+                    // Diagnosability fix (regression: multi_tenant path
+                    // sent bare-hex digest to Invoke, UnknownBundle despite
+                    // loaded bundle (alpha 2026-10-03)): `UnknownBundle`'s
+                    // `message` IS the digest the executor echoed back
+                    // (`bundle_executor::invoke::on_invoke`'s
+                    // `error_body`), so an empty/unresolved `deps.digest`
+                    // renders here with nothing to grep on -- log
+                    // `deps.digest`'s own prefix explicitly, matching
+                    // `core/svc_process/src/spine.rs`'s identical fix.
+                    tracing::error!(
+                        app_id = %deps.app_id,
+                        digest_prefix = bundle_active_set::digest_prefix(&deps.digest),
+                        error = %e,
+                        "action invoke failed, recording non-retryable attempt"
+                    );
+                    AttemptOutcome::NonRetryable {
+                        http_status: None,
+                        detail: format!("invoke failed: {e}"),
+                    }
+                }
             }
         },
         deps.retry_policy.max_retries,

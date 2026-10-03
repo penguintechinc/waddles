@@ -677,7 +677,17 @@ async fn handle_delivered<S: SpineOps>(
     let event_out = match outcome {
         Err(InvokeError::ExecutorError { code, message }) => {
             let kind = error_code_to_dlq_kind(code);
-            tracing::error!(app_id = %deps.app_id, ?code, %message, "transform invoke failed, dead-lettering");
+            // Diagnosability fix (regression: multi_tenant path sent
+            // bare-hex digest to Invoke, UnknownBundle despite loaded
+            // bundle (alpha 2026-10-03)): `message` IS the digest the
+            // executor echoed back for `UnknownBundle`
+            // (`bundle_executor::invoke::on_invoke`'s `error_body`), so an
+            // empty/unresolved `deps.digest` renders as an empty-looking
+            // `message=""` field with nothing to grep on. Log
+            // `deps.digest`'s own prefix explicitly so this is diagnosable
+            // even when `message` is empty.
+            let digest_prefix = bundle_active_set::digest_prefix(&deps.digest);
+            tracing::error!(app_id = %deps.app_id, ?code, digest_prefix, %message, "transform invoke failed, dead-lettering");
             let err = DlqError {
                 kind,
                 code: format!("{code:?}"),
