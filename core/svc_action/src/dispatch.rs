@@ -36,11 +36,56 @@ use penguin_spine::{
 };
 use serde::Deserialize;
 
+use crate::active_digests::ActiveDigests;
 use crate::capabilities::InvokeScope;
 use crate::hop::KeyRing;
 use crate::host_api::{Connection, ConnectionRegistry, HostApiError};
 use crate::retry::{dispatch_with_retry, AttemptOutcome, DispatchRecord, Jitter};
 use crate::usage::UsageBatcher;
+
+/// Where [`DispatchDeps`] gets the digest to `load`/`invoke` with on every
+/// single delivered entry -- direct port of `core/svc_process/src/
+/// spine.rs::DigestSource` under this stage's own module. See that type's
+/// doc for the full rationale; reproduced narrowly here since the two
+/// crates don't share a dependency this seam could live in.
+#[derive(Clone)]
+pub enum DigestSource {
+    /// The legacy, single-bundle-per-pod, env-configured path
+    /// (`crate::lib::try_start_dispatch`'s `ACTION_BUNDLE_DIGEST`) --
+    /// unchanged behavior from before this change. Empty disables nothing
+    /// by itself: an empty digest is simply sent as-is and the executor
+    /// reports `UNKNOWN_BUNDLE`, mapped to a non-retryable attempt like any
+    /// other unloaded-bundle invoke. This variant must never be selected by
+    /// the multi-tenant path (`crate::dispatch_supervisor`'s own doc).
+    Static(String),
+    /// The DB-driven multi-tenant path: the CURRENT canonical digest for
+    /// this consumer's own `(tenant_id, community_id, app_id)` scope, read
+    /// fresh from `crate::changelog_consumer`'s shared [`ActiveDigests`]
+    /// map on every single invoke -- never a value captured once at spawn
+    /// time, so a hot-swapped bundle takes effect on the very next message
+    /// with no consumer restart. [`DigestSource::current`] returns `None`
+    /// when this scope has no active digest right now (never seen,
+    /// unloaded, or its scope is currently failing to resolve); callers
+    /// MUST dead-letter rather than ever invoke with an empty digest.
+    ///
+    /// regression: svc-action had no multi-tenant dispatch consumers;
+    /// replies never sent after legacy env removal (alpha 2026-10-03)
+    Active {
+        scope: bundle_active_set::AppScope,
+        digests: Arc<ActiveDigests>,
+    },
+}
+
+impl DigestSource {
+    /// Resolves the digest to `invoke` with right now. See each variant's
+    /// own doc for what `None`/empty means.
+    fn current(&self) -> Option<String> {
+        match self {
+            DigestSource::Static(d) => Some(d.clone()),
+            DigestSource::Active { scope, digests } => digests.get(scope),
+        }
+    }
+}
 
 /// Tunables `run()` needs beyond what `penguin_spine::SpineConfig` already
 /// covers (spec §4.3).
@@ -435,7 +480,11 @@ impl SpineOps for SpineClient {
 /// ever-growing parameter list.
 pub struct DispatchDeps<A: AuditSink, T: TenantResolver, S: SpineOps> {
     pub app_id: String,
-    pub digest: String,
+    /// See [`DigestSource`]'s own doc -- resolved fresh on every single
+    /// delivered entry, never captured once at spawn time (regression:
+    /// svc-action had no multi-tenant dispatch consumers; replies never
+    /// sent after legacy env removal, alpha 2026-10-03).
+    pub digest_source: DigestSource,
     pub config_json: String,
     pub key_ring: KeyRing,
     pub connections: Arc<ConnectionRegistry>,
@@ -480,11 +529,39 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
             code: "TENANT_BOUNDARY".to_string(),
             message: reason.to_string(),
             detail: None,
-            artifact_digest: Some(deps.digest.clone()),
+            artifact_digest: deps.digest_source.current(),
             consumer_id: deps.consumer_id.clone(),
         };
         return deps.spine.dead_letter(d, &err).await;
     }
+
+    // Resolve the digest to invoke with BEFORE ever checking for an
+    // executor connection -- "if no active digest is known for an app when
+    // a message arrives, log ERROR and dead-letter for redelivery; never
+    // invoke with an empty digest" (regression: svc-action had no
+    // multi-tenant dispatch consumers; replies never sent after legacy env
+    // removal, alpha 2026-10-03). `DigestSource::Static` always resolves
+    // (possibly to an intentionally empty string, unchanged legacy
+    // behavior); only `DigestSource::Active` with no entry for this scope
+    // yields `None` here.
+    let Some(digest) = deps.digest_source.current() else {
+        tracing::error!(
+            app_id = %deps.app_id,
+            tenant = %d.env.tenant,
+            community = ?d.env.community,
+            "no active bundle digest known for this app's scope; dead-lettering for redelivery"
+        );
+        let err = penguin_spine::DlqError {
+            kind: penguin_spine::DlqErrorKind::BundleError,
+            code: "NO_ACTIVE_DIGEST".to_string(),
+            message: "no active bundle digest known for this (tenant, community, app) scope"
+                .to_string(),
+            detail: None,
+            artifact_digest: None,
+            consumer_id: deps.consumer_id.clone(),
+        };
+        return deps.spine.dead_letter(d, &err).await;
+    };
 
     let Some(connection) = deps.connections.active() else {
         // Escalated WARN -> ERROR (fix/executor-link-heartbeat, alpha
@@ -508,7 +585,7 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
             code: "EXECUTOR_UNAVAILABLE".to_string(),
             message: "no active host-api connection".to_string(),
             detail: None,
-            artifact_digest: Some(deps.digest.clone()),
+            artifact_digest: Some(digest.clone()),
             consumer_id: deps.consumer_id.clone(),
         };
         return deps.spine.dead_letter(d, &err).await;
@@ -532,7 +609,7 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
             match invoke_dispatch(
                 &connection,
                 &deps.app_id,
-                &deps.digest,
+                &digest,
                 &d.env,
                 &deps.config_json,
                 deps.retry_policy.call_timeout_ms,
@@ -546,13 +623,13 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
                     // loaded bundle (alpha 2026-10-03)): `UnknownBundle`'s
                     // `message` IS the digest the executor echoed back
                     // (`bundle_executor::invoke::on_invoke`'s
-                    // `error_body`), so an empty/unresolved `deps.digest`
-                    // renders here with nothing to grep on -- log
-                    // `deps.digest`'s own prefix explicitly, matching
+                    // `error_body`), so an empty/unresolved digest renders
+                    // here with nothing to grep on -- log the resolved
+                    // digest's own prefix explicitly, matching
                     // `core/svc_process/src/spine.rs`'s identical fix.
                     tracing::error!(
                         app_id = %deps.app_id,
-                        digest_prefix = bundle_active_set::digest_prefix(&deps.digest),
+                        digest_prefix = bundle_active_set::digest_prefix(&digest),
                         error = %e,
                         "action invoke failed, recording non-retryable attempt"
                     );
@@ -1181,7 +1258,7 @@ mod tests {
     ) -> DispatchDeps<FakeAudit, FixedTenantResolver, FakeSpineOps> {
         DispatchDeps {
             app_id: "waddles.bot.commands.default".to_string(),
-            digest: "sha256:00".to_string(),
+            digest_source: DigestSource::Static("sha256:00".to_string()),
             config_json: "{}".to_string(),
             key_ring: test_ring(),
             connections,
@@ -1349,6 +1426,66 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].status, "success");
         assert_eq!(deps.usage.lock().unwrap().pending_len(), 1);
+    }
+
+    // regression: svc-action had no multi-tenant dispatch consumers; replies
+    // never sent after legacy env removal (alpha 2026-10-03)
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_with_no_active_digest_and_never_invokes() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
+
+        // Empty `ActiveDigests`: this (tenant, community, app) scope has no
+        // active digest known -- `connections` is deliberately a registry
+        // with NO fake executor at all, proving the digest check happens
+        // (and dead-letters) BEFORE any invoke is ever attempted.
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
+        deps.digest_source = DigestSource::Active {
+            scope: (1, 0, "waddles.bot.commands.default".to_string()),
+            digests: Arc::new(ActiveDigests::new()),
+        };
+
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 0);
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, penguin_spine::DlqErrorKind::BundleError);
+        assert_eq!(dead_lettered[0].2, deps.consumer_id);
+    }
+
+    // regression: svc-action had no multi-tenant dispatch consumers; replies
+    // never sent after legacy env removal (alpha 2026-10-03)
+    #[tokio::test]
+    async fn handle_delivered_active_digest_source_invokes_with_the_scopes_active_digest() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
+
+        let connections = connected_registry_with_fake_executor(
+            serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+        )
+        .await;
+        let digests = Arc::new(ActiveDigests::new());
+        digests.set(
+            (1, 0, "waddles.bot.commands.default".to_string()),
+            "sha256:aa".to_string(),
+        );
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.digest_source = DigestSource::Active {
+            scope: (1, 0, "waddles.bot.commands.default".to_string()),
+            digests,
+        };
+
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+
+        assert_eq!(deps.spine.dead_lettered.lock().unwrap().len(), 0);
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
     }
 
     /// A [`crate::usage::UsageSink`] that records every delta it is asked

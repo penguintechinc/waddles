@@ -50,6 +50,7 @@
 //! by the DB-driven loader; see `crate::distribution`'s module doc for what
 //! that leaves as a documented seam.
 
+pub mod active_digests;
 pub mod bundle_loader;
 pub mod capabilities;
 pub mod changelog_consumer;
@@ -57,6 +58,7 @@ pub mod config;
 pub(crate) mod crypto;
 pub mod db;
 pub mod dispatch;
+pub mod dispatch_supervisor;
 pub mod distribution;
 pub mod egress;
 pub mod error;
@@ -168,6 +170,10 @@ where
     let bundle_loader_excluded_metric =
         telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
     let changelog_consumer_metrics = telemetry::register_changelog_consumer_metrics(&prom_registry);
+    // regression: svc-action had no multi-tenant dispatch consumers; replies
+    // never sent after legacy env removal (alpha 2026-10-03)
+    let dispatch_supervisor_metrics =
+        telemetry::register_dispatch_supervisor_metrics(&prom_registry);
     // regression: drain loop exited on NOGROUP (alpha 2026-10-02)
     let drain_loop_metrics = telemetry::register_drain_loop_metrics(&prom_registry);
     // fix/executor-link-heartbeat: `host_api_connected_executors`/
@@ -203,6 +209,8 @@ where
         bundle_loader_excluded_metric,
         Arc::clone(&kv_capabilities),
         changelog_consumer_metrics,
+        dispatch_supervisor_metrics,
+        Arc::clone(&usage),
         changelog_consumer_ready,
     );
     try_start_dispatch(
@@ -674,6 +682,7 @@ async fn env_bundle_loader_loop(
 /// (dataplane scale design, user requirement: "every svc_process/
 /// svc_action pod serves ALL tenants") -- this loader now discovers and
 /// serves every `(tenant_id, community_id)` scope in the database itself.
+#[allow(clippy::too_many_arguments)]
 fn try_start_changelog_consumer(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
@@ -681,6 +690,10 @@ fn try_start_changelog_consumer(
     excluded_metric: prometheus::IntCounterVec,
     kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     changelog_consumer_metrics: telemetry::ChangelogConsumerMetrics,
+    // regression: svc-action had no multi-tenant dispatch consumers; replies
+    // never sent after legacy env removal (alpha 2026-10-03)
+    dispatch_supervisor_metrics: telemetry::DispatchSupervisorMetrics,
+    usage: Arc<Mutex<usage::UsageBatcher>>,
     // regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
     // Independent from `try_start_dispatch`'s own `consumer_loop_ready` --
     // this path runs unconditionally alongside the dispatch loop (this
@@ -719,6 +732,43 @@ fn try_start_changelog_consumer(
     let poll_interval = config.cli.bundle_config_poll_interval();
     let full_reconcile_interval = config.cli.full_reconcile_interval();
     let call_timeout_ms = config.cli.executor_call_timeout_ms;
+
+    // Multi-tenant dispatch-consumer supervisor prerequisites (regression:
+    // svc-action had no multi-tenant dispatch consumers; replies never sent
+    // after legacy env removal, alpha 2026-10-03) -- same two synchronous
+    // checks `try_start_dispatch` performs before ever spawning, so a
+    // missing/invalid prerequisite logs and degrades gracefully (the
+    // DB-driven path still loads/unloads bundles via `BundleSink`; it just
+    // never dispatches) rather than panicking.
+    let dispatch_key_ring = match config.envelope_binding_keys.as_ref() {
+        Some(keys_raw) => match hop::KeyRing::parse(keys_raw.expose()) {
+            Ok(r) => Some(r),
+            Err(err) => {
+                tracing::warn!(error = %err, "ENVELOPE_BINDING_KEYS invalid; multi-tenant dispatch-consumer supervisor disabled");
+                None
+            }
+        },
+        None => {
+            tracing::warn!("ENVELOPE_BINDING_KEYS not set; multi-tenant dispatch-consumer supervisor disabled (hop verification must never fail open)");
+            None
+        }
+    };
+    let dispatch_spine_cfg = match penguin_spine::SpineConfig::from_env() {
+        Ok(c) => Some(c),
+        Err(err) => {
+            tracing::warn!(error = %err, "spine config unavailable; multi-tenant dispatch-consumer supervisor disabled");
+            None
+        }
+    };
+    let rust_data_plane = flag_or_closed(&license, flags::RUST_DATA_PLANE_FLAG);
+    let dispatch_retry_policy = dispatch::RetryPolicy {
+        max_retries: config.cli.action_max_retries,
+        base_backoff_ms: config.cli.action_base_backoff_ms,
+        max_backoff_ms: config.cli.action_max_backoff_ms,
+        call_timeout_ms: config.cli.executor_call_timeout_ms,
+    };
+    let dispatch_connections = Arc::clone(&connections);
+    let config_for_dispatch = config.clone();
 
     let startup_log_flag = Arc::clone(&flag);
     // Fail loud, never silent (user requirement): this path is selected
@@ -761,6 +811,62 @@ fn try_start_changelog_consumer(
                 std::process::exit(1);
             }
         };
+
+        // Builds the multi-tenant dispatch-consumer spawner, if both
+        // prerequisite checks above passed. A writable DB connection
+        // (distinct from the read-only `db` above -- `DbAuditSink`/
+        // `DbTenantResolver` write `action_dispatch_log` and read
+        // `tenants`/`communities`) is connected here, inside the async
+        // task, mirroring `try_start_dispatch`'s own `db::connect` call.
+        // Any failure here degrades gracefully (logs, `spawner = None`) --
+        // this is a supplementary capability, not the selected path itself
+        // (unlike the RO `db` connect above, which crashloops).
+        let active_digests = Arc::new(active_digests::ActiveDigests::new());
+        let dispatch_spawner: Option<Arc<dyn dispatch_supervisor::ConsumerSupervisor>> =
+            match (dispatch_key_ring, dispatch_spine_cfg) {
+                (Some(key_ring), Some(spine_cfg)) => {
+                    match db::connect(&config_for_dispatch).await {
+                        Ok(dispatch_db) => {
+                            tracing::info!(
+                                "startup path: multi-tenant dispatch-consumer supervisor enabled \
+                                 (ENVELOPE_BINDING_KEYS + spine config + db present)"
+                            );
+                            let deps = Arc::new(dispatch_supervisor::SupervisorDeps {
+                                spine_cfg,
+                                key_ring,
+                                connections: dispatch_connections,
+                                retry_policy: dispatch_retry_policy,
+                                db: dispatch_db,
+                                usage,
+                                metrics: Arc::new(penguin_spine::NoopMetrics),
+                                rust_data_plane,
+                                active_digests: Arc::clone(&active_digests),
+                            });
+                            Some(Arc::new(dispatch_supervisor::SpineConsumerSupervisor {
+                                deps,
+                            }))
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                error = %err,
+                                "db connection failed for the multi-tenant dispatch-consumer \
+                                 supervisor; the DB-driven path will load/unload bundles but \
+                                 dispatch nothing until this is resolved"
+                            );
+                            None
+                        }
+                    }
+                }
+                _ => {
+                    tracing::warn!(
+                        "multi-tenant dispatch-consumer supervisor not started; the DB-driven \
+                         path will load/unload bundles but dispatch nothing until \
+                         ENVELOPE_BINDING_KEYS and spine config are both present"
+                    );
+                    None
+                }
+            };
+
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             shutdown_signal().await;
@@ -773,10 +879,13 @@ fn try_start_changelog_consumer(
             call_timeout_ms,
             flag,
             connections,
+            dispatch_spawner,
             excluded_metric,
+            dispatch_supervisor_metrics,
             changelog_consumer_metrics,
             kv_capabilities,
             changelog_consumer_ready,
+            active_digests,
             shutdown_rx,
         )
         .await;
@@ -923,7 +1032,7 @@ fn try_start_dispatch(
 
             let deps = dispatch::DispatchDeps {
                 app_id: app_id.clone(),
-                digest: digest.clone(),
+                digest_source: dispatch::DigestSource::Static(digest.clone()),
                 config_json: config_json.clone(),
                 key_ring: key_ring.clone(),
                 connections: Arc::clone(&connections),
@@ -1491,6 +1600,7 @@ mod tests {
             db_reader_password: None,
         };
         let connections = Arc::new(host_api::ConnectionRegistry::new());
+        let usage = Arc::new(std::sync::Mutex::new(usage::UsageBatcher::new()));
         try_start_changelog_consumer(
             &config,
             connections,
@@ -1498,6 +1608,8 @@ mod tests {
             test_excluded_metric(),
             Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
             test_changelog_consumer_metrics(),
+            test_dispatch_supervisor_metrics(),
+            usage,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
     }
@@ -1641,6 +1753,12 @@ mod tests {
     /// same rationale as [`test_excluded_metric`].
     fn test_changelog_consumer_metrics() -> telemetry::ChangelogConsumerMetrics {
         telemetry::register_changelog_consumer_metrics(&prometheus::Registry::new())
+    }
+
+    /// A standalone, unregistered [`telemetry::DispatchSupervisorMetrics`] --
+    /// same rationale as [`test_excluded_metric`].
+    fn test_dispatch_supervisor_metrics() -> telemetry::DispatchSupervisorMetrics {
+        telemetry::register_dispatch_supervisor_metrics(&prometheus::Registry::new())
     }
 
     /// The core of this PR's fix: once a host-API connection is active,
