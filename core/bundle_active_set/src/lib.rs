@@ -79,8 +79,9 @@ pub use multi_tenant::{
     AppScope, ScopeKey,
 };
 pub use query::{
-    derive_component_keys, read_active_set, read_watermark, ActiveBundleRow, ActiveSetError,
-    ActiveSetRead, DegradedReason, ExclusionReason, Watermark, WatermarkTracker,
+    canonical_digest, derive_component_keys, read_active_set, read_watermark, ActiveBundleRow,
+    ActiveSetError, ActiveSetRead, DegradedReason, DigestError, ExclusionReason, Watermark,
+    WatermarkTracker,
 };
 pub use reader::ReaderConfig;
 pub use scope::{resolve_scope, ResolvedScope};

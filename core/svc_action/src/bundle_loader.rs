@@ -673,6 +673,121 @@ mod tests {
         assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
     }
 
+    /// Contract test (regression: DB bare-hex digest rejected by executor
+    /// Load (malformed digest), UnknownBundle, alpha 2026-10-03): direct
+    /// port of `core/svc_process/src/bundle_loader.rs`'s identically-named
+    /// test -- `app_versions.artifact_digest` is stored bare-hex by the
+    /// control plane; `bundle_active_set::canonical_digest` (the sole
+    /// normalization boundary) must turn that into the `sha256:`-prefixed
+    /// form before it ever reaches [`BundleSink::load`], which is what the
+    /// live executor's wire protocol requires
+    /// (`core/bundle_executor/src/invoke.rs::verify_digest`).
+    #[tokio::test]
+    async fn run_tick_sends_a_canonical_digest_to_the_sink_for_a_bare_hex_db_row() {
+        let hex = "d".repeat(64);
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([vec![version_row("waddles.a", 10, "1", &hex)]])
+            .append_query_results([vec![approval_row("waddles.a", "1")]])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        let sink = FakeSink::default();
+        run_tick(
+            &db,
+            1,
+            0,
+            &StaticFlag(true),
+            &mut tracker,
+            &mut loaded,
+            Some(&sink as &dyn BundleSink),
+            &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
+        )
+        .await;
+        let canonical = format!("sha256:{hex}");
+        assert_eq!(
+            loaded.get("waddles.a"),
+            Some(&canonical),
+            "loaded-state map must record the canonical (prefixed) form, never the bare DB value"
+        );
+        assert_eq!(
+            sink.calls(),
+            vec![format!("load:waddles.a:{canonical}")],
+            "the sink (and therefore the executor Load wire request) must see the sha256:-prefixed form"
+        );
+    }
+
+    /// Loaded-state comparisons match across forms end to end -- direct port
+    /// of `core/svc_process/src/bundle_loader.rs`'s identically-named test.
+    /// A bundle loaded from a bare-hex DB row (canonicalized on the way in)
+    /// is correctly recognized as "still active, unchanged" on a later tick
+    /// whose active set moved for an unrelated reason (a second app
+    /// activating) -- `diff::plan`'s `current_digest == &row.digest` check
+    /// never spuriously reloads `waddles.a` because one side was prefixed
+    /// and the other wasn't.
+    #[tokio::test]
+    async fn run_tick_does_not_reload_an_unchanged_bare_hex_digest_on_the_next_tick() {
+        let hex_a = "e".repeat(64);
+        let hex_b = "f".repeat(64);
+        let active_b = bundle_active_set::entities::app_active_versions::Model {
+            app_id: "waddles.b".to_string(),
+            tenant_id: 1,
+            community_id: 0,
+            version_id: 20,
+        };
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // Tick 1: only `waddles.a` active.
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([vec![version_row("waddles.a", 10, "1", &hex_a)]])
+            .append_query_results([vec![approval_row("waddles.a", "1")]])
+            // Tick 2: `waddles.b` newly activates (moves the watermark);
+            // `waddles.a`'s row is byte-for-byte identical to tick 1.
+            .append_query_results([vec![active_row("waddles.a"), active_b.clone()]])
+            .append_query_results([empty_bindings()])
+            .append_query_results([vec![active_row("waddles.a"), active_b]])
+            .append_query_results([vec![
+                version_row("waddles.a", 10, "1", &hex_a),
+                version_row("waddles.b", 20, "1", &hex_b),
+            ]])
+            .append_query_results([vec![
+                approval_row("waddles.a", "1"),
+                approval_row("waddles.b", "1"),
+            ]])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        let sink = FakeSink::default();
+        for _ in 0..2 {
+            run_tick(
+                &db,
+                1,
+                0,
+                &StaticFlag(true),
+                &mut tracker,
+                &mut loaded,
+                Some(&sink as &dyn BundleSink),
+                &test_metric(),
+                &bundle_host_kv::CapabilitySnapshot::new(),
+            )
+            .await;
+        }
+        assert_eq!(
+            sink.calls(),
+            vec![
+                format!("load:waddles.a:sha256:{hex_a}"),
+                format!("load:waddles.b:sha256:{hex_b}"),
+            ],
+            "waddles.a's unchanged bare-hex digest must compare equal to the canonical form \
+             already recorded and never trigger a redundant reload, even though the watermark \
+             moved for waddles.b's sake"
+        );
+    }
+
     #[tokio::test]
     async fn run_tick_unloads_a_bundle_removed_from_the_active_set() {
         let db = MockDatabase::new(DatabaseBackend::Postgres)

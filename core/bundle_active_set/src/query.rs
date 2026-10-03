@@ -179,6 +179,51 @@ pub fn derive_component_keys(digest: &str) -> (String, String) {
     )
 }
 
+/// A digest that is neither bare 64-hex nor `sha256:<64 hex>` -- see
+/// [`canonical_digest`]'s doc for why this is a typed, fail-loud error
+/// rather than a silent pass-through.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("malformed digest {0:?}: expected 64 hex chars, optionally prefixed with \"sha256:\"")]
+pub struct DigestError(pub String);
+
+/// Canonicalizes a digest to the `sha256:<64 lowercase hex>` form the
+/// executor's `Load`/`Unload`/`Invoke` wire protocol requires
+/// (`core/bundle_executor/src/invoke.rs::verify_digest`'s own parse:
+/// `strip_prefix("sha256:")`, `hex.len() == 64`, `is_ascii_hexdigit`) --
+/// this is a deliberate, commented duplicate of that validation, not an
+/// independent reimplementation; `bundle_executor` pulls in `wasmtime`, so
+/// it cannot be a dependency of this crate or of `svc_process`/`svc_action`
+/// without pulling `wasmtime` into their `cargo deny` scope (an earlier
+/// attempt did exactly that and broke `svc_action`'s deny gate).
+///
+/// **The one normalization point for every digest crossing the svc<->
+/// executor boundary** -- [`assemble_active_set`] is the sole caller, so
+/// every `ActiveBundleRow::digest` this crate ever produces (consumed by
+/// both `core/svc_process` and `core/svc_action`'s `bundle_loader::
+/// ExecutorSink::load`/`unload`, their `loaded: HashMap<app_id, digest>`
+/// state, and `crate::diff::plan`'s digest-equality check) is already
+/// canonical. `app_versions.artifact_digest` is stored as bare 64-hex by
+/// the control plane -- the legacy `PROCESS_BUNDLE_DIGEST`/
+/// `ACTION_BUNDLE_DIGEST` env path has always sent the `sha256:`-prefixed
+/// form directly to the executor without going through this crate at all,
+/// which is why the mismatch never surfaced until the DB-driven path
+/// shipped. Accepts either input form so both are idempotently normalized;
+/// lowercases hex so a canonical-form comparison never misses a match over
+/// case alone. Storage-key derivation ([`derive_component_keys`]) keeps
+/// using the bare-hex form it has always used -- it strips any `sha256:`
+/// prefix itself, so feeding it this function's canonical (prefixed) output
+/// is unaffected.
+///
+/// regression: DB bare-hex digest rejected by executor Load (malformed
+/// digest), UnknownBundle (alpha 2026-10-03)
+pub fn canonical_digest(input: &str) -> Result<String, DigestError> {
+    let hex = input.strip_prefix("sha256:").unwrap_or(input);
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(DigestError(input.to_string()));
+    }
+    Ok(format!("sha256:{}", hex.to_ascii_lowercase()))
+}
+
 /// Why one `app_active_versions` row was excluded from
 /// [`ActiveSetRead::rows`] -- ops-visibility fix (security review):
 /// exclusion used to be a `debug!`/`warn!` log line only, easy to miss when
@@ -199,6 +244,13 @@ pub enum ExclusionReason {
     /// The `app_versions` row has no `artifact_digest` yet (not published,
     /// or a race with a concurrent publish).
     MissingDigest,
+    /// `app_versions.artifact_digest` failed [`canonical_digest`] -- neither
+    /// bare 64-hex nor `sha256:<64 hex>`. Logged at `ERROR` (not `warn!`
+    /// like the other reasons) by [`assemble_active_set`): a malformed
+    /// digest the control plane itself wrote is a data-integrity bug, not
+    /// routine rollout/approval-lifecycle noise. Logged by
+    /// [`assemble_active_set`].
+    MalformedDigest,
 }
 
 impl ExclusionReason {
@@ -209,6 +261,7 @@ impl ExclusionReason {
             Self::MissingVersionRow => "missing_version_row",
             Self::NoApproval => "no_approval",
             Self::MissingDigest => "missing_digest",
+            Self::MalformedDigest => "malformed_digest",
         }
     }
 }
@@ -375,7 +428,7 @@ pub(crate) fn assemble_active_set(
             continue;
         }
 
-        let Some(digest) = version_row.artifact_digest.clone() else {
+        let Some(raw_digest) = version_row.artifact_digest.clone() else {
             tracing::warn!(
                 app_id = %active.app_id,
                 version = %version_row.version,
@@ -384,6 +437,29 @@ pub(crate) fn assemble_active_set(
             );
             excluded.push((active.app_id.clone(), ExclusionReason::MissingDigest));
             continue;
+        };
+        // Digest-format contract fix (regression: DB bare-hex digest
+        // rejected by executor Load (malformed digest), UnknownBundle
+        // (alpha 2026-10-03)): `artifact_digest` is stored bare-hex by the
+        // control plane but the executor's wire protocol requires
+        // `sha256:<64 hex>` -- canonicalize once here, the sole boundary
+        // every downstream `ActiveBundleRow::digest` consumer shares. Fail
+        // loud (not the `warn!` the other exclusion reasons use): a
+        // malformed digest the control plane itself wrote is a
+        // data-integrity bug.
+        let digest = match canonical_digest(&raw_digest) {
+            Ok(digest) => digest,
+            Err(err) => {
+                tracing::error!(
+                    app_id = %active.app_id,
+                    version = %version_row.version,
+                    error = %err,
+                    reason = ExclusionReason::MalformedDigest.as_str(),
+                    "excluding from active set: artifact_digest is malformed"
+                );
+                excluded.push((active.app_id.clone(), ExclusionReason::MalformedDigest));
+                continue;
+            }
         };
 
         // component_key contract (data-plane half; hub-api half is the
@@ -975,6 +1051,156 @@ mod tests {
             vec![(
                 "waddles.test.app".to_string(),
                 ExclusionReason::MissingDigest
+            )]
+        );
+        Ok(())
+    }
+
+    // -- `canonical_digest` contract (regression: DB bare-hex digest
+    // rejected by executor Load (malformed digest), UnknownBundle (alpha
+    // 2026-10-03)) --------------------------------------------------------
+
+    /// Mirrors `core/bundle_executor/src/invoke.rs::verify_digest`'s own
+    /// accept case -- an already-`sha256:`-prefixed, already-lowercase
+    /// digest is returned unchanged.
+    #[test]
+    fn canonical_digest_leaves_an_already_prefixed_lowercase_digest_unchanged() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        assert_eq!(canonical_digest(&digest).unwrap(), digest);
+    }
+
+    /// The exact bug this function exists to fix: `app_versions.
+    /// artifact_digest` is stored bare-hex by the control plane; the
+    /// executor's wire protocol rejects anything without the `sha256:`
+    /// prefix (`error "executor reported error LoadFailed: malformed digest
+    /// ...: expected sha256:<64 hex chars>"`, alpha 2026-10-03).
+    #[test]
+    fn canonical_digest_prefixes_a_bare_hex_digest() {
+        let hex = "b".repeat(64);
+        assert_eq!(canonical_digest(&hex).unwrap(), format!("sha256:{hex}"));
+    }
+
+    /// Lowercases hex so a canonical-form comparison (`diff::plan`'s
+    /// `loaded` map, `LoadState::is_loaded_on`) never misses a match over
+    /// case alone -- mirrors `verify_digest`'s `eq_ignore_ascii_case`
+    /// tolerance on the compare side by normalizing on the way in instead.
+    #[test]
+    fn canonical_digest_lowercases_mixed_case_hex_in_either_input_form() {
+        let upper_hex = "C".repeat(64);
+        let expected = format!("sha256:{}", "c".repeat(64));
+        assert_eq!(canonical_digest(&upper_hex).unwrap(), expected);
+        assert_eq!(
+            canonical_digest(&format!("sha256:{upper_hex}")).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn canonical_digest_rejects_the_wrong_hex_length() {
+        assert!(canonical_digest("deadbeef").is_err());
+        assert!(canonical_digest(&format!("sha256:{}", "a".repeat(63))).is_err());
+        assert!(canonical_digest(&format!("sha256:{}", "a".repeat(65))).is_err());
+    }
+
+    #[test]
+    fn canonical_digest_rejects_non_hex_characters() {
+        assert!(canonical_digest(&format!("sha256:{}z", "a".repeat(63))).is_err());
+    }
+
+    #[test]
+    fn canonical_digest_rejects_an_empty_string() {
+        assert!(canonical_digest("").is_err());
+    }
+
+    /// The DB-path contract end to end: a bare-hex `artifact_digest` (what
+    /// the control plane actually stores) produces a `sha256:`-prefixed
+    /// `ActiveBundleRow::digest` -- the form the executor's `Load` wire
+    /// request requires. Storage-key derivation keeps using the bare hex it
+    /// has always used (`derive_component_keys` strips the prefix itself).
+    #[tokio::test]
+    async fn read_active_set_canonicalizes_a_bare_hex_artifact_digest() -> Result<(), ActiveSetError>
+    {
+        let hex = "1".repeat(64);
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.test.app".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(hex.clone()),
+                scan_status: "scanned".to_string(),
+                component_key: None,
+                sidecar_key: None,
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 1,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].digest, format!("sha256:{hex}"));
+        // Storage keys derive from the bare hex, never double-prefixed.
+        assert_eq!(
+            result.rows[0].component_key,
+            format!("bundles/{hex}/component.wasm")
+        );
+        assert_eq!(
+            result.rows[0].sidecar_key,
+            format!("bundles/{hex}/sidecar.json")
+        );
+        Ok(())
+    }
+
+    /// An `artifact_digest` that is neither bare 64-hex nor `sha256:<64
+    /// hex>` must exclude the row (fail loud, never load a bundle the
+    /// executor is guaranteed to reject) rather than pass a malformed value
+    /// through to the wire.
+    #[tokio::test]
+    async fn read_active_set_excludes_a_malformed_artifact_digest() -> Result<(), ActiveSetError> {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.test.app".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some("not-a-digest".to_string()),
+                scan_status: "scanned".to_string(),
+                component_key: None,
+                sidecar_key: None,
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 1,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert!(result.rows.is_empty());
+        assert_eq!(
+            result.excluded,
+            vec![(
+                "waddles.test.app".to_string(),
+                ExclusionReason::MalformedDigest
             )]
         );
         Ok(())
