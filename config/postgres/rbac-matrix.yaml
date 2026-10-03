@@ -39,6 +39,9 @@ tables:
   - tenant_platform_credentials
   - guild_tenant_pairings
   - community_role_sync_bindings
+  - tenant_platform_apps
+  - platform_connections
+  - community_connection_access
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -417,6 +420,10 @@ grants:
   # 0034_bar_citizen_guild_pairing). hub_api is the sole writer -- these
   # are hub-api-owned control-plane tables; no data-plane service reads
   # them directly yet.
+  #
+  # tenant_platform_credentials is, as of 0035_connection_model_layers,
+  # a compatibility VIEW over the renamed tenant_platform_apps table (see
+  # that migration's docstring) -- same grants apply to a view as a table.
   - role: hub_api
     table: tenant_platform_credentials
     privileges: [SELECT, INSERT, UPDATE, DELETE]
@@ -490,4 +497,82 @@ grants:
     privileges: []
   - role: migration_runner
     table: community_role_sync_bindings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # Three-layer platform-connection model (migration
+  # 0035_connection_model_layers). hub_api is the sole writer -- same
+  # control-plane convention as the Bar Citizen tables above.
+  - role: hub_api
+    table: tenant_platform_apps
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: tenant_platform_apps
+    privileges: []
+  - role: svc_ingest
+    table: tenant_platform_apps
+    privileges: []
+  - role: svc_process
+    table: tenant_platform_apps
+    privileges: []
+  - role: svc_action
+    table: tenant_platform_apps
+    privileges: []
+  - role: svc_streaming
+    table: tenant_platform_apps
+    privileges: []
+  - role: webui
+    table: tenant_platform_apps
+    privileges: []
+  - role: migration_runner
+    table: tenant_platform_apps
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: platform_connections
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: platform_connections
+    privileges: []
+  - role: svc_ingest
+    table: platform_connections
+    privileges: []
+  - role: svc_process
+    table: platform_connections
+    privileges: []
+  - role: svc_action
+    table: platform_connections
+    privileges: []
+  - role: svc_streaming
+    table: platform_connections
+    privileges: []
+  - role: webui
+    table: platform_connections
+    privileges: []
+  - role: migration_runner
+    table: platform_connections
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: community_connection_access
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: community_connection_access
+    privileges: []
+  - role: svc_ingest
+    table: community_connection_access
+    privileges: []
+  - role: svc_process
+    table: community_connection_access
+    privileges: []
+  - role: svc_action
+    table: community_connection_access
+    privileges: []
+  - role: svc_streaming
+    table: community_connection_access
+    privileges: []
+  - role: webui
+    table: community_connection_access
+    privileges: []
+  - role: migration_runner
+    table: community_connection_access
     privileges: [SELECT, INSERT, UPDATE, DELETE]
