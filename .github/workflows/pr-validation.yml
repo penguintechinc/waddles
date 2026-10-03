@@ -619,6 +619,13 @@ jobs:
       - name: alpha render -- bundle-executor + legacy-env regression test
         run: bash scripts/ci/tests/test_alpha_render_bundle_executor.sh
 
+      # feature/hub-grpc-env-wiring -- PR #561 (PII tokenization, default ON) + #569
+      # (fail loud at startup if HUB_API_GRPC_ENDPOINT/SERVICE_JWT_TOKEN_ENDPOINT are
+      # unset) require svc-process-rust/svc-action-rust to render these non-empty or
+      # every tokenization-enabled pod crash-loops.
+      - name: alpha render -- hub gRPC client env wiring regression test
+        run: bash scripts/ci/tests/test_hub_grpc_env_wiring.sh
+
       # fix/legacy-path-mutually-exclusive -- the check above hard-requires a
       # bundle-executor Deployment (alpha-only); this covers the bare render
       # (base values.yaml defaults) and every other topology, none of which

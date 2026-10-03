@@ -965,6 +965,33 @@ pipeline:
     # live source; `false` (deny, the default) until an operator opts in at the pod level.
     instanceEgressAllowPrivateIp: false
 
+    # feature/hub-grpc-env-wiring -- closes #569's startup seam: svc-process-rust/
+    # svc-action-rust's `core/hub_client::HubClient` (PII tokenization/detokenization,
+    # #561) needs hub-api's internal gRPC endpoint + machine-JWT bootstrap endpoint to
+    # connect at startup, or it fails loud (exits non-zero) per #569's "fail loud, not
+    # silent dead-letter" design. Empty here (the default) means "compute from
+    # pipeline.hubApi's own Service port in-template" (see svc-process-rust.yaml/
+    # svc-action-rust.yaml) -- correct unmodified in every environment since hub-api is
+    # always colocated in the same Helm release/namespace; override only if that ever
+    # stops being true. TLS is mandatory on hub-api's gRPC listener (hub_api/
+    # grpc_internal/server.py, no insecure option) -- scheme is always "https".
+    #
+    # KNOWN GAP (follow-up required, do not assume this "just works"): (1) hub-api's
+    # own Deployment (templates/hub-api.yaml) does not yet wire
+    # `waddlebot.grpcTlsServerEnv`/volume the way templates/core/core-identity.yaml
+    # does, so its gRPC listener never starts (hub_api/app.py fails OPEN for the
+    # surrounding HTTP app but CLOSED for gRPC) until that's added. (2)
+    # `core/hub_client::HubClient::connect` calls `ClientTlsConfig::new().
+    # with_enabled_roots()` -- the bundled webpki/Mozilla root store only, no
+    # custom-CA support -- so even once hub-api's listener is up, a cert signed by
+    # this chart's own `global.grpcTls` CA (cert-manager `waddlebot-internal-ca` or
+    # the static dev CA) will fail TLS verification. Until hub_client supports CA
+    # pinning, use the `waddles.core.disable-pii-tokenization`/
+    # `disable-pii-detokenization` kill-switches in any environment where this isn't
+    # resolved yet, rather than deploying straight into a crash-loop.
+    hubApiGrpcEndpoint: ""
+    serviceJwtTokenEndpoint: ""
+
     svcIngest:
       enabled: true
       # fix/helm-alpha-self-provisioning -- distinct image repository from
@@ -2475,7 +2502,13 @@ serviceJwt:
       spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-action"
       serviceAccount: svc-action
       allowedScopes:
-        - "users:display-name:resolve"
+        # feature/hub-grpc-env-wiring -- was "users:display-name:resolve", which does
+        # not match hub_api/grpc_internal/servicers.py REQUIRED_SCOPES's
+        # "identity:displayname:read" for ResolveDisplayNames (core/svc_action's
+        # HUB_IDENTITY_RESOLVE_SCOPE). The mismatch would have minted a machine JWT
+        # missing the scope the server's AuthInterceptor actually checks, so every
+        # ResolveDisplayNames call would 403 even with a working connection.
+        - "identity:displayname:read"
         - "egress:connect"
     # svc-ingest isn't in this Rust-data-plane identities map yet (still
     # legacy/Python) but is one of egressProxy.allowedCallerServices --
