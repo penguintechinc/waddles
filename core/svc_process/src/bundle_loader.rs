@@ -113,6 +113,93 @@ impl BundleSink for ExecutorSink {
     }
 }
 
+/// Per-session counterpart to [`BundleSink`] -- every call names the exact
+/// [`bundle_active_set::SessionId`] it targets, rather than being bound to
+/// one connection for the sink's whole lifetime. Required by the per-session
+/// loading fix (regression: bundles loaded only onto a terminating executor
+/// during rollout; live executor got none, alpha 2026-10-03): a full sync
+/// must drive `Load`/`Unload` against EVERY live session independently, so
+/// the sink itself must be able to address any of them, not just whichever
+/// one `ConnectionRegistry::active()` happened to pick for the whole tick.
+pub trait SessionBundleSink: Send + Sync {
+    fn load<'a>(
+        &'a self,
+        session: bundle_active_set::SessionId,
+        tenant_id: i32,
+        community_id: i32,
+        row: &'a ActiveBundleRow,
+    ) -> BoxFuture<'a, Result<(), InvokeError>>;
+    fn unload<'a>(
+        &'a self,
+        session: bundle_active_set::SessionId,
+        tenant_id: i32,
+        community_id: i32,
+        app_id: &'a str,
+        digest: &'a str,
+    ) -> BoxFuture<'a, Result<(), InvokeError>>;
+}
+
+/// Production [`SessionBundleSink`]: resolves `session` against the live
+/// [`crate::host_api::ConnectionRegistry`] on every call (never cached), so
+/// a session that closes between two calls in the same tick simply fails
+/// that one call (`InvokeError::NoExecutor`) -- the caller leaves it
+/// unloaded for that session and retries next tick, it never panics or
+/// silently targets a different session.
+pub struct RegistrySink {
+    pub registry: Arc<crate::host_api::ConnectionRegistry>,
+    pub call_timeout_ms: u64,
+}
+
+impl SessionBundleSink for RegistrySink {
+    fn load<'a>(
+        &'a self,
+        session: bundle_active_set::SessionId,
+        tenant_id: i32,
+        community_id: i32,
+        row: &'a ActiveBundleRow,
+    ) -> BoxFuture<'a, Result<(), InvokeError>> {
+        Box::pin(async move {
+            let Some(connection) = self.registry.get(session) else {
+                return Err(InvokeError::NoExecutor);
+            };
+            crate::spine::ensure_loaded(
+                &connection,
+                tenant_id,
+                community_id,
+                &row.app_id,
+                &row.version,
+                &row.digest,
+                &row.component_key,
+                &row.sidecar_key,
+                penguin_bundle_host::wire::LoadLimits {
+                    timeout_ms: self.call_timeout_ms,
+                    memory_mb: 64,
+                },
+            )
+            .await
+            .map(|_| ())
+        })
+    }
+
+    fn unload<'a>(
+        &'a self,
+        session: bundle_active_set::SessionId,
+        tenant_id: i32,
+        community_id: i32,
+        app_id: &'a str,
+        digest: &'a str,
+    ) -> BoxFuture<'a, Result<(), InvokeError>> {
+        Box::pin(async move {
+            let Some(connection) = self.registry.get(session) else {
+                return Err(InvokeError::NoExecutor);
+            };
+            crate::spine::ensure_unloaded(&connection, tenant_id, community_id, app_id, digest)
+                .await
+                .map(|_| ())
+        })
+    }
+}
+
 /// One poll tick's worth of work, split out from [`run`] so it is directly
 /// testable against a `MockDatabase`-backed `DatabaseConnection`, a fake
 /// [`FeatureGate`], and a fake [`BundleSink`] -- no live Postgres, no live
@@ -298,6 +385,44 @@ mod tests {
     use crate::license::test_support::{FixedGate, ToggleGate};
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::Mutex as StdMutex;
+
+    fn test_row(digest: &str) -> ActiveBundleRow {
+        ActiveBundleRow {
+            app_id: "waddles.a".to_string(),
+            version: "1".to_string(),
+            digest: digest.to_string(),
+            component_key: "k".to_string(),
+            sidecar_key: "s".to_string(),
+            declared_capabilities: Vec::new(),
+        }
+    }
+
+    /// [`RegistrySink`] resolves `session` against the live registry on
+    /// every call -- a session with no live connection (never registered,
+    /// already removed, or closed) fails that one call with
+    /// `InvokeError::NoExecutor`, never panics and never silently targets a
+    /// different session.
+    #[tokio::test]
+    async fn registry_sink_load_fails_closed_for_an_unknown_session() {
+        let registry = Arc::new(crate::host_api::ConnectionRegistry::new());
+        let sink = RegistrySink {
+            registry,
+            call_timeout_ms: 1000,
+        };
+        let result = sink.load(99, 1, 0, &test_row("sha256:aa")).await;
+        assert!(matches!(result, Err(InvokeError::NoExecutor)));
+    }
+
+    #[tokio::test]
+    async fn registry_sink_unload_fails_closed_for_an_unknown_session() {
+        let registry = Arc::new(crate::host_api::ConnectionRegistry::new());
+        let sink = RegistrySink {
+            registry,
+            call_timeout_ms: 1000,
+        };
+        let result = sink.unload(99, 1, 0, "waddles.a", "sha256:aa").await;
+        assert!(matches!(result, Err(InvokeError::NoExecutor)));
+    }
 
     /// Records every `load`/`unload` call it receives and answers each
     /// with a fixed, caller-chosen result -- no network, no wasmtime, no

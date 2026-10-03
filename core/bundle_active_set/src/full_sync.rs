@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use crate::multi_tenant::{scoped_active_rows, AppScope, ScopeKey};
 use crate::query::ActiveSetRead;
+use crate::session_sync::{SessionId, SessionLoaded};
 
 /// Why a full send was triggered -- the `reason` label on the
 /// `bundle_full_sync_total` metric and the structured field on each full
@@ -100,6 +101,36 @@ pub fn loaded_state_diverged(
     active
         .iter()
         .any(|(scope, row)| loaded.get(scope) != Some(&row.digest))
+}
+
+/// Per-session counterpart to [`loaded_state_diverged`]: true when `session`
+/// specifically is missing, or holds the wrong digest for, at least one
+/// currently-active scoped bundle. Used by [`any_session_diverged`] (the
+/// actual per-tick check -- #547's divergence check compares per session,
+/// not against one flattened view that could paper over a single
+/// out-of-sync session).
+pub fn session_loaded_state_diverged(
+    by_scope: &HashMap<ScopeKey, ActiveSetRead>,
+    loaded: &SessionLoaded<AppScope>,
+    session: SessionId,
+) -> bool {
+    let active = scoped_active_rows(by_scope);
+    active
+        .iter()
+        .any(|(scope, row)| loaded.digest_for(session, scope) != Some(row.digest.as_str()))
+}
+
+/// True if ANY of `live_sessions` has diverged from the active set --
+/// `live_sessions` empty (no executor connected at all) is never
+/// "diverged" (there is nothing to resync onto).
+pub fn any_session_diverged(
+    by_scope: &HashMap<ScopeKey, ActiveSetRead>,
+    loaded: &SessionLoaded<AppScope>,
+    live_sessions: &[SessionId],
+) -> bool {
+    live_sessions
+        .iter()
+        .any(|&session| session_loaded_state_diverged(by_scope, loaded, session))
 }
 
 /// A short, stable-length prefix of a bundle digest for log lines -- never
@@ -219,6 +250,33 @@ mod tests {
         let mut loaded = HashMap::new();
         loaded.insert((1, 0, "waddles.a".to_string()), "d1".to_string());
         assert!(!loaded_state_diverged(&by_scope, &loaded));
+    }
+
+    #[test]
+    fn any_session_diverged_is_false_with_no_live_sessions() {
+        let mut by_scope = HashMap::new();
+        by_scope.insert((1, 0), active_set(vec![row("waddles.a", "d1")]));
+        let loaded = SessionLoaded::new();
+        assert!(!any_session_diverged(&by_scope, &loaded, &[]));
+    }
+
+    #[test]
+    fn any_session_diverged_is_true_when_one_of_several_live_sessions_lacks_the_bundle() {
+        let mut by_scope = HashMap::new();
+        by_scope.insert((1, 0), active_set(vec![row("waddles.a", "d1")]));
+        let mut loaded = SessionLoaded::new();
+        loaded.mark_loaded(1, (1, 0, "waddles.a".to_string()), "d1".to_string());
+        // Session 2 has nothing loaded -- diverged even though session 1 is fine.
+        assert!(any_session_diverged(&by_scope, &loaded, &[1, 2]));
+    }
+
+    #[test]
+    fn any_session_diverged_is_false_when_every_live_session_matches() {
+        let mut by_scope = HashMap::new();
+        by_scope.insert((1, 0), active_set(vec![row("waddles.a", "d1")]));
+        let mut loaded = SessionLoaded::new();
+        loaded.mark_loaded(1, (1, 0, "waddles.a".to_string()), "d1".to_string());
+        assert!(!any_session_diverged(&by_scope, &loaded, &[1]));
     }
 
     #[test]
