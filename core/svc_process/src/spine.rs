@@ -798,11 +798,11 @@ async fn handle_delivered<S: SpineOps>(
             // bundle (alpha 2026-10-03)): `message` IS the digest the
             // executor echoed back for `UnknownBundle`
             // (`bundle_executor::invoke::on_invoke`'s `error_body`), so an
-            // empty/unresolved `deps.digest` renders as an empty-looking
-            // `message=""` field with nothing to grep on. Log
-            // `deps.digest`'s own prefix explicitly so this is diagnosable
-            // even when `message` is empty.
-            let digest_prefix = bundle_active_set::digest_prefix(&deps.digest);
+            // empty/unresolved digest renders as an empty-looking
+            // `message=""` field with nothing to grep on. Log the resolved
+            // `digest`'s own prefix explicitly so this is diagnosable even
+            // when `message` is empty.
+            let digest_prefix = bundle_active_set::digest_prefix(&digest);
             tracing::error!(app_id = %deps.app_id, ?code, digest_prefix, %message, "transform invoke failed, dead-lettering");
             let err = DlqError {
                 kind,
