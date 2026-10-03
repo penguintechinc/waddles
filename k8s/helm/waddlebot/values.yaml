@@ -721,6 +721,20 @@ pipeline:
     backoffLimit: 2
     defaultTenantSlug: "global"
     tenantSlugs: ""
+    # fix/preexisting-test-failures (2026-10-02): dedicated seeder-owned ingest-source
+    # list, decoupled from rustDataPlane.svcProcess's legacy single-app PROCESS_INGEST_*
+    # fields (removed from alpha in fix/alpha-deploy-executor-and-failfast, PR #538, now
+    # that the DB-driven multi-tenant active-bundle loader is the sole bundle-selection
+    # path -- see values-alpha.yaml's rustDataPlane.svcProcess comment). The seeder still
+    # needs to register ingest sources independently of whether svc-process's legacy env
+    # is set, so this list is the seeder's own source of truth, each entry rendered into
+    # CORE_BUNDLES_PLATFORM_CONNECTIONS (templates/core-bundle-seeder-job.yaml):
+    #   - platform: "<ingest platform, e.g. discord>"
+    #     sourceId: "<ingest source id, e.g. dg-<guild id>>"
+    #     tenantSlug: "<optional, defaults to defaultTenantSlug above>"
+    #     communityId: <optional, defaults to null>
+    #     label: "<optional, defaults to '<platform> platform connection'>"
+    platformConnections: []
     resources:
       requests:
         cpu: "100m"
