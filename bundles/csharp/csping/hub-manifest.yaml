@@ -6,17 +6,25 @@
 #
 # csping is the C#-toolchain feasibility spike (spec
 # docs/superpowers/specs/2026-09-14-rust-data-plane-design.md S18 R13 / D35) -- see
-# bundles/csharp/csping/README.md. First version, no prior burned-slot history like ping's
-# 1.0.0/1.0.1 (bundles/rust/ping/hub-manifest.yaml's own comment) -- and unlike that gate,
-# csping's build is NOT currently proven byte-reproducible (componentize-dotnet/NativeAOT-LLVM
-# is a from-scratch spike, not yet run through two independent --no-cache builds), so it is
-# intentionally excluded from scripts/verify-core-bundles-reproducible.sh's byte-identity gate,
-# the same way waddles.core.example.pyping is -- see that script's own comment and
+# bundles/csharp/csping/README.md. csping's build is NOT currently proven byte-reproducible
+# (componentize-dotnet/NativeAOT-LLVM is a from-scratch spike, not yet run through two
+# independent --no-cache builds), so it is intentionally excluded from
+# scripts/verify-core-bundles-reproducible.sh's byte-identity gate, the same way
+# waddles.core.example.pyping is -- see that script's own comment and
 # bundles/Dockerfile.core-bundles's csharp-bundle-builder stage comment.
+#
+# 1.0.0 is permanently retired -- fix/csping-version-bump. alpha's app_versions already has a
+# 1.0.0 row published from the pre-#573 Dockerfile.core-bundles (missing the
+# `COPY sdk/waddle-sdk-cs` layer this bundle's .csproj ProjectReference depends on); #573's fix
+# changed the compiled csping.wasm for the same nominal version, and app_versions enforces an
+# immutable digest per (app_id, version), so re-seeding 1.0.0 now 409s as digest_conflict.
+# 1.0.1 is the first version built from the corrected Dockerfile. Mirrors
+# bundles/rust/ping/hub-manifest.yaml's own 1.0.0/1.0.1 retirement comment -- now also matching
+# ping's "no prior burned-slot history" pattern in having exactly one retired slot.
 schema_version: 2
 app_id: waddles.core.example.csping
 name: Ping Example Bundle (C#)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
