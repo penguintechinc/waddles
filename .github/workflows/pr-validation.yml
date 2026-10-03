@@ -690,6 +690,17 @@ jobs:
       - name: alpha render -- hub gRPC client env wiring regression test
         run: bash scripts/ci/tests/test_hub_grpc_env_wiring.sh
 
+      # fix/hub-api-grpc-service-jwt-issuer -- the auto-provisioned
+      # `service-jwt-signing-key` Secret's shape (unsuffixed key name, raw
+      # base64 seed instead of kid-suffixed PEM) silently never matched what
+      # `flask_core.service_jwt.load_issuer_from_env` scans for, so hub-api's
+      # internal gRPC listener (port 50204) was skipped on every alpha
+      # deploy, blocking svc-process/svc-action's HubClient and the whole
+      # PII-tokenization data path. Runs the real rendered Job script against
+      # a mocked kubectl and feeds its output through the real Python loader.
+      - name: alpha render -- hub-api service_jwt auto-provisioning regression test
+        run: bash scripts/ci/tests/test_hub_api_service_jwt_auto_provision.sh
+
       # fix/legacy-path-mutually-exclusive -- the check above hard-requires a
       # bundle-executor Deployment (alpha-only); this covers the bare render
       # (base values.yaml defaults) and every other topology, none of which
