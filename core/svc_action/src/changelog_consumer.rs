@@ -59,6 +59,31 @@ const SCOPE_STALE_EVICTION_BOUND: Duration = Duration::from_secs(3600);
 #[cfg(test)]
 const SCOPE_STALE_EVICTION_BOUND: Duration = Duration::from_millis(30);
 
+/// Upper bound this consumer waits for a single `Load`/`Unload` wire round
+/// trip before treating it as failed. `host_api::Connection::request`
+/// (unlike `Connection::ping`) has no timeout of its own -- it just `.await`s
+/// the reply oneshot forever. Generous enough for a from-scratch CPython
+/// bundle compile (`LoadLimits::timeout_ms` is a *different* number: it
+/// tells the EXECUTOR its own compile budget on the wire; this is this
+/// client's own ceiling on waiting for any reply to arrive at all).
+///
+/// regression (alpha 2026-10-03): during a rollout the about-to-terminate
+/// session's executor kept the connection open but never answered a `Load`
+/// it had already been sent (draining); `apply_active_set`'s old
+/// `to_load`/`to_unload` loops awaited each `(session, bundle)` call
+/// *sequentially*, so that one un-answered call silently starved every
+/// other entry queued behind it in the same full sync -- including the
+/// live session's own loads -- and parked this single-threaded consumer's
+/// entire `run()` loop (no further ticks, no further logs of ANY kind) for
+/// as long as the hang lasted. Fixed by pairing this timeout with running
+/// every `(session, bundle)` Load/Unload for a tick concurrently (see
+/// `apply_active_set`), so one stuck call can never block another, and by
+/// bounding how long "stuck" is allowed to mean "forever".
+#[cfg(not(test))]
+const SESSION_CALL_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(test)]
+const SESSION_CALL_TIMEOUT: Duration = Duration::from_millis(40);
+
 /// How long [`run`]'s loop coalesces repeated full-send triggers into a
 /// single forced full authoritative active-set read -- see
 /// `core/svc_process/src/changelog_consumer.rs`'s identical constant for the
@@ -418,6 +443,25 @@ async fn apply_active_set(
     }
 
     let loaded_snapshot = state.loaded.snapshot();
+    // Over-log by design, per-session (user rule: never silent) -- the
+    // single aggregate `loaded_count` DEBUG line in `run_incremental_tick`
+    // can look "healthy" overall while one specific live session is
+    // actually missing everything (alpha 2026-10-03's exact failure mode).
+    for &session in live_sessions {
+        let session_loaded = active
+            .keys()
+            .filter(|scope| {
+                loaded_snapshot.digest_for(session, scope)
+                    == active.get(scope).map(|row| row.digest.as_str())
+            })
+            .count();
+        tracing::debug!(
+            session,
+            session_loaded,
+            active_count = active.len(),
+            "changelog consumer: per-session load status this tick"
+        );
+    }
     let plan = bundle_active_set::plan_sessions(&loaded_snapshot, &active, live_sessions, |row| {
         row.digest.as_str()
     });
@@ -450,22 +494,46 @@ async fn apply_active_set(
         return;
     };
 
-    for (session, scope, row) in &plan.to_load {
-        let load_start = Instant::now();
-        match sink.load(*session, scope.0, scope.1, row).await {
-            Ok(()) => {
+    // Every (session, bundle) Load this tick is independent -- run them
+    // CONCURRENTLY (never sequentially) so one session's stuck/slow call can
+    // never starve another, and wrap each in `SESSION_CALL_TIMEOUT` so a
+    // session that never answers at all (alpha 2026-10-03: mid-termination,
+    // connection open, no reply) counts as failed instead of hanging this
+    // whole tick forever. The `(session, scope, row)` triples are only
+    // resolved against `state`/metrics AFTER every call has settled --
+    // `SessionBundleSink::load` only needs `&self`/shared refs, so no
+    // mutable borrow of `state` is live during the concurrent phase.
+    let load_outcomes =
+        futures_util::future::join_all(plan.to_load.iter().map(|(session, scope, row)| {
+            let load_start = Instant::now();
+            async move {
+                let outcome = tokio::time::timeout(
+                    SESSION_CALL_TIMEOUT,
+                    sink.load(*session, scope.0, scope.1, row),
+                )
+                .await;
+                (session, scope, row, outcome, load_start.elapsed())
+            }
+        }))
+        .await;
+
+    for (session, scope, row, outcome, elapsed) in load_outcomes {
+        match outcome {
+            Ok(Ok(())) => {
                 tracing::info!(
                     session = *session,
                     tenant_id = scope.0, community_id = scope.1,
                     app_id = %row.app_id, version = %row.version,
                     digest_prefix = %bundle_active_set::digest_prefix(&row.digest),
-                    duration_ms = load_start.elapsed().as_millis() as u64,
+                    duration_ms = elapsed.as_millis() as u64,
                     "changelog consumer: loaded"
                 );
                 metrics
                     .bundle_loads_total
                     .with_label_values(&["success"])
                     .inc();
+                // Mark loaded ONLY on this confirmed `Ok` reply -- never
+                // optimistically ahead of it.
                 state
                     .loaded
                     .mark_loaded(*session, scope.clone(), row.digest.clone());
@@ -475,7 +543,7 @@ async fn apply_active_set(
                 // legacy env removal (alpha 2026-10-03).
                 state.active_digests.set(scope.clone(), row.digest.clone());
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 // Per-session failure (e.g. a connection reset mid-load,
                 // alpha 2026-10-03's exact failure mode) leaves this
                 // specific session "not loaded" for this scope -- it is
@@ -486,7 +554,7 @@ async fn apply_active_set(
                     tenant_id = scope.0, community_id = scope.1,
                     app_id = %row.app_id, version = %row.version,
                     digest_prefix = %bundle_active_set::digest_prefix(&row.digest),
-                    duration_ms = load_start.elapsed().as_millis() as u64,
+                    duration_ms = elapsed.as_millis() as u64,
                     error = %err,
                     "changelog consumer: load failed for this session, will retry next tick"
                 );
@@ -495,14 +563,46 @@ async fn apply_active_set(
                     .with_label_values(&["failure"])
                     .inc();
             }
+            Err(_timed_out) => {
+                // regression: svc-action full sync silently dropped 2/3
+                // loads on live executor when old session died mid-sync
+                // (alpha 2026-10-03) -- a Load that never gets a reply at
+                // all must time out and count as failed, never hang this
+                // tick (or this consumer) forever.
+                let timeout_secs = SESSION_CALL_TIMEOUT.as_secs_f64();
+                tracing::error!(
+                    session = *session,
+                    tenant_id = scope.0, community_id = scope.1,
+                    app_id = %row.app_id, version = %row.version,
+                    digest_prefix = %bundle_active_set::digest_prefix(&row.digest),
+                    duration_ms = elapsed.as_millis() as u64,
+                    timeout_secs,
+                    "changelog consumer: load timed out after {timeout_secs}s for this \
+                     session with no reply, will retry next tick"
+                );
+                metrics
+                    .bundle_loads_total
+                    .with_label_values(&["timeout"])
+                    .inc();
+            }
         }
     }
-    for (session, scope, digest) in &plan.to_unload {
-        match sink
-            .unload(*session, scope.0, scope.1, &scope.2, digest)
-            .await
-        {
-            Ok(()) => {
+
+    let unload_outcomes = futures_util::future::join_all(plan.to_unload.iter().map(
+        |(session, scope, digest)| async move {
+            let outcome = tokio::time::timeout(
+                SESSION_CALL_TIMEOUT,
+                sink.unload(*session, scope.0, scope.1, &scope.2, digest),
+            )
+            .await;
+            (session, scope, digest, outcome)
+        },
+    ))
+    .await;
+
+    for (session, scope, digest, outcome) in unload_outcomes {
+        match outcome {
+            Ok(Ok(())) => {
                 tracing::info!(
                     session = *session,
                     tenant_id = scope.0, community_id = scope.1,
@@ -517,12 +617,22 @@ async fn apply_active_set(
                     state.active_digests.remove(scope);
                 }
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 tracing::warn!(
                     session = *session,
                     tenant_id = scope.0, community_id = scope.1,
                     app_id = %scope.2, digest, error = %err,
                     "changelog consumer: unload failed for this session, will retry next tick"
+                );
+            }
+            Err(_timed_out) => {
+                let timeout_secs = SESSION_CALL_TIMEOUT.as_secs_f64();
+                tracing::warn!(
+                    session = *session,
+                    tenant_id = scope.0, community_id = scope.1,
+                    app_id = %scope.2, digest, timeout_secs,
+                    "changelog consumer: unload timed out after {timeout_secs}s for this \
+                     session with no reply, will retry next tick"
                 );
             }
         }
@@ -2096,6 +2206,252 @@ mod tests {
             2,
             "both sessions must have been attempted, got {:?}",
             sink.calls()
+        );
+    }
+
+    /// A sink whose `load`/`unload` NEVER resolves for one specific session
+    /// id (models the alpha 2026-10-03 failure mode exactly: the connection
+    /// stays open and simply never answers, e.g. a draining executor that
+    /// accepted the frame but will not reply before the rollout kills it) --
+    /// every other session succeeds immediately. Distinct from
+    /// `DiesForSessionSink` above, which fails FAST (`Err`); this sink never
+    /// completes at all without `SESSION_CALL_TIMEOUT` stepping in.
+    #[derive(Default)]
+    struct HangsForSessionSink {
+        calls: StdMutex<Vec<String>>,
+        hangs_for: bundle_active_set::SessionId,
+    }
+    impl HangsForSessionSink {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+    impl SessionBundleSink for HangsForSessionSink {
+        fn load<'a>(
+            &'a self,
+            session: bundle_active_set::SessionId,
+            _tenant_id: i32,
+            _community_id: i32,
+            row: &'a bundle_active_set::ActiveBundleRow,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(), crate::dispatch::InvokeError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("load:{session}:{}:{}", row.app_id, row.digest));
+            let hangs = session == self.hangs_for;
+            Box::pin(async move {
+                if hangs {
+                    // Never resolves on its own -- only `tokio::time::
+                    // timeout` in `apply_active_set` can end this await.
+                    std::future::pending::<Result<(), crate::dispatch::InvokeError>>().await
+                } else {
+                    Ok(())
+                }
+            })
+        }
+        fn unload<'a>(
+            &'a self,
+            _session: bundle_active_set::SessionId,
+            _tenant_id: i32,
+            _community_id: i32,
+            _app_id: &'a str,
+            _digest: &'a str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(), crate::dispatch::InvokeError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move { Ok(()) })
+        }
+    }
+
+    /// **Regression (alpha 2026-10-03, the exact live failure): a Load that
+    /// never gets ANY reply (session mid-disconnect, connection still open)
+    /// must never block another session's Loads, and must never hang this
+    /// tick forever.** Three active bundles (mirrors the real `ping`/
+    /// `csping`/`pyping` incident) -- the terminating session (2) hangs on
+    /// every single one; the live session (1) must still end up holding all
+    /// three, and the whole call must finish quickly (proving the loads ran
+    /// CONCURRENTLY, not sequentially behind the hang) rather than only
+    /// after `3 * SESSION_CALL_TIMEOUT`.
+    #[tokio::test]
+    async fn run_full_reconcile_concurrently_loads_the_live_session_while_another_session_hangs() {
+        let apps = [
+            ("waddles.ping", format!("sha256:{}", "1".repeat(64))),
+            ("waddles.csping", format!("sha256:{}", "2".repeat(64))),
+            ("waddles.pyping", format!("sha256:{}", "3".repeat(64))),
+        ];
+        let active_rows: Vec<_> = apps
+            .iter()
+            .enumerate()
+            .map(|(i, (app_id, _))| active_row(app_id, 1, 0, 10 + i as i64))
+            .collect();
+        let version_rows: Vec<_> = apps
+            .iter()
+            .enumerate()
+            .map(|(i, (app_id, digest))| version_row(10 + i as i64, app_id, digest))
+            .collect();
+        let approval_rows: Vec<_> = apps
+            .iter()
+            .map(|(app_id, _)| approval_row(1, app_id))
+            .collect();
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([active_rows])
+            .append_query_results([version_rows])
+            .append_query_results([approval_rows])
+            .into_connection();
+        let mut state = ConsumerState::new(0);
+        let sink = HangsForSessionSink {
+            hangs_for: 2,
+            ..Default::default()
+        };
+        let metrics = test_changelog_metrics();
+
+        let start = Instant::now();
+        run_full_reconcile(
+            &db,
+            &mut state,
+            Some(&sink as &dyn SessionBundleSink),
+            &[1, 2],
+            None,
+            &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
+            &metrics,
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            FullSyncReason::Reconcile,
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < SESSION_CALL_TIMEOUT * 2,
+            "loads must run concurrently (one timeout's worth of wall time for \
+             ALL three hung session-2 calls together), took {elapsed:?}"
+        );
+        for (app_id, digest) in &apps {
+            assert_eq!(
+                state.loaded().digest_for(1, &(1, 0, app_id.to_string())),
+                Some(digest.as_str()),
+                "live session 1 must hold {app_id} despite session 2 hanging on every load"
+            );
+            assert_eq!(
+                state.loaded().digest_for(2, &(1, 0, app_id.to_string())),
+                None,
+                "a session whose Load never replied must NEVER be marked loaded \
+                 (no optimistic marking) for {app_id}"
+            );
+        }
+        assert_eq!(
+            sink.calls().len(),
+            6,
+            "both sessions must have been attempted for all 3 bundles, got {:?}",
+            sink.calls()
+        );
+        assert_eq!(
+            metrics
+                .bundle_loads_total
+                .with_label_values(&["timeout"])
+                .get(),
+            3,
+            "all 3 hung loads on session 2 must be counted as timeouts"
+        );
+        assert_eq!(
+            metrics
+                .bundle_loads_total
+                .with_label_values(&["success"])
+                .get(),
+            3,
+            "all 3 loads on the live session must still succeed"
+        );
+    }
+
+    /// **Regression: a timed-out Load is retried on the next tick, never
+    /// given up on.** First reconcile hangs (times out, not loaded); once
+    /// the session stops hanging, the very next reconcile loads it
+    /// successfully -- proving the timeout path leaves the bundle eligible
+    /// for retry rather than treating it as a permanent failure.
+    #[tokio::test]
+    async fn a_timed_out_load_is_retried_and_succeeds_on_the_next_reconcile() {
+        let digest = format!("sha256:{}", "4".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.a", &digest)]])
+            .append_query_results([vec![approval_row(1, "waddles.a")]])
+            .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.a", &digest)]])
+            .append_query_results([vec![approval_row(1, "waddles.a")]])
+            .into_connection();
+        let mut state = ConsumerState::new(0);
+        // `hangs_for: 1` on the first call; flipped to a harmless id before
+        // the second so the exact same session succeeds on retry.
+        let sink = HangsForSessionSink {
+            hangs_for: 1,
+            ..Default::default()
+        };
+        let metrics = test_changelog_metrics();
+
+        run_full_reconcile(
+            &db,
+            &mut state,
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
+            None,
+            &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
+            &metrics,
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            FullSyncReason::Reconcile,
+        )
+        .await;
+        assert_eq!(
+            state
+                .loaded()
+                .digest_for(1, &(1, 0, "waddles.a".to_string())),
+            None,
+            "a timed-out load must not be marked loaded"
+        );
+        assert_eq!(
+            metrics
+                .bundle_loads_total
+                .with_label_values(&["timeout"])
+                .get(),
+            1
+        );
+
+        // Same scope is still active and still not loaded on session 1 --
+        // the next reconcile must retry it, this time against a sink that
+        // answers immediately.
+        let retry_sink = DiesForSessionSink {
+            dies_for: 999, // no session dies; every live session succeeds
+            ..Default::default()
+        };
+        run_full_reconcile(
+            &db,
+            &mut state,
+            Some(&retry_sink as &dyn SessionBundleSink),
+            &[1],
+            None,
+            &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
+            &metrics,
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            FullSyncReason::Reconcile,
+        )
+        .await;
+        assert_eq!(
+            state
+                .loaded()
+                .digest_for(1, &(1, 0, "waddles.a".to_string())),
+            Some(digest.as_str()),
+            "the retried load must succeed once the session actually answers"
         );
     }
 
