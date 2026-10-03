@@ -496,6 +496,25 @@ pub(crate) fn assemble_active_set(
         let declared_capabilities = approval
             .map(|appr| declared_capabilities_from_summary(&appr.summary_json))
             .unwrap_or_default();
+        // Structural guard (regression: multi_tenant path sent bare-hex
+        // digest to Invoke, UnknownBundle despite loaded bundle (alpha
+        // 2026-10-03)): this is the ONE sanctioned production construction
+        // site for `ActiveBundleRow` in this crate -- every other caller
+        // (`crate::multi_tenant::read_active_set_all`, every service's
+        // `changelog_consumer`/`bundle_loader`) only ever clones a row this
+        // function already produced, never builds one from a raw
+        // `app_versions.artifact_digest` value directly. `ActiveBundleRow`
+        // can't be made a private-field/newtype-enforced type without a
+        // wide `bundle_active_set`/`svc_process`/`svc_action` test-fixture
+        // refactor out of this fix's scope -- this `debug_assert` plus
+        // `active_bundle_row_is_only_ever_constructed_from_canonical_digest_in_this_module`
+        // (below) are the cheaper structural substitute: any future
+        // construction site added outside this function's test-gated
+        // fixtures fails that scan test immediately.
+        debug_assert!(
+            digest.starts_with("sha256:") && digest.len() == 71,
+            "ActiveBundleRow::digest must always be canonical_digest()'s output, got {digest:?}"
+        );
         rows.push(ActiveBundleRow {
             app_id: active.app_id.clone(),
             version: version_row.version.clone(),
@@ -1326,5 +1345,70 @@ mod tests {
             .iter()
             .any(|c| c == "kv"));
         Ok(())
+    }
+
+    /// Structural regression guard (regression: multi_tenant path sent
+    /// bare-hex digest to Invoke, UnknownBundle despite loaded bundle
+    /// (alpha 2026-10-03)) -- `ActiveBundleRow` can't be made
+    /// newtype/private-field-enforced without a wide cross-crate test-
+    /// fixture refactor (see the `debug_assert` at this module's own
+    /// construction site), so this is the cheaper substitute: a textual
+    /// scan proving `assemble_active_set` (above, the sole canonicalizing
+    /// constructor) is still the ONLY place any of these five sibling
+    /// files builds an `ActiveBundleRow { .. }` outside their own
+    /// `#[cfg(test)] mod tests` fixtures. A future caller that copies
+    /// `app_versions::Model::artifact_digest` straight into a new
+    /// `ActiveBundleRow` literal -- bypassing `canonical_digest()` exactly
+    /// like the original bug -- fails this test immediately instead of
+    /// waiting for another alpha incident.
+    #[test]
+    fn active_bundle_row_is_only_ever_constructed_from_canonical_digest_outside_tests() {
+        // (file contents, byte offset of the file's own `mod tests` marker)
+        // -- every `ActiveBundleRow {` occurrence in a given file must come
+        // AFTER that file's `mod tests`, i.e. live only inside test
+        // fixtures. `include_str!` paths are resolved relative to this
+        // file (`src/query.rs`).
+        let files: &[(&str, &str)] = &[
+            (
+                "bundle_active_set/src/multi_tenant.rs",
+                include_str!("multi_tenant.rs"),
+            ),
+            (
+                "bundle_active_set/src/full_sync.rs",
+                include_str!("full_sync.rs"),
+            ),
+            ("bundle_active_set/src/diff.rs", include_str!("diff.rs")),
+            (
+                "svc_process/src/changelog_consumer.rs",
+                include_str!("../../svc_process/src/changelog_consumer.rs"),
+            ),
+            (
+                "svc_action/src/changelog_consumer.rs",
+                include_str!("../../svc_action/src/changelog_consumer.rs"),
+            ),
+        ];
+        let mut scanned = 0usize;
+        for (name, contents) in files {
+            let test_mod_at = contents
+                .find("mod tests")
+                .unwrap_or_else(|| panic!("{name}: expected a `mod tests` marker to scan against"));
+            for (idx, _) in contents.match_indices("ActiveBundleRow {") {
+                scanned += 1;
+                assert!(
+                    idx > test_mod_at,
+                    "{name}: found an `ActiveBundleRow {{` construction at byte {idx}, \
+                     before this file's `mod tests` (byte {test_mod_at}) -- a production \
+                     construction site outside `crate::query::assemble_active_set` must \
+                     canonicalize its digest via `canonical_digest()` or it will reproduce \
+                     the alpha 2026-10-03 UnknownBundle regression"
+                );
+            }
+        }
+        assert!(
+            scanned > 0,
+            "expected to find at least one ActiveBundleRow {{ construction across the scanned \
+             files (all currently test-only) -- a zero count means the scan itself is broken, \
+             not that the invariant holds"
+        );
     }
 }
