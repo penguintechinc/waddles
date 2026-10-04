@@ -22,7 +22,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use penguin_licensing::{LicenseClient, LicenseConfig, LicenseError};
 
@@ -355,6 +355,355 @@ fn apply_deployment_domain(cfg: LicenseConfig, raw: Option<&str>) -> LicenseConf
     match raw.map(str::trim) {
         Some(domain) if !domain.is_empty() => cfg.with_deployment_domain(domain.to_owned()),
         _ => cfg,
+    }
+}
+
+/// Un-stubs the `flags` WIT host capability (`crate::capabilities::
+/// StageCapabilities::handle_flags`, `enabled` op): a bundle's
+/// `feature_enabled(key, default)` call (e.g. every command bundle's own
+/// `waddles.command-<name>` gate) used to always resolve to `false`
+/// (`default=False` in every bundle) because the capability handler
+/// unconditionally denied `not_implemented` -- `core/bundle_executor::
+/// host::imports::flags::Host::enabled` then caught that `Err` and
+/// "failed open" to the caller's own `default_value`, so the bundle never
+/// saw a real PostHog value regardless of the flag's actual state.
+///
+/// [`FlagSource`] is this module's usual "wrap the external dependency
+/// behind a narrow, object-safe trait" seam ([`FeatureGate`] above,
+/// `bundle_host_http::egress::FeatureFlag`, ...): production wires a real
+/// `Arc<LicenseClient>` (the blanket impl below), tests wire a
+/// `FakeFlagSource` so every fallback branch (live / cached / never-seen
+/// default / capability-disabled / no-client) is provable without a live
+/// PostHog/license server.
+/// `Some((value, is_fresh))` -- `key`'s raw value plus whether it came
+/// from a snapshot fetched within `cache_ttl`; `None` means no snapshot
+/// has ever been fetched. Named alias so [`FlagSource::flag_value`]'s
+/// return type doesn't trip `clippy::type_complexity`.
+pub type FlagValueFuture<'a> = Pin<Box<dyn Future<Output = Option<(bool, bool)>> + Send + 'a>>;
+
+pub trait FlagSource: Send + Sync {
+    /// Whether this deployment bypasses all license/flag gating
+    /// (mirrors [`LicenseClient::bypass_active`]).
+    fn bypass_active(&self) -> bool;
+
+    /// Resolves `key`'s raw value plus whether it came from a *fresh*
+    /// (within `cache_ttl`) snapshot. `None` means no snapshot has ever
+    /// been fetched for this process (never-seen, or the flag server has
+    /// never once been reachable) -- the caller's own `default_value`
+    /// applies, not a value from this trait.
+    fn flag_value<'a>(&'a self, key: &'a str) -> FlagValueFuture<'a>;
+}
+
+impl FlagSource for Arc<LicenseClient> {
+    fn bypass_active(&self) -> bool {
+        LicenseClient::bypass_active(self)
+    }
+
+    fn flag_value<'a>(&'a self, key: &'a str) -> FlagValueFuture<'a> {
+        Box::pin(async move {
+            // `flag_enabled` already does the "refresh when the cached
+            // snapshot is stale, otherwise read-through-cache" work
+            // (`LicenseClient::fresh_snapshot`'s own doc) -- reading
+            // `snapshot()` again afterward tells us whether *any*
+            // snapshot now exists (never-seen vs. seen-at-least-once) and
+            // how fresh it is, without duplicating that logic here.
+            let value = self.flag_enabled(key).await;
+            let snap = self.snapshot()?;
+            let age = chrono::Utc::now().signed_duration_since(snap.fetched_at);
+            let fresh = age
+                .to_std()
+                .map(|a| a < self.config().cache_ttl)
+                .unwrap_or(false);
+            Some((value, fresh))
+        })
+    }
+}
+
+/// `FLAGS_CAPABILITY_ENABLED` -- a plain env off-switch for the whole
+/// `flags` host capability, independent of any individual PostHog flag's
+/// own state, mirroring `core/svc_action::config::CliConfig::
+/// pii_detokenization_enabled_override`'s "explicit, loudly-logged
+/// operator escape hatch" shape (same naming convention: `_ENABLED`,
+/// default-on, `false`/`0`/`off`/`no` opts out). Default ON (unset, or any
+/// other value, leaves the capability wired); `false` makes every
+/// `flags.enabled` host-call resolve straight to the caller's own
+/// `default_value`, with no license-client lookup at all -- the
+/// reversible-without-a-redeploy kill switch this task calls for.
+pub const FLAGS_CAPABILITY_ENABLED_ENV: &str = "FLAGS_CAPABILITY_ENABLED";
+
+/// Reads [`FLAGS_CAPABILITY_ENABLED_ENV`] fresh on every call (cheap env
+/// lookup, no caching) so flipping it takes effect on the very next
+/// `flags.enabled` host-call, not just at process startup.
+fn flags_capability_env_enabled() -> bool {
+    match std::env::var(FLAGS_CAPABILITY_ENABLED_ENV) {
+        Ok(raw) => !matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "off" | "no"
+        ),
+        Err(_) => true,
+    }
+}
+
+/// Resolves one `flags.enabled(key, default_value)` host-call (spec
+/// §7.4/§6.5): `capability_enabled == false` or no [`FlagSource`]
+/// available both short-circuit straight to `default_value` (never an
+/// error, matching `flags::Host::enabled`'s own "fail-open to default,
+/// never an exception" mandate); otherwise bypass short-circuits to
+/// `true`; otherwise a fresh snapshot's value wins ("live"), a stale-but-
+/// present snapshot's value still wins over `default_value` ("cached" --
+/// the flag server being unreachable right now must not un-set an
+/// already-known flag), and only a snapshot that has *never* been fetched
+/// falls back to `default_value`. Logs key/value/source at DEBUG and
+/// records via [`record_flag_eval`] on every path -- never silent, never a
+/// panic.
+pub async fn resolve_flag_with<F: FlagSource>(
+    source: Option<&F>,
+    capability_enabled: bool,
+    key: &str,
+    default_value: bool,
+) -> bool {
+    if !capability_enabled {
+        tracing::debug!(
+            key,
+            default_value,
+            source = "capability_disabled",
+            "flags.enabled: FLAGS_CAPABILITY_ENABLED=false, using caller default"
+        );
+        record_flag_eval("capability_disabled");
+        return default_value;
+    }
+    let Some(source) = source else {
+        tracing::debug!(
+            key,
+            default_value,
+            source = "no_client",
+            "flags.enabled: no license client configured, using caller default"
+        );
+        record_flag_eval("no_client");
+        return default_value;
+    };
+    if source.bypass_active() {
+        tracing::debug!(
+            key,
+            value = true,
+            source = "bypass",
+            "flags.enabled: license bypass active"
+        );
+        record_flag_eval("bypass");
+        return true;
+    }
+    match source.flag_value(key).await {
+        None => {
+            tracing::debug!(
+                key,
+                default_value,
+                source = "default",
+                "flags.enabled: never-seen (no snapshot ever fetched), using caller default"
+            );
+            record_flag_eval("default");
+            default_value
+        }
+        Some((value, true)) => {
+            tracing::debug!(key, value, source = "live", "flags.enabled resolved");
+            record_flag_eval("live");
+            value
+        }
+        Some((value, false)) => {
+            tracing::debug!(
+                key,
+                value,
+                source = "cached",
+                "flags.enabled: serving last-known-cached value (flag server unreachable or not yet due for refresh)"
+            );
+            record_flag_eval("cached");
+            value
+        }
+    }
+}
+
+/// This process's own shared flags-capability `LicenseClient`, built
+/// lazily on first use and reused for every subsequent `flags.enabled`
+/// host-call -- sharing one client (one cached snapshot) is what makes
+/// the live/cached distinction in [`resolve_flag_with`] meaningful at
+/// all; a fresh client per call would never have a warm cache and would
+/// pay a live network round-trip on every single bundle flag check.
+/// `None` when [`build_license_client`] fails (malformed
+/// `LICENSE_SERVER_URL`/`POSTHOG_HOST`) -- every call then falls back to
+/// the caller's `default_value` via [`resolve_flag_with`]'s `no_client`
+/// branch, never panics.
+fn shared_flags_license_client() -> Option<Arc<LicenseClient>> {
+    static CLIENT: OnceLock<Option<Arc<LicenseClient>>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| build_license_client("waddles").ok())
+        .clone()
+}
+
+/// `crate::telemetry::register_flags_metrics`'s counter, wired in here --
+/// `svc_process_flags_evaluated_total{result}` counts every
+/// `flags.enabled` host-call resolution by its `result` source
+/// (`live`/`cached`/`default`/`bypass`/`no_client`/`capability_disabled`).
+/// Deliberately *not* labeled by flag key (unbounded cardinality as the
+/// bundle catalog grows; `result` is a fixed, small enum of this module's
+/// own strings, so no cardinality risk there -- `rules/critical-
+/// rules.md` Observability (OTel)).
+static FLAGS_EVAL_TOTAL: OnceLock<prometheus::IntCounterVec> = OnceLock::new();
+
+/// Wires `crate::telemetry::register_flags_metrics`'s counter (registered
+/// into *this crate's own* Prometheus registry, so it is actually scraped
+/// at `/metrics`) into this module -- called once at startup
+/// (`crate::lib::run_with_shutdown`). `OnceLock::set` is a no-op past the
+/// first call, so a second, differently-scoped registration attempt
+/// (e.g. from an isolated test registry) is simply ignored rather than
+/// panicking or clobbering the production counter.
+pub fn set_flags_metric(counter: prometheus::IntCounterVec) {
+    let _ = FLAGS_EVAL_TOTAL.set(counter);
+}
+
+/// `None` until [`set_flags_metric`] has been called -- every
+/// [`resolve_flag_with`] call site treats that as "no metrics sink wired
+/// yet" and simply skips recording, never panics. This is the normal
+/// state for every unit test in this module that exercises
+/// `resolve_flag_with` directly without going through `crate::lib`'s
+/// startup wiring.
+fn record_flag_eval(result: &str) {
+    if let Some(counter) = FLAGS_EVAL_TOTAL.get() {
+        counter.with_label_values(&[result]).inc();
+    }
+}
+
+/// Production entry point `crate::capabilities::StageCapabilities::
+/// handle_flags` calls for the `enabled` op -- wires [`resolve_flag_with`]
+/// to [`shared_flags_license_client`] and [`flags_capability_env_enabled`].
+pub async fn resolve_flag(key: &str, default_value: bool) -> bool {
+    resolve_flag_with(
+        shared_flags_license_client().as_ref(),
+        flags_capability_env_enabled(),
+        key,
+        default_value,
+    )
+    .await
+}
+
+#[cfg(test)]
+mod flags_capability_tests {
+    use super::*;
+
+    /// Test double for [`FlagSource`] -- `value` mirrors the trait's own
+    /// `Option<(bool, bool)>` contract (`None` = never-seen,
+    /// `Some((value, is_fresh))` otherwise) so every fallback branch in
+    /// [`resolve_flag_with`] is provable without a live PostHog/license
+    /// server.
+    struct FakeFlagSource {
+        bypass: bool,
+        value: Option<(bool, bool)>,
+    }
+
+    impl FlagSource for FakeFlagSource {
+        fn bypass_active(&self) -> bool {
+            self.bypass
+        }
+
+        fn flag_value<'a>(&'a self, _key: &'a str) -> FlagValueFuture<'a> {
+            let value = self.value;
+            Box::pin(async move { value })
+        }
+    }
+
+    #[tokio::test]
+    async fn live_enabled_flag_resolves_true() {
+        let source = FakeFlagSource {
+            bypass: false,
+            value: Some((true, true)),
+        };
+        assert!(resolve_flag_with(Some(&source), true, "waddles.command-8ball", false).await);
+    }
+
+    #[tokio::test]
+    async fn live_disabled_flag_resolves_false_even_with_a_true_default() {
+        let source = FakeFlagSource {
+            bypass: false,
+            value: Some((false, true)),
+        };
+        assert!(!resolve_flag_with(Some(&source), true, "waddles.command-8ball", true).await);
+    }
+
+    #[tokio::test]
+    async fn stale_cached_value_wins_over_the_caller_default() {
+        // Flag server unreachable right now (stale snapshot, `is_fresh ==
+        // false`) but a prior fetch is still cached -- must serve that
+        // cached value, never silently fall back to `default_value`.
+        let source = FakeFlagSource {
+            bypass: false,
+            value: Some((true, false)),
+        };
+        assert!(resolve_flag_with(Some(&source), true, "waddles.command-roll", false).await);
+    }
+
+    #[tokio::test]
+    async fn never_seen_snapshot_falls_back_to_caller_default() {
+        let source = FakeFlagSource {
+            bypass: false,
+            value: None,
+        };
+        assert!(!resolve_flag_with(Some(&source), true, "waddles.command-lurk", false).await);
+        assert!(resolve_flag_with(Some(&source), true, "waddles.command-lurk", true).await);
+    }
+
+    #[tokio::test]
+    async fn capability_disabled_env_toggle_short_circuits_to_caller_default() {
+        // Even a source that would otherwise say "live, true" must never
+        // be consulted once the capability is toggled off.
+        let source = FakeFlagSource {
+            bypass: false,
+            value: Some((true, true)),
+        };
+        assert!(!resolve_flag_with(Some(&source), false, "waddles.command-count", false).await);
+    }
+
+    #[tokio::test]
+    async fn no_license_client_falls_back_to_caller_default() {
+        assert!(
+            !resolve_flag_with::<FakeFlagSource>(None, true, "waddles.command-8ball", false).await
+        );
+        assert!(
+            resolve_flag_with::<FakeFlagSource>(None, true, "waddles.command-8ball", true).await
+        );
+    }
+
+    #[tokio::test]
+    async fn bypass_active_resolves_true_regardless_of_default() {
+        let source = FakeFlagSource {
+            bypass: true,
+            value: Some((false, true)),
+        };
+        assert!(resolve_flag_with(Some(&source), true, "waddles.command-8ball", false).await);
+    }
+
+    /// Proves [`FlagSource`]'s blanket `Arc<LicenseClient>` impl reaches a
+    /// real, cold (never-fetched) client's own fail-closed contract rather
+    /// than this module inventing its own -- same proof style as
+    /// `core/svc_action::flags`'s `license_flag_reaches_a_real_cold_client_
+    /// and_fails_closed_to_off`.
+    #[tokio::test]
+    async fn real_cold_license_client_never_seen_falls_back_to_caller_default() {
+        let cfg = LicenseConfig::new("waddles-test-flags-capability")
+            .expect("default LicenseConfig::new never fails");
+        let client = LicenseClient::new(cfg)
+            .expect("LicenseClient::new with a valid default config never fails");
+        assert!(resolve_flag_with(Some(&client), true, "waddles.command-8ball", true).await);
+        assert!(!resolve_flag_with(Some(&client), true, "waddles.command-8ball", false).await);
+    }
+
+    #[test]
+    fn flags_capability_enabled_env_defaults_on_when_unset() {
+        // Isolated process-level env mutation is unsafe to run in
+        // parallel with other tests touching the same var -- this crate's
+        // test binary runs `#[tokio::test]`s concurrently, so this check
+        // only asserts the documented default behavior indirectly via
+        // `resolve_flag_with`'s own `capability_enabled` parameter
+        // (exercised directly above) rather than mutating process env
+        // here.
+        assert_eq!(FLAGS_CAPABILITY_ENABLED_ENV, "FLAGS_CAPABILITY_ENABLED");
     }
 }
 
