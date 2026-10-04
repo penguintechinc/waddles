@@ -1146,6 +1146,11 @@ pipeline:
       # full_reconcile_interval). Periodic full active-set reconcile -- bounds the
       # blast radius of any change-log defect to one interval.
       bundleConfigFullReconcileMinutes: 15
+      # feature/alpha-command-flag-envs -- arbitrary FLAG_<KEY>=true passthrough env
+      # vars, consumed by waddle_sdk's feature_enabled() as a baseline PostHog
+      # overrides when connected. Empty by default (unchanged behavior); see
+      # templates/svc-process-rust.yaml's identical comment on this key.
+      extraEnv: {}
       resources:
         requests:
           cpu: "100m"

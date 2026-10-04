@@ -290,6 +290,18 @@ pipeline:
       # the 300s chart default so hot-swap changes are noticed without a
       # multi-minute wait.
       bundleConfigPollSeconds: 30
+      # feature/alpha-command-flag-envs -- Docker ENV baseline for the 4 command
+      # bundle flags (process-stage `transform()` only; action-stage `dispatch()`
+      # has no flag check), now that posthog.enabled is false below. Convention:
+      # `FLAG_<KEY>` (flag key uppercased, `.`/`-` -> `_`) -- PostHog overrides
+      # these when connected (see templates/svc-process-rust.yaml's comment).
+      # License-gated flags are NOT env-overridable -- those always resolve
+      # against license.penguintech.io.
+      extraEnv:
+        FLAG_WADDLES_COMMAND_8BALL: "true"
+        FLAG_WADDLES_COMMAND_ROLL: "true"
+        FLAG_WADDLES_COMMAND_LURK: "true"
+        FLAG_WADDLES_COMMAND_COUNT: "true"
       resources:
         requests: { cpu: "100m", memory: "128Mi" }
         limits: { cpu: "500m", memory: "512Mi" }
@@ -605,6 +617,14 @@ modules:
         requests: { cpu: "50m", memory: "96Mi" }
         limits: { cpu: "300m", memory: "384Mi" }
 
+# feature/alpha-command-flag-envs -- flipped back OFF: this in-cluster stack was
+# crashlooping on alpha, and the 4 command flags below are now covered by the
+# FLAG_WADDLES_COMMAND_* Docker ENV baseline on svcProcess.extraEnv above
+# (waddle_sdk feature_enabled() baseline, PostHog overrides when connected), so
+# PostHog is no longer required to unblock them. Revert to `enabled: true` (no
+# other change needed, per the comment below) once the crashloop is root-caused
+# or a non-command flag needs in-cluster control.
+#
 # feature/alpha-localized-posthog -- flipped ON for alpha so feature flags
 # (incl. the 4 command flags below) are controllable in-cluster, without a
 # human needing PostHog organization access on license.penguintech.io.
@@ -632,7 +652,7 @@ modules:
 # (values.yaml) then auto-provisions the admin/org/project/API key and seeds
 # the command flags -- no manual PostHog UI step required either.
 posthog:
-  enabled: true
+  enabled: false
   bootstrap:
     enabled: true
   web:
