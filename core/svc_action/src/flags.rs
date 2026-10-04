@@ -377,10 +377,57 @@ fn flags_capability_env_enabled() -> bool {
     }
 }
 
+/// Derives this flag key's Docker ENV baseline variable name -- see
+/// `core/svc_process::license::env_flag_var_name`'s identical doc for the
+/// convention (`FLAG_` + key uppercased, `.`/`-` -> `_`).
+fn env_flag_var_name(key: &str) -> String {
+    let mut name = String::with_capacity(5 + key.len());
+    name.push_str("FLAG_");
+    for ch in key.chars() {
+        match ch {
+            '.' | '-' => name.push('_'),
+            c => name.extend(c.to_uppercase()),
+        }
+    }
+    name
+}
+
+/// Reads `key`'s Docker ENV baseline value, if any -- see
+/// `core/svc_process::license::env_flag_value`'s identical doc for the full
+/// rationale (makes PostHog optional) and the truthy/falsy parsing rules.
+/// `None` for unset or an unrecognized value.
+///
+/// **LICENSE-flag immunity:** wired *only* into [`resolve_flag_with`]'s
+/// plain FEATURE-flag path -- the [`FeatureFlag`] implementations above
+/// ([`LicenseFlag`], [`DisableDbBundleConfigFlag`],
+/// [`DisableMultiTenantWatermarkFlag`], [`DisablePiiDetokenizationFlag`])
+/// call `LicenseClient::flag_enabled` directly and never pass through this
+/// function or [`resolve_flag_with`] at all.
+fn env_flag_value(key: &str) -> Option<bool> {
+    let var = env_flag_var_name(key);
+    match std::env::var(&var) {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "on" | "yes" => Some(true),
+            "false" | "0" | "off" | "no" => Some(false),
+            other => {
+                tracing::debug!(
+                    key,
+                    var,
+                    value = other,
+                    "flags.enabled: unrecognized FLAG_* env value, ignoring"
+                );
+                None
+            }
+        },
+        Err(_) => None,
+    }
+}
+
 /// Resolves one `flags.enabled(key, default_value)` host-call -- see
 /// `core/svc_process::license::resolve_flag_with`'s identical doc for the
-/// full fallback-chain rationale (live -> cached -> `default_value`,
-/// never an error).
+/// full fallback-chain rationale: PostHog wins whenever it defines the flag
+/// (live, then cached), otherwise the [`env_flag_value`] Docker ENV
+/// baseline applies, otherwise `default_value` -- never an error.
 pub async fn resolve_flag_with<F: FlagSource>(
     source: Option<&F>,
     capability_enabled: bool,
@@ -398,13 +445,23 @@ pub async fn resolve_flag_with<F: FlagSource>(
         return default_value;
     }
     let Some(source) = source else {
+        if let Some(value) = env_flag_value(key) {
+            tracing::debug!(
+                key,
+                value,
+                source = "env",
+                "flags.enabled: no license client configured, using Docker ENV baseline"
+            );
+            record_flag_eval("env");
+            return value;
+        }
         tracing::debug!(
             key,
             default_value,
-            source = "no_client",
-            "flags.enabled: no license client configured, using caller default"
+            source = "default",
+            "flags.enabled: no license client configured and no ENV baseline set, using caller default"
         );
-        record_flag_eval("no_client");
+        record_flag_eval("default");
         return default_value;
     };
     if source.bypass_active() {
@@ -419,28 +476,43 @@ pub async fn resolve_flag_with<F: FlagSource>(
     }
     match source.flag_value(key).await {
         None => {
+            if let Some(value) = env_flag_value(key) {
+                tracing::debug!(
+                    key,
+                    value,
+                    source = "env",
+                    "flags.enabled: never-seen (no snapshot ever fetched), using Docker ENV baseline"
+                );
+                record_flag_eval("env");
+                return value;
+            }
             tracing::debug!(
                 key,
                 default_value,
                 source = "default",
-                "flags.enabled: never-seen (no snapshot ever fetched), using caller default"
+                "flags.enabled: never-seen (no snapshot ever fetched) and no ENV baseline set, using caller default"
             );
             record_flag_eval("default");
             default_value
         }
         Some((value, true)) => {
-            tracing::debug!(key, value, source = "live", "flags.enabled resolved");
-            record_flag_eval("live");
+            tracing::debug!(
+                key,
+                value,
+                source = "posthog-live",
+                "flags.enabled resolved"
+            );
+            record_flag_eval("posthog-live");
             value
         }
         Some((value, false)) => {
             tracing::debug!(
                 key,
                 value,
-                source = "cached",
+                source = "posthog-cached",
                 "flags.enabled: serving last-known-cached value (flag server unreachable or not yet due for refresh)"
             );
-            record_flag_eval("cached");
+            record_flag_eval("posthog-cached");
             value
         }
     }
@@ -493,6 +565,212 @@ pub async fn resolve_flag(key: &str, default_value: bool) -> bool {
 #[cfg(test)]
 mod flags_capability_tests {
     use super::*;
+    use tokio::sync::Mutex;
+
+    /// `std::env` is process-global; serialize this module's `FLAG_*`
+    /// env-mutating tests against each other (same rationale as
+    /// `core/svc_process::license`'s identical `ENV_LOCK`). No other test
+    /// in this crate mutates a `FLAG_*` variable, so a module-local lock is
+    /// sufficient here. `tokio::sync::Mutex` (not `std::sync::Mutex`)
+    /// deliberately -- several `#[tokio::test]`s below hold the guard
+    /// across an `.await`, which `clippy::await_holding_lock` forbids for a
+    /// `std::sync::MutexGuard`. The lone non-`async` `#[test]` uses
+    /// [`Mutex::blocking_lock`] instead of `.lock().await`.
+    static ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+    /// Sets `var` to `raw` for the duration of `body`, restoring the prior
+    /// unset state afterward -- for synchronous checks only (see
+    /// [`await_with_env_var`] for `resolve_flag_with`'s async case).
+    fn with_env_var<T>(var: &str, raw: &str, body: impl FnOnce() -> T) -> T {
+        // SAFETY: caller holds `ENV_LOCK`.
+        unsafe { std::env::set_var(var, raw) };
+        let result = body();
+        unsafe { std::env::remove_var(var) };
+        result
+    }
+
+    /// Async sibling of [`with_env_var`]: `fut` is only polled (so any
+    /// internal env read actually happens) while awaited below, between
+    /// `set_var` and `remove_var` -- see
+    /// `core/svc_process::license::flags_capability_tests::
+    /// await_with_env_var`'s identical doc for why a plain `FnOnce() ->
+    /// impl Future` would be wrong here (an unpolled `async fn` future
+    /// never runs its body).
+    async fn await_with_env_var<T>(
+        var: &str,
+        raw: &str,
+        fut: impl std::future::Future<Output = T>,
+    ) -> T {
+        // SAFETY: caller holds `ENV_LOCK`.
+        unsafe { std::env::set_var(var, raw) };
+        let result = fut.await;
+        unsafe { std::env::remove_var(var) };
+        result
+    }
+
+    #[test]
+    fn env_flag_var_name_uppercases_and_replaces_dots_and_dashes() {
+        assert_eq!(
+            env_flag_var_name("waddles.command-8ball"),
+            "FLAG_WADDLES_COMMAND_8BALL"
+        );
+        assert_eq!(
+            env_flag_var_name("waddles.command-roll"),
+            "FLAG_WADDLES_COMMAND_ROLL"
+        );
+    }
+
+    #[test]
+    fn env_flag_value_recognizes_truthy_and_falsy_strings_case_insensitively() {
+        let _guard = ENV_LOCK.blocking_lock();
+        let key = "waddles.test-env-flag-value-parsing";
+        let var = env_flag_var_name(key);
+        for truthy in ["true", "1", "on", "yes", "TRUE", "On"] {
+            assert_eq!(
+                with_env_var(&var, truthy, || env_flag_value(key)),
+                Some(true),
+                "expected {truthy:?} to parse as truthy"
+            );
+        }
+        for falsy in ["false", "0", "off", "no", "FALSE", "Off"] {
+            assert_eq!(
+                with_env_var(&var, falsy, || env_flag_value(key)),
+                Some(false),
+                "expected {falsy:?} to parse as falsy"
+            );
+        }
+        assert_eq!(
+            with_env_var(&var, "banana", || env_flag_value(key)),
+            None,
+            "an unrecognized value must fall through, not panic or guess"
+        );
+    }
+
+    /// Precedence proof: a live PostHog value must win even when the ENV
+    /// baseline disagrees with it.
+    #[tokio::test]
+    async fn posthog_live_value_wins_over_env_baseline_when_they_disagree() {
+        let _guard = ENV_LOCK.lock().await;
+        let key = "waddles.test-posthog-live-beats-env";
+        let var = env_flag_var_name(key);
+        let source = FakeFlagSource {
+            bypass: false,
+            value: Some((false, true)), // PostHog: live, flag OFF
+        };
+        let result = await_with_env_var(
+            &var,
+            "true",
+            resolve_flag_with(Some(&source), true, key, true),
+        )
+        .await;
+        assert!(
+            !result,
+            "a live PostHog value must win over a disagreeing ENV baseline"
+        );
+    }
+
+    /// The core "PostHog is optional" case: no license/PostHog client
+    /// configured at all (e.g. alpha running without PostHog), ENV
+    /// baseline set `true` -- must resolve `true`, not the caller default.
+    #[tokio::test]
+    async fn posthog_absent_env_true_resolves_true() {
+        let _guard = ENV_LOCK.lock().await;
+        let key = "waddles.test-env-baseline-true-no-client";
+        let var = env_flag_var_name(key);
+        let result = await_with_env_var(
+            &var,
+            "true",
+            resolve_flag_with::<FakeFlagSource>(None, true, key, false),
+        )
+        .await;
+        assert!(result, "ENV baseline true must win when PostHog is absent");
+    }
+
+    /// Mirror with a `false` ENV baseline overriding a `true` caller
+    /// default.
+    #[tokio::test]
+    async fn posthog_absent_env_false_resolves_false() {
+        let _guard = ENV_LOCK.lock().await;
+        let key = "waddles.test-env-baseline-false-no-client";
+        let var = env_flag_var_name(key);
+        let result = await_with_env_var(
+            &var,
+            "false",
+            resolve_flag_with::<FakeFlagSource>(None, true, key, true),
+        )
+        .await;
+        assert!(
+            !result,
+            "ENV baseline false must win when PostHog is absent"
+        );
+    }
+
+    /// No PostHog client AND no ENV baseline set -- falls all the way
+    /// through to the caller's compiled default.
+    #[tokio::test]
+    async fn posthog_absent_env_unset_falls_back_to_caller_default() {
+        let _guard = ENV_LOCK.lock().await;
+        let key = "waddles.test-env-baseline-unset-no-client";
+        let var = env_flag_var_name(key);
+        unsafe { std::env::remove_var(&var) };
+        assert!(
+            !resolve_flag_with::<FakeFlagSource>(None, true, key, false).await,
+            "no client, no ENV baseline -> caller default (false)"
+        );
+        assert!(
+            resolve_flag_with::<FakeFlagSource>(None, true, key, true).await,
+            "no client, no ENV baseline -> caller default (true)"
+        );
+    }
+
+    /// Never-seen-snapshot side of the same "PostHog absent" case: a real
+    /// client exists but has never fetched anything -- the ENV baseline
+    /// still applies here too.
+    #[tokio::test]
+    async fn never_seen_snapshot_env_baseline_wins_over_caller_default() {
+        let _guard = ENV_LOCK.lock().await;
+        let key = "waddles.test-env-baseline-never-seen";
+        let var = env_flag_var_name(key);
+        let source = FakeFlagSource {
+            bypass: false,
+            value: None,
+        };
+        let result = await_with_env_var(
+            &var,
+            "true",
+            resolve_flag_with(Some(&source), true, key, false),
+        )
+        .await;
+        assert!(
+            result,
+            "ENV baseline must win over caller default for a never-seen snapshot"
+        );
+    }
+
+    /// License-entitlement immunity: setting this flag's would-be ENV
+    /// baseline variable must have ZERO effect on [`LicenseFlag`] (or any
+    /// other [`FeatureFlag`] impl in this module) -- those call
+    /// `LicenseClient::flag_enabled` directly and never pass through
+    /// [`resolve_flag_with`]/[`env_flag_value`] at all. A cold
+    /// (never-fetched) client's `RUST_DATA_PLANE_FLAG` must still fail
+    /// closed to `false` even with `FLAG_WADDLES_CORE_RUST_DATA_PLANE=true`
+    /// set in the environment.
+    #[tokio::test]
+    async fn license_flag_is_not_overridable_by_its_env_flag_baseline() {
+        let _guard = ENV_LOCK.lock().await;
+        let var = env_flag_var_name(RUST_DATA_PLANE_FLAG);
+        assert_eq!(var, "FLAG_WADDLES_CORE_RUST_DATA_PLANE");
+        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-license-env-immunity")
+            .expect("default LicenseConfig::new never fails");
+        let client = penguin_licensing::LicenseClient::new(cfg)
+            .expect("LicenseClient::new with a valid default config never fails");
+        let flag = LicenseFlag::new(client, RUST_DATA_PLANE_FLAG);
+        let result = await_with_env_var(&var, "true", flag.enabled()).await;
+        assert!(
+            !result,
+            "LICENSE-entitlement gating must never be overridable by a FLAG_* env var"
+        );
+    }
 
     struct FakeFlagSource {
         bypass: bool,
