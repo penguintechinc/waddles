@@ -605,15 +605,36 @@ modules:
         requests: { cpu: "50m", memory: "96Mi" }
         limits: { cpu: "300m", memory: "384Mi" }
 
-# PostHog stays OFF by default even in alpha (trimmed stack still budgets
-# ~4GB RAM — heavier than typical alpha footprint). To smoke-test the
-# in-cluster stack locally, layer on top of this file:
-#   --set posthog.enabled=true \
-#   --set posthog.secrets.create=true \
-#   --set posthog.secrets.SECRET_KEY=dev-only-32-plus-byte-secret-000000 \
-#   --set posthog.secrets.POSTGRES_PASSWORD=posthog
+# feature/alpha-localized-posthog -- flipped ON for alpha so feature flags
+# (incl. the 4 command flags below) are controllable in-cluster, without a
+# human needing PostHog organization access on license.penguintech.io.
+#
+# REAL FOOTPRINT at the trimmed resource tier below (6 new pods: web,
+# worker, postgres, redis/valkey, clickhouse, kafka/redpanda) -- measured
+# from the requests/limits actually rendered, not estimated:
+#   requests: ~575m CPU / ~2.1Gi RAM   limits: ~2.6 CPU / ~4.2Gi RAM
+#   persistent storage: postgres 2Gi + redis 512Mi + clickhouse 3Gi + kafka 2Gi = 7.5Gi
+# This is heavier than a typical alpha service and was deliberately left OFF
+# before this change (see docs/posthog-feature-flags.md in license-server:
+# ClickHouse + Kafka are REQUIRED for the Django web app to boot at all --
+# flag management can't currently drop them). If the laptop alpha node is
+# already under disk/memory pressure, do NOT enable this blindly: either
+# free capacity first (disable an idle module/collector in this file) or
+# keep posthog.enabled=false and continue pointing at the hosted
+# license.penguintech.io PostHog (comment this whole block back to
+# `enabled: false` to revert instantly -- no other change needed).
+#
+# existingSecret/secrets.create both left unset: templates/infrastructure/
+# posthog/secret.yaml auto-generates posthog-secrets (SECRET_KEY/
+# POSTGRES_PASSWORD/CLICKHOUSE_PASSWORD) for alpha/local tiers only, via the
+# same lookup-then-generate-or-keep pattern as auto-provisioned-secrets.yaml
+# -- no literal committed here, no manual --set. posthog.bootstrap
+# (values.yaml) then auto-provisions the admin/org/project/API key and seeds
+# the command flags -- no manual PostHog UI step required either.
 posthog:
-  enabled: false
+  enabled: true
+  bootstrap:
+    enabled: true
   web:
     replicas: 1
     resources:

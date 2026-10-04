@@ -68,6 +68,18 @@ spec:
             name: {{ include "waddlebot.fullname" . }}-config
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
+        # feature/alpha-localized-posthog -- POSTHOG_API_KEY/POSTHOG_KEY auto-
+        # provisioned by templates/infrastructure/posthog/bootstrap.yaml once
+        # posthog.enabled=true (alpha). Listed BEFORE platformCredentials below
+        # so an operator-managed POSTHOG_API_KEY there still wins on a name
+        # collision (envFrom: later source wins) -- this is purely a
+        # convenience default for the in-cluster alpha PostHog, never an
+        # override of an operator's explicit choice. `optional: true`: safe to
+        # reference before the bootstrap Job has run, or when posthog.enabled
+        # is false (Secret never created).
+        - secretRef:
+            name: {{ .Values.posthog.bootstrap.secretName | default "posthog-bootstrap-secret" }}
+            optional: true
         # fix/helm-platform-credentials -- OAuth app client IDs/secrets, AWS/GCP,
         # WaddleAI, and PostHog API key (hub_api/services/platform_integrations_crypto.py
         # and Connections OAuth-flow initiation) come from the operator-managed

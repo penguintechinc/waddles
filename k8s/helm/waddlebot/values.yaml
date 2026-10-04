@@ -593,6 +593,44 @@ posthog:
     POSTGRES_PASSWORD: ""
     CLICKHOUSE_PASSWORD: ""
 
+  # feature/alpha-localized-posthog -- auto-provisioning for the in-cluster
+  # PostHog above. A post-install/post-upgrade hook Job (templates/
+  # infrastructure/posthog/bootstrap.yaml) signs up the first admin user,
+  # resolves the org/project, mints a personal API key, and writes it to a
+  # NEW, chart-owned Secret (bootstrap.secretName) -- NEVER into
+  # `waddlebot-platform-credentials` (see platformCredentials above /
+  # docs/PLATFORM_CREDENTIALS.md; that Secret stays exclusively
+  # operator-managed). Idempotent: skips entirely once POSTHOG_API_KEY is
+  # already present in that Secret, so a repeat `helm upgrade` never mints a
+  # second orphaned key. Admin password is generated inside the Job itself
+  # (never a values.yaml literal) and stored alongside the key.
+  #
+  # Disabled by default (posthog.enabled=false means this never renders
+  # regardless). Enable alongside posthog.enabled=true for alpha only --
+  # beta/gamma/production keep posthog.enabled=false and never run this Job.
+  bootstrap:
+    enabled: false
+    secretName: "posthog-bootstrap-secret"
+    adminEmail: "alpha-admin@waddlebot.localhost.local"
+    orgName: "Waddlebot Alpha"
+    # Deployment name SUFFIX (prefixed with the release fullname by the
+    # template) to roll after the key is written, so the primary flag/
+    # license consumer picks it up without a manual restart. Leave blank to
+    # skip the restart (e.g. svc-process-rust/svc-action-rust pick the key
+    # up on their own next natural redeploy).
+    restartDeployment: "hub-api-v3"
+    # Seeded ENABLED, 100% rollout, in the in-cluster PostHog as soon as it's
+    # provisioned -- explicit alpha-only enablement (critical-rules.md's
+    # "default OFF" rule governs the product-code default, not this one-time
+    # alpha seed) so these are immediately testable. NOTE: as of this change
+    # no command dispatcher actually gates on `waddles.command-*` keys yet --
+    # see PR description "Command-flag eval path" for the trace and the gap.
+    seedFlags:
+      - "waddles.command-eightball"
+      - "waddles.command-roll"
+      - "waddles.command-lurk"
+      - "waddles.command-count"
+
   # PostHog self-host has NO dated/semver releases — images are commit-tagged
   # off master. Pinned to the exact commit tag + digest named in
   # license-server's docs/posthog-feature-flags.md. Bump deliberately.

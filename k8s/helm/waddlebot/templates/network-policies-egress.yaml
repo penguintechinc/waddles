@@ -90,6 +90,25 @@ spec:
         - ports:
             - port: {{ .Values.egressPolicy.inCluster.hubApiGrpcPort | quote }}
               protocol: TCP
+    # feature/alpha-localized-posthog -- in-cluster PostHog (feature-flag
+    # execution plane), reached directly by svc-process-rust/svc-action-rust's
+    # penguin_licensing client (POSTHOG_HOST), not proxied through
+    # egress-proxy (that path is for bundle-initiated HTTP egress only). Only
+    # rendered when posthog.enabled=true; when false, POSTHOG_HOST resolves
+    # to the external hosted license.penguintech.io and these dataplane pods
+    # have no route to it under this CNP either way (pre-existing, unrelated
+    # to this change -- those calls already degrade to cached/default per
+    # penguin_licensing's own fail-open-to-cache semantics).
+    {{- if .Values.posthog.enabled }}
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: posthog-web
+      toPorts:
+        - ports:
+            - port: {{ .Values.posthog.web.port | quote }}
+              protocol: TCP
+    {{- end }}
     # OTel collector (logs/metrics/traces — mandatory emission, never the
     # public internet). Not yet deployed by this chart (otel.collector.enabled
     # stub); pre-allowed so no further CNP change is needed once it lands.

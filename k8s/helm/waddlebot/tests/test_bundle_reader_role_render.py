@@ -103,12 +103,18 @@ class TestSecretCarriesNonEmptyReaderPassword:
     def test_db_reader_password_non_empty_in_alpha(
         self, rendered_docs: list[dict[str, Any]]
     ) -> None:
+        # regression: feature/alpha-localized-posthog added a second
+        # "*-secrets"-suffixed Secret (posthog-secrets) to the alpha render,
+        # sorting before waddlebot-secrets and silently picking the wrong
+        # Secret via a bare endswith("-secrets") match (it has no
+        # DB_READER_PASSWORD key at all) -- match the exact chart Secret
+        # name, never a suffix that a future infra Secret could collide with.
         secrets = [
             doc
             for doc in rendered_docs
-            if doc.get("kind") == "Secret" and doc.get("metadata", {}).get("name", "").endswith("-secrets")
+            if doc.get("kind") == "Secret" and doc.get("metadata", {}).get("name", "") == "waddlebot-secrets"
         ]
-        assert secrets, "no *-secrets Secret found in rendered manifest"
+        assert secrets, "no waddlebot-secrets Secret found in rendered manifest"
         secret = secrets[0]
         # stringData is rendered inline (never base64) -- but guard both
         # shapes in case a future chart revision switches this Secret to
