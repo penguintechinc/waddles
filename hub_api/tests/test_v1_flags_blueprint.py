@@ -170,3 +170,27 @@ class TestResolution:
         response = await client.get("/api/v1/flags", headers=_headers())
         body = await response.get_json()
         assert list(body.keys()) == ["flags"]
+
+    async def test_webui_wave1_keys_are_resolvable(
+        self, client: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Confirm the Wave-1 hub-webui flag keys are resolvable.
+
+        Wave-1 pages gate on these keys (hubwebui-flag-wiring) -- confirm
+        each is in the allowlist and resolves through the same two-gate
+        path as every other `CLIENT_FLAG_KEYS` entry.
+        """
+        wave1_keys = {
+            "waddles.webui.community_bundles",
+            "waddles.webui.tenant_bundle_catalog",
+            "waddles.webui.super_communities",
+            "waddles.webui.super_tenants",
+        }
+        assert wave1_keys.issubset(set(CLIENT_FLAG_KEYS))
+
+        answers = {TENANT_SLUG: True}
+        _install_client(monkeypatch, _FakeFlagGate(answers=answers), _FakeLicenseGate())
+        response = await client.get("/api/v1/flags", headers=_headers())
+        assert response.status_code == 200
+        body = await response.get_json()
+        assert all(body["flags"][key] is True for key in wave1_keys)

@@ -1,52 +1,65 @@
-import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { apiClient } from './apiClient';
 
 /**
- * Minimal PostHog-style feature flag hook (S0 foundation).
+ * Resolved-flags hook (S0 foundation, wired in a follow-up) -- backed by the
+ * hub-api `GET /api/v1/flags` proxy (`hub_api/blueprints/v1/flags.py`), which
+ * resolves a curated `CLIENT_FLAG_KEYS` allowlist through the same
+ * `EntitlementClient`/PostHog path every other `waddles.<module>.<feature>`
+ * gate in this service uses. Per client.md Authentication & Tokens, no
+ * PostHog key ever lives in this bundle -- the backend is the only thing
+ * that talks to PostHog/the license server.
  *
- * `@penguintechinc/react-libs` 1.3.4 has no PostHog/feature-flag helper
- * (verified against its published dist -- LoginPageBuilder, SidebarMenu,
- * FormBuilder/FormModalBuilder, ConsoleVersion, useBreakpoint only), so this
- * is a from-scratch minimal implementation rather than reaching into a
- * shared package that doesn't have one yet.
+ * Fetched via TanStack Query (shared `apiClient`/`queryClient`, same pattern
+ * as every other server-state read in this app) and cached for
+ * `FLAGS_STALE_TIME_MS` so every `useFeatureFlag()` call site on a page
+ * shares one network request instead of one per flag.
  *
- * TODO(hubwebui-s0): wire `resolveFlags()` to a real source once one exists.
- * hub-api has no `/api/v1/*flags*` or PostHog-proxy endpoint today (checked
- * `admin/hub_module/hub_api` -- zero matches for "posthog"/"feature flag").
- * Per critical-rules.md Feature Flags & License Tiers and client.md Secrets
- * & Credentials, prefer having hub-api expose *resolved* flag values (it
- * already holds the tenant/session context) over embedding a PostHog
- * project key in this browser bundle -- a client-side key is not a secret
- * PostHog-side, but resolving server-side keeps tenant targeting rules in
- * one place and matches "never call third-party APIs directly from
- * client". Until that endpoint exists, every flag is unseen and MUST
- * default OFF (never crash, never block render).
+ * Per house rule (unseen flag = OFF), every path below defaults to `false`:
+ * while the query is loading, if the request fails (network error, 401,
+ * tenant mismatch, etc.), and for any key absent from the response map
+ * (e.g. not in hub-api's `CLIENT_FLAG_KEYS` allowlist). This hook never
+ * throws and never blocks render.
  */
 
 type FlagKey = `${string}.${string}`;
 
-const KNOWN_FLAGS: Readonly<Record<string, boolean>> = Object.freeze({});
+interface ResolvedFlagsResponse {
+  flags: Record<string, boolean>;
+}
+
+const FLAGS_QUERY_KEY = ['feature-flags'] as const;
+const FLAGS_STALE_TIME_MS = 60 * 1000;
 
 /**
- * Placeholder resolver -- always returns the empty/unseen map until the
- * hub-api resolved-flags endpoint (TODO above) lands. Kept as a separate
- * function so that wiring it up later is a one-line change here, not a
- * call-site change in every component using the hook.
+ * Fetches the resolved flag map for the authenticated tenant. Never throws --
+ * any failure (network, auth, server error) is caught and logged at debug
+ * (sanitized: status/message only, never response body/headers/cookies) and
+ * resolved as an empty map, which every call site turns into `false` via
+ * `?? false`.
  */
-function resolveFlags(): Readonly<Record<string, boolean>> {
-  return KNOWN_FLAGS;
+async function fetchResolvedFlags(): Promise<Record<string, boolean>> {
+  try {
+    const response = await apiClient.get<ResolvedFlagsResponse>('/api/v1/flags');
+    return response.data.flags ?? {};
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'unknown error';
+    console.debug('[useFeatureFlag] Fetch failed', { message });
+    return {};
+  }
 }
 
 /**
- * Returns whether a PostHog-style feature flag is enabled. Defaults to
- * `false` (OFF) for any flag not yet known/resolved -- per house rule,
- * absence of a flag is never treated as "on".
+ * Returns whether a PostHog-backed feature flag is enabled for the current
+ * tenant. Defaults to `false` while loading, on fetch error, and for any key
+ * not present in the resolved map -- absence is never treated as "on".
  */
 export function useFeatureFlag(key: FlagKey): boolean {
-  const [enabled, setEnabled] = useState<boolean>(() => resolveFlags()[key] ?? false);
+  const { data } = useQuery({
+    queryKey: FLAGS_QUERY_KEY,
+    queryFn: fetchResolvedFlags,
+    staleTime: FLAGS_STALE_TIME_MS,
+  });
 
-  useEffect(() => {
-    setEnabled(resolveFlags()[key] ?? false);
-  }, [key]);
-
-  return enabled;
+  return data?.[key] ?? false;
 }
