@@ -31,7 +31,9 @@ FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2
 # ca-certificates for rustls (webpki/native roots) on outbound TLS
 # (reqwest, OTLP) -- required once the hub-api distribution poll and
 # connector work land; harmless to have now.
+# CVE-2026-103111 (libpcre2): upgrade to 10.42-1+deb12u2 from security updates.
 RUN apt-get update \
+    && apt-get install --no-install-recommends -y --only-upgrade libpcre2-8-0 \
     && apt-get install --no-install-recommends -y \
         ca-certificates=20250419~deb12u1 \
     && rm -rf /var/lib/apt/lists/*
