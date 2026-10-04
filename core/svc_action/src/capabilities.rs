@@ -928,6 +928,44 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
 
         result.map(row_to_json).map_err(db_error_to_host_error)
     }
+
+    /// `enabled` op: `{"key": String, "default_value": bool}` ->
+    /// `{"enabled": bool}` -- un-stubs the `flags` WIT capability via
+    /// `crate::flags::resolve_flag`'s real `penguin_licensing::
+    /// LicenseClient`-backed fallback chain (live -> cached -> this
+    /// call's own `default_value`; see that function's doc). Never
+    /// returns an error for a well-formed call -- see `core/svc_process::
+    /// capabilities::StageCapabilities::handle_flags`'s identical doc for
+    /// why. `tier` is not wired in this landing.
+    async fn handle_flags(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        match call.op.as_str() {
+            "enabled" => {
+                let args: FlagsEnabledArgs =
+                    serde_json::from_value(call.args.clone()).map_err(|e| {
+                        denied(
+                            "invalid_args",
+                            format!("malformed flags.enabled host-call args: {e}"),
+                        )
+                    })?;
+                let value = crate::flags::resolve_flag(&args.key, args.default_value).await;
+                Ok(serde_json::json!({ "enabled": value }))
+            }
+            other => Err(denied(
+                "not_implemented",
+                format!("flags op {other:?} is not wired in this build -- TODO(M3+)"),
+            )),
+        }
+    }
+}
+
+/// `{"key": String, "default_value": bool}` -- `flags.enabled`'s args.
+#[derive(serde::Deserialize)]
+struct FlagsEnabledArgs {
+    key: String,
+    default_value: bool,
 }
 
 fn json_to_db_value(v: &serde_json::Value) -> Result<DbValue, HostResultError> {
@@ -1038,10 +1076,10 @@ impl<Q: RelayQueue, K: KvBackend> CapabilityHandler for StageCapabilities<Q, K> 
                 CapabilityKind::Kv => self.handle_kv(scope, &call).await,
                 // `db` is wired below (mirrors svc_process).
                 CapabilityKind::Db => self.handle_db(scope, &call).await,
-                CapabilityKind::Flags => Err(denied(
-                    "not_implemented",
-                    "flags capability is not wired in this build -- TODO(M3+)",
-                )),
+                // `enabled` is wired to a real `penguin_licensing::
+                // LicenseClient` (`crate::flags::resolve_flag`) -- see
+                // `handle_flags`'s doc for the fallback semantics.
+                CapabilityKind::Flags => self.handle_flags(&call).await,
             }
         })
     }

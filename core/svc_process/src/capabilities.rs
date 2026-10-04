@@ -554,6 +554,50 @@ impl<K: KvBackend> StageCapabilities<K> {
 
         result.map(row_to_json).map_err(db_error_to_host_error)
     }
+
+    /// `enabled` op: `{"key": String, "default_value": bool}` ->
+    /// `{"enabled": bool}` -- un-stubs the `flags` WIT capability
+    /// (`core/bundle_executor::host::imports::flags::Host::enabled`'s own
+    /// `call(...)` host-call) via `crate::license::resolve_flag`'s real
+    /// `penguin_licensing::LicenseClient`-backed fallback chain (live ->
+    /// cached -> this call's own `default_value`, see that function's
+    /// doc). Never returns an error for a well-formed call -- a flag
+    /// lookup failure must fail open to `default_value`, not deny the
+    /// host-call (spec §7.4/§6.5's "fail-open to the supplied
+    /// `default-value` on a flag-server outage, never an exception",
+    /// `core/bundle_executor::host::imports::flags::Host::enabled`'s own
+    /// doc). `tier` is not wired in this landing.
+    async fn handle_flags(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        match call.op.as_str() {
+            "enabled" => {
+                let args: FlagsEnabledArgs =
+                    serde_json::from_value(call.args.clone()).map_err(|e| {
+                        denied(
+                            "invalid_args",
+                            format!("malformed flags.enabled host-call args: {e}"),
+                        )
+                    })?;
+                let value = crate::license::resolve_flag(&args.key, args.default_value).await;
+                Ok(serde_json::json!({ "enabled": value }))
+            }
+            other => Err(denied(
+                "not_implemented",
+                format!("flags op {other:?} is not wired in this build -- TODO(M4+)"),
+            )),
+        }
+    }
+}
+
+/// `{"key": String, "default_value": bool}` -- `flags.enabled`'s args
+/// (`core/bundle_executor::host::imports::flags::Host::enabled`'s own
+/// `serde_json::json!` shape).
+#[derive(serde::Deserialize)]
+struct FlagsEnabledArgs {
+    key: String,
+    default_value: bool,
 }
 
 fn json_to_db_value(v: &serde_json::Value) -> Result<DbValue, HostResultError> {
@@ -677,10 +721,12 @@ impl<K: KvBackend> CapabilityHandler for StageCapabilities<K> {
                 // succeeding) is the correct behavior for an unimplemented
                 // capability until it does.
                 CapabilityKind::Db => self.handle_db(&call).await,
-                CapabilityKind::Flags => Err(denied(
-                    "not_implemented",
-                    "flags capability is not wired in this build -- TODO(M4+)",
-                )),
+                // `enabled` is wired to a real `penguin_licensing::
+                // LicenseClient` (`crate::license::resolve_flag`) -- see
+                // that module's doc for the fallback semantics (live ->
+                // cached -> caller default, never an error). `tier` is
+                // not wired in this landing.
+                CapabilityKind::Flags => self.handle_flags(&call).await,
                 // Spec §6.5: "Capability: granted only to action-stage
                 // bundles" -- never granted to a process-stage bundle at
                 // all, so this is a permanent denial, not a seam.

@@ -258,6 +258,13 @@ where
     // fix/executor-link-heartbeat: `host_api_connected_executors`/
     // `host_api_heartbeat_timeouts_total`/`dispatch_dead_lettered_no_executor_total`.
     let host_api_metrics = telemetry::register_host_api_metrics(&prom_registry);
+    // `crate::license::resolve_flag_with`'s `flags.enabled` host-call
+    // evaluation counter (`svc_process_flags_evaluated_total{result}`) --
+    // registered into this crate's own registry (not a process-global
+    // default one) and wired into `crate::license` via
+    // `set_flags_metric` before any bundle invoke can reach
+    // `StageCapabilities::handle_flags`.
+    license::set_flags_metric(telemetry::register_flags_metrics(&prom_registry));
 
     let connections = try_start_host_api(&config.cli, host_api_metrics);
 

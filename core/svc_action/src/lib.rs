@@ -305,6 +305,12 @@ where
     // fix/executor-link-heartbeat: `host_api_connected_executors`/
     // `host_api_heartbeat_timeouts_total`/`dispatch_dead_lettered_no_executor_total`.
     let host_api_metrics = telemetry::register_host_api_metrics(&prom_registry);
+    // `crate::flags::resolve_flag_with`'s `flags.enabled` host-call
+    // evaluation counter (`svc_action_flags_evaluated_total{result}`) --
+    // registered into this crate's own registry and wired into
+    // `crate::flags` before any bundle invoke can reach
+    // `StageCapabilities::handle_flags`.
+    flags::set_flags_metric(telemetry::register_flags_metrics(&prom_registry));
 
     // Outbound PII-detokenization's hub_client startup wiring (closes the
     // TODO seam `capabilities::StageCapabilities::with_detokenize` used to
@@ -490,7 +496,7 @@ const DEPLOYMENT_DOMAIN: &str = "svc-action.waddles.app";
 /// [`flag_or_closed`] to fall back to [`flags::StaticFlag`]`(false)` for
 /// both flags in that case, the same fail-closed-to-OFF posture spec
 /// §13.5 already specifies for a never-seen flag.
-fn build_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
+pub(crate) fn build_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
     let cfg = match penguin_licensing::LicenseConfig::from_env(LICENSE_PRODUCT) {
         Ok(cfg) => cfg,
         Err(err) => {

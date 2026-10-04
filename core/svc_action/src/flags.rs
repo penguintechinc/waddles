@@ -21,7 +21,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Gates the action-stage drain loop (`crate::dispatch::drain_loop`). OFF
 /// ⇒ the stage serves `/health`/`/metrics` and drains nothing -- the safe
@@ -298,6 +298,300 @@ impl FeatureFlag for AllFlags {
             }
             true
         })
+    }
+}
+
+/// Un-stubs the `flags` WIT host capability (`crate::capabilities::
+/// StageCapabilities::handle_flags`, `enabled` op) -- field-for-field
+/// mirror of `core/svc_process::license`'s identical fix (same doc there
+/// for the full "why" on the host-import fail-open bug this closes). A
+/// bundle's `feature_enabled(key, default)` call used to always resolve to
+/// `default` because this capability unconditionally denied
+/// `not_implemented`, and `core/bundle_executor::host::imports::
+/// flags::Host::enabled` silently caught that `Err` and fell back to the
+/// caller's own `default_value` -- so the bundle never saw a real PostHog
+/// value regardless of the flag's actual state.
+///
+/// [`FlagSource`] is this crate's usual "wrap the external dependency
+/// behind a narrow, object-safe trait" seam ([`FeatureFlag`] above):
+/// production wires a real `Arc<penguin_licensing::LicenseClient>` (the
+/// blanket impl below), tests wire a `FakeFlagSource` so every fallback
+/// branch (live / cached / never-seen default / capability-disabled /
+/// no-client) is provable without a live PostHog/license server.
+/// `Some((value, is_fresh))` -- `key`'s raw value plus whether it came
+/// from a snapshot fetched within `cache_ttl`; `None` means no snapshot
+/// has ever been fetched. Named alias so [`FlagSource::flag_value`]'s
+/// return type doesn't trip `clippy::type_complexity`.
+pub type FlagValueFuture<'a> = Pin<Box<dyn Future<Output = Option<(bool, bool)>> + Send + 'a>>;
+
+pub trait FlagSource: Send + Sync {
+    /// Whether this deployment bypasses all license/flag gating.
+    fn bypass_active(&self) -> bool;
+
+    /// Resolves `key`'s raw value plus whether it came from a *fresh*
+    /// (within `cache_ttl`) snapshot. `None` means no snapshot has ever
+    /// been fetched for this process -- the caller's own `default_value`
+    /// applies, not a value from this trait.
+    fn flag_value<'a>(&'a self, key: &'a str) -> FlagValueFuture<'a>;
+}
+
+impl FlagSource for Arc<penguin_licensing::LicenseClient> {
+    fn bypass_active(&self) -> bool {
+        penguin_licensing::LicenseClient::bypass_active(self)
+    }
+
+    fn flag_value<'a>(&'a self, key: &'a str) -> FlagValueFuture<'a> {
+        Box::pin(async move {
+            let value = self.flag_enabled(key).await;
+            let snap = self.snapshot()?;
+            let age = chrono::Utc::now().signed_duration_since(snap.fetched_at);
+            let fresh = age
+                .to_std()
+                .map(|a| a < self.config().cache_ttl)
+                .unwrap_or(false);
+            Some((value, fresh))
+        })
+    }
+}
+
+/// `FLAGS_CAPABILITY_ENABLED` -- a plain env off-switch for the whole
+/// `flags` host capability, independent of any individual PostHog flag's
+/// own state, mirroring `crate::config::CliConfig::
+/// pii_detokenization_enabled_override`'s "explicit, loudly-logged
+/// operator escape hatch" shape. Default ON (unset, or any other value,
+/// leaves the capability wired); `false`/`0`/`off`/`no` makes every
+/// `flags.enabled` host-call resolve straight to the caller's own
+/// `default_value`, with no license-client lookup at all.
+pub const FLAGS_CAPABILITY_ENABLED_ENV: &str = "FLAGS_CAPABILITY_ENABLED";
+
+/// Reads [`FLAGS_CAPABILITY_ENABLED_ENV`] fresh on every call (cheap env
+/// lookup, no caching) so flipping it takes effect on the very next
+/// `flags.enabled` host-call, not just at process startup.
+fn flags_capability_env_enabled() -> bool {
+    match std::env::var(FLAGS_CAPABILITY_ENABLED_ENV) {
+        Ok(raw) => !matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "false" | "0" | "off" | "no"
+        ),
+        Err(_) => true,
+    }
+}
+
+/// Resolves one `flags.enabled(key, default_value)` host-call -- see
+/// `core/svc_process::license::resolve_flag_with`'s identical doc for the
+/// full fallback-chain rationale (live -> cached -> `default_value`,
+/// never an error).
+pub async fn resolve_flag_with<F: FlagSource>(
+    source: Option<&F>,
+    capability_enabled: bool,
+    key: &str,
+    default_value: bool,
+) -> bool {
+    if !capability_enabled {
+        tracing::debug!(
+            key,
+            default_value,
+            source = "capability_disabled",
+            "flags.enabled: FLAGS_CAPABILITY_ENABLED=false, using caller default"
+        );
+        record_flag_eval("capability_disabled");
+        return default_value;
+    }
+    let Some(source) = source else {
+        tracing::debug!(
+            key,
+            default_value,
+            source = "no_client",
+            "flags.enabled: no license client configured, using caller default"
+        );
+        record_flag_eval("no_client");
+        return default_value;
+    };
+    if source.bypass_active() {
+        tracing::debug!(
+            key,
+            value = true,
+            source = "bypass",
+            "flags.enabled: license bypass active"
+        );
+        record_flag_eval("bypass");
+        return true;
+    }
+    match source.flag_value(key).await {
+        None => {
+            tracing::debug!(
+                key,
+                default_value,
+                source = "default",
+                "flags.enabled: never-seen (no snapshot ever fetched), using caller default"
+            );
+            record_flag_eval("default");
+            default_value
+        }
+        Some((value, true)) => {
+            tracing::debug!(key, value, source = "live", "flags.enabled resolved");
+            record_flag_eval("live");
+            value
+        }
+        Some((value, false)) => {
+            tracing::debug!(
+                key,
+                value,
+                source = "cached",
+                "flags.enabled: serving last-known-cached value (flag server unreachable or not yet due for refresh)"
+            );
+            record_flag_eval("cached");
+            value
+        }
+    }
+}
+
+/// This process's own shared flags-capability license client, built
+/// lazily on first use and reused for every subsequent `flags.enabled`
+/// host-call -- see `core/svc_process::license::shared_flags_license_client`'s
+/// identical doc for why sharing one client (one cached snapshot) matters.
+fn shared_flags_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
+    static CLIENT: OnceLock<Option<Arc<penguin_licensing::LicenseClient>>> = OnceLock::new();
+    CLIENT.get_or_init(crate::build_license_client).clone()
+}
+
+/// `crate::telemetry::register_flags_metrics`'s counter, wired in here --
+/// see `core/svc_process::license::FLAGS_EVAL_TOTAL`'s identical doc for
+/// the cardinality/labeling rationale.
+static FLAGS_EVAL_TOTAL: OnceLock<prometheus::IntCounterVec> = OnceLock::new();
+
+/// Wires `crate::telemetry::register_flags_metrics`'s counter into this
+/// module -- called once at startup (`crate::run_with_shutdown`).
+/// `OnceLock::set` is a no-op past the first call.
+pub fn set_flags_metric(counter: prometheus::IntCounterVec) {
+    let _ = FLAGS_EVAL_TOTAL.set(counter);
+}
+
+/// `None` until [`set_flags_metric`] has been called -- every
+/// [`resolve_flag_with`] call site treats that as "no metrics sink wired
+/// yet" and simply skips recording, never panics (the normal state for
+/// every unit test in this module exercising `resolve_flag_with`
+/// directly).
+fn record_flag_eval(result: &str) {
+    if let Some(counter) = FLAGS_EVAL_TOTAL.get() {
+        counter.with_label_values(&[result]).inc();
+    }
+}
+
+/// Production entry point `crate::capabilities::StageCapabilities::
+/// handle_flags` calls for the `enabled` op.
+pub async fn resolve_flag(key: &str, default_value: bool) -> bool {
+    resolve_flag_with(
+        shared_flags_license_client().as_ref(),
+        flags_capability_env_enabled(),
+        key,
+        default_value,
+    )
+    .await
+}
+
+#[cfg(test)]
+mod flags_capability_tests {
+    use super::*;
+
+    struct FakeFlagSource {
+        bypass: bool,
+        value: Option<(bool, bool)>,
+    }
+
+    impl FlagSource for FakeFlagSource {
+        fn bypass_active(&self) -> bool {
+            self.bypass
+        }
+
+        fn flag_value<'a>(&'a self, _key: &'a str) -> FlagValueFuture<'a> {
+            let value = self.value;
+            Box::pin(async move { value })
+        }
+    }
+
+    #[tokio::test]
+    async fn live_enabled_flag_resolves_true() {
+        let source = FakeFlagSource {
+            bypass: false,
+            value: Some((true, true)),
+        };
+        assert!(resolve_flag_with(Some(&source), true, "waddles.command-8ball", false).await);
+    }
+
+    #[tokio::test]
+    async fn live_disabled_flag_resolves_false_even_with_a_true_default() {
+        let source = FakeFlagSource {
+            bypass: false,
+            value: Some((false, true)),
+        };
+        assert!(!resolve_flag_with(Some(&source), true, "waddles.command-8ball", true).await);
+    }
+
+    #[tokio::test]
+    async fn stale_cached_value_wins_over_the_caller_default() {
+        let source = FakeFlagSource {
+            bypass: false,
+            value: Some((true, false)),
+        };
+        assert!(resolve_flag_with(Some(&source), true, "waddles.command-roll", false).await);
+    }
+
+    #[tokio::test]
+    async fn never_seen_snapshot_falls_back_to_caller_default() {
+        let source = FakeFlagSource {
+            bypass: false,
+            value: None,
+        };
+        assert!(!resolve_flag_with(Some(&source), true, "waddles.command-lurk", false).await);
+        assert!(resolve_flag_with(Some(&source), true, "waddles.command-lurk", true).await);
+    }
+
+    #[tokio::test]
+    async fn capability_disabled_env_toggle_short_circuits_to_caller_default() {
+        let source = FakeFlagSource {
+            bypass: false,
+            value: Some((true, true)),
+        };
+        assert!(!resolve_flag_with(Some(&source), false, "waddles.command-count", false).await);
+    }
+
+    #[tokio::test]
+    async fn no_license_client_falls_back_to_caller_default() {
+        assert!(
+            !resolve_flag_with::<FakeFlagSource>(None, true, "waddles.command-8ball", false).await
+        );
+        assert!(
+            resolve_flag_with::<FakeFlagSource>(None, true, "waddles.command-8ball", true).await
+        );
+    }
+
+    #[tokio::test]
+    async fn bypass_active_resolves_true_regardless_of_default() {
+        let source = FakeFlagSource {
+            bypass: true,
+            value: Some((false, true)),
+        };
+        assert!(resolve_flag_with(Some(&source), true, "waddles.command-8ball", false).await);
+    }
+
+    /// Proves [`FlagSource`]'s blanket `Arc<LicenseClient>` impl reaches a
+    /// real, cold (never-fetched) client's own fail-closed contract --
+    /// same proof style as this module's own
+    /// `license_flag_reaches_a_real_cold_client_and_fails_closed_to_off`.
+    #[tokio::test]
+    async fn real_cold_license_client_never_seen_falls_back_to_caller_default() {
+        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-flags-capability")
+            .expect("default LicenseConfig::new never fails");
+        let client = penguin_licensing::LicenseClient::new(cfg)
+            .expect("LicenseClient::new with a valid default config never fails");
+        assert!(resolve_flag_with(Some(&client), true, "waddles.command-8ball", true).await);
+        assert!(!resolve_flag_with(Some(&client), true, "waddles.command-8ball", false).await);
+    }
+
+    #[test]
+    fn flags_capability_enabled_env_name_matches_convention() {
+        assert_eq!(FLAGS_CAPABILITY_ENABLED_ENV, "FLAGS_CAPABILITY_ENABLED");
     }
 }
 

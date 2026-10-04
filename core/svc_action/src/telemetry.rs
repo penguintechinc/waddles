@@ -46,6 +46,27 @@ pub fn render_metrics(registry: &prometheus::Registry) -> anyhow::Result<String>
     Ok(String::from_utf8(buf)?)
 }
 
+/// `svc_action_flags_evaluated_total{result}` -- `crate::flags::
+/// resolve_flag_with`'s per-evaluation counter. Registered into *this*
+/// crate's own registry (like every other metric here, unlike a
+/// process-global default registry) and wired into `crate::flags` via
+/// [`crate::flags::set_flags_metric`] -- see `crate::run_with_shutdown`'s
+/// call site.
+pub fn register_flags_metrics(registry: &prometheus::Registry) -> prometheus::IntCounterVec {
+    let counter = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_action_flags_evaluated_total",
+            "Bundle flags.enabled host-call evaluations by result source",
+        ),
+        &["result"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(counter.clone()))
+        .expect("register svc_action_flags_evaluated_total");
+    counter
+}
+
 /// Base HTTP request metrics registered once against the Prometheus
 /// registry and shared via [`crate::http::AppState`] so the request-path
 /// middleware can record into them without re-registering (a
