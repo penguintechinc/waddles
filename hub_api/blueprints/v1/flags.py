@@ -56,6 +56,9 @@ CLIENT_FLAG_KEYS: tuple[str, ...] = (
     "waddles.webui.modular_nav",
     "waddles.webui.modular_dashboard",
     "waddles.webui.bundle_marketplace_ui",
+    "waddles.webui.community_bundles",
+    "waddles.webui.tenant_bundle_catalog",
+    "waddles.webui.super_communities",
     "waddles.webui.super_tenants",
 )
 
