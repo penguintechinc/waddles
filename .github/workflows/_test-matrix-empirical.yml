@@ -1,0 +1,28 @@
+name: Test Matrix Empirical
+on:
+  workflow_dispatch:
+jobs:
+  determine:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix_exclude: ${{ steps.v.outputs.matrix_exclude }}
+    steps:
+      - id: v
+        run: echo 'matrix_exclude=[{"platform":"linux/arm64"}]' >> "$GITHUB_OUTPUT"
+  build:
+    needs: determine
+    name: Build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+        exclude: ${{ fromJSON(needs.determine.outputs.matrix_exclude) }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "ran for ${{ matrix.platform }}"
