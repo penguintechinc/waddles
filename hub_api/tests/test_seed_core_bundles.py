@@ -733,19 +733,25 @@ async def test_run_rerun_with_the_same_digest_is_a_clean_no_op_at_process_level(
     assert len(versions) == 1  # never republished
 
 
-async def test_run_reports_a_clear_digest_conflict_and_nonzero_exit(
+async def test_run_reports_a_clear_digest_conflict_as_a_warning_and_clean_exit(
     install_dal: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A different-digest re-seed at the same version fails loudly, exit 1, clear log line.
+    """regression: gh-576 -- a digest conflict is logged clearly but no longer fails the Job.
 
-    Guards against the exact operator-facing regression this fix closes: `str(ApiError(...))`
-    renders as a raw `(message, status_code, code)` args tuple (ApiError has no
+    `digest_conflict` is in `RECOVERABLE_API_ERROR_CODES` (componentize-py's Python bundles
+    can legitimately drift byte-for-byte across rebuilds with no source change -- see that
+    constant's own docstring); `_run()` now logs it at WARNING with the full operator-facing
+    detail and exits 0 rather than blocking every subsequent `helm upgrade` forever on a
+    cosmetic artifact-byte mismatch the operator cannot even durably fix (the NEXT rebuild can
+    drift again). Guards against the original operator-facing regression too: `str(ApiError
+    (...))` renders as a raw `(message, status_code, code)` args tuple (ApiError has no
     `Exception.__init__()` call, see services/errors.py) unless `_run()` special-cases
-    `ApiError` and logs `.message`/`.code` directly -- assert the log record actually carries
-    the human-readable message and the `digest_conflict` code, not the tuple repr.
+    `ApiError` and embeds `.message`/`.code` in the RENDERED log line itself -- not only in
+    `extra` (which `caplog` captures regardless of formatter, masking the gap in CI; a plain
+    `kubectl logs` tail never renders `extra` under this module's bare `logging.basicConfig()`).
     """
     _patch_validator_and_storage(monkeypatch)
     _patch_run_dependencies(install_dal, monkeypatch)
@@ -777,22 +783,99 @@ async def test_run_reports_a_clear_digest_conflict_and_nonzero_exit(
     # catalog version string (e.g. a non-reproducible build drifting between runs).
     (tmp_path / "ping.wasm").write_bytes(_COMPONENT_BYTES + b"-drifted")
 
-    with caplog.at_level("ERROR", logger="waddles.hub_api.core_bundle_seeder"):
+    # INFO (not WARNING) -- need both the WARNING conflict line AND the INFO summary line.
+    with caplog.at_level("INFO", logger="waddles.hub_api.core_bundle_seeder"):
         second_exit = await seeder._run(tmp_path, catalog_path)
 
-    assert second_exit == 1  # fail-closed: never silently overwrites app_versions
+    assert second_exit == 0  # recoverable: never blocks the Helm hook
 
     conflict_records = [
         r
         for r in caplog.records
-        if r.getMessage() == "core-bundle-seeder: bundle failed" and r.app_id == entry.app_id
+        if r.name == "waddles.hub_api.core_bundle_seeder"
+        and r.levelname == "WARNING"
+        and getattr(r, "error_code", None) == "digest_conflict"
     ]
-    assert conflict_records, "expected a logged failure for the conflicting bundle"
+    assert conflict_records, "expected a logged warning for the conflicting bundle"
     record = conflict_records[0]
+    # The app_id, version, code, and message are in the RENDERED message itself -- never
+    # only in `extra`.
+    rendered = record.getMessage()
+    assert entry.app_id in rendered
+    assert "digest_conflict" in rendered
+    assert "ACTION REQUIRED" in rendered
+    assert "DIFFERENT digest" in rendered
     assert record.error_code == "digest_conflict"
     assert record.status_code == 409
-    assert "ACTION REQUIRED" in record.error
-    assert "DIFFERENT digest" in record.error
+
+    summary_records = [
+        r for r in caplog.records if r.getMessage().startswith("core-bundle-seeder: summary")
+    ]
+    assert summary_records, "expected a summary log line"
+    expected = f"{entry.app_id}@{entry.version} (digest_conflict)"
+    assert expected in summary_records[-1].skipped_conflicts[0]
+
+
+async def test_run_a_fatal_api_error_still_fails_the_run_and_other_bundles_still_seed(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Every ApiError code outside RECOVERABLE_API_ERROR_CODES still fails the run.
+
+    Full detail still lands in the rendered line (not only in `extra`), and one bundle's
+    failure never stops the remaining catalog entries from being processed.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    _patch_run_dependencies(install_dal, monkeypatch)
+
+    _write_bundle(tmp_path)  # ping.manifest.yaml + ping.wasm at tmp_path
+    catalog_path = tmp_path / "core-bundles.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(
+            {
+                "bundles": [
+                    {
+                        "app_id": "waddles.core.example.ping",
+                        "version": "1.0.0",
+                        "language": "rust",
+                        "manifest_path": "ping.manifest.yaml",
+                        "artifact_path": "ping.wasm",
+                        "activation_targets": [{"tenant_slug": "no-such-tenant"}],
+                    },
+                    {
+                        "app_id": "waddles.core.example.ping",
+                        "version": "1.0.0",
+                        "language": "rust",
+                        "manifest_path": "ping.manifest.yaml",
+                        "artifact_path": "ping.wasm",
+                        "activation_targets": [{"tenant_slug": TENANT_SLUG}],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level("ERROR", logger="waddles.hub_api.core_bundle_seeder"):
+        exit_code = await seeder._run(tmp_path, catalog_path)
+
+    assert exit_code == 1  # tenant_not_found is NOT in RECOVERABLE_API_ERROR_CODES
+
+    failure_records = [
+        r for r in caplog.records if r.levelname == "ERROR" and "tenant_not_found" in r.getMessage()
+    ]
+    assert failure_records, "expected the tenant_not_found ApiError logged with full detail"
+    assert "no-such-tenant" in failure_records[0].getMessage()
+
+    # The second catalog entry (same bundle, a valid tenant) still seeded despite the first
+    # entry's failure -- one bundle's fatal error never aborts the batch.
+    available = await install_dal(
+        (install_dal.bundle_tenant_availability.app_id == "waddles.core.example.ping")
+        & (install_dal.bundle_tenant_availability.available == True)  # noqa: E712
+    ).select()
+    assert len(available) == 1
 
 
 async def test_run_logs_the_exception_type_and_message_on_an_unexpected_storage_failure(

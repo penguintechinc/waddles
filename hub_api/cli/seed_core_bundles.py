@@ -110,6 +110,24 @@ _PLATFORM_CONNECTIONS_ENV = "CORE_BUNDLES_PLATFORM_CONNECTIONS"
 #: used one). Deliberately ASCII-only -- see `_guard_core_namespace()`'s own docstring.
 _APP_ID_CHARSET_RE = re.compile(r"^[a-z0-9]+(\.[a-z0-9-]+)+$")
 
+#: `ApiError.code` values that must NOT abort the whole Helm hook (gh-576: "seeder fails
+#: whole hook on one conflict"). Today this is exactly `digest_conflict` --
+#: `_resolve_or_publish_version()`'s own immutable-version guard -- which recurs
+#: indefinitely for `language: python` bundles specifically: `componentize-py` is a KNOWN,
+#: pre-approved non-reproducible build (see this repo's own mem0 note
+#: "python-bundle-snapshot-fallback" / `scripts/verify-core-bundles-reproducible.sh`'s
+#: Rust-only repro gate) -- an unrelated image rebuild (e.g. a different bundle's Dockerfile
+#: stage changing) can legitimately produce new `pyping.wasm` bytes under an UNCHANGED
+#: `core-bundles.yaml` version string, 409-ing forever against the one row that already
+#: published successfully. The already-published row keeps serving correctly either way --
+#: there is nothing an operator can act on except "bump the version", which does not even
+#: fix the underlying non-reproducibility for the NEXT rebuild. Treating this one code as a
+#: WARNING + skip (never a hard failure) stops a cosmetic artifact-byte drift from blocking
+#: every subsequent `helm upgrade` indefinitely; every OTHER `ApiError` code (tenant_not_
+#: found, stalled_core_bundle_upload, ...) still fails the run -- those genuinely need a
+#: human to intervene before the row they describe can ever resolve itself.
+RECOVERABLE_API_ERROR_CODES = frozenset({"digest_conflict"})
+
 
 @dataclass(slots=True, frozen=True)
 class ActivationTarget:
@@ -700,6 +718,10 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
 
     failures = 0
     seeded = 0
+    #: `(app_id, version, code)` strings for every RECOVERABLE_API_ERROR_CODES hit this run --
+    #: never counted in `failures` (see that constant's own docstring), but always surfaced in
+    #: the final summary log so an operator/dashboard sees it without the Job failing.
+    skipped_conflicts: list[str] = []
     try:
         entries = load_catalog(catalog_path)
         connections = load_platform_connections(catalog_path)
@@ -740,8 +762,9 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                 results = await seed_one(install_dal, entry, bundles_dir)
             except CoreBundleSeederError as exc:
                 logger.error(
-                    "core-bundle-seeder: refused",
+                    f"core-bundle-seeder: refused ({entry.app_id}@{entry.version}): {exc}",
                     extra={"app_id": entry.app_id, "version": entry.version, "reason": str(exc)},
+                    exc_info=True,
                 )
                 counter.add(1, {"app_id": entry.app_id, "outcome": "refused"})
                 failures += 1
@@ -753,13 +776,29 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                 # exactly the operator-facing clarity gap this branch exists to close.
                 # `exc.code` (e.g. "digest_conflict") is a stable, actionable outcome label --
                 # keep it in both the log and the metric so an operator/dashboard sees the
-                # SAME word, not a generic "failed" that hides why. This is fail-closed by
-                # construction: the exception already means no DB write happened for this
-                # entry, and `failures += 1` below guarantees a non-zero process exit code
-                # (see main()/_run()'s own `return 1 if failures else 0`) -- a seeding run
-                # that hits this branch must never be reported as a clean success.
-                logger.error(
-                    "core-bundle-seeder: bundle failed",
+                # SAME word, not a generic "failed" that hides why.
+                #
+                # Alpha incident (2026-10-03): this branch logged `extra={"error_code": ...,
+                # "error": exc.message, ...}` ONLY -- never embedded in the message string
+                # itself. `main()` wires nothing but `logging.basicConfig()` (default format
+                # "%(levelname)s:%(name)s:%(message)s"), which silently drops every `extra`
+                # key from the rendered line: `caplog` (this module's own test suite) sees
+                # `extra` regardless of formatter, masking the gap in CI, but a plain
+                # `kubectl logs` tail (this Job's only real-world observability) rendered a
+                # bare "core-bundle-seeder: bundle failed" with NO app_id, no code, no
+                # message -- see test_run_reports_a_clear_digest_conflict_and_nonzero_exit's
+                # updated docstring. The app_id/version/code/message are therefore put
+                # directly in the message string itself, same fix already applied to the
+                # generic Exception branch below. `exc_info=True` attaches the real
+                # traceback to the rendered line too (Python's logging renders a record's
+                # traceback unconditionally when `exc_info` is set, independent of the
+                # format string).
+                recoverable = exc.code in RECOVERABLE_API_ERROR_CODES
+                log_fn = logger.warning if recoverable else logger.error
+                verb = "skipped (recoverable conflict, gh-576)" if recoverable else "failed"
+                log_fn(
+                    f"core-bundle-seeder: bundle {verb} "
+                    f"({entry.app_id}@{entry.version}, {exc.code}): {exc.message}",
                     extra={
                         "app_id": entry.app_id,
                         "version": entry.version,
@@ -767,9 +806,21 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                         "status_code": exc.status_code,
                         "error": exc.message,
                     },
+                    exc_info=True,
                 )
-                counter.add(1, {"app_id": entry.app_id, "outcome": exc.code.lower()})
-                failures += 1
+                if recoverable:
+                    # Never counted in `failures` -- see RECOVERABLE_API_ERROR_CODES's own
+                    # docstring. Still surfaced in the final summary (never silent).
+                    skipped_conflicts.append(f"{entry.app_id}@{entry.version} ({exc.code})")
+                    counter.add(1, {"app_id": entry.app_id, "outcome": "skipped_" + exc.code})
+                else:
+                    # This is fail-closed by construction: the exception already means no DB
+                    # write happened for this entry, and `failures += 1` guarantees a
+                    # non-zero process exit code (see `_run()`'s own `return 1 if failures
+                    # else 0`) -- a seeding run that hits this branch must never be reported
+                    # as a clean success.
+                    counter.add(1, {"app_id": entry.app_id, "outcome": exc.code.lower()})
+                    failures += 1
                 continue
             except Exception as exc:  # noqa: BLE001 -- one bundle's failure must not abort the batch or hide the exit code
                 # regression: this branch was the actual alpha !ping blocker -- a boto3
@@ -784,15 +835,17 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                 # the message string itself -- sanitized by construction: `str(exc)` on a
                 # botocore ClientError/any stdlib exception never embeds the S3 secret key
                 # (boto3 never puts credentials in an exception message), only the operation,
-                # bucket/key, and the server's error code.
+                # bucket/key, and the server's error code. `exc_info=True` attaches the full
+                # traceback to the rendered line too, not only to `extra`.
                 logger.error(
-                    "core-bundle-seeder: bundle failed " f"({type(exc).__name__}: {exc})",
+                    f"core-bundle-seeder: bundle failed ({type(exc).__name__}: {exc})",
                     extra={
                         "app_id": entry.app_id,
                         "version": entry.version,
                         "error_type": type(exc).__name__,
                         "error": str(exc),
                     },
+                    exc_info=True,
                 )
                 counter.add(1, {"app_id": entry.app_id, "outcome": "failed"})
                 failures += 1
@@ -812,12 +865,15 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                 seeded += 1
 
         logger.info(
-            "core-bundle-seeder: summary",
+            "core-bundle-seeder: summary "
+            f"(examined={len(connections) + len(entries)}, results={seeded}, "
+            f"failures={failures}, skipped_conflicts={skipped_conflicts})",
             extra={
                 "connections_examined": len(connections),
                 "bundles_examined": len(entries),
                 "results": seeded,
                 "failures": failures,
+                "skipped_conflicts": skipped_conflicts,
             },
         )
     finally:
