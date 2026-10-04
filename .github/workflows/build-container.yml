@@ -39,7 +39,7 @@ jobs:
       suffix: ${{ steps.version.outputs.suffix }}
       is_release: ${{ steps.version.outputs.is_release }}
       multi_arch: ${{ steps.version.outputs.multi_arch }}
-      matrix_exclude: ${{ steps.version.outputs.matrix_exclude }}
+      matrix: ${{ steps.version.outputs.matrix }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -78,16 +78,23 @@ jobs:
             echo "is_release=false" >> $GITHUB_OUTPUT
           fi
 
-          # Derive the matrix exclude list + multi_arch flag from the single
+          # Derive the whole matrix object + multi_arch flag from the single
           # BUILD_PLATFORMS toggle (env, top of file). A comma means more
           # than one platform is requested -- restore arm64 by flipping that
           # one value back to "linux/amd64,linux/arm64".
+          #
+          # The matrix is emitted as one complete JSON object (not a static
+          # "include:" list plus a dynamic "exclude:" expression) because
+          # mixing a static matrix key with a fromJSON(...)-driven sibling
+          # key resolves to an empty job set -- see gh-577. This is GitHub's
+          # documented "defining a matrix dynamically" pattern instead:
+          # https://docs.github.com/actions/how-tos/write-workflows/choose-what-workflows-do/run-variations-of-jobs-in-a-workflow#defining-a-matrix-dynamically
           if [[ "${BUILD_PLATFORMS}" == *,* ]]; then
             echo "multi_arch=true" >> $GITHUB_OUTPUT
-            echo "matrix_exclude=[]" >> $GITHUB_OUTPUT
+            echo 'matrix={"include":[{"platform":"linux/amd64","runner":"ubuntu-latest"},{"platform":"linux/arm64","runner":"ubuntu-24.04-arm"}]}' >> $GITHUB_OUTPUT
           else
             echo "multi_arch=false" >> $GITHUB_OUTPUT
-            echo 'matrix_exclude=[{"platform":"linux/arm64"}]' >> $GITHUB_OUTPUT
+            echo 'matrix={"include":[{"platform":"linux/amd64","runner":"ubuntu-latest"}]}' >> $GITHUB_OUTPUT
           fi
 
   # Build each platform in parallel on native runners. Push-path only --
@@ -99,15 +106,10 @@ jobs:
     if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-        # Pruned to [] when BUILD_PLATFORMS has >1 entry -- see the toggle's
-        # comment at the top of this file.
-        exclude: ${{ fromJSON(needs.determine-version.outputs.matrix_exclude) }}
+      # Whole matrix object computed by determine-version (see that job's
+      # comment) -- a static `include:` plus dynamic `exclude:` resolved to
+      # zero jobs, see gh-577.
+      matrix: ${{ fromJSON(needs.determine-version.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     needs: determine-version
     steps:
