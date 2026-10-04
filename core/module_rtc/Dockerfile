@@ -26,7 +26,9 @@ FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0
 WORKDIR /app
 
 # Install runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# CVE-2026-103111 (libpcre2): upgrade to 10.42-1+deb12u2 from security updates.
+RUN apt-get update && apt-get install -y --no-install-recommends --only-upgrade libpcre2-8-0 \
+    && apt-get install -y --no-install-recommends \
     ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 

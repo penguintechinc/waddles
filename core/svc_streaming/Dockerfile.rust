@@ -34,7 +34,9 @@ FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe6
 # encoders out of the box -- the media engine `pipeline::ffmpeg` (S3) shells
 # out to, once implemented. `ca-certificates` for rustls (webpki/native
 # roots) on outbound TLS (reqwest, sea-orm's runtime-tokio-rustls, OTLP).
+# CVE-2026-103111 (libpcre2): upgrade to 10.42-1+deb12u2 from security updates.
 RUN apt-get update \
+    && apt-get install --no-install-recommends -y --only-upgrade libpcre2-8-0 \
     && apt-get install --no-install-recommends -y \
         ffmpeg=7:5.1.9-0+deb12u1 ca-certificates=20250419~deb12u1 \
     && rm -rf /var/lib/apt/lists/*
