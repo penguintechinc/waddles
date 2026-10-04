@@ -87,9 +87,22 @@ jobs:
           # container build + embedded smoke-test (/health curl) jobs from
           # containers.yml and build-*.yml (build-container.yml reusable
           # workflow). Advisory-only when the target branch isn't main.
+          #
+          # build-*.yml calls build-container.yml via workflow_call, so each
+          # of its job names shows up as a check-run PREFIXED with the
+          # caller's job name, e.g. "Build identity-core Container / Build
+          # & Scan (PR)" or "Build hub Container / Merge Multi-Arch
+          # Manifest" - NOT the bare "Build & Scan (PR)" that containers.yml
+          # itself produces (verified against a live merge_group run, gh#585
+          # run 37210620268: 117/158 check-run names on that commit matched
+          # this pattern, all of them container build/smoke-test jobs; the
+          # other 41 - lint, unit tests, CodeQL, Socket Security, Security
+          # Scan, Node audit, Alembic, frontend "Build Hub frontend"/"Build
+          # Website" - correctly did not).
+          #
           # Revert to fully-strict everywhere by setting this to "$^"
           # (matches nothing).
-          ADVISORY_CHECK_NAME_REGEX: '^(Determine Version and Tags|Detect Changed Modules|Build( .+)? \(linux/(amd64|arm64)\)( \[PR\])?|Build & Scan \(PR\)|Merge( .+)? Manifest|Trivy Image Scan \(gated\))$'
+          ADVISORY_CHECK_NAME_REGEX: '^(Build .+ Container / )?(Determine Version and Tags|Detect Changed Modules|Build( .+)? \((linux/(amd64|arm64)|\$\{\{ matrix\.platform \}\})\)( \[PR\])?|Build & Scan \(PR\)|Merge( .+)? Manifest|Trivy Image Scan \(gated\))$'
         run: |
           set -euo pipefail
 
