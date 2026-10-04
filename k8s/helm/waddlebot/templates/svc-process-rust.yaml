@@ -300,6 +300,19 @@ spec:
         # roots, which never includes this chart's self-signed/internal CA.
         {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
         {{- end }}
+        # feature/alpha-command-flag-envs -- Docker ENV baseline for data-plane feature
+        # flags, keyed `FLAG_<KEY>` (flag key uppercased, `.`/`-` -> `_`), e.g.
+        # `waddles.command-8ball` -> `FLAG_WADDLES_COMMAND_8BALL`. waddle_sdk's
+        # feature_enabled() reads this as the baseline and PostHog overrides it when
+        # connected -- lets alpha run command bundles with posthog.enabled=false. NOT
+        # usable for license-gated flags (Enterprise/Professional entitlements) -- those
+        # resolve against license.penguintech.io only, no env override, by design.
+        {{- if .Values.pipeline.rustDataPlane.svcProcess.extraEnv }}
+        {{- range $key, $value := .Values.pipeline.rustDataPlane.svcProcess.extraEnv }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
+        {{- end }}
+        {{- end }}
         livenessProbe:
           httpGet:
             path: /health
