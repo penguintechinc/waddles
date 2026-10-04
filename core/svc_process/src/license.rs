@@ -226,6 +226,43 @@ impl FeatureGate for AllGate {
     }
 }
 
+/// A [`FeatureGate`] whose answer is fixed at construction and never
+/// touches a `LicenseClient` -- production equivalent of
+/// `test_support::FixedGate` (that one is `#[cfg(test)]`-only), mirroring
+/// `bundle_host_http::egress::StaticFlag`'s identical "no live client"
+/// shape for the `http` capability's `FeatureFlag` trait.
+///
+/// **Fix: `pii_gate`/`hub_minter` env-override mismatch (alpha 2026-10-04
+/// dead-letter incident).** `crate::resolve_pii_tokenization_enabled`'s
+/// `PII_TOKENIZATION_ENABLED=false` env override short-circuits
+/// `hub_minter` to `None` *before* the PostHog kill-switch is ever
+/// consulted, but [`PiiTokenizationGate`] alone only ever consults the
+/// kill-switch (default ENABLED) -- so with the override set, the gate
+/// stayed `true` while the minter was `None`, and
+/// `crate::spine::handle_delivered`'s fail-closed check (correctly) dead-
+/// lettered every single inbound event. [`try_start_process_loop`]/
+/// [`try_start_changelog_consumer`] now build `StaticGate(false)` instead
+/// of a live [`PiiTokenizationGate`] whenever `CliConfig::
+/// pii_tokenization_enabled_override` is `Some(false)`, so the gate and
+/// the minter agree: both reflect "disabled", and the spine forwards
+/// un-tokenized rather than dead-lettering. When the override is unset/
+/// `true`, [`PiiTokenizationGate`]'s existing live PostHog read is used
+/// unchanged -- this never force-enables past the kill-switch, only ever
+/// forces off, matching [`resolve_pii_tokenization_enabled`]'s own
+/// contract.
+///
+/// [`try_start_process_loop`]: crate::lib::try_start_process_loop
+/// [`try_start_changelog_consumer`]: crate::lib::try_start_changelog_consumer
+/// [`resolve_pii_tokenization_enabled`]: crate::resolve_pii_tokenization_enabled
+pub struct StaticGate(pub bool);
+
+impl FeatureGate for StaticGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        let value = self.0;
+        Box::pin(async move { value })
+    }
+}
+
 /// Gates the bundle `db` host capability (`crate::capabilities::
 /// StageCapabilities::handle_db`) -- a plain opt-in flag (not an inverted
 /// kill-switch like [`DISABLE_DB_BUNDLE_CONFIG_FLAG`] above): unseen/OFF
@@ -1146,6 +1183,12 @@ mod tests {
         assert!(gate.enabled().await);
         gate.set(false);
         assert!(!gate.enabled().await);
+    }
+
+    #[tokio::test]
+    async fn static_gate_returns_its_constructed_value() {
+        assert!(StaticGate(true).enabled().await);
+        assert!(!StaticGate(false).enabled().await);
     }
 
     #[test]

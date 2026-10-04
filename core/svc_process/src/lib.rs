@@ -189,6 +189,43 @@ async fn resolve_pii_tokenization_enabled(cli: &config::CliConfig) -> bool {
     }
 }
 
+/// Picks the [`license::FeatureGate`] [`try_start_process_loop`]/
+/// [`try_start_changelog_consumer`] wire into `spine::ProcessDeps::
+/// pii_gate` -- the single call both functions route through so their gate
+/// selection can never drift from each other again.
+///
+/// `env_disabled` short-circuits to [`license::StaticGate`]`(false)`,
+/// bypassing `live` (a [`license::PiiTokenizationGate`] in production)
+/// entirely -- an explicit `PII_TOKENIZATION_ENABLED=false` always wins
+/// over the PostHog kill-switch's live answer, even when that kill-switch
+/// itself reports tokenization enabled (the inverted gate's unseen/default
+/// answer -- see [`license::PiiTokenizationGate`]'s own doc). When
+/// `env_disabled` is `false`, `live` is returned unchanged -- this never
+/// force-enables past the kill-switch, only ever forces off, matching
+/// [`resolve_pii_tokenization_enabled`]'s own "only ever disables" contract.
+///
+/// **Fix: `pii_gate`/`hub_minter` mismatch (alpha 2026-10-04 dead-letter
+/// incident).** Before this function existed, [`try_start_process_loop`]
+/// and [`try_start_changelog_consumer`] each built their own
+/// [`license::PiiTokenizationGate`] directly, consulting ONLY the PostHog
+/// kill-switch -- never [`resolve_pii_tokenization_enabled`]'s env
+/// override, which is what actually decided whether `hub_minter` got
+/// built. With `PII_TOKENIZATION_ENABLED=false` set, `hub_minter` was
+/// `None` while the gate still reported `true`, and
+/// `crate::spine::handle_delivered`'s fail-closed check (correctly) dead-
+/// lettered every inbound event, with no bundle ever reached. Both call
+/// sites now route their gate selection through this one function instead.
+fn resolve_pii_gate(
+    env_disabled: bool,
+    live: Arc<dyn license::FeatureGate>,
+) -> Arc<dyn license::FeatureGate> {
+    if env_disabled {
+        Arc::new(license::StaticGate(false))
+    } else {
+        live
+    }
+}
+
 /// Runs the service: loads config, bootstraps telemetry, builds the
 /// control-plane + metrics routers, starts the host-API mTLS listener and
 /// the process-stage drain loop (see [`try_start_host_api`]/
@@ -303,6 +340,26 @@ where
     // PII_TOKENIZATION_ENABLED env override evaluated before the PostHog
     // kill-switch.
     let pii_tokenization_enabled = resolve_pii_tokenization_enabled(&config.cli).await;
+    // Over-log the resolved state + source (never the flag/override VALUE
+    // alone, which gives no indication of why it resolved that way) --
+    // visibility fix for the alpha 2026-10-04 dead-letter incident, where
+    // this crate's OTHER tokenization gate (`crate::license::
+    // PiiTokenizationGate`, built separately in `try_start_process_loop`/
+    // `try_start_changelog_consumer`) silently disagreed with this one. No
+    // secrets/PII in this line -- just booleans and a source label. Field
+    // name deliberately avoids the substring "token" (unlike the local
+    // variable/doc prose) -- `penguin_logging::sanitize`'s key-pattern
+    // redaction matches on it and would otherwise print `[REDACTED]` for
+    // this boolean, defeating the entire point of this log line.
+    tracing::info!(
+        pii_inbound_mode_enabled = pii_tokenization_enabled,
+        source = if config.cli.pii_tokenization_enabled_override == Some(false) {
+            "env-override(PII_TOKENIZATION_ENABLED=false)"
+        } else {
+            "posthog-kill-switch-or-default"
+        },
+        "resolved inbound PII tokenization state"
+    );
     let hub_minter: Option<Arc<dyn pii_tokenize::IdentityMinter>> =
         build_hub_client(&config.cli, pii_tokenization_enabled)
             .await?
@@ -682,9 +739,16 @@ fn try_start_process_loop(
     ));
     // Opt-out kill-switch for the inbound PII-tokenization pre-dispatch
     // pass (`crate::pii_tokenize`) -- default ENABLED, see
-    // `license::PiiTokenizationGate`'s own doc.
-    let pii_gate: Arc<dyn license::FeatureGate> =
-        Arc::new(license::PiiTokenizationGate::new(license_client));
+    // `license::PiiTokenizationGate`'s own doc. Routed through
+    // `resolve_pii_gate` so `PII_TOKENIZATION_ENABLED=false` keeps this
+    // gate in lockstep with `hub_minter` (`None` under the same override,
+    // resolved once in `run_with_shutdown` via
+    // `resolve_pii_tokenization_enabled`) -- see `resolve_pii_gate`'s own
+    // doc for the dead-letter incident this fixes.
+    let pii_gate = resolve_pii_gate(
+        config.cli.pii_tokenization_enabled_override == Some(false),
+        Arc::new(license::PiiTokenizationGate::new(license_client)),
+    );
 
     // The `http` bundle capability's shared egress guard (`crate::
     // capabilities::StageCapabilities::egress`) -- one per process, built
@@ -1080,6 +1144,15 @@ fn try_start_changelog_consumer(
     // fail-open contract, so silently bailing out here on a second,
     // independent build attempt would contradict the very decision that
     // routed execution to this function in the first place.
+    // `resolve_pii_gate` forces `pii_gate` to `StaticGate(false)` in BOTH
+    // match arms below whenever the operator's env override is set,
+    // regardless of whether `license::build_license_client` itself
+    // succeeds -- it must stay in lockstep with `hub_minter` (`None` under
+    // the same override, resolved once in `run_with_shutdown` via
+    // `resolve_pii_tokenization_enabled`, independently of this function's
+    // own license client build). See `resolve_pii_gate`'s own doc for the
+    // dead-letter incident this fixes.
+    let pii_tokenization_env_disabled = config.cli.pii_tokenization_enabled_override == Some(false);
     let (gate, bundle_egress_flag, pii_gate): (
         Arc<dyn license::FeatureGate>,
         Arc<dyn bundle_host_http::egress::FeatureFlag>,
@@ -1097,7 +1170,10 @@ fn try_start_changelog_consumer(
             bundle_host_http::egress::boxed(license::BundleEgressFlag::new(Arc::clone(
                 &license_client,
             ))),
-            Arc::new(license::PiiTokenizationGate::new(license_client)),
+            resolve_pii_gate(
+                pii_tokenization_env_disabled,
+                Arc::new(license::PiiTokenizationGate::new(license_client)),
+            ),
         ),
         Err(err) => {
             tracing::warn!(
@@ -1114,8 +1190,14 @@ fn try_start_changelog_consumer(
                 // unlike `gate`/`bundle_egress_flag` above (feature
                 // availability), an unknown kill-switch state here must
                 // still resolve to "tokenization enabled" (the safe
-                // default), which `AllGate(Vec::new())` already gives.
-                Arc::new(license::AllGate(Vec::new())),
+                // default) UNLESS the operator's env override already
+                // forced it off -- `resolve_pii_gate` applies that same
+                // override here too, so `pii_gate` agrees with
+                // `hub_minter: None` the same as the `Ok` arm above.
+                resolve_pii_gate(
+                    pii_tokenization_env_disabled,
+                    Arc::new(license::AllGate(Vec::new())),
+                ),
             )
         }
     };
@@ -2071,6 +2153,38 @@ mod tests {
         let cli = CliConfig::parse_from(["svc-process"]);
         assert_eq!(cli.pii_tokenization_enabled_override, None);
         assert!(resolve_pii_tokenization_enabled(&cli).await);
+    }
+
+    /// Regression test for the alpha 2026-10-04 dead-letter incident:
+    /// `resolve_pii_gate(true, ...)` must report `false` even when the
+    /// `live` gate passed in would itself report `true` -- i.e. the env
+    /// override wins over a kill-switch that is ON (tokenization
+    /// "enabled"), not just over a kill-switch that happens to already be
+    /// OFF. This is the exact mismatch that left `pii_gate.enabled() ==
+    /// true` while `hub_minter == None`, dead-lettering every inbound
+    /// event.
+    #[tokio::test]
+    async fn resolve_pii_gate_env_override_wins_over_a_live_gate_reporting_enabled() {
+        let live: Arc<dyn license::FeatureGate> = Arc::new(license::test_support::FixedGate(true));
+        let gate = resolve_pii_gate(true, live);
+        assert!(
+            !gate.enabled().await,
+            "PII_TOKENIZATION_ENABLED=false must force the gate OFF even though the live \
+             kill-switch gate reports tokenization enabled"
+        );
+    }
+
+    /// `env_disabled: false` (override unset/`true`) must return `live`
+    /// unchanged -- this function never force-enables past the kill-switch,
+    /// only ever forces off.
+    #[tokio::test]
+    async fn resolve_pii_gate_defers_to_live_gate_when_env_override_is_not_explicitly_false() {
+        let live: Arc<dyn license::FeatureGate> = Arc::new(license::test_support::FixedGate(true));
+        assert!(resolve_pii_gate(false, Arc::clone(&live)).enabled().await);
+
+        let live_off: Arc<dyn license::FeatureGate> =
+            Arc::new(license::test_support::FixedGate(false));
+        assert!(!resolve_pii_gate(false, live_off).enabled().await);
     }
 
     /// Kill-switch ON (`tokenization_enabled: false`) -- no `HUB_API_GRPC_
