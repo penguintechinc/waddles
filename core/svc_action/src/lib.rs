@@ -319,6 +319,29 @@ where
     // contract.
     let pii_detokenization_enabled =
         resolve_pii_detokenization_enabled(&config.cli, &license).await;
+    // Over-log the resolved state + source -- visibility fix paired with
+    // `core/svc_process`'s identical log line (`resolve_pii_tokenization_
+    // enabled`'s own doc there), added after that crate's env-override/
+    // kill-switch gate mismatch dead-lettered every inbound event on alpha
+    // (2026-10-04). svc_action does not have the symmetric bug (`with_
+    // detokenize` is only ever wired when `hub_client_conn` is `Some`, so
+    // there is no second gate to disagree with it -- see this function's
+    // own match arm below), but the same startup visibility is still
+    // owed. No secrets/PII in this line -- just booleans and a source
+    // label. Field name deliberately avoids the substring "token" (unlike
+    // the local variable/doc prose) -- `penguin_logging::sanitize`'s
+    // key-pattern redaction matches on it and would otherwise print
+    // `[REDACTED]` for this boolean, defeating the entire point of this
+    // log line (see `core/svc_process`'s identical fix).
+    tracing::info!(
+        pii_outbound_mode_enabled = pii_detokenization_enabled,
+        source = if config.cli.pii_detokenization_enabled_override == Some(false) {
+            "env-override(PII_DETOKENIZATION_ENABLED=false)"
+        } else {
+            "posthog-kill-switch-or-default"
+        },
+        "resolved outbound PII detokenization state"
+    );
     let hub_client_conn = build_hub_client(&config.cli, pii_detokenization_enabled).await?;
 
     let connections = try_start_host_api(
