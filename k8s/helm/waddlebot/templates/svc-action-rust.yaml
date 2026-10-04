@@ -97,6 +97,14 @@ spec:
             name: {{ include "waddlebot.fullname" . }}-config
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
+        # feature/alpha-localized-posthog -- POSTHOG_KEY for
+        # penguin_licensing::LicenseConfig::from_env's flag_enabled() calls
+        # (core/svc_action/src/flags.rs), auto-provisioned by
+        # templates/infrastructure/posthog/bootstrap.yaml. optional: true --
+        # safe before the bootstrap Job runs or when posthog.enabled=false.
+        - secretRef:
+            name: {{ .Values.posthog.bootstrap.secretName | default "posthog-bootstrap-secret" }}
+            optional: true
         env:
         - name: MODULE_PORT
           value: {{ .Values.pipeline.rustDataPlane.svcAction.port | quote }}
