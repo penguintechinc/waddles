@@ -1,0 +1,24 @@
+[project]
+name = "waddle-bundle-quote"
+version = "1.0.0"
+description = "`!quote` -> community quote book backed by the shared Postgres `quotes` table (!quote add/list/remove/random/<id>). Ported from core/svc_process/bundles/social_quote_process.py (strangler extraction), modeled on bundles/python/count's hand-built (not bundle_compiler-routed) structure."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3", "mypy==1.14.1", "ruff==0.11.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+
+# `waddle-sdk` ships no `py.typed` marker (a pre-existing SDK packaging gap -- see
+# bundles/python/count/pyproject.toml's own identical override for why). Silencing
+# `import-untyped` here only, so `--strict` still catches real type errors in this
+# bundle's own code.
+[[tool.mypy.overrides]]
+module = "waddle_sdk.*"
+ignore_missing_imports = true

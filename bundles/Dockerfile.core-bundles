@@ -153,6 +153,7 @@ COPY bundles/python/eightball/src bundles/python/eightball/src
 COPY bundles/python/roll/src bundles/python/roll/src
 COPY bundles/python/lurk/src bundles/python/lurk/src
 COPY bundles/python/count/src bundles/python/count/src
+COPY bundles/python/quote/src bundles/python/quote/src
 
 ENV PYTHONHASHSEED=0 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -179,6 +180,11 @@ RUN componentize-py \
         componentize -p sdk/waddle-sdk/src -p bundles/python/count/src \
         waddle_sdk._component_entry \
         -o count.wasm
+RUN componentize-py \
+        -d wit/waddle-bundle -w stage \
+        componentize -p sdk/waddle-sdk/src -p bundles/python/quote/src \
+        waddle_sdk._component_entry \
+        -o quote.wasm
 
 # ---------------------------------------------------------------------------
 # Stage 3: waddles.core.example.csping (C#) -> WASI 0.2 component
@@ -303,6 +309,7 @@ COPY bundles/python/eightball/hub-manifest.yaml /core-bundles/eightball.manifest
 COPY bundles/python/roll/hub-manifest.yaml /core-bundles/roll.manifest.yaml
 COPY bundles/python/lurk/hub-manifest.yaml /core-bundles/lurk.manifest.yaml
 COPY bundles/python/count/hub-manifest.yaml /core-bundles/count.manifest.yaml
+COPY bundles/python/quote/hub-manifest.yaml /core-bundles/quote.manifest.yaml
 COPY --from=rust-bundle-builder /repo/bundles/rust/ping/target/wasm32-wasip2/release/waddle_bundle_ping_rust.wasm /core-bundles/ping.wasm
 COPY --from=python-bundle-builder /repo/pyping.wasm /core-bundles/pyping.wasm
 COPY --from=csharp-bundle-builder /repo/bundles/csharp/csping/bin/Release/net10.0/wasi-wasm/publish/csping.wasm /core-bundles/csping.wasm
@@ -310,6 +317,7 @@ COPY --from=python-batch1-builder /repo/eightball.wasm /core-bundles/eightball.w
 COPY --from=python-batch1-builder /repo/roll.wasm /core-bundles/roll.wasm
 COPY --from=python-batch1-builder /repo/lurk.wasm /core-bundles/lurk.wasm
 COPY --from=python-batch1-builder /repo/count.wasm /core-bundles/count.wasm
+COPY --from=python-batch1-builder /repo/quote.wasm /core-bundles/quote.wasm
 
 ENV CORE_BUNDLES_DIR=/core-bundles
 

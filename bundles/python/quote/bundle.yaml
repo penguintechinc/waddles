@@ -1,0 +1,59 @@
+schema_version: 2
+app_id: waddles.core.example.quote
+name: Quote Book Bundle (Python)
+# 1.0.0: strangler extraction of core/svc_process/bundles/social_quote_process.py's
+# `!quote` command into its own componentize-py bundle -- feature/bundle-quote.
+# BUILD-ONLY / INERT: ships flag-OFF and is not yet wired into the strangler
+# cut-over (bot_process._FEATURE_MODULES still owns `quote` live traffic until
+# the activation-gate P4 work lands -- see this bundle's src/app.py docstring).
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/quote
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!quote"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!quote"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# `quotes` (config/postgres/migrations/015_add_quote_tables.sql) is a shared
+# Postgres table, also read/written by hub-api -- this bundle never moves it
+# to `kv`. See `permissions` below for the `db` capability grant.
+data:
+  tables: ["quotes"]
+limits:
+  timeout_ms: 3000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - storage.tables
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

@@ -142,3 +142,20 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  # feature/bundle-quote: strangler extraction of core/svc_process/bundles/
+  # social_quote_process.py's `!quote` command. BUILD-ONLY / INERT -- gated behind
+  # `waddles.command-quote` (default OFF, same flag-only-safety-net pattern as every other
+  # bundle in this batch, per this catalog's own comment above: activating here only installs
+  # the bundle, it does not make it respond). bot_process._FEATURE_MODULES still owns live
+  # `quote` traffic until the activation-gate P4 strangler cut-over lands -- see
+  # bundles/python/quote/src/app.py's own module docstring. First Python core bundle to
+  # declare `storage.tables` (core/bundle_host_db/src/authorize.rs::DB_PERMISSION_ID) --
+  # reads/writes the shared Postgres `quotes` table, never `kv`.
+  - app_id: waddles.core.example.quote
+    version: "1.0.0"
+    language: python
+    manifest_path: quote.manifest.yaml
+    artifact_path: quote.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
