@@ -17,6 +17,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  no-stubs-gate:
+    name: No stubs / no silent fallbacks (check-no-stubs)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      # Pinned exact version (critical-rules.md Dependency Pinning) -- not
+      # `semgrep` unpinned, not `p/ci` registry configs (no network rule
+      # fetch, local config file only -- see scripts/ci/semgrep-silent-fallback.yml).
+      - name: Install semgrep + PyYAML
+        run: pip install --disable-pip-version-check --no-cache-dir "semgrep==1.99.0" "pyyaml==6.0.3"
+
+      # gh-regression: a `flags capability not wired -- TODO(M4+)` stub
+      # returned a silent default and shipped labeled "done" -- caused a
+      # multi-hour alpha outage. This is a fast quality gate (like lint/
+      # secrets), not part of the advisory container-build set -- any
+      # finding outside .ci/stub-allowlist.yml / .ci/silent-fallback-baseline.json
+      # fails this job, which is FATAL to ci-gate (not in
+      # ADVISORY_CHECK_NAME_REGEX).
+      - name: check-no-stubs
+        run: make check-no-stubs
+
   python-unit:
     name: Python unit tests
     runs-on: ubuntu-latest

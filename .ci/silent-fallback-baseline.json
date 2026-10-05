@@ -1,0 +1,3624 @@
+{
+  "_comment": "Frozen baseline of pre-existing silent-fallback findings as of 2026-10-04 -- see gh-605. NOT individually allowlisted; check-no-stubs.sh treats any finding matching {rule_id, path, line_hash} here as known debt (non-fatal) and fails ONLY on findings outside this set. line_hash = sha256(stripped matched line text)[:16], survives line-number drift from unrelated edits above a finding.",
+  "tracking_issue": "gh-605",
+  "entries": [
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "bundles/rust/example/src/lib.rs",
+      "line": 33,
+      "line_hash": "ca372531513a93f5"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/ai_researcher_module/services/bot_detection.py",
+      "line": 504,
+      "line_hash": "1d5a542b3f87fc4a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/ai_researcher_module/services/bot_detection.py",
+      "line": 504,
+      "line_hash": "1d5a542b3f87fc4a"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/ai_researcher_module/services/build_advisor_service.py",
+      "line": 426,
+      "line_hash": "dee3ecb9340b0bf6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/ai_researcher_module/services/build_advisor_service.py",
+      "line": 426,
+      "line_hash": "dee3ecb9340b0bf6"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/ai_researcher_module/services/clip_researcher_service.py",
+      "line": 407,
+      "line_hash": "dee3ecb9340b0bf6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/ai_researcher_module/services/clip_researcher_service.py",
+      "line": 407,
+      "line_hash": "dee3ecb9340b0bf6"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/ai_researcher_module/services/event_lookup_service.py",
+      "line": 406,
+      "line_hash": "dee3ecb9340b0bf6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/ai_researcher_module/services/event_lookup_service.py",
+      "line": 406,
+      "line_hash": "dee3ecb9340b0bf6"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/ai_researcher_module/services/game_lookup_service.py",
+      "line": 554,
+      "line_hash": "dee3ecb9340b0bf6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/ai_researcher_module/services/game_lookup_service.py",
+      "line": 554,
+      "line_hash": "dee3ecb9340b0bf6"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/ai_researcher_module/services/patch_notes_service.py",
+      "line": 360,
+      "line_hash": "dee3ecb9340b0bf6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/ai_researcher_module/services/patch_notes_service.py",
+      "line": 360,
+      "line_hash": "dee3ecb9340b0bf6"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/ai_researcher_module/services/price_tracker_service.py",
+      "line": 384,
+      "line_hash": "dee3ecb9340b0bf6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/ai_researcher_module/services/price_tracker_service.py",
+      "line": 384,
+      "line_hash": "dee3ecb9340b0bf6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/ai_researcher_module/services/searxng_service.py",
+      "line": 171,
+      "line_hash": "951c7884f825c943"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/ai_researcher_module/services/summary_service.py",
+      "line": 556,
+      "line_hash": "b0334bd082a8bfcf"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/ai_researcher_module/services/summary_service.py",
+      "line": 572,
+      "line_hash": "a3cc7e7266c5d346"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/ai_researcher_module/services/tech_troubleshooter_service.py",
+      "line": 385,
+      "line_hash": "dee3ecb9340b0bf6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/ai_researcher_module/services/tech_troubleshooter_service.py",
+      "line": 385,
+      "line_hash": "dee3ecb9340b0bf6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/analytics_core_module/blueprints/platform_bp.py",
+      "line": 24,
+      "line_hash": "3f159063fc8ed0a4"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/analytics_core_module/blueprints/platform_bp.py",
+      "line": 34,
+      "line_hash": "12c1a22f60fc2867"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/analytics_core_module/blueprints/platform_bp.py",
+      "line": 44,
+      "line_hash": "22e64156658bfe45"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/analytics_core_module/blueprints/platform_bp.py",
+      "line": 57,
+      "line_hash": "ffce4cfe9d53e805"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/analytics_core_module/blueprints/platform_bp.py",
+      "line": 67,
+      "line_hash": "5b3b4bb6035751f8"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/analytics_core_module/blueprints/user_bp.py",
+      "line": 24,
+      "line_hash": "0dadbd53d1142934"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/analytics_core_module/blueprints/user_bp.py",
+      "line": 34,
+      "line_hash": "3c22027f52185c94"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/analytics_core_module/blueprints/user_bp.py",
+      "line": 44,
+      "line_hash": "3e0845c2f44b4646"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/browser_source_core_module/app.py",
+      "line": 218,
+      "line_hash": "075db0fa42e71615"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/browser_source_core_module/services/grpc_handler.py",
+      "line": 47,
+      "line_hash": "306e6722fed6425c"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_active_set/src/changelog.rs",
+      "line": 107,
+      "line_hash": "d57675ed1a159d03"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_active_set/src/query.rs",
+      "line": 54,
+      "line_hash": "5e676dc671642980"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_active_set/src/query.rs",
+      "line": 496,
+      "line_hash": "9ca8e9a861382951"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_active_set/src/session_sync.rs",
+      "line": 75,
+      "line_hash": "37324de39bfe392d"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_capability_gate/src/permission.rs",
+      "line": 822,
+      "line_hash": "9c701932172dba01"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_compiler/src/logging.rs",
+      "line": 18,
+      "line_hash": "19cf9f398fbc534d"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_compiler/src/scan/sast.rs",
+      "line": 192,
+      "line_hash": "ca4e1d8573274c46"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_compiler/src/scan/sast.rs",
+      "line": 244,
+      "line_hash": "d3a9c7220caa19a0"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_executor/src/host/connector_imports.rs",
+      "line": 138,
+      "line_hash": "f40bfa77db9282ab"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_executor/src/host/imports.rs",
+      "line": 285,
+      "line_hash": "057b1af7880888dc"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_executor/src/invoke.rs",
+      "line": 1359,
+      "line_hash": "2a011270907acdbb"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_executor/src/lib.rs",
+      "line": 212,
+      "line_hash": "084695f5ea6d7228"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_executor/src/lib.rs",
+      "line": 259,
+      "line_hash": "288c069b86984f99"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_executor/src/lib.rs",
+      "line": 322,
+      "line_hash": "eea65f6e75038157"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_host_http/src/egress.rs",
+      "line": 518,
+      "line_hash": "81dcbb9c6e44d117"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_host_http/src/egress.rs",
+      "line": 560,
+      "line_hash": "f17145bcd12d47e9"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_host_http/src/egress.rs",
+      "line": 593,
+      "line_hash": "de4ae5e33b8b2688"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_host_http/src/egress.rs",
+      "line": 746,
+      "line_hash": "a629c5aee40c5d7d"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_host_http/src/egress.rs",
+      "line": 777,
+      "line_hash": "16c23d4b433e34e1"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_host_http/src/egress.rs",
+      "line": 1920,
+      "line_hash": "b1165d476ec89635"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/bundle_host_http/src/egress.rs",
+      "line": 1929,
+      "line_hash": "53f35e3802767330"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/credential_manager_module/services/refresh_service.py",
+      "line": 86,
+      "line_hash": "ef8246a3f00d1b8c"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/egress_assertion/src/lib.rs",
+      "line": 373,
+      "line_hash": "c2efa102eea5fd38"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/egress_proxy/src/assertion.rs",
+      "line": 106,
+      "line_hash": "bd5f7c8ee6eac709"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/egress_proxy/src/config.rs",
+      "line": 64,
+      "line_hash": "6a4d1ec827d538ef"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/egress_proxy/src/metrics.rs",
+      "line": 126,
+      "line_hash": "b43dee957252989d"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/engagement_module/app.py",
+      "line": 243,
+      "line_hash": "f8889b6ccd101e75"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/engagement_module/app.py",
+      "line": 243,
+      "line_hash": "f8889b6ccd101e75"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/engagement_module/app.py",
+      "line": 331,
+      "line_hash": "527d5b13cbc60df0"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/labels_core_module/app.py",
+      "line": 431,
+      "line_hash": "3a3d96ae65cc047e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/reputation_module/services/grpc_handler.py",
+      "line": 51,
+      "line_hash": "4bb1d98bfb6de82c"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/security_core_module/services/security_service.py",
+      "line": 301,
+      "line_hash": "acb9685eaf96ef89"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/security_core_module/services/security_service.py",
+      "line": 301,
+      "line_hash": "acb9685eaf96ef89"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/security_core_module/services/warning_manager.py",
+      "line": 202,
+      "line_hash": "acb9685eaf96ef89"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/security_core_module/services/warning_manager.py",
+      "line": 202,
+      "line_hash": "acb9685eaf96ef89"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/svc_action/app.py",
+      "line": 143,
+      "line_hash": "a0d3b735d6377b62"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_action/bundles/community_announcements_action.py",
+      "line": 115,
+      "line_hash": "604e8aebe63af8c3"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/svc_action/bundles/discord_send_action.py",
+      "line": 152,
+      "line_hash": "a2111f6a7fd3a737"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/svc_action/bundles/kick_send_action.py",
+      "line": 69,
+      "line_hash": "bf001ddb0f2fd239"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_action/bundles/kick_send_action.py",
+      "line": 69,
+      "line_hash": "bf001ddb0f2fd239"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/svc_action/bundles/social_music_action.py",
+      "line": 254,
+      "line_hash": "c03f9f362c55eb37"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/svc_action/bundles/social_music_action.py",
+      "line": 489,
+      "line_hash": "c03f9f362c55eb37"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/svc_action/bundles/social_music_action.py",
+      "line": 596,
+      "line_hash": "c03f9f362c55eb37"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/svc_action/bundles/social_quote_action.py",
+      "line": 195,
+      "line_hash": "efc5577e6c2356ed"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_action/bundles/social_quote_action.py",
+      "line": 195,
+      "line_hash": "efc5577e6c2356ed"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/svc_action/bundles/youtube_send_action.py",
+      "line": 112,
+      "line_hash": "01cd45da75353d4d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_action/bundles/youtube_send_action.py",
+      "line": 112,
+      "line_hash": "01cd45da75353d4d"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/svc_action/runner.py",
+      "line": 78,
+      "line_hash": "3f3b0a916db6e0cb"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_action/runner.py",
+      "line": 78,
+      "line_hash": "3f3b0a916db6e0cb"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_action/services/kick_oauth.py",
+      "line": 82,
+      "line_hash": "9ed79adc2b23a188"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_action/services/youtube_oauth.py",
+      "line": 111,
+      "line_hash": "9ed79adc2b23a188"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/active_digests.rs",
+      "line": 57,
+      "line_hash": "166616ce73424072"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/active_digests.rs",
+      "line": 91,
+      "line_hash": "593d2089e96d51bd"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/active_digests.rs",
+      "line": 104,
+      "line_hash": "593d2089e96d51bd"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/active_digests.rs",
+      "line": 116,
+      "line_hash": "593d2089e96d51bd"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/active_digests.rs",
+      "line": 169,
+      "line_hash": "593d2089e96d51bd"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/active_digests.rs",
+      "line": 178,
+      "line_hash": "593d2089e96d51bd"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/active_digests.rs",
+      "line": 191,
+      "line_hash": "593d2089e96d51bd"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/active_digests.rs",
+      "line": 201,
+      "line_hash": "166616ce73424072"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/active_digests.rs",
+      "line": 210,
+      "line_hash": "166616ce73424072"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/active_digests.rs",
+      "line": 229,
+      "line_hash": "a46be085ca52080f"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/active_digests.rs",
+      "line": 240,
+      "line_hash": "f655793a8f8e9987"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/capabilities.rs",
+      "line": 539,
+      "line_hash": "b5c5befc415a4116"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/capabilities.rs",
+      "line": 647,
+      "line_hash": "b5c5befc415a4116"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/config.rs",
+      "line": 815,
+      "line_hash": "520f6f80e11867c6"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/dispatch.rs",
+      "line": 430,
+      "line_hash": "19a1d8034cad6178"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/dispatch.rs",
+      "line": 756,
+      "line_hash": "e859a692204ea1e9"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/dispatch.rs",
+      "line": 1840,
+      "line_hash": "03a59a80d34237f8"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/distribution.rs",
+      "line": 70,
+      "line_hash": "a468440630139236"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/distribution.rs",
+      "line": 77,
+      "line_hash": "59d05cf37d1e004d"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/host_api.rs",
+      "line": 188,
+      "line_hash": "8c9a736f0396e07c"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/host_api.rs",
+      "line": 194,
+      "line_hash": "63a723f70d081b92"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/host_api.rs",
+      "line": 201,
+      "line_hash": "8c9a736f0396e07c"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/host_api.rs",
+      "line": 215,
+      "line_hash": "8c9a736f0396e07c"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/host_api.rs",
+      "line": 668,
+      "line_hash": "134479a7e1e01cde"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/host_api.rs",
+      "line": 687,
+      "line_hash": "134479a7e1e01cde"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/host_api.rs",
+      "line": 697,
+      "line_hash": "7cb3a82aaf99f5ce"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/host_api.rs",
+      "line": 733,
+      "line_hash": "67c0c02e8f6d203f"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/host_api.rs",
+      "line": 751,
+      "line_hash": "27ac60c646b76ca1"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/host_api.rs",
+      "line": 770,
+      "line_hash": "e73f899799fdc9b2"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/host_api.rs",
+      "line": 1338,
+      "line_hash": "8ecad50c715e3046"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/wiring.rs",
+      "line": 50,
+      "line_hash": "65989ff178759670"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_action/src/wiring.rs",
+      "line": 88,
+      "line_hash": "93b71ba727f51933"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/svc_ingest/app.py",
+      "line": 694,
+      "line_hash": "a0d3b735d6377b62"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_ingest/receivers/youtube_live_poll.py",
+      "line": 157,
+      "line_hash": "98cf55453f89294e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_ingest/receivers/youtube_live_poll.py",
+      "line": 181,
+      "line_hash": "9ed79adc2b23a188"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/svc_ingest/receivers/youtube_live_poll.py",
+      "line": 404,
+      "line_hash": "7a82816b518f07f5"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/svc_ingest/receivers/youtube_live_poll.py",
+      "line": 420,
+      "line_hash": "1fe4e525cb88acad"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_ingest/src/ingest/discord_identify_budget.rs",
+      "line": 139,
+      "line_hash": "f49917f5dd5568e5"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_ingest/src/ingest/discord_identify_budget.rs",
+      "line": 140,
+      "line_hash": "a5051209dd6bc8e1"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_ingest/src/ingest/twitch_eventsub.rs",
+      "line": 467,
+      "line_hash": "a3608bc8cf2e491d"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_ingest/src/ingest/twitch_eventsub.rs",
+      "line": 599,
+      "line_hash": "f49b811f126fcac3"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_ingest/src/ingest/twitch_eventsub.rs",
+      "line": 600,
+      "line_hash": "5fb21e9be64780aa"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_ingest/src/ingest/twitch_eventsub.rs",
+      "line": 605,
+      "line_hash": "0e93f55e2e6c0e38"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_ingest/src/ingest/twitch_eventsub.rs",
+      "line": 618,
+      "line_hash": "19534e6b4be088cd"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_ingest/src/ingest/twitch_eventsub.rs",
+      "line": 627,
+      "line_hash": "bf5e88b0f9b4760f"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_ingest/src/ingest/twitch_eventsub.rs",
+      "line": 654,
+      "line_hash": "1a54d315274e0956"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_ingest/src/normalize.rs",
+      "line": 221,
+      "line_hash": "752439cdf6bd2198"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/svc_ingest/supervisor.py",
+      "line": 119,
+      "line_hash": "8de53ba01acc3858"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/svc_presentation/services/presentation_hub.py",
+      "line": 104,
+      "line_hash": "7fb10b6bad453a25"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/svc_presentation/services/surfaces.py",
+      "line": 48,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_presentation/services/surfaces.py",
+      "line": 48,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/svc_process/app.py",
+      "line": 128,
+      "line_hash": "a0d3b735d6377b62"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/svc_process/bundles/bot_process.py",
+      "line": 341,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_process/bundles/bot_process.py",
+      "line": 341,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/svc_process/bundles/community_context_process.py",
+      "line": 101,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_process/bundles/community_context_process.py",
+      "line": 101,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_process/bundles/community_forums_process.py",
+      "line": 108,
+      "line_hash": "587a510b1cb15c37"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/svc_process/bundles/community_loyalty_process.py",
+      "line": 122,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_process/bundles/community_loyalty_process.py",
+      "line": 122,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_process/bundles/inventory_process.py",
+      "line": 249,
+      "line_hash": "451b427b7375e437"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_process/bundles/social_alias_process.py",
+      "line": 223,
+      "line_hash": "8bc8e9368f3053e2"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_process/bundles/social_alias_process.py",
+      "line": 270,
+      "line_hash": "9730034ce0e09595"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_process/bundles/social_alias_process.py",
+      "line": 288,
+      "line_hash": "b074e495bfa6f4b5"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/svc_process/bundles/social_alias_process.py",
+      "line": 471,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_process/bundles/social_alias_process.py",
+      "line": 471,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/svc_process/bundles/social_music_process.py",
+      "line": 255,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_process/bundles/social_music_process.py",
+      "line": 255,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/svc_process/bundles/social_quote_process.py",
+      "line": 91,
+      "line_hash": "a00c86b2461f6aa1"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_process/bundles/social_quote_process.py",
+      "line": 91,
+      "line_hash": "a00c86b2461f6aa1"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/svc_process/bundles/social_quote_process.py",
+      "line": 111,
+      "line_hash": "cab98f32e9cda64a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_process/bundles/social_quote_process.py",
+      "line": 111,
+      "line_hash": "cab98f32e9cda64a"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/svc_process/bundles/social_shoutout_process.py",
+      "line": 159,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_process/bundles/social_shoutout_process.py",
+      "line": 159,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/svc_process/runner.py",
+      "line": 261,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_process/runner.py",
+      "line": 261,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/svc_process/services/raid_shoutout.py",
+      "line": 242,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_process/services/raid_shoutout.py",
+      "line": 242,
+      "line_hash": "0e215b173718f20b"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/active_digests.rs",
+      "line": 51,
+      "line_hash": "166616ce73424072"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/active_digests.rs",
+      "line": 79,
+      "line_hash": "593d2089e96d51bd"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/active_digests.rs",
+      "line": 90,
+      "line_hash": "593d2089e96d51bd"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/active_digests.rs",
+      "line": 102,
+      "line_hash": "593d2089e96d51bd"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/capabilities.rs",
+      "line": 158,
+      "line_hash": "c063515a36e2102f"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/capabilities.rs",
+      "line": 167,
+      "line_hash": "3656e267a89da073"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/config.rs",
+      "line": 666,
+      "line_hash": "520f6f80e11867c6"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/host_api.rs",
+      "line": 238,
+      "line_hash": "29d35c0def748e6a"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/host_api.rs",
+      "line": 251,
+      "line_hash": "29d35c0def748e6a"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/host_api.rs",
+      "line": 263,
+      "line_hash": "29d35c0def748e6a"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/host_api.rs",
+      "line": 699,
+      "line_hash": "134479a7e1e01cde"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/host_api.rs",
+      "line": 718,
+      "line_hash": "134479a7e1e01cde"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/host_api.rs",
+      "line": 728,
+      "line_hash": "7cb3a82aaf99f5ce"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/host_api.rs",
+      "line": 761,
+      "line_hash": "67c0c02e8f6d203f"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/host_api.rs",
+      "line": 779,
+      "line_hash": "27ac60c646b76ca1"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/host_api.rs",
+      "line": 798,
+      "line_hash": "e73f899799fdc9b2"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/pii_tokenize.rs",
+      "line": 498,
+      "line_hash": "4fe5346a0086856f"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/spine.rs",
+      "line": 260,
+      "line_hash": "beb924cee8a8298e"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/spine.rs",
+      "line": 2610,
+      "line_hash": "03a59a80d34237f8"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_process/src/spine.rs",
+      "line": 2666,
+      "line_hash": "03a59a80d34237f8"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_streaming/blueprints/live_channels.py",
+      "line": 79,
+      "line_hash": "d721241805c5d945"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_streaming/blueprints/streaming.py",
+      "line": 208,
+      "line_hash": "05afd490007d55e1"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_streaming/blueprints/streaming.py",
+      "line": 230,
+      "line_hash": "f01df66a2caa7481"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_streaming/blueprints/streaming.py",
+      "line": 265,
+      "line_hash": "0e7f4f8b1a54ee74"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_streaming/blueprints/streaming.py",
+      "line": 286,
+      "line_hash": "8d64dff791fe2f71"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_streaming/blueprints/streaming.py",
+      "line": 309,
+      "line_hash": "60f09e1c201cd0ac"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_streaming/blueprints/streaming.py",
+      "line": 335,
+      "line_hash": "4106aca76266e77e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_streaming/blueprints/streaming.py",
+      "line": 363,
+      "line_hash": "a277a82a2fa3dde2"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/svc_streaming/blueprints/streaming.py",
+      "line": 377,
+      "line_hash": "1a5f8a134f7d2f4b"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_streaming/src/api/live_channels.rs",
+      "line": 66,
+      "line_hash": "a34b7f411da31567"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_streaming/src/egress/relay.rs",
+      "line": 111,
+      "line_hash": "2637669796396dd2"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_streaming/src/egress/relay.rs",
+      "line": 142,
+      "line_hash": "5d1331c24bd83d62"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_streaming/src/ingest/whip.rs",
+      "line": 245,
+      "line_hash": "a3d2c9b26daf385d"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_streaming/src/telemetry.rs",
+      "line": 65,
+      "line_hash": "a996203a023a8fdd"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_streaming/src/telemetry.rs",
+      "line": 111,
+      "line_hash": "376f928376a5c74c"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/unified_music_module/providers/soundcloud_provider.py",
+      "line": 347,
+      "line_hash": "7b58fa179f43d9a6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/unified_music_module/providers/soundcloud_provider.py",
+      "line": 347,
+      "line_hash": "7b58fa179f43d9a6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/unified_music_module/providers/soundcloud_provider.py",
+      "line": 379,
+      "line_hash": "ebe878841433a519"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/unified_music_module/providers/soundcloud_provider.py",
+      "line": 399,
+      "line_hash": "c26ef8006ac01266"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/unified_music_module/providers/soundcloud_provider.py",
+      "line": 399,
+      "line_hash": "c26ef8006ac01266"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/unified_music_module/providers/soundcloud_provider.py",
+      "line": 516,
+      "line_hash": "afda9dc5c7582e5a"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/unified_music_module/providers/soundcloud_provider.py",
+      "line": 646,
+      "line_hash": "03af7222755adf59"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/unified_music_module/providers/soundcloud_provider.py",
+      "line": 646,
+      "line_hash": "03af7222755adf59"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/unified_music_module/providers/soundcloud_provider.py",
+      "line": 669,
+      "line_hash": "c4c8367379e4374c"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/unified_music_module/providers/soundcloud_provider.py",
+      "line": 707,
+      "line_hash": "d4e370c3248b2b72"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/unified_music_module/providers/soundcloud_provider.py",
+      "line": 734,
+      "line_hash": "fe1d68f79f1a360e"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/unified_music_module/providers/spotify_provider.py",
+      "line": 361,
+      "line_hash": "2a9d8ddc4f9e31f4"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/unified_music_module/providers/spotify_provider.py",
+      "line": 361,
+      "line_hash": "2a9d8ddc4f9e31f4"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/unified_music_module/providers/spotify_provider.py",
+      "line": 449,
+      "line_hash": "c64bfc441f4a82df"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/unified_music_module/providers/spotify_provider.py",
+      "line": 449,
+      "line_hash": "c64bfc441f4a82df"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/unified_music_module/providers/spotify_provider.py",
+      "line": 471,
+      "line_hash": "7e013918d3242b09"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "core/unified_music_module/providers/spotify_provider.py",
+      "line": 630,
+      "line_hash": "14db785dab374e7f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/unified_music_module/providers/spotify_provider.py",
+      "line": 630,
+      "line_hash": "14db785dab374e7f"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/unified_music_module/providers/youtube_provider.py",
+      "line": 297,
+      "line_hash": "c320a1e3d5f7adf3"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/unified_music_module/providers/youtube_provider.py",
+      "line": 358,
+      "line_hash": "c320a1e3d5f7adf3"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/unified_music_module/services/radio_player.py",
+      "line": 412,
+      "line_hash": "205038010d6592cd"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/unified_music_module/services/radio_player.py",
+      "line": 501,
+      "line_hash": "9ec04523e07a1574"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/video_proxy_module/app.py",
+      "line": 260,
+      "line_hash": "20c9c14849aaa04e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/controllers/execution_api.py",
+      "line": 133,
+      "line_hash": "36a658ec1a0779dd"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/controllers/webhook_api.py",
+      "line": 195,
+      "line_hash": "be792a0d77f7e7e6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/controllers/workflow_api.py",
+      "line": 109,
+      "line_hash": "b670d33075de173e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/expression_engine.py",
+      "line": 499,
+      "line_hash": "9e0960148813112a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/expression_engine.py",
+      "line": 529,
+      "line_hash": "892ba5c5c5493278"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/expression_engine.py",
+      "line": 567,
+      "line_hash": "95cedcf5b34f75ba"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/expression_engine.py",
+      "line": 605,
+      "line_hash": "adb3beb15b11e5e3"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/expression_engine.py",
+      "line": 620,
+      "line_hash": "3a65bc8e8ac67af0"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/workflow_core_module/services/module_executor.py",
+      "line": 107,
+      "line_hash": "55e45862ada34e26"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/node_executor.py",
+      "line": 321,
+      "line_hash": "231603e88852c3d3"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/node_executor.py",
+      "line": 351,
+      "line_hash": "301a8eafbd5a6856"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/node_executor.py",
+      "line": 399,
+      "line_hash": "e5998f3422dd2e4b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/node_executor.py",
+      "line": 520,
+      "line_hash": "c856ed5d07fe0980"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/node_executor.py",
+      "line": 601,
+      "line_hash": "a324af5f38e2e61a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/node_executor.py",
+      "line": 699,
+      "line_hash": "5890828b1012e4db"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/node_executor.py",
+      "line": 759,
+      "line_hash": "e443b0ce57f68f87"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/node_executor.py",
+      "line": 818,
+      "line_hash": "5566853c6321dc1e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/node_executor.py",
+      "line": 871,
+      "line_hash": "0ede47a471870f7d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/node_executor.py",
+      "line": 876,
+      "line_hash": "67b064087f00a700"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/node_executor.py",
+      "line": 983,
+      "line_hash": "38ade9a035126970"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/node_executor.py",
+      "line": 1019,
+      "line_hash": "88f23283b6a4a8b2"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/node_executor.py",
+      "line": 1055,
+      "line_hash": "6a1f26e06a99497b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/node_executor.py",
+      "line": 1108,
+      "line_hash": "1c8264c2eb80b160"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "core/workflow_core_module/services/node_executor.py",
+      "line": 1158,
+      "line_hash": "367d3c5589d2eba1"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/workflow_core_module/services/schedule_service.py",
+      "line": 441,
+      "line_hash": "1d0fb55a7fa7aa1c"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "core/workflow_core_module/services/schedule_service.py",
+      "line": 566,
+      "line_hash": "1e63e2765a48db28"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/service_jwt_bp.py",
+      "line": 99,
+      "line_hash": "c779133a61fd1d63"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/access_token.py",
+      "line": 214,
+      "line_hash": "983911714e2f9f67"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/access_token.py",
+      "line": 236,
+      "line_hash": "d704cc5451688607"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/access_token.py",
+      "line": 283,
+      "line_hash": "aab2745b1ef93a6d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/access_token.py",
+      "line": 308,
+      "line_hash": "b45690d43fe2851c"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/admin.py",
+      "line": 307,
+      "line_hash": "af0acffd0284d32f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/admin.py",
+      "line": 339,
+      "line_hash": "987b0bd5a9af2785"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/admin.py",
+      "line": 370,
+      "line_hash": "46d9e166a81ac79a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/admin.py",
+      "line": 418,
+      "line_hash": "fb1ce75e441ebf11"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/admin.py",
+      "line": 446,
+      "line_hash": "2498a8181fd4689b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/admin.py",
+      "line": 476,
+      "line_hash": "1c492071f496c92c"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/admin.py",
+      "line": 513,
+      "line_hash": "db606b133a6bc8ad"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/admin.py",
+      "line": 549,
+      "line_hash": "c46ae380db2b1db3"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/admin.py",
+      "line": 582,
+      "line_hash": "8c9f34e34c2badf2"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/admin.py",
+      "line": 608,
+      "line_hash": "9fa505604916c0f7"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/admin.py",
+      "line": 628,
+      "line_hash": "07ba0fc2bc549027"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/ai_routing.py",
+      "line": 241,
+      "line_hash": "f5290b3072d48c5d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/ai_routing.py",
+      "line": 260,
+      "line_hash": "c4f60abeba021dc9"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/ai_routing.py",
+      "line": 284,
+      "line_hash": "f5290b3072d48c5d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/ai_routing.py",
+      "line": 307,
+      "line_hash": "9de3c7fed4d1eeb5"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/ai_routing.py",
+      "line": 332,
+      "line_hash": "7f41be7f83df015b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/ai_routing.py",
+      "line": 358,
+      "line_hash": "9a4c33b981571bcc"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/auth.py",
+      "line": 389,
+      "line_hash": "0564ba136766d86e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/auth.py",
+      "line": 427,
+      "line_hash": "b2616bc047155c86"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/auth.py",
+      "line": 457,
+      "line_hash": "d161a7aac72b873e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/auth.py",
+      "line": 473,
+      "line_hash": "eda3ee57ca3ef75f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/auth.py",
+      "line": 505,
+      "line_hash": "3058f45629b7eafa"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/auth.py",
+      "line": 534,
+      "line_hash": "02d57d7f33155a93"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/auth.py",
+      "line": 581,
+      "line_hash": "6ad0b4ef7b5e17dd"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/auth.py",
+      "line": 645,
+      "line_hash": "126b6800ddbf32b4"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/auth.py",
+      "line": 664,
+      "line_hash": "7b5ea6d841389ee9"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/auth.py",
+      "line": 693,
+      "line_hash": "b45207eb3ed94bce"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/auth.py",
+      "line": 726,
+      "line_hash": "e05923e44e67dd29"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/auth.py",
+      "line": 759,
+      "line_hash": "2b815b953fd6d19d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/auth.py",
+      "line": 772,
+      "line_hash": "fa9a5b279847d8f0"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/auth.py",
+      "line": 797,
+      "line_hash": "d49354f10b3ba95e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/auth.py",
+      "line": 816,
+      "line_hash": "91c312f6ae5dc7ec"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/auth.py",
+      "line": 848,
+      "line_hash": "9673120bd82b4189"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 348,
+      "line_hash": "ed5d04ad42505990"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 400,
+      "line_hash": "295f4c953510f86b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 603,
+      "line_hash": "e65cd1ca50073927"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 639,
+      "line_hash": "e252060e15ca9506"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 654,
+      "line_hash": "d8d54d124b019088"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 696,
+      "line_hash": "51d6fa3232f19654"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 739,
+      "line_hash": "c8ce08933c67dee8"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 763,
+      "line_hash": "80d0b584cbdf1cf9"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 933,
+      "line_hash": "3a73afd4a267c1e8"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 966,
+      "line_hash": "68014c2ce0a67edd"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 986,
+      "line_hash": "b7fc4a4243a6f413"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 1004,
+      "line_hash": "4ed19d0e00c5ad42"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 1023,
+      "line_hash": "073140c98a218b75"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 1040,
+      "line_hash": "26c947ebe44f89ed"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 1062,
+      "line_hash": "39028a6e3f2f39ed"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 1096,
+      "line_hash": "8ccdef79c7627e00"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bot.py",
+      "line": 1113,
+      "line_hash": "87a99b44b3409ed2"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bundle_activation.py",
+      "line": 111,
+      "line_hash": "16347d45696b84b6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bundle_activation.py",
+      "line": 137,
+      "line_hash": "2ed56431754d6781"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bundle_activation.py",
+      "line": 162,
+      "line_hash": "c011bc86783e2624"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bundle_admin.py",
+      "line": 98,
+      "line_hash": "d0e055ff33dbd38f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bundle_approvals.py",
+      "line": 124,
+      "line_hash": "019a76bd143f94e9"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bundle_approvals.py",
+      "line": 180,
+      "line_hash": "1a39a91eeb2092e0"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bundle_approvals.py",
+      "line": 201,
+      "line_hash": "29373bfadfb63098"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bundle_tenant_availability.py",
+      "line": 114,
+      "line_hash": "81a6b5bb22f9444a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bundle_tenant_availability.py",
+      "line": 132,
+      "line_hash": "829ba7cd263653c9"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bundle_tenant_availability.py",
+      "line": 155,
+      "line_hash": "94c651bde311b799"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bundle_versions.py",
+      "line": 122,
+      "line_hash": "da9e7b49f4fc46c4"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bundle_versions.py",
+      "line": 137,
+      "line_hash": "0aa16e5f2d89af1d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bundle_versions.py",
+      "line": 151,
+      "line_hash": "beb6b8aa3507eb0b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/bundle_versions.py",
+      "line": 217,
+      "line_hash": "124ea9e691624328"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/calls.py",
+      "line": 178,
+      "line_hash": "c8cd7939b48ac8cc"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/calls.py",
+      "line": 195,
+      "line_hash": "f5290b3072d48c5d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/calls.py",
+      "line": 209,
+      "line_hash": "f5290b3072d48c5d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/calls.py",
+      "line": 230,
+      "line_hash": "f5290b3072d48c5d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/calls.py",
+      "line": 250,
+      "line_hash": "f5290b3072d48c5d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/calls.py",
+      "line": 270,
+      "line_hash": "f5290b3072d48c5d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/calls.py",
+      "line": 290,
+      "line_hash": "f5290b3072d48c5d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/calls.py",
+      "line": 323,
+      "line_hash": "f5290b3072d48c5d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/calls.py",
+      "line": 343,
+      "line_hash": "f5290b3072d48c5d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/calls.py",
+      "line": 363,
+      "line_hash": "f5290b3072d48c5d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/calls.py",
+      "line": 396,
+      "line_hash": "f5290b3072d48c5d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/calls.py",
+      "line": 422,
+      "line_hash": "85cbcaa28a2e7dcb"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/calls.py",
+      "line": 435,
+      "line_hash": "85cbcaa28a2e7dcb"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/calls.py",
+      "line": 451,
+      "line_hash": "506b3f63e9538434"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/calls.py",
+      "line": 478,
+      "line_hash": "506b3f63e9538434"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_activity.py",
+      "line": 62,
+      "line_hash": "41002a5763dc704b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_connections.py",
+      "line": 216,
+      "line_hash": "a5f9a392c1619714"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_connections.py",
+      "line": 236,
+      "line_hash": "6ecc849f1aae208e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_connections.py",
+      "line": 323,
+      "line_hash": "0c38e38137cc1176"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_connections.py",
+      "line": 356,
+      "line_hash": "24feaee35aa48c5e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_loyalty.py",
+      "line": 135,
+      "line_hash": "aee2e740852d05c0"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_loyalty.py",
+      "line": 152,
+      "line_hash": "622cc34b86ff1a54"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_loyalty.py",
+      "line": 223,
+      "line_hash": "b2f271e1f952894d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_loyalty.py",
+      "line": 387,
+      "line_hash": "e135ef0fe781320a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_loyalty.py",
+      "line": 431,
+      "line_hash": "8e5a5cd9ee91cf9e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_loyalty.py",
+      "line": 479,
+      "line_hash": "2fa8dce52bf5c0b7"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_music_queue.py",
+      "line": 249,
+      "line_hash": "65d9f4f3c1277849"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_music_queue.py",
+      "line": 269,
+      "line_hash": "c46535ec16e63f67"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_music_queue.py",
+      "line": 298,
+      "line_hash": "6a963da8ce8aea88"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_music_queue.py",
+      "line": 336,
+      "line_hash": "7943a7d27e7c8ba6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_music_queue.py",
+      "line": 373,
+      "line_hash": "9a19c471e081c82e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_music_queue.py",
+      "line": 391,
+      "line_hash": "e244bc54884fa553"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_music_queue.py",
+      "line": 417,
+      "line_hash": "653aed256a3a5067"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_music_queue.py",
+      "line": 448,
+      "line_hash": "ce7926d38ed2c82e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_music_queue.py",
+      "line": 466,
+      "line_hash": "b4a148140f1a8b94"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_music_queue.py",
+      "line": 544,
+      "line_hash": "794fa1d108ff91ac"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_music_queue.py",
+      "line": 636,
+      "line_hash": "8b7e22528bc4f162"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_music_queue.py",
+      "line": 710,
+      "line_hash": "8aa57629acf2dea7"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_music_queue.py",
+      "line": 844,
+      "line_hash": "2306d46dc28139fc"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_music_queue.py",
+      "line": 893,
+      "line_hash": "dd0697019967ac10"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_music_queue.py",
+      "line": 948,
+      "line_hash": "130773ee8205f96f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_profile.py",
+      "line": 175,
+      "line_hash": "ea991b08cd82b5bf"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_profile.py",
+      "line": 203,
+      "line_hash": "1d3bcb337bed942b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_profile.py",
+      "line": 233,
+      "line_hash": "bce506afaf7e80ff"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_profile.py",
+      "line": 249,
+      "line_hash": "c4c3eb370123dc31"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_profile.py",
+      "line": 279,
+      "line_hash": "1586b891134c8d8a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/community_reputation.py",
+      "line": 88,
+      "line_hash": "4b749a08a3192688"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/cookie_consent.py",
+      "line": 426,
+      "line_hash": "0f682fd37d7d01e3"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/cookie_consent.py",
+      "line": 453,
+      "line_hash": "fb03090b8f56a14a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/cookie_consent.py",
+      "line": 516,
+      "line_hash": "d03f2c28f098caa3"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/cookie_consent.py",
+      "line": 577,
+      "line_hash": "d03f2c28f098caa3"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/cookie_consent.py",
+      "line": 611,
+      "line_hash": "b9626ac07ca5254f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/data_privacy.py",
+      "line": 118,
+      "line_hash": "781d2ec7826af974"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/data_privacy.py",
+      "line": 142,
+      "line_hash": "ae5a9c7edcd5d0bd"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/distribution.py",
+      "line": 158,
+      "line_hash": "4a0b2f610c741fca"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/github_sync.py",
+      "line": 76,
+      "line_hash": "dc6c3deada799527"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/github_sync.py",
+      "line": 123,
+      "line_hash": "67eff629bdb490cf"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/github_sync.py",
+      "line": 134,
+      "line_hash": "00331e720c5b1e3f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/github_sync.py",
+      "line": 179,
+      "line_hash": "1397d1951a99bd87"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/github_sync.py",
+      "line": 209,
+      "line_hash": "359908e4fd18830f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/github_sync.py",
+      "line": 216,
+      "line_hash": "d6ada5ab37a1fc15"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/github_sync.py",
+      "line": 239,
+      "line_hash": "776174fd2c3d6d23"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/github_sync.py",
+      "line": 284,
+      "line_hash": "776174fd2c3d6d23"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/github_sync.py",
+      "line": 299,
+      "line_hash": "7bf758bef3e3fcbf"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/guild_pairing.py",
+      "line": 158,
+      "line_hash": "f143cd89003a001e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/guild_pairing.py",
+      "line": 199,
+      "line_hash": "f98d6e1e5750e3a6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/guild_pairing.py",
+      "line": 250,
+      "line_hash": "c1f17fc0b6ebdebc"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/guild_pairing.py",
+      "line": 276,
+      "line_hash": "85b53ed5cfe05e49"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/guild_pairing.py",
+      "line": 302,
+      "line_hash": "f1a095322a4e96af"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/identity.py",
+      "line": 153,
+      "line_hash": "506921bfdca486de"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/identity.py",
+      "line": 169,
+      "line_hash": "3d0dda64607126d0"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/identity.py",
+      "line": 193,
+      "line_hash": "e036b6dc7c69bc91"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/identity.py",
+      "line": 213,
+      "line_hash": "7505fbffa7fd0944"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/ingest_sources.py",
+      "line": 214,
+      "line_hash": "7751af4213ff8e41"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/ingest_sources.py",
+      "line": 250,
+      "line_hash": "6ede39e09e9bda88"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/ingest_sources.py",
+      "line": 275,
+      "line_hash": "7c512bc2331c3d83"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/ingest_sources.py",
+      "line": 296,
+      "line_hash": "f17bf5b34b235e55"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/join_request.py",
+      "line": 160,
+      "line_hash": "f45d1d0f318dfcae"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/join_request.py",
+      "line": 215,
+      "line_hash": "dd8e3592c2229031"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/join_request.py",
+      "line": 265,
+      "line_hash": "2b86a57ac211e540"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/join_request.py",
+      "line": 289,
+      "line_hash": "541bed3292e9562c"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/live_status.py",
+      "line": 128,
+      "line_hash": "0e065eede63ac41d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/live_status.py",
+      "line": 169,
+      "line_hash": "0a6af80b43ade760"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_admin_review.py",
+      "line": 69,
+      "line_hash": "41002a5763dc704b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_admin_review.py",
+      "line": 99,
+      "line_hash": "4b6c1430779937ce"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_admin_review.py",
+      "line": 116,
+      "line_hash": "432e3df5e9964b1a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_admin_review.py",
+      "line": 153,
+      "line_hash": "2857a0345390d336"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_admin_review.py",
+      "line": 170,
+      "line_hash": "1154506c0f7cc5d3"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_admin_review.py",
+      "line": 228,
+      "line_hash": "535ec512138ed5ba"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_admin_review.py",
+      "line": 243,
+      "line_hash": "e43f39dbe9cea74f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_admin_review.py",
+      "line": 264,
+      "line_hash": "281cf8c1fb1a648c"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_admin_review.py",
+      "line": 285,
+      "line_hash": "82513224872e4252"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_admin_review.py",
+      "line": 301,
+      "line_hash": "c674d614c0ef98c9"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_admin_review.py",
+      "line": 329,
+      "line_hash": "25761e2f323afe3d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_billing.py",
+      "line": 144,
+      "line_hash": "43ed22dbcbf2686c"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_billing.py",
+      "line": 220,
+      "line_hash": "e91fc8619d373d76"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_billing.py",
+      "line": 276,
+      "line_hash": "bf89b081328969ea"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_billing.py",
+      "line": 318,
+      "line_hash": "41002a5763dc704b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_billing.py",
+      "line": 348,
+      "line_hash": "0b6e52a294a84735"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_billing.py",
+      "line": 380,
+      "line_hash": "c9a64540d4408a2e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_billing.py",
+      "line": 395,
+      "line_hash": "c42eba19214a853c"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_billing.py",
+      "line": 419,
+      "line_hash": "79cc3eed6940b8be"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_billing.py",
+      "line": 449,
+      "line_hash": "627810b9b2ed7236"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_billing.py",
+      "line": 502,
+      "line_hash": "1f1ef9c1669c39b4"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_billing.py",
+      "line": 524,
+      "line_hash": "eda2d31f634029ce"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_billing.py",
+      "line": 549,
+      "line_hash": "ebbf3123875cf98b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_billing.py",
+      "line": 585,
+      "line_hash": "7d2081103e68dd08"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_billing.py",
+      "line": 628,
+      "line_hash": "9150533271aff8ab"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_billing.py",
+      "line": 656,
+      "line_hash": "9024fa4f805489b0"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_billing.py",
+      "line": 676,
+      "line_hash": "4489aac80abdc9d8"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_catalog.py",
+      "line": 50,
+      "line_hash": "ed5d04ad42505990"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "hub_api/blueprints/v1/marketplace_catalog.py",
+      "line": 60,
+      "line_hash": "df32aeca1741adad"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_catalog.py",
+      "line": 60,
+      "line_hash": "df32aeca1741adad"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_lifecycle.py",
+      "line": 416,
+      "line_hash": "a5e4ad33d15c047b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_lifecycle.py",
+      "line": 430,
+      "line_hash": "4909348d5005e6fa"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_lifecycle.py",
+      "line": 455,
+      "line_hash": "81a6b5bb22f9444a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_lifecycle.py",
+      "line": 486,
+      "line_hash": "dc51dd86f29a2f90"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_lifecycle.py",
+      "line": 509,
+      "line_hash": "922b6e6d9bc1536f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_lifecycle.py",
+      "line": 535,
+      "line_hash": "16347d45696b84b6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_lifecycle.py",
+      "line": 572,
+      "line_hash": "0da0d722707c5d94"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_lifecycle.py",
+      "line": 599,
+      "line_hash": "341b7042d578548e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_lifecycle.py",
+      "line": 628,
+      "line_hash": "16347d45696b84b6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_modules.py",
+      "line": 70,
+      "line_hash": "ed5d04ad42505990"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_modules.py",
+      "line": 98,
+      "line_hash": "5d856478513ed4a5"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_modules.py",
+      "line": 122,
+      "line_hash": "a4c333c84e99148f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_modules.py",
+      "line": 143,
+      "line_hash": "1c8bf39ee3b9b9fe"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_modules.py",
+      "line": 160,
+      "line_hash": "831e5acad4cf7034"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_vendor.py",
+      "line": 61,
+      "line_hash": "41002a5763dc704b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_vendor.py",
+      "line": 87,
+      "line_hash": "0c699362db0dbaf2"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_vendor.py",
+      "line": 101,
+      "line_hash": "b97b97dcabf5804f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_vendor.py",
+      "line": 118,
+      "line_hash": "d72f2413cc9983f3"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_vendor.py",
+      "line": 184,
+      "line_hash": "04dae0607364f8ea"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_vendor.py",
+      "line": 225,
+      "line_hash": "99082355ea048f37"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_vendor.py",
+      "line": 254,
+      "line_hash": "bb689653609f7882"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_vendor.py",
+      "line": 268,
+      "line_hash": "984cb4d0f9647a22"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_vendor.py",
+      "line": 297,
+      "line_hash": "73d2343234a398db"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_vendor.py",
+      "line": 338,
+      "line_hash": "8e876aa1ce76781e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_vendor.py",
+      "line": 357,
+      "line_hash": "639dc210a5583b9a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_vendor.py",
+      "line": 375,
+      "line_hash": "da9e1e7c1f2538fe"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/marketplace_webhooks.py",
+      "line": 59,
+      "line_hash": "5b9d31ec21e7b078"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/music.py",
+      "line": 185,
+      "line_hash": "04aa0fbf54b5fd8f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/music.py",
+      "line": 206,
+      "line_hash": "1e1a2652580b927c"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/music.py",
+      "line": 233,
+      "line_hash": "46c7cde85c7eed62"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/music.py",
+      "line": 250,
+      "line_hash": "21c2648d2e204f82"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/music.py",
+      "line": 272,
+      "line_hash": "c7522cbe160a19ec"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/music.py",
+      "line": 288,
+      "line_hash": "425b9ef4aa0c4e6d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/music.py",
+      "line": 315,
+      "line_hash": "8a8a5d4abcfc9693"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/music.py",
+      "line": 342,
+      "line_hash": "bf29075d49ef55a1"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/overlay.py",
+      "line": 126,
+      "line_hash": "1176cd62bbc2a71f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/overlay.py",
+      "line": 149,
+      "line_hash": "0ceb67cea38d38a3"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/overlay.py",
+      "line": 171,
+      "line_hash": "8cfba5efdb621964"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/overlay.py",
+      "line": 198,
+      "line_hash": "5e60f57479c8683c"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/passkey.py",
+      "line": 89,
+      "line_hash": "f0ca13bb48ce949a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/passkey.py",
+      "line": 106,
+      "line_hash": "50ebe1e7700823ec"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/passkey.py",
+      "line": 146,
+      "line_hash": "1a83bfce4af25ed9"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/platform.py",
+      "line": 393,
+      "line_hash": "25e56a1ca9cef469"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/platform.py",
+      "line": 433,
+      "line_hash": "27c3745cf1a69a97"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/platform.py",
+      "line": 450,
+      "line_hash": "e56478c434a8be56"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/platform.py",
+      "line": 510,
+      "line_hash": "19f118c93bdba365"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/platform.py",
+      "line": 553,
+      "line_hash": "5479768bce9f0025"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/platform.py",
+      "line": 578,
+      "line_hash": "a770afbd244b477b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/platform_config.py",
+      "line": 191,
+      "line_hash": "a70069e387f718e0"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/platform_config.py",
+      "line": 208,
+      "line_hash": "ddfbca0e26348bea"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/profile.py",
+      "line": 138,
+      "line_hash": "f743f60abec8e9af"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/profile.py",
+      "line": 158,
+      "line_hash": "faa99a6b702d3c2d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/profile.py",
+      "line": 188,
+      "line_hash": "6ddd472f1f7cb8d9"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/profile.py",
+      "line": 215,
+      "line_hash": "93ed44dc78d433c7"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/public.py",
+      "line": 371,
+      "line_hash": "8f44953bb1c87f83"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/public.py",
+      "line": 394,
+      "line_hash": "8f44953bb1c87f83"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/public.py",
+      "line": 422,
+      "line_hash": "8f44953bb1c87f83"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/public.py",
+      "line": 457,
+      "line_hash": "e219995ff52e6e68"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/public.py",
+      "line": 511,
+      "line_hash": "8f4ea9a5655c5a7a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/public.py",
+      "line": 611,
+      "line_hash": "0f49e4578bc90b7f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/public_music_queue.py",
+      "line": 138,
+      "line_hash": "a74751a3b81f9eeb"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/stream.py",
+      "line": 83,
+      "line_hash": "65eeaa453fd6ea73"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/stream.py",
+      "line": 104,
+      "line_hash": "39625bd35c8f37c9"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/stream.py",
+      "line": 121,
+      "line_hash": "182dc28fa441ef7c"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/streaming.py",
+      "line": 58,
+      "line_hash": "811e7efcc33f40f7"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/streaming.py",
+      "line": 74,
+      "line_hash": "8bc5e95c2b909e08"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/streaming.py",
+      "line": 98,
+      "line_hash": "be59f38572472a0f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/streaming.py",
+      "line": 110,
+      "line_hash": "3bd5d3d50ab0e38b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/streaming.py",
+      "line": 122,
+      "line_hash": "e11460191797b973"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/streaming.py",
+      "line": 155,
+      "line_hash": "fee5a57d9045bf82"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/streaming.py",
+      "line": 169,
+      "line_hash": "757a0f2ddae756a9"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/streaming.py",
+      "line": 187,
+      "line_hash": "4bf5ef61db735ba3"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/superadmin.py",
+      "line": 483,
+      "line_hash": "813006084579af39"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/superadmin.py",
+      "line": 519,
+      "line_hash": "bec543bbaccb4676"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/superadmin.py",
+      "line": 576,
+      "line_hash": "7b99cc6c2a31a6be"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/superadmin.py",
+      "line": 593,
+      "line_hash": "3fd5bb38ac956f28"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/superadmin.py",
+      "line": 610,
+      "line_hash": "f293de1f3cf2b61f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/superadmin.py",
+      "line": 687,
+      "line_hash": "a7198f93605122b9"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/superadmin.py",
+      "line": 740,
+      "line_hash": "535d39300b2c6e38"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/superadmin.py",
+      "line": 757,
+      "line_hash": "a884527198230bb4"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/superadmin.py",
+      "line": 772,
+      "line_hash": "4f05a71493fd52ef"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/superadmin.py",
+      "line": 829,
+      "line_hash": "94816cbe81cd5e99"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/superadmin.py",
+      "line": 876,
+      "line_hash": "132610711e08ea6d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/superadmin.py",
+      "line": 890,
+      "line_hash": "c358ebc1e72e5f9e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/support.py",
+      "line": 65,
+      "line_hash": "41002a5763dc704b"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/support.py",
+      "line": 294,
+      "line_hash": "097dfcd5e2cb6a9e"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/support.py",
+      "line": 319,
+      "line_hash": "6f4a279b20253ded"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/support.py",
+      "line": 345,
+      "line_hash": "b2e60521457b027f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/support.py",
+      "line": 390,
+      "line_hash": "97a76570d5f1856f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/support.py",
+      "line": 415,
+      "line_hash": "70492951a41e90d6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/support.py",
+      "line": 435,
+      "line_hash": "205a0bbf1c47930c"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/support.py",
+      "line": 455,
+      "line_hash": "549c1472b1cb96f2"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/support.py",
+      "line": 477,
+      "line_hash": "4ff2cf8fa1395912"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/support.py",
+      "line": 532,
+      "line_hash": "787d36df5a9a39f4"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/support.py",
+      "line": 570,
+      "line_hash": "2fe83f6ab81192a1"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/support.py",
+      "line": 603,
+      "line_hash": "236a794b1d789770"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/tenant.py",
+      "line": 316,
+      "line_hash": "c47055cf2df80203"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/tenant.py",
+      "line": 334,
+      "line_hash": "60f6ca704b525f70"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/tenant.py",
+      "line": 359,
+      "line_hash": "537f0a1913b134eb"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/tenant.py",
+      "line": 379,
+      "line_hash": "48e1c355276f6cd6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/tenant.py",
+      "line": 403,
+      "line_hash": "67f69bbbaffa0614"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/tenant.py",
+      "line": 426,
+      "line_hash": "807d590a62b3b7e5"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/tenant.py",
+      "line": 448,
+      "line_hash": "badc0b944bfaad92"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/tenant.py",
+      "line": 467,
+      "line_hash": "f45313469e46dc99"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/tenant.py",
+      "line": 485,
+      "line_hash": "b9241215acccadb9"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/tenant.py",
+      "line": 504,
+      "line_hash": "8253fcca1a1410c8"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/tenant_discord_install.py",
+      "line": 127,
+      "line_hash": "b17de02eb56a289a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/tenant_discord_install.py",
+      "line": 157,
+      "line_hash": "63635aae6270d6ac"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/tenant_twitch_install.py",
+      "line": 195,
+      "line_hash": "4137c81976a802b3"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/token_billing.py",
+      "line": 264,
+      "line_hash": "2fe946328cd4073d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/token_billing.py",
+      "line": 295,
+      "line_hash": "427829a8dc7ecb5a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/token_billing.py",
+      "line": 332,
+      "line_hash": "b80cb269f79aa277"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/token_billing.py",
+      "line": 363,
+      "line_hash": "254bb3236fe181e6"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/user_management.py",
+      "line": 224,
+      "line_hash": "cd3c7b810fe7b07d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/user_management.py",
+      "line": 242,
+      "line_hash": "e8429d687de01634"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/user_management.py",
+      "line": 258,
+      "line_hash": "42d361265854bd36"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/user_management.py",
+      "line": 274,
+      "line_hash": "041faba202170554"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/user_management.py",
+      "line": 292,
+      "line_hash": "9ec59f742f92deb8"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/user_management.py",
+      "line": 318,
+      "line_hash": "a115cb9695ecbd81"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/user_management.py",
+      "line": 341,
+      "line_hash": "3b3be75cfb6e8cea"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/user_management.py",
+      "line": 361,
+      "line_hash": "87142bce734297fe"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/user_management.py",
+      "line": 386,
+      "line_hash": "212b1a1339c55bf4"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/workflow.py",
+      "line": 106,
+      "line_hash": "ed5d04ad42505990"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/workflow.py",
+      "line": 120,
+      "line_hash": "69c6591e0048faeb"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/workflow.py",
+      "line": 215,
+      "line_hash": "9f5ee3bc774179b4"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/workflow.py",
+      "line": 229,
+      "line_hash": "6ae0739c49b4a81a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/workflow.py",
+      "line": 257,
+      "line_hash": "6ae0739c49b4a81a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/workflow.py",
+      "line": 285,
+      "line_hash": "6ae0739c49b4a81a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/workflow.py",
+      "line": 346,
+      "line_hash": "6ae0739c49b4a81a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/workflow.py",
+      "line": 383,
+      "line_hash": "6ae0739c49b4a81a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/workflow.py",
+      "line": 412,
+      "line_hash": "6ae0739c49b4a81a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/workflow.py",
+      "line": 446,
+      "line_hash": "6ae0739c49b4a81a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/workflow.py",
+      "line": 471,
+      "line_hash": "6ae0739c49b4a81a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/workflow.py",
+      "line": 499,
+      "line_hash": "6ae0739c49b4a81a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/workflow.py",
+      "line": 521,
+      "line_hash": "6ae0739c49b4a81a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/workflow.py",
+      "line": 560,
+      "line_hash": "6ae0739c49b4a81a"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/blueprints/v1/workstream_usage.py",
+      "line": 114,
+      "line_hash": "651954f2a50774d1"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/analytics_proxy.py",
+      "line": 114,
+      "line_hash": "3f85b5494e4f0f00"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "hub_api/services/bundle_active_set_watermark_job.py",
+      "line": 247,
+      "line_hash": "64c1d07bd448857c"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "hub_api/services/bundle_active_set_watermark_job.py",
+      "line": 267,
+      "line_hash": "d89f5a8fe2cc5305"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "hub_api/services/bundle_audit.py",
+      "line": 40,
+      "line_hash": "7fceb81f33fc18c3"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/bundle_version_service.py",
+      "line": 143,
+      "line_hash": "24ab6cdd070b4ff0"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/calls_proxy.py",
+      "line": 89,
+      "line_hash": "b0208ca08b409b06"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/community_announcements.py",
+      "line": 382,
+      "line_hash": "cfbf05a5c676ab33"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/community_engagement_proxy.py",
+      "line": 38,
+      "line_hash": "95347ef4fa0e0c1d"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "hub_api/services/community_music_queue_service.py",
+      "line": 1031,
+      "line_hash": "448aa8b9b9e74d8f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/community_music_queue_service.py",
+      "line": 1031,
+      "line_hash": "448aa8b9b9e74d8f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/community_profile_service.py",
+      "line": 45,
+      "line_hash": "6466095e65475dce"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/community_raffle.py",
+      "line": 179,
+      "line_hash": "1bcc84c9941cf9c8"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "hub_api/services/community_relay.py",
+      "line": 135,
+      "line_hash": "359b68d007bbd5e8"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "hub_api/services/cookie_consent_service.py",
+      "line": 330,
+      "line_hash": "63b5377d9a51d2c4"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "hub_api/services/current_user.py",
+      "line": 55,
+      "line_hash": "403690c5d1f9e218"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/current_user.py",
+      "line": 55,
+      "line_hash": "403690c5d1f9e218"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "hub_api/services/data_privacy_service.py",
+      "line": 437,
+      "line_hash": "a4987afa8cc12232"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/event_calendar_proxy.py",
+      "line": 123,
+      "line_hash": "3d78e09561c756bf"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "hub_api/services/marketplace_lifecycle_service.py",
+      "line": 106,
+      "line_hash": "5dba7c31f583c725"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/marketplace_lifecycle_service.py",
+      "line": 116,
+      "line_hash": "326ba79cd81eaf2b"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "hub_api/services/music_providers/spotify.py",
+      "line": 59,
+      "line_hash": "0f2ae277cbd6ce4f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/music_providers/spotify.py",
+      "line": 59,
+      "line_hash": "0f2ae277cbd6ce4f"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "hub_api/services/music_providers/youtube.py",
+      "line": 217,
+      "line_hash": "0f2ae277cbd6ce4f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/music_providers/youtube.py",
+      "line": 217,
+      "line_hash": "0f2ae277cbd6ce4f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/music_providers/youtube.py",
+      "line": 388,
+      "line_hash": "9ed79adc2b23a188"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/music_providers/youtube.py",
+      "line": 625,
+      "line_hash": "98cf55453f89294e"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "hub_api/services/music_status_service.py",
+      "line": 134,
+      "line_hash": "0f2ae277cbd6ce4f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/music_status_service.py",
+      "line": 134,
+      "line_hash": "0f2ae277cbd6ce4f"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/music_status_service.py",
+      "line": 155,
+      "line_hash": "7762596dbd7fedcf"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/music_status_service.py",
+      "line": 227,
+      "line_hash": "08f183c0b44a0a24"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/music_status_service.py",
+      "line": 241,
+      "line_hash": "c6588671fe5a1d74"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/music_status_service.py",
+      "line": 251,
+      "line_hash": "ee510d207b34efad"
+    },
+    {
+      "rule_id": "python-capability-silent-denial",
+      "path": "hub_api/services/oauth_providers.py",
+      "line": 472,
+      "line_hash": "2f66ad9ac0926a55"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/oauth_providers.py",
+      "line": 472,
+      "line_hash": "2f66ad9ac0926a55"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/platform_config_service.py",
+      "line": 144,
+      "line_hash": "d9d8b4503c25e049"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/rate_limiting.py",
+      "line": 112,
+      "line_hash": "75112ba3026491dc"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/stripe_service.py",
+      "line": 76,
+      "line_hash": "2c6cad9b4ad5297a"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "hub_api/services/url_guard.py",
+      "line": 92,
+      "line_hash": "7f9184fad66d2732"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/url_guard.py",
+      "line": 97,
+      "line_hash": "e1a88aa16d3fb233"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "hub_api/services/url_guard.py",
+      "line": 108,
+      "line_hash": "b722e1bc2f0cfde6"
+    },
+    {
+      "rule_id": "python-bare-except-pass",
+      "path": "sdk/waddle-sdk/src/waddle_sdk/_component_entry.py",
+      "line": 84,
+      "line_hash": "1082a7b7855e957d"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "sdk/waddle-sdk/src/waddle_sdk/flask_core/feature_flags.py",
+      "line": 42,
+      "line_hash": "52cf4dda7e93d542"
+    }
+  ]
+}
