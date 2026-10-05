@@ -75,7 +75,7 @@ def upgrade() -> None:
         "COMMENT ON COLUMN community_role_sync_bindings.community_role IS "
         "'Target hub-platform community_members.role when sync_scope=community_role "
         "(Discord -> platform direction). NULL for subscriber_tier/moderator bindings "
-        "(Twitch -> Discord direction). Never community-owner -- see this migration's "
+        "(Twitch -> Discord direction). Never community-owner -- see this migration''s "
         "own docstring on owner-protection.'"
     )
 
