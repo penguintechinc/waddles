@@ -61,6 +61,9 @@ class GuildPairing:
     direction: str
     sync_enabled: bool
     role_name_prefix: str
+    #: migration 0039_event_sync_enabled -- independent opt-in from `sync_enabled`
+    #: (role-sync); gates `event_discord_sync_service.py`'s push engine.
+    event_sync_enabled: bool
     created_by_user_id: int | None
     created_at: str | None
     updated_at: str | None
@@ -142,6 +145,7 @@ def _pairing_from_row(row: Any) -> GuildPairing:
         direction=row.direction,
         sync_enabled=bool(row.sync_enabled),
         role_name_prefix=row.role_name_prefix,
+        event_sync_enabled=bool(getattr(row, "event_sync_enabled", False)),
         created_by_user_id=row.created_by_user_id,
         created_at=_iso(row.created_at),
         updated_at=_iso(row.updated_at),
@@ -173,6 +177,21 @@ def list_pairings(dal: Any, community_id: int) -> list[GuildPairing]:
     return [_pairing_from_row(row) for row in rows]
 
 
+def list_event_sync_enabled_pairings(dal: Any, community_id: int) -> list[GuildPairing]:
+    """Every `guild_tenant_pairings` row for `community_id` with `event_sync_enabled=True`.
+
+    The multi-guild fan-out seam `event_discord_sync_service.py` uses --
+    a community paired with N guilds pushes to every one of them that
+    opted in, independent of those guilds' `sync_enabled` (role-sync) state.
+    """
+    _ensure_tables(dal)
+    t = dal.guild_tenant_pairings
+    rows = dal((t.community_id == community_id) & (t.event_sync_enabled == True)).select(  # noqa: E712
+        orderby=t.id
+    )
+    return [_pairing_from_row(row) for row in rows]
+
+
 def get_pairing(dal: Any, community_id: int, pairing_id: int) -> GuildPairing | None:
     """Return one pairing scoped to `community_id`, or `None` if absent/not owned by it."""
     _ensure_tables(dal)
@@ -189,9 +208,14 @@ def create_pairing(
     direction: str,
     role_name_prefix: str,
     sync_enabled: bool = False,
+    event_sync_enabled: bool = False,
     actor_user_id: int | None,
 ) -> GuildPairing:
     """Create a new N:M guild<->community pairing; opt-in by default (`sync_enabled=False`).
+
+    `event_sync_enabled` is a second, independent opt-in (migration
+    0039_event_sync_enabled) -- a pairing can have role-sync on with
+    event-sync off, or vice versa, or both.
 
     Raises `conflict()` if this `(community_id, discord_guild_id)` pair
     already has a pairing -- `UNIQUE (community_id, discord_guild_id)` in
@@ -221,6 +245,7 @@ def create_pairing(
             discord_guild_id=discord_guild_id,
             direction=direction,
             sync_enabled=bool(sync_enabled),
+            event_sync_enabled=bool(event_sync_enabled),
             role_name_prefix=role_name_prefix,
             created_by_user_id=actor_user_id,
             created_at=now,
@@ -240,10 +265,14 @@ def update_pairing(
     pairing_id: int,
     *,
     sync_enabled: bool | None = None,
+    event_sync_enabled: bool | None = None,
     direction: str | None = None,
     role_name_prefix: str | None = None,
 ) -> GuildPairing:
-    """Partially update a pairing's opt-in toggle / sync direction / role-name prefix.
+    """Partially update a pairing's opt-in toggle(s) / sync direction / role-name prefix.
+
+    `event_sync_enabled` toggles independently of `sync_enabled` -- see
+    `create_pairing()`'s docstring.
 
     Raises `not_found()` if `pairing_id` doesn't exist under `community_id`.
     """
@@ -262,6 +291,8 @@ def update_pairing(
         updates: dict[str, Any] = {"updated_at": datetime.now(UTC)}
         if sync_enabled is not None:
             updates["sync_enabled"] = bool(sync_enabled)
+        if event_sync_enabled is not None:
+            updates["event_sync_enabled"] = bool(event_sync_enabled)
         if direction is not None:
             updates["direction"] = direction
         if role_name_prefix is not None:
