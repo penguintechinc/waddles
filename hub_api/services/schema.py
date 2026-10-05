@@ -2842,6 +2842,10 @@ def bind_bar_citizen_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("direction", "string", length=20, notnull=True),
         Field("sync_enabled", "boolean", notnull=True, default=False),
         Field("role_name_prefix", "string", length=50, notnull=True),
+        #: migration 0039_event_sync_enabled -- independent opt-in from the
+        #: role-sync `sync_enabled` column above; gates
+        #: `event_discord_sync_service.py`'s push engine per pairing.
+        Field("event_sync_enabled", "boolean", notnull=True, default=False),
         Field("created_by_user_id", "integer"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
@@ -2858,6 +2862,64 @@ def bind_bar_citizen_tables(dal: Any, *, migrate: bool = False) -> None:
         # Discord). See 0036's own docstring for the structural loop-prevention argument.
         Field("community_role", "string", length=20),
         Field("discord_role_id", "string", length=255, notnull=True),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+
+
+def bind_calendar_sync_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Define `calendar_events` (legacy, read/write subset) + `calendar_event_discord_syncs`.
+
+    **`calendar_events` is NOT owned by this binding** -- it's the
+    `calendar_interaction_module`'s own legacy table (`action/interactive/
+    calendar_interaction_module/services/calendar_service.py::EventInfo`
+    is the full column list; schema predates this port's numbered
+    migration set and is intentionally left alone here). This function
+    maps only the subset `event_discord_sync_service.py` actually reads/
+    writes: the full Discord-payload field set (title/description/
+    event_date/end_date/timezone/location/status/community_id) plus the
+    three legacy sync-state columns (`discord_event_id`/`sync_status`/
+    `sync_error`) `EventInfo` already documents as existing. `migrate=False`
+    in production for this half -- hub-api never alters this table's shape.
+
+    `calendar_event_discord_syncs` IS owned by this group (migration
+    0039_event_sync_enabled) -- the per-`(event_id, pairing_id)` sync-state
+    table multi-guild push needs (`calendar_events.discord_event_id` is a
+    single column; one event can be live-pushed to N guilds). Idempotent
+    per-DAL-instance guard, same pattern as every other `bind_*` in this file.
+    """
+    if "calendar_event_discord_syncs" in dal.tables:
+        return
+
+    dal.define_table(
+        "calendar_events",
+        Field("community_id", "integer", notnull=True),
+        Field("title", "string", length=255, notnull=True),
+        Field("description", "text"),
+        Field("event_date", "datetime", notnull=True),
+        Field("end_date", "datetime"),
+        Field("timezone", "string", length=100),
+        Field("location", "text"),
+        Field("status", "string", length=20, notnull=True),
+        Field("discord_event_id", "string", length=255),
+        Field("sync_status", "string", length=20, notnull=True, default="pending"),
+        Field("sync_error", "text"),
+        Field("last_sync_at", "datetime"),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+
+    dal.define_table(
+        "calendar_event_discord_syncs",
+        Field("event_id", "integer", notnull=True),
+        Field("pairing_id", "integer", notnull=True),
+        Field("discord_guild_id", "string", length=255, notnull=True),
+        Field("discord_event_id", "string", length=255),
+        Field("sync_status", "string", length=20, notnull=True, default="pending"),
+        Field("sync_error", "text"),
+        Field("last_sync_at", "datetime"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
         migrate=migrate,
