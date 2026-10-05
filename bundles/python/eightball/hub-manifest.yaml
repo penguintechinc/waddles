@@ -14,7 +14,7 @@
 schema_version: 2
 app_id: waddles.core.example.eightball
 name: 8-Ball Example Bundle (Python)
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin

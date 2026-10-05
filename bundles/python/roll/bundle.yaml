@@ -2,7 +2,7 @@ schema_version: 2
 app_id: waddles.core.example.roll
 name: Dice Roll Example Bundle (Python)
 # 1.0.0 retired -- fix/bump-command-bundles-1.0.1, see this bundle's hub-manifest.yaml for why.
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -46,6 +46,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.1"
-  min_version: "1.0.1"
+  tested_with: "1.0.2"
+  min_version: "1.0.2"
   max_version: null
