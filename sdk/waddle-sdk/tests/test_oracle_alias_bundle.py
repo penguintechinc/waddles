@@ -68,6 +68,25 @@ from waddle_sdk.flask_core.bundle_runtime import (
 )
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent
 
+# RETIRED (user decision: bundles use structured `db` ops -- insert/get/
+# query/update/delete -- never a raw-SQL/DAL-style query builder; design
+# doc SS1 round-1 CRITICAL finding: "no bundle-supplied SQL, ever").
+# `wit/waddle-bundle/stage.wit`'s `db` interface no longer has an `execute`
+# op at all, and `waddle_sdk.db.AsyncDB` (this oracle's subject) is now an
+# inert compatibility placeholder (see that module's own doc) -- the
+# multi-table `db.<table>.<column> == value` query-builder fidelity this
+# file proved against the real, unmigrated `social_alias_process.py`
+# bundle has no structured-ops analog (that bundle still uses the full
+# pydal-style `flask_core.get_bundle_dal()` query builder and is not
+# itself migrated in this change -- see this task's own scope note). Oracle
+# coverage for `social_alias_process` will be re-established, against the
+# structured API, when that bundle is actually migrated in a future wave.
+pytest.skip(
+    "retired: AsyncDB's DAL/query-builder facade is retired for the structured "
+    "db capability -- see this file's module docstring and this comment",
+    allow_module_level=True,
+)
+
 SVC_PROCESS_ROOT = Path(__file__).resolve().parents[3] / "core" / "svc_process"
 
 
@@ -89,9 +108,7 @@ def _event(text: str, *, actor: str | None = "penguin") -> PlatformEvent:
 def alias_bundle(monkeypatch: pytest.MonkeyPatch):
     """Import the real `bundles.social_alias_process` with `flask_core` shimmed to this SDK."""
     if not SVC_PROCESS_ROOT.is_dir():
-        pytest.skip(
-            f"core/svc_process not found at {SVC_PROCESS_ROOT} -- requires a full checkout"
-        )
+        pytest.skip(f"core/svc_process not found at {SVC_PROCESS_ROOT} -- requires a full checkout")
 
     monkeypatch.setitem(sys.modules, "flask_core", waddle_flask_core)
     monkeypatch.setitem(sys.modules, "flask_core.bundle_runtime", waddle_bundle_runtime)

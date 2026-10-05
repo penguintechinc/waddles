@@ -175,6 +175,7 @@ mod tests {
             service_api_key: Secret::new("x"),
             envelope_binding_keys: None,
             db_reader_password: None,
+            bundle_db_password: None,
         };
         AppState::new(
             config,
@@ -209,6 +210,7 @@ mod tests {
             service_api_key: Secret::new("x"),
             envelope_binding_keys: None,
             db_reader_password: None,
+            bundle_db_password: None,
         };
         let state = AppState::new(
             config,
@@ -260,6 +262,7 @@ mod tests {
             service_api_key: Secret::new("x"),
             envelope_binding_keys: None,
             db_reader_password: None,
+            bundle_db_password: None,
         };
         let state = AppState::new(
             config,
