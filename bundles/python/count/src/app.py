@@ -15,8 +15,8 @@ here on its very next message.
 
 Scope decision -- PER-COMMUNITY, not per-caller: unlike the 1.0.2 self-
 counter (and `lurk`'s toggle), these counters are channel-wide state, so
-`kv` keys here are plain literal strings (`"count:registry"`,
-`"count:value:{name}"`) with NO manual community/actor hashing -- the WIT
+`kv` keys here are plain literal strings (`"count.registry"`,
+`"count.value.{name}"`) with NO manual community/actor hashing -- the WIT
 `kv` host capability already scopes every key server-side by
 `(tenant, community, app_id)` (`core/bundle_host_kv/src/scope.rs::KvScope`),
 so two communities running this same bundle never see each other's
@@ -57,7 +57,7 @@ is therefore reduced to a pure relay of the `text` `transform` already
 built, mirroring `pyping`'s own minimal action-stage shape.
 
 kv cost per message (noted per task request): every inbound `!`-prefixed
-message that isn't `!count` costs exactly one `kv.get("count:registry")`
+message that isn't `!count` costs exactly one `kv.get("count.registry")`
 to decide "is this one of ours" -- unavoidable, since a dynamically created
 counter name can't be declared in `bundle.yaml`'s static `command_prefix`
 filter (which, separately, `core/svc_process/src/spine.rs::
@@ -92,8 +92,8 @@ FLAG_KEY = "waddles.command-count"
 MANAGEMENT_COMMAND = "!count"
 
 #: One registry key per community: a JSON array of every live counter name.
-REGISTRY_KEY = "count:registry"
-VALUE_KEY_PREFIX = "count:value:"
+REGISTRY_KEY = "count.registry"
+VALUE_KEY_PREFIX = "count.value."
 
 #: Longest counter name accepted -- comfortably inside the host's
 #: `MAX_GUEST_KEY_LEN` (256 bytes, `core/bundle_host_kv/src/scope.rs`) once
@@ -235,7 +235,12 @@ def _validate_counter_name(name: str) -> str | None:
     -- every one of these characters is also inside the host's own
     guest-key charset allowlist (`core/bundle_host_kv/src/scope.rs::
     is_allowed_key_byte`), so a valid counter name can never itself produce
-    an invalid `kv` key once prefixed with `VALUE_KEY_PREFIX`.
+    an invalid `kv` key once prefixed with `VALUE_KEY_PREFIX`. This only
+    holds if `VALUE_KEY_PREFIX` itself stays inside that same allowlist --
+    it previously used `:` (a byte the host explicitly forbids as its own
+    namespace separator) and broke every mutation in production; see
+    `REGISTRY_KEY`/`VALUE_KEY_PREFIX` above and
+    `tests/test_app.py::test_kv_key_constants_satisfy_host_guest_key_charset`.
     """
     if not name:
         return "a counter name is required, e.g. `!count add die`"
