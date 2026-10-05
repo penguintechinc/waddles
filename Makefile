@@ -3,7 +3,8 @@
         seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
         build-superpenguin-roll-bundle test-csharp-bundle-compile \
-        verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc
+        verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
+        test-bundle-flag-on-command-e2e
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -155,6 +156,17 @@ test-csharp-bundle-compile:
 # identical sha256 for each. See scripts/verify-core-bundles-reproducible.sh for why.
 verify-core-bundles-reproducible:
 	@bash scripts/verify-core-bundles-reproducible.sh
+
+# Real-path "flag ON -> command replies, flag OFF -> no reply" regression
+# gate (core/bundle_executor/tests/flag_on_command_e2e.rs): freshly compiles
+# bundles/python/eightball to wasm, loads it into the real bundle-executor
+# wasmtime host with the real `flags` capability wired, drives it through
+# the Docker-ENV flag baseline -- no mocking at the WIT/flags/wasm boundary.
+# Already FATAL via this crate's own `cargo test` gate
+# (.github/workflows/rust-bundle-executor.yml); this target is the direct
+# local/manual entry point.
+test-bundle-flag-on-command-e2e:
+	@bash scripts/test-bundle-flag-on-command-e2e.sh
 
 # Generates the Ed25519 signing keypair for hub-api's per-service machine
 # JWTs (feature/eddsa-machine-jwt) and applies the resulting k8s Secret --
