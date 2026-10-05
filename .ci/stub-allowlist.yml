@@ -218,3 +218,10 @@
 - path: admin/hub_module/frontend/src/pages/admin/AdminWorkflows.jsx
   pattern: "TODO"
   issue: gh-606
+
+# --- gh-613: command bundle `!command timer` persists config but no host-side
+# periodic-firing mechanism exists yet (no WIT tick/schedule import) -- static
+# command CRUD is fully functional and unaffected; see module docstring. ---
+- path: bundles/python/command/src/app.py
+  pattern: "not wired yet"
+  issue: gh-613

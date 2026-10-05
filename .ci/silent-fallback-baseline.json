@@ -3619,6 +3619,22 @@
       "path": "sdk/waddle-sdk/src/waddle_sdk/flask_core/feature_flags.py",
       "line": 42,
       "line_hash": "52cf4dda7e93d542"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "sdk/waddle-sdk/src/waddle_sdk/flask_core/feature_flags.py",
+      "line": 81,
+      "line_hash": "cd2a2a22999e2218",
+      "justification": "Sanctioned graceful degradation (critical-rules.md Feature Flags & License Tiers): tier() fails open to the lowest license tier (\"free\") when the WIT flags import is unavailable (host-side tests) or stale-world (component wizened before the import existed) -- never crashes, never silently grants a higher tier. See module docstring.",
+      "status": "sanctioned-by-design"
+    },
+    {
+      "rule_id": "python-silent-except-return-default",
+      "path": "bundles/python/lurk/src/app.py",
+      "line": 286,
+      "line_hash": "e06d4a6bfe41646f",
+      "justification": "Sanctioned graceful degradation (critical-rules.md Feature Flags & License Tiers): _license_tier() fails CLOSED to \"free\" (never \"enterprise\") when the WIT flags import is unavailable or stale-world -- same defensive shape as waddle_sdk.flask_core.feature_flags.tier(). Never overridable by env var/flag per license-tier rules. See function docstring.",
+      "status": "sanctioned-by-design"
     }
   ]
 }
