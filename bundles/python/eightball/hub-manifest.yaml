@@ -2,10 +2,19 @@
 # waddles.core.example.eightball -- see bundles/python/pyping/hub-manifest.yaml's own header
 # for why this is a separate file from this bundle's `bundle.yaml` (a different consumer's
 # schema).
+#
+# 1.0.0 is permanently retired -- fix/bump-command-bundles-1.0.1. The deployed wasm was
+# compiled against an older world missing the `flags` WIT import (feature_enabled() crashes/
+# degrades at runtime), while current source compiles correctly WITH it; app_versions enforces
+# an immutable digest per (app_id, version), so re-seeding 1.0.0 with the recompiled bytes
+# would 409 as digest_conflict and the seeder's #582 resilience change treats that as a
+# non-fatal SKIP, leaving the stale wasm active. 1.0.1 is the first version built from the
+# flags-enabled source. Mirrors bundles/csharp/csping/hub-manifest.yaml's own 1.0.0/1.0.1
+# retirement comment (fix/csping-version-bump, #575).
 schema_version: 2
 app_id: waddles.core.example.eightball
 name: 8-Ball Example Bundle (Python)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
