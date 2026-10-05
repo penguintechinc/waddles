@@ -2853,6 +2853,10 @@ def bind_bar_citizen_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("pairing_id", "integer", notnull=True),
         Field("sync_scope", "string", length=20, notnull=True),
         Field("subscriber_tier", "integer"),
+        # `community_role` (migration 0036) -- Discord -> platform direction's own
+        # binding type, mutually exclusive with `subscriber_tier`/`moderator` (Twitch ->
+        # Discord). See 0036's own docstring for the structural loop-prevention argument.
+        Field("community_role", "string", length=20),
         Field("discord_role_id", "string", length=255, notnull=True),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),

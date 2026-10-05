@@ -800,6 +800,26 @@ pipeline:
       limits:
         cpu: "500m"
         memory: "512Mi"
+  # Bar Citizen role-sync reconcile worker (Unit F, hub_api/services/role_sync_service.py) --
+  # deploy-time kill switch, defaulted OFF (critical-rules.md Feature Flags: every feature
+  # flagged OFF until validated) -- see templates/role-sync-cronjob.yaml's own header comment.
+  # The engine's own FEATURE_BAR_CITIZEN_ROLE_SYNC PostHog flag is the separate per-tenant
+  # RUNTIME gate; this value controls whether the CronJob is deployed at all.
+  roleSync:
+    enabled: false
+    # Twitch's own Helix rate limits make a sub-minute cadence pointless (role_sync_service.py's
+    # own module docstring) -- every 15 minutes is the default reconcile cadence, covering both
+    # directions (twitch_to_discord + discord_to_twitch/bidirectional) in one pass.
+    schedule: "*/15 * * * *"
+    backoffLimit: 2
+    activeDeadlineSeconds: 600
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
   goRuntimeImage: "debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a"
 
   svcIngest:

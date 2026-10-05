@@ -30,17 +30,33 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from services.admin_service import VALID_MEMBER_ROLES
 from services.errors import bad_request, conflict, not_found
 from services.schema import bind_bar_citizen_tables
 
 #: `guild_tenant_pairings.direction` -- migration 0034's own CHECK constraint values.
+#: `discord_to_twitch` is the Discord -> platform direction's historical name (kept
+#: verbatim rather than renamed, see `role_sync_service.py`'s module docstring) --
+#: Discord guild role changes drive the linked user's `community_role` binding, never
+#: an actual Twitch-side write (Twitch grants no API to assign subscriber tiers).
 VALID_DIRECTIONS: tuple[str, ...] = ("discord_to_twitch", "twitch_to_discord", "bidirectional")
 
-#: `community_role_sync_bindings.sync_scope` -- migration 0034's own CHECK constraint values.
-VALID_SYNC_SCOPES: tuple[str, ...] = ("subscriber_tier", "moderator")
+#: `community_role_sync_bindings.sync_scope` -- migration 0034/0036's own CHECK
+#: constraint values. `community_role` (0036) is the Discord -> platform direction's
+#: own binding type, mutually exclusive with `subscriber_tier`/`moderator` (Twitch ->
+#: Discord) -- see migration 0036's own docstring for the structural loop-prevention
+#: argument (each binding's scope fixes its one authoritative write direction).
+VALID_SYNC_SCOPES: tuple[str, ...] = ("subscriber_tier", "moderator", "community_role")
 
 #: `community_role_sync_bindings.subscriber_tier` -- migration 0034's own CHECK constraint values.
 VALID_SUBSCRIBER_TIERS: tuple[int, ...] = (1, 2, 3)
+
+#: `community_role_sync_bindings.community_role` -- migration 0036's own CHECK constraint
+#: values, the exact same set `services/admin_service.py::update_member_role()` accepts
+#: for a human-driven role change -- imported, not duplicated, so the two never drift.
+#: `community-owner` is deliberately excluded (never assignable by sync, see
+#: `role_sync_service.py`'s owner-protection invariant).
+VALID_COMMUNITY_ROLES: tuple[str, ...] = VALID_MEMBER_ROLES
 
 _MAX_ROLE_NAME_PREFIX_LEN = 50
 _MAX_EXTERNAL_ID_LEN = 255
@@ -74,6 +90,7 @@ class RoleSyncBinding:
     pairing_id: int
     sync_scope: str
     subscriber_tier: int | None
+    community_role: str | None
     discord_role_id: str
     created_at: str | None
     updated_at: str | None
@@ -115,14 +132,26 @@ def _validate_role_name_prefix(value: str) -> str:
     return value
 
 
-def _validate_sync_scope_and_tier(sync_scope: str, subscriber_tier: int | None) -> None:
+def _validate_sync_scope_and_tier(
+    sync_scope: str, subscriber_tier: int | None, community_role: str | None
+) -> None:
     if sync_scope not in VALID_SYNC_SCOPES:
         raise bad_request(f"sync_scope must be one of {VALID_SYNC_SCOPES}")
     if sync_scope == "subscriber_tier":
         if subscriber_tier not in VALID_SUBSCRIBER_TIERS:
             raise bad_request(f"subscriber_tier must be one of {VALID_SUBSCRIBER_TIERS}")
-    elif subscriber_tier is not None:
-        raise bad_request("subscriber_tier must be omitted when sync_scope is 'moderator'")
+        if community_role is not None:
+            raise bad_request("community_role must be omitted when sync_scope is 'subscriber_tier'")
+    elif sync_scope == "moderator":
+        if subscriber_tier is not None:
+            raise bad_request("subscriber_tier must be omitted when sync_scope is 'moderator'")
+        if community_role is not None:
+            raise bad_request("community_role must be omitted when sync_scope is 'moderator'")
+    else:  # "community_role"
+        if subscriber_tier is not None:
+            raise bad_request("subscriber_tier must be omitted when sync_scope is 'community_role'")
+        if community_role not in VALID_COMMUNITY_ROLES:
+            raise bad_request(f"community_role must be one of {VALID_COMMUNITY_ROLES}")
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +183,7 @@ def _binding_from_row(row: Any) -> RoleSyncBinding:
         pairing_id=int(row.pairing_id),
         sync_scope=row.sync_scope,
         subscriber_tier=row.subscriber_tier,
+        community_role=row.community_role,
         discord_role_id=row.discord_role_id,
         created_at=_iso(row.created_at),
         updated_at=_iso(row.updated_at),
@@ -329,14 +359,21 @@ def create_binding(
     sync_scope: str,
     discord_role_id: str,
     subscriber_tier: int | None = None,
+    community_role: str | None = None,
 ) -> RoleSyncBinding:
     """Create a role-sync binding under `pairing_id` (which must belong to `community_id`).
 
-    At most one binding per subscriber tier and at most one `moderator`
-    binding per pairing -- migration 0034's own partial unique indexes
-    are the production backstop; this is the clear, typed error path.
+    At most one binding per subscriber tier, at most one `moderator`
+    binding, and at most one `community_role` binding per `discord_role_id`,
+    per pairing -- migration 0034/0036's own partial unique indexes are the
+    production backstop; this is the clear, typed error path. A
+    `discord_role_id` already bound as `subscriber_tier`/`moderator` under
+    this pairing may never also be bound as `community_role` (and vice
+    versa) -- the DB schema alone cannot express a cross-partial-index
+    UNIQUE, so this is the one place that invariant is actually enforced
+    (see migration 0036's own docstring on structural loop-prevention).
     """
-    _validate_sync_scope_and_tier(sync_scope, subscriber_tier)
+    _validate_sync_scope_and_tier(sync_scope, subscriber_tier, community_role)
     discord_role_id = _validate_discord_role_id(discord_role_id)
 
     _ensure_tables(dal)
@@ -345,9 +382,24 @@ def create_binding(
 
     b = dal.community_role_sync_bindings
     try:
+        cross_direction = dal(
+            (b.pairing_id == pairing_id) & (b.discord_role_id == discord_role_id)
+        ).select()
+        for row in cross_direction:
+            is_new_community_role = sync_scope == "community_role"
+            is_existing_community_role = row.sync_scope == "community_role"
+            if is_new_community_role != is_existing_community_role:
+                raise conflict(
+                    f"discord role {discord_role_id} is already bound as "
+                    f"'{row.sync_scope}' under pairing {pairing_id} -- a role may never "
+                    "be bound for both directions under the same pairing"
+                )
+
         query = (b.pairing_id == pairing_id) & (b.sync_scope == sync_scope)
         if sync_scope == "subscriber_tier":
             query &= b.subscriber_tier == subscriber_tier
+        elif sync_scope == "community_role":
+            query &= b.discord_role_id == discord_role_id
         existing = dal(query).select().first()
         if existing is not None:
             raise conflict(
@@ -360,6 +412,7 @@ def create_binding(
             pairing_id=pairing_id,
             sync_scope=sync_scope,
             subscriber_tier=subscriber_tier,
+            community_role=community_role,
             discord_role_id=discord_role_id,
             created_at=now,
             updated_at=now,
