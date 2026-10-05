@@ -14,6 +14,12 @@ Sources of truth (read these, not memory, if this doc and code ever disagree):
 - `hub_api/services/distribution_service.py`
 - `libs/waddle_transports/`
 
+**Chat-command grammar, sub-modules, per-community data scoping:** see
+`sdk/waddle-sdk/AUTHORING.md` — covers `waddle_sdk.command.parse_command()`'s standard
+`!<command> [sub-module] [option] <input>` grammar, `waddle_sdk.sub_modules.SubModuleGate`
+(default-OFF sub-modules), and `waddle_sdk.community_kv` (community-scoped state). Addendum,
+not a FROZEN-status change — the pipeline/entrypoint contract below is unaffected.
+
 ---
 
 ## 1. Model Overview
