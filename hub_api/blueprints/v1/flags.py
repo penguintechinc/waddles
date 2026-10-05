@@ -60,6 +60,7 @@ CLIENT_FLAG_KEYS: tuple[str, ...] = (
     "waddles.webui.tenant_bundle_catalog",
     "waddles.webui.super_communities",
     "waddles.webui.super_tenants",
+    "waddles.webui.role_sync_mapping",
 )
 
 _meter = metrics.get_meter("waddles.hub_api.flags")
