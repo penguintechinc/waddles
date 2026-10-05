@@ -1,0 +1,65 @@
+schema_version: 2
+app_id: waddles.core.example.chat
+name: Chat History Bundle (Python)
+# 1.0.0: initial port of core/svc_process/bundles/community_chat_process.py's two read-only
+# commands (chat-history, channels) into a WASM-component App Bundle -- feature/bundle-chat.
+# BUILD-ONLY / INERT: bot_process._FEATURE_MODULES still runs the original monolith module;
+# cut-over to this bundle is a separate, later change (P4 activation gate).
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/chat
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!chat-history", "!channels"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!chat-history", "!channels"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# `data.tables` names the one existing platform table this bundle reads (read-only) -- it is
+# non-empty purely to grant the `db` capability (see `permissions` note below); this bundle
+# does not own/provision `hub_chat_messages` the way PR #415's one-table-per-bundle schema
+# design covers a bundle's OWN table.
+data:
+  tables:
+    - hub_chat_messages
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+# No `storage.kv` -- this bundle holds no state of its own, read-only queries only. `db`
+# capability itself is derived from `data.tables` being non-empty
+# (hub_api/services/bundle_approval_service.py::_derive_capabilities()), not from an explicit
+# permission id here -- there is no `storage.db`/`storage.tables` entry in the live permission
+# catalog yet (docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md is
+# APPROVED-WITH-CONDITIONS design, not yet implemented).
+permissions: []
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

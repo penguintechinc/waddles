@@ -142,3 +142,16 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  # feature/bundle-chat (2026-10-05): read-only chat-history/channels port of
+  # core/svc_process/bundles/community_chat_process.py. BUILD-ONLY / INERT --
+  # bot_process._FEATURE_MODULES still runs the original monolith module; cut-over to this
+  # bundle is a separate, later change (P4 activation gate). First Python core bundle to
+  # declare `db` capability via non-empty `data.tables` (see bundle.yaml's own comment).
+  - app_id: waddles.core.example.chat
+    version: "1.0.0"
+    language: python
+    manifest_path: chat.manifest.yaml
+    artifact_path: chat.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
