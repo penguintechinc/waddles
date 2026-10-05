@@ -69,6 +69,7 @@ real build, same follow-up class as ``waddle_sdk.http``'s flagged items.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 from typing import Any
 
@@ -91,6 +92,40 @@ try:
 except ImportError:
     # Only during this SDK's own host-side unit tests, which never compile a real component.
     _entry_wiring = None
+
+# Force componentize-py to wizen EVERY ``wit_world.imports.<capability>``
+# binding at module load, not just whichever ones happen to already be
+# reached by eager code elsewhere. componentize-py's wizening snapshot only
+# attaches a host-import submodule when something imports it at Python
+# MODULE-LOAD time; every one of this SDK's capability wrappers
+# (``clock.py``, ``db.py``, ``http.py``, ``kv.py``, ``log.py``, ``relay.py``,
+# ``flask_core/feature_flags.py``, and this module's own ``context`` use)
+# instead does ``import wit_world`` lazily, INSIDE a function body, so the
+# compiled component's WIT type can correctly declare e.g.
+# ``import waddle:bundle/%flags@1.0.0;`` (confirmed via ``wasm-tools
+# component wit``) while ``wit_world.imports`` still has no ``flags``
+# attribute at runtime -- proven for ``flags`` and ``clock`` the hard way by
+# ``core/bundle_executor/tests/flag_on_command_e2e.rs`` (PR #608), which
+# freshly compiles a real bundle and exercises the real WIT boundary: every
+# command gated by ``feature_flags.feature_enabled()`` silently degraded to
+# its fail-open ``default`` because that call's own
+# ``getattr(wit_world.imports, "flags", None)`` guard (the #596 guard
+# against a stale/pre-``%flags`` world) could never see the binding, fresh
+# build or not.
+#
+# Each import is independently try/except-guarded: a narrower WIT world than
+# the full ``stage`` world in ``wit/waddle-bundle/stage.wit`` may legitimately
+# omit some of these capabilities, and this SDK's own host-side unit tests
+# import this module with no ``wit_world`` package available at all --
+# neither case may break module load. Absence after this point is exactly
+# what each wrapper's existing ``getattr(..., None)``/``hasattr`` call-site
+# guard already handles.
+for _wit_capability in ("context", "http", "kv", "db", "relay", "flags", "log", "clock"):
+    try:
+        importlib.import_module(f"wit_world.imports.{_wit_capability}")
+    except (ImportError, AttributeError):
+        pass
+del _wit_capability
 
 set_bundle_dal(AsyncDB())
 

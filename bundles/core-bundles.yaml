@@ -106,7 +106,7 @@ bundles:
   # fresh publish+activate. Mirrors bundles/csharp/csping/hub-manifest.yaml's own 1.0.0/1.0.1
   # retirement (fix/csping-version-bump, #575).
   - app_id: waddles.core.example.eightball
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     manifest_path: eightball.manifest.yaml
     artifact_path: eightball.wasm
@@ -114,7 +114,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.roll
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     manifest_path: roll.manifest.yaml
     artifact_path: roll.wasm
@@ -124,7 +124,7 @@ bundles:
   # First Python core bundles to declare the `storage.kv` permission (lurk, count) --
   # see hub_api/services/bundle_approval_service.py::KV_PERMISSION_ID.
   - app_id: waddles.core.example.lurk
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     manifest_path: lurk.manifest.yaml
     artifact_path: lurk.wasm
@@ -132,7 +132,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.count
-    version: "1.0.1"
+    version: "1.0.2"
     language: python
     manifest_path: count.manifest.yaml
     artifact_path: count.wasm
