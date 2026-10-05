@@ -1,0 +1,43 @@
+# hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
+# waddles.core.example.slots -- see bundles/python/pyping/hub-manifest.yaml's own header for why
+# this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
+schema_version: 2
+app_id: waddles.core.example.slots
+name: Slot Machine Bundle (Python)
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/slots
+language: python
+artifact: prebuilt
+execution_model: native
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!slots"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!slots"]
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+# `storage.kv` -- required for the data plane to grant `kv` at all
+# (hub_api/services/bundle_approval_service.py::KV_PERMISSION_ID).
+permissions:
+  - storage.kv
+routes_to: []
