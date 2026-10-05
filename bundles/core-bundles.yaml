@@ -156,3 +156,25 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  # `!fish` -- weighted-random, per-community fishing minigame, kv-only v1 (no `db` dependency
+  # -- see bundles/python/fish/src/app.py's own module docstring for full scope and the
+  # cross-community-leaderboard deferral). Community-scoped fun content, inspired by (not a
+  # literal port of) superpenguintv (Psychoboy)'s PenguinTwitchBot fishing feature -- see
+  # bundle.yaml's `author`/`notice` for the credit.
+  #
+  # CATALOG-ONLY ENTRY, NOT YET BUILDABLE: bundles/Dockerfile.core-bundles does not build
+  # fish.wasm/fish.manifest.yaml yet -- it is being genericized in a parallel PR
+  # (chore/genericize-core-bundles-dockerfile) so a new bundle can be added without hand-editing
+  # a per-bundle `COPY`/`componentize-py` stage every time. Until that PR lands and this entry's
+  # artifact is actually produced, the core-bundle-seeder will not find fish.wasm in a built
+  # image and this bundle cannot activate -- confirmed by building fish.wasm standalone with the
+  # same componentize-py invocation the Dockerfile uses elsewhere (see this bundle's own README
+  # "Build" section); not a defect in this catalog row.
+  - app_id: waddles.core.example.fish
+    version: "1.0.0"
+    language: python
+    manifest_path: fish.manifest.yaml
+    artifact_path: fish.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
