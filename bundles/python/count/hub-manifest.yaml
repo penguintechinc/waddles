@@ -10,10 +10,12 @@
 # non-fatal SKIP, leaving the stale wasm active. 1.0.1 is the first version built from the
 # flags-enabled source. Mirrors bundles/csharp/csping/hub-manifest.yaml's own 1.0.0/1.0.1
 # retirement comment (fix/csping-version-bump, #575).
+# 1.0.3: promoted from a trivial self-counter to dynamic, per-community named counters --
+# see this bundle's src/app.py module docstring (feature/count-dynamic-counters).
 schema_version: 2
 app_id: waddles.core.example.count
-name: Self Counter Example Bundle (Python)
-version: 1.0.2
+name: Dynamic Counter Bundle (Python)
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin

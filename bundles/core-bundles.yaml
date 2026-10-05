@@ -131,8 +131,10 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  # 1.0.3: promoted from a trivial self-counter to dynamic, per-community named counters --
+  # see bundles/python/count/src/app.py's own module docstring (feature/count-dynamic-counters).
   - app_id: waddles.core.example.count
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     manifest_path: count.manifest.yaml
     artifact_path: count.wasm
