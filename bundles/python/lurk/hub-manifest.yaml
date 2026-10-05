@@ -14,7 +14,9 @@ schema_version: 2
 app_id: waddles.core.example.lurk
 name: Lurk Toggle Example Bundle (Python)
 # 1.0.3 (feature/lurk-v1): stateful lurk/unlurk rewrite -- see bundle.yaml/src/app.py.
-version: 1.0.3
+# 1.0.4 (fix/bump-count-lurk-1.0.4): version-only bump to republish the colon-free `kv` key
+# fix (gh-631, #638) -- app_versions is immutable per (app_id, version).
+version: 1.0.4
 feature: waddles.core.example
 module: core
 provider: builtin
