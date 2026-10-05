@@ -475,7 +475,13 @@ async def test_seed_one_activates_every_configured_target_independently(
 def test_load_catalog_parses_the_real_repo_catalog() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     entries = load_catalog(repo_root / "bundles" / "core-bundles.yaml")
-    assert {e.app_id for e in entries} == {
+
+    # Subset, not exact-match (fix/seed-catalog-subset-assertion): core-bundles.yaml grows
+    # continuously -- the `command` bundle (gh-613-adjacent) and the ~12-bundle bot_process
+    # migration queued behind it both add entries here. An exact `==` against a frozen set
+    # would red this test on every single addition. This proves every KNOWN core bundle is
+    # still present (and the catalog still parses) without forbidding new ones.
+    known_app_ids = {
         "waddles.core.example.ping",
         "waddles.core.example.pyping",
         "waddles.core.example.csping",
@@ -486,6 +492,10 @@ def test_load_catalog_parses_the_real_repo_catalog() -> None:
         "waddles.core.example.lurk",
         "waddles.core.example.count",
     }
+    catalog_app_ids = {e.app_id for e in entries}
+    missing = known_app_ids - catalog_app_ids
+    assert not missing, f"expected core bundles missing from bundles/core-bundles.yaml: {missing}"
+
     for entry in entries:
         # ActivationTarget(tenant_slug="global") defaults community_id=None -- every real
         # catalog entry activates tenant-wide, never scoped to one community (seeder.
