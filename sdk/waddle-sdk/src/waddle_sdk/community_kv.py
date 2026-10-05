@@ -17,15 +17,23 @@ from waddle_sdk import kv
 
 
 def _scoped_key(community_id: str, key: str) -> str:
-    """Build the `c:<community_id>:<key>` prefix -- fails loud on a missing community_id.
+    """Build the `c.<community_id>.<key>` prefix -- fails loud on a missing community_id.
 
     Raises `ValueError` rather than silently falling back to a global/
     unscoped key -- a bundle call site with no `community_id` yet is a bug
     to surface immediately, never a reason to leak state tenant-wide.
+
+    Uses `.` as the separator, never `:` (gh-631): the whole string this
+    builds is passed to `waddle_sdk.kv` as a single guest-supplied key, and
+    `:` is the real `kv` host capability's own reserved namespace separator
+    (`core/bundle_host_kv/src/scope.rs::is_allowed_key_byte`) -- the host
+    has no notion of a "community_kv prefix", so a `:` here would be
+    rejected exactly like any other guest key. `waddle_sdk.kv.validate_key`
+    (called by every function below) enforces this on the final key.
     """
     if not community_id:
         raise ValueError("community_kv requires a non-empty community_id")
-    return f"c:{community_id}:{key}"
+    return f"c.{community_id}.{key}"
 
 
 async def get(community_id: str, key: str) -> bytes | None:

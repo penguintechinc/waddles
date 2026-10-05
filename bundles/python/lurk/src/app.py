@@ -216,19 +216,28 @@ def _state_key(community: str, actor: str | None) -> str:
     raw username (tokenization pipeline #429 not yet merged), so it alone is
     SHA-256 hashed into a non-reversible pseudonym -- the stored key never
     contains PII, today or after #429.
+
+    Uses `.` as the key separator, never `:` (gh-631): the real `kv` host
+    capability (`core/bundle_host_kv/src/scope.rs::is_allowed_key_byte`)
+    reserves `:` as its own namespace separator and rejects any guest key
+    containing one. This bundle's original `lurk:state:{community}:
+    {pseudonym}` passed every test (the old hand-rolled fake accepted any
+    key) and then failed every real `kv` call in production with
+    `kv.error::backend` -- see `waddle_sdk.kv.validate_key`, which now
+    rejects this at the SDK boundary before a host call is even attempted.
     """
     pseudonym = hashlib.sha256((actor or "anonymous").encode()).hexdigest()
-    return f"lurk:state:{community}:{pseudonym}"
+    return f"lurk.state.{community}.{pseudonym}"
 
 
 def _message_key(community: str) -> str:
     """Per-community kv key for the customized `!lurk` message template."""
-    return f"lurk:config:{community}:message"
+    return f"lurk.config.{community}.message"
 
 
 def _ai_key(community: str) -> str:
     """Per-community kv key for the `ai_enabled` toggle. Presence = enabled."""
-    return f"lurk:config:{community}:ai_enabled"
+    return f"lurk.config.{community}.ai_enabled"
 
 
 def _render_template(template: str, *, username: str, duration: str = "") -> str:
