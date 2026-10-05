@@ -15,7 +15,7 @@ class CommunityWeights:
     community_id: int
     is_premium: bool = False
     # Activity weights -- whole, positive integers (gh-310): community_members
-    # .reputation / reputation_global.score are INTEGER columns with no
+    # .reputation / reputation_tenant.score are INTEGER columns with no
     # remainder-tracking column, so a magnitude < 0.5 per-event weight never
     # moves an integer-scored table across repeated events (see
     # ReputationService._clamp_score's docstring for the full rule). Farming
