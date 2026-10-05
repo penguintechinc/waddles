@@ -125,11 +125,13 @@ class TestCreatePairing:
             "direction",
             "sync_enabled",
             "role_name_prefix",
+            "event_sync_enabled",
             "created_by_user_id",
             "created_at",
             "updated_at",
         }
         assert body["pairing"]["sync_enabled"] is False
+        assert body["pairing"]["event_sync_enabled"] is False
 
     async def test_create_wrong_scope_is_403(
         self, client: Any, auth_headers: Any, bar_citizen_db: Any

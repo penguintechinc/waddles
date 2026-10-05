@@ -950,6 +950,26 @@ pipeline:
         cpu: "1000m"
         memory: "1Gi"
 
+  # Discord event-sync reconcile CronJob (hub_api/services/event_discord_sync_service.py::main) --
+  # periodic backstop sweeping calendar_events rows left pending/sync_error (SoT push engine's
+  # own `sync_event()` entry point handles the immediate, webhook-triggered path; this CronJob
+  # is the "reconciliation-by-polling never fully replaced by push" backstop, same philosophy
+  # as role-sync's own reconcile worker). Disabled by default -- the engine itself is also
+  # gated behind the waddles.calendar.event_discord_sync PostHog flag (defaulted OFF), so this
+  # is a belt-and-suspenders double-gate until the feature is validated.
+  eventSync:
+    enabled: false
+    schedule: "*/5 * * * *"
+    backoffLimit: 2
+    activeDeadlineSeconds: 240
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+
   # v3.0.x — Rust data-plane rewrite (Issue #287, core/svc_streaming crate). Supersedes the
   # earlier Python/ffmpeg control+data plane (own DB tables, migration 078). Adds the
   # media-plane ports (rtmp/srt/webrtc range) and MinIO/S3 recording env alongside the
