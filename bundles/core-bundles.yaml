@@ -94,8 +94,19 @@ bundles:
   # waddle_sdk.flask_core.feature_flags.feature_enabled -- a tenant-wide activation here
   # only installs the bundle, it does not itself make the bundle respond; the flag must
   # also be turned on in PostHog before any of these four produce a reply.
+  #
+  # 1.0.0 is permanently retired for all four (eightball, roll, lurk, count) --
+  # fix/bump-command-bundles-1.0.1. The wasm published under 1.0.0 was compiled against an
+  # older world missing the `flags` WIT import, so feature_enabled() crashes/degrades at
+  # runtime and the bundle never replies; current source compiles correctly WITH the import.
+  # app_versions enforces an immutable digest per (app_id, version), so re-seeding 1.0.0 with
+  # the recompiled bytes 409s as digest_conflict -- and the seeder's #582 resilience change
+  # treats that as a non-fatal SKIP, leaving the stale pre-flags wasm active instead of
+  # failing loudly. 1.0.1 is the first version built from the flags-enabled source, forcing a
+  # fresh publish+activate. Mirrors bundles/csharp/csping/hub-manifest.yaml's own 1.0.0/1.0.1
+  # retirement (fix/csping-version-bump, #575).
   - app_id: waddles.core.example.eightball
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     manifest_path: eightball.manifest.yaml
     artifact_path: eightball.wasm
@@ -103,7 +114,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.roll
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     manifest_path: roll.manifest.yaml
     artifact_path: roll.wasm
@@ -113,7 +124,7 @@ bundles:
   # First Python core bundles to declare the `storage.kv` permission (lurk, count) --
   # see hub_api/services/bundle_approval_service.py::KV_PERMISSION_ID.
   - app_id: waddles.core.example.lurk
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     manifest_path: lurk.manifest.yaml
     artifact_path: lurk.wasm
@@ -121,7 +132,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.count
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     manifest_path: count.manifest.yaml
     artifact_path: count.wasm
