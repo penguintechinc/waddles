@@ -1,6 +1,7 @@
 """
 Reputation Service - Core CRUD and calculation logic for reputation scores.
-Handles both per-community and global reputation tracking.
+Handles both per-community and per-tenant reputation tracking (the tenant
+aggregate never spans multiple tenants -- security.md Tenant Isolation).
 """
 import math
 import time
@@ -67,7 +68,8 @@ class ReputationService:
 
     Handles:
     - Per-community reputation (stored in community_members table)
-    - Global reputation (stored in reputation_global table)
+    - Per-tenant reputation, aggregated across a tenant's communities only
+      -- never across tenants (stored in reputation_tenant table)
     - Score adjustments with audit logging
     - FICO-style tier calculation
     """
@@ -87,12 +89,13 @@ class ReputationService:
     def _clamp_score(self, score: float, min_score: int, max_score: int) -> int:
         """Clamp `score` to `[min_score, max_score]`, rounding once via round-half-away-from-zero.
 
-        `community_members.reputation` / `reputation_global.score` are
+        `community_members.reputation` / `reputation_tenant.score` are
         INTEGER columns (`config/postgres/migrations/080_add_reputation_
-        tables.sql`) with no column to carry a fractional remainder across
-        separate events -- adding one is a migration, out of scope here
-        (gh-310). Every caller (`adjust()`, `_update_global_reputation()`,
-        `set_reputation()`) MUST pass `stored + delta` computed once and
+        tables.sql` / `097_reputation_tenant_scope.sql`) with no column to
+        carry a fractional remainder across separate events -- adding one is
+        a migration, out of scope here (gh-310). Every caller (`adjust()`,
+        `_update_tenant_reputation()`, `set_reputation()`) MUST pass `stored
+        + delta` computed once and
         round/clamp exactly once here, never re-round an already-rounded
         stored value a second time.
 
@@ -188,18 +191,25 @@ class ReputationService:
             self.logger.error(f"Failed to get reputation: {e}")
             return None
 
-    async def get_global_reputation(self, user_id: int) -> Optional[ReputationInfo]:
-        """Get global (cross-community) reputation for a user."""
+    async def get_tenant_reputation(self, tenant_id: int, user_id: int) -> Optional[ReputationInfo]:
+        """Get tenant-wide (cross-community, single-tenant) reputation for a user.
+
+        `tenant_id` MUST come from a validated source (the caller's own
+        `TenantContext.tenant_id`, published by `install_community_scoped_auth`
+        from the bearer JWT's `tenant` claim) -- never client-supplied.
+        Reputation is a hard tenant boundary (security.md Tenant Isolation):
+        this never aggregates or returns another tenant's score.
+        """
         try:
             result = self.dal.executesql(
                 """SELECT score, total_events, last_event_at
-                   FROM reputation_global
-                   WHERE hub_user_id = %s""",
-                [user_id]
+                   FROM reputation_tenant
+                   WHERE tenant_id = %s AND hub_user_id = %s""",
+                [tenant_id, user_id]
             )
 
             if not result or len(result) == 0:
-                # Return default if no global record exists
+                # Return default if no tenant record exists yet
                 tier_name, tier_label = self._get_tier(Config.REPUTATION_DEFAULT)
                 return ReputationInfo(
                     score=Config.REPUTATION_DEFAULT,
@@ -222,7 +232,7 @@ class ReputationService:
             )
 
         except Exception as e:
-            self.logger.error(f"Failed to get global reputation: {e}")
+            self.logger.error(f"Failed to get tenant reputation: {e}")
             return None
 
     async def adjust(
@@ -240,8 +250,9 @@ class ReputationService:
 
         Uses weight configuration to determine score change. Updates both
         community reputation (`community_members.reputation`) and, when the
-        member is linked to a hub account, global reputation
-        (`reputation_global.score`). Creates a `reputation_events` audit log
+        member is linked to a hub account, tenant-scoped reputation
+        (`reputation_tenant.score`, resolved from `community_id` ->
+        `communities.tenant_id`). Creates a `reputation_events` audit log
         entry.
 
         The community member row is matched by `(community_id, platform,
@@ -361,9 +372,11 @@ class ReputationService:
                  reason, json.dumps(metadata)]
             )
 
-            # Update global reputation if user is linked
+            # Update tenant-scoped reputation if user is linked
             if user_id:
-                await self._update_global_reputation(user_id, score_change, event_type, base_weight)
+                await self._update_tenant_reputation(
+                    community_id, user_id, score_change, event_type, base_weight
+                )
 
             self.dal.commit()
 
@@ -404,31 +417,61 @@ class ReputationService:
                 error=str(e)
             )
 
-    async def _update_global_reputation(
+    def _resolve_tenant_id(self, community_id: int) -> int:
+        """Resolve `community_id` -> its owning `communities.tenant_id`.
+
+        The ONLY tenant source for internal write paths (`adjust()`'s
+        callers never supply a tenant_id directly -- only a trusted,
+        already-validated `community_id`, the same boundary every other
+        community-scoped table in this schema uses, see migration 097's
+        header comment). `communities.tenant_id` is NOT NULL (migration
+        058), so a missing/NULL result here means `community_id` itself
+        doesn't resolve to a real row -- raised loudly, never defaulted to
+        a guessed tenant (security.md: tenant is a hard isolation boundary,
+        never silently assumed).
+        """
+        row = self.dal.executesql(
+            "SELECT tenant_id FROM communities WHERE id = %s",
+            [community_id]
+        )
+        if not row or row[0][0] is None:
+            raise ValueError(f"community {community_id} has no resolvable tenant_id")
+        return int(row[0][0])
+
+    async def _update_tenant_reputation(
         self,
+        community_id: int,
         user_id: int,
         score_change: float,
         event_type: str = '',
         weight: float = 0.0
     ) -> None:
-        """Update global reputation for a linked user.
+        """Update the tenant-scoped reputation aggregate for a linked user.
+
+        Tenant is resolved from `community_id` via `_resolve_tenant_id()`
+        (never client-supplied) and the update is confined to
+        `(tenant_id, hub_user_id)` -- this NEVER touches, aggregates, or
+        leaks another tenant's row (security.md Tenant Isolation).
 
         Applies `score_change` -- the same raw delta already computed once
         by the community-scope caller, never re-derived from
         `community_members`' rounded integer -- directly against the
-        stored global score via `_clamp_score`, the identical
+        stored tenant score via `_clamp_score`, the identical
         round-half-away-from-zero rule the community scope uses (see its
-        docstring). Previously this let the delta flow through raw SQL
-        arithmetic against the INTEGER column and relied on Postgres'
-        implicit numeric-to-int cast to round, which could diverge from
-        the app-level rule enforced everywhere else; computing the final
-        integer once in Python before writing it keeps both scopes on one
-        rounding implementation.
+        docstring). Computing the final integer once in Python before
+        writing it keeps both scopes on one rounding implementation.
+
+        Failure here (including an unresolvable tenant) is logged and
+        swallowed, same as the prior global-reputation behavior: a failure
+        on this secondary aggregate must not roll back the already-applied,
+        already-committed community-level adjustment.
         """
         try:
+            tenant_id = self._resolve_tenant_id(community_id)
+
             existing = self.dal.executesql(
-                "SELECT score FROM reputation_global WHERE hub_user_id = %s",
-                [user_id]
+                "SELECT score FROM reputation_tenant WHERE tenant_id = %s AND hub_user_id = %s",
+                [tenant_id, user_id]
             )
             if existing:
                 score_before = existing[0][0]
@@ -438,11 +481,11 @@ class ReputationService:
                     Config.REPUTATION_MAX
                 )
                 self.dal.executesql(
-                    """UPDATE reputation_global
+                    """UPDATE reputation_tenant
                        SET score = %s, total_events = total_events + 1,
                            last_event_at = NOW(), updated_at = NOW()
-                       WHERE hub_user_id = %s""",
-                    [score_after, user_id]
+                       WHERE tenant_id = %s AND hub_user_id = %s""",
+                    [score_after, tenant_id, user_id]
                 )
             else:
                 score_before = Config.REPUTATION_DEFAULT
@@ -455,25 +498,26 @@ class ReputationService:
                 # same non-atomic lookup-then-write pattern adjust() already
                 # uses for community_members above -- a pre-existing,
                 # out-of-scope race (two concurrent first-events for the same
-                # never-before-seen hub_user_id) shared by both, not
-                # introduced here.
+                # never-before-seen (tenant_id, hub_user_id) pair) shared by
+                # both, not introduced here.
                 self.dal.executesql(
-                    """INSERT INTO reputation_global (hub_user_id, score, total_events)
-                       VALUES (%s, %s, 1)""",
-                    [user_id, score_after]
+                    """INSERT INTO reputation_tenant (tenant_id, hub_user_id, score, total_events)
+                       VALUES (%s, %s, %s, 1)""",
+                    [tenant_id, user_id, score_after]
                 )
 
             self.logger.debug(
-                "Global reputation weight applied",
+                "Tenant reputation weight applied",
                 reputation_event_type=event_type,
                 weight=weight,
                 delta=score_change,
+                tenant_id=tenant_id,
                 hub_user_id=user_id,
                 score_before=score_before,
                 score_after=score_after,
             )
         except Exception as e:
-            self.logger.warning(f"Failed to update global reputation: {e}")
+            self.logger.warning(f"Failed to update tenant reputation: {e}")
 
     async def set_reputation(
         self,
@@ -654,22 +698,29 @@ class ReputationService:
             self.logger.error(f"Failed to get leaderboard: {e}")
             return []
 
-    async def get_global_leaderboard(
+    async def get_tenant_leaderboard(
         self,
+        tenant_id: int,
         limit: int = 25,
         offset: int = 0
     ) -> List[Dict[str, Any]]:
-        """Get global reputation leaderboard."""
+        """Get the tenant-wide reputation leaderboard, scoped to `tenant_id`.
+
+        `tenant_id` MUST come from a validated source (see
+        `get_tenant_reputation`'s docstring) -- this never returns rows
+        from another tenant.
+        """
         try:
             result = self.dal.executesql(
-                """SELECT rg.hub_user_id, hu.username, hu.avatar_url,
-                          rg.score, rg.total_events,
-                          RANK() OVER (ORDER BY rg.score DESC) as rank
-                   FROM reputation_global rg
-                   JOIN hub_users hu ON hu.id = rg.hub_user_id
-                   ORDER BY rg.score DESC
+                """SELECT rt.hub_user_id, hu.username, hu.avatar_url,
+                          rt.score, rt.total_events,
+                          RANK() OVER (ORDER BY rt.score DESC) as rank
+                   FROM reputation_tenant rt
+                   JOIN hub_users hu ON hu.id = rt.hub_user_id
+                   WHERE rt.tenant_id = %s
+                   ORDER BY rt.score DESC
                    LIMIT %s OFFSET %s""",
-                [limit, offset]
+                [tenant_id, limit, offset]
             )
 
             leaderboard = []
@@ -690,7 +741,7 @@ class ReputationService:
             return leaderboard
 
         except Exception as e:
-            self.logger.error(f"Failed to get global leaderboard: {e}")
+            self.logger.error(f"Failed to get tenant leaderboard: {e}")
             return []
 
     async def initialize_member(

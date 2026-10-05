@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-import ast
-from pathlib import Path
-
 import pytest
 from flask_core import PlatformEvent, bundle_context, reset_bundle_dal_for_tests, set_bundle_dal
+from flask_core.reputation_tiers import REPUTATION_TIERS as _SHARED_REPUTATION_TIERS
+from flask_core.reputation_tiers import reputation_tier as _shared_reputation_tier
 from penguin_dal import AsyncDB
 from sqlalchemy import text as sa_text
 
-from bundles.community_reputation_process import REPUTATION_TIERS, _reputation_label, transform
+from bundles.community_reputation_process import _reputation_label, transform
+
+#: This community row's `tenant_id` -- every test here operates under one
+#: tenant; `TestTenantIsolation` seeds a second, different tenant_id to
+#: prove the lookup never crosses it.
+_TENANT_ID = 900
 
 
 @pytest.fixture
@@ -26,10 +30,16 @@ async def dal():
             )
         )
         await conn.execute(
-            sa_text("CREATE TABLE communities (id INTEGER, display_name TEXT, name TEXT)")
+            sa_text(
+                "CREATE TABLE communities (id INTEGER, display_name TEXT, name TEXT, "
+                "tenant_id INTEGER)"
+            )
         )
         await conn.execute(
-            sa_text("CREATE TABLE reputation_global (hub_user_id TEXT, score INTEGER)")
+            sa_text(
+                "CREATE TABLE reputation_tenant (tenant_id INTEGER, hub_user_id TEXT, "
+                "score INTEGER)"
+            )
         )
     await db.reflect()
     set_bundle_dal(db)
@@ -58,6 +68,32 @@ async def _run(dal: AsyncDB, text: str, **event_kwargs: object) -> PlatformEvent
         return await transform(_event(text, **event_kwargs))  # type: ignore[arg-type]
 
 
+async def _insert_community(
+    conn: object, *, community_id: int, display_name: str, name: str, tenant_id: int
+) -> None:
+    """Bound-parameter INSERT -- avoids building SQL by string interpolation (S608)."""
+    await conn.execute(  # type: ignore[attr-defined]
+        sa_text(
+            "INSERT INTO communities (id, display_name, name, tenant_id) "
+            "VALUES (:id, :display_name, :name, :tenant_id)"
+        ),
+        {"id": community_id, "display_name": display_name, "name": name, "tenant_id": tenant_id},
+    )
+
+
+async def _insert_tenant_score(
+    conn: object, *, tenant_id: int, hub_user_id: str, score: int
+) -> None:
+    """Bound-parameter INSERT -- avoids building SQL by string interpolation (S608)."""
+    await conn.execute(  # type: ignore[attr-defined]
+        sa_text(
+            "INSERT INTO reputation_tenant (tenant_id, hub_user_id, score) "
+            "VALUES (:tenant_id, :hub_user_id, :score)"
+        ),
+        {"tenant_id": tenant_id, "hub_user_id": hub_user_id, "score": score},
+    )
+
+
 class TestRouting:
     async def test_non_command_text_returns_none(self, dal: AsyncDB) -> None:
         assert await transform(_event("just chatting")) is None
@@ -74,7 +110,7 @@ class TestRouting:
 
 
 class TestLookup:
-    async def test_reply_shows_both_global_and_community_with_labels(self, dal: AsyncDB) -> None:
+    async def test_reply_shows_both_tenant_and_community_with_labels(self, dal: AsyncDB) -> None:
         async with dal.engine.begin() as conn:
             await conn.execute(
                 sa_text(
@@ -83,19 +119,18 @@ class TestLookup:
                     "VALUES (4, 'twitch', 'u-123', 'penguinzplays', 720, '42')"
                 )
             )
-            await conn.execute(
-                sa_text(
-                    "INSERT INTO communities (id, display_name, name) "
-                    "VALUES (4, 'Waddlebot HQ', 'waddlebot_hq')"
-                )
+            await _insert_community(
+                conn,
+                community_id=4,
+                display_name="Waddlebot HQ",
+                name="waddlebot_hq",
+                tenant_id=_TENANT_ID,
             )
-            await conn.execute(
-                sa_text("INSERT INTO reputation_global (hub_user_id, score) " "VALUES ('42', 600)")
-            )
+            await _insert_tenant_score(conn, tenant_id=_TENANT_ID, hub_user_id="42", score=600)
         result = await _run(dal, "!reputation", author_id="u-123")
         assert result is not None
         assert result.payload["text"] == (
-            "\U0001f427 penguinzplays — Global: 600 (Trusted) · " "Waddlebot HQ: 720 (Respected)"
+            "\U0001f427 penguinzplays — Tenant: 600 (Trusted) · " "Waddlebot HQ: 720 (Respected)"
         )
 
     async def test_falls_back_to_display_name_when_no_author_id(self, dal: AsyncDB) -> None:
@@ -107,30 +142,32 @@ class TestLookup:
                     "VALUES (4, 'twitch', NULL, 'penguinzplays', 655, NULL)"
                 )
             )
-            await conn.execute(
-                sa_text(
-                    "INSERT INTO communities (id, display_name, name) "
-                    "VALUES (4, 'Waddlebot HQ', 'waddlebot_hq')"
-                )
+            await _insert_community(
+                conn,
+                community_id=4,
+                display_name="Waddlebot HQ",
+                name="waddlebot_hq",
+                tenant_id=_TENANT_ID,
             )
         result = await _run(dal, "!rep")
         assert result is not None
         assert "Waddlebot HQ: 655 (Trusted)" in result.payload["text"]
-        assert "Global: 600 (Trusted)" in result.payload["text"]
+        assert "Tenant: 600 (Trusted)" in result.payload["text"]
 
     async def test_new_user_defaults_both_sides_to_600(self, dal: AsyncDB) -> None:
-        """No `community_members` row and no `reputation_global` row -> 600 (Trusted) both sides."""
+        """No `community_members` row and no `reputation_tenant` row -> 600 (Trusted) both sides."""
         async with dal.engine.begin() as conn:
-            await conn.execute(
-                sa_text(
-                    "INSERT INTO communities (id, display_name, name) "
-                    "VALUES (4, 'Waddlebot HQ', 'waddlebot_hq')"
-                )
+            await _insert_community(
+                conn,
+                community_id=4,
+                display_name="Waddlebot HQ",
+                name="waddlebot_hq",
+                tenant_id=_TENANT_ID,
             )
         result = await _run(dal, "!reputation", actor="stranger")
         assert result is not None
         assert result.payload["text"] == (
-            "\U0001f427 stranger — Global: 600 (Trusted) · Waddlebot HQ: 600 (Trusted)"
+            "\U0001f427 stranger — Tenant: 600 (Trusted) · Waddlebot HQ: 600 (Trusted)"
         )
 
     async def test_community_without_display_name_falls_back_to_id(self, dal: AsyncDB) -> None:
@@ -152,6 +189,54 @@ class TestLookup:
         result = await _run(dal, "!reputation")
         assert result is not None
         assert "unavailable" in result.payload["text"]
+
+
+class TestTenantIsolation:
+    async def test_tenant_score_never_leaks_from_another_tenants_community(
+        self, dal: AsyncDB
+    ) -> None:
+        """A `reputation_tenant` row seeded under a DIFFERENT tenant_id must never surface here.
+
+        security.md Tenant Isolation: tenant is resolved from `community_id`
+        (community 4 -> tenant `_TENANT_ID`) via `_TENANT_SCORE_SQL`'s join
+        -- a row for the SAME `hub_user_id` under a different tenant_id
+        (seeded here under community 5 -> tenant `_TENANT_ID + 1`) must
+        never be returned for community 4's lookup.
+        """
+        other_tenant_id = _TENANT_ID + 1
+        async with dal.engine.begin() as conn:
+            await conn.execute(
+                sa_text(
+                    "INSERT INTO community_members "
+                    "(community_id, platform, platform_user_id, display_name, reputation, user_id) "
+                    "VALUES (4, 'twitch', 'u-123', 'penguinzplays', 720, '42')"
+                )
+            )
+            await _insert_community(
+                conn,
+                community_id=4,
+                display_name="Waddlebot HQ",
+                name="waddlebot_hq",
+                tenant_id=_TENANT_ID,
+            )
+            # A second community belonging to a DIFFERENT tenant, plus a
+            # reputation_tenant row for the SAME hub_user_id under that
+            # other tenant -- the exact shape a tenant-forgetting query
+            # would conflate.
+            await _insert_community(
+                conn,
+                community_id=5,
+                display_name="Other Org HQ",
+                name="other_org_hq",
+                tenant_id=other_tenant_id,
+            )
+            await _insert_tenant_score(conn, tenant_id=other_tenant_id, hub_user_id="42", score=850)
+        result = await _run(dal, "!reputation", author_id="u-123")
+        assert result is not None
+        # Community 4's tenant has NO reputation_tenant row of its own for
+        # hub_user_id=42 -- baseline 600, never the other tenant's 850.
+        assert "Tenant: 600 (Trusted)" in result.payload["text"]
+        assert "850" not in result.payload["text"]
 
 
 class TestReputationLabel:
@@ -176,43 +261,22 @@ class TestReputationLabel:
     def test_boundaries(self, dal: AsyncDB, score: int, expected: str) -> None:
         assert _reputation_label(score) == expected
 
-    def test_tier_table_matches_hub_api(self, dal: AsyncDB) -> None:
-        """Parses `hub_api`'s source directly (no import -- see module docstring) for parity.
+    def test_label_fn_uses_the_shared_flask_core_tier_table(self, dal: AsyncDB) -> None:
+        """`_reputation_label` IS `flask_core.reputation_tiers.reputation_tier` -- no local copy.
 
-        `hub_api` and this service are independently deployed processes
-        with separate dependency trees and a colliding top-level
-        `services` package name (both own one) -- a runtime cross-import
-        would silently resolve to the wrong package, so this reads
-        hub-api's module as plain text/AST instead of importing it.
-        Skipped (not failed) only when the whole `hub_api` checkout is
-        absent -- a genuinely different repo layout, not a drift signal;
-        any AST/constant-shape problem *within* an existing checkout is a
-        real failure, never swallowed.
+        Previously this bundle and `hub_api/services/
+        community_reputation_service.py` each kept a hand-mirrored
+        `REPUTATION_TIERS` constant, guarded only by a source-parsing drift
+        test (parsing hub-api's file as AST, since a runtime cross-import
+        between the two independently-deployed processes' own top-level
+        packages would resolve to the wrong one). Both processes already
+        depend on `flask_core` -- importing the tier table from there
+        instead eliminates the duplicate copies this test used to guard,
+        rather than needing to keep guarding them.
         """
-        hub_api_file = (
-            Path(__file__).resolve().parents[3]
-            / "hub_api"
-            / "services"
-            / "community_reputation_service.py"
-        )
-        if not hub_api_file.exists():
-            pytest.skip(f"hub_api checkout not present at {hub_api_file}")
+        from bundles import community_reputation_process
 
-        tree = ast.parse(hub_api_file.read_text(encoding="utf-8"), filename=str(hub_api_file))
-        hub_api_tiers = None
-        for node in tree.body:
-            if (
-                isinstance(node, ast.AnnAssign)
-                and isinstance(node.target, ast.Name)
-                and node.target.id == "REPUTATION_TIERS"
-                and node.value is not None
-            ):
-                hub_api_tiers = ast.literal_eval(node.value)
-                break
-        assert (
-            hub_api_tiers is not None
-        ), f"REPUTATION_TIERS not found in {hub_api_file} -- did it get renamed?"
-        assert hub_api_tiers == REPUTATION_TIERS, (
-            "bundle's REPUTATION_TIERS drifted from hub_api's -- keep the two mirrored copies "
-            "(this file + hub_api/services/community_reputation_service.py) byte-identical"
-        )
+        assert community_reputation_process._reputation_label is _shared_reputation_tier
+        for score, expected in [(300, "Newcomer"), (850, "Legend")]:
+            assert _reputation_label(score) == expected
+        assert _SHARED_REPUTATION_TIERS[0] == (465, "Newcomer")

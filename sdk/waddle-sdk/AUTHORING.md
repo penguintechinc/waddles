@@ -120,10 +120,11 @@ Use `.` to namespace your own key, e.g. `"count.registry"` / `"count.value.{name
 `"count:registry"`.
 
 **Reputation and user-details are the only
-two cross-community exceptions in the platform** (`reputation_global`, the hub `users`
-table) — neither goes through `community_kv`; they have their own dedicated, explicitly
-cross-community storage. A new bundle never introduces a third exception without updating
-this doc first.
+two cross-community exceptions in the platform** (`reputation_tenant` -- cross-community but
+hard-bounded to ONE tenant, never cross-tenant, see security.md Tenant Isolation -- and the
+hub `users` table) — neither goes through `community_kv`; they have their own dedicated,
+explicitly cross-community storage. A new bundle never introduces a third exception without
+updating this doc first.
 
 ## 3. Feature Flags & License Gating
 
