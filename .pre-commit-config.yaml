@@ -99,14 +99,18 @@ repos:
         language: script
         files: '(^|/)Dockerfile[^/]*$'
 
-  # ── No stubs / no silent fallbacks (gh-regression: a `flags capability not
-  #    wired -- TODO(M4+)` stub returned a silent default and shipped as
-  #    "done", causing a multi-hour alpha outage) ─────────────────────────
+  # ── No stubs / no silent fallbacks -- WARN-ONLY locally (user decision,
+  #    devops.md Branch Backups: WIP commits/pushes on feature/fix/chore
+  #    branches must never be blocked). Real enforcement (FATAL) happens at
+  #    the release/main merge boundary -- see .github/workflows/
+  #    pr-validation.yml's no-stubs-gate job, not here. gh-regression: a
+  #    `flags capability not wired -- TODO(M4+)` stub returned a silent
+  #    default and shipped as "done", causing a multi-hour alpha outage. ──
   - repo: local
     hooks:
       - id: check-no-stubs
-        name: No stub markers / silent fallbacks outside the tracked allowlist
-        entry: scripts/ci/check-no-stubs.sh
+        name: No stub markers / silent fallbacks (warn-only locally; enforced at release/main merge)
+        entry: scripts/hooks/check-no-stubs-warn-only.sh
         language: script
         pass_filenames: false
         files: '^(core|hub_api|sdk|bundles|admin/hub_module/frontend/src)/.*\.(rs|py|ts|tsx|js|jsx)$|^\.ci/(stub-allowlist\.yml|silent-fallback-baseline\.json)$'

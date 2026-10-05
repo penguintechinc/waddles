@@ -20,6 +20,21 @@ jobs:
   no-stubs-gate:
     name: No stubs / no silent fallbacks (check-no-stubs)
     runs-on: ubuntu-latest
+    # Scope correction (user decision, devops.md Branch Backups): this gate
+    # enforces ONLY on merges landing on release/* or main -- feature/fix/
+    # chore/docs/etc. branches are exempt so WIP backup-pushes with a TODO
+    # are never blocked. `github.base_ref` has no `refs/heads/` prefix on
+    # pull_request events (merge_group.base_ref does, but merge_group here
+    # is already scoped to release/** by this workflow's own trigger above,
+    # so it's always a real release target). A PR targeting a feature/fix/
+    # chore branch (e.g. a stacked PR) skips this job entirely -- skipped
+    # is neither "failure" nor "pending" to ci-gate's poller, so it never
+    # blocks that merge; the check still runs for real the moment the PR
+    # (or the stack) targets release/* or main.
+    if: >-
+      github.event_name == 'merge_group' ||
+      github.base_ref == 'main' ||
+      startsWith(github.base_ref, 'release/')
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
