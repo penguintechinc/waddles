@@ -139,8 +139,11 @@ bundles:
   # First Python core bundles to declare the `storage.kv` permission (lurk, count) --
   # see hub_api/services/bundle_approval_service.py::KV_PERMISSION_ID.
   # 1.0.3 (feature/lurk-v1): stateful lurk/unlurk rewrite, see lurk's own bundle.yaml.
+  # 1.0.4 (fix/bump-count-lurk-1.0.4): version-only bump to republish the colon-free `kv` key
+  # fix (gh-631, #638) -- app_versions is immutable per (app_id, version), so 1.0.3's digest
+  # still points at the pre-fix wasm; this bump is the only way the fixed build reaches alpha.
   - app_id: waddles.core.example.lurk
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/lurk
     manifest_path: lurk.manifest.yaml
@@ -150,8 +153,11 @@ bundles:
         community_id: null
   # 1.0.3: promoted from a trivial self-counter to dynamic, per-community named counters --
   # see bundles/python/count/src/app.py's own module docstring (feature/count-dynamic-counters).
+  # 1.0.4 (fix/bump-count-lurk-1.0.4): version-only bump to republish the colon-free `kv` key
+  # fix (gh-631, #638) -- app_versions is immutable per (app_id, version), so 1.0.3's digest
+  # still points at the pre-fix wasm; this bump is the only way the fixed build reaches alpha.
   - app_id: waddles.core.example.count
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/count
     manifest_path: count.manifest.yaml
