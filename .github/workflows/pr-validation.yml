@@ -17,6 +17,59 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  no-stubs-gate:
+    name: No stubs / no silent fallbacks (check-no-stubs)
+    runs-on: ubuntu-latest
+    # Scope correction (user decision, devops.md Branch Backups): this gate
+    # enforces ONLY on merges landing on release/* or main -- feature/fix/
+    # chore/docs/etc. branches are exempt so WIP backup-pushes with a TODO
+    # are never blocked. `github.base_ref` has no `refs/heads/` prefix on
+    # pull_request events (merge_group.base_ref does, but merge_group here
+    # is already scoped to release/** by this workflow's own trigger above,
+    # so it's always a real release target). A PR targeting a feature/fix/
+    # chore branch (e.g. a stacked PR) skips this job entirely -- skipped
+    # is neither "failure" nor "pending" to ci-gate's poller, so it never
+    # blocks that merge; the check still runs for real the moment the PR
+    # (or the stack) targets release/* or main.
+    if: >-
+      github.event_name == 'merge_group' ||
+      github.base_ref == 'main' ||
+      startsWith(github.base_ref, 'release/')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      # Pinned exact version (critical-rules.md Dependency Pinning) -- not
+      # `semgrep` unpinned, not `p/ci` registry configs (no network rule
+      # fetch, local config file only -- see scripts/ci/semgrep-silent-fallback.yml).
+      # setuptools<81 pinned explicitly: semgrep 1.99.0 -> opentelemetry-
+      # instrumentation-requests -> opentelemetry.instrumentation.dependencies
+      # imports `pkg_resources` eagerly at module load. setuptools>=81 (the
+      # default on actions/setup-python's Python 3.13 image, which ships no
+      # setuptools/pkg_resources at all) dropped pkg_resources entirely
+      # (removal flagged "as early as 2025-11-30"), so semgrep crashed with
+      # ModuleNotFoundError before scanning a single file -- the Makefile
+      # then JSON-parsed semgrep's empty stdout and the gate reported
+      # files_scanned=0 scanned as a false PASS path (gh-607; verified fix
+      # locally: semgrep now runs to completion against the real scan roots).
+      - name: Install semgrep + PyYAML
+        run: pip install --disable-pip-version-check --no-cache-dir "setuptools==80.9.0" "semgrep==1.99.0" "pyyaml==6.0.3"
+
+      # gh-regression: a `flags capability not wired -- TODO(M4+)` stub
+      # returned a silent default and shipped labeled "done" -- caused a
+      # multi-hour alpha outage. This is a fast quality gate (like lint/
+      # secrets), not part of the advisory container-build set -- any
+      # finding outside .ci/stub-allowlist.yml / .ci/silent-fallback-baseline.json
+      # fails this job, which is FATAL to ci-gate (not in
+      # ADVISORY_CHECK_NAME_REGEX).
+      - name: check-no-stubs
+        run: make check-no-stubs
+
   python-unit:
     name: Python unit tests
     runs-on: ubuntu-latest
