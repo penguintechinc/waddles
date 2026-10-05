@@ -1,0 +1,74 @@
+schema_version: 2
+app_id: waddles.core.example.announce
+name: Saved Announcements Bundle (Python)
+# 1.0.0: initial kv-only v1 -- !announce <key> (get) / !announce set <key> <message> (mod) /
+# !announce remove <key> (mod) / !announce list. See src/app.py's own module docstring for full
+# scope, including the documented !announce command-prefix overlap with the pre-existing,
+# DB-backed core/svc_process/bundles/community_announcements_process.py `!announce publish <id>`
+# script bundle (a different, legacy runner architecture) -- flagged there for the migration
+# owner to resolve, not silently papered over.
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+# Attribution: net-new Waddles content, NOT a literal port -- a generic "saved canned message"
+# grammar is common to many chat bots (credited for inspiration only, same convention as
+# fish/music's own bundle.yaml -- no original PenguinTwitchBot source or text reused, so no MIT
+# notice reproduction is required; contrast bundles/csharp/superpenguin-roll, an actual
+# line-for-line port, which does carry the full verbatim notice). `category` is left unset:
+# MARKETPLACE_CATEGORIES (libs/flask_core/flask_core/bundle_attribution.py) currently allows only
+# "alternatives", which does not fit first-party original content -- same documented gap as
+# fish/music's own bundle.yaml.
+author: "superpenguintv (Psychoboy)"
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/announce
+notice: |
+  Saved-canned-message command concept inspired by the general "mods save a
+  short message under a name, viewers recall it later" shape common to many
+  chat bots, including superpenguintv (Psychoboy)'s PenguinTwitchBot
+  (https://github.com/Psychoboy/PenguinTwitchBot). This is an original
+  Waddles implementation: the command grammar, storage shape, and all logic
+  are written fresh for this bundle. No original PenguinTwitchBot source
+  code or text is reused.
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!announce"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!announce"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- v1 is kv-only by design (see src/app.py module docstring).
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - storage.kv
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null
