@@ -56,3 +56,6 @@ tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread"] }
 testcontainers = "=0.28.0"
 sea-orm = { version = "=2.0.2", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-uuid"] }
 futures = "=0.3.31"
+# URL-parsing round-trip proof for `crate::connect`'s connection-string
+# builder -- same exact pin as `core/bundle_active_set`'s identical use.
+url = "=2.5.8"
