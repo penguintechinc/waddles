@@ -36,6 +36,29 @@ def test_feature_enabled_uses_the_wit_import_when_available(monkeypatch) -> None
     assert result is True
 
 
+def test_feature_enabled_degrades_when_wit_world_has_no_flags_attribute(monkeypatch) -> None:
+    """A component wizened against an older world (no `flags` import) must never crash.
+
+    Regression for the live-alpha bug: `wit_world` imports fine (the
+    component instantiated), but `wit_world.imports` has no `flags`
+    attribute -- previously an uncaught `AttributeError` that propagated out
+    of `transform()` as a wasm trap (`unreachable`), dropping the reply
+    entirely. Must fall back to `default`, matching the `ImportError` path.
+    """
+    fake_wit_world = types.ModuleType("wit_world")
+    # `imports` deliberately has no `flags` attribute -- mirrors a stale
+    # component built before the WIT world declared `%flags`.
+    fake_wit_world.imports = types.SimpleNamespace()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
+
+    assert (
+        asyncio.run(feature_enabled("waddles.core.example", tenant="acme", default=True)) is True
+    )
+    assert (
+        asyncio.run(feature_enabled("waddles.core.example", tenant="acme", default=False)) is False
+    )
+
+
 def test_feature_enabled_discards_tenant_and_community_for_call_site_compatibility(
     monkeypatch,
 ) -> None:

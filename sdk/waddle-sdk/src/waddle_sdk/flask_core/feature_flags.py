@@ -3,8 +3,19 @@
 Spec Sec6.5's ``flags`` capability: "fail-open to the supplied default" on a
 flag-server outage. Routes to the WIT ``flags.enabled`` import when the
 generated ``wit_world`` binding module is importable (i.e. running inside a
-compiled component under wasmtime); falls back to returning ``default``
-otherwise, so this module's own tests run host-side without a component.
+compiled component under wasmtime) *and* that binding actually exposes a
+``flags`` submodule; falls back to returning ``default`` in either case, so
+this module's own tests run host-side without a component, and a component
+built against an older ``wit_world`` (one wizened/cached before the
+``%flags`` import existed on its ``wit_world.imports``, e.g. a stale
+``core-bundle-seeder`` artifact) degrades instead of crashing ``transform()``
+with ``AttributeError: module 'wit_world.imports' has no attribute
+'flags'``. Confirmed via a from-scratch ``componentize-py componentize``
+build against the committed ``wit/waddle-bundle/stage.wit`` (which already
+declares ``import %flags;``) that a current build's component type does
+carry ``import waddle:bundle/%flags@1.0.0;`` -- this guard is defense
+against *stale* artifacts, not a sign the current world is missing the
+import.
 
 **Documented, necessary deviation from the real signature.** The current
 ``libs/flask_core/flask_core/feature_flags.py`` on this branch is ``async def
@@ -35,12 +46,16 @@ async def feature_enabled(
 
     ``tenant``/``community`` are accepted for call-site compatibility and
     discarded -- see this module's docstring. Fails open to ``default``
-    whenever the WIT binding is unavailable (host-side tests) or the stage
-    itself reports a flag-server outage (the stage's own fail-open behavior,
-    not duplicated here).
+    whenever the WIT binding is unavailable (host-side tests), the binding
+    has no ``flags`` import (a component wizened against an older world),
+    or the stage itself reports a flag-server outage (the stage's own
+    fail-open behavior, not duplicated here).
     """
     try:
         import wit_world  # generated binding -- only importable inside a component
     except ImportError:
         return default
-    return bool(wit_world.imports.flags.enabled(flag_key, default))
+    flags_mod = getattr(wit_world.imports, "flags", None)
+    if flags_mod is None:
+        return default
+    return bool(flags_mod.enabled(flag_key, default))
