@@ -9,6 +9,16 @@
 # in the built image and in a local checkout (CORE_BUNDLES_DIR env var points the seeder at
 # either).
 #
+# `source_dir` (added alongside bundles/build_python_bundles.py) is the bundle's own
+# directory relative to `bundles/` (e.g. `python/count`) -- hub_api's own seeder
+# (seed_core_bundles.py::load_catalog) ignores this field entirely, it exists purely for the
+# BUILD side: bundles/Dockerfile.core-bundles's python-bundles-builder stage loops over every
+# `language: python` entry here and componentizes `bundles/<source_dir>/src` +
+# `bundles/<source_dir>/hub-manifest.yaml` generically, so adding a new first-party Python
+# bundle needs ONLY a new entry here (+ its own bundles/python/<name>/ directory) -- never a
+# hand-edited Dockerfile stanza. Populated for every entry (not just python) for schema
+# consistency, even though only python bundles are consumed by the generic loop today.
+#
 # `activation_targets` is the default target list; CORE_BUNDLES_TENANT_SLUGS (env, comma
 # separated) overrides it for every bundle in this file with a tenant-wide activation per
 # listed slug, for a deployment that needs a different tenant list than the one below.
@@ -54,6 +64,7 @@ bundles:
   - app_id: waddles.core.example.ping
     version: "1.0.3"
     language: rust
+    source_dir: rust/ping
     manifest_path: ping.manifest.yaml
     artifact_path: ping.wasm
     activation_targets:
@@ -62,6 +73,7 @@ bundles:
   - app_id: waddles.core.example.pyping
     version: "1.0.0"
     language: python
+    source_dir: python/pyping
     manifest_path: pyping.manifest.yaml
     artifact_path: pyping.wasm
     activation_targets:
@@ -82,6 +94,7 @@ bundles:
   - app_id: waddles.core.example.csping
     version: "1.0.1"
     language: csharp
+    source_dir: csharp/csping
     manifest_path: csping.manifest.yaml
     artifact_path: csping.wasm
     activation_targets:
@@ -108,6 +121,7 @@ bundles:
   - app_id: waddles.core.example.eightball
     version: "1.0.2"
     language: python
+    source_dir: python/eightball
     manifest_path: eightball.manifest.yaml
     artifact_path: eightball.wasm
     activation_targets:
@@ -116,6 +130,7 @@ bundles:
   - app_id: waddles.core.example.roll
     version: "1.0.2"
     language: python
+    source_dir: python/roll
     manifest_path: roll.manifest.yaml
     artifact_path: roll.wasm
     activation_targets:
@@ -127,6 +142,7 @@ bundles:
   - app_id: waddles.core.example.lurk
     version: "1.0.3"
     language: python
+    source_dir: python/lurk
     manifest_path: lurk.manifest.yaml
     artifact_path: lurk.wasm
     activation_targets:
@@ -137,6 +153,7 @@ bundles:
   - app_id: waddles.core.example.count
     version: "1.0.3"
     language: python
+    source_dir: python/count
     manifest_path: count.manifest.yaml
     artifact_path: count.wasm
     activation_targets:
@@ -151,6 +168,7 @@ bundles:
   - app_id: waddles.core.example.command
     version: "1.0.0"
     language: python
+    source_dir: python/command
     manifest_path: command.manifest.yaml
     artifact_path: command.wasm
     activation_targets:
