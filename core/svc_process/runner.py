@@ -99,6 +99,21 @@ Skipped (never guessed) when the resolved community or the platform user
 id can't be determined, and for any non-"message" `event_type` (Twitch
 EventSub follow/subscribe/raid and similar system events are out of scope
 for this positive-accrual path). Never raises into the caller.
+
+Activation gate (P4, live-dispatch activation unification): right after
+`community_for_context` is resolved and BEFORE `bundle_context()`/
+`transform_fn` run, `services.activation_gate.is_app_activated` checks this
+envelope's resolved community against `app_activations` for `bundle.
+app_id` -- the webui's activation toggle (gh #586) was already the real
+on/off switch for the LOADING side (`hub_api`'s distribution endpoint
+already filters a community-scoped poll by `app_activations.enabled`); this
+is the missing per-EVENT equivalent, so disabling a bundle now stops live
+dispatch immediately rather than waiting on the next poll. Fails open (never
+blocks) for a tenant-wide envelope, an app_id with no `app_activations` row
+at all (most bundles today, including `bot_process` itself -- see that
+module's own docstring and `services/activation_gate.py`'s rationale), or a
+DB failure; only an EXISTING row with `enabled=False` actually blocks.
+Not-activated is a graceful skip (DEBUG log, `return 0`), never an error.
 """
 
 from __future__ import annotations
@@ -127,6 +142,7 @@ from flask_core.stage_runner import (
 from flask_core.stream_pipeline import bundle_stream_key
 
 from config import Config
+from services.activation_gate import is_app_activated
 from services.activity_accrual import ActivityAccrualResult
 from services.activity_accrual import record_activity as accrue_activity
 from services.activity_feed import record_activity
@@ -384,6 +400,24 @@ class ProcessRunner:
             )
         else:
             community_for_context = str(Config.DEMO_ACTIVITY_COMMUNITY_ID)
+
+        # Activation gate (P4, live-dispatch activation unification): skip
+        # dispatch entirely for a bundle the webui's activation toggle (#586)
+        # has disabled in this envelope's resolved community -- fails open
+        # (never blocks) for a tenant-wide envelope, an unonboarded app_id
+        # with no `app_activations` row at all, or a DB hiccup; see
+        # `services/activation_gate.py`'s own module docstring for the full
+        # rationale and why that is safe for every currently-working bundle.
+        # Deliberately checked BEFORE `bundle_context()`/`transform_fn` --
+        # moderation gate, activity emit/accrual, and the `:action` LPUSH
+        # must never run for a command this community turned off.
+        if not await is_app_activated(community=community_for_context, app_id=bundle.app_id):
+            logger.debug(
+                "process.not_activated app_id=%s community=%s -- skipping dispatch",
+                bundle.app_id,
+                community_for_context,
+            )
+            return 0
 
         try:
             with bundle_context(
