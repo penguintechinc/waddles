@@ -228,6 +228,26 @@ pub struct CliConfig {
     /// grants this role needs.
     #[arg(long, env = "DB_READER_USER", default_value = "svc_process_ro")]
     pub db_reader_user: String,
+
+    /// Production wiring for the bundle `db` host capability
+    /// (`crate::capabilities::DbWiring`, `bundle_host_db::connect`) --
+    /// connects as the least-privilege, read-write `waddles_bundle_runtime`
+    /// role (`alembic/versions/0030_bundle_app_schemas.py`), distinct from
+    /// both `DB_USER` (primary) and `DB_READER_USER` (read-only loader)
+    /// above. Defaults match the same shared `waddles` Postgres instance
+    /// those connect to -- a deployment with a dedicated bundle-db host/
+    /// port/name overrides these independently.
+    #[arg(long, env = "BUNDLE_DB_HOST", default_value = "localhost")]
+    pub bundle_db_host: String,
+    #[arg(long, env = "BUNDLE_DB_PORT", default_value_t = 5432)]
+    pub bundle_db_port: u16,
+    #[arg(long, env = "BUNDLE_DB_NAME", default_value = "waddlebot")]
+    pub bundle_db_name: String,
+    /// The role `0030_bundle_app_schemas.py` provisions -- never the
+    /// primary `DB_USER` account (least privilege: DML-only on
+    /// `app_core`/`app_community`, no DDL, no access to any other schema).
+    #[arg(long, env = "BUNDLE_DB_USER", default_value = "waddles_bundle_runtime")]
+    pub bundle_db_user: String,
     /// Poll interval, in whole seconds, for the change-log consumer's
     /// incremental tick (`bundle_active_set::read_safe_seq`/`read_changes`)
     /// -- the full active-set re-read only runs for scopes the change-log
@@ -474,6 +494,15 @@ pub struct Config {
     /// unset, the same graceful-degradation contract as
     /// `envelope_binding_keys` above.
     pub db_reader_password: Option<Secret>,
+    /// `BUNDLE_DB_PASSWORD` for the bundle `db` host capability's
+    /// `waddles_bundle_runtime` connection (`crate::capabilities::DbWiring`).
+    /// `Option`, same rationale as `db_reader_password`: `BUNDLE_DB_CAPABILITY_FLAG`
+    /// defaults OFF, so a fresh deployment that hasn't provisioned the role
+    /// yet must not fail startup over it -- `crate::lib::try_build_db_wiring`
+    /// logs and leaves the capability unwired (every `db` call then denies
+    /// `not_implemented`) when this is unset. Once set, a connection
+    /// *failure* is a different, louder case -- see that function's doc.
+    pub bundle_db_password: Option<Secret>,
 }
 
 impl fmt::Debug for Config {
@@ -489,6 +518,10 @@ impl fmt::Debug for Config {
             .field(
                 "db_reader_password",
                 &self.db_reader_password.as_ref().map(|_| Secret::new("")),
+            )
+            .field(
+                "bundle_db_password",
+                &self.bundle_db_password.as_ref().map(|_| Secret::new("")),
             )
             .field(
                 "envelope_binding_keys",
@@ -528,6 +561,12 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .map(Secret::new);
+        // Same "Helm always renders the secret key, empty until
+        // provisioned" treatment as `db_reader_password` above.
+        let bundle_db_password = std::env::var("BUNDLE_DB_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(Secret::new);
         Ok(Self {
             cli,
             db_password,
@@ -535,6 +574,7 @@ impl Config {
             service_api_key,
             envelope_binding_keys,
             db_reader_password,
+            bundle_db_password,
         })
     }
 }
@@ -559,6 +599,7 @@ mod tests {
             "SERVICE_API_KEY",
             "ENVELOPE_BINDING_KEYS",
             "DB_READER_PASSWORD",
+            "BUNDLE_DB_PASSWORD",
         ] {
             // SAFETY: serialized by ENV_LOCK, no concurrent readers/writers
             // of these specific variables within the test process.
