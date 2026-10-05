@@ -131,39 +131,85 @@ public sealed class WaddleHostAdapter : IWaddleHost
 
     private sealed class DbAdapter : IDbClient
     {
-        public DbRows Execute(string statement, IReadOnlyList<DbValue> parameters)
+        public DbRow Insert(IReadOnlyList<DbColumnValue> columnValues)
         {
-            // WIT `list<T>` (T != u8) lowers to `List<T>`, not an array --
-            // confirmed against the compiler. `list<u8>` is the one
-            // special-cased exception, lowering to `byte[]` (see `KvAdapter`,
-            // whose `byte[]?` usage compiled unchanged).
-            var witParams = new List<WitDb.Value>(parameters.Count);
-            foreach (var parameter in parameters)
-            {
-                witParams.Add(ToWit(parameter));
-            }
-
             try
             {
-                var rows = WitDb.Execute(statement, witParams);
-                var mapped = new List<IReadOnlyList<DbValue>>(rows.rows.Count);
-                foreach (var row in rows.rows)
-                {
-                    var mappedRow = new List<DbValue>(row.Count);
-                    foreach (var cell in row)
-                    {
-                        mappedRow.Add(FromWit(cell));
-                    }
-
-                    mapped.Add(mappedRow);
-                }
-
-                return new DbRows(rows.columns, mapped, rows.rowsAffected);
+                return FromWit(WitDb.Insert(ToWitColumnValues(columnValues)));
             }
             catch (global::StageWorld.WitException<WitDb.Error> ex)
             {
                 throw Convert(ex.TypedValue);
             }
+        }
+
+        public DbRow Get(string rowId)
+        {
+            try
+            {
+                return FromWit(WitDb.Get(rowId));
+            }
+            catch (global::StageWorld.WitException<WitDb.Error> ex)
+            {
+                throw Convert(ex.TypedValue);
+            }
+        }
+
+        public IReadOnlyList<DbRow> Query(uint limit, uint offset, DbOrderBy? orderBy = null)
+        {
+            try
+            {
+                var rows = WitDb.Query(limit, offset, ToWitOrderBy(orderBy));
+                var mapped = new List<DbRow>(rows.Count);
+                foreach (var row in rows)
+                {
+                    mapped.Add(FromWit(row));
+                }
+
+                return mapped;
+            }
+            catch (global::StageWorld.WitException<WitDb.Error> ex)
+            {
+                throw Convert(ex.TypedValue);
+            }
+        }
+
+        public DbRow Update(string rowId, ulong expectedVersion, IReadOnlyList<DbColumnValue> columnValues)
+        {
+            try
+            {
+                return FromWit(WitDb.Update(rowId, expectedVersion, ToWitColumnValues(columnValues)));
+            }
+            catch (global::StageWorld.WitException<WitDb.Error> ex)
+            {
+                throw Convert(ex.TypedValue);
+            }
+        }
+
+        public void Delete(string rowId, ulong expectedVersion)
+        {
+            try
+            {
+                WitDb.Delete(rowId, expectedVersion);
+            }
+            catch (global::StageWorld.WitException<WitDb.Error> ex)
+            {
+                throw Convert(ex.TypedValue);
+            }
+        }
+
+        private static List<WitDb.ColumnValue> ToWitColumnValues(IReadOnlyList<DbColumnValue> columnValues)
+        {
+            // WIT `list<T>` (T != u8) lowers to `List<T>`, not an array --
+            // confirmed against the compiler (see `HttpAdapter.Send`'s own
+            // header-list conversion for the same pattern).
+            var witColumnValues = new List<WitDb.ColumnValue>(columnValues.Count);
+            foreach (var columnValue in columnValues)
+            {
+                witColumnValues.Add(new WitDb.ColumnValue(columnValue.Column, ToWit(columnValue.Value)));
+            }
+
+            return witColumnValues;
         }
 
         private static WitDb.Value ToWit(DbValue value) => value.Kind switch
@@ -187,11 +233,39 @@ public sealed class WaddleHostAdapter : IWaddleHost
             _ => DbValue.Of(value.AsBytesValue),
         };
 
+        private static DbRow FromWit(WitDb.Row row)
+        {
+            var columns = new List<DbColumnValue>(row.columns.Count);
+            foreach (var columnValue in row.columns)
+            {
+                columns.Add(new DbColumnValue(columnValue.column, FromWit(columnValue.value)));
+            }
+
+            return new DbRow(row.rowId, row.version, columns);
+        }
+
+        private static WitDb.OrderBy? ToWitOrderBy(DbOrderBy? orderBy)
+        {
+            if (orderBy is not { } value)
+            {
+                return null;
+            }
+
+            return value.Kind switch
+            {
+                DbOrderByKind.Random => WitDb.OrderBy.Random(),
+                _ => WitDb.OrderBy.Column(new WitDb.OrderColumn(value.Column!.Name, value.Column.Descending)),
+            };
+        }
+
         private static WaddleDbException Convert(WitDb.Error error) => error.Tag switch
         {
             WitDb.Error.Tags.Denied => new WaddleDbException(DbErrorKind.Denied, error.AsDenied),
-            WitDb.Error.Tags.Syntax => new WaddleDbException(DbErrorKind.Syntax, error.AsSyntax),
+            WitDb.Error.Tags.InvalidColumn => new WaddleDbException(DbErrorKind.InvalidColumn, error.AsInvalidColumn),
+            WitDb.Error.Tags.InvalidValue => new WaddleDbException(DbErrorKind.InvalidValue, error.AsInvalidValue),
+            WitDb.Error.Tags.NotFound => new WaddleDbException(DbErrorKind.NotFound, "row not found"),
             WitDb.Error.Tags.Conflict => new WaddleDbException(DbErrorKind.Conflict, error.AsConflict),
+            WitDb.Error.Tags.QuotaExceeded => new WaddleDbException(DbErrorKind.QuotaExceeded, error.AsQuotaExceeded),
             WitDb.Error.Tags.Timeout => new WaddleDbException(DbErrorKind.Timeout, "db call timed out"),
             _ => new WaddleDbException(DbErrorKind.Backend, error.AsBackend),
         };
