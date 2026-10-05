@@ -526,10 +526,15 @@ ingress:
           pathType: Prefix
           service: inventory-interaction
           port: 8024
+        # SECURITY: routed through hub-api, NOT calendar-interaction directly
+        # -- hub-api's scope-gated event_calendar_bp + EventCalendarProxyClient
+        # are the only legitimate JWT-validators/setters of the
+        # X-User-Context/X-API-Key headers calendar_interaction_module trusts
+        # (live authz bypass, fixed 2026-10).
         - path: /api/v1/calendar
           pathType: Prefix
-          service: calendar-interaction
-          port: 8030
+          service: hub-api
+          port: 8060
         - path: /api/v1/memories
           pathType: Prefix
           service: memories-interaction
@@ -708,9 +713,12 @@ httproute:
     - path: /api/v1/alias
       service: "waddlebot-interactive-social"
       port: 8010
+    # SECURITY: routed through hub-api, NOT waddlebot-interactive-productivity
+    # directly (live authz bypass, fixed 2026-10) -- see matching comment above.
     - path: /api/v1/calendar
-      service: "waddlebot-interactive-productivity"
-      port: 8030
+      service: "waddlebot-hub-api"
+      port: 8060
+      timeoutSeconds: 3600
     - path: /api/v1/loyalty
       service: "waddlebot-interactive-loyalty"
       port: 8032
