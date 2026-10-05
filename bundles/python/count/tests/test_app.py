@@ -1,4 +1,4 @@
-"""Host-native tests for the `count` bundle's `transform`/`dispatch` logic.
+"""Host-native tests for the `count` bundle's dynamic-counter `transform`/`dispatch` logic.
 
 No WASM/wasmtime here -- see `bundles/python/lurk/tests/test_app.py`'s own docstring for the
 fake-`wit_world` approach this mirrors (fake `kv`/`relay`/`flags`/`log`).
@@ -7,14 +7,13 @@ fake-`wit_world` approach this mirrors (fake `kv`/`relay`/`flags`/`log`).
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import sys
 import types
 
 import pytest
 
-from app import _kv_key, dispatch, transform
+from app import dispatch, transform
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 
@@ -22,161 +21,484 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _expected_key(community: str | None, actor: str | None) -> str:
-    """Mirror `app._kv_key`'s hashing so tests assert the real contract, not a literal."""
-    pseudonym = hashlib.sha256(
-        f"{community or 'tenant'}:{actor or 'anonymous'}".encode()
-    ).hexdigest()
-    return f"count:{pseudonym}"
+class _FakeKv:
+    """In-memory `kv` host stand-in, with an optional scripted failure."""
 
+    def __init__(self) -> None:
+        self.store: dict[str, bytes] = {}
+        self.calls: list[tuple[str, tuple]] = []
+        self.fail_next: Exception | None = None
+        self.fail_ops: set[str] = set()
 
-def _sample_event(text: str, *, channel_id: str | None = "12345") -> PlatformEvent:
-    return PlatformEvent(
-        platform="twitch",
-        event_type="chat.message",
-        actor="viewer-1",
-        payload={"text": text, "channel_id": channel_id},
-        occurred_at="2026-10-03T00:00:00.000Z",
-    )
+    def _maybe_fail(self, op: str) -> None:
+        if op in self.fail_ops:
+            raise RuntimeError(f"scripted {op} failure")
+        if self.fail_next is not None:
+            exc = self.fail_next
+            self.fail_next = None
+            raise exc
+
+    def get(self, key: str):
+        self.calls.append(("get", (key,)))
+        self._maybe_fail("get")
+        return self.store.get(key)
+
+    def set(self, key: str, value, ttl_seconds: int):
+        self.calls.append(("set", (key, bytes(value), ttl_seconds)))
+        self._maybe_fail("set")
+        self.store[key] = bytes(value)
+
+    def delete(self, key: str):
+        self.calls.append(("delete", (key,)))
+        self._maybe_fail("delete")
+        self.store.pop(key, None)
+
+    def increment(self, key: str, delta: int, ttl_seconds: int):
+        self.calls.append(("increment", (key, delta, ttl_seconds)))
+        self._maybe_fail("increment")
+        current = int(self.store.get(key, b"0"))
+        new_value = current + delta
+        self.store[key] = str(new_value).encode()
+        return new_value
 
 
 @pytest.fixture
 def fake_host(monkeypatch: pytest.MonkeyPatch):
-    """Fake WIT host: `flags.enabled` True, `kv.increment` returns a scripted sequence."""
-    increments: list[tuple[str, int, int]] = []
+    """Fake WIT host: `flags.enabled` True by default, real in-memory `kv`, recording `relay`/`log`."""
+    fake_kv = _FakeKv()
     relay_calls: list[tuple[str, str]] = []
     log_calls: list[tuple[int, str, str]] = []
-    totals = iter([1, 2, 3, 4, 5])
+    flag_state = {"enabled": True}
 
-    flags_mod = types.SimpleNamespace(enabled=lambda key, default_value: True)
-    kv_mod = types.SimpleNamespace(
-        increment=lambda key, delta, ttl: (
-            increments.append((key, delta, ttl)) or next(totals)
-        ),
-        get=lambda key: None,
-        set=lambda key, value, ttl: None,
-        delete=lambda key: None,
+    flags_mod = types.SimpleNamespace(
+        enabled=lambda key, default_value: flag_state["enabled"]
     )
-    relay_mod = types.SimpleNamespace(push=lambda provider, msg: relay_calls.append((provider, msg)))
+    relay_mod = types.SimpleNamespace(
+        push=lambda provider, msg: relay_calls.append((provider, msg))
+    )
     log_mod = types.SimpleNamespace(
         Level={"ERROR": 0, "WARN": 1, "INFO": 2, "DEBUG": 3},
         write=lambda lvl, msg, fields_json: log_calls.append((lvl, msg, fields_json)),
     )
     fake_wit_world = types.ModuleType("wit_world")
     fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
-        flags=flags_mod, kv=kv_mod, relay=relay_mod, log=log_mod
+        flags=flags_mod, kv=fake_kv, relay=relay_mod, log=log_mod
     )
     monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-    return types.SimpleNamespace(increments=increments, relay_calls=relay_calls, log_calls=log_calls)
+    return types.SimpleNamespace(
+        kv=fake_kv, relay_calls=relay_calls, log_calls=log_calls, flag_state=flag_state
+    )
 
 
-@pytest.mark.parametrize("text", ["!count", "!COUNT", "  !count  "])
-def test_count_matches_case_insensitively_and_with_whitespace(text: str, fake_host) -> None:
-    result = _run(transform(_sample_event(text)))
-    assert result is not None
-    assert result.payload["channel_id"] == "12345"
+def _event(
+    text: str,
+    *,
+    platform: str = "twitch",
+    is_mod=False,
+    is_broadcaster=False,
+    channel_id="12345",
+):
+    payload = {"text": text, "channel_id": channel_id}
+    if is_mod is not None:
+        payload["is_mod"] = is_mod
+    if is_broadcaster is not None:
+        payload["is_broadcaster"] = is_broadcaster
+    return PlatformEvent(
+        platform=platform,
+        event_type="chat.message",
+        actor="viewer-1",
+        payload=payload,
+        occurred_at="2026-10-05T00:00:00.000Z",
+    )
 
 
-@pytest.mark.parametrize("text", ["!counting", "count", "!count me", "hello", ""])
-def test_non_matching_text_produces_no_reply(text: str, fake_host) -> None:
-    assert _run(transform(_sample_event(text))) is None
+def _no_role_event(text: str, *, platform: str = "discord", channel_id="guild-1"):
+    """A Discord-shaped event -- no `is_mod`/`is_broadcaster` keys at all (today's real gap)."""
+    return PlatformEvent(
+        platform=platform,
+        event_type="chat.message",
+        actor="viewer-1",
+        payload={"text": text, "channel_id": channel_id},
+        occurred_at="2026-10-05T00:00:00.000Z",
+    )
 
 
-def test_non_chat_payload_is_ignored_rather_than_erroring() -> None:
+def _reply_text(result: PlatformEvent) -> str:
+    return result.payload["text"]
+
+
+# ---------------------------------------------------------------------------
+# Basic routing / flag / non-matching
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", ["hello", "", "count add die", "die"])
+def test_messages_without_leading_bang_are_ignored(text: str, fake_host) -> None:
+    assert _run(transform(_event(text))) is None
+    assert fake_host.kv.calls == []  # cheap-skip: zero kv ops
+
+
+def test_disabled_flag_suppresses_every_reply(fake_host) -> None:
+    fake_host.flag_state["enabled"] = False
+    assert _run(transform(_event("!count add !die", is_mod=True))) is None
+
+
+def test_non_chat_payload_is_ignored(fake_host) -> None:
     event = PlatformEvent(
-        platform="twitch", event_type="channel.follow", actor=None, payload={}, occurred_at=""
+        platform="twitch",
+        event_type="channel.follow",
+        actor=None,
+        payload={},
+        occurred_at="",
     )
     assert _run(transform(event)) is None
 
 
-def test_disabled_flag_suppresses_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
-    flags_mod = types.SimpleNamespace(enabled=lambda key, default_value: False)
-    fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace(flags=flags_mod)  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-
-    assert _run(transform(_sample_event("!count"))) is None
+def test_unregistered_bang_token_returns_none(fake_host) -> None:
+    assert _run(transform(_event("!notacounter"))) is None
+    # exactly one registry read -- the per-message kv cost for an unmatched `!` token
+    assert fake_host.kv.calls == [("get", ("count:registry",))]
 
 
-def _sample_envelope(
-    platform: str, *, community: str | None = "comm-1", actor: str | None = "viewer-1"
-) -> StageEnvelope:
-    return StageEnvelope(
-        tenant="tenant-1",
-        community=community,
-        app_id="waddles.core.example.count",
-        stage="action",
-        event=PlatformEvent(
-            platform=platform,
-            event_type="chat.message",
-            actor=actor,
-            payload={"channel_id": "12345"},
-            occurred_at="2026-10-03T00:00:00.000Z",
-        ),
-        ts="2026-10-03T00:00:00.000Z",
+def test_bare_count_returns_usage(fake_host) -> None:
+    result = _run(transform(_event("!count")))
+    assert "Usage" in _reply_text(result)
+
+
+def test_unknown_count_subcommand_returns_error(fake_host) -> None:
+    result = _run(transform(_event("!count bogus")))
+    assert "Unknown" in _reply_text(result)
+
+
+# ---------------------------------------------------------------------------
+# !count add / remove / list
+# ---------------------------------------------------------------------------
+
+
+def test_count_add_creates_counter_at_zero(fake_host) -> None:
+    result = _run(transform(_event("!count add !die", is_mod=True)))
+    assert "Created counter 'die'" in _reply_text(result)
+    assert json.loads(fake_host.kv.store["count:registry"]) == ["die"]
+    assert fake_host.kv.store["count:value:die"] == b"0"
+
+
+def test_count_add_accepts_name_without_bang(fake_host) -> None:
+    result = _run(transform(_event("!count add die", is_mod=True)))
+    assert "Created counter 'die'" in _reply_text(result)
+
+
+def test_count_add_requires_moderator_or_broadcaster(fake_host) -> None:
+    result = _run(
+        transform(_event("!count add !die", is_mod=False, is_broadcaster=False))
+    )
+    assert "Only the broadcaster or a moderator" in _reply_text(result)
+    assert "count:registry" not in fake_host.kv.store
+
+
+def test_count_add_allowed_for_broadcaster_without_mod(fake_host) -> None:
+    result = _run(
+        transform(_event("!count add !die", is_mod=False, is_broadcaster=True))
+    )
+    assert "Created counter 'die'" in _reply_text(result)
+
+
+def test_count_add_duplicate_name_errors(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    result = _run(transform(_event("!count add !die", is_mod=True)))
+    assert "already exists" in _reply_text(result)
+
+
+@pytest.mark.parametrize(
+    "name,reason",
+    [
+        ("!", "name is required"),  # normalizes to "" after stripping the leading '!'
+        ("x" * 33, "or fewer"),
+        ("Die!", "lowercase letters"),
+        ("count", "reserved"),
+    ],
+)
+def test_count_add_rejects_invalid_names(name: str, reason: str, fake_host) -> None:
+    result = _run(transform(_event(f"!count add {name}", is_mod=True)))
+    assert reason in _reply_text(result)
+
+
+def test_count_add_with_no_name_argument_returns_usage(fake_host) -> None:
+    result = _run(transform(_event("!count add", is_mod=True)))
+    assert _reply_text(result) == "Usage: !count add <name>"
+
+
+def test_count_remove_deletes_counter(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    result = _run(transform(_event("!count remove !die", is_mod=True)))
+    assert "Removed counter 'die'" in _reply_text(result)
+    assert json.loads(fake_host.kv.store["count:registry"]) == []
+    assert "count:value:die" not in fake_host.kv.store
+
+
+def test_count_remove_requires_permission(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    result = _run(transform(_event("!count remove !die", is_mod=False)))
+    assert "Only the broadcaster or a moderator" in _reply_text(result)
+    assert "die" in json.loads(fake_host.kv.store["count:registry"])
+
+
+def test_count_remove_without_name_returns_usage(fake_host) -> None:
+    result = _run(transform(_event("!count remove", is_mod=True)))
+    assert _reply_text(result) == "Usage: !count remove <name>"
+
+
+def test_count_remove_nonexistent_errors(fake_host) -> None:
+    result = _run(transform(_event("!count remove !die", is_mod=True)))
+    assert "doesn't exist" in _reply_text(result)
+
+
+def test_count_list_empty(fake_host) -> None:
+    result = _run(transform(_event("!count list")))
+    assert "No counters" in _reply_text(result)
+
+
+def test_count_list_open_to_anyone(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    _run(transform(_event("!count add !wins", is_mod=True)))
+    result = _run(transform(_event("!count list", is_mod=False, is_broadcaster=False)))
+    assert "die" in _reply_text(result) and "wins" in _reply_text(result)
+
+
+# ---------------------------------------------------------------------------
+# Dynamic counter invocation: read / add / sub / set
+# ---------------------------------------------------------------------------
+
+
+def test_bare_counter_read_is_open_to_anyone(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    result = _run(transform(_event("!die", is_mod=False, is_broadcaster=False)))
+    assert _reply_text(result) == "die: 0"
+
+
+def test_counter_add_default_increment_is_one(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    result = _run(transform(_event("!die add", is_mod=True)))
+    assert _reply_text(result) == "die: 1"
+
+
+def test_counter_add_explicit_amount(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    result = _run(transform(_event("!die add 5", is_mod=True)))
+    assert _reply_text(result) == "die: 5"
+
+
+def test_counter_sub_default_decrement_is_one(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    _run(transform(_event("!die set 10", is_mod=True)))
+    result = _run(transform(_event("!die sub", is_mod=True)))
+    assert _reply_text(result) == "die: 9"
+
+
+def test_counter_set_explicit_value(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    result = _run(transform(_event("!die set 3", is_mod=True)))
+    assert _reply_text(result) == "die: 3"
+
+
+def test_counter_set_without_amount_errors(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    result = _run(transform(_event("!die set", is_mod=True)))
+    assert "a number is required" in _reply_text(result)
+
+
+@pytest.mark.parametrize("op", ["add", "sub", "set"])
+def test_counter_mutations_require_permission(op: str, fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    text = f"!die {op} 1"
+    result = _run(transform(_event(text, is_mod=False, is_broadcaster=False)))
+    assert "Only the broadcaster or a moderator" in _reply_text(result)
+    assert fake_host.kv.store["count:value:die"] == b"0"
+
+
+@pytest.mark.parametrize(
+    "amount,expected_fragment",
+    [
+        ("abc", "isn't a whole number"),
+        ("1.5", "isn't a whole number"),
+        (str(2**63), "out of range"),
+        ("-" + str(2**63 + 1), "out of range"),
+    ],
+)
+def test_counter_invalid_amount_errors_not_crashes(
+    amount: str, expected_fragment: str, fake_host
+) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    result = _run(transform(_event(f"!die set {amount}", is_mod=True)))
+    assert result is not None
+    assert expected_fragment in _reply_text(result)
+    assert fake_host.kv.store["count:value:die"] == b"0"  # rejected before any kv write
+
+
+def test_counter_add_invalid_amount_errors(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    result = _run(transform(_event("!die add abc", is_mod=True)))
+    assert "isn't a whole number" in _reply_text(result)
+    assert fake_host.kv.store["count:value:die"] == b"0"
+
+
+def test_counter_unknown_operation_errors(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    result = _run(transform(_event("!die frobnicate", is_mod=True)))
+    assert "Unknown operation" in _reply_text(result)
+
+
+def test_unregistered_counter_name_with_subcommand_shape_is_still_not_ours(
+    fake_host,
+) -> None:
+    # "!wins add 1" where "wins" was never created -- not a registered counter, not !count.
+    assert _run(transform(_event("!wins add 1", is_mod=True))) is None
+
+
+# ---------------------------------------------------------------------------
+# Permission fail-safe: role info unavailable (Discord today)
+# ---------------------------------------------------------------------------
+
+
+def test_discord_shaped_event_with_no_role_fields_rejects_mutation(fake_host) -> None:
+    result = _run(transform(_no_role_event("!count add !die")))
+    assert "Only the broadcaster or a moderator" in _reply_text(result)
+    assert "count:registry" not in fake_host.kv.store
+
+
+def test_discord_shaped_event_still_allows_reads(fake_host) -> None:
+    _run(
+        transform(_event("!count add !die", is_mod=True))
+    )  # created via a privileged Twitch event
+    result = _run(transform(_no_role_event("!die")))
+    assert _reply_text(result) == "die: 0"
+
+
+def test_role_info_unavailable_is_logged(fake_host) -> None:
+    _run(transform(_no_role_event("!count add !die")))
+    assert any(
+        msg == "count.role_info_unavailable"
+        for _lvl, msg, _fields in fake_host.log_calls
     )
 
 
-def test_dispatch_increments_kv_keyed_by_hashed_community_and_actor(fake_host) -> None:
-    envelope = _sample_envelope("twitch")
-    result = _run(dispatch(envelope, {}, http_client=None))
-
-    key, delta, ttl = fake_host.increments[0]
-    assert key == _expected_key("comm-1", "viewer-1")
-    assert "viewer-1" not in key  # raw actor must never appear in the stored kv key
-    assert delta == 1
-    assert ttl == 0  # no expiry -- a persistent running total
-    assert result.detail == "total=1"
-    provider, message_json = fake_host.relay_calls[0]
-    assert json.loads(message_json) == {"channel": "12345", "text": "You've been counted 1 time!"}
+# ---------------------------------------------------------------------------
+# kv failure handling: fail loud, never silent
+# ---------------------------------------------------------------------------
 
 
-def test_kv_key_is_a_non_reversible_hash_not_the_raw_actor() -> None:
-    assert _kv_key("comm-1", "viewer-1") == _expected_key("comm-1", "viewer-1")
-    assert "viewer-1" not in _kv_key("comm-1", "viewer-1")
+def test_kv_failure_on_registry_read_produces_error_reply_and_logs(fake_host) -> None:
+    fake_host.kv.fail_next = RuntimeError("backend unavailable")
+    result = _run(transform(_event("!count list")))
+    assert result is not None
+    assert "went wrong" in _reply_text(result)
+    assert any(msg == "count.kv_failure" for _lvl, msg, _fields in fake_host.log_calls)
 
 
-def test_transform_and_dispatch_never_log_the_raw_actor(fake_host) -> None:
-    _run(transform(_sample_event("!count")))
-    envelope = _sample_envelope("twitch")
-    _run(dispatch(envelope, {}, http_client=None))
+def test_corrupt_registry_is_treated_as_kv_failure(fake_host) -> None:
+    fake_host.kv.store["count:registry"] = b"not json"
+    result = _run(transform(_event("!count list")))
+    assert "went wrong" in _reply_text(result)
 
+
+def test_registry_not_a_list_of_strings_is_kv_failure(fake_host) -> None:
+    fake_host.kv.store["count:registry"] = json.dumps([1, 2, 3]).encode()
+    result = _run(transform(_event("!count list")))
+    assert "went wrong" in _reply_text(result)
+
+
+def test_corrupt_counter_value_is_kv_failure(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    fake_host.kv.store["count:value:die"] = b"not-a-number"
+    result = _run(transform(_event("!die")))
+    assert "went wrong" in _reply_text(result)
+
+
+def test_counter_registered_with_no_value_key_reads_as_zero(fake_host) -> None:
+    # Registry entry present but its value key was never written -- _get_counter_value's
+    # own `raw is None` default-to-zero path, distinct from the normal !count add flow
+    # (which always writes b"0" immediately).
+    fake_host.kv.store["count:registry"] = json.dumps(["die"]).encode()
+    result = _run(transform(_event("!die")))
+    assert _reply_text(result) == "die: 0"
+
+
+def test_kv_set_failure_on_registry_save_produces_error_reply(fake_host) -> None:
+    fake_host.kv.fail_ops = {"set"}
+    result = _run(transform(_event("!count add !die", is_mod=True)))
+    assert "went wrong" in _reply_text(result)
+    assert any(msg == "count.kv_failure" for _lvl, msg, _fields in fake_host.log_calls)
+
+
+def test_kv_delete_failure_on_remove_produces_error_reply(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    fake_host.kv.fail_ops = {"delete"}
+    result = _run(transform(_event("!count remove !die", is_mod=True)))
+    assert "went wrong" in _reply_text(result)
+
+
+def test_kv_increment_failure_produces_error_reply(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    fake_host.kv.fail_ops = {"increment"}
+    result = _run(transform(_event("!die add 1", is_mod=True)))
+    assert "went wrong" in _reply_text(result)
+
+
+# ---------------------------------------------------------------------------
+# No raw actor in kv keys or logs
+# ---------------------------------------------------------------------------
+
+
+def test_transform_never_stores_or_logs_the_raw_actor(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    _run(transform(_event("!die add 1", is_mod=True)))
+
+    for key in fake_host.kv.store:
+        assert "viewer-1" not in key
     for _level, message, fields_json in fake_host.log_calls:
         assert "viewer-1" not in message
         assert "viewer-1" not in fields_json
         assert "actor" not in json.loads(fields_json)
 
 
-def test_dispatch_reply_pluralizes_after_the_first_count(fake_host) -> None:
-    envelope = _sample_envelope("twitch")
-    _run(dispatch(envelope, {}, http_client=None))  # total=1
-    _run(dispatch(envelope, {}, http_client=None))  # total=2
-
-    _, message_json = fake_host.relay_calls[1]
-    assert json.loads(message_json)["text"] == "You've been counted 2 times!"
+# ---------------------------------------------------------------------------
+# dispatch
+# ---------------------------------------------------------------------------
 
 
-def test_dispatch_falls_back_to_tenant_sentinel_when_community_is_none(fake_host) -> None:
-    envelope = _sample_envelope("twitch", community=None)
-    _run(dispatch(envelope, {}, http_client=None))
-    assert fake_host.increments[0][0] == _expected_key(None, "viewer-1")
-
-
-def test_dispatch_raises_when_channel_id_is_missing(fake_host) -> None:
-    envelope = StageEnvelope(
+def _envelope(platform: str, payload: dict) -> StageEnvelope:
+    return StageEnvelope(
         tenant="tenant-1",
         community="comm-1",
         app_id="waddles.core.example.count",
         stage="action",
         event=PlatformEvent(
-            platform="twitch",
+            platform=platform,
             event_type="chat.message",
             actor="viewer-1",
-            payload={"channel_id": None},
-            occurred_at="2026-10-03T00:00:00.000Z",
+            payload=payload,
+            occurred_at="2026-10-05T00:00:00.000Z",
         ),
-        ts="2026-10-03T00:00:00.000Z",
+        ts="2026-10-05T00:00:00.000Z",
     )
+
+
+def test_dispatch_relays_the_text_transform_built(fake_host) -> None:
+    envelope = _envelope("twitch", {"channel_id": "12345", "text": "die: 1"})
+    result = _run(dispatch(envelope, {}, http_client=None))
+
+    provider, message_json = fake_host.relay_calls[0]
+    assert provider == "twitch"
+    assert json.loads(message_json) == {"channel": "12345", "text": "die: 1"}
+    assert result.detail == "relayed"
+
+
+def test_dispatch_raises_when_channel_id_is_missing(fake_host) -> None:
+    envelope = _envelope("twitch", {"channel_id": None, "text": "die: 1"})
     with pytest.raises(ValueError, match="channel_id"):
         _run(dispatch(envelope, {}, http_client=None))
-    assert fake_host.increments == []
+
+
+def test_dispatch_raises_when_text_is_missing(fake_host) -> None:
+    envelope = _envelope("twitch", {"channel_id": "12345", "text": None})
+    with pytest.raises(ValueError, match="text"):
+        _run(dispatch(envelope, {}, http_client=None))
