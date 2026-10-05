@@ -13,7 +13,7 @@ import types
 
 import pytest
 
-from app import dispatch, transform
+from app import REGISTRY_KEY, VALUE_KEY_PREFIX, _value_key, dispatch, transform
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
 
@@ -21,8 +21,38 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+# regression: gh alpha-count-kv-colon -- mirrors
+# `core/bundle_host_kv/src/scope.rs::is_allowed_key_byte` exactly (ASCII
+# alnum + `_`/`-`/`.`, notably NOT `:`). Production rejected every real
+# `count` kv call with `error_kind: invalid_key` because `REGISTRY_KEY`/
+# `VALUE_KEY_PREFIX` used `:` as a namespace separator -- a byte the host's
+# own guest-key validator has always forbidden (colon is reserved there as
+# the *server-side* namespace escape). The in-memory fake below previously
+# accepted any key, including one `:` would have rejected, so this bug was
+# invisible to the whole test suite. Validating here closes that blind spot.
+_ALLOWED_KV_KEY_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
+)
+
+
+class _HostKvError(Exception):
+    """Shaped like the generated WIT `Err` (`.value` holds the error union) -- see `waddle_sdk/kv.py`."""
+
+    def __init__(self, value: str) -> None:
+        super().__init__(value)
+        self.value = value
+
+
+def _validate_guest_key(key: str) -> None:
+    """Reject exactly what the real `bundle_host_kv` host capability rejects -- fail loud, not silent."""
+    if not key or len(key) > 256:
+        raise _HostKvError(f"too-large: key length {len(key)}")
+    if any(ch not in _ALLOWED_KV_KEY_CHARS for ch in key):
+        raise _HostKvError(f"backend: invalid key {key!r}")
+
+
 class _FakeKv:
-    """In-memory `kv` host stand-in, with an optional scripted failure."""
+    """In-memory `kv` host stand-in -- validates keys like the real host, with an optional scripted failure."""
 
     def __init__(self) -> None:
         self.store: dict[str, bytes] = {}
@@ -39,21 +69,25 @@ class _FakeKv:
             raise exc
 
     def get(self, key: str):
+        _validate_guest_key(key)
         self.calls.append(("get", (key,)))
         self._maybe_fail("get")
         return self.store.get(key)
 
     def set(self, key: str, value, ttl_seconds: int):
+        _validate_guest_key(key)
         self.calls.append(("set", (key, bytes(value), ttl_seconds)))
         self._maybe_fail("set")
         self.store[key] = bytes(value)
 
     def delete(self, key: str):
+        _validate_guest_key(key)
         self.calls.append(("delete", (key,)))
         self._maybe_fail("delete")
         self.store.pop(key, None)
 
     def increment(self, key: str, delta: int, ttl_seconds: int):
+        _validate_guest_key(key)
         self.calls.append(("increment", (key, delta, ttl_seconds)))
         self._maybe_fail("increment")
         current = int(self.store.get(key, b"0"))
@@ -157,7 +191,7 @@ def test_non_chat_payload_is_ignored(fake_host) -> None:
 def test_unregistered_bang_token_returns_none(fake_host) -> None:
     assert _run(transform(_event("!notacounter"))) is None
     # exactly one registry read -- the per-message kv cost for an unmatched `!` token
-    assert fake_host.kv.calls == [("get", ("count:registry",))]
+    assert fake_host.kv.calls == [("get", ("count.registry",))]
 
 
 def test_bare_count_returns_usage(fake_host) -> None:
@@ -178,8 +212,8 @@ def test_unknown_count_subcommand_returns_error(fake_host) -> None:
 def test_count_add_creates_counter_at_zero(fake_host) -> None:
     result = _run(transform(_event("!count add !die", is_mod=True)))
     assert "Created counter 'die'" in _reply_text(result)
-    assert json.loads(fake_host.kv.store["count:registry"]) == ["die"]
-    assert fake_host.kv.store["count:value:die"] == b"0"
+    assert json.loads(fake_host.kv.store["count.registry"]) == ["die"]
+    assert fake_host.kv.store["count.value.die"] == b"0"
 
 
 def test_count_add_accepts_name_without_bang(fake_host) -> None:
@@ -192,7 +226,7 @@ def test_count_add_requires_moderator_or_broadcaster(fake_host) -> None:
         transform(_event("!count add !die", is_mod=False, is_broadcaster=False))
     )
     assert "Only the broadcaster or a moderator" in _reply_text(result)
-    assert "count:registry" not in fake_host.kv.store
+    assert "count.registry" not in fake_host.kv.store
 
 
 def test_count_add_allowed_for_broadcaster_without_mod(fake_host) -> None:
@@ -231,15 +265,15 @@ def test_count_remove_deletes_counter(fake_host) -> None:
     _run(transform(_event("!count add !die", is_mod=True)))
     result = _run(transform(_event("!count remove !die", is_mod=True)))
     assert "Removed counter 'die'" in _reply_text(result)
-    assert json.loads(fake_host.kv.store["count:registry"]) == []
-    assert "count:value:die" not in fake_host.kv.store
+    assert json.loads(fake_host.kv.store["count.registry"]) == []
+    assert "count.value.die" not in fake_host.kv.store
 
 
 def test_count_remove_requires_permission(fake_host) -> None:
     _run(transform(_event("!count add !die", is_mod=True)))
     result = _run(transform(_event("!count remove !die", is_mod=False)))
     assert "Only the broadcaster or a moderator" in _reply_text(result)
-    assert "die" in json.loads(fake_host.kv.store["count:registry"])
+    assert "die" in json.loads(fake_host.kv.store["count.registry"])
 
 
 def test_count_remove_without_name_returns_usage(fake_host) -> None:
@@ -312,7 +346,7 @@ def test_counter_mutations_require_permission(op: str, fake_host) -> None:
     text = f"!die {op} 1"
     result = _run(transform(_event(text, is_mod=False, is_broadcaster=False)))
     assert "Only the broadcaster or a moderator" in _reply_text(result)
-    assert fake_host.kv.store["count:value:die"] == b"0"
+    assert fake_host.kv.store["count.value.die"] == b"0"
 
 
 @pytest.mark.parametrize(
@@ -331,14 +365,14 @@ def test_counter_invalid_amount_errors_not_crashes(
     result = _run(transform(_event(f"!die set {amount}", is_mod=True)))
     assert result is not None
     assert expected_fragment in _reply_text(result)
-    assert fake_host.kv.store["count:value:die"] == b"0"  # rejected before any kv write
+    assert fake_host.kv.store["count.value.die"] == b"0"  # rejected before any kv write
 
 
 def test_counter_add_invalid_amount_errors(fake_host) -> None:
     _run(transform(_event("!count add !die", is_mod=True)))
     result = _run(transform(_event("!die add abc", is_mod=True)))
     assert "isn't a whole number" in _reply_text(result)
-    assert fake_host.kv.store["count:value:die"] == b"0"
+    assert fake_host.kv.store["count.value.die"] == b"0"
 
 
 def test_counter_unknown_operation_errors(fake_host) -> None:
@@ -362,7 +396,7 @@ def test_unregistered_counter_name_with_subcommand_shape_is_still_not_ours(
 def test_discord_shaped_event_with_no_role_fields_rejects_mutation(fake_host) -> None:
     result = _run(transform(_no_role_event("!count add !die")))
     assert "Only the broadcaster or a moderator" in _reply_text(result)
-    assert "count:registry" not in fake_host.kv.store
+    assert "count.registry" not in fake_host.kv.store
 
 
 def test_discord_shaped_event_still_allows_reads(fake_host) -> None:
@@ -395,20 +429,20 @@ def test_kv_failure_on_registry_read_produces_error_reply_and_logs(fake_host) ->
 
 
 def test_corrupt_registry_is_treated_as_kv_failure(fake_host) -> None:
-    fake_host.kv.store["count:registry"] = b"not json"
+    fake_host.kv.store["count.registry"] = b"not json"
     result = _run(transform(_event("!count list")))
     assert "went wrong" in _reply_text(result)
 
 
 def test_registry_not_a_list_of_strings_is_kv_failure(fake_host) -> None:
-    fake_host.kv.store["count:registry"] = json.dumps([1, 2, 3]).encode()
+    fake_host.kv.store["count.registry"] = json.dumps([1, 2, 3]).encode()
     result = _run(transform(_event("!count list")))
     assert "went wrong" in _reply_text(result)
 
 
 def test_corrupt_counter_value_is_kv_failure(fake_host) -> None:
     _run(transform(_event("!count add !die", is_mod=True)))
-    fake_host.kv.store["count:value:die"] = b"not-a-number"
+    fake_host.kv.store["count.value.die"] = b"not-a-number"
     result = _run(transform(_event("!die")))
     assert "went wrong" in _reply_text(result)
 
@@ -417,7 +451,7 @@ def test_counter_registered_with_no_value_key_reads_as_zero(fake_host) -> None:
     # Registry entry present but its value key was never written -- _get_counter_value's
     # own `raw is None` default-to-zero path, distinct from the normal !count add flow
     # (which always writes b"0" immediately).
-    fake_host.kv.store["count:registry"] = json.dumps(["die"]).encode()
+    fake_host.kv.store["count.registry"] = json.dumps(["die"]).encode()
     result = _run(transform(_event("!die")))
     assert _reply_text(result) == "die: 0"
 
@@ -502,3 +536,53 @@ def test_dispatch_raises_when_text_is_missing(fake_host) -> None:
     envelope = _envelope("twitch", {"channel_id": "12345", "text": None})
     with pytest.raises(ValueError, match="text"):
         _run(dispatch(envelope, {}, http_client=None))
+
+
+# ---------------------------------------------------------------------------
+# Regression: gh alpha-count-kv-colon -- every kv key this bundle constructs
+# must satisfy the host's guest-key charset, or every counter mutation on
+# alpha fails with "Something went wrong updating the counter storage".
+# ---------------------------------------------------------------------------
+
+
+def test_kv_key_constants_satisfy_host_guest_key_charset() -> None:
+    """`REGISTRY_KEY`/`VALUE_KEY_PREFIX` (and prefixed counter-name keys) must never contain `:`.
+
+    This previously failed in production (not in this test suite, since
+    `_FakeKv` didn't validate keys): `REGISTRY_KEY = "count:registry"` and
+    `VALUE_KEY_PREFIX = "count:value:"` used `:` as a human-readable
+    namespace separator, but `core/bundle_host_kv/src/scope.rs::
+    is_allowed_key_byte` reserves `:` as the *server-side* namespace escape
+    and rejects any guest key containing one (`error_kind: invalid_key`,
+    surfaced to the bundle as a `kv.error`). Every `!count`/`!<counter>`
+    mutation hit this unconditionally, caught by `transform`'s `_KvFailure`
+    handler and replied with the generic storage-error message -- a total
+    outage for this bundle's write path, not an edge case.
+    """
+    assert set(REGISTRY_KEY) <= _ALLOWED_KV_KEY_CHARS
+    assert set(VALUE_KEY_PREFIX) <= _ALLOWED_KV_KEY_CHARS
+    assert set(_value_key("die")) <= _ALLOWED_KV_KEY_CHARS
+    assert ":" not in REGISTRY_KEY
+    assert ":" not in VALUE_KEY_PREFIX
+
+
+def test_counter_create_and_mutate_round_trip_against_host_key_validation(
+    fake_host,
+) -> None:
+    """End-to-end: create, add, set, read a counter -- every kv call must pass `_FakeKv`'s charset check.
+
+    Before the fix this raised `_HostKvError` on the very first
+    `kv.get(REGISTRY_KEY)` and the whole flow degraded to the generic
+    "Something went wrong" reply instead of ever reaching a real value.
+    """
+    create = _run(transform(_event("!count add !die", is_mod=True)))
+    assert _reply_text(create) == "Created counter 'die' (starting at 0). Use !die to read it."
+
+    added = _run(transform(_event("!die add 5", is_mod=True)))
+    assert _reply_text(added) == "die: 5"
+
+    was_set = _run(transform(_event("!die set 42", is_mod=True)))
+    assert _reply_text(was_set) == "die: 42"
+
+    read = _run(transform(_event("!die")))
+    assert _reply_text(read) == "die: 42"
