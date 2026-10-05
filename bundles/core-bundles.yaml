@@ -142,3 +142,17 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  # Generic per-community custom TEXT commands + timers (Twitch-style `!command set/remove/
+  # list`, plus direct `!<name>` invocation). Second Python core bundle (after count/lurk) to
+  # declare `storage.kv`, and the first whose `transform()` itself reads kv (a necessary, documented
+  # deviation -- see bundles/python/command/src/app.py's own module docstring for why). Timer
+  # firing has no scheduler yet (gh-613) -- `timer ...` persists config and replies saying so, loud
+  # not silent; static command CRUD does not depend on that gap.
+  - app_id: waddles.core.example.command
+    version: "1.0.0"
+    language: python
+    manifest_path: command.manifest.yaml
+    artifact_path: command.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
