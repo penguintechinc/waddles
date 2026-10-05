@@ -123,8 +123,9 @@ bundles:
         community_id: null
   # First Python core bundles to declare the `storage.kv` permission (lurk, count) --
   # see hub_api/services/bundle_approval_service.py::KV_PERMISSION_ID.
+  # 1.0.3 (feature/lurk-v1): stateful lurk/unlurk rewrite, see lurk's own bundle.yaml.
   - app_id: waddles.core.example.lurk
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     manifest_path: lurk.manifest.yaml
     artifact_path: lurk.wasm

@@ -2,7 +2,10 @@ schema_version: 2
 app_id: waddles.core.example.lurk
 name: Lurk Toggle Example Bundle (Python)
 # 1.0.0 retired -- fix/bump-command-bundles-1.0.1, see this bundle's hub-manifest.yaml for why.
-version: 1.0.2
+# 1.0.3 (feature/lurk-v1): stateful lurk/unlurk rewrite -- per-community message
+# templates, 24h TTL lurk-start state, and broadcaster/mod-only config commands
+# (`set`/`enable ai`/`disable ai`/`reset`). See src/app.py's own module docstring.
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -50,6 +53,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.2"
-  min_version: "1.0.2"
+  tested_with: "1.0.3"
+  min_version: "1.0.3"
   max_version: null
