@@ -49,7 +49,7 @@ oversight.
 | `WaddleSdk.Json` | `WaddleSdkJsonContext`, a source-generated `JsonSerializerContext` for the SDK's own payload POCOs -- never reflection-based `JsonSerializer` |
 | `WaddleSdk.Kv` | `IKvClient`, `TypedKv.GetJson`/`SetJson` (typed get/set via a source-gen `JsonTypeInfo<T>`), `WaddleKvException`/`KvErrorKind` |
 | `WaddleSdk.Cooldown` | `CooldownGuard.TryAcquire` -- per-user command cooldowns over `kv`, degrades gracefully on `KvErrorKind.Denied` |
-| `WaddleSdk.Db` | `IDbClient`, `DbValue`/`DbRows` (parameterized `execute`, never string concatenation), `WaddleDbException`/`DbErrorKind` |
+| `WaddleSdk.Db` | `IDbClient` (structured `Insert`/`Get`/`Query`/`Update`/`Delete` -- never raw SQL), `DbValue`/`DbColumnValue`/`DbRow`/`DbOrderBy`, `WaddleDbException`/`DbErrorKind` |
 | `WaddleSdk.Relay` | `IRelayClient`, `ReplyHelper.SendReply` (builds `{channel, text}` and pushes), `WaddleRelayException`/`RelayErrorKind` |
 | `WaddleSdk.Http` | `IHttpClient`, `HttpRequestInfo`/`HttpResponseInfo`, `WaddleHttpException`/`HttpErrorKind` |
 | `WaddleSdk.Flags` | `IFlagsClient` (PostHog flag + license tier, fail-open) |
@@ -62,13 +62,16 @@ oversight.
 
 ## kv/db availability (2026-09-28)
 
-The host `kv` and `db` capabilities are **currently hardcoded to deny every
-call** in svc-process/svc-action while the real backends are implemented
-(`db`'s design is still in progress). Both `WaddleKvException`/`KvErrorKind`
-and `WaddleDbException`/`DbErrorKind` carry a `Denied` case so callers can
-distinguish "not available yet" from a genuine backend failure:
+The host `kv` capability is **currently hardcoded to deny every call** in
+svc-process/svc-action while its real backend is implemented. `db` is now
+production-wired in svc_process (structured `insert`/`get`/`query`/`update`/
+`delete` against the bundle's own Postgres-backed table, see
+`core/bundle_host_db`) -- still denied wherever the host hasn't configured a
+connection. Both `WaddleKvException`/`KvErrorKind` and `WaddleDbException`/
+`DbErrorKind` carry a `Denied` case so callers can distinguish "not available"
+from a genuine backend failure:
 
-- `db`'s WIT `error` variant already has a native `denied(string)` case
+- `db`'s WIT `error` variant has a native `denied(string)` case
   (`wit/waddle-bundle/stage.wit`), so a bundle's adapter maps it straight to
   `DbErrorKind.Denied`.
 - `kv`'s WIT `error` variant does **not** have a native `denied` case (only

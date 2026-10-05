@@ -101,19 +101,39 @@ public class WaddleActionStageTests
 public class FakeDbClientTests
 {
     [Fact]
-    public void execute_returns_the_configured_result()
+    public void insert_then_get_round_trips_the_row()
     {
-        var db = new FakeDbClient { NextResult = new DbRows(["id"], [[DbValue.Of(1L)]], 1) };
-        var rows = db.Execute("SELECT 1", []);
-        Assert.Equal(1ul, rows.RowsAffected);
+        var db = new FakeDbClient();
+        var inserted = db.Insert([new DbColumnValue("name", DbValue.Of("alice"))]);
+        Assert.Equal(1ul, inserted.Version);
+
+        var fetched = db.Get(inserted.RowId);
+        Assert.Equal(inserted.RowId, fetched.RowId);
+        Assert.Equal("alice", fetched.Columns[0].Value.TextValue);
     }
 
     [Fact]
-    public void execute_defaults_to_empty_result()
+    public void get_throws_not_found_for_a_missing_row()
     {
         var db = new FakeDbClient();
-        var rows = db.Execute("SELECT 1", []);
-        Assert.Empty(rows.Columns);
-        Assert.Empty(rows.Rows);
+        var ex = Assert.Throws<WaddleDbException>(() => db.Get("missing"));
+        Assert.Equal(DbErrorKind.NotFound, ex.Kind);
+    }
+
+    [Fact]
+    public void update_with_a_stale_version_throws_conflict()
+    {
+        var db = new FakeDbClient();
+        var inserted = db.Insert([new DbColumnValue("name", DbValue.Of("alice"))]);
+        var ex = Assert.Throws<WaddleDbException>(
+            () => db.Update(inserted.RowId, expectedVersion: 99, [new DbColumnValue("name", DbValue.Of("bob"))]));
+        Assert.Equal(DbErrorKind.Conflict, ex.Kind);
+    }
+
+    [Fact]
+    public void query_defaults_to_an_empty_list()
+    {
+        var db = new FakeDbClient();
+        Assert.Empty(db.Query(limit: 10, offset: 0));
     }
 }

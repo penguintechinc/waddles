@@ -9,25 +9,38 @@ end to end through this SDK's `penguin_dal`-compatible facade and
 see it once `waddle-sdk` is installed in `flask_core`'s place at build time
 (spec D7/Sec4.12).
 
-**Scope note, stated once here.** The bundle's own current pytest suite
-seeds its fixtures via `dal.engine.connect()`/`dal.engine.begin()` -- a live
-SQLAlchemy async engine -- which is exactly the construct `AsyncDB.engine`
-(see `waddle_sdk/db.py`) explicitly cannot lower (no live connection exists
-inside the sandbox; the WIT `db` import *is* the connection). Running that
-literal test file unmodified against this facade is therefore not possible
-by design, not an oversight -- D21's own rule is that such a construct must
-raise, never silently mis-execute, and it does (see `test_bundle_runtime.py`'s
-`raw_sql_rows`/`raw_sql_write` tests for the same class of gap, hit by this
-bundle's own permission-check helper below).
+**Updated for the structured `db` capability (user decision: bundles use
+structured `insert`/`get`/`query`/`update`/`delete` ops, never a raw-SQL/
+DAL-style query builder; design doc SS1 round-1 CRITICAL finding: "no
+bundle-supplied SQL, ever").** `social_alias_process.py` itself is not
+migrated to the structured ops in this change -- it still drives
+`flask_core.get_bundle_dal()`'s pydal-style query builder, and
+`flask_core.bundle_runtime.raw_sql_rows`/`raw_sql_write` for its own
+permission-check join -- and neither has a structured-ops analog
+(`waddle_sdk.db.AsyncDB` is now an inert placeholder, `raw_sql_rows`/
+`raw_sql_write` are independently permanent `NotImplementedError` stubs,
+D21: a live `dal.engine` connection cannot be lowered into the sandbox).
+Full oracle coverage for this bundle's query-composition fidelity will be
+re-established, against the structured API, once the bundle itself is
+migrated in a future wave.
 
-This module is the facade's own oracle test instead: it imports the real
-bundle module fresh, with `flask_core` resolved to `waddle_sdk.flask_core`
-in `sys.modules` (the same substitution a real build performs), and drives
-`transform()` for the exact three commands the M1.5 suite covers business
-logic for (`!alias list`, `!alias add`, `!unalias`) through a fake WIT `db`
-import backed by `wit_fake_db.FakeWitDb` -- proving the query-composition
-fidelity (R1) against the bundle's real, current source, not a hand-picked
-reproduction.
+This file stays the facade's own oracle in the meantime by proving the
+REAL, currently-shipping behavior for real: every command path below runs
+the genuine `transform()`, through the genuine (non-mocked) `AsyncDB`
+placeholder and `raw_sql_rows` stub -- no WIT fake is installed at all,
+since neither code path reaches the WIT `db` import anymore. Per
+`critical-rules.md` Fail-Loud Code Paths, an unimplemented capability
+boundary must fail loudly, never silently return a default -- and that is
+exactly what both `AsyncDB.__getattr__`/`__call__` and `raw_sql_rows`/
+`raw_sql_write` do. `social_alias_process.py`'s own commands wrap their
+DB-dependent work in `except Exception` ("a write must reply, never crash
+the bot"), so the real, observable, end-to-end behavior through this SDK
+today is a graceful "Failed to ..." reply naming the retirement -- proven
+here against the bundle's real source, not a hand-picked reproduction. The
+one path NOT wrapped that way, the moderator/admin permission gate, itself
+independently catches every exception and fails closed (denies), which is
+real pre-existing behavior unrelated to this change (`raw_sql_rows` was
+already a `NotImplementedError` stub before the structured `db` rewrite).
 
 Two dependency-boundary stubs, neither touching the facade under test:
 
@@ -37,13 +50,10 @@ Two dependency-boundary stubs, neither touching the facade under test:
   dependency chain (`services.command_alias_store` -> `config.Config` ->
   `flask_core.secrets.require_secret_key`) is unrelated to the DB facade
   this test validates.
-- `_caller_is_moderator_or_admin` (the bundle's own permission gate) is
-  monkeypatched to allow, for the write-path tests only -- it calls
-  `flask_core.bundle_runtime.raw_sql_rows`, which is *separately* proven to
-  raise `NotImplementedError` in `test_bundle_runtime.py` (D21: raw
-  `dal.engine`-based joins cannot be lowered). Bypassing it here isolates
-  the DB-facade write path (the `!alias add`/`!unalias` benchmark the spike
-  itself ran) from that already-documented, unrelated gap.
+- No WIT `flags` fake is installed: `waddle_sdk.flask_core.feature_flags
+  .feature_enabled` falls back to its supplied `default` (`True`, this
+  bundle's own call-site default) whenever `wit_world` isn't importable at
+  all, which is exactly this host-side test's situation.
 """
 
 from __future__ import annotations
@@ -54,7 +64,6 @@ import types
 from pathlib import Path
 
 import pytest
-import wit_fake_db
 
 import waddle_sdk.flask_core as waddle_flask_core
 import waddle_sdk.flask_core.bundle_runtime as waddle_bundle_runtime
@@ -68,26 +77,12 @@ from waddle_sdk.flask_core.bundle_runtime import (
 )
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent
 
-# RETIRED (user decision: bundles use structured `db` ops -- insert/get/
-# query/update/delete -- never a raw-SQL/DAL-style query builder; design
-# doc SS1 round-1 CRITICAL finding: "no bundle-supplied SQL, ever").
-# `wit/waddle-bundle/stage.wit`'s `db` interface no longer has an `execute`
-# op at all, and `waddle_sdk.db.AsyncDB` (this oracle's subject) is now an
-# inert compatibility placeholder (see that module's own doc) -- the
-# multi-table `db.<table>.<column> == value` query-builder fidelity this
-# file proved against the real, unmigrated `social_alias_process.py`
-# bundle has no structured-ops analog (that bundle still uses the full
-# pydal-style `flask_core.get_bundle_dal()` query builder and is not
-# itself migrated in this change -- see this task's own scope note). Oracle
-# coverage for `social_alias_process` will be re-established, against the
-# structured API, when that bundle is actually migrated in a future wave.
-pytest.skip(
-    "retired: AsyncDB's DAL/query-builder facade is retired for the structured "
-    "db capability -- see this file's module docstring and this comment",
-    allow_module_level=True,
-)
-
 SVC_PROCESS_ROOT = Path(__file__).resolve().parents[3] / "core" / "svc_process"
+
+#: Substring every retired-facade failure reply carries (`AsyncDB.__getattr__`'s
+#: own message) -- the oracle proof that these replies are the real retirement
+#: error, not some other, unrelated failure swallowed by the same `except`.
+_RETIRED_MARKER = "is retired -- call waddle_sdk.db's structured"
 
 
 def _run(coro):
@@ -131,154 +126,92 @@ def alias_bundle(monkeypatch: pytest.MonkeyPatch):
             if name != "bundles.bot_process":
                 monkeypatch.delitem(sys.modules, name, raising=False)
 
-    fake_db = wit_fake_db.install(monkeypatch)
-    fake_db_module = sys.modules["wit_world"]
-    fake_db_module.imports.flags = types.SimpleNamespace(  # type: ignore[attr-defined]
-        enabled=lambda key, default_value: default_value
-    )
-
     reset_bundle_dal_for_tests()
     set_bundle_dal(AsyncDB())
 
     import bundles.social_alias_process as social_alias_process
 
-    yield social_alias_process, fake_db
+    yield social_alias_process
 
     reset_bundle_dal_for_tests()
 
 
-def test_alias_list_reports_no_aliases_through_the_facade(alias_bundle) -> None:
-    """`!alias list` with an empty table replies with the exact no-aliases message."""
-    social_alias_process, _fake_db = alias_bundle
+def test_alias_list_fails_loud_through_the_retired_facade(alias_bundle) -> None:
+    """`!alias list` surfaces the real `AsyncDB` retirement as a graceful reply, never a crash."""
+    social_alias_process = alias_bundle
     with bundle_context(tenant="acme", community="1", app_id="waddles.social.alias.default"):
         result = _run(social_alias_process.transform(_event("!alias list")))
     assert result is not None
-    assert result.payload["text"] == "no aliases set — try !alias xx somecommand"
-
-
-def test_alias_list_reports_seeded_aliases_through_the_facade(alias_bundle) -> None:
-    """`!alias list` reads real rows back through the facade's SELECT lowering."""
-    social_alias_process, fake_db = alias_bundle
-    fake_db.canned_rows["command_aliases"] = [
-        {"alias": "gg", "target_command": "hello"},
-        {"alias": "sr", "target_command": "ping"},
-    ]
-    with bundle_context(tenant="acme", community="1", app_id="waddles.social.alias.default"):
-        result = _run(social_alias_process.transform(_event("!alias list")))
-    assert "!gg → !hello" in result.payload["text"]
-    assert "!sr → !ping" in result.payload["text"]
-
-
-def test_alias_add_full_write_path_through_the_facade(
-    alias_bundle, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The spike's own benchmark: `!alias add` end to end, real bundle + this facade."""
-    social_alias_process, fake_db = alias_bundle
-
-    async def _allow(event, community_id):
-        return True
-
-    monkeypatch.setattr(social_alias_process, "_caller_is_moderator_or_admin", _allow)
-
-    with bundle_context(tenant="acme", community="1", app_id="waddles.social.alias.default"):
-        result = _run(social_alias_process.transform(_event("!alias add sr ping")))
-
-    assert result is not None
-    assert result.payload["text"] == "alias set: !sr → !ping"
-    insert_calls = [c for c in fake_db.calls if c[0].startswith("INSERT INTO command_aliases")]
-    assert len(insert_calls) == 1
-    sql, params = insert_calls[0]
-    assert sql == (
-        "INSERT INTO command_aliases (community_id, alias, target_command, created_by) "
-        "VALUES ($1, $2, $3, $4) RETURNING id"
-    )
-    assert params == [1, "sr", "ping", "penguin"]
-
-
-def test_alias_add_reuses_existing_row_via_update_when_alias_already_exists(
-    alias_bundle, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Re-adding an existing (even soft-deleted) alias name UPDATEs the row, never blind-INSERTs."""
-    social_alias_process, fake_db = alias_bundle
-
-    async def _allow(event, community_id):
-        return True
-
-    monkeypatch.setattr(social_alias_process, "_caller_is_moderator_or_admin", _allow)
-    fake_db.canned_rows["SELECT * FROM command_aliases WHERE"] = [
-        {
-            "id": 42,
-            "community_id": 1,
-            "alias": "sr",
-            "target_command": "old",
-            "deleted_at": "2026-01-01T00:00:00Z",
-        }
-    ]
-
-    with bundle_context(tenant="acme", community="1", app_id="waddles.social.alias.default"):
-        result = _run(social_alias_process.transform(_event("!alias add sr ping")))
-
-    assert result.payload["text"] == "alias set: !sr → !ping"
-    update_calls = [c for c in fake_db.calls if c[0].startswith("UPDATE command_aliases")]
-    assert len(update_calls) == 1
-    sql, params = update_calls[0]
-    assert "target_command = $1" in sql
-    assert "deleted_at = $2" in sql
-    assert "created_by = $3" in sql
-    assert params[0] == "ping"
-    assert params[1] is None
-    assert params[-1] == 42  # WHERE command_aliases.id = $4
+    text = result.payload["text"]
+    assert text.startswith("Failed to list aliases: AsyncDB.command_aliases ")
+    assert _RETIRED_MARKER in text
 
 
 def test_alias_add_denies_without_permission(alias_bundle) -> None:
-    """Without the permission-gate bypass, the write is denied (raw_sql_rows fails closed)."""
-    social_alias_process, fake_db = alias_bundle
+    """Without the permission-gate bypass, the write is denied.
+
+    The moderator/admin check itself fails closed on any lookup error
+    (`_caller_is_moderator_or_admin`'s own `except Exception: return False`)
+    -- real, pre-existing behavior given `raw_sql_rows` is independently a
+    permanent `NotImplementedError` stub, unrelated to the structured `db`
+    rewrite this file otherwise proves.
+    """
+    social_alias_process = alias_bundle
     with bundle_context(tenant="acme", community="1", app_id="waddles.social.alias.default"):
         result = _run(social_alias_process.transform(_event("!alias add sr ping")))
     assert result.payload["text"] == "only moderators/admins can set aliases"
-    assert not any(c[0].startswith("INSERT INTO command_aliases") for c in fake_db.calls)
 
 
-def test_unalias_full_write_path_through_the_facade(
+def test_unalias_denies_without_permission(alias_bundle) -> None:
+    """`!unalias` is gated the same way `!alias add` is -- same fail-closed permission check."""
+    social_alias_process = alias_bundle
+    with bundle_context(tenant="acme", community="1", app_id="waddles.social.alias.default"):
+        result = _run(social_alias_process.transform(_event("!unalias sr")))
+    assert result.payload["text"] == "only moderators/admins can set aliases"
+
+
+def test_alias_add_fails_loud_when_permission_bypassed(
     alias_bundle, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`!unalias <name>` soft-deletes the row (UPDATE deleted_at) through the facade."""
-    social_alias_process, fake_db = alias_bundle
+    """With the permission gate bypassed, the write itself hits the real retired `AsyncDB`.
+
+    This is the spike's own benchmark path (`!alias add`) -- proven here
+    against the bundle's real source: the write no longer silently
+    succeeds against a nonexistent backend, it fails loud and the bundle's
+    own `except Exception` turns that into a user-facing reply, never a
+    crash (`critical-rules.md` Fail-Loud Code Paths).
+    """
+    social_alias_process = alias_bundle
 
     async def _allow(event, community_id):
         return True
 
     monkeypatch.setattr(social_alias_process, "_caller_is_moderator_or_admin", _allow)
-    fake_db.canned_rows["SELECT * FROM command_aliases WHERE"] = [
-        {"id": 7, "community_id": 1, "alias": "sr", "target_command": "ping", "deleted_at": None}
-    ]
+
+    with bundle_context(tenant="acme", community="1", app_id="waddles.social.alias.default"):
+        result = _run(social_alias_process.transform(_event("!alias add sr ping")))
+
+    assert result is not None
+    text = result.payload["text"]
+    assert text.startswith("Failed to set alias: AsyncDB.command_aliases ")
+    assert _RETIRED_MARKER in text
+
+
+def test_unalias_fails_loud_when_permission_bypassed(
+    alias_bundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`!unalias` with the permission gate bypassed: same real retired-`AsyncDB` failure."""
+    social_alias_process = alias_bundle
+
+    async def _allow(event, community_id):
+        return True
+
+    monkeypatch.setattr(social_alias_process, "_caller_is_moderator_or_admin", _allow)
 
     with bundle_context(tenant="acme", community="1", app_id="waddles.social.alias.default"):
         result = _run(social_alias_process.transform(_event("!unalias sr")))
 
-    assert result.payload["text"] == "alias removed: !sr"
-    update_calls = [
-        c for c in fake_db.calls if c[0].startswith("UPDATE command_aliases SET deleted_at")
-    ]
-    assert len(update_calls) == 1
-    sql, params = update_calls[0]
-    assert sql == "UPDATE command_aliases SET deleted_at = $1 WHERE command_aliases.id = $2"
-    assert params[1] == 7
-
-
-def test_unalias_reports_no_alias_when_none_found(
-    alias_bundle, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`!unalias` on a name with no active row reports "no alias named", never crashes or writes."""
-    social_alias_process, fake_db = alias_bundle
-
-    async def _allow(event, community_id):
-        return True
-
-    monkeypatch.setattr(social_alias_process, "_caller_is_moderator_or_admin", _allow)
-
-    with bundle_context(tenant="acme", community="1", app_id="waddles.social.alias.default"):
-        result = _run(social_alias_process.transform(_event("!unalias ghost")))
-
-    assert result.payload["text"] == "no alias named !ghost"
-    assert not any(c[0].startswith("UPDATE") for c in fake_db.calls)
+    assert result is not None
+    text = result.payload["text"]
+    assert text.startswith("Failed to remove alias: AsyncDB.command_aliases ")
+    assert _RETIRED_MARKER in text
