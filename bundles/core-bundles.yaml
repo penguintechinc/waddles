@@ -142,3 +142,15 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  # 1.0.0 (feature/bundle-poll, BUILD-ONLY): extracted from the bot_process monolith
+  # (core/svc_process/bundles/community_polls_process.py) -- see bundles/python/poll/
+  # src/app.py's own module docstring. Flag-gated OFF (waddles.command-poll); the legacy
+  # bot_process._FEATURE_MODULES path is untouched -- cut-over is a separate, later change.
+  - app_id: waddles.core.example.poll
+    version: "1.0.0"
+    language: python
+    manifest_path: poll.manifest.yaml
+    artifact_path: poll.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
