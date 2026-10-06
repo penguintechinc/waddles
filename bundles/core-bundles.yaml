@@ -146,8 +146,11 @@ bundles:
   # silence when dispatch hits the tenant-wide sentinel (`community_id: null` below is exactly
   # that sentinel -- lurk's dispatch() intentionally refuses to operate under it, see
   # src/app.py's module docstring; a dedicated per-community activation is the real follow-up).
+  # 1.0.6 (this task): dispatch() now FUNCTIONS under the tenant-wide sentinel
+  # (`community_id: null` below) instead of only erroring -- scoped under
+  # `waddle_sdk.community_kv.TENANT_WIDE_SENTINEL`, see src/app.py's module docstring.
   - app_id: waddles.core.example.lurk
-    version: "1.0.5"
+    version: "1.0.6"
     language: python
     source_dir: python/lurk
     manifest_path: lurk.manifest.yaml
