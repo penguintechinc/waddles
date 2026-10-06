@@ -490,9 +490,11 @@ async def dispatch(
     Raises:
         ValueError: The envelope's payload has no `channel_id`; the
             envelope has no `community` (see module docstring's Data
-            scoping section -- there is no tenant-wide fallback); or an
-            unrecognized `command` (defensive -- `transform` only ever
-            emits a member of `_KNOWN_COMMANDS`).
+            scoping section -- there is no tenant-wide fallback; a chat
+            error reply and an ERROR log line are always emitted first,
+            same fail-loud shape as `_fail_kv`); or an unrecognized
+            `command` (defensive -- `transform` only ever emits a member
+            of `_KNOWN_COMMANDS`).
         RuntimeError: A `kv` backend call failed (see `_fail_kv` -- a chat
             error reply and an ERROR log line are always emitted first).
     """
@@ -507,7 +509,27 @@ async def dispatch(
     provider = envelope.event.platform
     community = envelope.community
     if not community:
+        # Fail-loud, same shape as `_fail_kv`: log AND reply, then raise --
+        # never just the log. This activation (`core-bundles.yaml`'s
+        # `activation_targets: community_id: null`, the host's tenant-wide
+        # sentinel, `core/bundle_active_set/src/scope.rs::ResolvedScope`
+        # doc) sends every invoke through here with `community=None`, so
+        # without a chat reply this is a 100%-reproducible silent failure
+        # on any tenant activated this way (gh-655) -- not a per-guild
+        # fluke. The underlying fix is a per-community activation target;
+        # this is the fail-loud guard so the caller is never met with pure
+        # silence in the meantime.
         log.error("lurk.missing_community", command=command)
+        await relay.push(
+            provider,
+            {
+                "channel": channel_id,
+                "text": (
+                    "lurk isn't available in this server/channel yet -- it needs to be "
+                    "linked to a community first. Ask an admin to set that up."
+                ),
+            },
+        )
         raise ValueError("lurk requires a community context and cannot operate tenant-wide")
 
     username = envelope.event.actor or "someone"

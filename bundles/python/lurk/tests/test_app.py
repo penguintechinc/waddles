@@ -344,6 +344,26 @@ def test_dispatch_raises_when_community_is_missing(fake_host: _FakeHost) -> None
     assert fake_host.kv_calls == []
 
 
+def test_dispatch_replies_to_chat_when_community_is_missing(fake_host: _FakeHost) -> None:
+    """Regression: gh-655 -- `!lurk` was completely silent in chat under this path.
+
+    The tenant-wide sentinel (`community=None`) made `dispatch()` log
+    `lurk.missing_community` and raise, but it never called `relay.push`, so the
+    caller saw nothing at all -- this is the fail-loud guard (same shape as
+    `_fail_kv`): log AND reply, then raise.
+    """
+    envelope = _sample_envelope("twitch", "lurk", community=None)
+    with pytest.raises(ValueError, match="community"):
+        _run(dispatch(envelope, {}, http_client=None))
+
+    assert fake_host.relay_calls, "lurk must never fail silently -- a chat reply is required"
+    provider, message_json = fake_host.relay_calls[-1]
+    assert provider == "twitch"
+    assert "community" in json.loads(message_json)["text"].lower()
+    error_logs = [(lvl, m) for lvl, m, _f in fake_host.log_calls if m == "lurk.missing_community"]
+    assert error_logs
+
+
 def test_different_communities_never_share_lurk_state(fake_host: _FakeHost) -> None:
     _run(dispatch(_sample_envelope("twitch", "lurk", community="comm-1"), {}, http_client=None))
     result = _run(

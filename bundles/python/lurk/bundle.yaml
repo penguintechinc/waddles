@@ -7,7 +7,12 @@ name: Lurk Toggle Example Bundle (Python)
 # (`set`/`enable ai`/`disable ai`/`reset`). See src/app.py's own module docstring.
 # 1.0.4 (fix/bump-count-lurk-1.0.4): version-only bump to republish the colon-free `kv` key
 # fix (gh-631, #638) -- app_versions is immutable per (app_id, version).
-version: 1.0.4
+# 1.0.5 (fix/lurk-silent-missing-community, gh-655): dispatch() now replies to chat before
+# raising on the "no community" path (fail-loud, matching `_fail_kv`'s own shape), instead of
+# only logging -- the tenant-wide activation (`community_id: null`) hit this on every message,
+# leaving `!lurk` totally silent in Discord. app_versions is immutable per (app_id, version),
+# so this bump is required to republish the fixed wasm.
+version: 1.0.5
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -55,6 +60,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.4"
-  min_version: "1.0.4"
+  tested_with: "1.0.5"
+  min_version: "1.0.5"
   max_version: null
