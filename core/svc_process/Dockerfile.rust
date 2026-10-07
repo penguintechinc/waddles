@@ -62,13 +62,15 @@ COPY --from=proto . /proto
 WORKDIR /build/svc_process
 RUN cargo build --release --locked
 
-FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 
 # `ca-certificates` for rustls (webpki/native roots) on outbound TLS
 # (reqwest, sea-orm's runtime-tokio-rustls, OTLP).
-# CVE-2026-103111 (libpcre2): upgrade to 10.42-1+deb12u2 from security updates.
+# Full apt-get upgrade (not just libpcre2-8-0) clears every fixable
+# HIGH/CRITICAL OS-package CVE the pinned debian:bookworm-slim digest
+# still ships (perl/perl-base, libcap, libgnutls, libpcre2-8-0, ...).
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y --only-upgrade libpcre2-8-0 \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install --no-install-recommends -y ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
