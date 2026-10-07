@@ -27,6 +27,10 @@ on:
       - 'core/svc_streaming/**'
   workflow_dispatch:
 
+concurrency:
+  group: build-svc-streaming-${{ github.event.merge_group.head_sha || github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   packages: write
