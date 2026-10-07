@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-lurk"
-version = "1.0.4"
+version = "1.0.6"
 description = "`!lurk`/`!unlurk` -> a stateful per-(community, caller) lurk/unlurk with customizable per-community message templates (24h TTL), confirmed by relay. Python equivalent of bundles/python/pyping, modeled on its hand-built (not bundle_compiler-routed) structure. First Python core bundle to declare the `storage.kv` permission."
 requires-python = ">=3.13"
 dependencies = []

@@ -52,11 +52,30 @@ def test_increment_is_scoped_per_community(fake_kv) -> None:
     assert _run(community_kv.increment("community-1", "counter", 1)) == 2
 
 
-@pytest.mark.parametrize("bad_id", ["", None])
-def test_missing_community_id_fails_loud(fake_kv, bad_id) -> None:
-    """A falsy community_id raises ValueError rather than silently using a global key."""
+def test_empty_string_community_id_fails_loud(fake_kv) -> None:
+    """An empty-string community_id raises ValueError -- the host never emits one."""
     with pytest.raises(ValueError, match="community_id"):
-        _run(community_kv.get(bad_id, "k"))
+        _run(community_kv.get("", "k"))
+
+
+# regression: this task -- `community_id=None` is the host's own tenant-wide sentinel
+# (`core/bundle_active_set/src/scope.rs::resolve_scope`'s `community_id == 0`, which
+# `core/svc_ingest/src/config.rs::ingest_scope` collapses to `None` before a bundle ever sees
+# it), not a bug -- alpha's only activation shape today routes every invoke through exactly
+# this path, so `community_kv` must scope it, not reject it.
+def test_none_community_id_scopes_under_the_tenant_wide_sentinel(fake_kv) -> None:
+    """`community_id=None` scopes under `TENANT_WIDE_SENTINEL`, never raises."""
+    _run(community_kv.set(None, "k", b"tenant-wide"))
+    assert _run(community_kv.get(None, "k")) == b"tenant-wide"
+    assert _run(community_kv.get(community_kv.TENANT_WIDE_SENTINEL, "k")) == b"tenant-wide"
+
+
+def test_none_and_a_real_community_id_never_collide(fake_kv) -> None:
+    """The tenant-wide sentinel and an actual community both named `"k"` stay independent."""
+    _run(community_kv.set(None, "k", b"tenant-wide"))
+    _run(community_kv.set("community-1", "k", b"scoped"))
+    assert _run(community_kv.get(None, "k")) == b"tenant-wide"
+    assert _run(community_kv.get("community-1", "k")) == b"scoped"
 
 
 # regression: gh-631 -- `_scoped_key` originally built `f"c:{community_id}:{key}"`, which the

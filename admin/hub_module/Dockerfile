@@ -2,7 +2,7 @@
 # node:20 reached upstream EOL 2026-04-30; bumped to node:24 (Active LTS;
 # org target is node:26, not yet released — 24 is the sanctioned interim).
 # Stage 1: Build frontend
-FROM node:24-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6 AS frontend-build
+FROM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS frontend-build
 
 WORKDIR /build/admin/hub_module/frontend
 
@@ -22,12 +22,17 @@ COPY admin/hub_module/frontend/ ./
 RUN npm run build
 
 # Stage 2: Production image
-FROM node:24-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
+FROM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 
 WORKDIR /app
 
-# Install dumb-init, curl for healthcheck, and build tools for native modules (bcrypt)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Upgrade all base-image OS packages to the latest Debian bookworm security
+# point release first -- clears HIGH/CRITICAL OS-package CVEs (libpcre2,
+# perl/perl-base, libcap, libgnutls, etc.) the pinned node:24-bookworm-slim
+# digest still ships -- then install dumb-init, curl for healthcheck, and
+# build tools for native modules (bcrypt).
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
     dumb-init curl make g++ \
     && rm -rf /var/lib/apt/lists/*
 
