@@ -178,10 +178,22 @@ jobs:
               exit 1
             fi
 
-            pending=$(jq '[.[] | select(.status != "completed")] | length' <<<"${combined}")
+            # Split pending (not-yet-completed) checks into fatal vs advisory
+            # the same way failures are split above: on a non-main target,
+            # the ~100 advisory container build/smoke-test checks no longer
+            # hold the gate open while they're still running - ci-gate only
+            # waits on the real required checks (lint, unit tests, security
+            # scans, CodeQL, etc). On a main target everything still counts.
+            if [ "${is_main_target}" = "true" ]; then
+              pending=$(jq '[.[] | select(.status != "completed")] | length' <<<"${combined}")
+              pending_advisory=0
+            else
+              pending=$(jq --arg re "${ADVISORY_CHECK_NAME_REGEX}" '[.[] | select(.status != "completed") | select((.name | test($re)) | not)] | length' <<<"${combined}")
+              pending_advisory=$(jq --arg re "${ADVISORY_CHECK_NAME_REGEX}" '[.[] | select(.status != "completed") | select(.name | test($re))] | length' <<<"${combined}")
+            fi
 
             if [ "${pending}" -gt 0 ]; then
-              echo "[attempt ${attempt}/${MAX_POLLS}] ${pending} of ${examined} examined check(s) still pending - waiting"
+              echo "[attempt ${attempt}/${MAX_POLLS}] ${pending} of ${examined} examined check(s) still pending (fatal; ${pending_advisory} advisory check(s) also pending but not waited on) - waiting"
               stable_count=0
               prev_signature=""
               sleep "${POLL_INTERVAL_SECONDS}"
