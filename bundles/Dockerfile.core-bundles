@@ -103,7 +103,7 @@ RUN cargo component build --release --target wasm32-wasip2 --locked
 # componentize` invocation (now issued by the script, not hand-written per bundle), so every
 # .wasm output is the same fully-independent artifact it always was.
 # ---------------------------------------------------------------------------
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS python-bundles-builder
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS python-bundles-builder
 
 RUN pip install --no-cache-dir componentize-py==0.25.1 pyyaml==6.0.3
 
@@ -222,7 +222,7 @@ RUN dotnet build -c Release
 # hub_api/Dockerfile's builder stage verbatim, same pinned base per
 # devops-containers.md ("never a second pinned digest for the same tag").
 # ---------------------------------------------------------------------------
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS hub-deps-builder
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS hub-deps-builder
 WORKDIR /app
 
 COPY hub_api/requirements.txt .
@@ -252,7 +252,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 # Final: hub-api runtime + the two built components + their manifests + the catalog.
 # ---------------------------------------------------------------------------
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 WORKDIR /app
 
 COPY --from=hub-deps-builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages

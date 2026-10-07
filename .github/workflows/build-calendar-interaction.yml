@@ -20,13 +20,52 @@ on:
   workflow_dispatch:
 
 
+concurrency:
+  group: build-calendar-interaction-${{ github.event.merge_group.head_sha || github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
-  packages: write
 
 jobs:
+  # Job-level merge_group change-gate (added 2026-10-07, see gh#ci-mergegroup-optimization):
+  # merge_group ignores the push/pull_request `paths:` filters above, so
+  # without this gate every build-<service>.yml workflow runs in FULL on
+  # every merge-queue attempt regardless of what changed. This mirrors the
+  # detect-changes job in containers.yml (dorny/paths-filter against the
+  # same path list used by the push trigger above) and gates the build job
+  # on it at the JOB level, not a step-level skip, so an unchanged module
+  # doesn't occupy a runner/check-run at all.
+  detect-changes:
+    name: Detect Changed Files
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.changes.outputs.changed }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          fetch-depth: 2
+
+      - name: Detect changes
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4
+        id: changes
+        with:
+          filters: |
+            changed:
+              - 'action/interactive/calendar_interaction_module/**'
+              - 'libs/flask_core/**'
+              - '.version'
+              - '.github/workflows/build-calendar-interaction.yml'
+              - '.github/workflows/build-container.yml'
+
   build:
     name: Build calendar-interaction Container
+    needs: detect-changes
+    if: needs.detect-changes.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/build-container.yml
     with:
       module_path: 'action/interactive/calendar_interaction_module'

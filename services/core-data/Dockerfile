@@ -1,7 +1,7 @@
 # Multi-stage build for core-data service
 # Combines 4 modules: analytics, engagement, reputation, labels
 
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS builder
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS builder
 
 WORKDIR /app
 
@@ -29,7 +29,7 @@ COPY services/core-data/config.py /app/config.py
 COPY services/core-data/engagement_bp.py /app/engagement_bp.py
 
 # Final stage
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 
 WORKDIR /app
 
