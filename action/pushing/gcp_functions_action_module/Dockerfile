@@ -1,7 +1,7 @@
 # GCP Functions Action Module Dockerfile
 # Build from parent directory: docker build -f action/pushing/gcp_functions_action_module/Dockerfile -t waddlebot/gcp-functions-action:latest .
 
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 
 # Set working directory
 WORKDIR /app
