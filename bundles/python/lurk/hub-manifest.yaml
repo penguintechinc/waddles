@@ -16,7 +16,11 @@ name: Lurk Toggle Example Bundle (Python)
 # 1.0.3 (feature/lurk-v1): stateful lurk/unlurk rewrite -- see bundle.yaml/src/app.py.
 # 1.0.4 (fix/bump-count-lurk-1.0.4): version-only bump to republish the colon-free `kv` key
 # fix (gh-631, #638) -- app_versions is immutable per (app_id, version).
-version: 1.0.4
+# 1.0.5 (fix/lurk-silent-missing-community, gh-655): fail-loud chat reply on the "no
+# community" dispatch path -- see bundle.yaml/src/app.py.
+# 1.0.6 (this task): dispatch() now functions under the tenant-wide sentinel
+# (`community=None`) instead of only replying with an error -- see bundle.yaml/src/app.py.
+version: 1.0.6
 feature: waddles.core.example
 module: core
 provider: builtin
