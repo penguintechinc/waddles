@@ -51,8 +51,9 @@ from services.url_guard import validate_outbound_url
 
 logger = logging.getLogger(__name__)
 
-#: Platform key this module always stores/reads under -- matches migration
-#: 0034's `tenant_platform_credentials.platform` convention.
+#: Platform key this module always stores/reads under -- matches
+#: `tenant_platform_apps.platform` convention (migration 0035, renamed
+#: from migration 0034's `tenant_platform_credentials`).
 PLATFORM_DISCORD = "discord"
 
 _AUTHORIZE_URL = "https://discord.com/oauth2/authorize"
