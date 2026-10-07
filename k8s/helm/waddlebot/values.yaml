@@ -746,7 +746,7 @@ posthog:
 # Dockerfile/CI-built image yet. Replace per-container once each does.
 pipeline:
   pythonBaseImage: "python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb"
-  nodeBaseImage: "node:20-bookworm-slim@sha256:1e85773c98c31d4fe5b545e4cb17379e617b348832fb3738b22a08f68dec30f3"
+  nodeBaseImage: "node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0"
 
   # T10 (v3 demo) — shared runner identity across svc-ingest/svc-process/svc-action.
   # RUNNER_TENANT_SLUG scopes stage_runner.py to one tenant; deliberately NOT paired
@@ -820,7 +820,7 @@ pipeline:
       limits:
         cpu: "500m"
         memory: "512Mi"
-  goRuntimeImage: "debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a"
+  goRuntimeImage: "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587"
 
   svcIngest:
     enabled: true
@@ -2395,7 +2395,7 @@ securityContext:
 # exact digest hub_api/Dockerfile's own FROM line already uses (Debian-only per
 # devops-containers.md; no new image to track/scan).
 waitForHubApi:
-  image: "python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26"
+  image: "python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641"
   stableChecks: 3
   stableIntervalSeconds: 5
   maxBackoffSeconds: 30
