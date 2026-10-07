@@ -139,8 +139,18 @@ bundles:
   # First Python core bundles to declare the `storage.kv` permission (lurk, count) --
   # see hub_api/services/bundle_approval_service.py::KV_PERMISSION_ID.
   # 1.0.3 (feature/lurk-v1): stateful lurk/unlurk rewrite, see lurk's own bundle.yaml.
+  # 1.0.4 (fix/bump-count-lurk-1.0.4): version-only bump to republish the colon-free `kv` key
+  # fix (gh-631, #638) -- app_versions is immutable per (app_id, version), so 1.0.3's digest
+  # still points at the pre-fix wasm; this bump is the only way the fixed build reaches alpha.
+  # 1.0.5 (fix/lurk-silent-missing-community, gh-655): fail-loud chat reply instead of pure
+  # silence when dispatch hits the tenant-wide sentinel (`community_id: null` below is exactly
+  # that sentinel -- lurk's dispatch() intentionally refuses to operate under it, see
+  # src/app.py's module docstring; a dedicated per-community activation is the real follow-up).
+  # 1.0.6 (this task): dispatch() now FUNCTIONS under the tenant-wide sentinel
+  # (`community_id: null` below) instead of only erroring -- scoped under
+  # `waddle_sdk.community_kv.TENANT_WIDE_SENTINEL`, see src/app.py's module docstring.
   - app_id: waddles.core.example.lurk
-    version: "1.0.3"
+    version: "1.0.6"
     language: python
     source_dir: python/lurk
     manifest_path: lurk.manifest.yaml
@@ -150,8 +160,11 @@ bundles:
         community_id: null
   # 1.0.3: promoted from a trivial self-counter to dynamic, per-community named counters --
   # see bundles/python/count/src/app.py's own module docstring (feature/count-dynamic-counters).
+  # 1.0.4 (fix/bump-count-lurk-1.0.4): version-only bump to republish the colon-free `kv` key
+  # fix (gh-631, #638) -- app_versions is immutable per (app_id, version), so 1.0.3's digest
+  # still points at the pre-fix wasm; this bump is the only way the fixed build reaches alpha.
   - app_id: waddles.core.example.count
-    version: "1.0.3"
+    version: "1.0.4"
     language: python
     source_dir: python/count
     manifest_path: count.manifest.yaml
@@ -171,6 +184,126 @@ bundles:
     source_dir: python/command
     manifest_path: command.manifest.yaml
     artifact_path: command.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  # Batch 1 of 11 example Python app bundles (2026-10-06, feature/bundle-batch1-registration):
+  # kv-only minigames/utilities built post-#638 (SDK kv-key charset validation), no DB
+  # migrations. Each gates its own reply behind a `waddles.command-<name>` PostHog flag
+  # (default OFF) inside `transform()`, same pattern as eightball/roll/lurk/count above --
+  # this catalog entry only installs the bundle, it does not make it respond.
+  #
+  # rps/coinflip/music originally built kv keys with a `:` separator (e.g.
+  # `"rps:wins:<hash>"`, `"music:queue"`) -- the same gh-631 class of bug fixed for count/lurk
+  # (see those entries' own comments): `community_kv._scoped_key()` prefixes every key with
+  # `c.<community_id>.`, so a `:` anywhere in the bundle's own key suffix produces a final key
+  # the real `kv` host capability rejects (`:` is its reserved namespace separator). All three
+  # bundles' own test suites proved this out (26/106 rps tests and equivalent coinflip tests
+  # failed with `InvalidKvKeyError` before the fix); re-keyed to `.`-separated
+  # (`"rps.wins.<hash>"`, `"music.queue"`) before registration here, matching
+  # `count`'s own `"count.registry"` convention. Fixed in this PR, not on the source branches.
+  - app_id: waddles.core.example.rps
+    version: "1.0.0"
+    language: python
+    source_dir: python/rps
+    manifest_path: rps.manifest.yaml
+    artifact_path: rps.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.music
+    version: "1.0.0"
+    language: python
+    source_dir: python/music
+    manifest_path: music.manifest.yaml
+    artifact_path: music.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.coinflip
+    version: "1.0.0"
+    language: python
+    source_dir: python/coinflip
+    manifest_path: coinflip.manifest.yaml
+    artifact_path: coinflip.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  # `waddles.command-announce` has a known command-prefix collision with the legacy
+  # `core/svc_process/bundles/community_announcements_process.py` / `..._action.py`
+  # `!announce publish <id>` script bundle (bundles/python/announce/README.md's own note) --
+  # registered here (installed) but its flag MUST stay OFF in PostHog until the migration
+  # owner resolves the overlap; `feature_enabled(FLAG_KEY, default=False)` in its own
+  # `transform()` keeps it silent by default either way.
+  - app_id: waddles.core.example.announce
+    version: "1.0.0"
+    language: python
+    source_dir: python/announce
+    manifest_path: announce.manifest.yaml
+    artifact_path: announce.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.raffle
+    version: "1.0.0"
+    language: python
+    source_dir: python/raffle
+    manifest_path: raffle.manifest.yaml
+    artifact_path: raffle.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.social
+    version: "1.0.0"
+    language: python
+    source_dir: python/social
+    manifest_path: social.manifest.yaml
+    artifact_path: social.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.wheel
+    version: "1.0.0"
+    language: python
+    source_dir: python/wheel
+    manifest_path: wheel.manifest.yaml
+    artifact_path: wheel.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.love
+    version: "1.0.0"
+    language: python
+    source_dir: python/love
+    manifest_path: love.manifest.yaml
+    artifact_path: love.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.roulette
+    version: "1.0.0"
+    language: python
+    source_dir: python/roulette
+    manifest_path: roulette.manifest.yaml
+    artifact_path: roulette.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.joke
+    version: "1.0.0"
+    language: python
+    source_dir: python/joke
+    manifest_path: joke.manifest.yaml
+    artifact_path: joke.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.first
+    version: "1.0.0"
+    language: python
+    source_dir: python/first
+    manifest_path: first.manifest.yaml
+    artifact_path: first.wasm
     activation_targets:
       - tenant_slug: global
         community_id: null

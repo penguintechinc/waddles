@@ -1,18 +1,27 @@
 """Event-Discord-sync: `guild_tenant_pairings.event_sync_enabled` + `calendar_event_discord_syncs`.
 
-**Migration-number collision note (2026-10-05).** At the time this was
-written, `release/v3.0.X`'s true head was `0035_connection_model_layers`,
-but two numbers an owner-confirmed instruction explicitly flagged as
-"already taken" -- `0036` (PR #639, `feature/role-sync-bidirectional`)
-and config/postgres `097` (PR #640, `feature/reputation-community-tenant-
-scope`) -- were claimed by still-open PRs, along with several OTHER open
-PRs independently claiming `0036`-`0038` / `097` for their own still-
-unmerged work (`#442` keystore, `#464` connector-pii-reader, `#501`
-guild-pairing, `#622` poll-bundle). Concurrent branches racing for the
-same next-free Alembic number is expected and resolved at merge/rebase
-time, not avoidable by checking once up front; `0039`/config `098` were
-picked as the highest free numbers observed at write time to minimize
-(not guarantee) a second collision.
+**Migration-number collision note (2026-10-05, updated post-rebase).** At
+the time this was written, `release/v3.0.X`'s true head was
+`0035_connection_model_layers`, but two numbers an owner-confirmed
+instruction explicitly flagged as "already taken" -- `0036` (PR #639,
+`feature/role-sync-bidirectional`) and config/postgres `097` (PR #640,
+`feature/reputation-community-tenant-scope`) -- were claimed by still-open
+PRs, along with several OTHER open PRs independently claiming `0036`-
+`0038` / `097` for their own still-unmerged work (`#442` keystore, `#464`
+connector-pii-reader, `#501` guild-pairing, `#622` poll-bundle).
+Concurrent branches racing for the same next-free Alembic number is
+expected and resolved at merge/rebase time, not avoidable by checking
+once up front; `0039`/config `098` were picked as the highest free
+numbers observed at write time to minimize (not guarantee) a second
+collision.
+
+PR #639 (`0036_role_sync_community_role`) has since merged to
+`release/v3.0.X` ahead of this branch, making `0036` -- not `0035` --
+the current single alembic head. This migration's `down_revision` was
+re-parented from `0035_connection_model_layers` to
+`0036_role_sync_community_role` to resolve the resulting multi-head
+chain (gh-643); `098` remained free (`097` was consumed by reputation,
+PR #640) so no renumbering was needed on the config/postgres side.
 
 **Scope.** Two independent additions for the Discord event-sync push
 engine (`hub_api/services/event_discord_sync_service.py`):
@@ -43,7 +52,7 @@ RBAC: `hub_api` is the sole writer for `calendar_event_discord_syncs`
 other role gets an explicit empty-privilege row per spec D28.
 
 Revision ID: 0039_event_sync_enabled
-Revises: 0035_connection_model_layers
+Revises: 0036_role_sync_community_role
 Create Date: 2026-10-05
 """
 
@@ -57,7 +66,7 @@ from pathlib import Path
 from alembic import op
 
 revision = "0039_event_sync_enabled"
-down_revision = "0035_connection_model_layers"
+down_revision = "0036_role_sync_community_role"
 branch_labels = None
 depends_on = None
 

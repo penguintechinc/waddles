@@ -12,10 +12,12 @@
 # retirement comment (fix/csping-version-bump, #575).
 # 1.0.3: promoted from a trivial self-counter to dynamic, per-community named counters --
 # see this bundle's src/app.py module docstring (feature/count-dynamic-counters).
+# 1.0.4 (fix/bump-count-lurk-1.0.4): version-only bump to republish the colon-free `kv` key
+# fix (gh-631, #638) -- app_versions is immutable per (app_id, version).
 schema_version: 2
 app_id: waddles.core.example.count
 name: Dynamic Counter Bundle (Python)
-version: 1.0.3
+version: 1.0.4
 feature: waddles.core.example
 module: core
 provider: builtin

@@ -2802,34 +2802,77 @@ def bind_loyalty_tables(dal: Any, *, migrate: bool = False) -> None:
 
 
 def bind_bar_citizen_tables(dal: Any, *, migrate: bool = False) -> None:
-    """Define the Bar Citizen guild-pairing + role-sync group's own tables (migration 0034).
+    """Define the Bar Citizen guild-pairing + role-sync group's own tables (migrations 0034/0035).
 
     Schema is owned by `alembic/versions/0034_bar_citizen_guild_pairing.py`
-    (raw SQL, not this process -- `backend-database.md`: "NO automatic
-    Alembic migrations on startup") -- `migrate=False` in production,
-    this function only maps pydal onto the already-migrated tables, same
-    split every other `bind_*` function in this file follows.
-    `flask_core.models.guild_pairing` mirrors the same columns
-    column-for-column for SQLAlchemy-side FK resolution; this is the
-    pydal-side mapping the service layer (`services/guild_pairing.py`,
-    `services/credential_resolver.py`) actually queries through.
+    + `0035_connection_model_layers.py` (raw SQL, not this process --
+    `backend-database.md`: "NO automatic Alembic migrations on startup")
+    -- `migrate=False` in production, this function only maps pydal onto
+    the already-migrated tables, same split every other `bind_*` function
+    in this file follows. `flask_core.models.guild_pairing` mirrors
+    `tenant_platform_apps`'s columns column-for-column for SQLAlchemy-side
+    FK resolution (still mapped to the pre-0035 name via that migration's
+    compatibility view -- see its own docstring); this is the pydal-side
+    mapping the service layer (`services/guild_pairing.py`,
+    `services/credential_resolver.py`) actually queries through, against
+    the real (renamed) table directly, not the compat view.
+
+    Three-layer connection model (`docs/CONNECTION_MODEL.local.md`,
+    migration 0035): `tenant_platform_apps` (layer 1, renamed from
+    `tenant_platform_credentials`), `platform_connections` (layer 2 --
+    per-resource install tokens), `community_connection_access` (layer 3
+    -- community grant, no tokens). `credential_resolver.py` is the only
+    service-layer caller of layers 2/3 as of this port; no FK is declared
+    pydal-side from `platform_connections` to `tenant_platform_apps` or
+    `community_connection_access` to `communities`/`platform_connections`
+    (plain integer/bigint columns, same "FK-shaped columns, not pydal
+    `reference`" convention `bind_marketplace_catalog_tables()` already
+    documents) -- composite `UNIQUE`s are DB-level only (migration SQL),
+    same precedent the old `tenant_platform_credentials` table already set.
 
     Depends on `bind_auth_tables()` for `tenants`/`communities`/
     `hub_users` (this group's FK targets), same dependency-first pattern
     `bind_platform_tables()` uses. Idempotent per-DAL-instance guard.
     """
-    if "tenant_platform_credentials" in dal.tables:
+    if "tenant_platform_apps" in dal.tables:
         return
 
     bind_auth_tables(dal, migrate=migrate)
 
     dal.define_table(
-        "tenant_platform_credentials",
+        "tenant_platform_apps",
         Field("tenant_id", "integer", notnull=True),
         Field("platform", "string", length=50, notnull=True),
         Field("credentials_ciphertext", "text", notnull=True),
         Field("key_ref", "string", length=255),
         Field("installed_by_user_id", "integer"),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+
+    dal.define_table(
+        "platform_connections",
+        Field("tenant_id", "integer", notnull=True),
+        Field("platform", "string", length=50, notnull=True),
+        Field("resource_type", "string", length=20, notnull=True),
+        Field("resource_id", "string", length=255, notnull=True),
+        Field("access_token", "text", notnull=True),
+        Field("refresh_token", "text"),
+        Field("status", "string", length=20, notnull=True, default="active"),
+        Field("installed_by_user_id", "integer"),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+
+    dal.define_table(
+        "community_connection_access",
+        Field("community_id", "integer", notnull=True),
+        Field("connection_id", "bigint", notnull=True),
+        Field("status", "string", length=20, notnull=True, default="pending"),
+        Field("requested_by_user_id", "integer"),
+        Field("approved_by_user_id", "integer"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
         migrate=migrate,

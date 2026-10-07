@@ -52,10 +52,10 @@ def _schema_py_calendar_sync_fields() -> set[str]:
 
 
 class TestMigrationMetadata:
-    def test_chains_directly_off_0035(self) -> None:
+    def test_chains_directly_off_0036(self) -> None:
         migration = _load_migration()
         assert migration.revision == "0039_event_sync_enabled"
-        assert migration.down_revision == "0035_connection_model_layers"
+        assert migration.down_revision == "0036_role_sync_community_role"
 
     def test_revision_id_fits_alembic_version_num_varchar32(self) -> None:
         assert len(_load_migration().revision) <= 32
