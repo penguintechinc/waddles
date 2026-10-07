@@ -18,6 +18,7 @@ edit to `routers/v1.py`/`blueprints/__init__.py` needed.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from quart import Blueprint
@@ -25,6 +26,8 @@ from quart_schema import validate_response
 
 from services.discord_bot_install import build_install_url
 from services.oauth_providers import ProviderNotConfigured
+
+logger = logging.getLogger(__name__)
 
 discord_bot_install_bp = Blueprint("v1_discord_bot_install", __name__, url_prefix="/api/v1/public")
 
@@ -49,7 +52,8 @@ async def get_bot_install_url() -> BotInstallUrlResponse | tuple[dict[str, objec
     """
     try:
         install_url = build_install_url()
-    except ProviderNotConfigured:
+    except ProviderNotConfigured as exc:
+        logger.warning("discord bot-install link unavailable: %s: %s", type(exc).__name__, exc)
         return {"error": "provider_not_configured", "provider": "discord"}, 503
 
     return BotInstallUrlResponse(success=True, installUrl=install_url)
