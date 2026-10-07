@@ -60,6 +60,7 @@ take any `AsyncDAL`-like fixture with a `.dal` attribute, not just
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -89,6 +90,7 @@ from services.schema import (
     bind_app_bundle_tables,
     bind_auth_tables,
     bind_bar_citizen_tables,
+    bind_calendar_sync_tables,
     bind_community_authz_tables,
     bind_github_sync_tables,
     bind_lifecycle_tables,
@@ -833,6 +835,65 @@ def bar_citizen_db(tmp_path: Any) -> Any:
     for table_name in dal.tables:
         dal(dal[table_name]).count()
     yield dal, community_id, tenant_id, global_tenant_id
+    dal.close()
+
+
+@pytest.fixture
+def event_sync_db(tmp_path: Any) -> Any:
+    """File-backed pydal DB for the Discord event-sync group (migration 0039_event_sync_enabled).
+
+    Additive on top of `bar_citizen_db`'s own layering pattern --
+    `bind_auth_tables()` + `bind_bar_citizen_tables()` (for `guild_tenant_
+    pairings.event_sync_enabled` + `CredentialResolver`'s tenant lookup)
+    plus this group's own `bind_calendar_sync_tables()` (`calendar_events`
+    + `calendar_event_discord_syncs`). Seeds one regular tenant + one
+    global tenant + one community + one `approved` calendar event under
+    that community, so `event_discord_sync_service.py`'s tests can create
+    a guild pairing and call `sync_event()`/`run_event_sync_reconcile_
+    batch()` without each test re-seeding the base rows.
+
+    Yields `(dal, community_id, tenant_id, global_tenant_id, event_id)`.
+    """
+    async_dal = AsyncDAL(f"sqlite://{tmp_path / 'event_sync_test.db'}", pool_size=1)
+    dal = async_dal.dal
+    dal.define_table(
+        "tenants",
+        Field("slug", unique=True),
+        Field("display_name"),
+        Field("logo_url"),
+        Field("is_global", "boolean", default=False),
+        Field("is_active", "boolean", default=True),
+        Field("config", "json"),
+    )
+    bind_auth_tables(dal, migrate=True)
+    bind_bar_citizen_tables(dal, migrate=True)
+    bind_calendar_sync_tables(dal, migrate=True)
+
+    tenant_id = dal.tenants.insert(
+        slug=TENANT_SLUG, display_name="Acme Corp", is_active=True, is_global=False
+    )
+    global_tenant_id = dal.tenants.insert(
+        slug=GLOBAL_TENANT_SLUG, display_name="Global", is_active=True, is_global=True
+    )
+    community_id = dal.communities.insert(name="test-community", tenant_id=tenant_id)
+    now = datetime.now(UTC)
+    event_id = dal.calendar_events.insert(
+        community_id=community_id,
+        title="Test Event",
+        description="A test event",
+        event_date=now,
+        end_date=None,
+        timezone="UTC",
+        location="",
+        status="approved",
+        sync_status="pending",
+        created_at=now,
+        updated_at=now,
+    )
+    dal.commit()
+    for table_name in dal.tables:
+        dal(dal[table_name]).count()
+    yield dal, community_id, tenant_id, global_tenant_id, event_id
     dal.close()
 
 
