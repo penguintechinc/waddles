@@ -355,6 +355,12 @@ do_deploy() {
         --values "${PROJECT_ROOT}/${HELM_CHART}/values-alpha.yaml"
         --values "${SECRETS_VALUES_FILE}"
         --set-string "global.imageTag=${TAG}"
+        # fix/seeder-throughput -- core-bundle-seeder-job.yaml is a post-install/
+        # post-upgrade Helm hook; Helm always waits on hook completion using
+        # --timeout (default 5m) regardless of --wait. That default was shorter
+        # than pipeline.coreBundleSeeder.activeDeadlineSeconds (3000s/50min),
+        # so this script's `helm upgrade` could give up on a still-healthy Job.
+        --timeout 60m
     )
 
     if [[ "${DRY_RUN}" == "true" ]]; then
