@@ -402,6 +402,9 @@ mod tests {
                 digest: digest.to_string(),
                 component_key: "k".to_string(),
                 sidecar_key: "s".to_string(),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
                 declared_capabilities: Vec::new(),
             }
         }
@@ -523,6 +526,9 @@ mod tests {
             scan_status: "scanned".to_string(),
             component_key: Some(format!("bundles/{app_id}/{version}/{hex}.wasm")),
             sidecar_key: Some(format!("bundles/{app_id}/{version}/{hex}.json")),
+            artifact_signature: None,
+            artifact_signature_key_id: None,
+            artifact_signed_approval_id: None,
         }
     }
 
@@ -544,6 +550,9 @@ mod tests {
             scan_status: "scanned".to_string(),
             component_key: None,
             sidecar_key: None,
+            artifact_signature: None,
+            artifact_signature_key_id: None,
+            artifact_signed_approval_id: None,
         }
     }
 

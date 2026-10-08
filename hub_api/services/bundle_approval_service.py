@@ -94,7 +94,12 @@ from penguin_dal import AsyncDB
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
 
-from services import app_source_binding_service, bundle_audit, valkey_admin_client
+from services import (
+    app_source_binding_service,
+    bundle_audit,
+    bundle_signing_service,
+    valkey_admin_client,
+)
 from services.bundle_manifest_v2 import BundleManifestV2, ConsumeRule, EgressRule, Limits
 from services.bundle_version_service import STATUS_PUBLISHED, STATUS_REJECTED, advance_state
 from services.errors import ApiError, conflict, not_found
@@ -595,18 +600,55 @@ async def _write_approval_and_activate(
     version_id: int,
     manifest: BundleManifestV2,
     approval_source: str = "human",
-) -> tuple[int, dict[str, list[str]]]:
+) -> tuple[int, dict[str, list[str]], dict[str, Any]]:
     """Write `app_install_approvals` + upsert `app_active_versions` + AUTO-BIND sources, in one tx.
 
-    `community_id` is now a required `int` (never `None`) -- see this
+    `community_id` is a required `int` (never `None`) -- see this
     module's own docstring on retiring the tenant-wide sentinel write
-    path. Otherwise unchanged from the pre-split module's identical
-    function (same atomicity guarantee, same security-review rationale
-    for the raw `engine.begin()` block over `TableProxy`'s
-    auto-committing calls).
+    path.
+
+    Security-review fix: every `install_dal(...)`/`TableProxy` call
+    (the ordinary query-builder path used everywhere else in this
+    module) opens and auto-commits its OWN session --
+    `penguin_dal.AsyncDB.commit()`'s own docstring says so explicitly
+    ("commit is a no-op since AsyncQuerySet methods auto-commit"). Two
+    such calls composed in sequence (write the approval, then activate)
+    can never be atomic: a failure in the second call leaves a durably
+    committed "approved" row with no matching activation -- exactly the
+    dangling state this module claims to prevent. The one primitive this
+    DAL exposes that spans multiple statements in a single transaction
+    is the raw SQLAlchemy `engine.begin()` block (the same escape hatch
+    `bundle_install_dal.raw_sql_write()` documents) -- used here via
+    SQLAlchemy Core against the already-reflected `Table` objects
+    (`install_dal.metadata.tables[...]`, the same `Table` a `TableProxy`
+    wraps internally) rather than hand-written SQL strings, so column
+    types (e.g. `summary_json`'s JSON/JSONB) are bound correctly by the
+    dialect instead of needing a manual cast.
+
+    `approved_by=None` + `approval_source="system:core-seeder"` is the
+    SYSTEM-actor representation `hub_api/cli/seed_core_bundles.py` uses
+    to activate a first-party `waddles.core.*` bundle with no human
+    global-admin approval -- `approved_by` is a NULLABLE FK (migration
+    0023), so this is a real NULL, never a fake `hub_users` row.
+    `approval_source` (migration 0026) defaults to `"human"`, matching
+    every existing caller's unchanged behavior.
+
+    Returns `(new_id, bound, signing_result)`: the new
+    `app_install_approvals.id`, `app_source_binding_service.
+    sync_bindings()`'s own return value (the caller uses `bound` to
+    provision consumer groups AFTER this transaction commits -- see
+    `approve_version()`), and `bundle_signing_service.
+    sign_and_record_version()`'s return value (the caller uses it to
+    upload the signed bucket sidecar, likewise AFTER commit). All four
+    writes (approval, artifact signature, AUTO-BIND, activation) commit
+    together, or (on any exception before the `async with` block exits)
+    none does -- verified by
+    `test_bundle_approval_service.py::test_approve_version_rolls_back_the_approval_if_activation_fails`
+    and its artifact-signing counterpart.
     """
     approvals_table = install_dal.metadata.tables["app_install_approvals"]
     active_table = install_dal.metadata.tables["app_active_versions"]
+    versions_table = install_dal.metadata.tables["app_versions"]
     now = datetime.now(UTC)
 
     async with install_dal.engine.begin() as conn:
@@ -643,6 +685,28 @@ async def _write_approval_and_activate(
                 .values(superseded_by=new_id)
             )
 
+        # Artifact signing (spec SS5.6, Gemini review condition 9): signs
+        # the digest this exact approval just recorded and writes the
+        # signature columns to `app_versions` -- inside the SAME
+        # transaction as the approval insert above, so a signing failure
+        # (no key configured, or a data-integrity gap) rolls the approval
+        # back rather than leaving it unsigned. The bucket sidecar upload
+        # itself is a separate, post-commit step (see `approve_version()`).
+        signing_result = await bundle_signing_service.sign_and_record_version(
+            conn,
+            app_versions_table=versions_table,
+            version_id=version_id,
+            app_id=app_id,
+            version=version,
+            approval_id=new_id,
+        )
+
+        # AUTO-BIND: replace app_id's ingest-source bindings for this
+        # (tenant, community) inside the SAME transaction as the approval
+        # + activation writes above/below -- a failure anywhere in this
+        # `engine.begin()` block (including the active_table write that
+        # follows) rolls the bindings back too, never leaving a
+        # committed binding with no matching approval/activation.
         bound = await app_source_binding_service.sync_bindings(
             conn,
             tenant_id=tenant_id,
@@ -679,7 +743,7 @@ async def _write_approval_and_activate(
                 )
             )
 
-    return int(new_id), bound
+    return int(new_id), bound, signing_result
 
 
 async def _write_tenant_wide_approval_and_activate(
@@ -1004,7 +1068,7 @@ async def activate_for_community(
         install_dal, app_id=app_id, version=version
     )
 
-    new_id, bound = await _write_approval_and_activate(
+    new_id, bound, signing_result = await _write_approval_and_activate(
         install_dal,
         app_id=app_id,
         version=version,
@@ -1037,6 +1101,20 @@ async def activate_for_community(
         },
     )
 
+    # SIGN -- AFTER the transaction above committed: uploads the signed
+    # sidecar `bundle_signing_service.sign_and_record_version()` already
+    # computed and recorded on `app_versions` inside that transaction.
+    # Unlike the Valkey provisioning below, a failure here is NOT
+    # best-effort -- it is raised straight to the caller, since an
+    # executor cannot load this version at all without the bucket sidecar
+    # actually carrying the signature (see that function's own doc for the
+    # backfill CLI that re-runs this write idempotently).
+    await bundle_signing_service.upload_signed_sidecar(**signing_result)
+
+    # PROVISION -- AFTER the transaction above committed: ensure_group is a
+    # Valkey side effect with no rollback, so it must never run inside a
+    # DB transaction that might still abort (see app_source_binding_
+    # service.py's own module docstring).
     if bound:
         tenant_slug = await _tenant_slug(install_dal, tenant_id)
         client = valkey_client if valkey_client is not None else valkey_admin_client.build_client()
