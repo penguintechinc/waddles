@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use tower_http::trace::TraceLayer;
 
 use crate::api::SharedEngine;
+use crate::billing::token_ledger::TokenLedgerClient;
 use crate::config::Config;
 use crate::egress::hls::HlsRouterState;
 use crate::egress::whep::{WhepState, DEFAULT_MAX_VIEWERS};
@@ -63,6 +64,11 @@ pub struct AppState {
     /// Shared WHEP (WebRTC egress) signaling state -- always present so
     /// `/whep/*` is always mounted.
     pub whep_state: Arc<WhepState>,
+    /// HTTP client for hub-api's transcode-token ledger
+    /// (`crate::billing::token_ledger`) -- used by
+    /// `crate::api::lifecycle::start`'s TRANSCODE admission check. Always
+    /// present (cheap to construct, holds no connection state).
+    pub token_ledger: Arc<TokenLedgerClient>,
 }
 
 impl AppState {
@@ -130,6 +136,7 @@ impl AppState {
             hls_router_state,
             whip_state,
             whep_state,
+            token_ledger: Arc::new(TokenLedgerClient::new()),
         }
     }
 }
