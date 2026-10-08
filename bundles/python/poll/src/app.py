@@ -219,7 +219,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     try:
         parsed = parse_command(text, SPEC)
     except CommandUsageError as exc:
-        log.info("poll.usage_error", error=str(exc))
+        log.info("poll.usage_error", error=type(exc).__name__)
         return _reply(event, str(exc))
 
     mapped = _map_action(parsed)
