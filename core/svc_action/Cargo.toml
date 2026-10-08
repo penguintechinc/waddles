@@ -134,6 +134,10 @@ bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
 # capability is written and tested exactly once. See
 # `core/bundle_host_kv/Cargo.toml`.
 bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0" }
+# The standard enforcement gate every host capability arm calls first
+# (`docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+# SS5, `src/capabilities.rs`).
+bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0" }
 # `db` bundle host capability (`src/capabilities.rs::handle_db`) -- same
 # same-repo path dependency as `core/svc_process`'s identical line: this
 # crate's identifier-safety/tenant-isolation rules are owned by this

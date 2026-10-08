@@ -101,6 +101,16 @@ pub enum ExecutorError {
     /// process's own configuration was invalid".
     #[error("bucket fetch failed: {0}")]
     BucketFetch(String),
+
+    /// `crate::signing::verify_artifact_signature` refused a `load`: the
+    /// sidecar was missing/malformed, its claimed `app_id`/`version`/
+    /// `digest` did not match the load frame, its `key_id` is not among
+    /// the configured platform public keys, or its Ed25519 signature did
+    /// not verify (spec SS5.6, Gemini review condition 9). Always
+    /// surfaces to the stage as `LOAD_FAILED` -- fail closed, never a
+    /// degraded warning.
+    #[error("artifact signature invalid: {0}")]
+    SignatureInvalid(String),
 }
 
 /// `wasmtime::Error` does not implement `std::error::Error` in this

@@ -26,9 +26,27 @@ pub enum ActiveSetError {
 pub struct ActiveBundleRow {
     pub app_id: String,
     pub version: String,
+    /// `app_versions.id` -- the same numeric id `app_active_versions.
+    /// version_id` stores and [`bundle_capability_gate::GrantScopeKey::
+    /// app_version`]/`InvokeScope::app_version` actually key grants on
+    /// (`core/svc_action::grant_gate::PgGrantLoader`'s own doc). Callers
+    /// resolving a live invocation's `app_version` must read this field --
+    /// never re-derive it from `version` (the semver TEXT) or hardcode `0`.
+    pub version_id: i64,
     pub digest: String,
     pub component_key: String,
     pub sidecar_key: String,
+    /// Artifact-signature columns (spec SS5.6/Gemini review condition 9,
+    /// migration `0040_bundle_artifact_signature`) -- surfaced here for
+    /// observability/audit only. The AUTHORITATIVE check is
+    /// `core/bundle_executor/src/signing.rs`'s verification of the signed
+    /// `.json` sidecar fetched from the bucket at `sidecar_key`, not a
+    /// comparison against these columns directly (see
+    /// `entities::app_versions`'s module doc for why: the wire protocol's
+    /// `LoadBody` has no field to carry them to the executor).
+    pub artifact_signature: Option<String>,
+    pub artifact_signature_key_id: Option<String>,
+    pub artifact_signed_approval_id: Option<i64>,
     /// The install-time consent summary's derived `"capabilities"` array
     /// (`app_install_approvals.summary_json`, `crate::entities::
     /// app_install_approvals`'s doc) -- e.g. `["context","kv","flags",
@@ -518,9 +536,13 @@ pub(crate) fn assemble_active_set(
         rows.push(ActiveBundleRow {
             app_id: active.app_id.clone(),
             version: version_row.version.clone(),
+            version_id: version_row.id,
             digest,
             component_key,
             sidecar_key,
+            artifact_signature: version_row.artifact_signature.clone(),
+            artifact_signature_key_id: version_row.artifact_signature_key_id.clone(),
+            artifact_signed_approval_id: version_row.artifact_signed_approval_id,
             declared_capabilities,
         });
     }
@@ -816,6 +838,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([Vec::<app_install_approvals::Model>::new()])
             .into_connection();
@@ -855,6 +880,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -912,6 +940,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: Some(real_component_key.clone()),
                 sidecar_key: Some(real_sidecar_key.clone()),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -939,6 +970,104 @@ mod tests {
         Ok(())
     }
 
+    /// Artifact-signature columns (migration `0040_bundle_artifact_
+    /// signature`) pass through `ActiveBundleRow` verbatim -- surfaced for
+    /// observability only, the authoritative check lives in
+    /// `core/bundle_executor/src/signing.rs` against the bucket sidecar
+    /// (see `entities::app_versions`'s module doc).
+    #[tokio::test]
+    async fn read_active_set_surfaces_the_artifact_signature_columns() -> Result<(), ActiveSetError>
+    {
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.test.app".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(digest),
+                scan_status: "scanned".to_string(),
+                component_key: Some("bundles/waddles.test.app/1/real.wasm".to_string()),
+                sidecar_key: Some("bundles/waddles.test.app/1/real.json".to_string()),
+                artifact_signature: Some("c2lnbmF0dXJl".to_string()),
+                artifact_signature_key_id: Some("platform-2026-09".to_string()),
+                artifact_signed_approval_id: Some(42),
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 42,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].artifact_signature.as_deref(),
+            Some("c2lnbmF0dXJl")
+        );
+        assert_eq!(
+            result.rows[0].artifact_signature_key_id.as_deref(),
+            Some("platform-2026-09")
+        );
+        assert_eq!(result.rows[0].artifact_signed_approval_id, Some(42));
+        Ok(())
+    }
+
+    /// A not-yet-signed row (pre-migration backfill, or approved before
+    /// hub-api's signing step ran) surfaces `None` for all three columns
+    /// rather than erroring or excluding the row -- `bundle_executor`'s own
+    /// sidecar-based check is what fails closed on a genuinely missing
+    /// signature, not this crate.
+    #[tokio::test]
+    async fn read_active_set_surfaces_none_when_artifact_signature_columns_are_unset(
+    ) -> Result<(), ActiveSetError> {
+        let digest = format!("sha256:{}", "e".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.test.app".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(digest),
+                scan_status: "scanned".to_string(),
+                component_key: Some("bundles/waddles.test.app/1/real.wasm".to_string()),
+                sidecar_key: Some("bundles/waddles.test.app/1/real.json".to_string()),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 1,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert_eq!(result.rows.len(), 1);
+        assert!(result.rows[0].artifact_signature.is_none());
+        assert!(result.rows[0].artifact_signature_key_id.is_none());
+        assert!(result.rows[0].artifact_signed_approval_id.is_none());
+        Ok(())
+    }
+
     /// `sidecar_key` falls back independently of `component_key`: a real
     /// `component_key` with a `NULL` `sidecar_key` uses the real component
     /// key verbatim and only derives the sidecar half -- not treated as
@@ -963,6 +1092,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: Some(real_component_key.clone()),
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -1010,6 +1142,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             // Approval belongs to tenant 2, not tenant 1 -- same app_id/
             // version/community sentinel otherwise.
@@ -1052,6 +1187,9 @@ mod tests {
                 scan_status: "not_scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -1155,6 +1293,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -1215,6 +1356,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 2,
@@ -1262,6 +1406,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             },
         );
         versions_by_id.insert(
@@ -1274,6 +1421,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             },
         );
         let approval_rows = vec![app_install_approvals::Model {
@@ -1314,6 +1464,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -1392,6 +1545,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: Some("bundles/waddles.test.app/1/c.wasm".to_string()),
                 sidecar_key: Some("bundles/waddles.test.app/1/s.json".to_string()),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -1437,6 +1593,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: Some("bundles/waddles.test.app/1/c.wasm".to_string()),
                 sidecar_key: Some("bundles/waddles.test.app/1/s.json".to_string()),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
