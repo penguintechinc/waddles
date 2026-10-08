@@ -137,6 +137,10 @@ mod tests {
             digest: digest.to_string(),
             component_key: String::new(),
             sidecar_key: String::new(),
+            artifact_signature: None,
+            artifact_signature_key_id: None,
+            artifact_signed_approval_id: None,
+            declared_capabilities: Vec::new(),
         }
     }
 
