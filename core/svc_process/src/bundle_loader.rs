@@ -232,6 +232,7 @@ pub async fn run_tick(
     sink: Option<&dyn BundleSink>,
     excluded_metric: &prometheus::IntCounterVec,
     kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
+    snapshot: &bundle_active_set::ActiveVersionSnapshot,
 ) {
     if !gate.enabled().await {
         tracing::debug!(
@@ -289,6 +290,12 @@ pub async fn run_tick(
     for row in &active {
         kv_capabilities.update(row.app_id.clone(), row.declared_capabilities.clone());
     }
+    // Wholesale-replace the shared `app_version` snapshot from this SAME
+    // read, before the load/unload decision below -- `crate::spine`/
+    // `crate::source_supervisor`'s per-invocation resolution (spec SS4/
+    // SS5.1) must see a superseded digest stop resolving the instant the
+    // active set moves, not just after this tick's load/unload completes.
+    snapshot.update(&active);
 
     let plan = diff::plan(loaded, &active);
     if plan.is_empty() {
@@ -349,6 +356,7 @@ pub async fn run(
     excluded_metric: prometheus::IntCounterVec,
     kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
+    snapshot: bundle_active_set::ActiveVersionSnapshot,
 ) {
     let mut tracker = WatermarkTracker::new();
     let mut loaded: HashMap<String, String> = HashMap::new();
@@ -372,6 +380,7 @@ pub async fn run(
                     sink.as_ref().map(|s| s as &dyn BundleSink),
                     &excluded_metric,
                     &kv_capabilities,
+                    &snapshot,
                 )
                 .await;
             }
@@ -390,6 +399,7 @@ mod tests {
         ActiveBundleRow {
             app_id: "waddles.a".to_string(),
             version: "1".to_string(),
+            version_id: 1,
             digest: digest.to_string(),
             component_key: "k".to_string(),
             sidecar_key: "s".to_string(),
@@ -521,6 +531,7 @@ mod tests {
             None,
             &test_metric(),
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &test_snapshot(),
         )
         .await;
         assert!(loaded.is_empty());
@@ -567,6 +578,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &metric,
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &test_snapshot(),
         )
         .await;
         run_tick(
@@ -579,6 +591,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &metric,
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &test_snapshot(),
         )
         .await;
 
@@ -611,6 +624,7 @@ mod tests {
             None,
             &test_metric(),
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &test_snapshot(),
         )
         .await;
         assert!(
@@ -642,6 +656,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_metric(),
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &test_snapshot(),
         )
         .await;
         assert_eq!(loaded.get("waddles.a"), Some(&digest));
@@ -679,6 +694,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_metric(),
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &test_snapshot(),
         )
         .await;
         let canonical = format!("sha256:{hex}");
@@ -747,6 +763,7 @@ mod tests {
                 Some(&sink as &dyn BundleSink),
                 &test_metric(),
                 &bundle_host_kv::CapabilitySnapshot::new(),
+                &test_snapshot(),
             )
             .await;
         }
@@ -787,6 +804,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_metric(),
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &test_snapshot(),
         )
         .await;
         assert!(loaded.is_empty());
@@ -820,6 +838,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_metric(),
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &test_snapshot(),
         )
         .await;
         assert!(
@@ -845,6 +864,7 @@ mod tests {
             None,
             &test_metric(),
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &test_snapshot(),
         )
         .await;
         assert!(loaded.is_empty());
@@ -855,6 +875,10 @@ mod tests {
     /// for `/metrics` exposition, not internal correctness), so tests don't
     /// need to thread `telemetry::register_bundle_loader_excluded_metrics`
     /// through just to satisfy `run_tick`'s signature.
+    fn test_snapshot() -> bundle_active_set::ActiveVersionSnapshot {
+        bundle_active_set::ActiveVersionSnapshot::new()
+    }
+
     fn test_metric() -> prometheus::IntCounterVec {
         prometheus::IntCounterVec::new(
             prometheus::Opts::new("test_bundle_active_set_excluded_total", "test"),
@@ -982,6 +1006,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &metric,
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &test_snapshot(),
         )
         .await;
         assert_eq!(loaded.get("waddles.a"), Some(&digest));
@@ -1037,6 +1062,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &metric,
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &test_snapshot(),
         )
         .await;
         assert_eq!(
@@ -1092,6 +1118,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_metric(),
             &kv_capabilities,
+            &test_snapshot(),
         )
         .await;
         assert!(kv_capabilities.declares("waddles.a", "kv"));
@@ -1128,6 +1155,7 @@ mod tests {
             Some(&sink as &dyn BundleSink),
             &test_metric(),
             &kv_capabilities,
+            &test_snapshot(),
         )
         .await;
         assert!(!kv_capabilities.declares("waddles.a", "kv"));

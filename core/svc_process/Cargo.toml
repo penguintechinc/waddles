@@ -156,6 +156,10 @@ bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
 # dependency so the capability is written and tested exactly once. See
 # `core/bundle_host_kv/Cargo.toml`.
 bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0" }
+# The standard enforcement gate every host capability arm calls first
+# (`docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+# SS5, `src/capabilities.rs`).
+bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0" }
 # The shared `db` bundle host-capability implementation (insert/get/update/
 # delete against a bundle's own `app_core`/`app_community` table) -- a
 # same-repo path dependency, same rationale as `bundle-active-set` above:
@@ -174,14 +178,12 @@ redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp"
 # instead of a second copy. Same same-repo `path`-dependency rationale as
 # `bundle-active-set` above.
 bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
+# `futures_util::StreamExt`/`join_all`: `grant_gate`'s pub/sub invalidation
+# subscriber (`PubSubStream::into_on_message()`) AND
 # `apply_active_set`'s concurrent per-(session,bundle) Load/Unload dispatch
 # (`src/changelog_consumer.rs`, fix/svc-process-load-reliability-and-
-# symmetry, porting fix/action-per-session-load-reliability #554): runs
-# every call in a tick via `join_all` instead of sequentially, so one
-# stuck/terminating session's call can never starve another live session's
-# load. Same exact version pin `core/svc_action` uses for the identical
-# purpose -- already resolves transitively (reqwest), pinned directly here
-# so this promotion adds no new version to the dependency graph.
+# symmetry, porting fix/action-per-session-load-reliability #554) both use
+# this crate -- same exact version pin `core/svc_action` uses.
 futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
 # Inbound PII-tokenization pre-dispatch pass (`src/pii_tokenize.rs`):
 # Discord structured-mention / Twitch-IRC handle-mention scanning in

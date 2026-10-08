@@ -146,6 +146,13 @@ pub struct SupervisorDeps {
     /// loaded only onto a terminating executor during rollout; live
     /// executor got none (alpha 2026-10-03).
     pub loaded_sessions: Arc<LoadedSessions>,
+    /// Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
+    /// the SAME instance `crate::changelog_consumer` keeps current via
+    /// `apply_active_set` -- cloned into every spawned consumer's own
+    /// `DispatchDeps::app_version_snapshot` so `dispatch::handle_delivered`
+    /// resolves grants against the live `app_versions.id`, never a value
+    /// captured once at spawn time (spec SS4/SS5.1).
+    pub app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
 }
 
 /// A running per-app dispatch consumer: a shutdown signal plus the
@@ -276,6 +283,7 @@ async fn run_app_consumer(
             consumer_id: deps.spine_cfg.consumer_id.clone(),
             spine: spine_client,
             metrics: deps.metrics.clone(),
+            app_version_snapshot: deps.app_version_snapshot.clone(),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();

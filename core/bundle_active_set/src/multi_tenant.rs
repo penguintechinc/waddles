@@ -508,6 +508,7 @@ mod tests {
         ActiveBundleRow {
             app_id: app_id.to_string(),
             version: "1".to_string(),
+            version_id: 1,
             digest: digest.to_string(),
             component_key: format!("bundles/{digest}/component.wasm"),
             sidecar_key: format!("bundles/{digest}/sidecar.json"),

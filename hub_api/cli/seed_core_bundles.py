@@ -78,7 +78,10 @@ from services.bundle_approval_service import (
 )
 from services.bundle_install_dal import build_install_dal, raw_sql_write
 from services.bundle_manifest_v2 import BundleManifestV2, parse_bundle_manifest_v2
-from services.bundle_permission_service import seed_core_permission_requests
+from services.bundle_permission_service import (
+    grant_community_permissions,
+    seed_core_permission_requests,
+)
 from services.bundle_telemetry import get_meter
 from services.bundle_version_service import create_version, process_prebuilt_component
 from services.errors import ApiError
@@ -633,13 +636,28 @@ async def seed_one(
             installed_by=None,
             install_source=SYSTEM_ACTOR,
         )
-        # spec Sec3.6: pre-grant every permission this core bundle's manifest
-        # declares -- same SYSTEM-actor convention as the install above.
-        # `_guard_core_namespace()` (top of this function) already hard-
-        # guards `entry.app_id` to CORE_NAMESPACE_PREFIX before any DB write.
-        await seed_core_permission_requests(
-            install_dal, app_id=entry.app_id, version=entry.version, manifest=manifest
-        )
+
+    # spec Sec3.6: pre-grant every permission this core bundle's manifest declares --
+    # same SYSTEM-actor convention as the install above. `_guard_core_namespace()` (top
+    # of this function) already hard-guards `entry.app_id` to CORE_NAMESPACE_PREFIX
+    # before any DB write. Called UNCONDITIONALLY every seeder run, not just inside the
+    # `if not already_installed:` branch above (review finding, PR #433 blocker): a core
+    # bundle first installed before the permission-catalog system existed (e.g.
+    # count/lurk/rps, installed 2026-09-27, one day before the catalog landed
+    # 2026-09-28) is `already_installed` forever, so gating this call on that flag left
+    # its GLOBAL tier (`app_permission_requests`) permanently empty. With the GLOBAL
+    # ceiling never backfilled, `_grant_core_bundle_permissions()`'s own COMMUNITY-tier
+    # self-heal below could never succeed either -- `grant_community_permissions()`
+    # computes `allowed = approved(ceiling) - restricted`, finds every required
+    # permission "not in catalog", and raises `permission_not_in_catalog_grant` (422),
+    # caught and logged, never fixed -- so `community_permission_grants` stayed empty
+    # for every pre-existing core bundle. `record_permission_requests()` (what this
+    # calls) is a DELETE-then-INSERT keyed on `(app_id, version)`, so re-running it for
+    # an already-seeded bundle is a safe, idempotent no-op -- it does not touch any
+    # human/vendor-submitted `app_permission_requests` row for a different `app_id`.
+    await seed_core_permission_requests(
+        install_dal, app_id=entry.app_id, version=entry.version, manifest=manifest
+    )
 
     results: list[SeedResult] = []
     for target in targets:
@@ -668,6 +686,15 @@ async def seed_one(
                 community_id=TENANT_WIDE_COMMUNITY_SENTINEL,
                 version_id=version_id,
             ):
+                await _grant_core_bundle_permissions(
+                    install_dal,
+                    tenant_id=tenant_id,
+                    community_id=TENANT_WIDE_COMMUNITY_SENTINEL,
+                    app_id=entry.app_id,
+                    version=entry.version,
+                    manifest=manifest,
+                    valkey_client=valkey_client,
+                )
                 results.append(
                     SeedResult(
                         entry.app_id,
@@ -684,6 +711,15 @@ async def seed_one(
                 app_id=entry.app_id,
                 activated_by=None,
                 approval_source=SYSTEM_ACTOR,
+                valkey_client=valkey_client,
+            )
+            await _grant_core_bundle_permissions(
+                install_dal,
+                tenant_id=tenant_id,
+                community_id=TENANT_WIDE_COMMUNITY_SENTINEL,
+                app_id=entry.app_id,
+                version=entry.version,
+                manifest=manifest,
                 valkey_client=valkey_client,
             )
             results.append(
@@ -703,6 +739,15 @@ async def seed_one(
             community_id=target.community_id,
             version_id=version_id,
         ):
+            await _grant_core_bundle_permissions(
+                install_dal,
+                tenant_id=tenant_id,
+                community_id=target.community_id,
+                app_id=entry.app_id,
+                version=entry.version,
+                manifest=manifest,
+                valkey_client=valkey_client,
+            )
             results.append(
                 SeedResult(
                     entry.app_id,
@@ -723,6 +768,15 @@ async def seed_one(
             approval_source=SYSTEM_ACTOR,
             valkey_client=valkey_client,
         )
+        await _grant_core_bundle_permissions(
+            install_dal,
+            tenant_id=tenant_id,
+            community_id=target.community_id,
+            app_id=entry.app_id,
+            version=entry.version,
+            manifest=manifest,
+            valkey_client=valkey_client,
+        )
         results.append(
             SeedResult(
                 entry.app_id,
@@ -732,6 +786,67 @@ async def seed_one(
             )
         )
     return results
+
+
+async def _grant_core_bundle_permissions(
+    install_dal: AsyncDB,
+    *,
+    tenant_id: int,
+    community_id: int,
+    app_id: str,
+    version: str,
+    manifest: BundleManifestV2,
+    valkey_client: Any | None,
+) -> None:
+    """COMMUNITY-tier auto-grant for a SYSTEM-seeded core bundle (spec Sec3.3/Sec3.6).
+
+    `seed_core_permission_requests()` above only writes the GLOBAL catalog-approval tier
+    (`app_permission_requests`) -- it never writes `community_permission_grants` (the
+    COMMUNITY tier `bundle_capability_gate::authorize()`'s `PgGrantLoader` actually reads
+    at data-plane enforcement time, `core/svc_action::grant_gate`/`core/svc_process::
+    grant_gate`'s own doc). Before the capability gate was wired in (PR #433), every host
+    call fell back to the interim `AlwaysGrantedLoader`-only seam, so this gap was latent;
+    once `authorize()` is live, EVERY already-seeded core bundle (count/lurk/rps/etc., spec
+    Sec3.6) would silently start denying every `storage.kv`/etc. host call with zero grant
+    row ever having been written for it. Called unconditionally on every seeder run
+    (including for an already-active bundle) so this is self-healing for bundles installed
+    before this fix shipped, not just newly-seeded ones -- `grant_community_permissions`'s
+    own DELETE-then-INSERT is already idempotent (safe to call every run).
+
+    Grants exactly what the manifest declares (no more, no less) -- mirrors
+    `grant_community_permissions`'s own `required` vs `allowed` check, which this call
+    must satisfy identically to a human community-admin's explicit consent, just performed
+    by the SYSTEM actor instead. Never raises on a transient failure: a grant gap for one
+    core bundle must not abort the whole seeder run (every other install/activation this
+    run already committed) -- logged loud instead, so an operator notices and reruns.
+    """
+    required = frozenset(d.id for d in manifest.permission_declarations)
+    if not required:
+        return
+    try:
+        await grant_community_permissions(
+            install_dal,
+            tenant_id=tenant_id,
+            community_id=community_id,
+            app_id=app_id,
+            version=version,
+            manifest=manifest,
+            granted_permission_ids=required,
+            params_by_id=None,
+            granted_by=None,
+            valkey_client=valkey_client,
+        )
+    except ApiError:
+        logger.exception(
+            "core bundle permission auto-grant failed -- every non-platform host call for "
+            "this (tenant, community, app) scope will deny until this is resolved",
+            extra={
+                "app_id": app_id,
+                "tenant_id": tenant_id,
+                "community_id": community_id,
+                "required_permission_ids": sorted(required),
+            },
+        )
 
 
 async def _tenant_slug_for_id(install_dal: AsyncDB, tenant_id: int) -> str:
