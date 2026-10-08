@@ -1,0 +1,86 @@
+# feature/bundle-artifact-signing -- one-off backfill (hub_api/cli/sign_approved_bundles.py)
+# as a Helm hook Job, mirroring templates/core-bundle-seeder-job.yaml's shape. Deliberately
+# gated on its own `enabled` flag (default false, see values.yaml's
+# pipeline.hubApi.bundleSigningBackfill comment) rather than always firing on every
+# post-install/post-upgrade -- this is a rollout step the operator runs ONCE, after the
+# bundle-signing Secret exists and hub-api itself is deployed, before the executor is
+# deployed (see the chart README's "Bundle artifact signing rollout order" section). The
+# CLI is idempotent (module docstring: a row it already signed no longer matches its own
+# selection filter), so a stray extra run of this hook is always harmless.
+{{- if .Values.pipeline.hubApi.bundleSigningBackfill.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-bundle-signing-backfill
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bundle-signing-backfill
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.pipeline.hubApi.bundleSigningBackfill.backoffLimit }}
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: bundle-signing-backfill
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: bundle-signing-backfill
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.global.imageTag) }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+        command: ["python3", "-m", "cli.sign_approved_bundles"]
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        envFrom:
+        - configMapRef:
+            name: {{ include "waddlebot.fullname" . }}-config
+        - secretRef:
+            name: {{ include "waddlebot.fullname" . }}-secrets
+        env:
+        - name: MODULE_NAME
+          value: "bundle-signing-backfill"
+        # Same secretKeyRef pair as templates/hub-api.yaml -- see that file's comment.
+        # NOT optional here: a backfill run with no signing key configured can only ever
+        # fail every row (PlatformSigner.from_env()'s own fail-closed 500), so failing this
+        # Job's pod fast on a missing Secret is more useful than a guaranteed-all-failed run.
+        - name: BUNDLE_SIGNING_PRIVATE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.pipeline.hubApi.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
+              key: BUNDLE_SIGNING_PRIVATE_KEY
+        - name: BUNDLE_SIGNING_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.pipeline.hubApi.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
+              key: BUNDLE_SIGNING_KEY_ID
+        resources:
+          {{- toYaml .Values.pipeline.hubApi.bundleSigningBackfill.resources | nindent 10 }}
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+{{- end }}

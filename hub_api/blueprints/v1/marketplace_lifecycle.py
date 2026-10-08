@@ -44,12 +44,14 @@ unaffected by that crash (a different code path) and may nest freely.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
 from flask_core.tenancy import get_tenant_context, tenant_middleware
+from penguin_dal import AsyncDB
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
@@ -59,6 +61,8 @@ from services.current_user import get_current_user_id
 from services.errors import ApiError
 from services.tenant_service import require_matching_tenant
 
+logger = logging.getLogger(__name__)
+
 marketplace_lifecycle_bp = Blueprint(
     "v1_marketplace_lifecycle", __name__, url_prefix="/api/v1/marketplace"
 )
@@ -67,6 +71,21 @@ marketplace_lifecycle_bp = Blueprint(
 def _dal() -> tuple[Any, Any]:
     """Return `(async_dal, dal)` from app config -- same accessor shape as every other group."""
     return current_app.config["async_dal"], current_app.config["dal"]
+
+
+def _install_dal() -> AsyncDB | None:
+    """The penguin-dal `AsyncDB` handle -- feeds `_guard_*_reconsent()`'s permission-grant reads.
+
+    `None` (not a `KeyError`) when unset -- a handful of this group's own
+    test fixtures build a narrower Quart app that never populates
+    `install_dal` (this blueprint's pre-existing tables never needed it
+    before the permission-reconsent gate); `services.marketplace_
+    lifecycle_service`'s own `install_dal: AsyncDB | None = None` default
+    treats that the same as an explicit opt-out (its docstring covers
+    why: the reconsent gate is additive, not a hard dependency for the
+    older, non-permission-catalog `AppManifest` pipeline).
+    """
+    return cast("AsyncDB | None", current_app.config.get("install_dal"))
 
 
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
@@ -491,8 +510,16 @@ async def make_available(
             tenant_id=tenant_id,
             app_id=data.appId,
             config_defaults=data.configDefaults,
+            install_dal=_install_dal(),
         )
     except ApiError as exc:
+        logger.warning(
+            "make_available failed for tenant=%s app=%s: %s (%s)",
+            tenant_slug,
+            data.appId,
+            exc.message,
+            exc.code,
+        )
         return _err(exc)
     return MessageResponse(success=True, message=f"Bundle {data.appId} made available"), 201
 
@@ -580,8 +607,16 @@ async def activate_bundle(
             app_id=data.appId,
             config=data.config,
             activated_by=caller_id,
+            install_dal=_install_dal(),
         )
     except ApiError as exc:
+        logger.warning(
+            "activate_bundle failed for community=%s app=%s: %s (%s)",
+            community_id,
+            data.appId,
+            exc.message,
+            exc.code,
+        )
         return _err(exc)
     return MessageResponse(success=True, message=f"Bundle {data.appId} activated"), 201
 

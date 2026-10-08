@@ -52,8 +52,8 @@ pub mod scope;
 pub use denied::Denied;
 pub use gate::CapabilityGate;
 pub use grant::{
-    GrantCache, GrantLoader, GrantSet, GrantSnapshot, GrantedPermission, InMemoryGrantLoader,
-    InMemoryGrantSnapshot,
+    GrantCache, GrantLoadError, GrantLoader, GrantSet, GrantSnapshot, GrantedPermission,
+    InMemoryGrantLoader, InMemoryGrantSnapshot,
 };
 pub use instance_policy::{InMemoryInstancePolicySnapshot, InstanceAction, InstancePolicySnapshot};
 pub use membership::{InMemoryMembership, MembershipCheck};
