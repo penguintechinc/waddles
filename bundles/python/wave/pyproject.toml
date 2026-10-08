@@ -1,0 +1,13 @@
+[project]
+name = "waddle-bundle-wave"
+version = "1.0.0"
+description = "`!wave [target]` -> a wholesome, wave-themed social flavor-text reply, relayed back to the caller's own origin platform. Relay only, no kv/db state. Python equivalent of bundles/python/pyping, modeled on bundles/python/eightball's hand-built structure."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
