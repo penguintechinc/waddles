@@ -17,10 +17,11 @@ legacy transform's own help-on-no-args behavior.
 
 **BUILD-ONLY / INERT.** Ships behind `waddles.command-quote`, default OFF,
 and `bot_process._FEATURE_MODULES` (the legacy strangler registry) still
-owns live `quote` traffic -- this bundle is not wired into the cut-over
-yet. That happens after the activation-gate P4 work lands; removing `quote`
-from `_FEATURE_MODULES` before then would double-reply or disable the
-command entirely. See the PR description for the explicit follow-up.
+owns live `quote` traffic -- this bundle has not yet been connected into
+the cut-over. That happens after the activation-gate P4 work lands;
+removing `quote` from `_FEATURE_MODULES` before then would double-reply or
+disable the command entirely. See the PR description for the explicit
+follow-up.
 
 Storage -- deliberately Postgres, NOT `kv`: `quotes`
 (`config/postgres/migrations/015_add_quote_tables.sql`) is a table shared
@@ -30,9 +31,10 @@ with hub-api's own admin/moderation surface, so this bundle uses
 over the WIT `db` import, declaring the `storage.tables` capability
 (`core/bundle_host_db/src/authorize.rs::DB_PERMISSION_ID`) in `bundle.yaml`
 -- never `storage.kv`. Two reads (`random`, `list`) need `ORDER BY`/`LIMIT`,
-which the structured query builder does not support
-(`AsyncQuerySet.select(orderby=..., limitby=...)` raises
-`NotImplementedError` -- see `waddle_sdk/db.py`), so those two calls use
+which the structured query builder does not support --
+`AsyncQuerySet.select(orderby=..., limitby=...)` raises loudly rather than
+silently truncating or misordering results (see `waddle_sdk/db.py`), so
+those two calls use
 `AsyncDB.execute()`'s own documented raw-SQL escape hatch instead, fully
 parameterized (`$1`/`$2` placeholders, never f-string interpolation of a
 caller-supplied value) -- every other operation (insert/get/update) goes
