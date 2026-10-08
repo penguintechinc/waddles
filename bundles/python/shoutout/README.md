@@ -55,8 +55,8 @@ tenant-wide.
 
 | Key | Scope | TTL | Purpose |
 |---|---|---|---|
-| `shoutout:config:template` | per-community | none | Configured shoutout template (`$(username)` placeholder). |
-| `shoutout:auto:list` | per-community | none | JSON array of SHA-256 pseudonyms on the auto-shoutout list. |
+| `shoutout.config.template` | per-community | none | Configured shoutout template (`$(username)` placeholder). |
+| `shoutout.auto.list` | per-community | none | JSON array of SHA-256 pseudonyms on the auto-shoutout list. |
 | `submodule:shoutout:auto` | per-community | none | `auto` sub-module enabled flag (`waddle_sdk.sub_modules.SubModuleGate`). |
 | `submodule:shoutout:ai` | per-community | none | `ai` sub-module enabled flag (same gate). |
 

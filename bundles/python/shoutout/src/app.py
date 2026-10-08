@@ -122,8 +122,8 @@ _GATE = SubModuleGate(command="shoutout")
 #: Flags & License Tiers: "basic AI = Professional").
 _AI_TIER_REQUIRED = "professional"
 
-_TEMPLATE_KEY = "shoutout:config:template"
-_AUTO_LIST_KEY = "shoutout:auto:list"
+_TEMPLATE_KEY = "shoutout.config.template"
+_AUTO_LIST_KEY = "shoutout.auto.list"
 
 #: Rendered when no per-community template has been configured yet.
 DEFAULT_TEMPLATE = "Shoutout to $(username) -- go check them out and give them a follow!"
