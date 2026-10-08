@@ -958,6 +958,14 @@ pipeline:
     replicas: 2
     service:
       type: ClusterIP
+    # Direct host-IP NodePort exposure (no /etc/hosts or Host-header routing) -- alpha
+    # only; base/beta/gamma/production stay ClusterIP+Ingress-only (see
+    # templates/hub-webui.yaml's second Service block). 30879 matches
+    # webui.publicUrl/connectionsCallbackBaseUrl in values-alpha.yaml, which already
+    # reserved this port for "hub-webui NodePort" ahead of this Service existing.
+    nodePort:
+      enabled: false
+      port: 30879
     resources:
       requests:
         cpu: "100m"

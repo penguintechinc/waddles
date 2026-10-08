@@ -196,6 +196,13 @@ pipeline:
   hubWebui:
     enabled: true
     replicas: 1
+    # Direct host-IP access for testers (http://<node-ip>:30879, no /etc/hosts or
+    # Host-header needed) -- port matches webui.publicUrl/connectionsCallbackBaseUrl
+    # above, which already assumed this NodePort. Ingress (waddles.localhost.local)
+    # keeps working unchanged alongside it -- see templates/hub-webui.yaml.
+    nodePort:
+      enabled: true
+      port: 30879
     resources:
       requests: { cpu: "50m", memory: "64Mi" }
       limits: { cpu: "200m", memory: "256Mi" }
