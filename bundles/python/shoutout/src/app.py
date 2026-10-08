@@ -190,7 +190,10 @@ def _resolve(rest: str) -> tuple[str, str | None]:
 
     try:
         parsed = parse_command(f"!so {rest}", SPEC)
-    except CommandUsageError:
+    except CommandUsageError as exc:
+        # Expected-input skip, not a fault -- malformed/unknown `!so` grammar
+        # falls through to the usage reply. Never log `rest` (raw user input).
+        log.debug("shoutout.command_usage_error", op="so_resolve", error_type=type(exc).__name__)
         return "usage", None
     return _map_parsed(parsed)
 
