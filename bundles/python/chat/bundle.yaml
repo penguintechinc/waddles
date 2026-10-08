@@ -5,6 +5,11 @@ name: Chat History Bundle (Python)
 # commands (chat-history, channels) into a WASM-component App Bundle -- feature/bundle-chat.
 # BUILD-ONLY / INERT: bot_process._FEATURE_MODULES still runs the original monolith module;
 # cut-over to this bundle is a separate, later change (P4 activation gate).
+# 2026-10-08: re-ported onto the structured waddle_sdk.db facade (release/v3.0.X) -- the
+# facade has no path to read the hub-owned `hub_chat_messages` table (see src/app.py's own
+# module docstring), so this bundle no longer declares any data/storage capability at all;
+# both commands always reply with an explicit "not available yet" message. Tracked:
+# https://github.com/penguintechinc/waddles/issues/678
 version: 1.0.0
 feature: waddles.core.example
 module: core
@@ -38,23 +43,17 @@ stages:
     spec:
       required_config: []
 egress: []
-# `data.tables` names the one existing platform table this bundle reads (read-only) -- it is
-# non-empty purely to grant the `db` capability (see `permissions` note below); this bundle
-# does not own/provision `hub_chat_messages` the way PR #415's one-table-per-bundle schema
-# design covers a bundle's OWN table.
+# No `data.table` -- this bundle holds no state of its own and has no path to read the
+# hub-owned `hub_chat_messages` table under the current structured `db` facade (one
+# bundle-owned table only, see src/app.py's module docstring). Both commands reply with an
+# explicit "not available yet" message rather than attempting an impossible db call.
 data:
-  tables:
-    - hub_chat_messages
+  tables: []
 limits:
   timeout_ms: 2000
   memory_mb: 64
   egress_rps: 10
-# No `storage.kv` -- this bundle holds no state of its own, read-only queries only. `db`
-# capability itself is derived from `data.tables` being non-empty
-# (hub_api/services/bundle_approval_service.py::_derive_capabilities()), not from an explicit
-# permission id here -- there is no `storage.db`/`storage.tables` entry in the live permission
-# catalog yet (docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md is
-# APPROVED-WITH-CONDITIONS design, not yet implemented).
+# No `storage.kv`/`storage.db` -- no capability this bundle actually uses.
 permissions: []
 config_schema: {}
 compatible_with: []

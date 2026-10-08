@@ -5,6 +5,9 @@
 # 1.0.0: initial port of core/svc_process/bundles/community_chat_process.py's two read-only
 # commands (chat-history, channels) -- see this bundle's src/app.py module docstring
 # (feature/bundle-chat). BUILD-ONLY / INERT -- see that docstring's own note.
+# 2026-10-08: re-ported onto the structured waddle_sdk.db facade -- no data/storage capability
+# declared (the facade can't read the hub-owned hub_chat_messages table). Tracked:
+# https://github.com/penguintechinc/waddles/issues/678
 schema_version: 2
 app_id: waddles.core.example.chat
 name: Chat History Bundle (Python)
@@ -32,8 +35,7 @@ stages:
     entry: "waddle:bundle/action-stage#dispatch"
 egress: []
 data:
-  tables:
-    - hub_chat_messages
+  tables: []
 limits:
   timeout_ms: 2000
   memory_mb: 64

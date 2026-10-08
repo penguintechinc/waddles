@@ -1,38 +1,52 @@
-"""`!chat-history [list]` / `!channels [list]` -- read-only chat history queries.
+"""`!chat-history [list]` / `!channels [list]` -- community chat lookup commands.
 
 Ported from `core/svc_process/bundles/community_chat_process.py`'s two
-read-only commands into a WASM-component App Bundle. Behavior parity with
-the source, with two deliberate changes:
+read-only commands into a WASM-component App Bundle. Command recognition
+and grammar (`!chat-history`/`!chat-history list`, `!channels`/`!channels
+list`, via the standard `waddle_sdk.command` grammar) carry over unchanged
+from the original port (PR #621). The actual data read does not.
 
-1. **Grammar**: parsing goes through the standard `waddle_sdk.command`
-   grammar (`parse_command`/`CommandSpec`, SDK #618) instead of hand-rolled
-   `text.startswith(...)` -- `!chat-history` and `!chat-history list` are
-   equivalent (both show history); `!channels` and `!channels list` are
-   equivalent (both list channels). Neither command declares sub-modules
-   (there is nothing to enable/disable here), so `waddle_sdk.sub_modules.
-   SubModuleGate` is not used -- see that module's own docstring for when
-   it would apply.
-2. **Scope**: community-scoped only (`community_id`), never tenant --
-   the source's `communities`/`tenants` join subquery is dropped. The SDK
-   `waddle_sdk.db` facade (spec D21) has no live SQLAlchemy connection to
-   express that join on anyway (only a single-table query builder plus a
-   raw `execute()` escape hatch for one parameterized statement at a
-   time -- `raw_sql_rows`/`raw_sql_write` are explicitly `NotImplemented`
-   in this facade), and the task's own scope decision is community-only.
-   Likewise, `GROUP BY`/`ORDER BY`/`LIMIT` aren't expressible in the
-   facade's query builder (`AsyncQuerySet.select()` raises on `orderby`/
-   `limitby`) -- both commands below fetch every matching row for the
-   community with a single `WHERE community_id = $1` and sort/aggregate/
-   truncate in guest Python instead.
+**Architecture gap (2026-10-08, release/v3.0.X): this bundle cannot serve
+its reads under the current `waddle_sdk.db` facade.** PR #621 was written
+against the facade's retired query-builder (`AsyncQuerySet`/`get_bundle_dal`
+-> `dal(dal.hub_chat_messages.community_id == community_id).select()`),
+reading the named shared table `hub_chat_messages` via the old
+`data.tables: [<name>]` manifest shape. That facade is gone. The current
+`waddle_sdk.db` module (see its own docstring, "no bundle-supplied SQL,
+ever") exposes exactly `insert`/`get`/`query`/`update`/`delete`, each
+implicitly targeting the ONE table a bundle owns (provisioned at install
+time from *this bundle's own* `data.table.columns`, in `app_core`/
+`app_community` -- `core/bundle_host_db/src/scope.rs::DbScope` only ever
+resolves `(tenant, community, app_id)` against the calling bundle's own
+schema). `hub_chat_messages` is a hub-api-owned table (`hub_api/services/
+community_chat.py`), outside both schemas and outside this bundle's own
+`app_id` -- there is no `table` parameter left to name it with, and no
+host capability that grants cross-bundle/cross-service reads.
+
+`waddle_sdk.kv` doesn't help either: it is a small per-app blob store,
+never populated with the hub's chat message history, so routing through
+it would mean inventing a brand-new duplicate-storage feature (and
+PII-duplication concern, see `client.md`/`critical-rules.md` PII
+Tokenization: message content and sender identity belong inside the API
+boundary, not re-homed into a bundle's own storage) rather than porting
+the existing read. `waddle_sdk.http`'s egress-allowlisted client is built
+for external third-party calls, not an authenticated internal call back
+into hub-api's own `community.chat:read`-scoped, tenant-middleware-gated
+REST endpoints (`hub_api/blueprints/v1/community_chat.py`) -- no bundle
+capability issues a service-to-service JWT today.
+
+Until a host capability exists for this (e.g. a dedicated WIT import for
+hub-owned read-only lookups, or a service-authenticated call path into
+hub-api), both commands recognize correctly, stay flag-gated, and always
+produce an explicit, honest reply -- never a crash, never a silent drop.
+Tracked: https://github.com/penguintechinc/waddles/issues/678
 
 Read-only -- open to anyone, matching the source (no `_is_privileged()`
 gate, unlike `count`/`lurk`'s mutating commands).
 
-PII note: chat messages carry `sender_username`. Reply text includes it
-(same as the source -- that's the whole point of a chat-history read),
-but every `log.*` call here is scoped to command/error metadata only,
+PII note: every `log.*` call here is scoped to command metadata only,
 never message content or usernames (AUTHORING.md's log-sanitization rule;
-see also critical-rules.md PII Tokenization).
+see also `critical-rules.md` PII Tokenization).
 
 Gated behind the PostHog flag ``waddles.command-chat``, default OFF (see
 `bundles/python/count/src/app.py`'s own docstring for the flag-gate
@@ -42,25 +56,18 @@ only once a `!`-prefixed, command-matching message is in hand).
 **BUILD-ONLY / INERT**: `core/svc_process`'s `bot_process._FEATURE_MODULES`
 still runs the original `community_chat_process` monolith module -- this
 bundle is not yet the live implementation. Cut-over is a separate, later
-change (P4 activation gate). Shipped flag-OFF and unactivated.
+change (P4 activation gate), and -- per the architecture gap above --
+cannot happen until the read path is built.
 """
 
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import dataclass
 from typing import Any
 
 from waddle_sdk import log, relay
 from waddle_sdk.command import CommandSpec, CommandUsageError, parse_command
-from waddle_sdk.db import DALError
-from waddle_sdk.flask_core import (
-    BundleContext,
-    PlatformEvent,
-    StageEnvelope,
-    get_bundle_context,
-    get_bundle_dal,
-)
+from waddle_sdk.flask_core import PlatformEvent, StageEnvelope
 from waddle_sdk.flask_core.feature_flags import feature_enabled
 
 FLAG_KEY = "waddles.command-chat"
@@ -68,162 +75,14 @@ FLAG_KEY = "waddles.command-chat"
 _CHAT_HISTORY_SPEC = CommandSpec(name="chat-history")
 _CHANNELS_SPEC = CommandSpec(name="channels")
 
-#: Max messages shown by `!chat-history` -- matches the source's `LIMIT 20`.
-_MAX_HISTORY_MESSAGES = 20
+#: Tracks the architecture gap described in the module docstring -- a
+#: cross-service/cross-table read capability does not exist yet for bundles.
+_TRACKING_ISSUE = "https://github.com/penguintechinc/waddles/issues/678"
 
-#: Max reply length -- matches the source's ~4000-char chat-platform budget.
-_MAX_REPLY_CHARS = 4000
-_TRUNCATE_AT = 3900
-
-_NO_COMMUNITY_REPLY = (
-    "Chat history isn't available outside a community channel."
+_UNAVAILABLE_REPLY = (
+    "Chat lookups aren't available from this bundle yet -- the read needs a "
+    f"capability that doesn't exist today. Tracked: {_TRACKING_ISSUE}"
 )
-
-
-@dataclass(slots=True, frozen=True)
-class ChatMessage:
-    """One chat message row from `hub_chat_messages`."""
-
-    id: int
-    community_id: int
-    channel_name: str | None
-    sender_username: str | None
-    content: str
-    message_type: str
-    created_at: str | None
-
-
-@dataclass(slots=True, frozen=True)
-class ChatChannel:
-    """One distinct chat channel with aggregate activity."""
-
-    name: str
-    message_count: int
-    last_message_at: str | None
-
-
-def _format_chat_history(messages: list[ChatMessage]) -> str:
-    """Format a list of `ChatMessage`s into a readable reply string, newest-command-first input.
-
-    `messages` is expected oldest-first (the caller already sorted/sliced)
-    -- matches `community_chat_process._format_chat_history`'s contract.
-    """
-    if not messages:
-        return "(no messages found)"
-
-    lines = ["**Chat History (newest first):**"]
-    for msg in messages:
-        user = msg.sender_username or "unknown"
-        ts = msg.created_at[:10] if msg.created_at else "?"
-        lines.append(f"[{ts}] {user}: {msg.content[:100]}")
-
-    # `lines[:_MAX_HISTORY_MESSAGES]` matches the source's own `lines[:20]` exactly, including
-    # its quirk: `lines` is the header plus up to `_MAX_HISTORY_MESSAGES` message lines, so this
-    # slice silently drops the oldest message line when the input is a full 20 messages (the
-    # header itself consumes one of the 20 slots). Reproduced as-is for behavior parity, not
-    # fixed here -- a real fix is a source-bundle change, out of this port's scope.
-    result = "\n".join(lines[:_MAX_HISTORY_MESSAGES])
-    if len(result) > _MAX_REPLY_CHARS:
-        result = result[:_TRUNCATE_AT] + "...(truncated)"
-    return result
-
-
-def _format_channels(channels: list[ChatChannel]) -> str:
-    """Format a list of `ChatChannel`s into a readable reply string."""
-    if not channels:
-        return "(no channels found)"
-
-    lines = ["**Chat Channels:**"]
-    for ch in channels:
-        lines.append(f"- {ch.name}: {ch.message_count} messages")
-
-    result = "\n".join(lines)
-    if len(result) > _MAX_REPLY_CHARS:
-        result = result[:_TRUNCATE_AT] + "...(truncated)"
-    return result
-
-
-def _resolve_community_id(ctx: BundleContext) -> int | None:
-    """Parse `ctx.community` into the `community_id` int this bundle's queries need.
-
-    Returns `None` if no community is bound (e.g. a DM/non-community
-    context) or the bound value isn't a valid integer -- never guesses or
-    defaults to `0` (the source's own `int(ctx.community) if ctx.community
-    else 0` is a documented deviation this bundle deliberately does not
-    repeat: a "no community" state is a distinct, visible reply, not a
-    silent query against community_id=0).
-    """
-    if ctx.community is None:
-        return None
-    try:
-        return int(ctx.community)
-    except ValueError as exc:
-        # Expected-input skip, not a fault -- some transports bind a non-numeric
-        # `ctx.community` (e.g. a slug). Never log the raw value (PII/platform-ID
-        # boundary); only the fact that parsing was skipped and why.
-        log.debug("chat.community_id_unparseable", error_type=type(exc).__name__)
-        return None
-
-
-async def _fetch_chat_history(dal: Any, community_id: int) -> list[ChatMessage]:
-    """Fetch the community's most recent `_MAX_HISTORY_MESSAGES`, returned oldest-first.
-
-    Issues one `SELECT * FROM hub_chat_messages WHERE community_id = $1`
-    (the facade's query builder has no `ORDER BY`/`LIMIT` -- see module
-    docstring) and sorts/slices in guest Python.
-
-    Raises:
-        DALError: The `db` host call failed.
-    """
-    rows = await dal(dal.hub_chat_messages.community_id == community_id).select()
-    messages = [
-        ChatMessage(
-            id=int(row["id"]),
-            community_id=int(row["community_id"]),
-            channel_name=row.get("channel_name"),
-            sender_username=row.get("sender_username"),
-            content=str(row["message_content"]),
-            message_type=str(row["message_type"]),
-            created_at=row.get("created_at"),
-        )
-        for row in rows
-    ]
-    messages.sort(key=lambda m: m.created_at or "", reverse=True)
-    newest_first = messages[:_MAX_HISTORY_MESSAGES]
-    newest_first.reverse()  # oldest first in output, matches the source
-    return newest_first
-
-
-async def _fetch_channels(dal: Any, community_id: int) -> list[ChatChannel]:
-    """Fetch every distinct channel for the community with its message count and last activity.
-
-    Same single-`WHERE`-clause fetch as :func:`_fetch_chat_history`;
-    `GROUP BY`/aggregate is done in guest Python since the facade's query
-    builder has no `GROUP BY`. Always includes a `general` entry (even
-    `message_count=0`) when the community has never posted there, matching
-    the source's sentinel-channel behavior.
-
-    Raises:
-        DALError: The `db` host call failed.
-    """
-    rows = await dal(dal.hub_chat_messages.community_id == community_id).select()
-    aggregates: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        name = row.get("channel_name") or "general"
-        created_at = row.get("created_at")
-        entry = aggregates.setdefault(name, {"count": 0, "last": None})
-        entry["count"] += 1
-        if created_at is not None and (entry["last"] is None or created_at > entry["last"]):
-            entry["last"] = created_at
-
-    channels = [
-        ChatChannel(name=name, message_count=data["count"], last_message_at=data["last"])
-        for name, data in aggregates.items()
-    ]
-    channels.sort(key=lambda c: c.last_message_at or "", reverse=True)
-    if not any(c.name == "general" for c in channels):
-        channels.insert(0, ChatChannel(name="general", message_count=0, last_message_at=None))
-    return channels
 
 
 async def transform(event: PlatformEvent) -> PlatformEvent | None:
@@ -232,11 +91,9 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     Returns `None` for any non-chat payload, text with no leading `!`
     (cheap-skip before the flag check), an unrecognized leading command
     token, and while `waddles.command-chat` is disabled. Once a command
-    token matches, parsing/db failures always produce a reply -- never a
-    silent drop (AUTHORING.md's fail-loud rule) -- while an exception from
-    `get_bundle_context()`/`get_bundle_dal()` (unbound runtime) is left to
-    propagate, since that is a host wiring bug, not a per-message
-    condition this bundle can usefully recover from.
+    token matches, parsing failures and the always-current architecture-gap
+    reply (module docstring) both still produce a reply -- never a silent
+    drop (AUTHORING.md's fail-loud rule).
     """
     text = event.payload.get("text")
     if not isinstance(text, str):
@@ -264,24 +121,8 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
         if parsed.option not in (None, "list"):
             reply_text = f"Usage: !{spec.name} [list]"
         else:
-            ctx = get_bundle_context()
-            community_id = _resolve_community_id(ctx)
-            if community_id is None:
-                reply_text = _NO_COMMUNITY_REPLY
-            else:
-                dal = get_bundle_dal()
-                try:
-                    if spec is _CHAT_HISTORY_SPEC:
-                        messages = await _fetch_chat_history(dal, community_id)
-                        reply_text = _format_chat_history(messages)
-                    else:
-                        channels = await _fetch_channels(dal, community_id)
-                        reply_text = _format_channels(channels)
-                except DALError as exc:
-                    log.error("chat.db_failure", command=spec.name, error=str(exc))
-                    reply_text = (
-                        "Something went wrong fetching chat data - please try again."
-                    )
+            log.warn("chat.read_unavailable", command=spec.name)
+            reply_text = _UNAVAILABLE_REPLY
 
     log.info("chat.transform matched", command=spec.name)
     return dataclasses.replace(
