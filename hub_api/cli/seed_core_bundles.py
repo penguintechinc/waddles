@@ -78,7 +78,10 @@ from services.bundle_approval_service import (
 )
 from services.bundle_install_dal import build_install_dal, raw_sql_write
 from services.bundle_manifest_v2 import BundleManifestV2, parse_bundle_manifest_v2
-from services.bundle_permission_service import seed_core_permission_requests
+from services.bundle_permission_service import (
+    grant_community_permissions,
+    seed_core_permission_requests,
+)
 from services.bundle_telemetry import get_meter
 from services.bundle_version_service import create_version, process_prebuilt_component
 from services.errors import ApiError
@@ -668,6 +671,15 @@ async def seed_one(
                 community_id=TENANT_WIDE_COMMUNITY_SENTINEL,
                 version_id=version_id,
             ):
+                await _grant_core_bundle_permissions(
+                    install_dal,
+                    tenant_id=tenant_id,
+                    community_id=TENANT_WIDE_COMMUNITY_SENTINEL,
+                    app_id=entry.app_id,
+                    version=entry.version,
+                    manifest=manifest,
+                    valkey_client=valkey_client,
+                )
                 results.append(
                     SeedResult(
                         entry.app_id,
@@ -684,6 +696,15 @@ async def seed_one(
                 app_id=entry.app_id,
                 activated_by=None,
                 approval_source=SYSTEM_ACTOR,
+                valkey_client=valkey_client,
+            )
+            await _grant_core_bundle_permissions(
+                install_dal,
+                tenant_id=tenant_id,
+                community_id=TENANT_WIDE_COMMUNITY_SENTINEL,
+                app_id=entry.app_id,
+                version=entry.version,
+                manifest=manifest,
                 valkey_client=valkey_client,
             )
             results.append(
@@ -703,6 +724,15 @@ async def seed_one(
             community_id=target.community_id,
             version_id=version_id,
         ):
+            await _grant_core_bundle_permissions(
+                install_dal,
+                tenant_id=tenant_id,
+                community_id=target.community_id,
+                app_id=entry.app_id,
+                version=entry.version,
+                manifest=manifest,
+                valkey_client=valkey_client,
+            )
             results.append(
                 SeedResult(
                     entry.app_id,
@@ -723,6 +753,15 @@ async def seed_one(
             approval_source=SYSTEM_ACTOR,
             valkey_client=valkey_client,
         )
+        await _grant_core_bundle_permissions(
+            install_dal,
+            tenant_id=tenant_id,
+            community_id=target.community_id,
+            app_id=entry.app_id,
+            version=entry.version,
+            manifest=manifest,
+            valkey_client=valkey_client,
+        )
         results.append(
             SeedResult(
                 entry.app_id,
@@ -732,6 +771,67 @@ async def seed_one(
             )
         )
     return results
+
+
+async def _grant_core_bundle_permissions(
+    install_dal: AsyncDB,
+    *,
+    tenant_id: int,
+    community_id: int,
+    app_id: str,
+    version: str,
+    manifest: BundleManifestV2,
+    valkey_client: Any | None,
+) -> None:
+    """COMMUNITY-tier auto-grant for a SYSTEM-seeded core bundle (spec Sec3.3/Sec3.6).
+
+    `seed_core_permission_requests()` above only writes the GLOBAL catalog-approval tier
+    (`app_permission_requests`) -- it never writes `community_permission_grants` (the
+    COMMUNITY tier `bundle_capability_gate::authorize()`'s `PgGrantLoader` actually reads
+    at data-plane enforcement time, `core/svc_action::grant_gate`/`core/svc_process::
+    grant_gate`'s own doc). Before the capability gate was wired in (PR #433), every host
+    call fell back to the interim `AlwaysGrantedLoader`-only seam, so this gap was latent;
+    once `authorize()` is live, EVERY already-seeded core bundle (count/lurk/rps/etc., spec
+    Sec3.6) would silently start denying every `storage.kv`/etc. host call with zero grant
+    row ever having been written for it. Called unconditionally on every seeder run
+    (including for an already-active bundle) so this is self-healing for bundles installed
+    before this fix shipped, not just newly-seeded ones -- `grant_community_permissions`'s
+    own DELETE-then-INSERT is already idempotent (safe to call every run).
+
+    Grants exactly what the manifest declares (no more, no less) -- mirrors
+    `grant_community_permissions`'s own `required` vs `allowed` check, which this call
+    must satisfy identically to a human community-admin's explicit consent, just performed
+    by the SYSTEM actor instead. Never raises on a transient failure: a grant gap for one
+    core bundle must not abort the whole seeder run (every other install/activation this
+    run already committed) -- logged loud instead, so an operator notices and reruns.
+    """
+    required = frozenset(d.id for d in manifest.permission_declarations)
+    if not required:
+        return
+    try:
+        await grant_community_permissions(
+            install_dal,
+            tenant_id=tenant_id,
+            community_id=community_id,
+            app_id=app_id,
+            version=version,
+            manifest=manifest,
+            granted_permission_ids=required,
+            params_by_id=None,
+            granted_by=None,
+            valkey_client=valkey_client,
+        )
+    except ApiError:
+        logger.exception(
+            "core bundle permission auto-grant failed -- every non-platform host call for "
+            "this (tenant, community, app) scope will deny until this is resolved",
+            extra={
+                "app_id": app_id,
+                "tenant_id": tenant_id,
+                "community_id": community_id,
+                "required_permission_ids": sorted(required),
+            },
+        )
 
 
 async def _tenant_slug_for_id(install_dal: AsyncDB, tenant_id: int) -> str:
