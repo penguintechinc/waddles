@@ -332,7 +332,13 @@ def test_resolve_command_unimplemented_option_is_usage() -> None:
         ("50 alice", ("add", "alice", 50)),
     ],
 )
-def test_resolve_adjust(args: str | None, expected: tuple[str, str | None, int | None]) -> None:
+def test_resolve_adjust(
+    args: str | None,
+    expected: tuple[str, str | None, int | None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Install the fake host: an unparseable amount (e.g. "abc alice") logs via `log.debug()`.
+    _install(monkeypatch, _FakeHost())
     assert _resolve_adjust("add", args) == expected
 
 

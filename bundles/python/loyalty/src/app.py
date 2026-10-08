@@ -74,8 +74,8 @@ decision, not a stub.
 **Known, pre-existing platform gap this bundle does not fix.** The richer
 declarative `data.table.columns[]` schema (`hub_api/services/
 bundle_data_schema.py`) that would let hub-api provision this bundle's
-table columns automatically is, by that module's own docstring, "not wired
-into onboarding yet" -- wiring `bundle_manifest_v2.py`/
+table columns automatically is, by that module's own docstring, pending
+onboarding integration -- wiring `bundle_manifest_v2.py`/
 `bundle_approval_service.py` to it is a separate, already-tracked follow-on
 phase, not something this bundle's own PR is positioned to fix.
 
@@ -257,6 +257,7 @@ def _resolve_adjust(verb: str, args: str | None) -> tuple[str, str | None, int |
     try:
         amount = int(amount_text)
     except ValueError:
+        log.debug("loyalty.adjust_invalid_amount", command=verb)
         return "usage", None, None
     if amount <= 0:
         return "usage", None, None
