@@ -120,6 +120,53 @@ pub struct CliConfig {
     /// trusted_issuers`'s doc comment on why this is a list).
     #[arg(long, env = "PUSH_TRUSTED_ISSUER", default_value = "hub-api")]
     pub push_trusted_issuer: String,
+
+    /// SeaweedFS/S3-compatible endpoint for overlay image assets (P6/P9).
+    /// `IMAGE_BUCKET_*` (not `S3_*`/`RECORDINGS_BUCKET`, `core/svc_streaming`'s
+    /// convention) -- a distinct, service-scoped env namespace, same
+    /// precedent `core/bundle_executor`'s own `BUNDLE_BUCKET_*` convention
+    /// sets, so running both services in the same cluster never risks one
+    /// misreading the other's bucket/credential pair.
+    #[arg(
+        long,
+        env = "IMAGE_BUCKET_ENDPOINT",
+        default_value = "http://infra-seaweedfs:8333"
+    )]
+    pub image_bucket_endpoint: String,
+
+    /// Bucket name -- defaults to the same `waddlebot-assets` bucket the
+    /// existing Python hub avatar/logo uploads use (`docs/guides/
+    /// seaweedfs-object-storage.md`), but under `image_bucket_prefix`'s own
+    /// key prefix below so overlay image assets are never reachable at a
+    /// flat/public avatar-style path.
+    #[arg(long, env = "IMAGE_BUCKET_NAME", default_value = "waddlebot-assets")]
+    pub image_bucket_name: String,
+
+    #[arg(long, env = "IMAGE_BUCKET_REGION", default_value = "us-east-1")]
+    pub image_bucket_region: String,
+
+    /// Key prefix every overlay image object is stored under
+    /// (`{prefix}/{community_id}/{asset_id}.{ext}`) -- deliberately NOT
+    /// `avatars/`/`community-logos/` (those are public-read by design,
+    /// `docs/guides/seaweedfs-object-storage.md`'s "Public Read Access").
+    /// Overlay image assets are served only via `crate::images::render`'s
+    /// signed, scoped, expiring presigned URL -- see that module's doc for
+    /// the full rationale.
+    #[arg(long, env = "IMAGE_BUCKET_PREFIX", default_value = "overlay-images")]
+    pub image_bucket_prefix: String,
+
+    /// Maximum accepted upload size, bytes. Default 8 MiB -- generous for
+    /// a PNG/JPEG/WebP overlay graphic, small enough that
+    /// `crate::images::upload` never buffers an unbounded body.
+    #[arg(long, env = "IMAGE_MAX_BYTES", default_value_t = 8 * 1024 * 1024)]
+    pub image_max_bytes: u64,
+
+    /// TTL for a presigned GET URL `crate::images::render` issues. Short
+    /// enough that a leaked overlay-client URL stops working soon after;
+    /// long enough that a 60s-interval OBS browser-source poll/reconnect
+    /// doesn't need to re-fetch a render just to get a fresh link.
+    #[arg(long, env = "IMAGE_SIGNED_URL_TTL_SECONDS", default_value_t = 300)]
+    pub image_signed_url_ttl_seconds: u64,
 }
 
 impl CliConfig {
@@ -143,6 +190,15 @@ pub struct Config {
     pub cli: CliConfig,
     pub db_password: Secret,
     pub cache_password: Option<Secret>,
+    /// `IMAGE_BUCKET_ACCESS_KEY_ID`/`IMAGE_BUCKET_SECRET_ACCESS_KEY` --
+    /// optional (unlike `db_password`): a deployment that never enables
+    /// `crate::flags::IMAGE_UPLOAD_FLAG` need not configure a bucket at
+    /// all, so a missing credential here is not a startup error. Absent ⇒
+    /// `crate::images::store::ObjectStoreImageStore::from_config` fails
+    /// loudly at first use (upload/render time), never silently -- see
+    /// that function's own doc.
+    pub image_bucket_access_key_id: Option<Secret>,
+    pub image_bucket_secret_access_key: Option<Secret>,
 }
 
 impl fmt::Debug for Config {
@@ -153,6 +209,20 @@ impl fmt::Debug for Config {
             .field(
                 "cache_password",
                 &self.cache_password.as_ref().map(|_| Secret::new("")),
+            )
+            .field(
+                "image_bucket_access_key_id",
+                &self
+                    .image_bucket_access_key_id
+                    .as_ref()
+                    .map(|_| Secret::new("")),
+            )
+            .field(
+                "image_bucket_secret_access_key",
+                &self
+                    .image_bucket_secret_access_key
+                    .as_ref()
+                    .map(|_| Secret::new("")),
             )
             .finish()
     }
@@ -174,10 +244,18 @@ impl Config {
         cli.validate()?;
         let db_password = Secret::new(env_required("DB_PASSWORD")?);
         let cache_password = std::env::var("CACHE_PASSWORD").ok().map(Secret::new);
+        let image_bucket_access_key_id = std::env::var("IMAGE_BUCKET_ACCESS_KEY_ID")
+            .ok()
+            .map(Secret::new);
+        let image_bucket_secret_access_key = std::env::var("IMAGE_BUCKET_SECRET_ACCESS_KEY")
+            .ok()
+            .map(Secret::new);
         Ok(Self {
             cli,
             db_password,
             cache_password,
+            image_bucket_access_key_id,
+            image_bucket_secret_access_key,
         })
     }
 }

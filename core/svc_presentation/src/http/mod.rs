@@ -1,26 +1,30 @@
 //! HTTP layer: axum router wiring for the control-plane surface (health,
-//! readiness, Prometheus metrics). No overlay routes are mounted in P1 --
-//! see [`crate::overlay::router`]'s module doc for the
-//! `with_view_guard`/`with_push_guard` extension points P2-P4 call from
-//! here once the real routes exist, and for why P1 does not pre-attach
-//! either guard to an empty router.
+//! readiness, Prometheus metrics) plus P6's PUSH-guarded image-upload
+//! route. No view/live overlay routes are mounted yet -- see
+//! [`crate::overlay::router`]'s module doc for the `with_view_guard`
+//! extension point P2/P3 call from here once those routes exist, and for
+//! why P1 did not pre-attach either guard to an empty router (P6 is the
+//! first chunk to actually exercise `with_push_guard` against a real
+//! route).
 
 pub mod health;
 
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use sea_orm::DatabaseConnection;
 use tower_http::trace::TraceLayer;
 
 use crate::config::Config;
+use crate::images::store::ObjectStoreImageStore;
+use crate::images::{AssetStore, ImageStore, SeaOrmImageAssetStore};
 use crate::overlay::{AppPushTrustSource, SeaOrmViewCredentialStore};
-use crate::telemetry::RequestMetrics;
+use crate::telemetry::{ImageMetrics, RequestMetrics};
 
 /// Shared state handed to every axum handler via `Router::with_state`.
 /// Cheap to clone: everything behind an `Arc` (or already `Clone`, like
@@ -40,6 +44,18 @@ pub struct AppState {
     /// Concrete `overlay_auth::PushTrustSource` this service mounts --
     /// shared with `crate::overlay::router::push_guarded_router`.
     pub push_trust_source: Arc<AppPushTrustSource>,
+    /// P6/P9 image-upload/render additions.
+    ///
+    /// `None` when `IMAGE_BUCKET_ACCESS_KEY_ID`/`IMAGE_BUCKET_SECRET_ACCESS_KEY`
+    /// are unset -- a deployment that never enables
+    /// `crate::flags::IMAGE_UPLOAD_FLAG` need not configure a bucket at
+    /// all (`crate::images::store::ObjectStoreImageStore::from_config`'s
+    /// own doc). `crate::images::upload::upload_image` returns a clear 500
+    /// rather than panicking when this is `None` but the flag is ON.
+    pub image_store: Option<Arc<dyn ImageStore>>,
+    pub image_asset_store: Arc<dyn AssetStore>,
+    pub image_upload_flag: Arc<dyn crate::flags::FeatureFlag>,
+    pub image_metrics: ImageMetrics,
 }
 
 impl AppState {
@@ -49,8 +65,30 @@ impl AppState {
     /// [`crate::db::get_or_connect`]).
     pub fn new(config: Config, metrics: prometheus::Registry, db: DatabaseConnection) -> Self {
         let request_metrics = crate::telemetry::register_request_metrics(&metrics);
+        let image_metrics = crate::telemetry::register_image_metrics(&metrics);
         let view_store = Arc::new(SeaOrmViewCredentialStore::new(db.clone()));
         let push_trust_source = Arc::new(AppPushTrustSource::from_config(&config));
+        let image_asset_store: Arc<dyn AssetStore> =
+            Arc::new(SeaOrmImageAssetStore::new(db.clone()));
+        // Best-effort: a deployment that never enables
+        // `crate::flags::IMAGE_UPLOAD_FLAG` need not set
+        // `IMAGE_BUCKET_ACCESS_KEY_ID`/`IMAGE_BUCKET_SECRET_ACCESS_KEY` at
+        // all, so a construction failure here is logged and degrades to
+        // `None`, never a process-wide startup failure
+        // (`rules/general.md` Red Flags).
+        let image_store: Option<Arc<dyn ImageStore>> =
+            match ObjectStoreImageStore::from_config(&config) {
+                Ok(store) => Some(Arc::new(store)),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "image bucket not configured; image upload/render will fail if enabled"
+                    );
+                    None
+                }
+            };
+        let license_client = crate::flags::build_license_client();
+        let image_upload_flag = crate::flags::image_upload_flag(&license_client);
         Self {
             config: Arc::new(config),
             metrics: Arc::new(metrics),
@@ -59,6 +97,10 @@ impl AppState {
             db,
             view_store,
             push_trust_source,
+            image_store,
+            image_asset_store,
+            image_upload_flag,
+            image_metrics,
         }
     }
 }
@@ -86,12 +128,14 @@ async fn record_http_metrics(State(state): State<AppState>, req: Request, next: 
     response
 }
 
-/// Builds the control-plane router: public health/readiness (no auth).
+/// Builds the control-plane router: public health/readiness (no auth), plus
+/// P6's PUSH-guarded image-upload route
+/// (`POST /overlay/{community}/image/push`).
 ///
-/// EXTENSION POINT (P2/P3/P4): once a real overlay route exists, wrap it
-/// with `crate::overlay::router::with_view_guard`/`with_push_guard`
-/// (passing `state.view_store.clone()`/`state.push_trust_source.clone()`)
-/// and `.merge(...)` the result into `public` below, e.g.:
+/// EXTENSION POINT (P2/P3): once a real view/live route exists, wrap it
+/// with `crate::overlay::router::with_view_guard`
+/// (passing `state.view_store.clone()`) and `.merge(...)` the result in
+/// here too, e.g.:
 /// ```ignore
 /// let overlay_view = crate::overlay::router::with_view_guard(
 ///     Router::new().route("/overlay/{community}/{surface}", get(render::surface)),
@@ -104,7 +148,27 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health::liveness))
         .route("/readyz", get(health::readiness));
 
+    // The literal `image` segment plays the generic PUSH route's
+    // `{surface}` role -- `overlay_auth::push_scope` is keyed on
+    // `community_id` alone, so this reuses `with_push_guard` unmodified
+    // (`crate::images::upload`'s own module doc).
+    let image_upload = crate::overlay::router::with_push_guard(
+        Router::new().route(
+            "/overlay/{community}/image/push",
+            post(crate::images::upload::upload_image),
+        ),
+        state.push_trust_source.clone(),
+    )
+    // Bounds the raw request body independently of the post-decode
+    // `IMAGE_MAX_BYTES` check in `crate::images::upload` -- defense in
+    // depth against an oversized multipart body being buffered at all.
+    // +64KiB headroom for multipart boundaries/field overhead.
+    .layer(DefaultBodyLimit::max(
+        state.config.cli.image_max_bytes as usize + 64 * 1024,
+    ));
+
     public
+        .merge(image_upload)
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

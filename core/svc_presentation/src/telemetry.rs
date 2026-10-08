@@ -236,6 +236,57 @@ pub fn register_request_metrics(registry: &prometheus::Registry) -> RequestMetri
     }
 }
 
+/// P6/P9 overlay-image metrics: upload counter (labeled by outcome),
+/// upload-size histogram, and presigned-URL signing-latency histogram --
+/// histograms first per `rules/critical-rules.md` Observability ("a lone
+/// request counter is not instrumentation").
+#[derive(Clone)]
+pub struct ImageMetrics {
+    pub uploads_total: prometheus::IntCounterVec,
+    pub upload_bytes: prometheus::Histogram,
+    pub sign_latency_seconds: prometheus::Histogram,
+}
+
+/// Registers [`ImageMetrics`] against `registry`. Must be called exactly
+/// once per `registry` -- see [`crate::http::AppState::new`].
+pub fn register_image_metrics(registry: &prometheus::Registry) -> ImageMetrics {
+    let uploads_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_presentation_image_uploads_total",
+            "Overlay image uploads handled, labeled by outcome (success/rejected/error)",
+        ),
+        &["result"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(uploads_total.clone()))
+        .expect("register svc_presentation_image_uploads_total");
+
+    let upload_bytes = prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+        "svc_presentation_image_upload_bytes",
+        "Uploaded overlay image size in bytes",
+    ))
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(upload_bytes.clone()))
+        .expect("register svc_presentation_image_upload_bytes");
+
+    let sign_latency_seconds = prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+        "svc_presentation_image_sign_latency_seconds",
+        "Latency of generating a presigned overlay-image GET URL",
+    ))
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(sign_latency_seconds.clone()))
+        .expect("register svc_presentation_image_sign_latency_seconds");
+
+    ImageMetrics {
+        uploads_total,
+        upload_bytes,
+        sign_latency_seconds,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +321,20 @@ mod tests {
         register_request_metrics(&registry);
         let rendered = render_metrics(&registry).expect("registry with metrics must encode");
         assert!(rendered.contains("svc_presentation_up 1"));
+    }
+
+    #[test]
+    fn register_image_metrics_produces_a_non_empty_exposition() {
+        let registry = prometheus::Registry::new();
+        let metrics = register_image_metrics(&registry);
+        metrics.uploads_total.with_label_values(&["success"]).inc();
+        metrics.upload_bytes.observe(2048.0);
+        metrics.sign_latency_seconds.observe(0.01);
+
+        let rendered = render_metrics(&registry).expect("registry with metrics must encode");
+        assert!(rendered.contains("svc_presentation_image_uploads_total"));
+        assert!(rendered.contains("svc_presentation_image_upload_bytes"));
+        assert!(rendered.contains("svc_presentation_image_sign_latency_seconds"));
     }
 
     #[test]
