@@ -207,7 +207,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     try:
         parsed = parse_command(stripped, SPEC)
     except CommandUsageError as exc:
-        log.info("countdown.transform usage_error", error=str(exc))
+        log.info("countdown.transform usage_error", error=type(exc).__name__)
         action, arg = "usage", str(exc)
     else:
         action, arg = _classify(parsed)
@@ -324,7 +324,7 @@ async def _handle_set(
     try:
         target_ms = _parse_time_token(token, now_ms=now_ms)
     except _InvalidTimeTokenError as exc:
-        log.info("countdown.set invalid_time_token", token=token)
+        log.info("countdown.set invalid_time_token")
         return f"{exc} {_USAGE_SET}"
 
     await _kv_set(
