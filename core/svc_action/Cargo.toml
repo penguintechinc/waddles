@@ -28,6 +28,12 @@ path = "src/main.rs"
 # `[sources] allow-git` must list this exact repository URL.
 [dependencies]
 tokio = { version = "=1.53.1", features = ["full"] }
+# Host-API acceptor TCP keepalive (fix/executor-link-heartbeat, alpha
+# 2026-10-02 incident: a rolled svc pod left the executor's socket
+# half-open with no OS-level signal) -- already resolves to this exact
+# version transitively (tokio/rustls), pinned directly here so
+# `SockRef::set_tcp_keepalive` is available without bumping anything else.
+socket2 = { version = "=0.6.5", features = ["all"] }
 axum = "=0.8.9"
 tower-http = { version = "=0.7.1", features = ["trace"] }
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -119,6 +125,20 @@ redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp"
 # declares the identical dependency so the query/diff logic is written and
 # tested exactly once. See `core/bundle_active_set/Cargo.toml`.
 bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
+# The `kv` bundle host capability's shared key-derivation/isolation/quota
+# logic (`src/capabilities.rs`'s `handle_kv`) -- a same-repo `path`
+# dependency, NOT a `penguin-libs` git dependency: like `bundle-active-set`
+# above, this is this repo's own security boundary for `stage.wit`'s
+# `interface kv`, evolved alongside the manifest schema and executor this
+# repo owns. `core/svc_process` declares the identical dependency so the
+# capability is written and tested exactly once. See
+# `core/bundle_host_kv/Cargo.toml`.
+bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0" }
+# `db` bundle host capability (`src/capabilities.rs::handle_db`) -- same
+# same-repo path dependency as `core/svc_process`'s identical line: this
+# crate's identifier-safety/tenant-isolation rules are owned by this
+# repo's own bundle-db-capability design doc, not penguin-libs.
+bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
 # The bundle `http` host capability's shared, SSRF-hardened egress guard
 # (`src/egress.rs`, now a thin re-export shim) -- extracted here (PR #459
 # follow-up) so `core/svc_process` can enforce the identical pipeline for
@@ -127,6 +147,17 @@ bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
 # specific to this repo's own bundle-host wire shapes, not a penguin-libs
 # crate.
 bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
+# Outbound PII-detokenization pass (`src/capabilities.rs`'s
+# `detokenize_text`/`with_detokenize`) -- the egress half of the PII
+# boundary whose inbound half is `core/svc_process`'s own `pii_tokenize`
+# dependency on `hub_client`. Same-repo path dependency, same rationale as
+# `bundle-active-set` above.
+egress_detokenizer = { path = "../egress_detokenizer", version = "=0.1.0" }
+# `waddles.hub.internal.v1.IdentityService.ResolveDisplayNames` client,
+# needed directly (not just transitively via `egress_detokenizer`) so
+# `crate::lib`'s startup wiring can construct the real
+# `egress_detokenizer::HubClientResolver`.
+hub_client = { path = "../hub_client", version = "=0.1.0" }
 
 [dev-dependencies]
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks

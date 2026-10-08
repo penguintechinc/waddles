@@ -354,7 +354,7 @@ do_deploy() {
         --create-namespace
         --values "${PROJECT_ROOT}/${HELM_CHART}/values-alpha.yaml"
         --values "${SECRETS_VALUES_FILE}"
-        --set "global.imageTag=${TAG}"
+        --set-string "global.imageTag=${TAG}"
     )
 
     if [[ "${DRY_RUN}" == "true" ]]; then

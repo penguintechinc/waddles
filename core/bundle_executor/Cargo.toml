@@ -33,7 +33,7 @@ path = "src/main.rs"
 # wasmtime: component model + WASI 0.2 host, epoch interruption, pooling
 # allocator, `-C collector=drc` (spec SS7.2 -- must match componentize-py's
 # GC collector or a precompiled artifact fails to load).
-wasmtime = { version = "=49.0.1", default-features = false, features = ["component-model", "async", "runtime", "cranelift", "gc", "gc-drc", "pooling-allocator"] }
+wasmtime = { version = "=49.0.2", default-features = false, features = ["component-model", "async", "runtime", "cranelift", "gc", "gc-drc", "pooling-allocator"] }
 # wasmtime-wasi: the permitted-for-Rust-components WASI surface (wasi:cli
 # with empty args/env, wasi:filesystem single read-only /scratch preopen,
 # wasi:random/random, wasi:clocks, wasi:io -- spec SS6.5's per-language
@@ -44,7 +44,7 @@ wasmtime = { version = "=49.0.1", default-features = false, features = ["compone
 # `error-code::access-denied` before any OS syscall -- native to this
 # binary, not a hand-authored stub component (round 2 of the compiler-
 # sandbox spike found those impractical). See `src/host/mod.rs`.
-wasmtime-wasi = { version = "=49.0.1", default-features = false, features = ["p2"] }
+wasmtime-wasi = { version = "=49.0.2", default-features = false, features = ["p2"] }
 tokio = { version = "=1.53.1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync", "signal"] }
 tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
 rustls = { version = "=0.23.45", default-features = false, features = ["ring", "tls12"] }
@@ -123,6 +123,14 @@ base64 = "=0.22.1"
 # its own dependency tree (nom/der-parser/asn1-rs/oid-registry/ring/
 # data-encoding) pulls any of them in.
 x509-parser = "=0.18.1"
+# TCP keepalive on the host-API socket (`crate::tls::dial_stage`) -- catches
+# a half-open connection to a since-terminated stage pod (regression:
+# executor stuck on terminated svc pod after rollout, alpha 2026-10-02) at
+# the OS level, independent of any wire-protocol cooperation from the
+# stage. Already present transitively (via tokio) at this exact version per
+# this crate's own committed Cargo.lock -- pinning it directly adds no new
+# version to the dependency tree. No networking/HTTP dependency of its own.
+socket2 = { version = "=0.6.5", features = ["all"] }
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }

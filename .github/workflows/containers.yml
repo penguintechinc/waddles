@@ -23,8 +23,12 @@ on:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
   merge_group:
     types: [checks_requested]
-    branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
+    branches: ['release/**']
   workflow_dispatch:
+
+concurrency:
+  group: containers-${{ github.event.merge_group.head_sha || github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -34,6 +38,11 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # TEMPORARY amd64-only (user-approved 2026-10-03). Re-enable arm64 near
+  # release / for the mixed-arch Minisforum alpha cluster by setting
+  # BUILD_PLATFORMS=linux/amd64,linux/arm64 (this is the single toggle --
+  # every build-*.yml workflow that builds images keys off the same name).
+  BUILD_PLATFORMS: linux/amd64
 
 jobs:
   # Determine version and tag suffix
@@ -44,6 +53,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       suffix: ${{ steps.version.outputs.suffix }}
       is_release: ${{ steps.version.outputs.is_release }}
+      multi_arch: ${{ steps.version.outputs.multi_arch }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -89,6 +99,19 @@ jobs:
             echo "Building ALPHA: v${VERSION}-alpha"
           fi
 
+          # Derive the multi_arch flag from the single BUILD_PLATFORMS toggle
+          # (env, top of file). A comma means more than one platform is
+          # requested -- restore arm64 by flipping that one value back to
+          # "linux/amd64,linux/arm64". (The per-module build matrix itself is
+          # computed dynamically by detect-changes's "Build module matrix"
+          # step -- see gh-577: a static `include:` + dynamic `exclude:`
+          # sibling resolves to zero matrix jobs.)
+          if [[ "${BUILD_PLATFORMS}" == *,* ]]; then
+            echo "multi_arch=true" >> $GITHUB_OUTPUT
+          else
+            echo "multi_arch=false" >> $GITHUB_OUTPUT
+          fi
+
   # Detect changed modules
   detect-changes:
     name: Detect Changed Modules
@@ -110,6 +133,10 @@ jobs:
       action-serverless: ${{ steps.changes.outputs.action-serverless }}
       libs: ${{ steps.changes.outputs.libs }}
       migrations: ${{ steps.changes.outputs.migrations }}
+      # Shared by build-platform and build-pr (their include lists are
+      # identical) -- see the "Build module matrix" step below for why this
+      # is computed here instead of as a static include: + dynamic exclude:.
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
 
     steps:
       - name: Checkout code
@@ -211,6 +238,112 @@ jobs:
             migrations:
               - 'migrations/**'
 
+      - name: Build module matrix
+        id: build-matrix
+        # Emits the complete build-platform/build-pr matrix (identical
+        # include list shared by both jobs) as one JSON object instead of a
+        # static `include:` list plus a dynamic `exclude: ${{ fromJSON(...) }}`
+        # sibling -- that combination resolves to zero matrix jobs, see
+        # gh-577. Each module's `condition` is resolved here (from this
+        # job's own change-detection outputs) because a baked JSON string
+        # can't carry a live `${{ }}` expression the way the old static
+        # YAML could. arm64 entries are included/dropped per BUILD_PLATFORMS
+        # (env, top of file) exactly like the single-module build-*.yml
+        # workflows. Docs: https://docs.github.com/actions/how-tos/write-workflows/choose-what-workflows-do/run-variations-of-jobs-in-a-workflow#defining-a-matrix-dynamically
+        env:
+          ROUTER: ${{ steps.changes.outputs.router }}
+          MARKETPLACE: ${{ steps.changes.outputs.marketplace }}
+          MIGRATIONS: ${{ steps.changes.outputs.migrations }}
+          CORE_DATA: ${{ steps.changes.outputs.core-data }}
+          CORE_IDENTITY: ${{ steps.changes.outputs.core-identity }}
+          CORE_COMMUNITY: ${{ steps.changes.outputs.core-community }}
+          TRIGGER_STREAMING: ${{ steps.changes.outputs.trigger-streaming }}
+          TRIGGER_WEBHOOKS: ${{ steps.changes.outputs.trigger-webhooks }}
+          INTERACTIVE_SOCIAL: ${{ steps.changes.outputs.interactive-social }}
+          INTERACTIVE_GAMING: ${{ steps.changes.outputs.interactive-gaming }}
+          INTERACTIVE_MEDIA: ${{ steps.changes.outputs.interactive-media }}
+          INTERACTIVE_PRODUCTIVITY: ${{ steps.changes.outputs.interactive-productivity }}
+          HUB: ${{ steps.changes.outputs.hub }}
+          ACTION_PLATFORMS: ${{ steps.changes.outputs.action-platforms }}
+          ACTION_SERVERLESS: ${{ steps.changes.outputs.action-serverless }}
+          LIBS: ${{ steps.changes.outputs.libs }}
+          # workflow_dispatch must still force-build every module -- the
+          # unconditional-emit filter below (gh#ci-mergegroup-optimization)
+          # would otherwise drop every module on a manual run with no real
+          # file changes, same as the step-level `|| github.event_name ==
+          # 'workflow_dispatch'` guards used throughout this workflow.
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$BUILD_PLATFORMS" == *,* ]]; then
+            ARCHES=(amd64 arm64)
+          else
+            ARCHES=(amd64)
+          fi
+
+          # name|changed-flag-var|dockerfile|port
+          MODULES=(
+            "router|$ROUTER|./processing/router_module/Dockerfile|0"
+            "marketplace|$MARKETPLACE|./admin/marketplace_module/Dockerfile|0"
+            "migrations|$MIGRATIONS|./migrations/Dockerfile|0"
+            "core-data|$CORE_DATA|./services/core-data/Dockerfile|0"
+            "core-identity|$CORE_IDENTITY|./services/core-identity/Dockerfile|0"
+            "core-community|$CORE_COMMUNITY|./services/core-community/Dockerfile|0"
+            "trigger-streaming|$TRIGGER_STREAMING|./services/trigger-streaming/Dockerfile|0"
+            "trigger-webhooks|$TRIGGER_WEBHOOKS|./services/trigger-webhooks/Dockerfile|0"
+            "interactive-social|$INTERACTIVE_SOCIAL|./services/interactive-social/Dockerfile|0"
+            "interactive-gaming|$INTERACTIVE_GAMING|./services/interactive-gaming/Dockerfile|0"
+            "interactive-media|$INTERACTIVE_MEDIA|./services/interactive-media/Dockerfile|0"
+            "interactive-productivity|$INTERACTIVE_PRODUCTIVITY|./services/interactive-productivity/Dockerfile|0"
+            "hub-api|$HUB|./admin/hub_module/Dockerfile|8060"
+            "hub-webui|$HUB|./admin/hub_module/Dockerfile.webui|8080"
+            "action-platforms|$ACTION_PLATFORMS|./services/action-platforms/Dockerfile|0"
+            "action-serverless|$ACTION_SERVERLESS|./services/action-serverless/Dockerfile|0"
+          )
+
+          ENTRIES="[]"
+          for m in "${MODULES[@]}"; do
+            IFS='|' read -r NAME CHANGED DOCKERFILE PORT <<< "$m"
+            if [ "$CHANGED" = "true" ] || [ "$LIBS" = "true" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+              CONDITION="true"
+            else
+              CONDITION="false"
+            fi
+            # Only emit entries for modules that actually changed (or when
+            # libs/** changed, which affects every module) -- an unchanged
+            # module previously still got a full matrix entry per arch here,
+            # guarded only by the step-level `matrix.condition == 'true'`
+            # checks below, so it still spawned a job/check-run that did
+            # nothing (gh#ci-mergegroup-optimization). Skipping the entry
+            # entirely removes that always-present job for every unchanged
+            # module instead of just no-opping its steps.
+            if [ "$CONDITION" != "true" ]; then
+              continue
+            fi
+            for ARCH in "${ARCHES[@]}"; do
+              if [ "$ARCH" = "amd64" ]; then
+                PLATFORM="linux/amd64"
+                RUNNER="ubuntu-latest"
+              else
+                PLATFORM="linux/arm64"
+                RUNNER="ubuntu-24.04-arm"
+              fi
+              ENTRIES=$(jq -c -n \
+                --argjson entries "$ENTRIES" \
+                --arg module "$NAME" \
+                --arg platform "$PLATFORM" \
+                --arg runner "$RUNNER" \
+                --arg condition "$CONDITION" \
+                --arg dockerfile "$DOCKERFILE" \
+                --argjson port "$PORT" \
+                '$entries + [{"module":$module,"platform":$platform,"runner":$runner,"condition":$condition,"dockerfile":$dockerfile,"context":".","port":$port}]')
+            done
+          done
+
+          MATRIX=$(jq -c -n --argjson include "$ENTRIES" '{"include":$include}')
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
   # ============================================================
   # Build Docker images — parallel multi-arch
   # ============================================================
@@ -246,252 +379,10 @@ jobs:
       github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # Core modules
-          - module: router
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.router == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./processing/router_module/Dockerfile
-            context: .
-            port: 0
-          - module: router
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.router == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./processing/router_module/Dockerfile
-            context: .
-            port: 0
-
-          - module: marketplace
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.marketplace == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./admin/marketplace_module/Dockerfile
-            context: .
-            port: 0
-          - module: marketplace
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.marketplace == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./admin/marketplace_module/Dockerfile
-            context: .
-            port: 0
-
-          - module: migrations
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.migrations == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./migrations/Dockerfile
-            context: .
-            port: 0
-          - module: migrations
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.migrations == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./migrations/Dockerfile
-            context: .
-            port: 0
-
-          - module: core-data
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.core-data == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/core-data/Dockerfile
-            context: .
-            port: 0
-          - module: core-data
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.core-data == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/core-data/Dockerfile
-            context: .
-            port: 0
-
-          - module: core-identity
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.core-identity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/core-identity/Dockerfile
-            context: .
-            port: 0
-          - module: core-identity
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.core-identity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/core-identity/Dockerfile
-            context: .
-            port: 0
-
-          - module: core-community
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.core-community == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/core-community/Dockerfile
-            context: .
-            port: 0
-          - module: core-community
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.core-community == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/core-community/Dockerfile
-            context: .
-            port: 0
-
-          # Trigger modules
-          - module: trigger-streaming
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.trigger-streaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/trigger-streaming/Dockerfile
-            context: .
-            port: 0
-          - module: trigger-streaming
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.trigger-streaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/trigger-streaming/Dockerfile
-            context: .
-            port: 0
-
-          - module: trigger-webhooks
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.trigger-webhooks == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/trigger-webhooks/Dockerfile
-            context: .
-            port: 0
-          - module: trigger-webhooks
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.trigger-webhooks == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/trigger-webhooks/Dockerfile
-            context: .
-            port: 0
-
-          # Interactive modules
-          - module: interactive-social
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.interactive-social == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/interactive-social/Dockerfile
-            context: .
-            port: 0
-          - module: interactive-social
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.interactive-social == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/interactive-social/Dockerfile
-            context: .
-            port: 0
-
-          - module: interactive-gaming
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.interactive-gaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/interactive-gaming/Dockerfile
-            context: .
-            port: 0
-          - module: interactive-gaming
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.interactive-gaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/interactive-gaming/Dockerfile
-            context: .
-            port: 0
-
-          - module: interactive-media
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.interactive-media == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/interactive-media/Dockerfile
-            context: .
-            port: 0
-          - module: interactive-media
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.interactive-media == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/interactive-media/Dockerfile
-            context: .
-            port: 0
-
-          - module: interactive-productivity
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.interactive-productivity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/interactive-productivity/Dockerfile
-            context: .
-            port: 0
-          - module: interactive-productivity
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.interactive-productivity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/interactive-productivity/Dockerfile
-            context: .
-            port: 0
-
-          # Admin modules
-          - module: hub-api
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./admin/hub_module/Dockerfile
-            context: .
-            port: 8060
-          - module: hub-api
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./admin/hub_module/Dockerfile
-            context: .
-            port: 8060
-
-          - module: hub-webui
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./admin/hub_module/Dockerfile.webui
-            context: .
-            port: 8080
-          - module: hub-webui
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./admin/hub_module/Dockerfile.webui
-            context: .
-            port: 8080
-
-          # Action modules
-          - module: action-platforms
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.action-platforms == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/action-platforms/Dockerfile
-            context: .
-            port: 0
-          - module: action-platforms
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.action-platforms == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/action-platforms/Dockerfile
-            context: .
-            port: 0
-
-          - module: action-serverless
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.action-serverless == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/action-serverless/Dockerfile
-            context: .
-            port: 0
-          - module: action-serverless
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.action-serverless == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/action-serverless/Dockerfile
-            context: .
-            port: 0
+      # Whole matrix object computed by detect-changes (see that job's
+      # "Build module matrix" step) -- a static `include:` plus dynamic
+      # `exclude:` resolved to zero jobs, see gh-577.
+      matrix: ${{ fromJSON(needs.detect-changes.outputs.matrix) }}
 
     steps:
       - name: Checkout code
@@ -521,6 +412,35 @@ jobs:
           PLATFORM_SUFFIX=$(echo "${{ matrix.platform }}" | sed 's|linux/||')
           echo "suffix=${PLATFORM_SUFFIX}" >> $GITHUB_OUTPUT
 
+      # Single-platform builds (BUILD_PLATFORMS has no comma) skip this
+      # module's merge-manifests entry entirely, so this step must also
+      # publish the plain (and, on release, :latest) tag that job would
+      # otherwise create -- a single-arch build ends up pushing a normal
+      # image, never a manifest list. (No-op for build-pr, which never
+      # pushes -- push: false there regardless of this tag list.)
+      - name: Compute image tags
+        id: tags
+        if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}
+          VERSION: ${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
+          IS_RELEASE: ${{ needs.determine-version.outputs.is_release }}
+          MULTI_ARCH: ${{ needs.determine-version.outputs.multi_arch }}
+          ARCH_SUFFIX: ${{ steps.platform-suffix.outputs.suffix }}
+        run: |
+          TAGS="${IMAGE}:${VERSION}-${ARCH_SUFFIX}"
+          if [ "${MULTI_ARCH}" != "true" ]; then
+            TAGS=$(printf '%s\n%s' "$TAGS" "${IMAGE}:${VERSION}")
+            if [ "${IS_RELEASE}" = "true" ]; then
+              TAGS=$(printf '%s\n%s' "$TAGS" "${IMAGE}:latest")
+            fi
+          fi
+          {
+            echo "list<<TAGEOF"
+            echo "${TAGS}"
+            echo "TAGEOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push Docker image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
@@ -529,7 +449,7 @@ jobs:
           file: ${{ matrix.dockerfile }}
           push: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           load: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && matrix.platform == 'linux/amd64' }}
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ steps.platform-suffix.outputs.suffix }}
+          tags: ${{ steps.tags.outputs.list }}
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=${{ matrix.module }}-${{ steps.platform-suffix.outputs.suffix }}
           cache-to: type=gha,mode=max,scope=${{ matrix.module }}-${{ steps.platform-suffix.outputs.suffix }}
@@ -565,14 +485,38 @@ jobs:
           matrix.platform == 'linux/amd64')
         run: |
           docker run --rm --name test-${{ matrix.module }} -d -p ${{ matrix.port }}:${{ matrix.port }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ steps.platform-suffix.outputs.suffix }}
-          sleep 10
-          if curl -f http://localhost:${{ matrix.port }}/health; then
-            echo "Health check passed for ${{ matrix.module }}"
-          else
-            echo "Health check failed for ${{ matrix.module }}"
-            exit 1
-          fi
+
+          # Retry health check with exponential backoff (up to 60s total).
+          # Accept 200 (healthy) or 503 (degraded but running) as success.
+          # Fail only on connection refused, timeout, or container exit.
+          # Services with deep readiness checks (e.g. hub-api with DB ping) legitimately
+          # return 503 when dependencies are absent; the test proves the service booted and routed.
+          MAX_RETRIES=12
+          RETRY=0
+          WAIT=5
+          while [ $RETRY -lt $MAX_RETRIES ]; do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${{ matrix.port }}/health 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "503" ]; then
+              echo "Health check passed for ${{ matrix.module }} (HTTP $HTTP_CODE)"
+              docker stop test-${{ matrix.module }}
+              exit 0
+            fi
+            if ! docker ps --filter "name=test-${{ matrix.module }}" --quiet | grep -q .; then
+              echo "Container exited before health check passed"
+              docker logs test-${{ matrix.module }} 2>&1 || true
+              exit 1
+            fi
+            RETRY=$((RETRY + 1))
+            if [ $RETRY -lt $MAX_RETRIES ]; then
+              echo "Health check attempt $RETRY/$MAX_RETRIES failed (HTTP $HTTP_CODE), retrying in ${WAIT}s..."
+              sleep $WAIT
+              WAIT=$((WAIT + 2))
+            fi
+          done
+          echo "Health check failed for ${{ matrix.module }} after $MAX_RETRIES attempts"
+          docker logs test-${{ matrix.module }} 2>&1 || true
           docker stop test-${{ matrix.module }}
+          exit 1
 
   # PR/merge_group path: same matrix, amd64-only effective work (steps
   # below already gate on matrix.platform == 'linux/amd64' for PR), no
@@ -605,252 +549,10 @@ jobs:
       github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # Core modules
-          - module: router
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.router == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./processing/router_module/Dockerfile
-            context: .
-            port: 0
-          - module: router
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.router == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./processing/router_module/Dockerfile
-            context: .
-            port: 0
-
-          - module: marketplace
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.marketplace == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./admin/marketplace_module/Dockerfile
-            context: .
-            port: 0
-          - module: marketplace
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.marketplace == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./admin/marketplace_module/Dockerfile
-            context: .
-            port: 0
-
-          - module: migrations
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.migrations == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./migrations/Dockerfile
-            context: .
-            port: 0
-          - module: migrations
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.migrations == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./migrations/Dockerfile
-            context: .
-            port: 0
-
-          - module: core-data
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.core-data == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/core-data/Dockerfile
-            context: .
-            port: 0
-          - module: core-data
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.core-data == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/core-data/Dockerfile
-            context: .
-            port: 0
-
-          - module: core-identity
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.core-identity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/core-identity/Dockerfile
-            context: .
-            port: 0
-          - module: core-identity
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.core-identity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/core-identity/Dockerfile
-            context: .
-            port: 0
-
-          - module: core-community
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.core-community == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/core-community/Dockerfile
-            context: .
-            port: 0
-          - module: core-community
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.core-community == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/core-community/Dockerfile
-            context: .
-            port: 0
-
-          # Trigger modules
-          - module: trigger-streaming
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.trigger-streaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/trigger-streaming/Dockerfile
-            context: .
-            port: 0
-          - module: trigger-streaming
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.trigger-streaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/trigger-streaming/Dockerfile
-            context: .
-            port: 0
-
-          - module: trigger-webhooks
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.trigger-webhooks == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/trigger-webhooks/Dockerfile
-            context: .
-            port: 0
-          - module: trigger-webhooks
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.trigger-webhooks == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/trigger-webhooks/Dockerfile
-            context: .
-            port: 0
-
-          # Interactive modules
-          - module: interactive-social
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.interactive-social == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/interactive-social/Dockerfile
-            context: .
-            port: 0
-          - module: interactive-social
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.interactive-social == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/interactive-social/Dockerfile
-            context: .
-            port: 0
-
-          - module: interactive-gaming
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.interactive-gaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/interactive-gaming/Dockerfile
-            context: .
-            port: 0
-          - module: interactive-gaming
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.interactive-gaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/interactive-gaming/Dockerfile
-            context: .
-            port: 0
-
-          - module: interactive-media
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.interactive-media == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/interactive-media/Dockerfile
-            context: .
-            port: 0
-          - module: interactive-media
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.interactive-media == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/interactive-media/Dockerfile
-            context: .
-            port: 0
-
-          - module: interactive-productivity
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.interactive-productivity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/interactive-productivity/Dockerfile
-            context: .
-            port: 0
-          - module: interactive-productivity
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.interactive-productivity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/interactive-productivity/Dockerfile
-            context: .
-            port: 0
-
-          # Admin modules
-          - module: hub-api
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./admin/hub_module/Dockerfile
-            context: .
-            port: 8060
-          - module: hub-api
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./admin/hub_module/Dockerfile
-            context: .
-            port: 8060
-
-          - module: hub-webui
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./admin/hub_module/Dockerfile.webui
-            context: .
-            port: 8080
-          - module: hub-webui
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./admin/hub_module/Dockerfile.webui
-            context: .
-            port: 8080
-
-          # Action modules
-          - module: action-platforms
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.action-platforms == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/action-platforms/Dockerfile
-            context: .
-            port: 0
-          - module: action-platforms
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.action-platforms == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/action-platforms/Dockerfile
-            context: .
-            port: 0
-
-          - module: action-serverless
-            platform: linux/amd64
-            runner: ubuntu-latest
-            condition: ${{ needs.detect-changes.outputs.action-serverless == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/action-serverless/Dockerfile
-            context: .
-            port: 0
-          - module: action-serverless
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            condition: ${{ needs.detect-changes.outputs.action-serverless == 'true' || needs.detect-changes.outputs.libs == 'true' }}
-            dockerfile: ./services/action-serverless/Dockerfile
-            context: .
-            port: 0
+      # Whole matrix object computed by detect-changes (see that job's
+      # "Build module matrix" step) -- a static `include:` plus dynamic
+      # `exclude:` resolved to zero jobs, see gh-577.
+      matrix: ${{ fromJSON(needs.detect-changes.outputs.matrix) }}
 
     steps:
       - name: Checkout code
@@ -880,6 +582,35 @@ jobs:
           PLATFORM_SUFFIX=$(echo "${{ matrix.platform }}" | sed 's|linux/||')
           echo "suffix=${PLATFORM_SUFFIX}" >> $GITHUB_OUTPUT
 
+      # Single-platform builds (BUILD_PLATFORMS has no comma) skip this
+      # module's merge-manifests entry entirely, so this step must also
+      # publish the plain (and, on release, :latest) tag that job would
+      # otherwise create -- a single-arch build ends up pushing a normal
+      # image, never a manifest list. (No-op for build-pr, which never
+      # pushes -- push: false there regardless of this tag list.)
+      - name: Compute image tags
+        id: tags
+        if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}
+          VERSION: ${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
+          IS_RELEASE: ${{ needs.determine-version.outputs.is_release }}
+          MULTI_ARCH: ${{ needs.determine-version.outputs.multi_arch }}
+          ARCH_SUFFIX: ${{ steps.platform-suffix.outputs.suffix }}
+        run: |
+          TAGS="${IMAGE}:${VERSION}-${ARCH_SUFFIX}"
+          if [ "${MULTI_ARCH}" != "true" ]; then
+            TAGS=$(printf '%s\n%s' "$TAGS" "${IMAGE}:${VERSION}")
+            if [ "${IS_RELEASE}" = "true" ]; then
+              TAGS=$(printf '%s\n%s' "$TAGS" "${IMAGE}:latest")
+            fi
+          fi
+          {
+            echo "list<<TAGEOF"
+            echo "${TAGS}"
+            echo "TAGEOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push Docker image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         if: matrix.condition == 'true' || github.event_name == 'workflow_dispatch'
@@ -888,7 +619,7 @@ jobs:
           file: ${{ matrix.dockerfile }}
           push: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           load: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && matrix.platform == 'linux/amd64' }}
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ steps.platform-suffix.outputs.suffix }}
+          tags: ${{ steps.tags.outputs.list }}
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=${{ matrix.module }}-${{ steps.platform-suffix.outputs.suffix }}
           cache-to: type=gha,mode=max,scope=${{ matrix.module }}-${{ steps.platform-suffix.outputs.suffix }}
@@ -924,14 +655,38 @@ jobs:
           matrix.platform == 'linux/amd64')
         run: |
           docker run --rm --name test-${{ matrix.module }} -d -p ${{ matrix.port }}:${{ matrix.port }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ steps.platform-suffix.outputs.suffix }}
-          sleep 10
-          if curl -f http://localhost:${{ matrix.port }}/health; then
-            echo "Health check passed for ${{ matrix.module }}"
-          else
-            echo "Health check failed for ${{ matrix.module }}"
-            exit 1
-          fi
+
+          # Retry health check with exponential backoff (up to 60s total).
+          # Accept 200 (healthy) or 503 (degraded but running) as success.
+          # Fail only on connection refused, timeout, or container exit.
+          # Services with deep readiness checks (e.g. hub-api with DB ping) legitimately
+          # return 503 when dependencies are absent; the test proves the service booted and routed.
+          MAX_RETRIES=12
+          RETRY=0
+          WAIT=5
+          while [ $RETRY -lt $MAX_RETRIES ]; do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${{ matrix.port }}/health 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "503" ]; then
+              echo "Health check passed for ${{ matrix.module }} (HTTP $HTTP_CODE)"
+              docker stop test-${{ matrix.module }}
+              exit 0
+            fi
+            if ! docker ps --filter "name=test-${{ matrix.module }}" --quiet | grep -q .; then
+              echo "Container exited before health check passed"
+              docker logs test-${{ matrix.module }} 2>&1 || true
+              exit 1
+            fi
+            RETRY=$((RETRY + 1))
+            if [ $RETRY -lt $MAX_RETRIES ]; then
+              echo "Health check attempt $RETRY/$MAX_RETRIES failed (HTTP $HTTP_CODE), retrying in ${WAIT}s..."
+              sleep $WAIT
+              WAIT=$((WAIT + 2))
+            fi
+          done
+          echo "Health check failed for ${{ matrix.module }} after $MAX_RETRIES attempts"
+          docker logs test-${{ matrix.module }} 2>&1 || true
           docker stop test-${{ matrix.module }}
+          exit 1
 
   # ============================================================
   # Merge multi-arch manifests
@@ -940,9 +695,13 @@ jobs:
     name: Merge ${{ matrix.module }} Manifest
     runs-on: ubuntu-latest
     needs: [determine-version, detect-changes, build-platform]
+    # No-ops cleanly when BUILD_PLATFORMS is amd64-only -- build-platform's
+    # "Compute image tags" step already pushed the plain/:latest tags
+    # directly per module in that case, so there is nothing to merge.
     if: >
       github.event_name != 'pull_request' &&
       github.event_name != 'merge_group' &&
+      needs.determine-version.outputs.multi_arch == 'true' &&
       (needs.detect-changes.outputs.router == 'true' ||
       needs.detect-changes.outputs.marketplace == 'true' ||
       needs.detect-changes.outputs.migrations == 'true' ||
@@ -1034,7 +793,13 @@ jobs:
     name: Security Scan
     runs-on: ubuntu-latest
     needs: [determine-version, detect-changes, merge-manifests]
-    if: always() && needs.merge-manifests.result == 'success'
+    # merge-manifests is intentionally skipped (not failed) when
+    # BUILD_PLATFORMS is amd64-only -- the plain tag this scans still
+    # exists (pushed directly by build-platform in that case), so tolerate
+    # "skipped" the same as "success".
+    if: >
+      always() &&
+      (needs.merge-manifests.result == 'success' || needs.merge-manifests.result == 'skipped')
     continue-on-error: true
     strategy:
       fail-fast: false
@@ -1106,7 +871,13 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     needs: [determine-version, merge-manifests]
-    if: needs.determine-version.outputs.is_release == 'true'
+    # always() so a skipped merge-manifests (BUILD_PLATFORMS amd64-only)
+    # doesn't implicitly block this job -- release tags still get created,
+    # pointing at the plain tags build-platform pushed directly.
+    if: >
+      always() &&
+      needs.determine-version.outputs.is_release == 'true' &&
+      (needs.merge-manifests.result == 'success' || needs.merge-manifests.result == 'skipped')
     permissions:
       contents: write
     steps:

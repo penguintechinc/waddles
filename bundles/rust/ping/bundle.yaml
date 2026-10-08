@@ -1,9 +1,13 @@
 schema_version: 2
 app_id: waddles.core.example.ping
 name: Ping Example Bundle (Rust)
-# See hub-manifest.yaml's own comment -- 1.0.0 is permanently retired
-# (fix/core-bundle-reproducible-ping), keep these two files' version fields in lockstep.
-version: 1.0.1
+# See hub-manifest.yaml's own comment -- 1.0.0 AND 1.0.1 are permanently retired
+# (fix/reproducible-core-bundles), keep these two files' version fields in lockstep. 1.0.3
+# (fix/seeder-activate-tenant-wide) adds the `discord` consumes rule below, mirroring
+# hub-manifest.yaml's own -- this file isn't what hub-api reads for activation/auto-bind, but
+# the two manifests describe the same real bundle and must not silently diverge on what it
+# actually consumes.
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -22,6 +26,8 @@ stages:
         event_types: ["chat.message"]
         filters:
           command_prefix: ["!ping"]
+      - platform: discord
+        event_types: ["chat.message"]
     produces: []
     config: {}
     spec:
@@ -43,6 +49,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.1"
-  min_version: "1.0.1"
+  tested_with: "1.0.3"
+  min_version: "1.0.3"
   max_version: null

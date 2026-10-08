@@ -74,19 +74,132 @@ class Value_BytesValue:
 
 
 @dataclass
-class DbRows:
-    """Matches the generated ``db.Rows`` record."""
+class ColumnValue:
+    """Matches the generated ``db.ColumnValue`` record."""
 
-    columns: list[str]
-    rows: list[list[Any]]
-    rows_affected: int
+    column: str
+    value: Any
+
+
+@dataclass
+class DbRow:
+    """Matches the generated ``db.Row`` record."""
+
+    row_id: str
+    version: int
+    columns: list[ColumnValue]
+
+
+@dataclass
+class OrderColumn:
+    """Matches the generated ``db.OrderColumn`` record."""
+
+    name: str
+    descending: bool
+
+
+@dataclass
+class OrderBy_Column:
+    """Matches the generated ``db.OrderBy_Column`` variant case."""
+
+    value: OrderColumn
+
+
+@dataclass
+class OrderBy_Random:
+    """Matches the generated ``db.OrderBy_Random`` variant case (no payload)."""
+
+
+@dataclass
+class DbError_Denied:
+    """Matches the generated ``db.Error_Denied`` case.
+
+    Prefixed ``Db`` only to avoid a Python identifier collision with
+    ``http``'s/``kv``'s own same-named ``Error_*`` cases in this one shared
+    module -- see ``HttpError_Denied``'s own docstring for the full
+    rationale. ``__name__``/``__qualname__`` forced back to the real
+    generated name below, since ``waddle_sdk.db``'s error classification
+    dispatches on ``type(value).__name__``.
+    """
+
+    value: str
+
+
+DbError_Denied.__name__ = "Error_Denied"
+DbError_Denied.__qualname__ = "Error_Denied"
+
+
+@dataclass
+class DbError_InvalidColumn:
+    """Matches the generated ``db.Error_InvalidColumn`` case. See ``DbError_Denied`` docstring."""
+
+    value: str
+
+
+DbError_InvalidColumn.__name__ = "Error_InvalidColumn"
+DbError_InvalidColumn.__qualname__ = "Error_InvalidColumn"
+
+
+@dataclass
+class DbError_InvalidValue:
+    """Matches the generated ``db.Error_InvalidValue`` case. See ``DbError_Denied`` docstring."""
+
+    value: str
+
+
+DbError_InvalidValue.__name__ = "Error_InvalidValue"
+DbError_InvalidValue.__qualname__ = "Error_InvalidValue"
+
+
+@dataclass
+class DbError_NotFound:
+    """Matches ``db.Error_NotFound`` (no payload). See ``DbError_Denied`` docstring."""
+
+
+DbError_NotFound.__name__ = "Error_NotFound"
+DbError_NotFound.__qualname__ = "Error_NotFound"
+
+
+@dataclass
+class DbError_Conflict:
+    """Matches the generated ``db.Error_Conflict`` case. See ``DbError_Denied`` docstring."""
+
+    value: str
+
+
+DbError_Conflict.__name__ = "Error_Conflict"
+DbError_Conflict.__qualname__ = "Error_Conflict"
+
+
+@dataclass
+class DbError_QuotaExceeded:
+    """Matches the generated ``db.Error_QuotaExceeded`` case. See ``DbError_Denied`` docstring."""
+
+    value: str
+
+
+DbError_QuotaExceeded.__name__ = "Error_QuotaExceeded"
+DbError_QuotaExceeded.__qualname__ = "Error_QuotaExceeded"
+
+
+@dataclass
+class DbError_Timeout:
+    """Matches ``db.Error_Timeout`` (no payload). See ``DbError_Denied`` docstring."""
+
+
+DbError_Timeout.__name__ = "Error_Timeout"
+DbError_Timeout.__qualname__ = "Error_Timeout"
 
 
 @dataclass
 class DbError_Backend:
-    """Matches the generated ``db.Error_Backend`` case."""
+    """Matches the generated ``db.Error_Backend`` case. See ``DbError_Denied`` docstring."""
 
     value: str
+
+
+DbError_Backend.__name__ = "Error_Backend"
+DbError_Backend.__qualname__ = "Error_Backend"
 
 
 # ---- wit_world.imports.http ----

@@ -1,0 +1,231 @@
+name: CI Gate
+
+# Aggregate merge-queue gate for release/* branches.
+#
+# GitHub's native merge queue only requires checks that report on the
+# merge_group event; workflows without that trigger, or path-filtered
+# workflows that don't run for every commit, would otherwise block the
+# queue forever. This job is the single always-running required check:
+# it polls the Checks/Status APIs for every *other* check on the same
+# head SHA and passes only once at least one other check was examined,
+# none of them failed, and the set has stayed stable (no pending checks)
+# across two consecutive polls - so late-starting checks can't sneak past.
+
+on:
+  pull_request:
+    branches: ['release/**']
+  merge_group:
+    branches: ['release/**']
+
+permissions:
+  contents: read # required to resolve the head commit ref, and to checkout scripts/ci/
+  checks: read # to list other check-runs on the head SHA via the Checks API
+  statuses: read # to list classic commit statuses (e.g. submit-queue) on the head SHA
+
+# ----------------------------------------------------------------------------
+# Target-aware gating policy (added 2026-10-04, see gh#581 for the incident):
+#
+# Container image builds + their embedded smoke-test step ("Run container
+# tests" / curl /health in containers.yml and build-*.yml) are HEAVY and were
+# deadlocking the release merge queue: a flaky/broken container build blocked
+# every release/* merge, including unrelated fixes. Policy:
+#
+#   - target branch == main            -> EVERYTHING fatal (unchanged today;
+#                                          ci-gate doesn't currently even run
+#                                          against main, but this keeps the
+#                                          logic correct if that ever changes)
+#   - target branch != main (release/*,
+#     feature/*, merge_group->release)  -> container build/smoke-test check
+#                                          failures are ADVISORY (logged as
+#                                          warnings, never fail ci-gate);
+#                                          every other check (lint, unit
+#                                          tests, security/secrets scans,
+#                                          Socket Security, CodeQL, etc.)
+#                                          stays FATAL
+#
+# The container jobs still run and still report their real conclusion - nothing
+# about build-pr/build-platform, the Trivy scans, or the /health check itself
+# is touched. Only ci-gate's pass/fail decision changes.
+#
+# To revert to fully-strict everywhere: delete the ADVISORY_CHECK_NAME_REGEX
+# env var below (or set it to an unmatchable value, e.g. "$^") so every
+# failure is always treated as fatal again.
+# ----------------------------------------------------------------------------
+
+concurrency:
+  group: ci-gate-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  ci-gate:
+    name: ci-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout (scripts/ci only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/ci
+
+      - name: Wait for all other checks on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+          SELF_NAME: ci-gate
+          IGNORE_CONTEXT: submit-queue
+          POLL_INTERVAL_SECONDS: "30"
+          MAX_POLLS: "180"
+          # Raw target ref for this run - normalized to a bare branch name
+          # below (pull_request.base_ref has no refs/heads/ prefix,
+          # merge_group.base_ref does). See the target-aware gating policy
+          # comment at the top of this file.
+          RAW_TARGET_REF: ${{ github.base_ref || github.event.merge_group.base_ref || '' }}
+          # Check-run / status names matching this ERE are the "heavy"
+          # container build + embedded smoke-test (/health curl) jobs from
+          # containers.yml and build-*.yml (build-container.yml reusable
+          # workflow). Advisory-only when the target branch isn't main.
+          #
+          # build-*.yml calls build-container.yml via workflow_call, so each
+          # of its job names shows up as a check-run PREFIXED with the
+          # caller's job name, e.g. "Build identity-core Container / Build
+          # & Scan (PR)" or "Build hub Container / Merge Multi-Arch
+          # Manifest" - NOT the bare "Build & Scan (PR)" that containers.yml
+          # itself produces (verified against a live merge_group run, gh#585
+          # run 37210620268: 117/158 check-run names on that commit matched
+          # this pattern, all of them container build/smoke-test jobs; the
+          # other 41 - lint, unit tests, CodeQL, Socket Security, Security
+          # Scan, Node audit, Alembic, frontend "Build Hub frontend"/"Build
+          # Website" - correctly did not).
+          #
+          # Revert to fully-strict everywhere by setting this to "$^"
+          # (matches nothing).
+          ADVISORY_CHECK_NAME_REGEX: '^(Build .+ Container / )?(Determine Version and Tags|Detect Changed Modules|Build( .+)? \((linux/(amd64|arm64)|\$\{\{ matrix\.platform \}\})\)( \[PR\])?|Build & Scan \(PR\)|Merge( .+)? Manifest|Trivy Image Scan \(gated\))$'
+        run: |
+          set -euo pipefail
+
+          stable_count=0
+          prev_signature=""
+
+          merge_pages="${GITHUB_WORKSPACE}/scripts/ci/ci-gate-merge-pages.sh"
+
+          # Normalize RAW_TARGET_REF ("refs/heads/main" or "main" or "") to a
+          # bare branch name and decide strict-vs-advisory policy once,
+          # up front - see the target-aware gating policy comment at the
+          # top of this file.
+          target_branch="${RAW_TARGET_REF#refs/heads/}"
+          if [ "${target_branch}" = "main" ]; then
+            is_main_target="true"
+          else
+            is_main_target="false"
+          fi
+          echo "ci-gate policy: target branch = '${target_branch:-<unknown>}', strict-everything = ${is_main_target}"
+          if [ "${is_main_target}" = "true" ]; then
+            echo "  -> main target: container build + smoke-test checks are FATAL, same as every other check."
+          else
+            echo "  -> non-main target: container build + smoke-test checks (pattern: ${ADVISORY_CHECK_NAME_REGEX}) are ADVISORY (warn-only); all other checks remain FATAL."
+          fi
+
+          for attempt in $(seq 1 "${MAX_POLLS}"); do
+            # --paginate re-runs --jq once per page of up to 100 results, so
+            # for >100 check-runs/statuses gh prints several JSON arrays back
+            # to back ("[..][..]"), not one valid document. ci-gate-merge-pages.sh
+            # slurps that stream and flattens it into a single array - see
+            # scripts/ci/tests/test_ci_gate_merge_pages.sh (regression: #515/#517).
+            runs_json=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100" --paginate \
+              --jq '[.check_runs[] | select(.name != env.SELF_NAME and .name != env.IGNORE_CONTEXT) | {name: .name, status: .status, conclusion: .conclusion}]' \
+              | "${merge_pages}")
+
+            statuses_json=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/status?per_page=100" --paginate \
+              --jq '[.statuses[] | select(.context != env.IGNORE_CONTEXT) | {name: .context, status: (if .state == "pending" then "in_progress" else "completed" end), conclusion: (if .state == "success" then "success" elif (.state == "failure" or .state == "error") then "failure" else .state end)}]' \
+              | "${merge_pages}")
+
+            combined=$(jq -n --argjson a "${runs_json}" --argjson b "${statuses_json}" '$a + $b')
+            examined=$(jq 'length' <<<"${combined}")
+
+            if [ "${examined}" -eq 0 ]; then
+              echo "[attempt ${attempt}/${MAX_POLLS}] no other checks reported yet for ${HEAD_SHA} - waiting"
+              stable_count=0
+              prev_signature=""
+              sleep "${POLL_INTERVAL_SECONDS}"
+              continue
+            fi
+
+            failed=$(jq '[.[] | select(.status == "completed" and (.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required"))]' <<<"${combined}")
+
+            # Split failures into fatal vs advisory (container build/smoke-test,
+            # non-main targets only) per the target-aware gating policy above.
+            if [ "${is_main_target}" = "true" ]; then
+              fatal_failed="${failed}"
+              advisory_failed="[]"
+            else
+              fatal_failed=$(jq --arg re "${ADVISORY_CHECK_NAME_REGEX}" '[.[] | select((.name | test($re)) | not)]' <<<"${failed}")
+              advisory_failed=$(jq --arg re "${ADVISORY_CHECK_NAME_REGEX}" '[.[] | select(.name | test($re))]' <<<"${failed}")
+            fi
+            fatal_count=$(jq 'length' <<<"${fatal_failed}")
+            advisory_count=$(jq 'length' <<<"${advisory_failed}")
+
+            if [ "${advisory_count}" -gt 0 ]; then
+              echo "::warning::ci-gate ADVISORY - ${advisory_count} container build/smoke-test check(s) failed but are non-fatal for target '${target_branch}':"
+              jq -r '.[] | "  - [advisory] " + .name + ": " + (.conclusion // .status)' <<<"${advisory_failed}"
+            fi
+
+            if [ "${fatal_count}" -gt 0 ]; then
+              echo "::error::ci-gate FAIL - ${fatal_count} of ${examined} examined check(s) did not succeed (fatal):"
+              jq -r '.[] | "  - " + .name + ": " + (.conclusion // .status)' <<<"${fatal_failed}"
+              exit 1
+            fi
+
+            # Split pending (not-yet-completed) checks into fatal vs advisory
+            # the same way failures are split above: on a non-main target,
+            # the ~100 advisory container build/smoke-test checks no longer
+            # hold the gate open while they're still running - ci-gate only
+            # waits on the real required checks (lint, unit tests, security
+            # scans, CodeQL, etc). On a main target everything still counts.
+            if [ "${is_main_target}" = "true" ]; then
+              pending=$(jq '[.[] | select(.status != "completed")] | length' <<<"${combined}")
+              pending_advisory=0
+            else
+              pending=$(jq --arg re "${ADVISORY_CHECK_NAME_REGEX}" '[.[] | select(.status != "completed") | select((.name | test($re)) | not)] | length' <<<"${combined}")
+              pending_advisory=$(jq --arg re "${ADVISORY_CHECK_NAME_REGEX}" '[.[] | select(.status != "completed") | select(.name | test($re))] | length' <<<"${combined}")
+            fi
+
+            if [ "${pending}" -gt 0 ]; then
+              echo "[attempt ${attempt}/${MAX_POLLS}] ${pending} of ${examined} examined check(s) still pending (fatal; ${pending_advisory} advisory check(s) also pending but not waited on) - waiting"
+              stable_count=0
+              prev_signature=""
+              sleep "${POLL_INTERVAL_SECONDS}"
+              continue
+            fi
+
+            signature=$(jq -Sc 'map({name, conclusion}) | sort_by(.name)' <<<"${combined}")
+            if [ "${signature}" = "${prev_signature}" ]; then
+              stable_count=$((stable_count + 1))
+            else
+              stable_count=1
+            fi
+            prev_signature="${signature}"
+
+            if [ "${advisory_count}" -gt 0 ]; then
+              echo "[attempt ${attempt}/${MAX_POLLS}] ${examined} check(s) examined, 0 fatal failures (${advisory_count} advisory failure(s) ignored for target '${target_branch}'), stable_count=${stable_count}:"
+            else
+              echo "[attempt ${attempt}/${MAX_POLLS}] ${examined} check(s) examined, all completed successfully, stable_count=${stable_count}:"
+            fi
+            jq -r '.[] | "  - " + .name + ": " + .conclusion' <<<"${combined}"
+
+            if [ "${stable_count}" -ge 2 ]; then
+              if [ "${advisory_count}" -gt 0 ]; then
+                echo "ci-gate PASS (with ${advisory_count} advisory warning(s)) - ${examined} check(s) examined, 0 fatal failures, set stable across 2 consecutive polls."
+              else
+                echo "ci-gate PASS - ${examined} check(s) examined, none failed, set stable across 2 consecutive polls."
+              fi
+              exit 0
+            fi
+
+            sleep "${POLL_INTERVAL_SECONDS}"
+          done
+
+          echo "::error::ci-gate FAIL - timed out after ${MAX_POLLS} polls without a stable, all-green, non-empty check set for ${HEAD_SHA}."
+          exit 1

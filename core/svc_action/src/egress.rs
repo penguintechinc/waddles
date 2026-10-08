@@ -165,11 +165,22 @@ mod tests {
             .expect("discord webhook send reaches the transport");
         assert_eq!(result["status"], 204);
 
-        let sent = transport.requests.lock().unwrap();
-        assert_eq!(sent[0].method, "POST");
-        assert_eq!(sent[0].url, "https://discord.com/api/webhooks/1/abc");
-        let body = sent[0].body.as_ref().expect("body present");
-        let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
-        assert_eq!(parsed["content"], "hello from waddles");
+        {
+            let sent = transport.requests.lock().unwrap();
+            assert_eq!(sent[0].method, "POST");
+            assert_eq!(sent[0].url, "https://discord.com/api/webhooks/1/abc");
+            let body = sent[0].body.as_ref().expect("body present");
+            let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(parsed["content"], "hello from waddles");
+        }
+
+        // `FakeTransport`'s un-queued default response (200, empty `{}`
+        // body) -- exercised by a second send with nothing left queued,
+        // distinct from the explicit 204 queued above.
+        let result2 = guard
+            .send("waddles.socials.discord.default", &args)
+            .await
+            .expect("default un-queued response still succeeds");
+        assert_eq!(result2["status"], 200);
     }
 }

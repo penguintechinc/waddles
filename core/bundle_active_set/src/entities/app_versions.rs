@@ -3,7 +3,7 @@
 //! separately, hub-api half of this same contract -- adding
 //! `component_key TEXT`/`sidecar_key TEXT` (migration
 //! `0024_app_versions_component_key`) and the artifact-signature columns
-//! below (migration `0031_bundle_artifact_signature`)). Only the columns
+//! below (migration `0040_bundle_artifact_signature`)). Only the columns
 //! this crate's queries actually read are declared; `artifact_digest` is
 //! the `sha256:<64 hex>` string the executor's `verify_digest`
 //! (`core/bundle_executor/src/invoke.rs`) checks against.

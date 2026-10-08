@@ -69,6 +69,16 @@ CREATE TABLE hub_users (
 CREATE TABLE app_catalog (
     app_id VARCHAR(255) PRIMARY KEY
 );
+-- 0039_event_sync_enabled is the first Alembic migration to FK into
+-- calendar_events -- a legacy table owned by config/postgres/migrations/
+-- (never Alembic, see this module's own docstring on why the full legacy
+-- baseline isn't replayed here). Same minimal-bootstrap convention as
+-- tenants/communities/hub_users/app_catalog above: only the column(s)
+-- migrations 0020+ actually FK against (just `id`), not the real table's
+-- full column set.
+CREATE TABLE calendar_events (
+    id SERIAL PRIMARY KEY
+);
 """
 
 
@@ -156,17 +166,28 @@ def migrated_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
             capture_output=True,
             check=True,
         )
+        # fix/no-empty-kept-secrets -- 0032_bundle_reader_role.py's upgrade() now
+        # refuses an empty DB_READER_PASSWORD (previously silently provisioned
+        # waddles_bundle_reader with no usable password). Most callers of this
+        # harness (every real-Postgres test outside alembic/tests/
+        # test_0032_bundle_reader_role.py itself) don't care about this role at
+        # all, so `setdefault` supplies a throwaway value here -- never a real
+        # credential, this container is destroyed at context-manager exit --
+        # while still letting a caller that DOES care (stages its own value in
+        # `os.environ` beforehand) override it, same as every other env var.
+        migration_env = {**os.environ, "DATABASE_URL": db.dsn}
+        migration_env.setdefault("DB_READER_PASSWORD", "pg-docker-harness-default-reader-pw")
         subprocess.run(  # noqa: S603 -- fixed argv, no shell
             [sys.executable, "-m", "alembic", "stamp", _STAMP_REVISION],
             cwd=REPO_ROOT,
-            env={**os.environ, "DATABASE_URL": db.dsn},
+            env=migration_env,
             capture_output=True,
             check=True,
         )
         upgrade = subprocess.run(  # noqa: S603 -- fixed argv, no shell
             [sys.executable, "-m", "alembic", "upgrade", "head"],
             cwd=REPO_ROOT,
-            env={**os.environ, "DATABASE_URL": db.dsn},
+            env=migration_env,
             capture_output=True,
             check=False,
         )
@@ -181,12 +202,56 @@ def migrated_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
         )
 
 
+@contextmanager
+def empty_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
+    """Start a genuinely empty Postgres 17 container (no bootstrap SQL, no stamp, no
+    migrations) -- used only by `hub_api/tests/test_bootstrap_schema_drift.py` to measure
+    what `hub_api/bootstrap.py`'s `create_all()` path alone produces on a truly fresh
+    database, as opposed to `migrated_postgres()`'s full Alembic-chain result above.
+    """
+    container = f"waddles-migtest-{name_suffix}"
+    port = _free_port()
+    db = PgTestDatabase(
+        host="127.0.0.1", port=port, user="waddlebot", password="testpass123", dbname="waddlebot"
+    )
+    subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        ["docker", "rm", "-f", container], capture_output=True, check=False
+    )
+    subprocess.run(  # noqa: S603 -- fixed argv, no shell
+        [
+            "docker", "run", "-d", "--name", container,
+            "-e", f"POSTGRES_USER={db.user}",
+            "-e", f"POSTGRES_PASSWORD={db.password}",
+            "-e", f"POSTGRES_DB={db.dbname}",
+            "-p", f"{port}:5432",
+            "postgres:17-bookworm",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    try:
+        _wait_ready(container, db.user, db.dbname)
+        yield db
+    finally:
+        subprocess.run(  # noqa: S603 -- fixed argv, no shell
+            ["docker", "rm", "-f", container], capture_output=True, check=False
+        )
+
+
 def alembic_cli(*args: str, dsn: str) -> subprocess.CompletedProcess[str]:
-    """Run one `alembic` subcommand against `dsn`, repo root as cwd. Raises on nonzero exit."""
+    """Run one `alembic` subcommand against `dsn`, repo root as cwd. Raises on nonzero exit.
+
+    Same `DB_READER_PASSWORD` default as `migrated_postgres` above -- an
+    `upgrade`/`downgrade` round-trip that crosses 0032_bundle_reader_role.py
+    re-runs its (now fail-loud-on-empty) `upgrade()`, and most callers of this
+    helper don't stage their own value.
+    """
+    env = {**os.environ, "DATABASE_URL": dsn}
+    env.setdefault("DB_READER_PASSWORD", "pg-docker-harness-default-reader-pw")
     result = subprocess.run(  # noqa: S603 -- fixed argv, no shell
         [sys.executable, "-m", "alembic", *args],
         cwd=REPO_ROOT,
-        env={**os.environ, "DATABASE_URL": dsn},
+        env=env,
         capture_output=True,
         text=True,
         check=False,

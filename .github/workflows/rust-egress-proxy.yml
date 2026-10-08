@@ -1,0 +1,34 @@
+name: Rust egress-proxy (lint + test)
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/egress_proxy/**'
+      - '.github/workflows/rust-egress-proxy.yml'
+      - '.github/workflows/rust-crate-ci.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/egress_proxy/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    name: fmt + clippy + deny + coverage
+    uses: ./.github/workflows/rust-crate-ci.yml
+    with:
+      crate_name: egress-proxy
+      working_directory: core/egress_proxy
+      # aws-lc-sys (the jsonwebtoken aws_lc_rs backend, src/assertion.rs)
+      # needs cmake + a C/C++ compiler to build -- same rationale as
+      # rust-svc-action.yml.
+      extra_apt_packages: cmake build-essential
+      extra_apt_reason: 'for aws-lc-sys (cmake, C/C++ toolchain)'
+      # main.rs is a thin binary entrypoint (all logic lives in src/lib.rs,
+      # see its own module doc) -- same coverage_ignore_regex convention as
+      # rust-svc-process.yml.
+      coverage_ignore_regex: 'main\.rs'

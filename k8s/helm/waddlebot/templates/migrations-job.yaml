@@ -1,10 +1,45 @@
-# v3.0.x Task T10 (v3 demo) — pre-install/pre-upgrade Helm hook Job that applies
-# config/postgres/migrations/*.sql to completion BEFORE any pipeline Deployment's pods are
-# scheduled. Complements (does not replace) the per-pod waddlebot.dbMigrateInitContainer
-# already used by svc-ingest/svc-process/svc-action/hub-api/svc-core (_helpers.tpl) — that
-# initContainer guards against schema drift if a pod restarts mid-rollout; this Job is what
-# actually applies the migration directory to a clean cluster before the demo's Deployments
-# come up in the first place, without N pods racing the same advisory lock at once.
+# USER DECISION (2026-10-01, fix/chart-fresh-install-hooks) -- "post-install,pre-upgrade"
+# Helm hook Job: the schema ALWAYS comes from this Job, fresh install included. The prior
+# design in this PR moved fresh-install schema creation into hub-api's own startup path
+# (SQLAlchemy create_all()+stamp) to dodge this Job racing the in-chart Postgres Deployment
+# (a plain/regular resource Helm only creates AFTER the whole pre-install hook phase
+# finishes -- "Database not ready after 60s", confirmed on alpha 2026-10-01). That dodge
+# traded one bug for a worse one: `flask_core.models.db.metadata` only covers ~14-21 of the
+# 100+ tables the full migration chain creates, so create_all()+stamp left legacy
+# raw-SQL-only tables (`commands`, `platform_integrations`, ...) missing, and the FIRST
+# `helm upgrade` after install then failed (`run-alembic.sh`'s own required-table check:
+# "migration completed with required tables missing"). See
+# hub_api/tests/test_bootstrap_schema_drift.py and hub_api/bootstrap.py's module docstring.
+#
+# Fix: this Job now also runs post-install, not just pre-upgrade. By the time ANY
+# post-install hook fires, Helm has already created every regular resource in the release,
+# including templates/infrastructure/postgres.yaml -- so Postgres exists (the object is
+# created; this Job's entrypoint, migrations/run-alembic.sh, already has its own 60s
+# wait-for-DB retry loop for the pod itself finishing startup). "pre-install" is
+# deliberately never added back -- only "post-install,pre-upgrade" -- since pre-install
+# fires BEFORE regular resources exist and would reintroduce the original race.
+#
+# Hook-weight ordering within the post-install phase (Helm runs a phase's hooks strictly by
+# ascending weight, waiting for each to complete before the next starts): this Job's
+# dedicated SA/Secret (migrations-job-rbac.yaml, secrets.yaml; weight -10) -> this Job
+# (weight -5) -> seaweedfs-bucket-init (weight 1) -> core-bundle-seeder (weight 5, needs
+# both the schema AND hub-api `/ready`). hub-api's own startup (hub_api/bootstrap.py) only
+# OBSERVES `alembic_version` (never creates/alters schema) and polls until this Job has run
+# -- see that module's docstring for its state machine.
+#
+# Every other Deployment/Job in this chart that needs the schema waits on hub-api's own
+# `/ready` endpoint (waddlebot.waitForHubApiInitContainer, _helpers.tpl) rather than racing
+# this Job or re-running migrations itself per-pod.
+#
+# Install-order note (why this doesn't deadlock): scripts/alpha-deploy.sh's `helm upgrade
+# --install` deliberately never passes `--wait`/`--atomic` -- see that script's comment at
+# the HELM_ARGS definition. With `--wait`, Helm blocks on every created Deployment reaching
+# Ready BEFORE running post-install hooks, but hub-api (and the 40 other workloads gated on
+# its `/ready`) can only become Ready AFTER this Job runs -- a `--wait` install would
+# deadlock on its own timeout. Without `--wait`, Helm creates the Deployment objects (pods
+# scheduled, not required to be Ready) and immediately proceeds to the post-install hook
+# phase; alpha-deploy.sh does its own explicit `kubectl wait --for=condition=complete
+# job/db-migrate` before waiting on Deployment rollouts, which is race-free by construction.
 #
 # T8 landed on release/v3.0.X: migrations now run through
 # config/postgres/migrations/083_discord_twitch_demo_convergence.sql (seeds both
@@ -23,7 +58,7 @@ metadata:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: db-migrate
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook": post-install,pre-upgrade
     "helm.sh/hook-weight": "-5"
     # fix/helm-hook-rbac-ordering -- serviceAccountName below is now the dedicated
     # {{ include "waddlebot.fullname" . }}-db-migrate hook SA (migrations-job-rbac.yaml,
@@ -71,7 +106,7 @@ spec:
         # never drift apart again.
         {{- $registry := .Values.global.imageRegistry | default "" }}
         {{- $repository := .Values.modules.migrations.image | default "waddlebot-migrations" }}
-        {{- $tag := .Values.global.imageTag }}
+        {{- $tag := .Values.global.imageTag | toString }}
         {{- if $registry }}
         image: "{{ $registry }}/{{ $repository }}:{{ $tag }}"
         {{- else }}

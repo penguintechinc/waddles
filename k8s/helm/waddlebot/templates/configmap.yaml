@@ -35,6 +35,14 @@ data:
   S3_ENDPOINT_URL: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
   S3_BUCKET_NAME: {{ .Values.infrastructure.seaweedfs.bucketName | quote }}
   S3_STORAGE_ENABLED: "true"
+  # regression: bundle publish/fetch bucket split after SeaweedFS migration (#508/#509) --
+  # hub_api/services/storage_service.py's bundle component/sidecar uploads (and
+  # hub_api/cli/seed_core_bundles.py, which shares this ConfigMap via envFrom) MUST target
+  # the SAME bucket core/bundle_executor's BUNDLE_BUCKET_NAME reads from
+  # (pipeline.rustDataPlane.bundleExecutor.bucketName), never S3_BUCKET_NAME
+  # ("waddlebot-assets", avatars/community assets only) -- a publish into the wrong bucket
+  # 404s for the executor even though the upload itself "succeeded".
+  BUNDLE_BUCKET_NAME: {{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName | quote }}
 
   # Qdrant Configuration
   QDRANT_URL: "http://{{ .Values.infrastructure.qdrant.service.name }}:{{ .Values.infrastructure.qdrant.service.port }}"

@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    xUnit tests for the `csping` bundle's business logic (`CspingLogic`/
+    `CspingDispatch`), run on the normal host CLR - NOT a ProjectReference to
+    `../csping.csproj`, which pins `RuntimeIdentifier=wasi-wasm`/
+    `SelfContained=true` for its componentize-dotnet build and cannot be
+    restored or executed as a normal `dotnet test` host target. Instead this
+    project links the bundle's own pure-logic source files directly
+    (`<Compile Include="../CspingLogic.cs" />`) - real source, not a copy -
+    while excluding `WaddleHostAdapter.cs`/`ProcessStageExportsImpl.cs`/
+    `ActionStageExportsImpl.cs`, which reference wit-bindgen-generated types
+    that exist only inside an actual componentize-dotnet build. Mirrors
+    `bundles/csharp/superpenguin-roll/tests/SuperpenguinRoll.Tests.csproj`
+    exactly. End-to-end compiled-component behavior (the parts this project
+    cannot exercise) remains covered by
+    `core/bundle_executor/tests/csharp_bundle_integration.rs`.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>WaddleBundleCsping.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="coverlet.collector" Version="10.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../../../sdk/waddle-sdk-cs/waddle-sdk-cs.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../CspingLogic.cs" Link="CspingLogic.cs" />
+    <Compile Include="../CspingDispatch.cs" Link="CspingDispatch.cs" />
+  </ItemGroup>
+
+</Project>

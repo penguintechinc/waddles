@@ -1,0 +1,58 @@
+schema_version: 2
+app_id: waddles.core.example.command
+name: Custom Text Commands & Timers Bundle (Python)
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/command
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        # `!command` is the only statically declarable prefix -- this bundle
+        # additionally answers any registered custom command `!<name>`,
+        # which is dynamic (community-scoped, kv-backed) and cannot be
+        # enumerated here. See `src/app.py`'s own module docstring: the
+        # `command_prefix` filter is informational only today (not enforced
+        # by `core/svc_ingest/fanout.py`), so this is not a functional gap.
+        filters:
+          command_prefix: ["!command"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!command"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- state (registry + timer configs) lives in `kv` only.
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - storage.kv
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

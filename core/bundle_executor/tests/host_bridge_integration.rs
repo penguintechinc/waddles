@@ -19,6 +19,7 @@
 use std::sync::Arc;
 
 use bundle_executor::config::CliConfig;
+use bundle_executor::heartbeat::Heartbeat;
 use bundle_executor::invoke::{ComponentSource, Executor};
 use bundle_executor::wire::run_connection;
 use penguin_bundle_host::wire::{
@@ -266,6 +267,8 @@ async fn full_stack_load_transform_dispatch_against_a_real_component() {
                 },
             },
             Arc::clone(&executor),
+            "test-peer",
+            Heartbeat::disabled(),
         )
         .await
     });
@@ -421,6 +424,8 @@ async fn socket_probe_completes_without_trapping_the_component() {
                 },
             },
             Arc::clone(&executor),
+            "test-peer",
+            Heartbeat::disabled(),
         )
         .await
     });

@@ -28,13 +28,17 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked
 
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 
 # Debian bookworm's `ffmpeg` package carries libx264/libx265/libsvtav1/libaom
 # encoders out of the box -- the media engine `pipeline::ffmpeg` (S3) shells
 # out to, once implemented. `ca-certificates` for rustls (webpki/native
 # roots) on outbound TLS (reqwest, sea-orm's runtime-tokio-rustls, OTLP).
+# Full apt-get upgrade (not just libpcre2-8-0) clears every fixable
+# HIGH/CRITICAL OS-package CVE the pinned debian:bookworm-slim digest
+# still ships (perl/perl-base, libcap, libgnutls, libpcre2-8-0, ...).
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install --no-install-recommends -y \
         ffmpeg=7:5.1.9-0+deb12u1 ca-certificates=20250419~deb12u1 \
     && rm -rf /var/lib/apt/lists/*

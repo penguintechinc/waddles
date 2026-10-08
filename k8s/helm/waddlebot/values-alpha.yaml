@@ -116,17 +116,29 @@ infrastructure:
 # skeleton) and svcRtc is additionally gated on modules.social.enabled; neither
 # is part of this fix's scope.
 pipeline:
+  # fix/alpha-clean-deploy -- the legacy Python svc-ingest/svc-process/svc-action
+  # Deployments crash-loop in this cluster (`No module named 'waddle'` loading
+  # ping's WASM entrypoint) and are no longer the live path here: the Rust data
+  # plane (pipeline.rustDataPlane below, enabled: true) is. Previously kept
+  # enabled alongside the Rust stack on purpose ("coexistence, not cutover") --
+  # that coexistence is now producing pure crash-loop noise with no working
+  # legacy consumer left in this cluster, so disabling here (alpha/local only;
+  # left enabled in base values.yaml + beta/gamma/production, which still run
+  # the Python pipeline for real).
   svcIngest:
+    enabled: false
     replicas: 1
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "500m", memory: "512Mi" }
   svcProcess:
+    enabled: false
     replicas: 1
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "500m", memory: "512Mi" }
   svcAction:
+    enabled: false
     replicas: 1
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
@@ -146,11 +158,41 @@ pipeline:
   # core-bundle-seeder-job.yaml -- explicit true here (matches values.yaml's own default)
   # since this is the environment this milestone's own e2e proof (waddles.core.example.ping/
   # pyping + the Discord guild connection below) targets first.
+  #
+  # fix/seeder-memory: this override previously capped the seeder at 64Mi/128Mi -- far
+  # below what a real seed run needs and the actual OOMKilled cause in CI's kind install
+  # (gh PR #480: "Job/waddlebot-core-bundle-seeder ... failed: 3/1", Reason: OOMKilled),
+  # NOT the base values.yaml limit (512Mi) the bug report assumed was in effect; Helm
+  # merges this file over the chart default, so this 128Mi override was the one actually
+  # applied to every alpha/pre-alpha install. Measured peak cgroup memory (`docker run
+  # --memory=4g` + `/sys/fs/cgroup/memory.peak`) running seed_one() against the REAL
+  # ping.wasm (173KB, Rust) and pyping.wasm (21.6MB, componentize-py) artifacts through
+  # the actual wasm-tools subprocess validate_component() call, sequentially in one
+  # process (matching `_run()`'s own for-loop, never concurrent) with only the S3 PUT
+  # network call mocked: 228,876,288 bytes (~218Mi) for BOTH bundles. Limits set to
+  # ~1.5x that measured peak, rounded up, with extra headroom for real asyncpg/Postgres
+  # (vs the measurement's sqlite fixture) and OTel SDK overhead not present in the probe.
   coreBundleSeeder:
     enabled: true
+    # fix/preexisting-test-failures: the alpha Discord ingest source, moved here from
+    # rustDataPlane.svcProcess's legacy processIngestPlatform/processIngestSourceId
+    # (removed by PR #538 -- see rustDataPlane.svcProcess comment above). Activation
+    # and bindings for the alpha Discord community still require this seeded here,
+    # independent of svc-process's DB-driven bundle path.
+    platformConnections:
+      - platform: "discord"
+        sourceId: "dg-474965105759748096"
+        label: "svc-ingest platform connection"
+    # fix/seeder-memory (not yet merged as of this branch's base): 64Mi/128Mi was
+    # the real OOMKilled cause in CI's kind install (gh PR #480), overriding the
+    # base chart's 512Mi limit -- Helm merges this file over the chart default,
+    # so this override was what actually applied. Measured real peak (cgroup
+    # memory.peak) seeding both ping.wasm/pyping.wasm sequentially: ~218Mi.
+    # Raised to 256Mi/512Mi (~1.5x peak headroom). Reconcile/drop this block if
+    # fix/seeder-memory (PR #515) lands first.
     resources:
-      requests: { cpu: "50m", memory: "64Mi" }
-      limits: { cpu: "200m", memory: "128Mi" }
+      requests: { cpu: "100m", memory: "256Mi" }
+      limits: { cpu: "300m", memory: "512Mi" }
   hubWebui:
     enabled: true
     replicas: 1
@@ -192,18 +234,23 @@ pipeline:
   # committed to git (tribal knowledge, at risk of being lost between sessions). This alpha
   # cluster's real, proven purpose today IS the Rust data-plane e2e proof (ping/pong bundle,
   # spec `docs/superpowers/specs/2026-09-14-rust-data-plane-design.md`), so `enabled: true`
-  # now reflects that honestly. The Python pipeline.svcIngest/svcProcess/svcAction
-  # Deployments above stay enabled too (coexistence, not cutover) -- matches the live
-  # cluster's actual pod list. Still requires, via --reuse-values or an ephemeral
+  # now reflects that honestly. fix/alpha-clean-deploy: the Python
+  # pipeline.svcIngest/svcProcess/svcAction Deployments above are now disabled
+  # (`enabled: false`) instead of coexisting -- they had no working legacy
+  # consumer left in this cluster and were pure crash-loop noise alongside the
+  # Rust stack below. Still requires, via --reuse-values or an ephemeral
   # secrets file (never committed, critical-rules.md Token & Secret Hygiene):
-  #   1. global.hostApiTls real mTLS material (--set-file; no insecureDev escape hatch
-  #      exists, unlike global.grpcTls);
-  #   2. global.envelopeBindingKeys (kid e2e1) -- HMAC key material, secret, never committed.
-  #   3. feature/bundle-artifact-signing -- `make generate-bundle-signing-key KEY_ID=... \
+  #   1. global.envelopeBindingKeys (kid e2e1) -- HMAC key material, secret, never committed.
+  #   2. feature/bundle-artifact-signing -- `make generate-bundle-signing-key KEY_ID=... \
   #      KUBE_CONTEXT=local-prealpha NAMESPACE=waddlebot` BEFORE this executor starts (it
   #      fails closed with no configured platform key, `PlatformPublicKeys::
   #      from_cli_required`), then set pipeline.rustDataPlane.bundleSigningPublicKeys below
   #      to the printed `key_id: public_key` pair -- see the chart README's rollout order.
+  # global.hostApiTls real mTLS material is NO LONGER a manual --set-file requirement here
+  # (fix/alpha-host-api-tls) -- templates/host-api-tls-secret.yaml self-provisions it on
+  # alpha/local (lookup-then-generate, same policy as global.valkeyTls), so
+  # waddlebot.hostApiTlsMaterialAvailable is true whenever this enabled flag is, with no
+  # insecureDev escape hatch needed (unlike global.grpcTls).
   rustDataPlane:
     enabled: true
     # OVERRIDE REQUIRED via --set/--set-file before the executor(s) will start signature
@@ -223,65 +270,64 @@ pipeline:
         limits: { cpu: "500m", memory: "512Mi" }
     svcProcess:
       replicas: 1
-      # Superseded migration 083's discord/twitch demo app_id with the minimal
-      # waddles.core.example.ping bundle (PRIOR DEPLOY STATE: MinIO bucket
-      # waddles-bundles, DB-registered, digest below) -- the actual bundle this alpha
-      # cluster's e2e proof exercises end-to-end today.
-      processAppId: "waddles.core.example.ping"
-      # fix/svc-action-bundle-executor-alpha-wiring -- real Discord ingest routing.
-      # svc-ingest-rust's Discord gateway receiver is genuinely live in this cluster
-      # (DISCORD_BOT_TOKEN set, core/svc_ingest/src/ingest/discord.rs connected --
-      # confirmed via its own "connected" platform=discord log lines) and normalizes
-      # into `Scope::source_stream("discord", source_id(guild_id))`
-      # (core/svc_ingest/src/ingest/discord.rs::source_id: "dg-{guild_id}", "dg-dm" for
-      # a DM). `dg-474965105759748096` is the real guild the bot is already joined to
-      # ("Club Penguinz", #waddlebot-test channel id 1311210594011054151) -- discovered
-      # via `GET /users/@me/guilds` against the cluster's own DISCORD_BOT_TOKEN, never
-      # hardcoded/invented. Routing is guild-wide (source_id has no channel component),
-      # so `!ping` in ANY channel of that guild reaches this bundle, not just
-      # #waddlebot-test.
+      # fix/alpha-deploy-executor-and-failfast -- the legacy single-app env
+      # (processAppId, processIngestPlatform/SourceId, processBundleDigest/
+      # Version/ComponentKey/SidecarKey, including the stale pinned
+      # waddles.core.example.ping 1.0.0 digest sha256:4d24eedf...) is REMOVED
+      # here. The DB-driven multi-tenant active-bundle loader below
+      # (feature/bundle-reader-role, waddles_bundle_reader RO Postgres role)
+      # is the sole bundle-selection path in this cluster now -- it serves
+      # every app/tenant/community it finds in the DB (ping, pyping, later
+      # csping) rather than one hardcoded app_id/digest, and core/svc_process/
+      # src/lib.rs's mutual-exclusion rule means the legacy fields never ran
+      # anyway once DB_READER_PASSWORD was provisioned. Leaving them unset
+      # here (chart default: "", templates/svc-process-rust.yaml now omits
+      # these env vars entirely when unset) closes the regression risk of a
+      # stale digest silently winning back over the DB path on a future
+      # `helm upgrade` if the DB-driven path is ever disabled.
       #
-      # Supersedes this same field's prior `twitch`/`e2e-proof` value, the hermetic
-      # relay e2e proof's synthetic ingest source (Twitch live is impossible here --
-      # ~/.twitch.token is app creds, not a live bot session) -- that proof's evidence
-      # (Valkey `waddles:transport:irc:twitch:outbound` entry + `action_dispatch_log`
-      # row id 4, status=success) was captured before this switch and remains valid;
-      # switching the single svc-process-rust replica's live grant afterward doesn't
-      # retract it. See the Discord round-trip honest-assessment note below for why a
-      # real `!ping` here still won't produce a `pong` back in Discord.
-      processIngestPlatform: "discord"
-      processIngestSourceId: "dg-474965105759748096"
-      processBundleDigest: "sha256:4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7"
-      processBundleVersion: "1.0.0"
-      processBundleComponentKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.wasm"
-      processBundleSidecarKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.json"
       # Multi-tenant, change-log-driven active-bundle loader (core/svc_process/
       # src/config.rs, core/bundle_active_set, core/svc_process/src/
-      # changelog_consumer.rs) -- the RO Postgres role (svc_process_ro) still
-      # isn't provisioned yet -- DB_READER_PASSWORD stays empty (templates/
-      # secrets.yaml default), which is `try_start_changelog_consumer`'s own
-      # independent disable gate (core/svc_process/src/lib.rs). So PROCESS_APP_ID/
-      # PROCESS_BUNDLE_* above remain this alpha e2e proof's sole bundle source,
-      # unaffected by this block, until that role exists. Only overriding the poll
-      # interval here (tunable per deployment) -- a shorter interval than the 300s
-      # chart default so a future alpha e2e proof of the hot-swap path itself
-      # doesn't need a multi-minute wait between DB writes and the loader noticing.
+      # changelog_consumer.rs) -- feature/bundle-reader-role: the RO Postgres
+      # role (waddles_bundle_reader, alembic/versions/0032_bundle_reader_role.py)
+      # is provisioned, and templates/secrets.yaml auto-generates
+      # DB_READER_PASSWORD in alpha (same lookup-KEEP-then-generate policy as
+      # POSTGRES_PASSWORD), so `resolve_multi_tenant_path_active`
+      # (core/svc_process/src/lib.rs) resolves true at startup (both
+      # kill-switch gates default enabled when unseen) and this DB-driven path
+      # is authoritative for this pod's whole lifetime. Only overriding the
+      # poll interval here (tunable per deployment) -- a shorter interval than
+      # the 300s chart default so hot-swap changes are noticed without a
+      # multi-minute wait.
       bundleConfigPollSeconds: 30
+      # feature/alpha-command-flag-envs -- Docker ENV baseline for the 4 command
+      # bundle flags (process-stage `transform()` only; action-stage `dispatch()`
+      # has no flag check), now that posthog.enabled is false below. Convention:
+      # `FLAG_<KEY>` (flag key uppercased, `.`/`-` -> `_`) -- PostHog overrides
+      # these when connected (see templates/svc-process-rust.yaml's comment).
+      # License-gated flags are NOT env-overridable -- those always resolve
+      # against license.penguintech.io.
+      extraEnv:
+        FLAG_WADDLES_COMMAND_8BALL: "true"
+        FLAG_WADDLES_COMMAND_ROLL: "true"
+        FLAG_WADDLES_COMMAND_LURK: "true"
+        FLAG_WADDLES_COMMAND_COUNT: "true"
+        # PR #615 (waddles.core.example.command, custom text commands/timers) --
+        # same Docker ENV baseline convention as the 4 flags above.
+        FLAG_WADDLES_COMMAND_CUSTOMCOMMANDS: "true"
       resources:
         requests: { cpu: "100m", memory: "128Mi" }
         limits: { cpu: "500m", memory: "512Mi" }
     svcAction:
       replicas: 1
-      actionAppId: "waddles.core.example.ping"
       envelopeBindingActiveKid: "e2e1"
-      # fix/svc-action-bundle-executor-alpha-wiring -- ACTION_BUNDLE_* (core/svc_action/
-      # src/config.rs, #366): the SAME ping.wasm component as svcProcess.processBundle*
-      # above -- one bundle implements both ProcessStage::transform (detects `!ping`) and
-      # ActionStage::dispatch (relays the `pong`), spec SS7.6.
-      actionBundleDigest: "sha256:4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7"
-      actionBundleVersion: "1.0.0"
-      actionBundleComponentKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.wasm"
-      actionBundleSidecarKey: "bundles/waddles.core.example.ping/1.0.0/4d24eedf14283a95a9ed782d66a31814be2a537fb136360a8649d981bd901dd7.json"
+      # fix/alpha-deploy-executor-and-failfast -- see svcProcess's identical
+      # comment above: the legacy actionAppId/actionBundleDigest/Version/
+      # ComponentKey/SidecarKey fields (including the same stale pinned
+      # sha256:4d24eedf... digest) are REMOVED here. The DB-driven active-
+      # bundle loader below (same RO role/mechanism as svcProcess) is the sole
+      # path; templates/svc-action-rust.yaml now omits these env vars entirely
+      # when unset.
       # Multi-tenant changelog consumer -- see svcProcess's identical comment above.
       bundleConfigPollSeconds: 30
       resources:
@@ -310,18 +356,36 @@ pipeline:
       # waddlebot-secrets). Prevents regression if values.yaml defaults diverge.
       bucketName: "waddles-bundles"
       bucketRegion: "us-east-1"
+      # fix/alpha-deploy-executor-and-failfast -- bumped from 64Mi/256Mi: pods
+      # were OOMKilled compiling a 21MB CPython component plus a .NET
+      # component via Cranelift (JIT-compiles fresh on every `load`, no
+      # .cwasm cache yet -- see bundle-executor.yaml's precompile-cache
+      # comment). CPU limit kept generous (mandatory per standards, never
+      # unbounded) rather than removed.
       resources:
-        requests: { cpu: "100m", memory: "64Mi" }
-        limits: { cpu: "500m", memory: "256Mi" }
+        requests: { cpu: "500m", memory: "1Gi" }
+        limits: { cpu: "2000m", memory: "2560Mi" }
     # fix/svc-action-bundle-executor-alpha-wiring -- second, independent executor for the
     # action stage (default stageTarget=svc-action-rust already matches, no override
     # needed). See values.yaml's own comment on this block for why a second pod is
     # required rather than re-pointing the one above.
     bundleExecutorAction:
       replicas: 1
+      # fix/alpha-deploy-executor-and-failfast -- same OOM fix and rationale
+      # as bundleExecutor.resources above (identical compile workload).
       resources:
-        requests: { cpu: "100m", memory: "64Mi" }
-        limits: { cpu: "500m", memory: "256Mi" }
+        requests: { cpu: "500m", memory: "1Gi" }
+        limits: { cpu: "2000m", memory: "2560Mi" }
+
+  # TEMP: re-enable once hub-api service_jwt issuer + internal gRPC listener
+  # are wired (see fix/hub-api-grpc-issuer). PII tokenization disabled so the
+  # data plane can start. Renders PII_TOKENIZATION_ENABLED=false on
+  # svc-process-rust and PII_DETOKENIZATION_ENABLED=false on svc-action-rust
+  # (see values.yaml's own comment on pipeline.piiTokenization for the full
+  # rationale) -- the PostHog kill-switch alone can't be set here (no
+  # in-cluster PostHog in alpha).
+  piiTokenization:
+    enabled: false
 
 presentation:
   image:
@@ -342,13 +406,20 @@ streaming:
     tag: "alpha"
 
 # feature/e2e-helm-rust-dataplane -- bundle-executor built locally + pushed to the local
-# registry (no Dockerfile/CI image exists for this crate yet -- see
-# pipeline.rustDataPlane.bundleExecutor's KNOWN GAPS comment in values.yaml), same pattern
-# as every other alpha-only module image.
+# registry, same pattern as every other alpha module image. fix/alpha-deploy-executor-
+# and-failfast: core/bundle_executor/Dockerfile.rust now exists and scripts/
+# alpha-deploy.sh builds+pushes it -- tag is intentionally left unset (not a static
+# "alpha") so the bundle-executor.yaml/bundle-executor-action.yaml templates' `.Values.
+# bundleExecutor.image.tag | default .Values.global.imageTag` falls through to the
+# per-commit SHA8 alpha-deploy.sh sets via `--set global.imageTag`, same as every other
+# SHA-tagged alpha image. This closes the stale-mutable-tag bug where both executor
+# Deployments kept running a build from before the live object_store bucket wiring
+# landed (bundle-executor.yaml's own imagePullPolicy comment) because nothing ever
+# rebuilt/pushed a new `:alpha` tag for this image.
 bundleExecutor:
   image:
     repository: "localhost:32000/waddlebot/bundle-executor"
-    tag: "alpha"
+    tag: ""
 
 # Reputation service (Issue #310) -- built locally, pushed to the local
 # registry (no CI image for it yet), same as every other alpha module.
@@ -559,15 +630,44 @@ modules:
         requests: { cpu: "50m", memory: "96Mi" }
         limits: { cpu: "300m", memory: "384Mi" }
 
-# PostHog stays OFF by default even in alpha (trimmed stack still budgets
-# ~4GB RAM — heavier than typical alpha footprint). To smoke-test the
-# in-cluster stack locally, layer on top of this file:
-#   --set posthog.enabled=true \
-#   --set posthog.secrets.create=true \
-#   --set posthog.secrets.SECRET_KEY=dev-only-32-plus-byte-secret-000000 \
-#   --set posthog.secrets.POSTGRES_PASSWORD=posthog
+# feature/alpha-command-flag-envs -- flipped back OFF: this in-cluster stack was
+# crashlooping on alpha, and the 4 command flags below are now covered by the
+# FLAG_WADDLES_COMMAND_* Docker ENV baseline on svcProcess.extraEnv above
+# (waddle_sdk feature_enabled() baseline, PostHog overrides when connected), so
+# PostHog is no longer required to unblock them. Revert to `enabled: true` (no
+# other change needed, per the comment below) once the crashloop is root-caused
+# or a non-command flag needs in-cluster control.
+#
+# feature/alpha-localized-posthog -- flipped ON for alpha so feature flags
+# (incl. the 4 command flags below) are controllable in-cluster, without a
+# human needing PostHog organization access on license.penguintech.io.
+#
+# REAL FOOTPRINT at the trimmed resource tier below (6 new pods: web,
+# worker, postgres, redis/valkey, clickhouse, kafka/redpanda) -- measured
+# from the requests/limits actually rendered, not estimated:
+#   requests: ~575m CPU / ~2.1Gi RAM   limits: ~2.6 CPU / ~4.2Gi RAM
+#   persistent storage: postgres 2Gi + redis 512Mi + clickhouse 3Gi + kafka 2Gi = 7.5Gi
+# This is heavier than a typical alpha service and was deliberately left OFF
+# before this change (see docs/posthog-feature-flags.md in license-server:
+# ClickHouse + Kafka are REQUIRED for the Django web app to boot at all --
+# flag management can't currently drop them). If the laptop alpha node is
+# already under disk/memory pressure, do NOT enable this blindly: either
+# free capacity first (disable an idle module/collector in this file) or
+# keep posthog.enabled=false and continue pointing at the hosted
+# license.penguintech.io PostHog (comment this whole block back to
+# `enabled: false` to revert instantly -- no other change needed).
+#
+# existingSecret/secrets.create both left unset: templates/infrastructure/
+# posthog/secret.yaml auto-generates posthog-secrets (SECRET_KEY/
+# POSTGRES_PASSWORD/CLICKHOUSE_PASSWORD) for alpha/local tiers only, via the
+# same lookup-then-generate-or-keep pattern as auto-provisioned-secrets.yaml
+# -- no literal committed here, no manual --set. posthog.bootstrap
+# (values.yaml) then auto-provisions the admin/org/project/API key and seeds
+# the command flags -- no manual PostHog UI step required either.
 posthog:
   enabled: false
+  bootstrap:
+    enabled: true
   web:
     replicas: 1
     resources:

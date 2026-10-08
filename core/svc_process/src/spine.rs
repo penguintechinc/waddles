@@ -46,6 +46,7 @@ use penguin_spine::{
     SpineConfig, SpineError, SpineMetrics, Stage, StageEnvelope,
 };
 
+use crate::active_digests::ActiveDigests;
 use crate::builtins::RouteDecision;
 use crate::capabilities::{CapabilityHandler, StageCapabilities};
 use crate::hop::KeyRing;
@@ -100,6 +101,30 @@ fn platform_event_from_wire(wire: &serde_json::Value) -> Result<PlatformEvent, I
     });
     serde_json::from_value(reconstructed)
         .map_err(|e| InvokeError::MalformedPayload(format!("invalid platform-event: {e}")))
+}
+
+// regression: action envelope dropped event.source so discord relay had no origin channel (alpha 2026-10-02)
+/// Overwrites `event_out.source` with `inbound`'s own `event.source` --
+/// `source` identifies which inbound connection produced this entry
+/// (platform/account/channel) and is the ONLY place `svc_action::dispatch::
+/// invoke_dispatch` derives `origin_channel_id` from (host-controlled by
+/// design, never bundle-chosen -- see that function's doc and
+/// `svc_action::capabilities::handle_discord_relay`'s "the channel is never
+/// the bundle's to name"). `platform_event_from_wire` already hardcodes
+/// `source: null` on every bundle reply (its own doc: "never populated from
+/// bundle output"), so `event_out.source` reaching here is always `None` on
+/// the real invoke path today -- this is still the single place
+/// `handle_delivered` builds the next-stage envelope, so it unconditionally
+/// REPLACES whatever `event_out.source` holds (never merges, never trusts
+/// it) rather than relying solely on the wire layer -- defense in depth
+/// against a future wire-format change or a non-wire (builtin/synthetic)
+/// caller ever populating it. Before this fix `event_out.source` (always
+/// `None`) was carried straight onto the action envelope unchanged, so
+/// every Discord relay's origin channel was `None` and `svc_action` denied
+/// it with "discord relay requires an origin channel id" (a denial
+/// `svc_action` never logs).
+fn carry_inbound_source(event_out: &mut PlatformEvent, inbound: &PlatformEvent) {
+    event_out.source = inbound.source.clone();
 }
 
 /// Errors invoking the bundle's `transform` export over the host-API
@@ -292,6 +317,19 @@ fn error_code_to_dlq_kind(code: ErrorCode) -> DlqErrorKind {
 /// success or `unsupported_stage` alike); an `InvokeError` covers every
 /// case that never produced one (host-api failure, guest trap, malformed
 /// reply payload).
+///
+/// Guards every outbound `Invoke` (the shared helper both the legacy and
+/// multi-tenant `ProcessDeps::digest_source` paths funnel through) against
+/// a NON-EMPTY but malformed digest ever reaching the wire -- an empty
+/// digest remains a legitimate, deliberately-unloaded sentinel for
+/// `DigestSource::Static` (see that variant's own doc: the executor's own
+/// `UNKNOWN_BUNDLE` reply is the intended signal there), but anything
+/// non-empty must already be canonical (`sha256:<64-hex>`) by the time it
+/// gets here -- `DigestSource::Active` never calls this with anything else
+/// (its own `debug_assert` already covers that path); this is the single
+/// chokepoint catching a regression in EITHER caller.
+/// regression: multi-tenant consumers invoked with empty legacy digest,
+/// UnknownBundle (alpha 2026-10-03)
 pub async fn invoke_transform(
     conn: &Connection,
     app_id: &str,
@@ -301,6 +339,10 @@ pub async fn invoke_transform(
     trace: Option<TraceContext>,
     capabilities: Arc<dyn CapabilityHandler>,
 ) -> Result<TransformOutcome, InvokeError> {
+    debug_assert!(
+        digest.is_empty() || bundle_active_set::canonical_digest(digest).as_deref() == Ok(digest),
+        "invoke digest {digest:?} must be either the legacy empty sentinel or already canonical"
+    );
     let payload =
         wire_platform_event(event).map_err(|e| InvokeError::MalformedPayload(e.to_string()))?;
     let reply = conn
@@ -406,23 +448,121 @@ impl SpineOps for SpineClient {
     }
 }
 
+/// Where a [`ProcessDeps`]'s invoke/load digest comes from -- the fix for
+/// the regression named below: the DB-driven multi-tenant path
+/// (`crate::source_supervisor::run_binding_consumer`) used to build every
+/// per-binding consumer's `ProcessDeps` with a fixed, permanently-empty
+/// `digest: String::new()` (bundle load/unload is `crate::
+/// changelog_consumer`'s job, never this consumer's own -- see
+/// `crate::source_supervisor`'s module doc), so every single invoke on
+/// that path hit the executor's real `UNKNOWN_BUNDLE` no matter what was
+/// actually loaded.
+///
+/// regression: multi-tenant consumers invoked with empty legacy digest,
+/// UnknownBundle (alpha 2026-10-03)
+pub enum DigestSource {
+    /// The legacy, single-bundle-per-pod, env-configured path
+    /// (`crate::lib::try_start_process_loop`'s `PROCESS_BUNDLE_DIGEST`) --
+    /// UNCHANGED behavior from before this fix. Empty disables nothing by
+    /// itself: an empty digest is simply sent as-is and the executor
+    /// reports `UNKNOWN_BUNDLE`, mapped to `DlqErrorKind::BundleError`
+    /// like any other unloaded-bundle invoke -- the same "caller's
+    /// responsibility until the poll client lands" scope `svc_action::
+    /// dispatch::ensure_loaded`'s doc comment documents for its own
+    /// crate. This variant must never be selected by the multi-tenant
+    /// path (`crate::source_supervisor`'s own doc: "never fall back to
+    /// legacy env on the multi-tenant path").
+    Static(String),
+    /// The DB-driven multi-tenant path: the CURRENT canonical digest for
+    /// this consumer's own `(tenant_id, community_id, app_id)` scope, read
+    /// fresh from `crate::changelog_consumer`'s shared [`ActiveDigests`]
+    /// map on every single invoke -- never a value captured once at spawn
+    /// time, so a hot-swapped bundle takes effect on the very next message
+    /// with no consumer restart. [`DigestSource::current`] returns `None`
+    /// when this scope has no active digest right now (never seen,
+    /// unloaded, or its scope is currently failing to resolve); callers
+    /// MUST dead-letter rather than ever invoke with an empty digest.
+    Active {
+        scope: bundle_active_set::AppScope,
+        digests: Arc<ActiveDigests>,
+    },
+}
+
+impl DigestSource {
+    /// Resolves the digest to `load`/`invoke` with right now. See each
+    /// variant's own doc for what `None`/empty means.
+    fn current(&self) -> Option<String> {
+        match self {
+            DigestSource::Static(d) => Some(d.clone()),
+            DigestSource::Active { scope, digests } => {
+                let digest = digests.get(scope)?;
+                // Defense in depth, not the primary guarantee: a canonical,
+                // non-empty digest is already enforced at the DB-read
+                // boundary (`bundle_active_set::canonical_digest`, applied
+                // before `crate::changelog_consumer` ever calls
+                // `ActiveDigests::set`) AND at `ActiveDigests::set` itself
+                // (which now refuses to store an empty digest at all) --
+                // this `debug_assert` exists purely to catch a future
+                // regression that reintroduces a bare-hex or empty digest
+                // into that map before it ever reaches the wire. It is
+                // compiled OUT in the release profile this service actually
+                // runs, which is exactly why [`Self::usable_digest`] below
+                // is the one callers must use for the real runtime gate.
+                debug_assert!(
+                    !digest.is_empty(),
+                    "ActiveDigests must never hold an empty digest for a scope"
+                );
+                debug_assert_eq!(
+                    bundle_active_set::canonical_digest(&digest).as_deref(),
+                    Ok(digest.as_str()),
+                    "ActiveDigests digest {digest:?} must already be canonical (sha256:<64-hex>)"
+                );
+                Some(digest)
+            }
+        }
+    }
+
+    /// Like [`Self::current`], but additionally treats an `Active`-path
+    /// digest that resolved to an empty string the same as "no active
+    /// digest known" (`None`) -- the one call [`handle_delivered`]'s own
+    /// `NO_ACTIVE_DIGEST` guard must use, never [`Self::current`] directly,
+    /// so that guard can never be bypassed by an empty-but-`Some` digest in
+    /// the release profile (where the `debug_assert`s above are compiled
+    /// out). Direct port of `core/svc_action/src/dispatch.rs::DigestSource::
+    /// usable_digest`'s identical fix -- see that function's own doc for the
+    /// full rationale, including why `Static`'s own intentionally-empty
+    /// legacy sentinel is left untouched here.
+    ///
+    /// regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    /// emptied svc-action dispatch digest (alpha 2026-10-03)
+    ///
+    /// **Deliberately does NOT call [`Self::current`] for the `Active`
+    /// case** -- `current`'s own `debug_assert`s would PANIC on an empty
+    /// digest in debug/test builds rather than letting this function
+    /// gracefully treat it as `None`, which would defeat the very guard
+    /// this function exists to provide. Reads `digests.get(scope)` directly
+    /// instead; the format-canonicalization assertion remains `current`'s
+    /// job for its own (non-empty-digest) callers.
+    fn usable_digest(&self) -> Option<String> {
+        match self {
+            DigestSource::Active { scope, digests } => digests.get(scope).filter(|d| !d.is_empty()),
+            DigestSource::Static(_) => self.current(),
+        }
+    }
+}
+
 /// Everything [`handle_delivered`] needs beyond the entry itself --
 /// bundled so `drain_batch`/`drain_loop`/`run` don't carry an
 /// ever-growing parameter list. Mirrors `svc_action::dispatch::
 /// DispatchDeps`'s shape.
 pub struct ProcessDeps<S: SpineOps> {
     pub app_id: String,
-    /// Interim substitute for the distribution poll's resolved digest
-    /// (spec §6.7) -- `crate::lib::try_start_process_loop`'s
-    /// `PROCESS_BUNDLE_DIGEST`. Empty disables nothing by itself: an
-    /// empty digest is simply sent as-is and the executor reports
-    /// `UNKNOWN_BUNDLE`, mapped to `DlqErrorKind::BundleError` like any
-    /// other unloaded-bundle invoke -- the same "caller's responsibility
-    /// until the poll client lands" scope `svc_action::dispatch::
-    /// ensure_loaded`'s doc comment documents for its own crate. Sent via
+    /// See [`DigestSource`]'s own doc -- replaces the former fixed
+    /// `digest: String` field (regression: multi-tenant consumers invoked
+    /// with empty legacy digest, UnknownBundle, alpha 2026-10-03). Sent via
     /// [`ensure_loaded`] before the first invoke that needs it -- see
     /// [`ProcessDeps::load_state`].
-    pub digest: String,
+    pub digest_source: DigestSource,
     /// `PROCESS_BUNDLE_VERSION` -- the `load` frame's `version` field
     /// (spec §6.6). Distinct from `digest`: the executor's `loaded` reply
     /// echoes both back, and hot-swap reconciliation (TODO(M4+)) keys off
@@ -459,11 +599,60 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `reader.read()` at all (drains nothing; `/health`/`/metrics` are
     /// unaffected, since they run on entirely separate tasks).
     pub license: Arc<dyn FeatureGate>,
+    /// The direct Valkey connection the `kv` host capability is backed by
+    /// (`crate::capabilities::StageCapabilities::with_kv`), opened once at
+    /// startup (`crate::lib::connect_kv`) and cloned -- a cheap handle
+    /// clone over one shared connection, not a new socket -- into every
+    /// per-invoke [`StageCapabilities`] this loop constructs. `None` when
+    /// that connection could not be opened (spine config missing/Valkey
+    /// unreachable at startup): every `kv` host-call then sees
+    /// `not_implemented` rather than this loop failing to start, the same
+    /// graceful-degradation posture `core/svc_action::capabilities::
+    /// StageCapabilities::with_kv`'s doc describes.
+    pub kv_conn: Option<redis::aio::MultiplexedConnection>,
+    /// The manifest-declared-capability snapshot
+    /// `bundle_host_kv::authorize::authorize_kv` checks before granting
+    /// `kv` (coordinator fix on PR #425: "undeclared means denied").
+    /// Populated once per active `app_id` per poll tick by
+    /// `crate::bundle_loader::run_tick`/`crate::source_supervisor`'s own
+    /// equivalent, from `bundle_active_set::ActiveBundleRow::
+    /// declared_capabilities` -- shared (not copied) with every per-invoke
+    /// [`StageCapabilities`] this loop constructs, so a capability change
+    /// is visible to the very next `kv` host-call.
+    pub kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     /// The per-process `bundle_host_http::egress::EgressGuard` cloned into
     /// every per-invoke [`crate::capabilities::StageCapabilities`]'s
     /// `http` capability (see that struct's doc for why this is a
     /// singleton, not scope-implicit like every other capability).
     pub egress: Arc<bundle_host_http::egress::EgressGuard>,
+    /// Gates the inbound PII-tokenization pre-dispatch pass
+    /// (`crate::pii_tokenize`) on `waddles.core.disable-pii-tokenization`
+    /// (opt-out kill-switch, default ENABLED -- `crate::license::
+    /// PiiTokenizationGate`). OFF (the default) means tokenization runs;
+    /// ON means this stage falls back to the pre-tokenization legacy
+    /// behavior (raw PII reaches the bundle) -- an explicit, documented
+    /// operational tradeoff, never the default.
+    pub pii_gate: Arc<dyn FeatureGate>,
+    /// `None` until a real `hub_client::HubClient` connection is wired at
+    /// startup (`crate::lib::build_hub_minter`) -- when [`pii_gate`] is
+    /// enabled (the default) and this is `None`, [`handle_delivered`]
+    /// fails closed (dead-letters) rather than ever forwarding raw PII,
+    /// exactly as if a configured minter's RPC call had failed.
+    ///
+    /// [`pii_gate`]: ProcessDeps::pii_gate
+    pub pii_minter: Option<Arc<dyn crate::pii_tokenize::IdentityMinter>>,
+    /// The `db` host capability's production wiring
+    /// (`crate::capabilities::StageCapabilities::with_db`), built once at
+    /// startup (`crate::lib::try_build_db_wiring`) and cloned -- cheap,
+    /// `Arc`-backed -- into every per-invoke `StageCapabilities` this loop
+    /// constructs, mirroring [`ProcessDeps::egress`]'s "per-process
+    /// singleton, scope-implicit per call" shape. `None` when
+    /// `BUNDLE_DB_PASSWORD` was never configured on this deployment (every
+    /// `db` call then denies `not_implemented`, same graceful-degradation
+    /// posture as [`ProcessDeps::kv_conn`]) -- see that function's own doc
+    /// for the distinct, louder behavior when the password *was* configured
+    /// but the connection itself failed.
+    pub db_wiring: Option<crate::capabilities::DbWiring>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -474,14 +663,14 @@ pub struct ProcessDeps<S: SpineOps> {
 /// matching `svc_action::dispatch::handle_delivered`'s identical
 /// error-handling shape.
 ///
-/// Sends [`ensure_loaded`] for [`ProcessDeps::digest`] before the first
-/// `transform` invoke that needs it (cached per connection by
-/// [`ProcessDeps::load_state`], see that type's doc for why) -- this is
-/// what actually makes the executor hold the configured bundle at all;
-/// without it every invoke would hit `UNKNOWN_BUNDLE` because nothing
-/// upstream of this loop ever sends `load` (bug fix: previously the only
-/// callers of `PROCESS_BUNDLE_*` were this crate's own default-value unit
-/// tests).
+/// Sends [`ensure_loaded`] for the resolved digest ([`DigestSource`])
+/// before the first `transform` invoke that needs it (cached per
+/// connection by [`ProcessDeps::load_state`], see that type's doc for why)
+/// -- this is what actually makes the executor hold the configured bundle
+/// at all; without it every invoke would hit `UNKNOWN_BUNDLE` because
+/// nothing upstream of this loop ever sends `load` (bug fix: previously
+/// the only callers of `PROCESS_BUNDLE_*` were this crate's own
+/// default-value unit tests).
 ///
 /// **Not yet wired here (documented, not silently skipped):** the
 /// content-moderation gate (`crate::builtins::run_moderation_gate`, an
@@ -513,20 +702,126 @@ async fn handle_delivered<S: SpineOps>(
             code: "TENANT_BOUNDARY".to_string(),
             message: reason.to_string(),
             detail: None,
-            artifact_digest: Some(deps.digest.clone()),
+            artifact_digest: deps.digest_source.current(),
             consumer_id: deps.consumer_id.clone(),
         };
         return deps.spine.dead_letter(d, &err).await;
     }
 
+    // PII boundary hard invariant (`rules/critical-rules.md` PII
+    // Tokenization): a bundle's `transform` must never see a raw platform
+    // username/login/display-name/mention -- run strictly after hop
+    // verification and strictly before `invoke_transform` below. Fails
+    // closed: any resolution failure (hub-api unreachable, circuit open,
+    // no minter configured) dead-letters the entry for redelivery rather
+    // than ever forwarding the raw event.
+    let tokenized_event: PlatformEvent = if deps.pii_gate.enabled().await {
+        match &deps.pii_minter {
+            Some(minter) => {
+                match crate::pii_tokenize::tokenize_event(
+                    &d.env.event,
+                    &d.env.tenant,
+                    minter.as_ref(),
+                )
+                .await
+                {
+                    Ok(tokenized) => tokenized,
+                    Err(reason) => {
+                        tracing::error!(
+                            app_id = %d.env.app_id,
+                            tenant = %d.env.tenant,
+                            error = %reason,
+                            "PII tokenization failed; dead-lettering (fail-closed, never \
+                             forwarding raw PII to a bundle)"
+                        );
+                        let err = DlqError {
+                            kind: DlqErrorKind::BundleError,
+                            code: "PII_TOKENIZE_FAILED".to_string(),
+                            message: reason.to_string(),
+                            detail: None,
+                            artifact_digest: deps.digest_source.current(),
+                            consumer_id: deps.consumer_id.clone(),
+                        };
+                        return deps.spine.dead_letter(d, &err).await;
+                    }
+                }
+            }
+            None => {
+                tracing::error!(
+                    app_id = %d.env.app_id,
+                    tenant = %d.env.tenant,
+                    "PII tokenization is enabled but no hub identity client is configured; \
+                     dead-lettering (fail-closed, never forwarding raw PII to a bundle)"
+                );
+                let err = DlqError {
+                    kind: DlqErrorKind::BundleError,
+                    code: "PII_RESOLVER_UNAVAILABLE".to_string(),
+                    message: "no hub_client identity minter configured".to_string(),
+                    detail: None,
+                    artifact_digest: deps.digest_source.current(),
+                    consumer_id: deps.consumer_id.clone(),
+                };
+                return deps.spine.dead_letter(d, &err).await;
+            }
+        }
+    } else {
+        // Kill-switch ON: documented, explicit opt-out -- legacy
+        // pre-tokenization behavior (raw PII reaches the bundle).
+        d.env.event.clone()
+    };
+
+    // Resolve the digest to load/invoke with BEFORE ever checking for an
+    // executor connection -- "if no active digest is known for an app when
+    // a message arrives, log ERROR and dead-letter for redelivery; never
+    // invoke with an empty digest" (regression: multi-tenant consumers
+    // invoked with empty legacy digest, UnknownBundle, alpha 2026-10-03).
+    // `DigestSource::Static` always resolves (possibly to an intentionally
+    // empty string, unchanged legacy behavior -- see that variant's own
+    // doc); only `DigestSource::Active` with no entry for this scope yields
+    // `None` here.
+    let Some(digest) = deps.digest_source.usable_digest() else {
+        tracing::error!(
+            app_id = %deps.app_id,
+            tenant = %d.env.tenant,
+            community = ?d.env.community,
+            "no active bundle digest known for this app's scope; dead-lettering for redelivery"
+        );
+        let err = DlqError {
+            kind: DlqErrorKind::BundleError,
+            code: "NO_ACTIVE_DIGEST".to_string(),
+            message: "no active bundle digest known for this (tenant, community, app) scope"
+                .to_string(),
+            detail: None,
+            artifact_digest: None,
+            consumer_id: deps.consumer_id.clone(),
+        };
+        return deps.spine.dead_letter(d, &err).await;
+    };
+
     let Some(connection) = deps.connections.active() else {
-        tracing::warn!(app_id = %deps.app_id, "no executor connection available, dead-lettering for redelivery");
+        // Escalated WARN -> ERROR (fix/executor-link-heartbeat, alpha
+        // 2026-10-02 incident: svc-process/svc-action were rolled and each
+        // bundle-executor stayed bound to its old, terminated pod; the new
+        // svc-process had zero executors and silently dead-lettered every
+        // `!ping` at WARN -- nobody noticed until a user reported it). The
+        // outage duration is named in the rendered message itself, not
+        // only a structured field, per the "over-log, never swallow
+        // errors" rule.
+        let app_id = &deps.app_id;
+        let no_executor_for_s = deps.connections.duration_without_executor().as_secs();
+        deps.connections.record_dead_letter_no_executor();
+        tracing::error!(
+            app_id = %app_id,
+            no_executor_for_s,
+            "no executor connection available for {no_executor_for_s}s (app_id {app_id}), \
+             dead-lettering for redelivery"
+        );
         let err = DlqError {
             kind: DlqErrorKind::ExecutorUnavailable,
             code: "EXECUTOR_UNAVAILABLE".to_string(),
             message: "no active host-api connection".to_string(),
             detail: None,
-            artifact_digest: Some(deps.digest.clone()),
+            artifact_digest: Some(digest.clone()),
             consumer_id: deps.consumer_id.clone(),
         };
         return deps.spine.dead_letter(d, &err).await;
@@ -534,26 +829,31 @@ async fn handle_delivered<S: SpineOps>(
 
     // Send `load` at most once per (connection, digest) -- see
     // `LoadState`'s doc. An empty digest means no bundle is configured yet
-    // (`PROCESS_BUNDLE_DIGEST` unset): skip straight to invoking, exactly
-    // as before this fix, so the executor's own `UNKNOWN_BUNDLE` reply
-    // still drives the existing `BundleError` DLQ path below.
-    if !deps.digest.is_empty() && !deps.load_state.is_loaded_on(&connection, &deps.digest) {
+    // (legacy `PROCESS_BUNDLE_DIGEST` unset -- never possible on the
+    // multi-tenant path, see [`DigestSource::current`]'s doc): skip
+    // straight to invoking, exactly as before this fix, so the executor's
+    // own `UNKNOWN_BUNDLE` reply still drives the existing `BundleError`
+    // DLQ path below.
+    if !digest.is_empty() && !deps.load_state.is_loaded_on(&connection, &digest) {
         // `(0, 0)`: this interim, env-configured single-app-per-pod path
         // predates the numeric `(tenant_id, community_id)` scoping
-        // `bundle_active_set` introduced (TODO(M4+) real distribution poll,
-        // see `ProcessDeps::digest`'s own doc) -- it has no real tenant row
-        // to resolve, only `d.env.tenant`/`d.env.community` STRING slugs
+        // `bundle_active_set` introduced -- it has no real tenant row to
+        // resolve, only `d.env.tenant`/`d.env.community` STRING slugs
         // (Valkey stream naming, a different identifier space entirely).
         // `(0, 0)` is a reserved sentinel (`bundle_active_set` tenant ids
         // start at 1 in every real schema row) naming "no real DB scope",
-        // never confusable with a genuine tenant.
+        // never confusable with a genuine tenant. The multi-tenant
+        // `DigestSource::Active` path's OWN scope is a different concern
+        // entirely (which digest to use) -- `ensure_loaded`'s own
+        // `tenant_id`/`community_id` parameters here are the bundle
+        // executor's load-scoping, unrelated to which digest was resolved.
         if let Err(e) = ensure_loaded(
             &connection,
             0,
             0,
             &deps.app_id,
             &deps.version,
-            &deps.digest,
+            &digest,
             &deps.component_key,
             &deps.sidecar_key,
             LoadLimits {
@@ -563,31 +863,44 @@ async fn handle_delivered<S: SpineOps>(
         )
         .await
         {
-            tracing::error!(app_id = %deps.app_id, digest = %deps.digest, error = %e, "bundle load failed, dead-lettering");
+            tracing::error!(app_id = %deps.app_id, digest = %digest, error = %e, "bundle load failed, dead-lettering");
             let err = DlqError {
                 kind: DlqErrorKind::BundleError,
                 code: "LOAD_FAILED".to_string(),
                 message: e.to_string(),
                 detail: None,
-                artifact_digest: Some(deps.digest.clone()),
+                artifact_digest: Some(digest.clone()),
                 consumer_id: deps.consumer_id.clone(),
             };
             return deps.spine.dead_letter(d, &err).await;
         }
         deps.load_state
-            .mark_loaded(Arc::clone(&connection), deps.digest.clone());
+            .mark_loaded(Arc::clone(&connection), digest.clone());
     }
 
     // Per-invoke capability scope (see `crate::host_api`/`crate::
     // capabilities`'s per-invoke-scoping design): built fresh from THIS
     // envelope's own (tenant, community, app_id), never a fixed
-    // connection-lifetime default.
-    let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::new(
-        d.env.tenant.clone(),
-        d.env.community.clone(),
-        deps.app_id.clone(),
-        Arc::clone(&deps.egress),
-    ));
+    // connection-lifetime default. `kv` reuses `deps.kv_conn` (a cheap
+    // handle clone, see that field's doc) rather than opening a new
+    // connection on every invoke.
+    let capabilities: Arc<dyn CapabilityHandler> = {
+        let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+            d.env.tenant.clone(),
+            d.env.community.clone(),
+            deps.app_id.clone(),
+            Arc::clone(&deps.egress),
+        );
+        let caps = match &deps.kv_conn {
+            Some(conn) => caps.with_kv(conn.clone(), Arc::clone(&deps.kv_capabilities)),
+            None => caps,
+        };
+        let caps = match &deps.db_wiring {
+            Some(db) => caps.with_db(db.clone()),
+            None => caps,
+        };
+        Arc::new(caps)
+    };
     let trace = d.env.trace.as_ref().map(|t| TraceContext {
         traceparent: t.traceparent.clone(),
         tracestate: t.tracestate.clone(),
@@ -596,8 +909,8 @@ async fn handle_delivered<S: SpineOps>(
     let outcome = invoke_transform(
         &connection,
         &deps.app_id,
-        &deps.digest,
-        &d.env.event,
+        &digest,
+        &tokenized_event,
         deps.call_timeout_ms,
         trace,
         capabilities,
@@ -607,13 +920,23 @@ async fn handle_delivered<S: SpineOps>(
     let event_out = match outcome {
         Err(InvokeError::ExecutorError { code, message }) => {
             let kind = error_code_to_dlq_kind(code);
-            tracing::error!(app_id = %deps.app_id, ?code, %message, "transform invoke failed, dead-lettering");
+            // Diagnosability fix (regression: multi_tenant path sent
+            // bare-hex digest to Invoke, UnknownBundle despite loaded
+            // bundle (alpha 2026-10-03)): `message` IS the digest the
+            // executor echoed back for `UnknownBundle`
+            // (`bundle_executor::invoke::on_invoke`'s `error_body`), so an
+            // empty/unresolved digest renders as an empty-looking
+            // `message=""` field with nothing to grep on. Log the resolved
+            // `digest`'s own prefix explicitly so this is diagnosable even
+            // when `message` is empty.
+            let digest_prefix = bundle_active_set::digest_prefix(&digest);
+            tracing::error!(app_id = %deps.app_id, ?code, digest_prefix, %message, "transform invoke failed, dead-lettering");
             let err = DlqError {
                 kind,
                 code: format!("{code:?}"),
                 message,
                 detail: None,
-                artifact_digest: Some(deps.digest.clone()),
+                artifact_digest: Some(digest.clone()),
                 consumer_id: deps.consumer_id.clone(),
             };
             return deps.spine.dead_letter(d, &err).await;
@@ -625,7 +948,7 @@ async fn handle_delivered<S: SpineOps>(
                 code: "INVOKE_FAILED".to_string(),
                 message: e.to_string(),
                 detail: None,
-                artifact_digest: Some(deps.digest.clone()),
+                artifact_digest: Some(digest.clone()),
                 consumer_id: deps.consumer_id.clone(),
             };
             return deps.spine.dead_letter(d, &err).await;
@@ -637,7 +960,7 @@ async fn handle_delivered<S: SpineOps>(
                 code: "UNSUPPORTED_STAGE".to_string(),
                 message: "bundle does not implement process-stage.transform".to_string(),
                 detail: None,
-                artifact_digest: Some(deps.digest.clone()),
+                artifact_digest: Some(digest.clone()),
                 consumer_id: deps.consumer_id.clone(),
             };
             return deps.spine.dead_letter(d, &err).await;
@@ -650,6 +973,14 @@ async fn handle_delivered<S: SpineOps>(
     };
 
     let mut event_out = event_out;
+    tracing::debug!(
+        app_id = %deps.app_id,
+        platform = d.env.event.source.as_ref().map(|s| s.platform.as_str()).unwrap_or(""),
+        channel_id = d.env.event.source.as_ref().and_then(|s| s.channel_id.as_deref()).unwrap_or(""),
+        "carrying inbound event.source onto action-stage envelope"
+    );
+    carry_inbound_source(&mut event_out, &d.env.event);
+
     let decision = crate::builtins::resolve_cross_app_route(
         &mut event_out.payload,
         &d.env.tenant,
@@ -764,10 +1095,204 @@ pub async fn run(
     drain_loop(reader, deps, shutdown).await
 }
 
+/// Builds a raw `redis::Client` for `cfg`'s transport -- the same
+/// connection-building logic as `core/svc_ingest/src/outbound.rs::
+/// build_redis_client` (that module's own doc explains why this is
+/// duplicated rather than imported: `penguin_spine`'s own equivalent is
+/// `pub(crate)` to that crate). Used only by [`ensure_consumer_group`]: a
+/// raw `XGROUP CREATE` is outside `SpineClient`'s/`GroupReader`'s own
+/// Streams-only surface.
+fn build_raw_client(cfg: &SpineConfig) -> Result<redis::Client, redis::RedisError> {
+    let base: redis::ConnectionInfo =
+        redis::IntoConnectionInfo::into_connection_info(cfg.valkey_url.as_str())?;
+    let mut settings = base.redis_settings().clone();
+    if let Some(username) = &cfg.valkey_username {
+        settings = settings.set_username(username);
+    }
+    if let Some(password) = &cfg.valkey_password {
+        settings = settings.set_password(password);
+    }
+    let info = base.set_redis_settings(settings);
+
+    if cfg.security_transport_tls {
+        crate::host_api::ensure_crypto_provider_installed();
+        let root_cert = std::fs::read(&cfg.valkey_ca_file).ok();
+        redis::Client::build_with_tls(
+            info,
+            redis::TlsCertificates {
+                client_tls: None,
+                root_cert,
+            },
+        )
+    } else {
+        redis::Client::open(info)
+    }
+}
+
+/// Idempotently ensures `group` exists on `stream` via `XGROUP CREATE
+/// <stream> <group> $ MKSTREAM` -- `BUSYGROUP` (the group already exists)
+/// is treated as success, never an error. On a fresh Valkey (no persisted
+/// state), nothing else in this crate's env-driven legacy single-consumer
+/// path (`crate::lib::try_start_process_loop`) ever creates the consumer
+/// group, unlike the DB-driven multi-tenant path where hub-api is expected
+/// to provision it out of band (`crate::source_supervisor`'s module doc) --
+/// so that loop self-provisions here, both once at startup and again as the
+/// self-heal step whenever a [`is_nogroup_error`] error surfaces mid-drain.
+///
+/// Returns `Ok(true)` if the group was newly created, `Ok(false)` if it
+/// already existed (`BUSYGROUP`) -- callers use this to drive a
+/// `consumer_group_created_total` counter without double-counting an
+/// already-provisioned group on every retry.
+///
+/// regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+pub(crate) async fn ensure_consumer_group(
+    cfg: &SpineConfig,
+    stream: &str,
+    group: &str,
+) -> Result<bool, SpineError> {
+    let client = build_raw_client(cfg)?;
+    let mut conn = client.get_multiplexed_async_connection().await?;
+    let result: Result<(), redis::RedisError> = redis::cmd("XGROUP")
+        .arg("CREATE")
+        .arg(stream)
+        .arg(group)
+        .arg("$")
+        .arg("MKSTREAM")
+        .query_async(&mut conn)
+        .await;
+    match result {
+        Ok(()) => Ok(true),
+        Err(e) if e.code() == Some("BUSYGROUP") => Ok(false),
+        Err(e) => Err(SpineError::from(e)),
+    }
+}
+
+/// `true` when `err` is Valkey's `NOGROUP` reply -- matches on
+/// [`redis::RedisError::code`] (the raw server-reported error code) rather
+/// than a substring match on the full `Display` text, same rationale as
+/// `crate::source_supervisor::is_nogroup_error`'s identical check (kept as
+/// a separate copy there -- see that module's own doc for why).
+pub(crate) fn is_nogroup_error(err: &SpineError) -> bool {
+    matches!(err, SpineError::Redis(e) if e.code() == Some("NOGROUP"))
+}
+
+/// Test-only helpers for exercising [`ensure_consumer_group`] against a
+/// real local Valkey/Redis instance when one happens to be reachable (dev
+/// box / CI service container on the default port) -- skipped gracefully
+/// (never a failure) when nothing answers, so `cargo test` stays green on a
+/// machine with no Valkey running. Mirrors the "use a real dependency when
+/// available, skip honestly when not" posture this crate has no
+/// `testcontainers` harness for yet.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::SpineConfig;
+
+    /// A `SpineConfig` pointing at `127.0.0.1:6379` (plaintext, no auth) --
+    /// `Some` only if something actually answers `PING` there.
+    pub(crate) fn local_valkey_config() -> Option<SpineConfig> {
+        let client = redis::Client::open("redis://127.0.0.1:6379/").ok()?;
+        let mut conn = client.get_connection().ok()?;
+        let _: String = redis::cmd("PING").query(&mut conn).ok()?;
+        Some(SpineConfig {
+            valkey_url: "redis://127.0.0.1:6379/".to_string(),
+            valkey_username: None,
+            valkey_password: None,
+            valkey_ca_file: std::path::PathBuf::from("/nonexistent-ca.crt"),
+            security_transport_tls: false,
+            security_transport_auth: false,
+            consumer_id: "test-consumer".to_string(),
+            stream_maxlen: 1_000,
+            read_count: 16,
+            block_ms: 200,
+            claim_idle_ms: 30_000,
+            claim_interval_ms: 15_000,
+            stats_interval_ms: 10_000,
+            pel_alert: 5_000,
+            dlq_maxlen: 1_000,
+            max_deliveries: 5,
+            drain_socket_timeout_s: 5,
+            relay_block_timeout_s: 5,
+        })
+    }
+
+    /// A process-unique key suffix (nanosecond timestamp) so parallel test
+    /// runs against a shared, real Valkey instance never collide.
+    pub(crate) fn unique_key(prefix: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("waddles:test:{prefix}:{nanos}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    // regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+    #[test]
+    fn is_nogroup_error_matches_on_the_redis_error_code_not_message_wording() {
+        let err = SpineError::Redis(redis::make_extension_error(
+            "NOGROUP".to_string(),
+            Some(
+                "No such key 'waddles:t:global:c:_tenant:src:twitch:tw-x:events' or consumer \
+                 group 'waddles.core.example.ping' in XREADGROUP with GROUP option"
+                    .to_string(),
+            ),
+        ));
+        assert!(is_nogroup_error(&err));
+
+        let err_different_wording = SpineError::Redis(redis::make_extension_error(
+            "NOGROUP".to_string(),
+            Some("a totally different detail string".to_string()),
+        ));
+        assert!(is_nogroup_error(&err_different_wording));
+    }
+
+    #[test]
+    fn is_nogroup_error_rejects_a_different_redis_error_code() {
+        let err = SpineError::Redis(redis::make_extension_error(
+            "WRONGTYPE".to_string(),
+            Some("Operation against a key holding the wrong kind of value".to_string()),
+        ));
+        assert!(!is_nogroup_error(&err));
+    }
+
+    #[test]
+    fn is_nogroup_error_rejects_a_non_redis_spine_error() {
+        let err = SpineError::Config("unrelated config error".to_string());
+        assert!(!is_nogroup_error(&err));
+    }
+
+    // regression: drain loop exited on NOGROUP (alpha 2026-10-02) -- proves
+    // `ensure_consumer_group` self-heals on a fresh Valkey (no group, no
+    // stream) rather than ever surfacing NOGROUP to the drain loop.
+    #[tokio::test]
+    async fn ensure_consumer_group_creates_the_group_and_stream_on_a_fresh_valkey() {
+        let Some(cfg) = test_support::local_valkey_config() else {
+            eprintln!("skipping: no local Valkey reachable at 127.0.0.1:6379");
+            return;
+        };
+        let stream = test_support::unique_key("ensure-group-stream");
+        let group = test_support::unique_key("ensure-group-group");
+
+        let created = ensure_consumer_group(&cfg, &stream, &group)
+            .await
+            .expect("first create succeeds");
+        assert!(created, "group did not exist yet, must report created=true");
+
+        // Idempotent: BUSYGROUP on the second call must be Ok(false), never
+        // an error.
+        let created_again = ensure_consumer_group(&cfg, &stream, &group)
+            .await
+            .expect("second create (BUSYGROUP) must not error");
+        assert!(
+            !created_again,
+            "group already existed, must report created=false"
+        );
+    }
 
     fn fixture_delivered(
         tenant: &str,
@@ -828,6 +1353,134 @@ mod tests {
 
     fn test_ring() -> KeyRing {
         KeyRing::new(vec![("k1".to_string(), vec![9u8; 32])])
+    }
+
+    /// Like [`fixture_delivered`] but with a caller-supplied `event.source`
+    /// (`fixture_delivered` hardcodes `source: null`) -- used by the
+    /// `carry_inbound_source`/`handle_delivered` tests below that need a
+    /// real inbound `source` to assert gets carried onto the action
+    /// envelope.
+    fn fixture_delivered_with_source(
+        tenant: &str,
+        community: Option<&str>,
+        ring: &KeyRing,
+        kid: &str,
+        source: serde_json::Value,
+    ) -> Delivered {
+        let mac = penguin_spine::compute_binding_mac(
+            ring,
+            kid,
+            tenant,
+            community,
+            "00000000-0000-0000-0000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+            None,
+        )
+        .unwrap();
+        let community_segment = community.unwrap_or(penguin_spine::TENANT_WIDE_SEGMENT);
+        Delivered {
+            stream: format!("waddles:t:{tenant}:c:{community_segment}:src:discord:guild-A:events"),
+            entry_id: "1234567890-0".to_string(),
+            env: serde_json::from_value(serde_json::json!({
+                "schema_version": 2,
+                "tenant": tenant,
+                "community": community,
+                "app_id": "waddles.bot.commands.default",
+                "stage": "process",
+                "event": {
+                    "platform": "discord",
+                    "event_type": "chat.message",
+                    "actor": "some_user",
+                    "payload": {"text": "!ping"},
+                    "occurred_at": "2026-09-22T00:00:00.000Z",
+                    "source": source
+                },
+                "ts": "2026-09-22T00:00:00.000Z",
+                "target_app_id": null,
+                "workstream_id": "00000000-0000-0000-0000-000000000001",
+                "event_id": "00000000-0000-4000-8000-000000000002",
+                "session_id": null,
+                "trace": null,
+                "binding": {"kid": kid, "mac": mac}
+            }))
+            .unwrap(),
+            deliveries: 1,
+            group: "waddles.bot.commands.default".to_string(),
+        }
+    }
+
+    #[test]
+    // regression: action envelope dropped event.source so discord relay had no origin channel (alpha 2026-10-02)
+    fn carry_inbound_source_populates_a_none_bundle_source_from_the_inbound_envelope() {
+        let inbound = PlatformEvent {
+            platform: "discord".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: Some("some_user".to_string()),
+            payload: serde_json::Map::new(),
+            occurred_at: "2026-09-22T00:00:00.000Z".to_string(),
+            source: Some(penguin_spine::Source {
+                platform: "discord".to_string(),
+                account_id: "bot-123".to_string(),
+                channel_id: Some("origin-channel".to_string()),
+            }),
+        };
+        let mut event_out = PlatformEvent {
+            platform: "discord".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: Some("bot".to_string()),
+            payload: serde_json::from_value(serde_json::json!({"text": "pong"})).unwrap(),
+            occurred_at: "2026-09-22T00:00:01.000Z".to_string(),
+            source: None,
+        };
+
+        carry_inbound_source(&mut event_out, &inbound);
+
+        let source = event_out.source.expect("source carried from inbound");
+        assert_eq!(source.platform, "discord");
+        assert_eq!(source.account_id, "bot-123");
+        assert_eq!(source.channel_id.as_deref(), Some("origin-channel"));
+    }
+
+    #[test]
+    // regression: action envelope dropped event.source so discord relay had no origin channel (alpha 2026-10-02)
+    //
+    // Security property: even if a bundle's `transform` output somehow
+    // carried its OWN `source` (today impossible via the real wire path --
+    // `platform_event_from_wire` hardcodes `source: null` -- but this
+    // proves the host never trusts/merges one if it ever did), the inbound
+    // envelope's `source` unconditionally wins. This is what makes a
+    // bundle unable to pick its own Discord relay origin channel.
+    fn carry_inbound_source_overwrites_a_bundle_supplied_source_with_the_inbound_one() {
+        let inbound = PlatformEvent {
+            platform: "discord".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: Some("some_user".to_string()),
+            payload: serde_json::Map::new(),
+            occurred_at: "2026-09-22T00:00:00.000Z".to_string(),
+            source: Some(penguin_spine::Source {
+                platform: "discord".to_string(),
+                account_id: "bot-123".to_string(),
+                channel_id: Some("real-origin-channel".to_string()),
+            }),
+        };
+        let mut event_out = PlatformEvent {
+            platform: "discord".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: Some("bot".to_string()),
+            payload: serde_json::from_value(serde_json::json!({"text": "pong"})).unwrap(),
+            occurred_at: "2026-09-22T00:00:01.000Z".to_string(),
+            source: Some(penguin_spine::Source {
+                platform: "discord".to_string(),
+                account_id: "attacker-controlled".to_string(),
+                channel_id: Some("attacker-chosen-channel".to_string()),
+            }),
+        };
+
+        carry_inbound_source(&mut event_out, &inbound);
+
+        let source = event_out.source.expect("source present");
+        assert_eq!(source.account_id, "bot-123");
+        assert_eq!(source.channel_id.as_deref(), Some("real-origin-channel"));
     }
 
     #[test]
@@ -1028,14 +1681,15 @@ mod tests {
         let metrics = Arc::new(RecordingSpineMetrics::default());
         let deps = ProcessDeps {
             app_id: "waddles.bot.commands.default".to_string(),
-            // Empty by default -- see `ProcessDeps::digest`'s doc: an empty
-            // digest skips `ensure_loaded` entirely, which is what every
-            // pre-existing test in this module (fixed before this fix's
-            // `Load` call was added) already assumes of its fake executor
-            // (`connected_registry_with_fake_executor` answers exactly one
-            // `invoke`, no `load`). Tests exercising `ensure_loaded` itself
-            // set `digest`/`component_key`/`sidecar_key` explicitly.
-            digest: String::new(),
+            // Empty `Static` by default -- see `DigestSource::Static`'s
+            // doc: an empty digest skips `ensure_loaded` entirely, which is
+            // what every pre-existing test in this module (fixed before
+            // this fix's `Load` call was added) already assumes of its fake
+            // executor (`connected_registry_with_fake_executor` answers
+            // exactly one `invoke`, no `load`). Tests exercising
+            // `ensure_loaded` itself set `digest_source`/`component_key`/
+            // `sidecar_key` explicitly.
+            digest_source: DigestSource::Static(String::new()),
             version: "1".to_string(),
             component_key: String::new(),
             sidecar_key: String::new(),
@@ -1051,6 +1705,12 @@ mod tests {
             // unaffected -- the gate's own OFF/ON behavior is exercised
             // directly by the `license_gate_*` tests below.
             license: Arc::new(crate::license::test_support::FixedGate(true)),
+            // No live Valkey server in this module's unit tests -- every
+            // `kv` host-call a fixture invokes sees `not_implemented`,
+            // exercised directly by `capabilities`'s own test suite
+            // instead of here.
+            kv_conn: None,
+            kv_capabilities: Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
             // Deny-by-default fixture (empty catalog, see
             // `crate::capabilities::HttpEgressCatalog`'s doc) -- no test in
             // this module exercises `http` through `ProcessDeps` itself
@@ -1076,6 +1736,18 @@ mod tests {
                 .unwrap(),
                 bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(true)),
             )),
+            // OFF by default so every pre-existing test's `invoke_transform`
+            // assertion (built against the raw, un-tokenized fixture event)
+            // is unaffected -- same "ON/OFF fixture convention" as
+            // `license` above. Dedicated `pii_tokenize_*` tests below
+            // override both fields directly to exercise the gate's actual
+            // ON behavior.
+            pii_gate: Arc::new(crate::license::test_support::FixedGate(false)),
+            pii_minter: None,
+            // No live Postgres connection in this module's unit tests --
+            // every `db` host-call a fixture invokes sees `not_implemented`,
+            // exercised directly by `capabilities`'s own test suite instead.
+            db_wiring: None,
         };
         (deps, metrics)
     }
@@ -1116,6 +1788,287 @@ mod tests {
         let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
         assert_eq!(dead_lettered.len(), 1);
         assert_eq!(dead_lettered[0].1, DlqErrorKind::ExecutorUnavailable);
+    }
+
+    /// A minimal [`crate::pii_tokenize::IdentityMinter`] test fixture:
+    /// always succeeds, minting `"tok-<platform_user_id>"` for every item.
+    struct FixtureMinter;
+
+    impl crate::pii_tokenize::IdentityMinter for FixtureMinter {
+        fn mint_many<'a>(
+            &'a self,
+            _tenant_id: &'a str,
+            items: Vec<crate::pii_tokenize::MintItem>,
+        ) -> crate::pii_tokenize::MintResult<'a> {
+            Box::pin(async move {
+                Ok(items
+                    .into_iter()
+                    .map(|i| {
+                        (
+                            i.platform_user_id.clone(),
+                            format!("tok-{}", i.platform_user_id),
+                        )
+                    })
+                    .collect())
+            })
+        }
+    }
+
+    /// Always fails -- simulates hub-api being unreachable.
+    struct FixtureFailMinter;
+
+    impl crate::pii_tokenize::IdentityMinter for FixtureFailMinter {
+        fn mint_many<'a>(
+            &'a self,
+            _tenant_id: &'a str,
+            _items: Vec<crate::pii_tokenize::MintItem>,
+        ) -> crate::pii_tokenize::MintResult<'a> {
+            Box::pin(async move {
+                Err(crate::pii_tokenize::TokenizeError::ResolutionUnavailable(
+                    "simulated hub-api outage".to_string(),
+                ))
+            })
+        }
+    }
+
+    /// PII boundary hard invariant wiring test: when the kill-switch is
+    /// disabled (tokenization ON, the default) and a minter is configured,
+    /// `handle_delivered` reaches `invoke_transform` successfully (acked,
+    /// never dead-lettered) -- the actual "only a token, never raw PII"
+    /// substitution guarantee is proven exhaustively by
+    /// `crate::pii_tokenize`'s own unit tests; this test proves the wiring
+    /// reaches that code path rather than bypassing it.
+    #[tokio::test]
+    async fn handle_delivered_tokenizes_then_invokes_transform_when_pii_gate_enabled() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let connections = connected_registry_with_fake_executor(serde_json::json!(null)).await;
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.pii_gate = Arc::new(crate::license::test_support::FixedGate(true));
+        deps.pii_minter = Some(Arc::new(FixtureMinter));
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+    }
+
+    /// Fail-closed regression test: PII tokenization enabled but no
+    /// `hub_client` minter configured yet (the honest startup-wiring gap,
+    /// see `crate::source_supervisor::SupervisorDeps::pii_minter`'s doc)
+    /// must dead-letter, never fall through to `invoke_transform` with raw
+    /// PII.
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_when_pii_gate_enabled_and_no_minter_configured() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
+        deps.pii_gate = Arc::new(crate::license::test_support::FixedGate(true));
+        deps.pii_minter = None;
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert!(deps.spine.acked.lock().unwrap().is_empty());
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, DlqErrorKind::BundleError);
+    }
+
+    /// Fail-closed regression test: a minter that fails (hub-api
+    /// unreachable/circuit open) must dead-letter the entry rather than
+    /// ever forwarding the raw, un-tokenized event.
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_when_minter_fails() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
+        deps.pii_gate = Arc::new(crate::license::test_support::FixedGate(true));
+        deps.pii_minter = Some(Arc::new(FixtureFailMinter));
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert!(deps.spine.acked.lock().unwrap().is_empty());
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, DlqErrorKind::BundleError);
+    }
+
+    /// Kill-switch regression test: with the opt-out flag ON (tokenization
+    /// disabled), `handle_delivered` falls back to the legacy
+    /// pre-tokenization behavior even with no minter configured at all --
+    /// proving the kill-switch is a genuine escape hatch, not dead code.
+    #[tokio::test]
+    async fn handle_delivered_skips_tokenization_when_kill_switch_is_on() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let connections = connected_registry_with_fake_executor(serde_json::json!(null)).await;
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.pii_gate = Arc::new(crate::license::test_support::FixedGate(false));
+        deps.pii_minter = None;
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+    }
+
+    fn test_scope(app_id: &str) -> bundle_active_set::AppScope {
+        (1, 0, app_id.to_string())
+    }
+
+    // regression: multi-tenant consumers invoked with empty legacy digest,
+    // UnknownBundle (alpha 2026-10-03)
+    //
+    // The DB-driven multi-tenant path must invoke with the active set's own
+    // canonical digest for this consumer's scope, never the legacy
+    // env-configured (and, pre-fix, permanently empty) `Static` value.
+    #[tokio::test]
+    async fn handle_delivered_active_digest_source_invokes_with_the_scopes_active_digest() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let active_digest = format!("sha256:{}", "a".repeat(64));
+        let (connections, load_count, last_load) =
+            connected_registry_with_fake_executor_expecting_load_first(serde_json::json!(null), 1)
+                .await;
+        let digests = Arc::new(ActiveDigests::new());
+        digests.set(
+            test_scope("waddles.bot.commands.default"),
+            active_digest.clone(),
+        );
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.digest_source = DigestSource::Active {
+            scope: test_scope("waddles.bot.commands.default"),
+            digests,
+        };
+        deps.component_key = "k".to_string();
+        deps.sidecar_key = "s".to_string();
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert_eq!(load_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let load_body = last_load.lock().unwrap().clone().unwrap();
+        assert_eq!(load_body.digest, active_digest);
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+    }
+
+    // regression: multi-tenant consumers invoked with empty legacy digest,
+    // UnknownBundle (alpha 2026-10-03)
+    //
+    // A hot-swap (`ActiveDigests::set` called again for the same scope,
+    // exactly what `changelog_consumer::apply_active_set` does on a bundle
+    // version bump) must be reflected on the VERY NEXT `DigestSource::
+    // current` call -- no consumer restart, no new `ProcessDeps`, no new
+    // `LoadState` -- proving the exact mechanism `handle_delivered` relies
+    // on every single invoke (the end-to-end executor-wire proof that a
+    // freshly-active digest reaches `load`/`invoke` is
+    // `handle_delivered_active_digest_source_invokes_with_the_scopes_active_digest`
+    // above).
+    #[test]
+    fn digest_source_active_current_reflects_a_hot_swap_immediately() {
+        let scope = test_scope("waddles.a");
+        let digest_v1 = format!("sha256:{}", "1".repeat(64));
+        let digest_v2 = format!("sha256:{}", "2".repeat(64));
+        let digests = Arc::new(ActiveDigests::new());
+        digests.set(scope.clone(), digest_v1.clone());
+        let source = DigestSource::Active {
+            scope: scope.clone(),
+            digests: Arc::clone(&digests),
+        };
+        assert_eq!(source.current(), Some(digest_v1));
+
+        // Hot-swap: the changelog consumer loads a new digest for the same
+        // scope -- the already-constructed `DigestSource` (never rebuilt)
+        // must resolve it on its very next call.
+        digests.set(scope, digest_v2.clone());
+        assert_eq!(source.current(), Some(digest_v2));
+    }
+
+    // regression: multi-tenant consumers invoked with empty legacy digest,
+    // UnknownBundle (alpha 2026-10-03)
+    //
+    // No active digest known for this scope (never loaded, unloaded, or the
+    // scope is currently failing to resolve) must dead-letter for
+    // redelivery with NO invoke ever sent -- never fall back to an empty
+    // digest. The connection registry here has NO active connection at all;
+    // if `handle_delivered` ever tried to invoke, it would panic on
+    // `deps.connections.active()` returning `None` before reaching the
+    // executor, proving this path returns before even checking for a
+    // connection.
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_when_no_active_digest_is_known_for_the_scope() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let digests = Arc::new(ActiveDigests::new());
+        // Deliberately never `set` for this scope -- "unknown app".
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
+        deps.digest_source = DigestSource::Active {
+            scope: test_scope("waddles.bot.commands.default"),
+            digests,
+        };
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, DlqErrorKind::BundleError);
+    }
+
+    // regression: multi-tenant consumers invoked with empty legacy digest,
+    // UnknownBundle (alpha 2026-10-03) -- `DigestSource::Active::current`'s
+    // own debug_assert must fire for an empty digest ever smuggled into
+    // `ActiveDigests` (defense in depth; `bundle_active_set::canonical_
+    // digest` already prevents this at the DB-read boundary in production,
+    // and `ActiveDigests::set`'s own non-empty guard is now a SECOND layer
+    // -- `force_set_for_test` bypasses both to exercise this third,
+    // release-profile-compiled-out layer in isolation).
+    #[test]
+    #[should_panic(expected = "must never hold an empty digest")]
+    fn digest_source_active_current_panics_on_an_empty_active_digest_in_debug_builds() {
+        let digests = Arc::new(ActiveDigests::new());
+        digests.force_set_for_test(test_scope("waddles.a"), String::new());
+        let source = DigestSource::Active {
+            scope: test_scope("waddles.a"),
+            digests,
+        };
+        let _ = source.current();
+    }
+
+    // regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    // emptied svc-action dispatch digest (alpha 2026-10-03). The RELEASE
+    // profile this service actually runs compiles out the `debug_assert`
+    // above -- `usable_digest` is the real runtime gate, and must treat an
+    // empty `Active` digest exactly like "no active digest known", with NO
+    // invoke ever attempted.
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_no_active_digest_when_the_resolved_digest_is_empty() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let digests = Arc::new(ActiveDigests::new());
+        digests.force_set_for_test(test_scope("waddles.bot.commands.default"), String::new());
+        let spine = FakeSpineOps::default();
+        // No executor connection at all -- if `handle_delivered` ever tried
+        // to invoke, it would fail before reaching the executor, proving
+        // this path returns before even checking for a connection (same
+        // shape as `handle_delivered_dead_letters_when_no_active_digest_is_
+        // known_for_the_scope` above).
+        let mut deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
+        deps.digest_source = DigestSource::Active {
+            scope: test_scope("waddles.bot.commands.default"),
+            digests,
+        };
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, DlqErrorKind::BundleError);
     }
 
     /// Drives a fake executor over an in-memory duplex: completes the
@@ -1324,8 +2277,9 @@ mod tests {
                 .await;
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, connections);
-        deps.digest =
+        let digest =
             "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string();
+        deps.digest_source = DigestSource::Static(digest.clone());
         deps.version = "3".to_string();
         deps.component_key = "bundles/waddles.bot.commands.default/3/deadbeef.wasm".to_string();
         deps.sidecar_key = "bundles/waddles.bot.commands.default/3/deadbeef.json".to_string();
@@ -1344,7 +2298,7 @@ mod tests {
             .expect("load must have been observed");
         assert_eq!(load_body.app_id, deps.app_id);
         assert_eq!(load_body.version, "3");
-        assert_eq!(load_body.digest, deps.digest);
+        assert_eq!(load_body.digest, digest);
         assert_eq!(load_body.component_key, deps.component_key);
         assert_eq!(load_body.sidecar_key, deps.sidecar_key);
 
@@ -1368,7 +2322,7 @@ mod tests {
                 .await;
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, connections);
-        deps.digest = "sha256:00".to_string();
+        deps.digest_source = DigestSource::Static(format!("sha256:{}", "0".repeat(64)));
         deps.component_key = "k".to_string();
         deps.sidecar_key = "s".to_string();
 
@@ -1458,7 +2412,7 @@ mod tests {
         let d = fixture_delivered("acme", Some("main"), &ring, "k1");
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, registry);
-        deps.digest = "sha256:00".to_string();
+        deps.digest_source = DigestSource::Static(format!("sha256:{}", "0".repeat(64)));
         deps.component_key = "k".to_string();
         deps.sidecar_key = "s".to_string();
 
@@ -1522,6 +2476,59 @@ mod tests {
             appended[0].1.event.payload.get("text"),
             Some(&serde_json::json!("pong"))
         );
+    }
+
+    #[tokio::test]
+    // regression: action envelope dropped event.source so discord relay had no origin channel (alpha 2026-10-02)
+    //
+    // End-to-end version of `carry_inbound_source_populates_a_none_bundle_
+    // source_from_the_inbound_envelope` through the full `handle_delivered`
+    // path: the bundle's `transform` reply carries no `source` (the only
+    // shape possible through the real wire format -- `platform_event_from_
+    // wire` hardcodes it `null`), yet the action envelope `handle_delivered`
+    // appends still carries the INBOUND envelope's own `event.source` --
+    // proving `svc_action::dispatch::invoke_dispatch`'s `origin_channel_id`
+    // derivation (`env.event.source.channel_id`) will see a real channel
+    // for a Discord relay instead of `None`.
+    async fn handle_delivered_reply_carries_the_inbound_event_source_onto_the_action_envelope() {
+        let ring = test_ring();
+        let d = fixture_delivered_with_source(
+            "acme",
+            Some("main"),
+            &ring,
+            "k1",
+            serde_json::json!({
+                "platform": "discord",
+                "account_id": "bot-123",
+                "channel_id": "origin-channel"
+            }),
+        );
+        let reply = wire_platform_event(&PlatformEvent {
+            platform: "discord".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: Some("bot".to_string()),
+            payload: serde_json::from_value(serde_json::json!({"text": "pong"})).unwrap(),
+            occurred_at: "2026-09-22T00:00:01.000Z".to_string(),
+            source: None,
+        })
+        .unwrap();
+        let connections = connected_registry_with_fake_executor(reply).await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        let appended = deps.spine.appended.lock().unwrap();
+        assert_eq!(appended.len(), 1);
+        let source = appended[0]
+            .1
+            .event
+            .source
+            .as_ref()
+            .expect("inbound source carried onto the action envelope");
+        assert_eq!(source.platform, "discord");
+        assert_eq!(source.account_id, "bot-123");
+        assert_eq!(source.channel_id.as_deref(), Some("origin-channel"));
     }
 
     #[tokio::test]

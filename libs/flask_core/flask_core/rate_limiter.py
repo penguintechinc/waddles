@@ -22,6 +22,24 @@ except ImportError:
     REDIS_AVAILABLE = False
     redis = None
 
+from flask_core.valkey_tls import build_tls_kwargs
+
+try:
+    from prometheus_client import Counter
+
+    try:
+        _FALLBACK_TOTAL: Optional[Counter] = Counter(
+            "flask_core_rate_limiter_fallback_total",
+            "Times a RateLimiter fell back to in-memory mode after a Redis/Valkey "
+            "connect failure (degraded mode -- not distributed across replicas)",
+        )
+    except ValueError:
+        # Already registered (e.g. module re-imported under test) -- a second
+        # registration attempt would raise, reuse is harmless.
+        _FALLBACK_TOTAL = None
+except ImportError:  # pragma: no cover - prometheus_client always installed in prod
+    _FALLBACK_TOTAL = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,7 +100,8 @@ class RateLimiter:
                 encoding="utf-8",
                 decode_responses=True,
                 socket_connect_timeout=5,
-                socket_timeout=5
+                socket_timeout=5,
+                **build_tls_kwargs(self.redis_url)
             )
 
             # Test connection
@@ -93,7 +112,19 @@ class RateLimiter:
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {e}")
             if self.enable_fallback:
-                logger.info("Falling back to in-memory rate limiter")
+                # Loud on purpose (security.md/critical-rules.md: degradations must
+                # never be silent) -- in-memory mode is not distributed, so every
+                # hub-api replica enforces its own independent limit instead of a
+                # shared one. A CERTIFICATE_VERIFY_FAILED here (missing/mismatched
+                # Valkey CA) looks "non-fatal" only because of this fallback.
+                logger.error(
+                    "Falling back to in-memory rate limiter for namespace %r -- "
+                    "rate limits are now PER-REPLICA, not distributed, until Redis/"
+                    "Valkey connectivity is restored",
+                    self.namespace,
+                )
+                if _FALLBACK_TOTAL is not None:
+                    _FALLBACK_TOTAL.inc()
                 self._fallback_enabled = True
             else:
                 raise
