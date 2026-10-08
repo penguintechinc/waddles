@@ -422,3 +422,83 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  # Batch 3 of example Python app bundles (2026-10-08, feat/register-batch3-bundles):
+  # three DB-backed economy bundles (rank, loyalty, inventory -- each grants `db` via a
+  # non-empty `data.tables` plus `storage.kv` for a lookup index, same pattern as `poll`
+  # above and `lurk`/`count` for the kv half -- see each bundle's own bundle.yaml comment),
+  # one DB-backed quote book (quote, same db+kv shape), and four stateless/kv-only
+  # minigames/utilities (choose, dadjoke, wave, slap). Same pattern as prior batches: each
+  # gates its own reply behind a `waddles.command-<name>` PostHog flag (default OFF) inside
+  # `transform()` -- this catalog entry only installs the bundle, it does not make it respond.
+  - app_id: waddles.core.example.rank
+    version: "1.0.0"
+    language: python
+    source_dir: python/rank
+    manifest_path: rank.manifest.yaml
+    artifact_path: rank.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.quote
+    version: "1.0.0"
+    language: python
+    source_dir: python/quote
+    manifest_path: quote.manifest.yaml
+    artifact_path: quote.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.loyalty
+    version: "1.0.0"
+    language: python
+    source_dir: python/loyalty
+    manifest_path: loyalty.manifest.yaml
+    artifact_path: loyalty.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.inventory
+    version: "1.0.0"
+    language: python
+    source_dir: python/inventory
+    manifest_path: inventory.manifest.yaml
+    artifact_path: inventory.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.choose
+    version: "1.0.0"
+    language: python
+    source_dir: python/choose
+    manifest_path: choose.manifest.yaml
+    artifact_path: choose.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.dadjoke
+    version: "1.0.0"
+    language: python
+    source_dir: python/dadjoke
+    manifest_path: dadjoke.manifest.yaml
+    artifact_path: dadjoke.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.wave
+    version: "1.0.0"
+    language: python
+    source_dir: python/wave
+    manifest_path: wave.manifest.yaml
+    artifact_path: wave.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.slap
+    version: "1.0.0"
+    language: python
+    source_dir: python/slap
+    manifest_path: slap.manifest.yaml
+    artifact_path: slap.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
