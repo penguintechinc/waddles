@@ -2274,7 +2274,7 @@
       "rule_id": "python-silent-except-return-default",
       "path": "hub_api/blueprints/v1/guild_pairing.py",
       "line": 276,
-      "line_hash": "85b53ed5cfe05e49"
+      "line_hash": "88f7e6e6d90e7bcb"
     },
     {
       "rule_id": "python-silent-except-return-default",

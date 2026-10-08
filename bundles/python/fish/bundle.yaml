@@ -1,0 +1,69 @@
+schema_version: 2
+app_id: waddles.core.example.fish
+name: Fishing Game Bundle (Python)
+# 1.0.0: initial kv-only v1 -- !fish (cast)/!fish list/!fish set cooldown <seconds>. See
+# src/app.py's own module docstring for full scope + the cross-community-leaderboard deferral.
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+# Attribution: net-new Waddles content, NOT a literal port -- credited for inspiration only
+# (no original PenguinTwitchBot source or text reused, so no MIT notice reproduction is
+# required; contrast bundles/csharp/superpenguin-roll, an actual line-for-line port, which
+# does carry the full verbatim notice). `category` is left unset: MARKETPLACE_CATEGORIES
+# (libs/flask_core/flask_core/bundle_attribution.py) currently allows only "alternatives",
+# which does not fit first-party original content -- flagged in this bundle's PR description
+# as a manifest-schema gap rather than forced into the wrong enum value.
+author: "superpenguintv (Psychoboy)"
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/fish
+notice: |
+  Catch-and-track game concept inspired by superpenguintv (Psychoboy)'s
+  PenguinTwitchBot fishing minigame (https://github.com/Psychoboy/PenguinTwitchBot).
+  This is an original Waddles implementation: the catch table, weights, flavor
+  text, cooldown mechanism, and all game logic are written fresh for this
+  bundle. No original PenguinTwitchBot source code or text is reused.
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!fish"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!fish"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- v1 is kv-only by design (see src/app.py module docstring: no dependency
+# on the in-flight #623 db order_by API). Cross-community leaderboards are explicitly deferred
+# to a v2 that needs that API, not stubbed here.
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - storage.kv
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import CommunityConnections from '../CommunityConnections';
 import { adminApi } from '../../../services/api';
@@ -16,6 +17,14 @@ vi.mock('../../../services/api', () => ({
     authorizeCommunityConnection: vi.fn(),
     disconnectCommunityConnection: vi.fn(),
   },
+}));
+
+// The embedded `DiscordBotInstallLink` card reads its own feature flag --
+// default OFF here so this suite's assertions (which predate that card)
+// stay scoped to the OAuth provider grid; the card's own behavior is
+// covered by `components/settings/__tests__/DiscordBotInstallLink.test.tsx`.
+vi.mock('../../../lib/useFeatureFlag', () => ({
+  useFeatureFlag: vi.fn().mockReturnValue(false),
 }));
 
 const EMPTY_RESPONSE = { data: { connections: [], callback_base: 'https://hub.example/api/v1' } };
@@ -30,12 +39,15 @@ function connectionsResponse(overrides = []) {
 }
 
 function mount(communityId = '42') {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <MemoryRouter initialEntries={[`/admin/${communityId}/connections`]}>
-      <Routes>
-        <Route path="/admin/:communityId/connections" element={<CommunityConnections />} />
-      </Routes>
-    </MemoryRouter>,
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={[`/admin/${communityId}/connections`]}>
+        <Routes>
+          <Route path="/admin/:communityId/connections" element={<CommunityConnections />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 

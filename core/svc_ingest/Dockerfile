@@ -4,7 +4,7 @@
 # python:3.13-slim-bookworm tag). Build from parent (repo root):
 #   docker build -f core/svc_ingest/Dockerfile -t waddlebot/svc-ingest:local .
 
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS builder
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS builder
 WORKDIR /app
 
 COPY core/svc_ingest/requirements.txt .
@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir /app/libs/flask_core
 COPY libs/waddle_transports /app/libs/waddle_transports
 RUN pip install --no-cache-dir /app/libs/waddle_transports
 
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin

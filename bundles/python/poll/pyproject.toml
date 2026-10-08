@@ -1,0 +1,23 @@
+[project]
+name = "waddle-bundle-poll"
+version = "1.0.0"
+description = "`!poll` -> chat-command community polls over the shared community_polls/poll_options/poll_votes tables. Extracted from the bot_process monolith (core/svc_process/bundles/community_polls_process.py) onto waddle_sdk.command/waddle_sdk.db."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3", "mypy==1.14.1", "ruff==0.11.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+
+# `waddle-sdk` ships no `py.typed` marker (a pre-existing SDK packaging gap) -- silencing
+# `import-untyped` here only, so `--strict` still catches real type errors in this
+# bundle's own code. Mirrors bundles/python/count/pyproject.toml's identical override.
+[[tool.mypy.overrides]]
+module = "waddle_sdk.*"
+ignore_missing_imports = true

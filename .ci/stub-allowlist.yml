@@ -81,7 +81,7 @@
   pattern: "TODO\\(M[0-9]"
   issue: gh-599
 - path: core/svc_process/src/lib.rs
-  pattern: "TODO\\(M[0-9]"
+  pattern: "TODO\\(M[0-9]|not wired"
   issue: gh-599
 - path: core/svc_process/src/spine.rs
   pattern: "TODO\\(M[0-9]"

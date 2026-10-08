@@ -16,6 +16,7 @@ import types
 import pytest
 from waddle_sdk.flask_core.bundle_runtime import bundle_context
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.kv import validate_key
 
 from app import (
     _dispatch_list,
@@ -75,13 +76,26 @@ def fake_host(monkeypatch: pytest.MonkeyPatch):
     relay_calls: list[tuple[str, str]] = []
     log_calls: list[tuple[int, str, str]] = []
 
+    def _get(key: str):
+        # regression: gh-631 -- validates exactly like the real `bundle_host_kv` host
+        # capability (`core/bundle_host_kv/src/scope.rs::is_allowed_key_byte`).
+        validate_key(key)
+        return kv_store.get(key)
+
+    def _set(key: str, value, ttl) -> None:
+        validate_key(key)
+        kv_store[key] = bytes(value)
+
+    def _delete(key: str) -> None:
+        validate_key(key)
+        kv_store.pop(key, None)
+
+    def _increment(key: str, delta: int, ttl: int) -> int:
+        validate_key(key)
+        return 0
+
     flags_mod = types.SimpleNamespace(enabled=lambda key, default_value: True)
-    kv_mod = types.SimpleNamespace(
-        get=lambda key: kv_store.get(key),
-        set=lambda key, value, ttl: kv_store.__setitem__(key, bytes(value)),
-        delete=lambda key: kv_store.pop(key, None),
-        increment=lambda key, delta, ttl: 0,
-    )
+    kv_mod = types.SimpleNamespace(get=_get, set=_set, delete=_delete, increment=_increment)
     relay_mod = types.SimpleNamespace(
         push=lambda provider, msg: relay_calls.append((provider, msg))
     )
@@ -106,11 +120,11 @@ def _ctx(community: str | None):
 
 
 def _seed_registry(fake_host, community: str, registry: dict[str, str]) -> None:
-    fake_host.kv_store[f"command:registry:{community}"] = json.dumps(registry).encode()
+    fake_host.kv_store[f"command.registry.{community}"] = json.dumps(registry).encode()
 
 
 def _seed_timers(fake_host, community: str, timers: dict[str, dict]) -> None:
-    fake_host.kv_store[f"command:timers:{community}"] = json.dumps(timers).encode()
+    fake_host.kv_store[f"command.timers.{community}"] = json.dumps(timers).encode()
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +216,7 @@ def test_set_command_stores_and_dispatch_relays_confirmation(fake_host) -> None:
 
     result = _run(dispatch(envelope, {}, http_client=None))
 
-    stored = json.loads(fake_host.kv_store["command:registry:comm-1"])
+    stored = json.loads(fake_host.kv_store["command.registry.comm-1"])
     assert stored == {"greet": "hi $(username)"}
     provider, message_json = fake_host.relay_calls[0]
     assert provider == "twitch"
@@ -219,7 +233,7 @@ def test_set_without_community_replies_requires_community(fake_host) -> None:
 
     _, message_json = fake_host.relay_calls[0]
     assert "community context" in json.loads(message_json)["text"]
-    assert "command:registry" not in "".join(fake_host.kv_store.keys())
+    assert "command.registry" not in "".join(fake_host.kv_store.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +259,7 @@ def test_remove_existing_command(fake_host) -> None:
 
     _run(dispatch(_envelope(transformed), {}, http_client=None))
 
-    assert json.loads(fake_host.kv_store["command:registry:comm-1"]) == {}
+    assert json.loads(fake_host.kv_store["command.registry.comm-1"]) == {}
     _, message_json = fake_host.relay_calls[0]
     assert json.loads(message_json)["text"] == "command removed: !greet"
 
@@ -366,7 +380,7 @@ def test_timer_set_requires_existing_command(fake_host) -> None:
 
     _, message_json = fake_host.relay_calls[0]
     assert "set it first" in json.loads(message_json)["text"]
-    assert "command:timers" not in "".join(fake_host.kv_store.keys())
+    assert "command.timers" not in "".join(fake_host.kv_store.keys())
 
 
 def test_timer_set_stores_interval_and_mentions_pending_scheduler(fake_host) -> None:
@@ -376,7 +390,7 @@ def test_timer_set_stores_interval_and_mentions_pending_scheduler(fake_host) -> 
 
     _run(dispatch(_envelope(transformed), {}, http_client=None))
 
-    stored = json.loads(fake_host.kv_store["command:timers:comm-1"])
+    stored = json.loads(fake_host.kv_store["command.timers.comm-1"])
     assert stored == {"greet": {"interval_seconds": 300, "enabled": False}}
     _, message_json = fake_host.relay_calls[0]
     text = json.loads(message_json)["text"]
@@ -400,12 +414,12 @@ def test_timer_enable_and_disable_toggle_stored_state(fake_host) -> None:
     enable_result = _run(transform(_event("!command timer !greet enable", is_mod=True)))
     assert enable_result is not None
     _run(dispatch(_envelope(enable_result), {}, http_client=None))
-    assert json.loads(fake_host.kv_store["command:timers:comm-1"])["greet"]["enabled"] is True
+    assert json.loads(fake_host.kv_store["command.timers.comm-1"])["greet"]["enabled"] is True
 
     disable_result = _run(transform(_event("!command timer !greet disable", is_mod=True)))
     assert disable_result is not None
     _run(dispatch(_envelope(disable_result), {}, http_client=None))
-    assert json.loads(fake_host.kv_store["command:timers:comm-1"])["greet"]["enabled"] is False
+    assert json.loads(fake_host.kv_store["command.timers.comm-1"])["greet"]["enabled"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -553,3 +567,16 @@ def test_dispatch_timer_set_rejects_non_int_interval(fake_host) -> None:
 def test_dispatch_timer_toggle_rejects_non_string_name(fake_host) -> None:
     result = _run(_dispatch_timer_toggle("comm-1", None, enabled=True))
     assert "Usage: !command timer" in result
+
+
+# regression: gh-631 -- `_registry_key`/`_timers_key` originally used `:`
+# (`"command:registry:{community}"`, `"command:timers:{community}"`), rejected by the real
+# `kv` host capability (`core/bundle_host_kv/src/scope.rs` reserves `:` as its own namespace
+# separator). Every real `kv` call this bundle made failed in production with
+# `kv.error::backend`, invisible to this whole test suite because the old fake `kv` host
+# accepted any key -- `fake_host` now validates like the real host (see the fixture above).
+def test_kv_key_helpers_contain_no_colon() -> None:
+    from app import _registry_key, _timers_key
+
+    assert ":" not in _registry_key("comm-1")
+    assert ":" not in _timers_key("comm-1")

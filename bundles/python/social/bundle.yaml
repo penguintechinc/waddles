@@ -1,0 +1,66 @@
+schema_version: 2
+app_id: waddles.core.example.social
+name: Social Interactions Example Bundle (Python)
+# 1.0.0: initial kv-only v1 -- !hug/!highfive/!pat <user> (interact), !social stats. See
+# src/app.py's own module docstring for full scope.
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+# Inspiration credit only -- general "fun social interaction command" concept, not a literal
+# port (contrast bundles/csharp/superpenguin-roll, an actual line-for-line port, which does
+# carry the full verbatim notice). No original PenguinTwitchBot source or text is reused --
+# see src/app.py's own module docstring.
+author: "superpenguintv (Psychoboy)"
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/social
+notice: |
+  General "fun" social/interaction command concept (hug-a-user, high-five, pat-on-the-back)
+  inspired by superpenguintv (Psychoboy)'s PenguinTwitchBot
+  (https://github.com/Psychoboy/PenguinTwitchBot), which ships a similar command category.
+  This is an original Waddles implementation: the command set, flavor text, counters, and
+  all dispatch logic are written fresh for this bundle. No original PenguinTwitchBot source
+  code or text is reused.
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!hug", "!highfive", "!pat", "!social"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!hug", "!highfive", "!pat", "!social"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- v1 is kv-only by design, same shape as duel/fish/lurk/count (see
+# src/app.py module docstring).
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - storage.kv
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

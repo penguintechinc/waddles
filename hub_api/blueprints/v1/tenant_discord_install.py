@@ -19,8 +19,14 @@ Scope resolution deliberately stops short of activating a
 `guild_tenant_pairings` row -- that's Unit F's role-sync worker's own
 concern, sitting on top of `#563`'s `services/guild_pairing.py`. This
 group's entire job is getting a verified, encrypted, per-tenant Discord
-app into `tenant_platform_credentials` (migration 0034) via
-`services.credential_resolver.store_tenant_credentials()`.
+app into `tenant_platform_apps` (layer 1 of migration 0035's three-layer
+connection model, renamed from migration 0034's `tenant_platform_
+credentials`) via `services.credential_resolver.store_tenant_credentials()`.
+This flow stores ONLY app-level credentials (`client_id`/`client_secret`/
+`bot_token`) -- it never captures a `guild_id`, so it has no layer-2
+`platform_connections` row to create; see that module's own docstring for
+why (a Discord bot token is app-scoped, not guild-scoped, and this OAuth
+callback's contract doesn't carry a resource identifier today).
 """
 
 from __future__ import annotations

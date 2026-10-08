@@ -3,7 +3,7 @@
 Two member-facing routes, mounted at `/api/v1/community/<communityId>/
 reputation/...` (same `url_prefix` `community_activity.py`'s/
 `community_interaction.py`'s own member-facing blueprints use): the
-caller's own community + global reputation snapshot (`GET .../me`) and a
+caller's own community + tenant reputation snapshot (`GET .../me`) and a
 community's top-N reputation leaderboard (`GET .../leaderboard`, display
 names only -- no ids/emails). Both `tenant_middleware` -> `require_scope
 ("community.reputation:read")` -- a plain member-tier read scope, not an
@@ -75,7 +75,7 @@ def _envelope(data: dict[str, Any]) -> tuple[dict[str, Any], int]:
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("community.reputation:read")  # type: ignore[untyped-decorator]
 async def get_my_reputation(community_id: int) -> tuple[dict[str, Any], int]:
-    """`GET /api/v1/community/<id>/reputation/me` -- caller's own community + global scores."""
+    """`GET /api/v1/community/<id>/reputation/me` -- caller's own community + tenant scores."""
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(
@@ -92,7 +92,7 @@ async def get_my_reputation(community_id: int) -> tuple[dict[str, Any], int]:
 
     async_dal, dal = _dal()
     snapshot = await reputation_svc.get_my_reputation(
-        async_dal, dal, community_id=community_id, hub_user_id=hub_user_id
+        async_dal, dal, community_id=community_id, hub_user_id=hub_user_id, tenant_id=ctx.tenant_id
     )
     return _envelope(asdict(snapshot))
 

@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-count"
-version = "1.0.3"
+version = "1.0.4"
 description = "`!count` -> a dynamic, per-community kv-backed counter system (!count add/remove/list, !<name> read/add/sub/set). Python equivalent of bundles/python/pyping, modeled on its hand-built (not bundle_compiler-routed) structure."
 requires-python = ">=3.13"
 dependencies = []

@@ -746,7 +746,7 @@ posthog:
 # Dockerfile/CI-built image yet. Replace per-container once each does.
 pipeline:
   pythonBaseImage: "python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb"
-  nodeBaseImage: "node:20-bookworm-slim@sha256:1e85773c98c31d4fe5b545e4cb17379e617b348832fb3738b22a08f68dec30f3"
+  nodeBaseImage: "node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0"
 
   # T10 (v3 demo) — shared runner identity across svc-ingest/svc-process/svc-action.
   # RUNNER_TENANT_SLUG scopes stage_runner.py to one tenant; deliberately NOT paired
@@ -800,7 +800,27 @@ pipeline:
       limits:
         cpu: "500m"
         memory: "512Mi"
-  goRuntimeImage: "debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a"
+  # Bar Citizen role-sync reconcile worker (Unit F, hub_api/services/role_sync_service.py) --
+  # deploy-time kill switch, defaulted OFF (critical-rules.md Feature Flags: every feature
+  # flagged OFF until validated) -- see templates/role-sync-cronjob.yaml's own header comment.
+  # The engine's own FEATURE_BAR_CITIZEN_ROLE_SYNC PostHog flag is the separate per-tenant
+  # RUNTIME gate; this value controls whether the CronJob is deployed at all.
+  roleSync:
+    enabled: false
+    # Twitch's own Helix rate limits make a sub-minute cadence pointless (role_sync_service.py's
+    # own module docstring) -- every 15 minutes is the default reconcile cadence, covering both
+    # directions (twitch_to_discord + discord_to_twitch/bidirectional) in one pass.
+    schedule: "*/15 * * * *"
+    backoffLimit: 2
+    activeDeadlineSeconds: 600
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+  goRuntimeImage: "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587"
 
   svcIngest:
     enabled: true
@@ -884,6 +904,50 @@ pipeline:
       limits:
         cpu: "1000m"
         memory: "1Gi"
+    # feature/bundle-artifact-signing -- BUNDLE_SIGNING_PRIVATE_KEY/BUNDLE_SIGNING_KEY_ID
+    # (hub_api/services/bundle_signing_service.py) are wired via secretKeyRef against this
+    # externally-managed Secret, NEVER templated from values (the private key must never
+    # pass through `helm template`/`helm install --set`/a values file). Generate + apply
+    # with `make generate-bundle-signing-key` (scripts/generate-bundle-signing-key.sh)
+    # BEFORE deploying hub-api -- see the chart README's rollout-order section. `optional:
+    # true` on the env's secretKeyRef so hub-api still starts (approvals just fail closed
+    # per PlatformSigner.from_env()) before that script has been run once.
+    bundleSigning:
+      secretName: ""  # default: "{{ fullname }}-bundle-signing" -- computed in the template when empty
+    # One-off backfill CLI (hub_api/cli/sign_approved_bundles.py) as a Helm Job --
+    # templates/bundle-signing-backfill-job.yaml. Disabled by default: this is a deliberate
+    # rollout step (create secret -> deploy hub-api -> run this Job once -> deploy
+    # executor), not a hook that should fire on every `helm upgrade`. Flip to true for one
+    # `helm upgrade --set pipeline.hubApi.bundleSigningBackfill.enabled=true`, then back to
+    # false -- idempotent either way (module docstring), so a stray extra run is harmless.
+    bundleSigningBackfill:
+      enabled: false
+      backoffLimit: 2
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+    # MEDIUM security-review finding -- CronJob that re-uploads any missing signed bucket
+    # sidecar for a version that IS signed in Postgres (artifact_signature NOT NULL) but
+    # whose sidecar object is missing/stale (e.g. a prior upload_signed_sidecar() failure
+    # that was only ever recorded as a backfill-CLI row outcome, never retried). Runs
+    # hub_api/cli/reconcile_signed_sidecars.py on a schedule; metrics via the same
+    # bundle_telemetry meter the backfill CLI uses.
+    bundleSigningReconciler:
+      enabled: true
+      schedule: "*/30 * * * *"
+      backoffLimit: 3
+      concurrencyPolicy: Forbid
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
 
   hubWebui:
     enabled: true
@@ -929,6 +993,26 @@ pipeline:
       limits:
         cpu: "1000m"
         memory: "1Gi"
+
+  # Discord event-sync reconcile CronJob (hub_api/services/event_discord_sync_service.py::main) --
+  # periodic backstop sweeping calendar_events rows left pending/sync_error (SoT push engine's
+  # own `sync_event()` entry point handles the immediate, webhook-triggered path; this CronJob
+  # is the "reconciliation-by-polling never fully replaced by push" backstop, same philosophy
+  # as role-sync's own reconcile worker). Disabled by default -- the engine itself is also
+  # gated behind the waddles.calendar.event_discord_sync PostHog flag (defaulted OFF), so this
+  # is a belt-and-suspenders double-gate until the feature is validated.
+  eventSync:
+    enabled: false
+    schedule: "*/5 * * * *"
+    backoffLimit: 2
+    activeDeadlineSeconds: 240
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
 
   # v3.0.x — Rust data-plane rewrite (Issue #287, core/svc_streaming crate). Supersedes the
   # earlier Python/ffmpeg control+data plane (own DB tables, migration 078). Adds the
@@ -1022,6 +1106,20 @@ pipeline:
     # global-admin opt-in"). PR #428/#432's capability-gate grant snapshot is the eventual
     # live source; `false` (deny, the default) until an operator opts in at the pod level.
     instanceEgressAllowPrivateIp: false
+
+    # feature/bundle-artifact-signing -- BUNDLE_SIGNING_PUBLIC_KEYS (core/bundle_executor/
+    # src/config.rs, core/bundle_executor/src/signing.rs::PlatformPublicKeys), shared by
+    # both bundleExecutor and bundleExecutorAction below (each executor verifies against
+    # the same platform key set regardless of which stage it dials). Map of
+    # `key_id -> base64(32-byte Ed25519 public key)` -- NOT secret (public keys), so this
+    # is safe to carry directly in values (unlike hubApi.bundleSigning's private-key
+    # secretKeyRef above). Rendered into the container env as a JSON object. Empty by
+    # default; `crate::signing::PlatformPublicKeys::from_cli_required` (the real
+    # production path, `crate::lib::run`) fails closed at startup if this is unset once
+    # `pipeline.rustDataPlane.enabled` is true -- set per-environment via
+    # values-{alpha,beta,gamma,production}.yaml once `make generate-bundle-signing-key`
+    # has printed the corresponding public key.
+    bundleSigningPublicKeys: {}
 
     # feature/hub-grpc-env-wiring -- closes #569's startup seam: svc-process-rust/
     # svc-action-rust's `core/hub_client::HubClient` (PII tokenization/detokenization,
@@ -2355,7 +2453,7 @@ securityContext:
 # exact digest hub_api/Dockerfile's own FROM line already uses (Debian-only per
 # devops-containers.md; no new image to track/scan).
 waitForHubApi:
-  image: "python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26"
+  image: "python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641"
   stableChecks: 3
   stableIntervalSeconds: 5
   maxBackoffSeconds: 30

@@ -1,0 +1,46 @@
+[project]
+name = "waddle-bundle-shoutout"
+version = "1.0.0"
+description = "`!so <user>` -> a customizable, per-community shoutout command, migrated from the bot_process monolith's `!so` feature. Two default-OFF sub-modules: `auto` (auto-shoutout list) and `ai` (Professional-tier-gated AI-generated text, toggle only -- see module docstring). Inspired by superpenguintv (Psychoboy)'s PenguinTwitchBot `!so` -- original implementation, no code/text reused."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3", "mypy==1.14.1", "ruff==0.14.1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+
+# `wit_world` is generated per-build, only inside a real compiled component
+# (see sdk/waddle-sdk/src/waddle_sdk/db.py's own module docstring) -- never
+# pip-installable, so no stub can exist for static analysis to find. Mirrors
+# sdk/waddle-sdk/pyproject.toml's own override.
+[[tool.mypy.overrides]]
+module = ["wit_world"]
+ignore_missing_imports = true
+
+# `waddle_sdk` itself ships no `py.typed` marker yet (pre-existing SDK
+# packaging gap, out of this bundle's own scope) -- editable-installed, it
+# resolves to an untyped third-party import under `--strict` without this.
+[[tool.mypy.overrides]]
+module = ["waddle_sdk.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "D", "UP", "B", "ASYNC", "S"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Test names are self-documenting (pytest convention); S101 is standard
+# pytest usage; D1xx docstrings are not required on every test function.
+"tests/*" = ["D100", "D101", "D102", "D103", "D104", "S101"]
