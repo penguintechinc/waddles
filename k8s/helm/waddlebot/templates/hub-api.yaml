@@ -170,6 +170,26 @@ spec:
               # (live alpha's waddlebot-secrets predates this key); hub_api/config.py
               # must fail closed on Connections use if this resolves empty/unset.
               optional: true
+        # feature/bundle-artifact-signing -- BUNDLE_SIGNING_PRIVATE_KEY/BUNDLE_SIGNING_KEY_ID
+        # (hub_api/services/bundle_signing_service.py::PlatformSigner.from_env). Sourced
+        # from a SEPARATE, externally-managed Secret (never this chart's values-templated
+        # waddlebot-secrets, never a `value:` literal) -- see values.yaml's
+        # pipeline.hubApi.bundleSigning comment and scripts/generate-bundle-signing-key.sh.
+        # `optional: true` on both keys: a hub-api deploy that predates the secret being
+        # created must still start (approvals fail closed at sign time, per
+        # PlatformSigner.from_env()'s own 500 rather than this pod crash-looping).
+        - name: BUNDLE_SIGNING_PRIVATE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.pipeline.hubApi.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
+              key: BUNDLE_SIGNING_PRIVATE_KEY
+              optional: true
+        - name: BUNDLE_SIGNING_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.pipeline.hubApi.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
+              key: BUNDLE_SIGNING_KEY_ID
+              optional: true
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         # regression: seeder VALKEY_URL REPLACE_ME / missing TLS wiring -- hub-api itself
         # calls hub_api/services/valkey_admin_client.py::build_client() (via
