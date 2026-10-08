@@ -36,6 +36,13 @@ def test_interaction_pii_receive_is_dangerous() -> None:
     assert is_known_permission("interaction.pii.receive")
 
 
+def test_streaming_lifecycle_subscribe_is_normal() -> None:
+    """Read-only subscribe to svc-streaming-rust's lifecycle hooks (issue #456) is `normal`."""
+    assert resolve_risk("streaming.lifecycle.subscribe") == "normal"
+    assert not is_dangerous("streaming.lifecycle.subscribe")
+    assert is_known_permission("streaming.lifecycle.subscribe")
+
+
 def test_chat_send_family_is_normal_for_known_platform() -> None:
     assert resolve_risk("chat.send:discord") == "normal"
     assert resolve_risk("chat.send:twitch") == "normal"

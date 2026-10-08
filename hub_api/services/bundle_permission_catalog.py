@@ -94,6 +94,14 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     "storage.tables": "normal",
     "storage.objects": "normal",
     "overlay.media": "dangerous",
+    #: Read-only subscribe to svc-streaming-rust's stream-lifecycle hooks
+    #: (`on-start`/`on-stop`/`on-segment`/`on-recording-ready`,
+    #: `wit/waddle-bundle/stage.wit`'s `streaming-lifecycle` export,
+    #: issue #456). `normal`: no outbound call, no write capability of its
+    #: own -- the bundle only receives host-pushed stream metadata (stream
+    #: id, platform, segment/recording URLs). Host wiring (actually linking
+    #: the export, enforcing the grant) is deferred past this catalog entry.
+    "streaming.lifecycle.subscribe": "normal",
     "ai.generate": "dangerous",
     #: Raw PII (not just a tenant-tokenized UUID) embedded in a form/modal/
     #: interaction input the bundle receives -- e.g. a free-text field the
