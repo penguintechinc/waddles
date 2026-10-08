@@ -6,6 +6,7 @@ on:
     paths:
       - 'core/svc_process/**'
       - 'core/bundle_host_kv/**'
+      - 'core/bundle_capability_gate/**'
       - 'core/hub_client/**'
       - '.github/workflows/rust-svc-process.yml'
       - '.github/workflows/rust-crate-ci.yml'
@@ -14,6 +15,7 @@ on:
     paths:
       - 'core/svc_process/**'
       - 'core/bundle_host_kv/**'
+      - 'core/bundle_capability_gate/**'
       - 'core/hub_client/**'
   workflow_dispatch:
 
