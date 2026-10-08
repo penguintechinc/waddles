@@ -309,6 +309,7 @@ def _resolve_adjust(verb: str, args: str | None) -> tuple[str, str | None, int |
     try:
         amount = int(amount_text)
     except ValueError:
+        log.debug("rank.adjust_invalid_amount", command=verb)
         return "usage", None, None
     if amount <= 0:
         return "usage", None, None
