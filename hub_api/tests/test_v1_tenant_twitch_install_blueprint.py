@@ -274,7 +274,7 @@ class TestCallback:
         )
         store_calls: list[dict[str, Any]] = []
 
-        def _store(dal: Any, **kwargs: Any) -> None:
+        async def _store(dal: Any, **kwargs: Any) -> None:
             store_calls.append(kwargs)
 
         monkeypatch.setattr(install_module.creds_svc, "store_initial_credentials", _store)

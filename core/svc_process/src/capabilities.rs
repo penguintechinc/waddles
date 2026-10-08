@@ -515,12 +515,6 @@ impl<K: KvBackend> StageCapabilities<K> {
                     .map_err(db_error_to_host_error);
             }
             "query" => {
-                // Host-side op ready for the proposed `query` WIT shape
-                // (this crate's PR description) -- not yet reachable from
-                // a guest bundle's `stage.wit` bindings in this landing
-                // (no WIT/`bundle_executor` change here), but already
-                // dispatchable at this untyped `{capability, op, args}`
-                // layer the same way insert/get/update/delete are.
                 let limit = call
                     .args
                     .get("limit")
@@ -533,9 +527,20 @@ impl<K: KvBackend> StageCapabilities<K> {
                     .and_then(|v| v.as_u64())
                     .and_then(|v| u32::try_from(v).ok())
                     .unwrap_or(0);
+                let order_by = match parse_order_by(&call.args) {
+                    Ok(o) => o,
+                    Err(e) => return Err(e),
+                };
                 return db
                     .host
-                    .query(&scope, &db.schemas, &db.capabilities, limit, offset)
+                    .query(
+                        &scope,
+                        &db.schemas,
+                        &db.capabilities,
+                        limit,
+                        offset,
+                        order_by,
+                    )
                     .await
                     .map(|rows| {
                         serde_json::json!({
@@ -632,6 +637,43 @@ fn db_value_to_json(v: &DbValue) -> serde_json::Value {
         DbValue::Text(s) => serde_json::json!(s),
         DbValue::Bytes(b) => serde_json::json!(b),
     }
+}
+
+/// Parses `query`'s optional `order_by` arg: `{"random": true}` or
+/// `{"column": "<name>", "descending": <bool>}` -- `None`/absent means the
+/// backend's own default (`row_id ASC`). Column-name validation itself
+/// happens host-side in `bundle_host_db::backend::order_by_sql` (never
+/// trusted from this JSON alone) -- this function only shapes the
+/// wire-level args into [`bundle_host_db::OrderBy`].
+fn parse_order_by(
+    args: &serde_json::Value,
+) -> Result<Option<bundle_host_db::OrderBy>, HostResultError> {
+    let Some(order_by) = args.get("order_by") else {
+        return Ok(None);
+    };
+    if order_by.is_null() {
+        return Ok(None);
+    }
+    if order_by.get("random").and_then(|v| v.as_bool()) == Some(true) {
+        return Ok(Some(bundle_host_db::OrderBy::Random));
+    }
+    let name = order_by
+        .get("column")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            denied(
+                "invalid_args",
+                "order_by must be {\"random\": true} or {\"column\": string, \"descending\": bool}",
+            )
+        })?;
+    let descending = order_by
+        .get("descending")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok(Some(bundle_host_db::OrderBy::Column {
+        name: name.to_string(),
+        descending,
+    }))
 }
 
 fn row_to_json(row: bundle_host_db::Row) -> serde_json::Value {
@@ -1127,6 +1169,79 @@ mod tests {
         // (`DbHost::resolve_and_authorize` maps a denied authorize() to
         // `DbError::InvalidColumn`, whose `code()` is `"invalid_column"`).
         assert_eq!(err.code, "invalid_column");
+    }
+
+    #[test]
+    fn parse_order_by_is_none_when_absent_or_null() {
+        assert!(parse_order_by(&serde_json::json!({})).unwrap().is_none());
+        assert!(parse_order_by(&serde_json::json!({"order_by": null}))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn parse_order_by_parses_random() {
+        let order_by = parse_order_by(&serde_json::json!({"order_by": {"random": true}}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(order_by, bundle_host_db::OrderBy::Random);
+    }
+
+    #[test]
+    fn parse_order_by_parses_column_and_direction() {
+        let order_by = parse_order_by(
+            &serde_json::json!({"order_by": {"column": "score", "descending": true}}),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            order_by,
+            bundle_host_db::OrderBy::Column {
+                name: "score".to_string(),
+                descending: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_order_by_column_defaults_descending_to_false() {
+        let order_by = parse_order_by(&serde_json::json!({"order_by": {"column": "score"}}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            order_by,
+            bundle_host_db::OrderBy::Column {
+                name: "score".to_string(),
+                descending: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_order_by_rejects_a_malformed_order_by() {
+        let err = parse_order_by(&serde_json::json!({"order_by": "not-an-object"})).unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn db_capability_query_op_accepts_order_by_random() {
+        // Proves `order_by` actually reaches `DbHost::query` through the
+        // untyped op layer (denied `no_table`, same as every other query
+        // test above, rather than `invalid_args`).
+        let capabilities = caps().with_db(mock_db_wiring(true));
+        capabilities.db.as_ref().unwrap().capabilities.update(
+            "waddles.bot.commands.default",
+            ["storage.tables".to_string()],
+        );
+        let err = capabilities
+            .handle_db(&call(
+                CapabilityKind::Db,
+                "query",
+                serde_json::json!({"limit": 1, "order_by": {"random": true}}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "no_table");
     }
 
     #[test]

@@ -104,16 +104,27 @@ substitute_placeholders(template, {"username": "penguin", "channel": "general"})
 ```python
 from waddle_sdk import community_kv
 
-total = await community_kv.increment(envelope.community, "count:<pseudonym>", 1)
+total = await community_kv.increment(envelope.community, "count.<pseudonym>", 1)
 ```
 
 Every call takes `community_id` as its first argument and raises `ValueError` if it's
 falsy — a missing `community_id` is a bundle bug to surface immediately, never a reason to
-silently fall back to a global/tenant-wide key. **Reputation and user-details are the only
-two cross-community exceptions in the platform** (`reputation_global`, the hub `users`
-table) — neither goes through `community_kv`; they have their own dedicated, explicitly
-cross-community storage. A new bundle never introduces a third exception without updating
-this doc first.
+silently fall back to a global/tenant-wide key.
+
+**`key` charset: `[A-Za-z0-9_.-]` only, never `:` (gh-631).** The real `kv` host capability
+(`core/bundle_host_kv/src/scope.rs::is_allowed_key_byte`) reserves `:` as its own namespace
+separator and rejects any guest key containing one; `waddle_sdk.kv.validate_key()` enforces
+this before every host call (including the key `community_kv` builds internally), raising
+`InvalidKvKeyError` with the exact offending characters instead of a generic host error.
+Use `.` to namespace your own key, e.g. `"count.registry"` / `"count.value.{name}"`, never
+`"count:registry"`.
+
+**Reputation and user-details are the only
+two cross-community exceptions in the platform** (`reputation_tenant` -- cross-community but
+hard-bounded to ONE tenant, never cross-tenant, see security.md Tenant Isolation -- and the
+hub `users` table) — neither goes through `community_kv`; they have their own dedicated,
+explicitly cross-community storage. A new bundle never introduces a third exception without
+updating this doc first.
 
 ## 3. Feature Flags & License Gating
 

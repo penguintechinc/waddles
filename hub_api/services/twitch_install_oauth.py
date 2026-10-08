@@ -50,6 +50,7 @@ _ALLOWED_SCHEMES: tuple[str, ...] = ("https",)
 
 TWITCH_AUTHORIZE_URL = "https://id.twitch.tv/oauth2/authorize"
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"  # noqa: S105 - URL, not a credential
+TWITCH_VALIDATE_URL = "https://id.twitch.tv/oauth2/validate"
 
 #: The exact Helix scopes the role-sync worker needs -- see module docstring.
 ROLE_SYNC_SCOPES: tuple[str, ...] = (
@@ -196,6 +197,44 @@ async def exchange_code(
     }
     payload = await _post_token(data)
     return _result_from_payload(payload)
+
+
+async def fetch_token_user_id(*, access_token: str, client_id: str) -> str:
+    """`GET /oauth2/validate` -- resolve the Twitch user id an access token belongs to.
+
+    Called once at install/refresh time (`services.twitch_install_
+    credentials.store_initial_credentials`) to pin `platform_connections.
+    resource_id` (migration 0035, `resource_type="twitch_channel"`) to the
+    exact broadcaster channel the OAuth grant authorizes -- Twitch's own
+    documented way to introspect a token, no Helix scope required. Raises
+    `TwitchOAuthError` on any transport/response failure; never logs the
+    access token.
+    """
+    await _guard_url(TWITCH_VALIDATE_URL)
+
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            response = await client.get(
+                TWITCH_VALIDATE_URL,
+                headers={"Authorization": f"OAuth {access_token}", "Client-Id": client_id},
+            )
+    except httpx.HTTPError as exc:
+        logger.warning("twitch_install_oauth.validate_request_failed")
+        raise TwitchOAuthError("twitch: token validate request failed") from exc
+
+    if response.status_code // 100 != 2:
+        logger.warning("twitch_install_oauth.validate_non_2xx status=%d", response.status_code)
+        raise TwitchOAuthError(f"twitch: validate endpoint returned HTTP {response.status_code}")
+
+    try:
+        payload: Any = response.json()
+    except ValueError as exc:
+        raise TwitchOAuthError("twitch: validate endpoint returned malformed JSON") from exc
+
+    user_id = payload.get("user_id") if isinstance(payload, dict) else None
+    if not isinstance(user_id, str) or not user_id:
+        raise TwitchOAuthError("twitch: validate endpoint response missing user_id")
+    return user_id
 
 
 async def refresh_access_token(

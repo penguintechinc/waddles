@@ -46,14 +46,14 @@ FICO-style reputation system with event-driven scoring, premium weight customiza
 ### ReputationService
 - Calculate reputation scores (FICO-style 300-850)
 - Determine tiers (Exceptional, Very Good, Good, Fair, Poor)
-- Maintain community and global reputation
+- Maintain community and tenant reputation (tenant aggregate never spans tenants)
 - Generate leaderboards
 
 ### EventProcessor
 - Process events in batches
 - Apply weights to events
 - Update community_members table
-- Update reputation_global table
+- Update reputation_tenant table
 - Trigger policy enforcement
 
 ### WeightManager
@@ -123,12 +123,14 @@ reason TEXT,
 metadata JSONB
 ```
 
-### reputation_global
+### reputation_tenant
 ```sql
-hub_user_id INTEGER PRIMARY KEY,
+tenant_id INTEGER NOT NULL,
+hub_user_id INTEGER NOT NULL,
 score INTEGER DEFAULT 600,
 total_events INTEGER,
-last_event_at TIMESTAMP
+last_event_at TIMESTAMP,
+PRIMARY KEY (tenant_id, hub_user_id)
 ```
 
 ## Scalability

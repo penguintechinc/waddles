@@ -69,6 +69,16 @@ CREATE TABLE hub_users (
 CREATE TABLE app_catalog (
     app_id VARCHAR(255) PRIMARY KEY
 );
+-- 0039_event_sync_enabled is the first Alembic migration to FK into
+-- calendar_events -- a legacy table owned by config/postgres/migrations/
+-- (never Alembic, see this module's own docstring on why the full legacy
+-- baseline isn't replayed here). Same minimal-bootstrap convention as
+-- tenants/communities/hub_users/app_catalog above: only the column(s)
+-- migrations 0020+ actually FK against (just `id`), not the real table's
+-- full column set.
+CREATE TABLE calendar_events (
+    id SERIAL PRIMARY KEY
+);
 """
 
 

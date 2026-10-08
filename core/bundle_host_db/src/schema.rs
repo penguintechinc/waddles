@@ -76,6 +76,31 @@ pub struct TableSchema {
     pub schema: AppSchema,
     pub table: String,
     pub columns: Vec<ColumnDef>,
+    /// **Deliberate, explicit, per-table opt-in** for the cross-community
+    /// read exception (`rules/critical-rules.md` PII Tokenization's
+    /// `[[bundle-state-community-scoped]]` note: "the only exceptions are
+    /// reputation + user details"). `false` for every table by default and
+    /// for every table this crate's own `validated()` constructs -- only
+    /// flippable afterward via [`Self::with_cross_community_read`], which a
+    /// future platform-owned schema loader (never a bundle manifest) would
+    /// call only for the specific tables the platform itself designates as
+    /// intentionally cross-community (e.g. a hub-api-owned
+    /// `reputation_global` keyed by `hub_user_id`).
+    ///
+    /// **What this does and does not bypass.** [`crate::backend`]'s `get`/
+    /// `query` drop the explicit `tenant_id = $n AND community_id = $m`
+    /// predicate (and its RLS counterpart is expected to carry a matching
+    /// policy exception at the DDL layer -- out of this crate's scope, see
+    /// `crate::backend`'s own doc) when this is `true`; `insert`/`update`/
+    /// `delete` refuse outright (`DbError::InvalidColumn`) rather than ever
+    /// writing a row with no tenant scope. **`app_id` scoping is never
+    /// bypassed** -- this crate's whole design is "one table per app", so a
+    /// cross-community-read table still only ever resolves and reads its
+    /// own app's table, never another app's; "without the
+    /// (tenant, community, app_id) row-scoping" in the exception's own
+    /// design note refers to the tenant/community half of that triple, the
+    /// part this flag actually controls.
+    pub cross_community_read: bool,
 }
 
 impl TableSchema {
@@ -110,7 +135,19 @@ impl TableSchema {
             schema,
             table,
             columns,
+            cross_community_read: false,
         })
+    }
+
+    /// Opts this already-[`validated`](Self::validated) table into the
+    /// cross-community read exception -- see [`Self::cross_community_read`]'s
+    /// own doc for exactly what this does and does not bypass. Builder-style
+    /// so every existing `validated()` call site (every test in this crate,
+    /// every production schema-loader row today) is unaffected; only a
+    /// caller that explicitly opts in ever sets this.
+    pub fn with_cross_community_read(mut self) -> Self {
+        self.cross_community_read = true;
+        self
     }
 
     /// The column definition for `name`, if declared -- the single lookup
@@ -272,6 +309,20 @@ mod tests {
     fn schema_cache_get_is_none_for_an_unknown_app() {
         let cache = SchemaCache::new();
         assert!(cache.get("never_provisioned").is_none());
+    }
+
+    #[test]
+    fn validated_defaults_cross_community_read_to_false() {
+        let schema = TableSchema::validated(AppSchema::Core, "fishing_core", vec![]).unwrap();
+        assert!(!schema.cross_community_read);
+    }
+
+    #[test]
+    fn with_cross_community_read_opts_a_table_in() {
+        let schema = TableSchema::validated(AppSchema::Core, "reputation_global", vec![])
+            .unwrap()
+            .with_cross_community_read();
+        assert!(schema.cross_community_read);
     }
 
     #[test]

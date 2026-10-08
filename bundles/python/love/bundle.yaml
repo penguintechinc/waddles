@@ -1,0 +1,55 @@
+schema_version: 2
+app_id: waddles.core.example.love
+name: Love/Ship Compatibility Bundle (Python)
+# 1.0.0: initial kv-only v1 -- !love <user> (pair caller+target)/!love list/
+# !ship <userA> <userB>. See src/app.py's own module docstring for full scope.
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+author: PenguinTech/waddles
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/love
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!love", "!ship"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!love", "!ship"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- v1 is kv-only by design, same shape as duel/fish/lurk/count (see
+# src/app.py module docstring).
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - storage.kv
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null
