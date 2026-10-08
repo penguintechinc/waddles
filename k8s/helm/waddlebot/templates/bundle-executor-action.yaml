@@ -14,8 +14,11 @@
 # file). Gated on the top-level pipeline.rustDataPlane.enabled flag (default false) plus
 # this module's own .enabled sub-flag.
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.bundleExecutorAction.enabled }}
+{{- $bseaTier := .Values.global.deploymentTier }}
 {{- if not .Values.pipeline.rustDataPlane.bundleSigningPublicKeys }}
-{{- fail "pipeline.rustDataPlane.bundleSigningPublicKeys is empty: run make generate-bundle-signing-key and set values; see README rollout order" }}
+{{- if not (or (eq $bseaTier "alpha") (eq $bseaTier "local")) }}
+{{- fail (printf "pipeline.rustDataPlane.bundleSigningPublicKeys is empty and global.deploymentTier=%q is outside alpha/local: run make generate-bundle-signing-key and set values; see README rollout order" $bseaTier) }}
+{{- end }}
 {{- end }}
 ---
 apiVersion: apps/v1

@@ -228,11 +228,31 @@ async def read_bundle_sidecar(app_id: str, version: str, sha256_hex: str) -> dic
         try:
             resp = _client().get_object(Bucket=_bucket(), Key=key)
         except _client().exceptions.NoSuchKey:
+            logger.debug(
+                "bundle sidecar not found (typed NoSuchKey): bucket=%s key=%s",
+                _bucket(),
+                key,
+            )
             return None
         except Exception as exc:  # noqa: BLE001 -- botocore raises a generic ClientError for
             # some backends' 404s (MinIO) rather than the typed NoSuchKey subclass
             if "NoSuchKey" in str(exc) or "404" in str(exc):
+                logger.debug(
+                    "bundle sidecar not found (generic ClientError 404/NoSuchKey): "
+                    "bucket=%s key=%s exc_type=%s exc=%s",
+                    _bucket(),
+                    key,
+                    type(exc).__name__,
+                    exc,
+                )
                 return None
+            logger.error(
+                "bundle sidecar read failed: bucket=%s key=%s exc_type=%s exc=%s",
+                _bucket(),
+                key,
+                type(exc).__name__,
+                exc,
+            )
             raise
         body = resp["Body"].read()
         result: dict[str, Any] = json.loads(body)

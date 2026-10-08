@@ -49,8 +49,11 @@
 # truly stuck pod observable and recoverable instead of silently serving nothing forever
 # (see global.hostApiTls's comment for the broken/missing mTLS cert case specifically).
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.bundleExecutor.enabled }}
+{{- $bsepTier := .Values.global.deploymentTier }}
 {{- if not .Values.pipeline.rustDataPlane.bundleSigningPublicKeys }}
-{{- fail "pipeline.rustDataPlane.bundleSigningPublicKeys is empty: run make generate-bundle-signing-key and set values; see README rollout order" }}
+{{- if not (or (eq $bsepTier "alpha") (eq $bsepTier "local")) }}
+{{- fail (printf "pipeline.rustDataPlane.bundleSigningPublicKeys is empty and global.deploymentTier=%q is outside alpha/local: run make generate-bundle-signing-key and set values; see README rollout order" $bsepTier) }}
+{{- end }}
 {{- end }}
 ---
 apiVersion: apps/v1
