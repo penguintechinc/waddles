@@ -115,7 +115,7 @@ MAX_COOLDOWN_SECONDS = 3600
 
 #: Durable per-community config -- never expires (`ttl_seconds=0`), mirrors
 #: `fish`'s own `_COOLDOWN_CONFIG_KEY` convention.
-_COOLDOWN_CONFIG_KEY = "duel:config:cooldown"
+_COOLDOWN_CONFIG_KEY = "duel.config.cooldown"
 
 #: A plausible username/mention shape: an optional leading `@` (stripped),
 #: then 1-32 chars of letters/digits/underscore/dot/hyphen. Not a lookup
@@ -152,17 +152,17 @@ def _pseudonym(identity: str | None) -> str:
 
 def _wins_key(pseudonym: str) -> str:
     """Per-(community, participant) total-wins counter key."""
-    return f"duel:wins:{pseudonym}"
+    return f"duel.wins.{pseudonym}"
 
 
 def _losses_key(pseudonym: str) -> str:
     """Per-(community, participant) total-losses counter key."""
-    return f"duel:losses:{pseudonym}"
+    return f"duel.losses.{pseudonym}"
 
 
 def _lastduel_key(pseudonym: str) -> str:
     """Per-(community, challenger) last-challenge-timestamp key (the cooldown gate)."""
-    return f"duel:lastduel:{pseudonym}"
+    return f"duel.lastduel.{pseudonym}"
 
 
 def _format_duration(total_seconds: int) -> str:

@@ -44,10 +44,10 @@ docstring for the full identity/pseudonymization trade-off.
 
 | Key | Scope | TTL | Purpose |
 |---|---|---|---|
-| `duel:lastduel:<pseudonym>` | per-(community, challenger) | `cooldown` seconds | Cooldown gate -- presence + elapsed time decide allow/deny. |
-| `duel:wins:<pseudonym>` | per-(community, participant) | none | Running total wins (`kv.increment`). |
-| `duel:losses:<pseudonym>` | per-(community, participant) | none | Running total losses (`kv.increment`). |
-| `duel:config:cooldown` | per-community | none | Admin-configured challenge cooldown in seconds. |
+| `duel.lastduel.<pseudonym>` | per-(community, challenger) | `cooldown` seconds | Cooldown gate -- presence + elapsed time decide allow/deny. |
+| `duel.wins.<pseudonym>` | per-(community, participant) | none | Running total wins (`kv.increment`). |
+| `duel.losses.<pseudonym>` | per-(community, participant) | none | Running total losses (`kv.increment`). |
+| `duel.config.cooldown` | per-community | none | Admin-configured challenge cooldown in seconds. |
 
 ## Deferred to v2 (not stubbed)
 
