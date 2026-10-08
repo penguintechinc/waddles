@@ -647,4 +647,405 @@ mod tests {
             .expect_err("post-revoke, the very next call must deny");
         assert_eq!(err.reason_str(), "not_granted");
     }
+
+    /// A malformed row (missing `permission_id` entirely) must be skipped
+    /// without panicking or discarding the rest of the batch -- the
+    /// `Err(_) => continue` branch in [`PgGrantLoader::load`]'s row loop.
+    #[tokio::test]
+    async fn pg_grant_loader_skips_a_row_missing_permission_id_and_keeps_the_rest() {
+        use sea_orm::{DatabaseBackend, MockDatabase};
+        use std::collections::BTreeMap;
+
+        let malformed_row: BTreeMap<String, sea_orm::Value> = BTreeMap::from([(
+            "params_json".to_string(),
+            sea_orm::Value::from("{}".to_string()),
+        )]);
+        let good_row: BTreeMap<String, sea_orm::Value> = BTreeMap::from([
+            (
+                "permission_id".to_string(),
+                sea_orm::Value::from("chat.send:discord".to_string()),
+            ),
+            (
+                "params_json".to_string(),
+                sea_orm::Value::from("{}".to_string()),
+            ),
+        ]);
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![malformed_row, good_row]])
+            .into_connection();
+        let loader = PgGrantLoader::new(db);
+        let result = loader
+            .load(&key())
+            .await
+            .unwrap()
+            .expect("one good row was seeded");
+        assert_eq!(
+            result.grants.len(),
+            1,
+            "the malformed row must be skipped, not panic or abort the batch"
+        );
+        assert!(result.get("chat.send:discord").is_some());
+    }
+
+    // ---- parse_invalidate_fields ---------------------------------------
+
+    #[test]
+    fn parse_invalidate_fields_parses_a_complete_entry() {
+        let fields = HashMap::from([
+            ("tenant_id".to_string(), "7".to_string()),
+            ("community_id".to_string(), "3".to_string()),
+            ("app_id".to_string(), "waddles.core.ping".to_string()),
+            ("version".to_string(), "1.0.0".to_string()),
+        ]);
+        let payload = parse_invalidate_fields(&fields).expect("all required fields present");
+        assert_eq!(payload.tenant_id, 7);
+        assert_eq!(payload.community_id, 3);
+        assert_eq!(payload.app_id, "waddles.core.ping");
+    }
+
+    #[test]
+    fn parse_invalidate_fields_rejects_missing_tenant_id() {
+        let fields = HashMap::from([
+            ("community_id".to_string(), "3".to_string()),
+            ("app_id".to_string(), "waddles.core.ping".to_string()),
+        ]);
+        assert!(parse_invalidate_fields(&fields).is_none());
+    }
+
+    #[test]
+    fn parse_invalidate_fields_rejects_missing_community_id() {
+        let fields = HashMap::from([
+            ("tenant_id".to_string(), "7".to_string()),
+            ("app_id".to_string(), "waddles.core.ping".to_string()),
+        ]);
+        assert!(parse_invalidate_fields(&fields).is_none());
+    }
+
+    #[test]
+    fn parse_invalidate_fields_rejects_missing_app_id() {
+        let fields = HashMap::from([
+            ("tenant_id".to_string(), "7".to_string()),
+            ("community_id".to_string(), "3".to_string()),
+        ]);
+        assert!(parse_invalidate_fields(&fields).is_none());
+    }
+
+    #[test]
+    fn parse_invalidate_fields_rejects_an_unparseable_tenant_id() {
+        let fields = HashMap::from([
+            ("tenant_id".to_string(), "not-a-number".to_string()),
+            ("community_id".to_string(), "3".to_string()),
+            ("app_id".to_string(), "waddles.core.ping".to_string()),
+        ]);
+        assert!(parse_invalidate_fields(&fields).is_none());
+    }
+
+    // ---- invalidate_matching / poll_refresh_all / tail_invalidation_stream
+    // / run_grant_gate_refresh_loop / build_production_gate ---------------
+
+    fn other_key() -> GrantScopeKey {
+        GrantScopeKey {
+            tenant_id: 7,
+            community_id: 3,
+            app_id: "waddles.core.other_bundle".to_string(),
+            app_version: 1,
+        }
+    }
+
+    /// Counts every [`GrantLoader::load`] call it forwards -- lets a test
+    /// assert a scope's grant WAS (or was not) re-fetched, not just that the
+    /// call didn't panic.
+    struct CountingLoader<L: GrantLoader> {
+        inner: L,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl<L: GrantLoader> CountingLoader<L> {
+        fn new(inner: L) -> Self {
+            Self {
+                inner,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl<L: GrantLoader> GrantLoader for CountingLoader<L> {
+        fn load<'a>(
+            &'a self,
+            key: &'a GrantScopeKey,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Option<GrantSet>, GrantLoadError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.load(key)
+        }
+    }
+
+    /// Succeeds exactly once, then fails every call after -- lets a test
+    /// seed a cache entry and then exercise the "refresh after
+    /// invalidation/poll failed" log-and-continue branches without a real
+    /// backend flapping.
+    struct FlakyLoader {
+        remaining_successes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FlakyLoader {
+        fn succeeds_once_then_fails() -> Self {
+            Self {
+                remaining_successes: std::sync::atomic::AtomicUsize::new(1),
+            }
+        }
+    }
+
+    impl GrantLoader for FlakyLoader {
+        fn load<'a>(
+            &'a self,
+            _key: &'a GrantScopeKey,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Option<GrantSet>, GrantLoadError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            let succeeded = self
+                .remaining_successes
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |n| n.checked_sub(1),
+                )
+                .is_ok();
+            Box::pin(async move {
+                if succeeded {
+                    Ok(Some(GrantSet {
+                        permission_snapshot_hash: "seed".to_string(),
+                        grants: HashMap::new(),
+                    }))
+                } else {
+                    Err(GrantLoadError::Backend("simulated".to_string()))
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn invalidate_matching_only_refreshes_keys_matching_the_payload() {
+        let inner = InMemoryGrantLoader::new();
+        inner.set(
+            key(),
+            GrantSet {
+                permission_snapshot_hash: "h1".to_string(),
+                grants: HashMap::new(),
+            },
+        );
+        inner.set(
+            other_key(),
+            GrantSet {
+                permission_snapshot_hash: "h2".to_string(),
+                grants: HashMap::new(),
+            },
+        );
+        let loader = Arc::new(CountingLoader::new(inner));
+        let cache = Arc::new(GrantCache::new(Arc::clone(&loader)));
+        cache.refresh(&key()).await.unwrap();
+        cache.refresh(&other_key()).await.unwrap();
+        let before = loader.call_count();
+
+        let payload = InvalidatePayload {
+            tenant_id: key().tenant_id,
+            community_id: key().community_id,
+            app_id: key().app_id.clone(),
+        };
+        invalidate_matching(&cache, &payload).await;
+
+        assert_eq!(
+            loader.call_count(),
+            before + 1,
+            "only the matching key's grant should be reloaded"
+        );
+        assert!(
+            cache.keys().contains(&other_key()),
+            "the non-matching key must be left untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidate_matching_logs_and_continues_when_the_refresh_itself_fails() {
+        use bundle_capability_gate::GrantSnapshot;
+
+        let cache = Arc::new(GrantCache::new(Arc::new(
+            FlakyLoader::succeeds_once_then_fails(),
+        )));
+        cache
+            .refresh(&key())
+            .await
+            .expect("first load succeeds, seeding the cache");
+        assert!(cache.current(&key()).is_some());
+
+        let payload = InvalidatePayload {
+            tenant_id: key().tenant_id,
+            community_id: key().community_id,
+            app_id: key().app_id.clone(),
+        };
+        // Must not panic even though the inner refresh now fails.
+        invalidate_matching(&cache, &payload).await;
+
+        // `invalidate()` already dropped the stale entry before the failed
+        // refresh attempt -- the scope now fails closed, exactly the
+        // fail-closed posture the module doc promises.
+        assert!(cache.current(&key()).is_none());
+    }
+
+    #[tokio::test]
+    async fn poll_refresh_all_refreshes_every_resident_key_every_tick() {
+        let inner = InMemoryGrantLoader::new();
+        inner.set(
+            key(),
+            GrantSet {
+                permission_snapshot_hash: "h".to_string(),
+                grants: HashMap::new(),
+            },
+        );
+        let loader = Arc::new(CountingLoader::new(inner));
+        let cache = Arc::new(GrantCache::new(Arc::clone(&loader)));
+        cache.refresh(&key()).await.unwrap();
+        let before = loader.call_count();
+
+        // One tick is enough to prove the sweep calls refresh on the
+        // resident key; bound the (otherwise-infinite) loop with a timeout.
+        let _ = tokio::time::timeout(
+            Duration::from_millis(50),
+            poll_refresh_all(&cache, Duration::from_millis(1)),
+        )
+        .await;
+
+        assert!(
+            loader.call_count() > before,
+            "poll_refresh_all must re-fetch every key resident in the cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_refresh_all_logs_and_continues_when_a_refresh_fails() {
+        let cache = Arc::new(GrantCache::new(Arc::new(
+            FlakyLoader::succeeds_once_then_fails(),
+        )));
+        cache.refresh(&key()).await.expect("seed succeeds");
+        // Reaching the timeout without panicking is the assertion: a
+        // failing poll-refresh must log and keep sweeping, never crash the
+        // task.
+        let _ = tokio::time::timeout(
+            Duration::from_millis(50),
+            poll_refresh_all(&cache, Duration::from_millis(1)),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn tail_invalidation_stream_retries_on_a_connect_failure_without_panicking() {
+        let client =
+            redis::Client::open("redis://127.0.0.1:1/").expect("valid URL, just unreachable");
+        let cache = Arc::new(GrantCache::new(Arc::new(InMemoryGrantLoader::new())));
+        // Bound the otherwise-infinite retry loop: reaching the timeout
+        // without panicking proves the connect-failure branch logs and
+        // retries instead of crashing the task.
+        let _ = tokio::time::timeout(
+            Duration::from_millis(100),
+            tail_invalidation_stream(&client, &cache),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn run_grant_gate_refresh_loop_runs_both_arms_without_panicking() {
+        let client =
+            redis::Client::open("redis://127.0.0.1:1/").expect("valid URL, just unreachable");
+        let cache = Arc::new(GrantCache::new(Arc::new(InMemoryGrantLoader::new())));
+        let _ = tokio::time::timeout(
+            Duration::from_millis(100),
+            run_grant_gate_refresh_loop(client, cache, Duration::from_millis(1)),
+        )
+        .await;
+    }
+
+    /// `build_production_gate` wires a brand-new, never-refreshed
+    /// [`GrantCache`] -- nothing has populated the scope's memo entry yet,
+    /// so [`CapabilityGate::authorize`] must fail closed exactly like any
+    /// other cache miss (module doc: "deny, never panic, never fall back to
+    /// a default-allow"), never crash building the gate itself and never
+    /// silently default-allow just because no Valkey client was supplied.
+    #[tokio::test]
+    async fn build_production_gate_with_no_redis_client_fails_closed_until_refreshed() {
+        use bundle_capability_gate::{
+            AppScopedResource, HostInvokeScopeBuilder, PermissionId, ResourceRef, TenantTier,
+        };
+
+        let gate =
+            build_production_gate(InMemoryGrantLoader::new(), None, Duration::from_secs(300));
+        let scope = HostInvokeScopeBuilder::new()
+            .tenant_id(7)
+            .community_id(3)
+            .app_id("waddles.core.example_echo".to_string())
+            .app_version(1)
+            .tenant_tier(TenantTier::Free)
+            .build()
+            .expect("every required field is set above");
+        let err = gate
+            .authorize(
+                &scope,
+                PermissionId::PlatformClock,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .expect_err("a never-refreshed scope must deny, not default-allow");
+        assert_eq!(err.reason_str(), "not_granted");
+    }
+
+    /// Same fail-closed posture as above, but with a (here unreachable)
+    /// Valkey client supplied -- proves the `Some(client) =>
+    /// tokio::spawn(...)` branch doesn't panic the calling task and the
+    /// returned gate is still immediately usable (and still fails closed)
+    /// even while its background refresh loop is retrying a dead
+    /// connection.
+    #[tokio::test]
+    async fn build_production_gate_with_a_redis_client_spawns_the_refresh_loop_without_panicking() {
+        use bundle_capability_gate::{
+            AppScopedResource, HostInvokeScopeBuilder, PermissionId, ResourceRef, TenantTier,
+        };
+
+        let client =
+            redis::Client::open("redis://127.0.0.1:1/").expect("valid URL, just unreachable");
+        let gate = build_production_gate(
+            InMemoryGrantLoader::new(),
+            Some(client),
+            Duration::from_millis(1),
+        );
+        let scope = HostInvokeScopeBuilder::new()
+            .tenant_id(7)
+            .community_id(3)
+            .app_id("waddles.core.example_echo".to_string())
+            .app_version(1)
+            .tenant_tier(TenantTier::Free)
+            .build()
+            .expect("every required field is set above");
+        // Give the spawned task a moment to run at least once against the
+        // unreachable address without this test hanging or panicking.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let err = gate
+            .authorize(
+                &scope,
+                PermissionId::PlatformLog,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .expect_err("still never refreshed -- must deny, not default-allow");
+        assert_eq!(err.reason_str(), "not_granted");
+    }
 }

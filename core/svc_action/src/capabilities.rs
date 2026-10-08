@@ -3092,4 +3092,192 @@ mod tests {
             .await;
         assert!(result.is_err());
     }
+
+    // ---- handle_flags: authorize() allow/deny + op dispatch ------------
+
+    /// `permissive_gate()` grants `flags.read` to this scope's app id --
+    /// the gate's allow branch must fall through to the real
+    /// `crate::flags::resolve_flag` resolution, not short-circuit deny.
+    /// Asserts `true` regardless of `default_value` (rather than asserting
+    /// a specific value derived from it) because this test process has no
+    /// license env vars configured, so `resolve_flag`'s hardcoded-domain
+    /// bypass (`crate::flags`'s own `bypass_active_resolves_true_
+    /// regardless_of_default` test) is what actually answers the call --
+    /// the point here is that `handle_flags` reached that resolution at
+    /// all, not which fallback tier inside it fired.
+    #[tokio::test]
+    async fn flags_enabled_resolves_through_the_gate_when_granted() {
+        let caps = caps(FakeRelayQueue::default());
+        let result = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Flags,
+                    "enabled",
+                    serde_json::json!({"key": "waddles.some-capability", "default_value": false}),
+                ),
+            )
+            .await
+            .expect("flags.read is granted by permissive_gate()");
+        assert_eq!(result["enabled"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn flags_enabled_malformed_args_is_invalid_args() {
+        let caps = caps(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Flags, "enabled", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn flags_unknown_op_is_not_implemented() {
+        let caps = caps(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Flags, "bogus-op", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_implemented");
+    }
+
+    // ---- db/JSON value mapping helpers (handle_db's building blocks) ---
+
+    #[test]
+    fn json_to_db_value_maps_every_supported_json_shape() {
+        assert_eq!(
+            json_to_db_value(&serde_json::json!(null)).unwrap(),
+            DbValue::Null
+        );
+        assert_eq!(
+            json_to_db_value(&serde_json::json!(true)).unwrap(),
+            DbValue::Bool(true)
+        );
+        assert_eq!(
+            json_to_db_value(&serde_json::json!(42)).unwrap(),
+            DbValue::Int(42)
+        );
+        assert_eq!(
+            json_to_db_value(&serde_json::json!(1.5)).unwrap(),
+            DbValue::Float(1.5)
+        );
+        assert_eq!(
+            json_to_db_value(&serde_json::json!("hi")).unwrap(),
+            DbValue::Text("hi".to_string())
+        );
+    }
+
+    #[test]
+    fn json_to_db_value_rejects_arrays_and_objects() {
+        assert_eq!(
+            json_to_db_value(&serde_json::json!([1, 2]))
+                .unwrap_err()
+                .code,
+            "invalid_args"
+        );
+        assert_eq!(
+            json_to_db_value(&serde_json::json!({"a": 1}))
+                .unwrap_err()
+                .code,
+            "invalid_args"
+        );
+    }
+
+    #[test]
+    fn parse_order_by_defaults_to_none_when_absent_or_null() {
+        assert_eq!(parse_order_by(&serde_json::json!({})).unwrap(), None);
+        assert_eq!(
+            parse_order_by(&serde_json::json!({"order_by": null})).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_order_by_parses_random() {
+        assert_eq!(
+            parse_order_by(&serde_json::json!({"order_by": {"random": true}})).unwrap(),
+            Some(bundle_host_db::OrderBy::Random)
+        );
+    }
+
+    #[test]
+    fn parse_order_by_parses_a_column_with_explicit_descending() {
+        assert_eq!(
+            parse_order_by(&serde_json::json!({
+                "order_by": {"column": "created_at", "descending": true}
+            }))
+            .unwrap(),
+            Some(bundle_host_db::OrderBy::Column {
+                name: "created_at".to_string(),
+                descending: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_order_by_defaults_descending_to_false() {
+        assert_eq!(
+            parse_order_by(&serde_json::json!({"order_by": {"column": "row_id"}})).unwrap(),
+            Some(bundle_host_db::OrderBy::Column {
+                name: "row_id".to_string(),
+                descending: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_order_by_rejects_a_malformed_order_by_object() {
+        let err = parse_order_by(&serde_json::json!({"order_by": {}})).unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[test]
+    fn db_value_to_json_maps_every_variant() {
+        assert_eq!(db_value_to_json(&DbValue::Null), serde_json::Value::Null);
+        assert_eq!(
+            db_value_to_json(&DbValue::Bool(true)),
+            serde_json::json!(true)
+        );
+        assert_eq!(db_value_to_json(&DbValue::Int(7)), serde_json::json!(7));
+        assert_eq!(
+            db_value_to_json(&DbValue::Float(2.5)),
+            serde_json::json!(2.5)
+        );
+        assert_eq!(
+            db_value_to_json(&DbValue::Text("x".to_string())),
+            serde_json::json!("x")
+        );
+        assert_eq!(
+            db_value_to_json(&DbValue::Bytes(vec![1, 2, 3])),
+            serde_json::json!([1, 2, 3])
+        );
+    }
+
+    #[test]
+    fn row_to_json_shapes_row_id_version_and_columns() {
+        let row = bundle_host_db::Row {
+            row_id: "r1".to_string(),
+            version: 3,
+            columns: vec![("name".to_string(), DbValue::Text("quote".to_string()))],
+        };
+        let json = row_to_json(row);
+        assert_eq!(json["row_id"], serde_json::json!("r1"));
+        assert_eq!(json["version"], serde_json::json!(3));
+        assert_eq!(json["columns"]["name"], serde_json::json!("quote"));
+    }
+
+    #[test]
+    fn db_error_to_host_error_carries_the_stable_reason_code() {
+        let err = db_error_to_host_error(DbError::NoTable);
+        assert_eq!(err.code, "no_table");
+        let err = db_error_to_host_error(DbError::Conflict);
+        assert_eq!(err.code, "conflict");
+    }
 }
