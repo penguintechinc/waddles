@@ -494,7 +494,7 @@ async def _maybe_cleanup_zero_row(
     try:
         await _db_delete(row_id, expected_version, provider=provider, channel_id=channel_id)
     except db.ConflictError:
-        log.info("inventory.cleanup_skipped", item=item, reason="conflict")
+        log.info("inventory.cleanup_skipped", row_id=row_id, reason="conflict")
         return
     directory = await _dir_get(community, pseudonym, provider=provider, channel_id=channel_id)
     if directory.get(item) == row_id:
@@ -698,7 +698,7 @@ async def dispatch(
         )
         reply_text = f"{username} gave 1 {item} to {target_raw}."
         await relay.push(provider, {"channel": channel_id, "text": reply_text})
-        log.info("inventory.dispatch gave", item=item)
+        log.info("inventory.dispatch gave", command=command)
         return DispatchResult(transport=provider, detail="give")
 
     if command == "list_other":
