@@ -213,8 +213,8 @@ interface relay {
 }
 
 /// Bundle-pushable overlay widgets rendered by svc-presentation-rust
-/// (issue #457). Additive, `stage-v1-1`-only (spec SS5-style world
-/// versioning, see `world stage-v1-1` below) -- `world stage` (1.0.0)
+/// (issue #457). Additive, `stage-next`-only (spec SS5-style world
+/// versioning, see `world stage-next` below) -- `world stage` (1.0.0)
 /// never imports this. Capability: granted only when permission
 /// `overlay.media` is held (`bundle_capability_gate::permission::
 /// PermissionFamily::OverlayMedia`); the community/token resolution is
@@ -276,7 +276,7 @@ interface overlay {
 }
 
 /// Stream-lifecycle hooks a bundle exports to react to svc-streaming-rust
-/// events (issue #456). Additive, `stage-v1-1`-only, modeled on
+/// events (issue #456). Additive, `stage-next`-only, modeled on
 /// `scheduled-stage`'s "export a hook, `none`/`unsupported-stage` means
 /// not interested" shape -- a bundle not implementing streaming behavior
 /// returns `unsupported-stage` from every hook (SDK default), exactly as
@@ -386,29 +386,43 @@ world stage {
 /// stage` (1.0.0) import/export stays byte-for-byte, plus the new
 /// `overlay` import and `streaming-lifecycle` export landed here (C1,
 /// issues #456/#457). `world stage` above is completely untouched: an
-/// existing 1.0.0 component never references `stage-v1-1` and is
+/// existing 1.0.0 component never references `stage-next` and is
 /// unaffected by anything added to it.
 ///
-/// **Package version intentionally NOT bumped** (still `waddle:bundle@
-/// 1.0.0`) -- `docs/superpowers/specs/2026-09-28-wit-stage-v1-1-design.md`
-/// SS5 sketches a package-version bump (`@1.1.0`) alongside a frozen
-/// `@1.0.0` `world stage`, but per-item semver pinning that would require
-/// (two differently-versioned `interface types { ... }` declarations in
-/// one file) is not supported syntax in this repo's pinned wasm-tools
-/// 1.259.0 WIT parser (verified: `interface foo@1.0.0 { ... }` is a parse
-/// error). A single package version with two worlds -- this file's actual
-/// approach -- is the verified-safe additive mechanism; reconcile with
-/// that design doc's own versioning story in whichever PR lands
-/// moderation/scheduled-triggers/db-batch.
+/// **Named `stage-next`, NOT `stage-v1-1` or `stage-v1_1`** (the
+/// provisional name `docs/superpowers/specs/2026-09-28-wit-stage-v1-1-
+/// design.md` SS5 sketches): a trailing bare-digit segment after a hyphen
+/// (`-1`) is INVALID WIT kebab-case grammar (each `-`-separated segment
+/// must start with a letter, not a digit) -- `wasm-tools component wit`'s
+/// pretty-printer round-trip silently accepted `world stage-v1-1` when
+/// this was verified locally, but `wit-bindgen` 0.44.0's parser (the one
+/// `sdk/waddle-sdk-rs` actually builds against via `wit_bindgen::
+/// generate!`) correctly rejects it (`invalid character in identifier
+/// '1'`), which only surfaced in CI. **Flag for whoever lands
+/// moderation/scheduled-triggers/db-batch**: that design doc's own
+/// `stage-v1_1` naming will hit this exact grammar error too -- use
+/// `stage-next` (or another non-digit-leading-segment name), not
+/// `stage-v1_1`/`stage-v1-1`.
 ///
-/// **Whoever lands moderation/scheduled-triggers/db-batch (wit-stage-v1-1
-/// design doc) extends THIS SAME `stage-v1-1` world** (add `import
-/// moderation;`/`export scheduled-stage;`/the `db` interface's
-/// `execute-batch` addition here) rather than declaring a second
-/// `stage-v1-1` -- WIT worlds are not open/mergeable across files, so a
-/// second same-named world definition would be a hard duplicate-world
-/// conflict, not an extension.
-world stage-v1-1 {
+/// **Package version intentionally NOT bumped** (still `waddle:bundle@
+/// 1.0.0`) -- that design doc also sketches a package-version bump
+/// (`@1.1.0`) alongside a frozen `@1.0.0` `world stage`, but per-item
+/// semver pinning that would require (two differently-versioned
+/// `interface types { ... }` declarations in one file) is not supported
+/// syntax in this repo's pinned wasm-tools 1.259.0 WIT parser (verified:
+/// `interface foo@1.0.0 { ... }` is a parse error). A single package
+/// version with two worlds -- this file's actual approach -- is the
+/// verified-safe additive mechanism; reconcile with that design doc's own
+/// versioning story in whichever PR lands moderation/scheduled-triggers/
+/// db-batch.
+///
+/// **Whoever lands moderation/scheduled-triggers/db-batch extends THIS
+/// SAME `stage-next` world** (add `import moderation;`/`export
+/// scheduled-stage;`/the `db` interface's `execute-batch` addition here)
+/// rather than declaring a second next-version world -- WIT worlds are
+/// not open/mergeable across files, so a second same-purpose world
+/// definition would be a hard duplicate-world conflict, not an extension.
+world stage-next {
   import context;
   import http;
   import kv;
