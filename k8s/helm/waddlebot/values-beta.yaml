@@ -81,9 +81,12 @@ pipeline:
     # feature/bundle-artifact-signing -- run `make generate-bundle-signing-key
     # KEY_ID=<label> KUBE_CONTEXT=dal2-beta NAMESPACE=waddlebot` once before the first
     # bundle approval on this env (uses the default secret name -- see values.yaml's
-    # pipeline.hubApi.bundleSigning comment). rustDataPlane stays disabled here (base
-    # default), so no bundleSigningPublicKeys override is needed yet -- add one under
-    # pipeline.rustDataPlane.bundleSigningPublicKeys if/when the executor is enabled here.
+    # pipeline.hubApi.bundleSigning comment); deploymentTier=beta is outside alpha/local
+    # so templates/auto-provisioned-keys-job.yaml's hook cannot generate this Secret
+    # itself, only derive+publish its public key once it exists. rustDataPlane stays
+    # disabled here (base default) -- fix/chart-autogen-bundle-signing-key: no
+    # bundleSigningPublicKeys override is needed when the executor IS enabled here, it
+    # now sources the public key from the auto-derived ConfigMap by default.
   hubWebui:
     replicas: 1
     resources:
