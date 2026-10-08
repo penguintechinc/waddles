@@ -63,6 +63,7 @@ from config import HubAPIConfig
 from services import twitch_install_credentials as creds_svc
 from services import twitch_install_oauth as oauth_svc
 from services import twitch_install_state as state_svc
+from services.credential_resolver import TransportUnavailable
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request, forbidden, payment_required
 
@@ -255,7 +256,7 @@ async def callback() -> tuple[Response, int] | Response:
         return _callback_html(ok=False, error="exchange_failed")
 
     try:
-        creds_svc.store_initial_credentials(
+        await creds_svc.store_initial_credentials(
             _dal(),
             tenant_id=payload.tenant_id,
             client_id=payload.client_id,
@@ -263,7 +264,7 @@ async def callback() -> tuple[Response, int] | Response:
             token=token,
             installed_by_user_id=payload.installed_by_user_id,
         )
-    except ApiError:
+    except (ApiError, TransportUnavailable):
         logger.warning("tenant_twitch_install.store_failed tenant_id=%s", payload.tenant_id)
         return _callback_html(ok=False, error="save_failed")
 

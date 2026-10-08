@@ -1,41 +1,106 @@
-"""Bar Citizen role-sync worker (Unit F) -- `twitch_to_discord` reconcile engine.
+"""Bar Citizen role-sync worker (Unit F) -- bidirectional Twitch<->Discord reconcile engine.
 
-**Scope landed this PR: `twitch_to_discord` only.** The primary ask --
-Twitch subscriber tiers T1/T2/T3 + moderators mirrored INTO Discord, via
-the per-community `role_name_prefix`'d roles `community_role_sync_
-bindings` already points at by Discord role ID -- is implemented and
-tested here. `discord_to_twitch` and `bidirectional` (which additionally
-needs loop-prevention: never re-applying a change this worker just made)
-are deliberately deferred to a follow-up PR per the owner's own
-budget-split instruction. A pairing whose `direction` is anything other
-than `"twitch_to_discord"` is skipped here -- logged/counted, not an
-error -- rather than partially applied.
+**Two directions, each with its own single authoritative source -- never
+the same role concept written both ways.** `guild_tenant_pairings.direction`
+picks which of the two reconcile passes below run for a pairing
+(`twitch_to_discord`, `discord_to_twitch`, or `bidirectional` -- both):
+
+- **`twitch_to_discord`** (`reconcile_pairing()`, unchanged from the first
+  cut of this worker): Twitch subscriber tiers T1/T2/T3 + moderators are
+  authoritative, mirrored INTO Discord via `community_role_sync_bindings`
+  rows with `sync_scope IN ('subscriber_tier', 'moderator')`.
+- **`discord_to_twitch`** (`reconcile_pairing_discord_to_platform()`, new
+  this PR -- the direction deferred at Unit F's first cut, see git
+  history for the prior module docstring's "deliberately deferred"
+  note). Despite the historical name (kept verbatim rather than
+  renamed -- it is `guild_tenant_pairings.direction`'s literal CHECK
+  constraint value, changing it is a breaking migration for zero
+  benefit), this direction does NOT write to Twitch at all -- Twitch
+  grants no API to assign a subscriber tier. Discord guild role
+  membership is authoritative instead, driving the linked hub_user's
+  **community** role/scope (`community_members.role`) via
+  `community_role_sync_bindings` rows with `sync_scope = 'community_role'`
+  (migration 0036) -- i.e. "Discord role -> this platform's own community
+  authz", not "Discord role -> Twitch".
+
+**Loop-prevention is structural, not stateful.** The blocker that
+deferred this direction at Unit F's first cut was "never re-applying a
+change this worker just made". Migration 0036 resolves it at the schema
+level instead of a last-applied-state table: a `community_role_sync_
+bindings` row's `sync_scope` fixes ONE authoritative write direction for
+life (enforced at binding-creation time by `services/guild_pairing.py::
+create_binding()` -- a `discord_role_id` already bound as `subscriber_
+tier`/`moderator` under a pairing can never also be bound as
+`community_role` there, and vice versa). `reconcile_pairing()` only ever
+calls Discord's add/remove-role API; `reconcile_pairing_discord_to_
+platform()` only ever reads Discord roles and writes `community_members`
+-- disjoint write targets, so this worker's own write is never also
+something it later reads back as a change to re-apply. No cycle exists to
+prevent at runtime.
+
+**Conflict precedence (one user, >1 mapped Discord role).** Resolved by
+`community_roles.priority` (existing column, already the DB-side ordering
+other callers use) -- highest priority held among the user's currently-
+mapped Discord roles wins, deterministic tie-break on role name. See
+`_resolve_desired_community_role()`.
+
+**Grant-only, never auto-demotes.** If a previously-mapped user holds none
+of a pairing's mapped Discord roles this pass, their community role is
+left untouched -- a transient Discord API hiccup must never silently
+revoke a human's existing community authz. Demotion remains an explicit
+admin action (`services/admin_service.py::update_member_role()`). Roles
+are security-sensitive (authz, not display) -- this worker is
+conservative by design, matching `community-owner`'s own existing
+never-touched protection (below) rather than requiring a second
+protection category.
+
+**`community-owner` is sacrosanct.** Never assignable via a
+`community_role` binding (`services/guild_pairing.py`'s own
+`VALID_COMMUNITY_ROLES` excludes it) and never overwritten by this
+worker even if somehow already set -- mirrors `admin_service.
+update_member_role()`'s own invariant verbatim.
+
+**Role-sync never crosses tenants.** Both directions resolve every
+mapping through `community_role_sync_bindings`/`guild_tenant_pairings`,
+which are scoped by `community_id` alone; `_resolve_tenant_for_community()`
+derives the owning tenant from that community row, never from caller
+input -- a Discord guild paired with communities in two different tenants
+(N:M, migration 0034) reconciles each pairing's tenant independently, and
+a hub_user's community-role write is always scoped to the SAME
+`community_id` the Discord role mapping came from.
 
 **Trigger model: periodic reconcile, not event-driven.** Wiring Twitch
-EventSub subscription/moderator-change events through the live ingest
-pipeline would touch `core/svc_ingest`/`core/svc_action`'s Rust dispatch
--- exactly the surface PR #561 (tokenization) and the future Rust routing
-unit are also changing concurrently. Rather than risk a collision there,
-this unit polls Helix per enabled pairing on a fixed cadence via `main()`
-below, run as a Kubernetes CronJob -- same "standalone process, own
+EventSub subscription/moderator-change events (or a Discord gateway
+GUILD_MEMBER_UPDATE push) through the live ingest pipeline would touch
+`core/svc_ingest`/`core/svc_action`'s Rust dispatch -- exactly the surface
+PR #561 (tokenization) and the future Rust routing unit are also changing
+concurrently. Rather than risk a collision there, this unit polls Helix/
+Discord REST per enabled pairing on a fixed cadence via `main()` below,
+run as a Kubernetes CronJob -- same "standalone process, own
 `penguin-dal` connection" shape `usage_aggregator_service.py` already
 uses, chosen over an in-process hub-api loop since Twitch's own rate
 limits make a sub-minute cadence pointless here (unlike that module's
-`e2s` cadence). **Follow-up (not in this PR):** an EventSub-pushed fast
-path once the Rust dispatch work lands; this worker's periodic pass
+`e2s` cadence). **Follow-up (not in this PR):** an EventSub/gateway-pushed
+fast path once the Rust dispatch work lands; this worker's periodic pass
 remains the correctness backstop (drift reconciliation) even after that
 lands -- reconciliation-by-polling is never fully replaced by push.
 
 **Identity resolution.** `community_role_sync_bindings` maps a Twitch
-concept (sub tier / moderator) to a Discord role ID; the actual Twitch
-user -> Discord user link is `hub_user_identities` (one row per
-`(hub_user_id, platform)`). A Twitch subscriber/moderator with no linked
-Discord identity (or vice versa) is skipped and counted, never an error.
+concept (sub tier / moderator) or a hub-platform concept (community role)
+to a Discord role ID; the actual Twitch user <-> Discord user <-> hub_user
+link is `hub_user_identities` (one row per `(hub_user_id, platform)`). A
+Twitch subscriber/moderator or Discord guild member with no linked
+counterpart identity is skipped and counted, never an error. A linked
+hub_user who is not yet an active `community_members` row for the target
+community is also skipped and counted, never an error -- this worker
+never creates community membership, only adjusts an existing member's
+role.
 
-**Fail-closed per pairing.** A credential/API failure for one pairing is
-logged at ERROR and that pairing is skipped; it never raises out of
-`run_role_sync_reconcile_batch()` and never affects any other pairing or
-tenant.
+**Fail-closed per pairing, per direction.** A credential/API failure for
+one pairing's one direction is logged at ERROR and that direction's
+reconcile is skipped; it never raises out of `run_role_sync_reconcile_
+batch()` and never affects the other direction of the same pairing, any
+other pairing, or any other tenant.
 
 **No raw PII in logs.** Every log line below carries platform user IDs,
 pairing/community/guild IDs, and counts only -- never a Twitch login or
@@ -48,6 +113,7 @@ import logging
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import httpx
@@ -72,12 +138,18 @@ logger = logging.getLogger(__name__)
 TWITCH_API_BASE = "https://api.twitch.tv/helix"
 DISCORD_API_BASE = "https://discord.com/api/v10"
 _REQUEST_TIMEOUT_SECONDS = 10.0
-#: Safety cap on Helix pagination per pairing per reconcile pass (~2,000 rows at 100/page).
+#: Safety cap on Helix/Discord pagination per pairing per reconcile pass
+#: (~2,000 rows at 100-1000/page).
 _MAX_PAGES = 20
+#: Discord's own documented max page size for `GET /guilds/{id}/members`.
+_DISCORD_MEMBER_PAGE_SIZE = 1000
 
-#: Direction this unit actually processes this PR -- `discord_to_twitch`/`bidirectional`
-#: are deferred, see module docstring.
-_HANDLED_DIRECTION = "twitch_to_discord"
+#: `guild_tenant_pairings.direction` values that run `reconcile_pairing()` (Twitch ->
+#: Discord, subscriber_tier/moderator bindings).
+_TWITCH_TO_DISCORD_DIRECTIONS = frozenset({"twitch_to_discord", "bidirectional"})
+#: `guild_tenant_pairings.direction` values that run `reconcile_pairing_discord_to_
+#: platform()` (Discord -> this platform's community role, community_role bindings).
+_DISCORD_TO_PLATFORM_DIRECTIONS = frozenset({"discord_to_twitch", "bidirectional"})
 
 #: PostHog flag gating this entire engine -- defaulted OFF until validated (critical-rules.md).
 FEATURE_BAR_CITIZEN_ROLE_SYNC = "waddles.bar_citizen.role_sync"
@@ -88,6 +160,11 @@ _roles_added_counter = _meter.create_counter(
 )
 _roles_removed_counter = _meter.create_counter(
     "waddles_bar_citizen_roles_removed_total", description="Discord roles removed by role-sync"
+)
+_community_roles_applied_counter = _meter.create_counter(
+    "waddles_bar_citizen_community_roles_applied_total",
+    description="hub-platform community_members.role changes applied by role-sync "
+    "(Discord -> platform direction)",
 )
 _sync_errors_counter = _meter.create_counter(
     "waddles_bar_citizen_sync_errors_total", description="role-sync pairing failures, fail-closed"
@@ -122,6 +199,14 @@ class TwitchRoleSourceClient(Protocol):
         ...
 
 
+@dataclass(slots=True, frozen=True)
+class DiscordGuildMember:
+    """One `GET /guilds/{id}/members` row -- the Discord-side source for the platform direction."""
+
+    user_id: str
+    role_ids: frozenset[str]
+
+
 class DiscordRoleTargetClient(Protocol):
     """Discord-side role read/write this engine needs. Real impl: `HttpDiscordRoleTargetClient`."""
 
@@ -135,6 +220,10 @@ class DiscordRoleTargetClient(Protocol):
 
     async def remove_role(self, *, guild_id: str, user_id: str, role_id: str) -> bool:
         """`DELETE` the role from the member; return whether the call succeeded."""
+        ...
+
+    async def list_guild_members(self, *, guild_id: str) -> list[DiscordGuildMember]:
+        """Return every guild member's `(user_id, role_ids)` -- the platform direction's read."""
         ...
 
 
@@ -323,6 +412,52 @@ class HttpDiscordRoleTargetClient:
             guild_id=guild_id, user_id=user_id, role_id=role_id, add=False
         )
 
+    async def list_guild_members(self, *, guild_id: str) -> list[DiscordGuildMember]:
+        """`GET /guilds/{guild_id}/members`, paginated by snowflake `after` cursor (max 1000/page).
+
+        The discord_to_platform direction's one read of guild state --
+        mirrors `_paginate()`'s cursor-loop shape on
+        `HttpTwitchRoleSourceClient` (a different pagination style --
+        Discord has no cursor token, just "page by the last-seen user id" --
+        so not shared code, same `_MAX_PAGES` safety cap).
+        """
+        members: list[DiscordGuildMember] = []
+        after: str | None = None
+        for _ in range(_MAX_PAGES):
+            params: dict[str, str] = {"limit": str(_DISCORD_MEMBER_PAGE_SIZE)}
+            if after:
+                params["after"] = after
+            try:
+                response = await self._http.get(
+                    f"{self._api_base}/guilds/{guild_id}/members",
+                    headers=self._headers(),
+                    params=params,
+                    timeout=_REQUEST_TIMEOUT_SECONDS,
+                )
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as exc:
+                raise DiscordSyncError(f"discord guild member list failed: {exc}") from exc
+            _classify_discord(response, action="guild member list")
+            page = response.json() or []
+            if not page:
+                break
+            for row in page:
+                user = row.get("user") or {}
+                user_id = user.get("id")
+                if not user_id:
+                    continue
+                members.append(
+                    DiscordGuildMember(
+                        user_id=str(user_id),
+                        role_ids=frozenset(str(r) for r in row.get("roles") or []),
+                    )
+                )
+            if len(page) < _DISCORD_MEMBER_PAGE_SIZE:
+                break
+            after = str(page[-1].get("user", {}).get("id") or "")
+            if not after:
+                break
+        return members
+
 
 @dataclass(slots=True, frozen=True)
 class PairingSyncResult:
@@ -336,6 +471,19 @@ class PairingSyncResult:
     error: str | None
 
 
+@dataclass(slots=True, frozen=True)
+class PlatformSyncResult:
+    """Outcome of one `reconcile_pairing_discord_to_platform()` call -- counts only."""
+
+    pairing_id: int
+    community_id: int
+    community_roles_applied: int
+    users_skipped_unlinked: int
+    users_skipped_not_member: int
+    users_skipped_owner_protected: int
+    error: str | None
+
+
 @dataclass(slots=True)
 class ReconcileSummary:
     """Aggregate counters for one `run_role_sync_reconcile_batch()` pass -- the CLI's print line."""
@@ -346,6 +494,7 @@ class ReconcileSummary:
     pairings_failed: int = 0
     roles_added: int = 0
     roles_removed: int = 0
+    community_roles_applied: int = 0
 
 
 def _list_enabled_pairings(dal: Any) -> list[Any]:
@@ -420,6 +569,97 @@ def _find_linked_discord_user(dal: Any, twitch_user_id: str) -> str | None:
     return str(discord_row.platform_user_id)
 
 
+def _find_linked_hub_user_by_discord(dal: Any, discord_user_id: str) -> int | None:
+    """Reverse of `_find_linked_discord_user()`: discord_user_id -> hub_user_id.
+
+    `None` if this Discord account has no linked hub_user -- a guild
+    member who never connected their platform account, a normal,
+    uncounted-as-error state.
+    """
+    bind_auth_tables(dal)
+    t = dal.hub_user_identities
+    row = dal((t.platform == "discord") & (t.platform_user_id == discord_user_id)).select().first()
+    return int(row.hub_user_id) if row is not None else None
+
+
+def _resolve_desired_community_role(
+    role_priority: dict[str, int], mapped_roles: set[str]
+) -> str | None:
+    """Highest-`community_roles.priority` role among `mapped_roles`; deterministic tie-break.
+
+    `role_priority` unknown entries default to priority 0 (same default
+    `community_roles.priority` itself uses) -- a `community_role` binding
+    naming a role this community has never explicitly prioritized still
+    resolves, just lowest-priority among whatever else is in play. Ties
+    (equal priority) break on role name, descending, purely for
+    determinism across reconcile passes -- never a semantic ranking.
+    """
+    if not mapped_roles:
+        return None
+    return max(mapped_roles, key=lambda role: (role_priority.get(role, 0), role))
+
+
+def _community_role_priorities(dal: Any, community_id: int) -> dict[str, int]:
+    """`{community_roles.name: priority}` for `community_id` -- the conflict-precedence table."""
+    bind_auth_tables(dal)
+    rows = dal(dal.community_roles.community_id == community_id).select()
+    return {row.name: int(row.priority or 0) for row in rows}
+
+
+def _apply_community_role(
+    dal: Any, *, community_id: int, hub_user_id: int, desired_role: str
+) -> str:
+    """Idempotently set an existing active member's role, never touching `community-owner`.
+
+    Returns one of `"applied"` / `"unchanged"` / `"not_a_member"` /
+    `"owner_protected"` -- this worker never creates `community_members`
+    rows (a Discord guild member who never joined this hub platform
+    community is skipped, not auto-enrolled) and never downgrades
+    `community-owner` (mirrors `admin_service.update_member_role()`'s own
+    invariant). Mirrors that function's own `community_role_id` lookup +
+    `claims_cache` reset tail, but via the sync `dal` this module already
+    uses throughout (see module docstring / `guild_pairing.py`'s own
+    "raw pydal, explicit commit" convention) rather than `admin_service`'s
+    `async_dal`/`TenantContext`-gated surface, which assumes a human actor
+    performing one promotion, not a system reconcile pass.
+    """
+    bind_auth_tables(dal)
+    member = (
+        dal(
+            (dal.community_members.community_id == community_id)
+            & (dal.community_members.user_id == str(hub_user_id))
+            & (dal.community_members.is_active == True)  # noqa: E712 - pydal idiom
+        )
+        .select()
+        .first()
+    )
+    if member is None:
+        return "not_a_member"
+    if member.role == "community-owner":
+        return "owner_protected"
+    if member.role == desired_role:
+        return "unchanged"
+
+    role_row = (
+        dal(
+            (dal.community_roles.community_id == community_id)
+            & (dal.community_roles.name == desired_role)
+        )
+        .select()
+        .first()
+    )
+    community_role_id = int(role_row.id) if role_row is not None else None
+
+    dal(dal.community_members.id == member.id).update(
+        role=desired_role,
+        community_role_id=community_role_id,
+        claims_cache=None,
+        updated_at=datetime.now(UTC),
+    )
+    dal.commit()
+    return "applied"
+
+
 async def _flag_enabled(tenant_slug: str) -> bool:
     """`feature_enabled(FEATURE_BAR_CITIZEN_ROLE_SYNC, tenant=...)`, defaulted OFF.
 
@@ -443,7 +683,11 @@ async def reconcile_pairing(
     twitch_client: TwitchRoleSourceClient,
     make_discord_client: Callable[[str], DiscordRoleTargetClient],
 ) -> PairingSyncResult:
-    """Reconcile ONE `guild_tenant_pairings` row, for `direction == "twitch_to_discord"` only.
+    """Reconcile ONE `guild_tenant_pairings` row's Twitch -> Discord direction.
+
+    Runs for `direction in ("twitch_to_discord", "bidirectional")` --
+    `discord_to_twitch`-only pairings are a no-op here (handled instead by
+    `reconcile_pairing_discord_to_platform()`).
 
     Fail-closed: any credential/API/unexpected failure is caught here and
     returned as `PairingSyncResult.error` -- never raised to the caller
@@ -454,7 +698,7 @@ async def reconcile_pairing(
     community_id = int(pairing.community_id)
     guild_id = str(pairing.discord_guild_id)
 
-    if not pairing.sync_enabled or pairing.direction != _HANDLED_DIRECTION:
+    if not pairing.sync_enabled or pairing.direction not in _TWITCH_TO_DISCORD_DIRECTIONS:
         return PairingSyncResult(pairing_id, community_id, 0, 0, 0, None)
 
     try:
@@ -581,6 +825,143 @@ async def reconcile_pairing(
         return PairingSyncResult(pairing_id, community_id, 0, 0, 0, "unexpected_error")
 
 
+async def reconcile_pairing_discord_to_platform(
+    dal: Any,
+    pairing: Any,
+    *,
+    credential_resolver: CredentialResolver,
+    make_discord_client: Callable[[str], DiscordRoleTargetClient],
+) -> PlatformSyncResult:
+    """Reconcile ONE `guild_tenant_pairings` row's Discord -> platform direction.
+
+    Runs for `direction in ("discord_to_twitch", "bidirectional")` --
+    `twitch_to_discord`-only pairings are a no-op here (handled instead by
+    `reconcile_pairing()`). Discord guild role membership is authoritative;
+    this never calls Discord's add/remove-role API (see module docstring's
+    structural loop-prevention argument) -- only `community_members.role`
+    is ever written.
+
+    Needs no Twitch credentials/broadcaster token at all (unlike
+    `reconcile_pairing()`) -- a `bidirectional` pairing missing its Twitch
+    broadcaster token still runs this direction independently; the two
+    directions fail closed independently, each wrapped in its own
+    try/except, same per-pairing isolation `run_role_sync_reconcile_batch`
+    already guarantees across pairings.
+    """
+    pairing_id = int(pairing.id)
+    community_id = int(pairing.community_id)
+    guild_id = str(pairing.discord_guild_id)
+
+    if not pairing.sync_enabled or pairing.direction not in _DISCORD_TO_PLATFORM_DIRECTIONS:
+        return PlatformSyncResult(pairing_id, community_id, 0, 0, 0, 0, None)
+
+    try:
+        tenant = _resolve_tenant_for_community(dal, community_id)
+        if tenant is None:
+            raise TransportUnavailable(f"community {community_id} has no resolvable tenant")
+        tenant_id, tenant_slug, is_global = tenant
+
+        if not await _flag_enabled(tenant_slug):
+            logger.info(
+                "role_sync.platform_flag_disabled pairing_id=%s tenant=%s", pairing_id, tenant_slug
+            )
+            return PlatformSyncResult(pairing_id, community_id, 0, 0, 0, 0, None)
+
+        discord_creds = await credential_resolver.resolve(
+            dal, tenant_id=tenant_id, is_global_tenant=is_global, platform="discord"
+        )
+        bot_token = str(discord_creds.payload.get("bot_token", ""))
+        if not bot_token:
+            raise TransportUnavailable(f"tenant {tenant_id} has no discord bot token for role-sync")
+
+        bindings = list_bindings(dal, community_id, pairing_id)
+        role_by_discord_role_id: dict[str, str] = {
+            b.discord_role_id: b.community_role
+            for b in bindings
+            if b.sync_scope == "community_role" and b.community_role is not None
+        }
+        if not role_by_discord_role_id:
+            return PlatformSyncResult(pairing_id, community_id, 0, 0, 0, 0, None)
+
+        discord_client = make_discord_client(bot_token)
+        members = await discord_client.list_guild_members(guild_id=guild_id)
+        role_priority = _community_role_priorities(dal, community_id)
+
+        applied = 0
+        skipped_unlinked = 0
+        skipped_not_member = 0
+        skipped_owner_protected = 0
+        for member in members:
+            mapped_roles = {
+                role_by_discord_role_id[role_id]
+                for role_id in member.role_ids
+                if role_id in role_by_discord_role_id
+            }
+            desired_role = _resolve_desired_community_role(role_priority, mapped_roles)
+            if desired_role is None:
+                continue  # no mapped Discord role held this pass -- grant-only, never demote
+
+            hub_user_id = _find_linked_hub_user_by_discord(dal, member.user_id)
+            if hub_user_id is None:
+                skipped_unlinked += 1
+                continue
+
+            outcome = _apply_community_role(
+                dal, community_id=community_id, hub_user_id=hub_user_id, desired_role=desired_role
+            )
+            if outcome == "applied":
+                applied += 1
+            elif outcome == "not_a_member":
+                skipped_not_member += 1
+            elif outcome == "owner_protected":
+                skipped_owner_protected += 1
+            # "unchanged" -- already correct, not counted as a skip or an error.
+
+        logger.info(
+            "role_sync.platform_pairing_synced pairing_id=%s community_id=%s guild_id=%s "
+            "members=%d community_roles_applied=%d skipped_unlinked=%d skipped_not_member=%d "
+            "skipped_owner_protected=%d",
+            pairing_id,
+            community_id,
+            guild_id,
+            len(members),
+            applied,
+            skipped_unlinked,
+            skipped_not_member,
+            skipped_owner_protected,
+        )
+        _community_roles_applied_counter.add(applied)
+        return PlatformSyncResult(
+            pairing_id,
+            community_id,
+            applied,
+            skipped_unlinked,
+            skipped_not_member,
+            skipped_owner_protected,
+            None,
+        )
+
+    except (TransportUnavailable, DiscordSyncError) as exc:
+        logger.error(
+            "role_sync.platform_pairing_failed pairing_id=%s community_id=%s error_type=%s",
+            pairing_id,
+            community_id,
+            type(exc).__name__,
+        )
+        _sync_errors_counter.add(1)
+        return PlatformSyncResult(pairing_id, community_id, 0, 0, 0, 0, type(exc).__name__)
+    except Exception as exc:  # noqa: BLE001 - fail-closed: one pairing's bug must never crash the worker
+        logger.error(
+            "role_sync.platform_pairing_failed_unexpected pairing_id=%s community_id=%s "
+            "error_type=%s",
+            pairing_id,
+            community_id,
+            type(exc).__name__,
+        )
+        _sync_errors_counter.add(1)
+        return PlatformSyncResult(pairing_id, community_id, 0, 0, 0, 0, "unexpected_error")
+
+
 async def run_role_sync_reconcile_batch(
     dal: Any,
     *,
@@ -613,24 +994,57 @@ async def run_role_sync_reconcile_batch(
         pairings = _list_enabled_pairings(dal)
         summary.pairings_examined = len(pairings)
         for pairing in pairings:
-            if pairing.direction != _HANDLED_DIRECTION:
+            direction = pairing.direction
+            if (
+                direction not in _TWITCH_TO_DISCORD_DIRECTIONS
+                and direction not in _DISCORD_TO_PLATFORM_DIRECTIONS
+            ):
+                # Defensive only -- `guild_tenant_pairings.direction` has a DB-level CHECK
+                # constraint (migration 0034) covering exactly these three values; this
+                # branch should be unreachable in production but is counted, never silently
+                # dropped, if it is ever hit (e.g. a future direction value added to the DB
+                # before this worker is updated to handle it).
                 summary.pairings_skipped_wrong_direction += 1
                 continue
+
+            pairing_failed = False
             async with bundle_span("bar_citizen.role_sync.pairing", pairing_id=int(pairing.id)):
-                result = await reconcile_pairing(
-                    dal,
-                    pairing,
-                    get_broadcaster_user_token=get_broadcaster_user_token,
-                    credential_resolver=credential_resolver,
-                    twitch_client=twitch_client,
-                    make_discord_client=make_discord_client,
-                )
-            if result.error:
+                if direction in _TWITCH_TO_DISCORD_DIRECTIONS:
+                    twitch_result = await reconcile_pairing(
+                        dal,
+                        pairing,
+                        get_broadcaster_user_token=get_broadcaster_user_token,
+                        credential_resolver=credential_resolver,
+                        twitch_client=twitch_client,
+                        make_discord_client=make_discord_client,
+                    )
+                    if twitch_result.error:
+                        pairing_failed = True
+                    else:
+                        summary.roles_added += twitch_result.roles_added
+                        summary.roles_removed += twitch_result.roles_removed
+
+                if direction in _DISCORD_TO_PLATFORM_DIRECTIONS:
+                    platform_result = await reconcile_pairing_discord_to_platform(
+                        dal,
+                        pairing,
+                        credential_resolver=credential_resolver,
+                        make_discord_client=make_discord_client,
+                    )
+                    if platform_result.error:
+                        pairing_failed = True
+                    else:
+                        summary.community_roles_applied += platform_result.community_roles_applied
+
+            # A `bidirectional` pairing where one direction succeeds and the other fails
+            # counts as failed, not synced -- `pairings_synced`/`pairings_failed` is a
+            # per-pairing binary classification, not per-direction; each direction's own
+            # role/community-role counters above are still credited independently of this
+            # classification, so a partial success is never silently invisible.
+            if pairing_failed:
                 summary.pairings_failed += 1
             else:
                 summary.pairings_synced += 1
-                summary.roles_added += result.roles_added
-                summary.roles_removed += result.roles_removed
         return summary
     finally:
         if owns_http_client:
@@ -667,7 +1081,8 @@ async def main() -> int:
         f"pairings_synced={summary.pairings_synced} "
         f"pairings_failed={summary.pairings_failed} "
         f"pairings_skipped_wrong_direction={summary.pairings_skipped_wrong_direction} "
-        f"roles_added={summary.roles_added} roles_removed={summary.roles_removed}"
+        f"roles_added={summary.roles_added} roles_removed={summary.roles_removed} "
+        f"community_roles_applied={summary.community_roles_applied}"
     )
     return 0
 

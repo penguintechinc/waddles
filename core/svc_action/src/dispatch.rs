@@ -296,6 +296,7 @@ fn envelope_to_wire_json(env: &StageEnvelope) -> Result<serde_json::Value, Invok
 /// [`envelope_to_wire_json`] -- see that function's doc for the wire-shape
 /// bug this replaced. Returns the raw `result.payload` JSON for
 /// [`interpret_dispatch_payload`] to classify.
+#[allow(clippy::too_many_arguments)]
 pub async fn invoke_dispatch(
     conn: &Connection,
     app_id: &str,
@@ -303,6 +304,9 @@ pub async fn invoke_dispatch(
     env: &StageEnvelope,
     config_json: &str,
     deadline_ms: u64,
+    tenant_id: i32,
+    community_id: i32,
+    app_version: i64,
 ) -> Result<serde_json::Value, InvokeError> {
     let trace = env.trace.as_ref().map(|t| TraceContext {
         traceparent: t.traceparent.clone(),
@@ -325,6 +329,16 @@ pub async fn invoke_dispatch(
         // discord) -- `None` when the platform/event has no channel
         // concept. Never re-derived from anything a bundle returns.
         origin_channel_id: env.event.source.as_ref().and_then(|s| s.channel_id.clone()),
+        tenant_id,
+        community_id,
+        // Resolved once at startup from the active-set row that loaded
+        // `digest` (`crate::lib::try_start_dispatch`'s `resolve_action_app_version`
+        // call, mirroring `core/svc_process::lib::resolve_app_version_id`) --
+        // never `0` for a live invocation (spec SS4/SS5.1: grants are keyed
+        // `(tenant, community, app, app_version)`; `0` only ever matches a
+        // grant row also written under version `0`, never a real approved
+        // version).
+        app_version,
     };
     let reply = conn
         .invoke(
@@ -535,6 +549,19 @@ pub struct DispatchDeps<A: AuditSink, T: TenantResolver, S: SpineOps> {
     /// svc-action had no multi-tenant dispatch consumers; replies never
     /// sent after legacy env removal, alpha 2026-10-03).
     pub digest_source: DigestSource,
+    /// The live, poll-refreshed `app_id -> (digest, app_versions.id)`
+    /// snapshot (`crate::lib::try_start_dispatch`/`try_start_changelog_
+    /// consumer`'s shared handle, populated every tick by
+    /// `crate::bundle_loader`/`crate::changelog_consumer`) -- resolved PER
+    /// INVOCATION in [`handle_delivered`] against whatever digest
+    /// [`DigestSource`] just picked, never captured once as a plain `i64`:
+    /// a bundle hot-swap must be reflected on the very next invocation
+    /// (spec SS4/SS5.1). [`DigestSource`] (not this snapshot) owns
+    /// dead-letter-vs-redirect decisions for a superseded/absent digest --
+    /// this snapshot's only job is resolving the matching `app_versions.id`
+    /// for the gate's `GrantScopeKey`, fail-closed to `0` (never matches a
+    /// real grant row) if the two maps ever briefly disagree.
+    pub app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
     pub config_json: String,
     pub key_ring: KeyRing,
     pub connections: Arc<ConnectionRegistry>,
@@ -612,6 +639,31 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
         };
         return deps.spine.dead_letter(d, &err).await;
     };
+
+    // Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
+    // the `app_versions.id` this invoke's grants are keyed on (spec
+    // SS4/SS5.1), resolved PER INVOCATION against the already-chosen
+    // `digest` -- never a value captured once at startup. `digest_source`
+    // above (not this lookup) already owns every dead-letter-vs-redirect
+    // decision for a superseded/absent digest; `app_version_snapshot` is
+    // fed by the exact same active-set reads (`crate::changelog_consumer`/
+    // `crate::bundle_loader`), so it should always agree with whatever
+    // `digest` was just resolved to. A momentary disagreement (the two
+    // live maps refresh independently) fails closed to `0` -- which never
+    // matches a real grant row -- rather than blocking dispatch on it.
+    let app_version = deps
+        .app_version_snapshot
+        .resolve_for_digest(&deps.app_id, &digest)
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                app_id = %deps.app_id,
+                digest_prefix = %bundle_active_set::digest_prefix(&digest),
+                "no app_version found in the active-version snapshot for this digest; \
+                 falling back to the fail-closed 0 sentinel (every non-platform \
+                 permission will deny for this invoke)"
+            );
+            0
+        });
 
     // Pick the executor session to invoke on. `DigestSource::Active` MUST
     // pick a live session that actually has `digest` loaded
@@ -699,6 +751,21 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
     // catches the "no executor at all"/"no session has this digest" cases
     // before ever entering this loop, which is the one infra failure worth
     // a distinct DLQ kind at this stage's current scope.
+    //
+    // Resolved once per delivered envelope (memoized by `deps.tenants` after
+    // the first lookup for this `(tenant, community)` pair) and threaded
+    // into every capability `authorize()` call this invoke makes (spec
+    // `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+    // SS5.1) -- an unresolvable tenant/community falls back to the `(0, 0)`
+    // sentinel, which fails closed (never matches a real grant row) rather
+    // than skipping the gate.
+    let (tenant_id, community_id) = deps
+        .tenants
+        .resolve(&d.env.tenant, d.env.community.as_deref())
+        .await
+        .map(|(t, c)| (t, c.unwrap_or(0)))
+        .unwrap_or((0, 0));
+
     let (record, _attempts) = dispatch_with_retry(
         |_attempt| async {
             match invoke_dispatch(
@@ -708,6 +775,9 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
                 &d.env,
                 &deps.config_json,
                 deps.retry_policy.call_timeout_ms,
+                tenant_id,
+                community_id,
+                app_version,
             )
             .await
             {
@@ -1412,9 +1482,23 @@ mod tests {
         spine: FakeSpineOps,
         connections: Arc<ConnectionRegistry>,
     ) -> DispatchDeps<FakeAudit, FixedTenantResolver, FakeSpineOps> {
+        let app_version_snapshot = bundle_active_set::ActiveVersionSnapshot::new();
+        app_version_snapshot.update(&[bundle_active_set::ActiveBundleRow {
+            app_id: "waddles.bot.commands.default".to_string(),
+            version: "1".to_string(),
+            version_id: 1,
+            digest: "sha256:00".to_string(),
+            component_key: String::new(),
+            sidecar_key: String::new(),
+            artifact_signature: None,
+            artifact_signature_key_id: None,
+            artifact_signed_approval_id: None,
+            declared_capabilities: Vec::new(),
+        }]);
         DispatchDeps {
             app_id: "waddles.bot.commands.default".to_string(),
             digest_source: DigestSource::Static("sha256:00".to_string()),
+            app_version_snapshot,
             config_json: "{}".to_string(),
             key_ring: test_ring(),
             connections,
@@ -1535,6 +1619,84 @@ mod tests {
             )
             .await
             .unwrap();
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(crate::capabilities::DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let registry = Arc::new(ConnectionRegistry::new());
+        registry.set_active(connection);
+        registry
+    }
+
+    /// Same as [`connected_registry_with_fake_executor`], but answers
+    /// `invoke_count` invokes with the same `response` -- for tests that
+    /// drive `handle_delivered` more than once against the same live
+    /// connection (e.g. the app-version-resolution-per-invocation
+    /// regression).
+    async fn connected_registry_with_fake_executor_multi(
+        response: serde_json::Value,
+        invoke_count: usize,
+    ) -> Arc<ConnectionRegistry> {
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, Frame, HelloBody, HelloOkBody, ResultBody, SandboxInfo,
+        };
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            let hello_ok = read_frame(&mut executor_io).await.unwrap();
+            assert!(matches!(hello_ok.message, Message::HelloOk(_)));
+
+            for _ in 0..invoke_count {
+                let invoke = read_frame(&mut executor_io).await.unwrap();
+                write_frame(
+                    &mut executor_io,
+                    &Frame::new(
+                        invoke.id,
+                        Message::Result(ResultBody {
+                            payload: response.clone(),
+                            duration_ms: 1,
+                            fuel_used: 0,
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+            }
         });
 
         let (connection, read_loop) = crate::host_api::run_connection(
@@ -1741,6 +1903,62 @@ mod tests {
 
         assert_eq!(deps.spine.dead_lettered.lock().unwrap().len(), 0);
         assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+    }
+
+    /// Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4)
+    /// regression: `app_version` must be resolved PER INVOCATION against the
+    /// live `app_version_snapshot`, never a value captured once -- a hot
+    /// swap (the poller's next tick seeding a NEW `app_versions.id` for this
+    /// SAME digest/app_id) must be reflected on the very next delivery
+    /// without a consumer restart.
+    #[tokio::test]
+    async fn handle_delivered_resolves_app_version_from_the_live_snapshot_per_invocation() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
+
+        let connections = connected_registry_with_fake_executor_multi(
+            serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+            2,
+        )
+        .await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+
+        // `test_deps` seeds `app_version_snapshot` with version_id 1 for
+        // digest "sha256:00" (the `Static` digest it also configures) --
+        // the first delivery must succeed under that resolved version.
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 1);
+
+        // Hot swap: the poller's next tick seeds a NEW version_id for the
+        // SAME digest -- the very next delivery must resolve the NEW
+        // version, never a value cached from the first call.
+        deps.app_version_snapshot
+            .update(&[bundle_active_set::ActiveBundleRow {
+                app_id: "waddles.bot.commands.default".to_string(),
+                version: "2".to_string(),
+                version_id: 2,
+                digest: "sha256:00".to_string(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+                declared_capabilities: Vec::new(),
+            }]);
+        assert_eq!(
+            deps.app_version_snapshot
+                .resolve_for_digest("waddles.bot.commands.default", "sha256:00"),
+            Some(2),
+            "the live snapshot must reflect the hot swap immediately"
+        );
+
+        let mac2 = mac_for(&ring, "acme");
+        let d2 = fixture_delivered("acme", "waddles.bot.commands.default", mac2, "k1");
+        handle_delivered(&d2, &stream_key, &deps).await.unwrap();
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 2);
     }
 
     /// A [`crate::usage::UsageSink`] that records every delta it is asked

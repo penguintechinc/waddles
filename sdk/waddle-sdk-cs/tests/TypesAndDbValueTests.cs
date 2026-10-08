@@ -142,7 +142,7 @@ public class DbValueTests
     public void db_denied_is_distinguishable_from_other_db_errors()
     {
         var db = new DenyingDbClient();
-        var ex = Assert.Throws<WaddleDbException>(() => db.Execute("SELECT 1", []));
+        var ex = Assert.Throws<WaddleDbException>(() => db.Insert([new DbColumnValue("name", DbValue.Of("x"))]));
         Assert.Equal(DbErrorKind.Denied, ex.Kind);
     }
 }

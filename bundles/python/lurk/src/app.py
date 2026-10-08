@@ -49,13 +49,26 @@ this file used to be):
   fields today), the config change is rejected and logged -- never silently
   allowed just because the signal happens to be missing.
 
-Data scoping (2026-10-05 correction): every piece of state here -- the
-lurk start-time, the per-community message template, and the `ai_enabled`
-flag -- is keyed by the envelope's own `community_id` ONLY. There is no
-tenant-wide or "community 0" catch-all bucket: `dispatch()` raises before
-touching `kv` at all if `envelope.community` is falsy, rather than
-defaulting to a shared sentinel the way this bundle's pre-v1 `_kv_key` used
-to (`community or "tenant"`).
+Data scoping (2026-10-06 correction, supersedes 2026-10-05): every piece of
+state here -- the lurk start-time, the per-community message template, and
+the `ai_enabled` flag -- is keyed by `envelope.community`, which is now
+resolved through `waddle_sdk.community_kv.TENANT_WIDE_SENTINEL` the same way
+`waddle_sdk.community_kv` itself does: `envelope.community is None` is the
+host's own deliberate, explicit tenant-wide sentinel (`core/bundle_
+active_set/src/scope.rs::resolve_scope`'s `community_id == 0`, collapsed to
+`None` by `core/svc_ingest/src/config.rs::ingest_scope` before this bundle
+ever sees it -- exactly what `core/bundle_host_kv/src/scope.rs::KvScope`
+already does for the host-scoped `kv` capability's own `_tenant` segment),
+**not** a bug or an absent value, and is scoped under the literal segment
+`"0"` so state is still per-scope-isolated, just under the one scope alpha
+currently activates this bundle at (`core-bundles.yaml`'s
+`activation_targets: community_id: null`). The 2026-10-05 version of this
+bundle (`fix/lurk-silent-missing-community`, gh-655) treated this as fatal
+and merely replied with an error before raising -- `!lurk` was never
+actually usable on alpha. `dispatch()` still raises before touching `kv` if
+`envelope.community` is an **empty string** (`""`): the host never emits
+one, so a string that empty can only be a caller-side bug, never silently
+treated as tenant-wide.
 
 License gating (2026-10-05 addition): `!lurk enable ai` reads the always-
 granted WIT `%flags.tier()` import (`wit/waddle-bundle/stage.wit`) and only
@@ -96,6 +109,7 @@ import re
 from typing import Any, NoReturn
 
 from waddle_sdk import clock, kv, log, relay
+from waddle_sdk.community_kv import TENANT_WIDE_SENTINEL
 from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
@@ -216,19 +230,28 @@ def _state_key(community: str, actor: str | None) -> str:
     raw username (tokenization pipeline #429 not yet merged), so it alone is
     SHA-256 hashed into a non-reversible pseudonym -- the stored key never
     contains PII, today or after #429.
+
+    Uses `.` as the key separator, never `:` (gh-631): the real `kv` host
+    capability (`core/bundle_host_kv/src/scope.rs::is_allowed_key_byte`)
+    reserves `:` as its own namespace separator and rejects any guest key
+    containing one. This bundle's original `lurk:state:{community}:
+    {pseudonym}` passed every test (the old hand-rolled fake accepted any
+    key) and then failed every real `kv` call in production with
+    `kv.error::backend` -- see `waddle_sdk.kv.validate_key`, which now
+    rejects this at the SDK boundary before a host call is even attempted.
     """
     pseudonym = hashlib.sha256((actor or "anonymous").encode()).hexdigest()
-    return f"lurk:state:{community}:{pseudonym}"
+    return f"lurk.state.{community}.{pseudonym}"
 
 
 def _message_key(community: str) -> str:
     """Per-community kv key for the customized `!lurk` message template."""
-    return f"lurk:config:{community}:message"
+    return f"lurk.config.{community}.message"
 
 
 def _ai_key(community: str) -> str:
     """Per-community kv key for the `ai_enabled` toggle. Presence = enabled."""
-    return f"lurk:config:{community}:ai_enabled"
+    return f"lurk.config.{community}.ai_enabled"
 
 
 def _render_template(template: str, *, username: str, duration: str = "") -> str:
@@ -480,8 +503,11 @@ async def dispatch(
 
     Raises:
         ValueError: The envelope's payload has no `channel_id`; the
-            envelope has no `community` (see module docstring's Data
-            scoping section -- there is no tenant-wide fallback); or an
+            envelope's `community` is an empty string (see module
+            docstring's Data scoping section -- the host never emits one,
+            so this is always a caller-side bug, not the tenant-wide
+            sentinel; a chat error reply and an ERROR log line are always
+            emitted first, same fail-loud shape as `_fail_kv`); or an
             unrecognized `command` (defensive -- `transform` only ever
             emits a member of `_KNOWN_COMMANDS`).
         RuntimeError: A `kv` backend call failed (see `_fail_kv` -- a chat
@@ -497,9 +523,32 @@ async def dispatch(
 
     provider = envelope.event.platform
     community = envelope.community
-    if not community:
+    if community == "":
+        # Fail-loud, same shape as `_fail_kv`: log AND reply, then raise --
+        # never just the log. Distinct from `community is None`: the host
+        # never emits an empty string (`core/bundle_active_set/src/
+        # scope.rs::resolve_scope`'s `community_id == 0` DB sentinel always
+        # collapses to `None`, never `""`), so this path can only mean a
+        # caller-side bug, and keeps failing loud.
         log.error("lurk.missing_community", command=command)
+        await relay.push(
+            provider,
+            {
+                "channel": channel_id,
+                "text": (
+                    "lurk isn't available in this server/channel yet -- it needs to be "
+                    "linked to a community first. Ask an admin to set that up."
+                ),
+            },
+        )
         raise ValueError("lurk requires a community context and cannot operate tenant-wide")
+
+    # `community is None` is the host's own tenant-wide sentinel (module
+    # docstring's Data scoping section) -- alpha's only activation shape
+    # today. Scope it under the same literal `waddle_sdk.community_kv`
+    # uses, so lurk actually functions instead of only failing less
+    # silently (this bundle's previous 1.0.5 behavior).
+    community = community if community is not None else TENANT_WIDE_SENTINEL
 
     username = envelope.event.actor or "someone"
 

@@ -391,23 +391,72 @@ async def trending_events(query_params: UpcomingEventsParams, community_id):
 
 
 # ============================================================================
-# PLATFORM SYNC ENDPOINTS (Stubs for Phase 4)
+# PLATFORM SYNC ENDPOINTS
 # ============================================================================
 
 @calendar_bp.route('/<int:community_id>/sync/enable', methods=['POST'])
 @async_endpoint
 async def enable_sync(community_id):
-    """Enable platform sync (Phase 4 implementation)."""
-    # TODO: Implement in Phase 4
-    return success_response({"message": "Sync configuration updated (stub)"})
+    """
+    Toggle Discord event-sync opt-in for every guild paired with this community.
+
+    Body (optional): {"enabled": bool}, defaults to true. Calls hub-api's
+    internal POST /api/v1/internal/calendar/guild-pairings/event-sync,
+    which flips guild_tenant_pairings.event_sync_enabled for every pairing
+    under this community -- the opt-in event_discord_sync_service.py's
+    push engine fans out against.
+    """
+    body = await request.get_json(force=True, silent=True) or {}
+    enabled = bool(body.get('enabled', True))
+
+    result = await calendar_service.sync_client.set_event_sync_enabled(community_id, enabled)
+    if not result.ok:
+        return error_response(
+            f"Failed to update sync configuration: {result.error}", status_code=502
+        )
+
+    return success_response({
+        "community_id": result.community_id,
+        "event_sync_enabled": result.event_sync_enabled,
+        "pairings_updated": result.pairings_updated
+    })
 
 
 @calendar_bp.route('/<int:community_id>/events/<int:event_id>/sync', methods=['POST'])
 @async_endpoint
 async def manual_sync(community_id, event_id):
-    """Manually trigger sync for event (Phase 4 implementation)."""
-    # TODO: Implement in Phase 4
-    return success_response({"message": "Manual sync triggered (stub)"})
+    """
+    Manually (synchronously) trigger a Discord sync for one event.
+
+    Unlike the lifecycle hooks in calendar_service.py (fire-and-forget),
+    this is a direct user action: call hub-api's internal sync-discord
+    endpoint and wait for its result, so the caller sees the real outcome
+    (or a clear failure) immediately rather than polling /sync/status.
+    """
+    event = await calendar_service.get_event(event_id)
+    if not event:
+        return error_response("Event not found", status_code=404)
+
+    if event['status'] == 'cancelled':
+        action = 'cancel'
+    elif event.get('sync', {}).get('discord_event_id'):
+        action = 'update'
+    else:
+        action = 'create'
+
+    result = await calendar_service.sync_client.sync_event(event_id, action)
+    if not result.ok:
+        return error_response(
+            f"Discord sync failed: {result.sync_error}", status_code=502
+        )
+
+    return success_response({
+        "event_id": result.event_id,
+        "action": action,
+        "discord_event_id": result.discord_event_id,
+        "sync_status": result.sync_status,
+        "sync_error": result.sync_error
+    })
 
 
 @calendar_bp.route('/<int:community_id>/events/<int:event_id>/sync/status', methods=['GET'])
