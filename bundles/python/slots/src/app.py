@@ -89,7 +89,7 @@ MAX_COOLDOWN_SECONDS = 3600
 
 #: Durable per-community config -- never expires (`ttl_seconds=0`), mirrors
 #: `fish`'s own `_COOLDOWN_CONFIG_KEY` convention.
-_COOLDOWN_CONFIG_KEY = "slots:config:cooldown"
+_COOLDOWN_CONFIG_KEY = "slots.config.cooldown"
 
 _USAGE = "Usage: !slots | !slots list | !slots set cooldown <seconds> (set is admin/mod only)"
 _PERMISSION_DENIED_MSG = "only moderators/broadcasters can configure !slots"
@@ -157,22 +157,22 @@ def _pseudonym(actor: str | None) -> str:
 
 def _spins_key(pseudonym: str) -> str:
     """Per-(community, caller) total-spins counter key."""
-    return f"slots:spins:{pseudonym}"
+    return f"slots.spins.{pseudonym}"
 
 
 def _wins_key(pseudonym: str) -> str:
     """Per-(community, caller) total-wins counter key."""
-    return f"slots:wins:{pseudonym}"
+    return f"slots.wins.{pseudonym}"
 
 
 def _lastspin_key(pseudonym: str) -> str:
     """Per-(community, caller) last-spin-timestamp key (the cooldown gate)."""
-    return f"slots:lastspin:{pseudonym}"
+    return f"slots.lastspin.{pseudonym}"
 
 
 def _bestpayout_key(pseudonym: str) -> str:
     """Per-(community, caller) best-payout record key (JSON: symbol/payout)."""
-    return f"slots:bestpayout:{pseudonym}"
+    return f"slots.bestpayout.{pseudonym}"
 
 
 def _format_duration(total_seconds: int) -> str:

@@ -48,11 +48,11 @@ username/actor id -- see `src/app.py::_pseudonym()`), ahead of the PII-tokenizat
 
 | Key | Scope | TTL | Purpose |
 |---|---|---|---|
-| `slots:lastspin:<pseudonym>` | per-(community, caller) | `cooldown` seconds | Cooldown gate -- presence + elapsed time decide allow/deny. |
-| `slots:spins:<pseudonym>` | per-(community, caller) | none | Running total spins (`kv.increment`). |
-| `slots:wins:<pseudonym>` | per-(community, caller) | none | Running total wins (`kv.increment`, win spins only). |
-| `slots:bestpayout:<pseudonym>` | per-(community, caller) | none | JSON `{symbol, payout}` of the caller's best (highest-payout) spin. |
-| `slots:config:cooldown` | per-community | none | Admin-configured spin cooldown in seconds. |
+| `slots.lastspin.<pseudonym>` | per-(community, caller) | `cooldown` seconds | Cooldown gate -- presence + elapsed time decide allow/deny. |
+| `slots.spins.<pseudonym>` | per-(community, caller) | none | Running total spins (`kv.increment`). |
+| `slots.wins.<pseudonym>` | per-(community, caller) | none | Running total wins (`kv.increment`, win spins only). |
+| `slots.bestpayout.<pseudonym>` | per-(community, caller) | none | JSON `{symbol, payout}` of the caller's best (highest-payout) spin. |
+| `slots.config.cooldown` | per-community | none | Admin-configured spin cooldown in seconds. |
 
 ## Deferred to v2 (not stubbed)
 
