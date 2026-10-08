@@ -1,0 +1,25 @@
+name: Rust overlay-schema (lint + test)
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/overlay_schema/**'
+      - '.github/workflows/rust-overlay-schema.yml'
+      - '.github/workflows/rust-crate-ci.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/overlay_schema/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    name: fmt + clippy + deny + coverage
+    uses: ./.github/workflows/rust-crate-ci.yml
+    with:
+      crate_name: overlay-schema
+      working_directory: core/overlay_schema

@@ -212,6 +212,115 @@ interface relay {
   push: func(provider: string, message-json: string) -> result<_, error>;
 }
 
+/// Bundle-pushable overlay widgets rendered by svc-presentation-rust
+/// (issue #457). Additive, `stage-v1-1`-only (spec SS5-style world
+/// versioning, see `world stage-v1-1` below) -- `world stage` (1.0.0)
+/// never imports this. Capability: granted only when permission
+/// `overlay.media` is held (`bundle_capability_gate::permission::
+/// PermissionFamily::OverlayMedia`); the community/token resolution is
+/// entirely server-derived from the invocation scope
+/// (`AppScopedResource::Overlay`, same as every other `AppScoped` family)
+/// -- a bundle never supplies or sees a community id, token, or websocket
+/// address here.
+///
+/// Wire shape mirrors `core/overlay_schema` (Rust, the single source of
+/// truth also consumed by svc-presentation-rust, svc-streaming-rust and
+/// the webui) byte-for-byte -- `surface` is that crate's `Surface` enum,
+/// `payload-json` round-trips through its `OverlayPush` serde type.
+interface overlay {
+  use types.{transport-result, transport-error};
+
+  /// The unified surface id set a bundle may target -- kept in lockstep
+  /// with `core/overlay_schema::Surface` (C3); a surface added to one must
+  /// be added to the other in the same PR.
+  enum surface {
+    full-screen,
+    media,
+    crawler,
+    music,
+    alert-box,
+    chat,
+    goals,
+    ticker,
+    image,
+  }
+
+  /// One widget this bundle offers the overlay designer's palette
+  /// (issue #458 "Bundle widgets"). Declarative only -- `descriptor-json`
+  /// is host-validated against a fixed schema (size/anchor/data-binding
+  /// fields), never raw HTML/CSS/JS; sandboxed custom-code widgets are a
+  /// separate, not-yet-built, Enterprise-only surface per #458's
+  /// architecture notes, out of scope for this interface.
+  record widget-descriptor {
+    /// This bundle's own namespaced id, stable across pushes/registrations.
+    widget-id: string,
+    display-name: string,
+    surface: surface,
+    /// Canonical JSON object text: default size/anchor + declared
+    /// data-binding fields.
+    descriptor-json: string,
+  }
+
+  /// Declares (or idempotently updates) one widget for the designer's
+  /// palette. Does not push any live content -- see `push`.
+  register-widget: func(widget: widget-descriptor) -> result<transport-result, transport-error>;
+
+  /// Pushes one content update for `widget-id` out to every live overlay
+  /// client watching `surface`, fanned out over svc-presentation-rust's
+  /// SSE/websocket channel. `payload-json` is a canonical JSON object
+  /// matching the surface's documented fields (`core/overlay_schema`'s
+  /// `OverlayPush` variants) -- `title`/`body`/`image-url` for
+  /// `full-screen`/`media`, `text` for `crawler`/`ticker`, etc.
+  push: func(widget-id: string, surface: surface, payload-json: string)
+    -> result<transport-result, transport-error>;
+}
+
+/// Stream-lifecycle hooks a bundle exports to react to svc-streaming-rust
+/// events (issue #456). Additive, `stage-v1-1`-only, modeled on
+/// `scheduled-stage`'s "export a hook, `none`/`unsupported-stage` means
+/// not interested" shape -- a bundle not implementing streaming behavior
+/// returns `unsupported-stage` from every hook (SDK default), exactly as
+/// an existing bundle may already do for `process-stage`/`action-stage`.
+/// Capability: the component is linked with this export registered only
+/// when permission `streaming.lifecycle.subscribe` is held -- enforcement
+/// mechanics are host-wiring, deferred past this contract (see
+/// `bundle_capability_gate::permission::PermissionFamily::
+/// StreamingLifecycleSubscribe`).
+interface streaming-lifecycle {
+  use types.{platform-event, unsupported-stage};
+
+  record stream-info {
+    stream-id: string,
+    community: string,
+    platform: string,
+    /// RFC 3339 UTC, millisecond precision.
+    started-at: string,
+  }
+
+  record segment-info {
+    stream-id: string,
+    segment-index: u32,
+    segment-url: string,
+    duration-ms: u32,
+  }
+
+  record recording-info {
+    stream-id: string,
+    recording-url: string,
+    duration-ms: u32,
+    size-bytes: u64,
+  }
+
+  /// Returning `some` emits a platform-event back onto the normal
+  /// downstream path (e.g. an announcement); `none` means "side effects
+  /// only".
+  on-start: func(info: stream-info) -> result<option<platform-event>, unsupported-stage>;
+  on-stop: func(info: stream-info) -> result<option<platform-event>, unsupported-stage>;
+  on-segment: func(segment: segment-info) -> result<option<platform-event>, unsupported-stage>;
+  on-recording-ready: func(recording: recording-info)
+    -> result<option<platform-event>, unsupported-stage>;
+}
+
 /// PostHog flag + license entitlement, two-gate, cached, fail-open to the
 /// supplied default. Capability: always granted.
 ///
@@ -271,4 +380,46 @@ world stage {
 
   export process-stage;
   export action-stage;
+}
+
+/// Additive next-version world (this PR establishes it) -- every `world
+/// stage` (1.0.0) import/export stays byte-for-byte, plus the new
+/// `overlay` import and `streaming-lifecycle` export landed here (C1,
+/// issues #456/#457). `world stage` above is completely untouched: an
+/// existing 1.0.0 component never references `stage-v1-1` and is
+/// unaffected by anything added to it.
+///
+/// **Package version intentionally NOT bumped** (still `waddle:bundle@
+/// 1.0.0`) -- `docs/superpowers/specs/2026-09-28-wit-stage-v1-1-design.md`
+/// SS5 sketches a package-version bump (`@1.1.0`) alongside a frozen
+/// `@1.0.0` `world stage`, but per-item semver pinning that would require
+/// (two differently-versioned `interface types { ... }` declarations in
+/// one file) is not supported syntax in this repo's pinned wasm-tools
+/// 1.259.0 WIT parser (verified: `interface foo@1.0.0 { ... }` is a parse
+/// error). A single package version with two worlds -- this file's actual
+/// approach -- is the verified-safe additive mechanism; reconcile with
+/// that design doc's own versioning story in whichever PR lands
+/// moderation/scheduled-triggers/db-batch.
+///
+/// **Whoever lands moderation/scheduled-triggers/db-batch (wit-stage-v1-1
+/// design doc) extends THIS SAME `stage-v1-1` world** (add `import
+/// moderation;`/`export scheduled-stage;`/the `db` interface's
+/// `execute-batch` addition here) rather than declaring a second
+/// `stage-v1-1` -- WIT worlds are not open/mergeable across files, so a
+/// second same-named world definition would be a hard duplicate-world
+/// conflict, not an extension.
+world stage-v1-1 {
+  import context;
+  import http;
+  import kv;
+  import db;
+  import relay;
+  import %flags;
+  import log;
+  import clock;
+  import overlay;
+
+  export process-stage;
+  export action-stage;
+  export streaming-lifecycle;
 }
