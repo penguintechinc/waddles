@@ -185,11 +185,16 @@ class GuildTenantPairing(db.Model):
 
 
 class CommunityRoleSyncBinding(db.Model):
-    """Maps one pairing's platform-role concept (sub tier / moderator) to a Discord role id."""
+    """Maps one pairing's platform-role concept (sub tier / moderator / community role) to a Discord role id.
+
+    `community_role` (0036) is the Discord -> platform direction's own binding type --
+    mutually exclusive with `subscriber_tier`/`moderator` (Twitch -> Discord), see that
+    migration's own docstring for the structural loop-prevention argument.
+    """
     __tablename__ = 'community_role_sync_bindings'
     __table_args__ = (
         CheckConstraint(
-            "sync_scope IN ('subscriber_tier', 'moderator')",
+            "sync_scope IN ('subscriber_tier', 'moderator', 'community_role')",
             name='community_role_sync_bindings_sync_scope_check',
         ),
         CheckConstraint(
@@ -197,10 +202,23 @@ class CommunityRoleSyncBinding(db.Model):
             name='community_role_sync_bindings_subscriber_tier_check',
         ),
         CheckConstraint(
-            "(sync_scope = 'subscriber_tier' AND subscriber_tier IS NOT NULL) "
-            "OR (sync_scope = 'moderator' AND subscriber_tier IS NULL)",
+            "community_role IS NULL OR community_role IN "
+            "('community-admin', 'moderator', 'vip', 'member')",
+            name='chk_role_sync_binding_community_role',
+        ),
+        CheckConstraint(
+            "(sync_scope = 'subscriber_tier' AND subscriber_tier IS NOT NULL AND community_role IS NULL) "
+            "OR (sync_scope = 'moderator' AND subscriber_tier IS NULL AND community_role IS NULL) "
+            "OR (sync_scope = 'community_role' AND subscriber_tier IS NULL AND community_role IS NOT NULL)",
             name='chk_role_sync_binding_scope_tier',
         ),
+        # NOTE: 0034/0036's own partial UNIQUE indexes (uq_role_sync_binding_tier,
+        # uq_role_sync_binding_moderator, uq_role_sync_binding_community_role -- each
+        # scoped by a `WHERE sync_scope = ...` predicate) are schema-only, not mirrored
+        # here, matching this model's existing convention (see module docstring:
+        # "column-for-column", not index-for-index) -- a plain UniqueConstraint across
+        # all three scopes would be a stricter, incorrect constraint on this ORM-only
+        # read model.
         {'extend_existing': True},
     )
 
@@ -208,6 +226,7 @@ class CommunityRoleSyncBinding(db.Model):
     pairing_id = Column(Integer, ForeignKey('guild_tenant_pairings.id', ondelete='CASCADE'), nullable=False)
     sync_scope = Column(String(20), nullable=False)
     subscriber_tier = Column(SmallInteger, nullable=True)
+    community_role = Column(String(20), nullable=True)
     discord_role_id = Column(String(255), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

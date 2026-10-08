@@ -20,4 +20,12 @@ for exp in process-stage action-stage; do
   grep -q "export $exp;" "$FILE"
 done
 
-echo "PASS: stage.wit declares 8 imports + 2 exports"
+# `db` is structured ops (insert/get/query/update/delete), never raw SQL --
+# design doc SS1 round-1 CRITICAL finding. Assert the structured ops exist
+# and the retired raw-SQL `execute` shape is gone.
+for op in insert get query update delete; do
+  grep -q "  $op:" "$FILE"
+done
+! grep -q "execute: func(statement" "$FILE"
+
+echo "PASS: stage.wit declares 8 imports + 2 exports, db is structured (no raw SQL)"

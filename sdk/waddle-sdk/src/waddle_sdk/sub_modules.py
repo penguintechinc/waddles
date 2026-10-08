@@ -30,7 +30,10 @@ class SubModuleGate:
     command: str
 
     def _key(self, sub_module: str) -> str:
-        return f"submodule:{self.command}:{sub_module}"
+        # `.`, never `:` (gh-631) -- this is a guest-supplied `community_kv`
+        # key, and `:` is the real `kv` host capability's reserved namespace
+        # separator (`core/bundle_host_kv/src/scope.rs`).
+        return f"submodule.{self.command}.{sub_module}"
 
     async def is_enabled(self, community_id: str, sub_module: str) -> bool:
         """Default OFF -- `True` only once an admin has explicitly enabled `sub_module`."""

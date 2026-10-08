@@ -641,6 +641,18 @@ pub struct ProcessDeps<S: SpineOps> {
     ///
     /// [`pii_gate`]: ProcessDeps::pii_gate
     pub pii_minter: Option<Arc<dyn crate::pii_tokenize::IdentityMinter>>,
+    /// The `db` host capability's production wiring
+    /// (`crate::capabilities::StageCapabilities::with_db`), built once at
+    /// startup (`crate::lib::try_build_db_wiring`) and cloned -- cheap,
+    /// `Arc`-backed -- into every per-invoke `StageCapabilities` this loop
+    /// constructs, mirroring [`ProcessDeps::egress`]'s "per-process
+    /// singleton, scope-implicit per call" shape. `None` when
+    /// `BUNDLE_DB_PASSWORD` was never configured on this deployment (every
+    /// `db` call then denies `not_implemented`, same graceful-degradation
+    /// posture as [`ProcessDeps::kv_conn`]) -- see that function's own doc
+    /// for the distinct, louder behavior when the password *was* configured
+    /// but the connection itself failed.
+    pub db_wiring: Option<crate::capabilities::DbWiring>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -881,6 +893,10 @@ async fn handle_delivered<S: SpineOps>(
         );
         let caps = match &deps.kv_conn {
             Some(conn) => caps.with_kv(conn.clone(), Arc::clone(&deps.kv_capabilities)),
+            None => caps,
+        };
+        let caps = match &deps.db_wiring {
+            Some(db) => caps.with_db(db.clone()),
             None => caps,
         };
         Arc::new(caps)
@@ -1728,6 +1744,10 @@ mod tests {
             // ON behavior.
             pii_gate: Arc::new(crate::license::test_support::FixedGate(false)),
             pii_minter: None,
+            // No live Postgres connection in this module's unit tests --
+            // every `db` host-call a fixture invokes sees `not_implemented`,
+            // exercised directly by `capabilities`'s own test suite instead.
+            db_wiring: None,
         };
         (deps, metrics)
     }

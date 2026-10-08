@@ -3,9 +3,10 @@
 Deliberately connects to a *real* Postgres running the actual
 ``config/postgres/migrations/*.sql`` files rather than a hand-defined
 pydal/SQLite schema -- the bug this suite guards against (reputation_events /
-reputation_global missing their CREATE TABLE migration, see migration
-080_add_reputation_tables.sql) is invisible to any test that defines its own
-schema independently of the migration files.
+reputation_tenant missing their CREATE TABLE migration, see migrations
+080_add_reputation_tables.sql / 097_reputation_tenant_scope.sql) is
+invisible to any test that defines its own schema independently of the
+migration files.
 
 Skips the whole module if no reachable Postgres is configured via
 ``TEST_DATABASE_URL``/``DATABASE_URL`` -- this is an integration suite, not a
@@ -115,9 +116,26 @@ def seeded_ids(dal: DAL) -> Iterator[tuple[int, int]]:
     yield community_id, hub_user_id
 
     dal.executesql("DELETE FROM reputation_events WHERE community_id = %s", [community_id])
-    dal.executesql("DELETE FROM reputation_global WHERE hub_user_id = %s", [hub_user_id])
+    dal.executesql(
+        "DELETE FROM reputation_tenant WHERE tenant_id = %s AND hub_user_id = %s",
+        [tenant_id, hub_user_id],
+    )
     dal.executesql("DELETE FROM community_members WHERE community_id = %s", [community_id])
     dal.executesql("DELETE FROM communities WHERE id = %s", [community_id])
     dal.executesql("DELETE FROM hub_users WHERE id = %s", [hub_user_id])
     dal.executesql("DELETE FROM tenants WHERE id = %s", [tenant_id])
     dal.commit()
+
+
+@pytest.fixture()
+def seeded_tenant_id(dal: DAL, seeded_ids: tuple[int, int]) -> int:
+    """The real `communities.tenant_id` backing `seeded_ids`'s community.
+
+    Looked up via the DB (never assumed from `seeded_ids`'s own id-generation
+    scheme) so tenant-scoped tests exercise the exact same `community_id ->
+    communities.tenant_id` mapping `ReputationService._resolve_tenant_id()`
+    uses in production.
+    """
+    community_id, _hub_user_id = seeded_ids
+    row = dal.executesql("SELECT tenant_id FROM communities WHERE id = %s", [community_id])
+    return int(row[0][0])

@@ -33,6 +33,15 @@ _TABLE_MODEL_PAIRS = [
     ("community_role_sync_bindings", "CommunityRoleSyncBinding"),
 ]
 
+# Columns a LATER migration adds via `ALTER TABLE` to a table 0034 itself creates --
+# legitimately on the model (so 0036's own schema-drift test can cross-check them) but
+# absent from 0034's own `CREATE TABLE` SQL, same "evolves forward" relationship
+# `test_0035_schema_drift.py` documents for the renamed tenant_platform_apps table.
+_COLUMNS_ADDED_BY_LATER_MIGRATIONS: dict[str, set[str]] = {
+    # 0036_role_sync_community_role: Discord -> platform direction's own binding column.
+    "community_role_sync_bindings": {"community_role"},
+}
+
 
 def _load_migration() -> ModuleType:
     spec = importlib.util.spec_from_file_location(
@@ -141,9 +150,10 @@ class TestNoDriftBetweenMigrationAndModels:
         sql = _migration_sql()
         sql_columns = _sql_columns_for_table(sql, table)
         model_columns = _model_columns(model_name)
+        later_columns = _COLUMNS_ADDED_BY_LATER_MIGRATIONS.get(table, set())
 
         missing_from_model = sql_columns - model_columns
-        missing_from_sql = model_columns - sql_columns
+        missing_from_sql = model_columns - sql_columns - later_columns
 
         assert not missing_from_model, (
             f"{table}: migration has column(s) {missing_from_model} with no matching "

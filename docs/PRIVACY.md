@@ -112,7 +112,7 @@ The rows linking a user's Discord ID, Twitch ID, etc. to their `hub_user_id` are
 - **Account reclaim**: If a user returns and logs in via their platform account, the OAuth flow (`findOrCreateUserFromOAuth`) finds the existing identity link and reconnects them to their original account — including their full reputation history. See *Account Reclaim After Deletion* below.
 - **Platform identity is not WaddleBot PII**: Discord/Twitch user IDs are owned and managed by those platforms. Deleting them from our records does not erase them from the source platform.
 
-#### 2. `reputation_global` + `reputation_events` — Score & Audit Trail
+#### 2. `reputation_tenant` + `reputation_events` — Score & Audit Trail
 *Legal basis: Legitimate interest (Article 6(1)(f)) — platform integrity / anti-gaming*
 
 Reputation scores and their audit trail are retained. **This is disclosed to users before they confirm deletion.**

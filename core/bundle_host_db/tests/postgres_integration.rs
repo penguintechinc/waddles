@@ -347,7 +347,7 @@ async fn bundle_db_capability_isolation_and_safety_against_real_postgres() {
     assert_eq!(updated_score, Some(DbValue::Int(100)));
 
     let queried = backend
-        .query(&schema, &tenant_a_scope, 10, 0)
+        .query(&schema, &tenant_a_scope, 10, 0, None)
         .await
         .expect("tenant A queries its own table");
     assert_eq!(queried.len(), 1);
@@ -355,7 +355,7 @@ async fn bundle_db_capability_isolation_and_safety_against_real_postgres() {
     assert_eq!(queried[0].version, updated.version);
 
     let queried_for_tenant_b = backend
-        .query(&schema, &tenant_b_scope, 10, 0)
+        .query(&schema, &tenant_b_scope, 10, 0, None)
         .await
         .expect("query itself succeeds, just returns nothing");
     assert!(
@@ -647,7 +647,7 @@ async fn db_host_wrapper_reaches_a_real_backend_for_every_op() {
     assert_eq!(updated.version, row.version + 1);
 
     let queried = host
-        .query(&scope, &schemas, &snapshot, 10, 0)
+        .query(&scope, &schemas, &snapshot, 10, 0, None)
         .await
         .expect("query through DbHost");
     assert_eq!(queried.len(), 1);

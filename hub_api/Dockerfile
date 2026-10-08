@@ -3,7 +3,7 @@
 # Multi-stage, rootless. Base digest reused from services/interactive-social/
 # Dockerfile (already pinned in this repo -- devops-containers.md forbids
 # inventing a second one for the same python:3.13-slim-bookworm tag).
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS builder
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS builder
 WORKDIR /app
 
 COPY hub_api/requirements.txt .
@@ -38,7 +38,7 @@ RUN set -eux; \
     install -m 0755 "/tmp/wasm-tools-${WASM_TOOLS_VERSION}-${wt_arch}-linux/wasm-tools" /usr/local/bin/wasm-tools; \
     rm -rf /tmp/wasm-tools.tar.gz "/tmp/wasm-tools-${WASM_TOOLS_VERSION}-${wt_arch}-linux"
 
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin

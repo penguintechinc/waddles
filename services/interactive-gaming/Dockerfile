@@ -1,7 +1,7 @@
 # Multi-stage build for interactive-gaming service
 # Combines 4 gaming interaction modules into one Quart app on port 8104
 
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS builder
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS builder
 
 WORKDIR /app
 
@@ -24,7 +24,7 @@ COPY action/interactive/server_manager_interaction_module/ ./server_manager_inte
 COPY action/interactive/server_status_interaction_module/ ./server_status_interaction_module/
 
 # Runtime stage
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 
 WORKDIR /app
 

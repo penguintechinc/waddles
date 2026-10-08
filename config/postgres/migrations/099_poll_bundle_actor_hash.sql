@@ -1,4 +1,4 @@
--- Migration 097: let the chat-command poll bundle (bundles/python/poll) write to the
+-- Migration 099: let the chat-command poll bundle (bundles/python/poll) write to the
 -- existing community_polls/poll_votes tables (migration 028) without a resolved
 -- hub_users.id.
 --
