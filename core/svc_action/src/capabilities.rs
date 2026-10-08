@@ -44,6 +44,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use bundle_capability_gate::{
+    AppScopedResource, CapabilityGate, Denied, HostInvokeScopeBuilder, PermissionId, ResourceRef,
+    TenantTier,
+};
 use bundle_host_db::{
     CapabilitySnapshot as DbCapabilitySnapshot, DbError, DbHost, DbScope, DbValue, PostgresBackend,
     SchemaCache,
@@ -75,6 +79,107 @@ pub struct InvokeScope {
     /// bundle's own `message_json`, unchanged) and for any invoke with no
     /// channel-bearing origin event.
     pub origin_channel_id: Option<String>,
+    /// Numeric `tenants.id`/`communities.id` (spec
+    /// `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+    /// SS5.1/SS4 `GrantScopeKey`) -- resolved by `crate::dispatch::
+    /// handle_delivered` via `TenantResolver` before this scope is built
+    /// (never guest-suppliable). `community_id` is `0` for a tenant-wide
+    /// activation, matching `bundle_active_set`'s existing sentinel
+    /// convention.
+    pub tenant_id: i32,
+    pub community_id: i32,
+    /// The approved `(app_id, version)` row id this invoke's grants are
+    /// pinned to (spec SS4). **Interim placeholder** until the real
+    /// `app_versions.id` is threaded through `crate::dispatch`'s bundle-load
+    /// path (tracked as follow-on work, same "interim substitute" posture
+    /// this crate already documents for `ProcessDeps::version`): every
+    /// invocation today resolves to `0` here, which only ever matches a
+    /// grant row also written under version `0` -- never a real approved
+    /// version, so this fails closed (denies every non-platform permission)
+    /// rather than silently matching the wrong version's grants.
+    pub app_version: i64,
+}
+
+impl InvokeScope {
+    /// Builds the gate's host-only [`bundle_capability_gate::InvokeScope`]
+    /// from this already-trusted scope (spec SS5.1: `HostInvokeScopeBuilder`
+    /// is the sole constructor). `tenant_tier` is not yet resolved per
+    /// invocation (no capability wired in this stage today reads it) and
+    /// defaults to [`TenantTier::Free`] -- documented here rather than
+    /// silently guessed, so the follow-on task that wires `storage.objects`
+    /// (spec SS6) knows exactly what to replace.
+    fn gate_scope(&self) -> bundle_capability_gate::InvokeScope {
+        HostInvokeScopeBuilder::new()
+            .tenant_id(self.tenant_id)
+            .community_id(self.community_id)
+            .app_id(self.app_id.clone())
+            .app_version(self.app_version)
+            .tenant_tier(TenantTier::Free)
+            .build()
+            // `app_id` is always non-empty here: it is always
+            // `deps.app_id`, itself sourced from a live `app_catalog` row
+            // (never guest input, never constructed empty) -- see
+            // `crate::dispatch::DispatchDeps::app_id`'s doc.
+            .expect("InvokeScope::app_id is never empty for a live invocation")
+    }
+}
+
+/// Maps a gate [`Denied`] onto the `{code, message}` shape every `host-call`
+/// error reply carries (spec SS5.4's stable `reason` vocabulary).
+fn denied_from_gate(err: Denied) -> HostResultError {
+    denied(err.reason_str(), err.to_string())
+}
+
+/// Best-effort host extraction for `net.http:<host>` (spec SS1) from the
+/// `http.send` host-call's own `{"url": ...}` arg -- no `url` crate
+/// dependency in this crate, so this is a small manual scheme/port strip
+/// rather than a full URL parse. `crate::egress::EgressGuard::send` (called
+/// only once this permission is authorized) performs the real, security-
+/// relevant URL validation/SSRF guarding on this same `url` string; this
+/// function only needs a good-enough host to select which per-host
+/// permission grant to check.
+fn extract_http_host(args: &serde_json::Value) -> Option<String> {
+    let url = args.get("url").and_then(|v| v.as_str())?;
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host = host_port.split(':').next().unwrap_or(host_port);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+/// Classifies an extracted `http.send` host into the specific
+/// [`PermissionId`] family `bundle_capability_gate`'s catalog actually
+/// grants against (`NetHttpFqdn`/`NetHttpPublicIp`/`NetHttpPrivateIp`) --
+/// a literal IP address is classified directly (no DNS lookup, since only
+/// literal-IP syntax can be classified without one); anything else is a
+/// hostname, gated as `NetHttpFqdn`. This is a permission-family choice,
+/// NOT the SSRF wall itself -- `crate::egress::EgressGuard::send`'s own
+/// resolved-IP `is_forbidden_address` check remains the authoritative
+/// defense against a hostname that DNS-resolves to a private address; a
+/// bundle merely holding `net.http.fqdn` never bypasses that downstream
+/// check.
+fn classify_net_http_permission(host: &str) -> PermissionId {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            if v4.is_private() || v4.is_loopback() || v4.is_link_local() {
+                PermissionId::NetHttpPrivateIp(host.to_string())
+            } else {
+                PermissionId::NetHttpPublicIp(host.to_string())
+            }
+        }
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let is_unique_local = (v6.segments()[0] & 0xfe00) == 0xfc00;
+            if v6.is_loopback() || v6.is_unicast_link_local() || is_unique_local {
+                PermissionId::NetHttpPrivateIp(host.to_string())
+            } else {
+                PermissionId::NetHttpPublicIp(host.to_string())
+            }
+        }
+        Err(_) => PermissionId::NetHttpFqdn(host.to_string()),
+    }
 }
 
 /// Answers one `host-call` for a given `capability`/`op`, scoped to the
@@ -301,6 +406,10 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Multiplex
     /// `not_implemented` rather than this process failing to start if a
     /// live Valkey connection for `kv` was never configured).
     kv: Option<KvHost<K>>,
+    /// The standard enforcement gate (spec SS5) every arm of
+    /// [`CapabilityHandler::handle`] calls first. Mandatory, never
+    /// bypassable (spec SS5.2 "no kill-switch") -- see [`Self::new`]'s doc.
+    gate: Arc<CapabilityGate>,
     /// `None` until `crate::lib`'s startup wiring provisions a live
     /// Postgres pool + flag client -- every `db` call denies
     /// `feature_disabled` in that state, never panics (mirrors every
@@ -333,14 +442,24 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     /// (`relay_unavailable`/`not_implemented` until [`Self::with_discord`]/
     /// [`Self::with_kv`] are chained on) so every existing caller of this
     /// constructor -- production and test alike -- is unaffected by this
-    /// landing.
-    pub fn new(relay_queue: Q, egress: Arc<EgressGuard>, usage: Arc<Mutex<UsageBatcher>>) -> Self {
+    /// landing. `gate` is mandatory: every arm calls `gate.authorize()`
+    /// first (spec SS5), typically backed by
+    /// `crate::grant_gate::AlwaysGrantedLoader` so `context`/`clock`/`log`
+    /// keep working even before the sibling grants migration lands, while
+    /// every other permission fails closed with no grant data.
+    pub fn new(
+        relay_queue: Q,
+        egress: Arc<EgressGuard>,
+        usage: Arc<Mutex<UsageBatcher>>,
+        gate: Arc<CapabilityGate>,
+    ) -> Self {
         Self {
             relay_queue,
             egress,
             usage,
             discord: None,
             kv: None,
+            gate,
             db: None,
             detokenize: None,
         }
@@ -456,6 +575,16 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 format!("relay provider {provider:?} is not in the compiled-in allowlist"),
             ));
         }
+        // Gate call FIRST (spec SS5), now that `provider` is known well
+        // enough to name the specific `chat.send:<platform>` permission id
+        // this call maps to.
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::ChatSend(provider.to_string()),
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
         // WIT `relay.push(provider: string, message-json: string)`
         // (`wit/waddle-bundle/stage.wit`) carries the message as an
         // opaque, provider-shaped JSON *string* -- `channel`/`text` are
@@ -657,7 +786,18 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         Ok(serde_json::json!({"sent": true, "provider": "discord"}))
     }
 
-    fn handle_clock(&self, op: &str) -> Result<serde_json::Value, HostResultError> {
+    fn handle_clock(
+        &self,
+        scope: &InvokeScope,
+        op: &str,
+    ) -> Result<serde_json::Value, HostResultError> {
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::PlatformClock,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
         match op {
             "now-millis" => {
                 let millis = std::time::SystemTime::now()
@@ -674,6 +814,13 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     }
 
     fn handle_context(&self, scope: &InvokeScope) -> Result<serde_json::Value, HostResultError> {
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::PlatformContext,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
         // Spec §7.4: "Tenant and community come from the key, never from
         // payload." Never includes a credential or secret.
         Ok(serde_json::json!({
@@ -688,6 +835,13 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         scope: &InvokeScope,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, HostResultError> {
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::PlatformLog,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
         let level = args.get("level").and_then(|v| v.as_str()).unwrap_or("info");
         let raw_message = args
             .get("message")
@@ -728,6 +882,18 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         scope: &InvokeScope,
         call: &HostCallBody,
     ) -> Result<serde_json::Value, HostResultError> {
+        // Gate call FIRST (spec SS5) -- `storage.kv`, `AppScoped`. This
+        // supersedes `bundle_host_kv::authorize::authorize_kv`'s interim
+        // always-grant stand-in as the real security boundary; that inner
+        // seam remains harmlessly redundant until it is retired in a
+        // follow-on cleanup.
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::StorageKv,
+                ResourceRef::AppScoped(AppScopedResource::KvState),
+            )
+            .map_err(denied_from_gate)?;
         let Some(kv) = &self.kv else {
             return Err(denied(
                 "not_implemented",
@@ -812,6 +978,19 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         scope: &InvokeScope,
         call: &HostCallBody,
     ) -> Result<serde_json::Value, HostResultError> {
+        // Gate call FIRST (spec SS5), same pattern as `handle_kv` above --
+        // checked before the feature-flag/wiring state below so an
+        // ungranted call always reports `not_granted`, never
+        // `not_implemented`/`feature_disabled` (which would leak whether
+        // the capability is wired at all to a caller that was never
+        // entitled to ask).
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::StorageTables,
+                ResourceRef::AppScoped(AppScopedResource::Table),
+            )
+            .map_err(denied_from_gate)?;
         let Some(db) = &self.db else {
             return Err(denied(
                 "not_implemented",
@@ -907,9 +1086,20 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                     .and_then(|v| v.as_u64())
                     .and_then(|v| u32::try_from(v).ok())
                     .unwrap_or(0);
+                let order_by = match parse_order_by(&call.args) {
+                    Ok(o) => o,
+                    Err(e) => return Err(e),
+                };
                 return db
                     .host
-                    .query(&db_scope, &db.schemas, &db.capabilities, limit, offset)
+                    .query(
+                        &db_scope,
+                        &db.schemas,
+                        &db.capabilities,
+                        limit,
+                        offset,
+                        order_by,
+                    )
                     .await
                     .map(|rows| {
                         serde_json::json!({
@@ -939,8 +1129,17 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     /// why. `tier` is not wired in this landing.
     async fn handle_flags(
         &self,
+        scope: &InvokeScope,
         call: &HostCallBody,
     ) -> Result<serde_json::Value, HostResultError> {
+        // Gate call FIRST (spec SS5), same pattern as `handle_kv`/`handle_db`.
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                PermissionId::FlagsRead,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
         match call.op.as_str() {
             "enabled" => {
                 let args: FlagsEnabledArgs =
@@ -989,6 +1188,45 @@ fn json_to_db_value(v: &serde_json::Value) -> Result<DbValue, HostResultError> {
             ))
         }
     })
+}
+
+/// Parses `query`'s optional `order_by` arg: `{"random": true}` or
+/// `{"column": "<name>", "descending": <bool>}` -- `None`/absent means the
+/// backend's own default (`row_id ASC`). Column-name validation itself
+/// happens host-side in `bundle_host_db::backend::order_by_sql` (never
+/// trusted from this JSON alone) -- this function only shapes the
+/// wire-level args into [`bundle_host_db::OrderBy`]. Mirrors
+/// `svc_process::capabilities::parse_order_by` (not shared/exported from
+/// `bundle_host_db`, so duplicated here).
+fn parse_order_by(
+    args: &serde_json::Value,
+) -> Result<Option<bundle_host_db::OrderBy>, HostResultError> {
+    let Some(order_by) = args.get("order_by") else {
+        return Ok(None);
+    };
+    if order_by.is_null() {
+        return Ok(None);
+    }
+    if order_by.get("random").and_then(|v| v.as_bool()) == Some(true) {
+        return Ok(Some(bundle_host_db::OrderBy::Random));
+    }
+    let name = order_by
+        .get("column")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            denied(
+                "invalid_args",
+                "order_by must be {\"random\": true} or {\"column\": string, \"descending\": bool}",
+            )
+        })?;
+    let descending = order_by
+        .get("descending")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok(Some(bundle_host_db::OrderBy::Column {
+        name: name.to_string(),
+        descending,
+    }))
 }
 
 fn db_value_to_json(v: &DbValue) -> serde_json::Value {
@@ -1069,17 +1307,32 @@ impl<Q: RelayQueue, K: KvBackend> CapabilityHandler for StageCapabilities<Q, K> 
         Box::pin(async move {
             match call.capability {
                 CapabilityKind::Relay => self.handle_relay(scope, &call.args).await,
-                CapabilityKind::Clock => self.handle_clock(&call.op),
+                CapabilityKind::Clock => self.handle_clock(scope, &call.op),
                 CapabilityKind::Context => self.handle_context(scope),
                 CapabilityKind::Log => self.handle_log(scope, &call.args),
-                CapabilityKind::Http => self.egress.send(&scope.app_id, &call.args).await,
+                CapabilityKind::Http => {
+                    let host = extract_http_host(&call.args).ok_or_else(|| {
+                        denied("invalid_args", "http.send requires a 'url' string")
+                    })?;
+                    self.gate
+                        .authorize(
+                            &scope.gate_scope(),
+                            classify_net_http_permission(&host),
+                            ResourceRef::AppScoped(AppScopedResource::None),
+                        )
+                        .map_err(denied_from_gate)?;
+                    self.egress.send(&scope.app_id, &call.args).await
+                }
                 CapabilityKind::Kv => self.handle_kv(scope, &call).await,
-                // `db` is wired below (mirrors svc_process).
+                // `db` is wired below (mirrors svc_process); `handle_db`
+                // itself gate-checks FIRST (spec SS5) before consulting its
+                // own feature-flag/wiring state.
                 CapabilityKind::Db => self.handle_db(scope, &call).await,
                 // `enabled` is wired to a real `penguin_licensing::
                 // LicenseClient` (`crate::flags::resolve_flag`) -- see
                 // `handle_flags`'s doc for the fallback semantics.
-                CapabilityKind::Flags => self.handle_flags(&call).await,
+                // `handle_flags` itself gate-checks FIRST (spec SS5).
+                CapabilityKind::Flags => self.handle_flags(scope, &call).await,
             }
         })
     }
@@ -1284,6 +1537,68 @@ mod tests {
         ))
     }
 
+    /// Grants every permission this file's existing (pre-gate) tests
+    /// already exercised, for both app ids this suite uses
+    /// (`kv_two_apps_in_the_same_tenant_are_isolated_through_the_handler`'s
+    /// `waddles.bot.other` included) under `scope()`'s `(7, 3, 1)` -- so
+    /// every happy-path test keeps proving its own capability logic, not
+    /// this landing's gate wiring (which the dedicated `gate_*` tests below
+    /// exercise directly, including the deny-without-grant cases).
+    fn permissive_gate() -> Arc<CapabilityGate> {
+        let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+        for app_id in ["waddles.bot.commands.default", "waddles.bot.other"] {
+            let mut grants = std::collections::HashMap::new();
+            for id in [
+                "platform.context",
+                "platform.clock",
+                "platform.log",
+                "storage.kv",
+                "chat.send:twitch",
+                "chat.send:discord",
+                "net.http.fqdn:example.com",
+                "storage.tables",
+                "flags.read",
+            ] {
+                grants.insert(
+                    id.to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: id.to_string(),
+                        params: serde_json::json!({}),
+                    },
+                );
+            }
+            snapshot.set(
+                bundle_capability_gate::GrantScopeKey {
+                    tenant_id: 7,
+                    community_id: 3,
+                    app_id: app_id.to_string(),
+                    app_version: 1,
+                },
+                bundle_capability_gate::GrantSet {
+                    permission_snapshot_hash: "test".to_string(),
+                    grants,
+                },
+            );
+        }
+        Arc::new(CapabilityGate::new(
+            Arc::new(snapshot),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ))
+    }
+
+    /// A gate with an empty snapshot -- every permission fails closed
+    /// `not_granted`, for tests proving the gate is actually consulted.
+    fn deny_all_gate() -> Arc<CapabilityGate> {
+        Arc::new(CapabilityGate::new(
+            Arc::new(bundle_capability_gate::InMemoryGrantSnapshot::new()),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ))
+    }
+
     fn caps(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue> {
         caps_with_usage(queue, Arc::new(Mutex::new(UsageBatcher::new())))
     }
@@ -1292,7 +1607,7 @@ mod tests {
         queue: FakeRelayQueue,
         usage: Arc<Mutex<UsageBatcher>>,
     ) -> StageCapabilities<FakeRelayQueue> {
-        StageCapabilities::new(queue, test_egress(), usage)
+        StageCapabilities::new(queue, test_egress(), usage, permissive_gate())
     }
 
     /// Grants `storage.kv` to `"waddles.bot.commands.default"` -- the
@@ -1321,6 +1636,7 @@ mod tests {
             queue,
             test_egress(),
             Arc::new(Mutex::new(UsageBatcher::new())),
+            permissive_gate(),
         )
         .with_kv(FakeKvBackend::default(), Arc::new(snapshot))
     }
@@ -1331,6 +1647,9 @@ mod tests {
             community: Some("main".to_string()),
             app_id: "waddles.bot.commands.default".to_string(),
             origin_channel_id: None,
+            tenant_id: 7,
+            community_id: 3,
+            app_version: 1,
         }
     }
 
@@ -2470,6 +2789,286 @@ mod tests {
         }
     }
 
+    /// A [`StageCapabilities`] wired to `deny_all_gate()` -- every arm below
+    /// exercises `gate.authorize()` actually being consulted first, not
+    /// bypassed.
+    fn caps_denied(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue, FakeKvBackend> {
+        StageCapabilities::new(
+            queue,
+            test_egress(),
+            Arc::new(Mutex::new(UsageBatcher::new())),
+            deny_all_gate(),
+        )
+        .with_kv(
+            FakeKvBackend::default(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+        )
+    }
+
+    /// Regression (gh-433): the dispatch-time `InvokeScope.app_version` this
+    /// module's own `gate_scope()` builds must be the REAL resolved
+    /// `app_versions.id` (never the `0` interim placeholder
+    /// `crate::dispatch::invoke_dispatch` used to hardcode) for a seeded
+    /// grant to ever match -- `permissive_gate()`'s grants are seeded under
+    /// `app_version: 1` (`scope()`'s own value, the same value a real
+    /// dispatch loop now threads through via `crate::dispatch::
+    /// resolve_action_app_version`), so an invoke carrying that resolved
+    /// version is ALLOWED.
+    #[tokio::test]
+    async fn dispatch_invocation_with_the_resolved_app_version_is_allowed_by_a_seeded_grant() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        let result = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .expect("a grant seeded under the resolved app_version allows the call");
+        assert_eq!(result["value"], serde_json::Value::Null);
+    }
+
+    /// Regression (gh-433): an invoke whose `app_version` cannot be
+    /// resolved to the version a grant was actually issued for -- modeled
+    /// here as a scope carrying a version no grant was ever seeded under --
+    /// is DENIED, never silently authorized under the wrong version's
+    /// permissions (which is exactly what the old `app_version: 0`
+    /// placeholder would have risked had any grant ever been seeded under
+    /// `0`).
+    #[tokio::test]
+    async fn dispatch_invocation_with_an_unresolved_app_version_is_denied() {
+        let caps = caps_with_kv(FakeRelayQueue::default());
+        let unresolved_scope = InvokeScope {
+            app_version: 999,
+            ..scope()
+        };
+        let err = caps
+            .handle(
+                &unresolved_scope,
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_kv_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_relay_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "message_json": r#"{"channel":"c","text":"hi"}"#}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_http_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Http,
+                    "send",
+                    serde_json::json!({"method": "GET", "url": "https://example.com/"}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_db_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Db, "execute", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_flags_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Flags, "get", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    /// The "Always granted, zero-config" platform capabilities (spec SS1)
+    /// still route through `gate.authorize()` (module doc: "so every call is
+    /// still audited uniformly") -- with no grant data at all, they deny
+    /// exactly like any other permission; `crate::grant_gate::
+    /// AlwaysGrantedLoader` (not exercised by this gate double) is what
+    /// makes them unconditionally present in production.
+    #[tokio::test]
+    async fn gate_denies_context_clock_log_without_a_grant() {
+        let caps = caps_denied(FakeRelayQueue::default());
+        for capability in [
+            CapabilityKind::Context,
+            CapabilityKind::Clock,
+            CapabilityKind::Log,
+        ] {
+            let err = caps
+                .handle(
+                    &scope(),
+                    call(capability, "now-millis", serde_json::json!({})),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_granted");
+        }
+    }
+
+    /// An undeclared permission (granted set has entries, but not the one
+    /// this call needs) denies exactly like an empty grant set -- proving
+    /// `authorize()` checks the specific permission id, not just "some
+    /// grant exists for this app."
+    #[tokio::test]
+    async fn gate_denies_a_permission_the_app_was_never_granted() {
+        let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+        snapshot.set(
+            bundle_capability_gate::GrantScopeKey {
+                tenant_id: 7,
+                community_id: 3,
+                app_id: "waddles.bot.commands.default".to_string(),
+                app_version: 1,
+            },
+            bundle_capability_gate::GrantSet {
+                permission_snapshot_hash: "test".to_string(),
+                grants: std::collections::HashMap::from([(
+                    "flags.read".to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: "flags.read".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                )]),
+            },
+        );
+        let gate = Arc::new(CapabilityGate::new(
+            Arc::new(snapshot),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ));
+        let caps = StageCapabilities::new(
+            FakeRelayQueue::default(),
+            test_egress(),
+            Arc::new(Mutex::new(UsageBatcher::new())),
+            gate,
+        )
+        .with_kv(
+            FakeKvBackend::default(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+        );
+
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    /// Revocation mid-stream (spec SS4/SS5.3, task instruction): a grant
+    /// present at the start of the connection, then invalidated (simulating
+    /// a `bundle:grants:invalidate` push notification landing between two
+    /// calls), denies the very next call -- proving `StageCapabilities`
+    /// reads through a live [`bundle_capability_gate::GrantCache`], not a
+    /// one-shot snapshot copied at construction time.
+    #[tokio::test]
+    async fn gate_revocation_mid_stream_denies_the_next_call() {
+        let key = bundle_capability_gate::GrantScopeKey {
+            tenant_id: 7,
+            community_id: 3,
+            app_id: "waddles.bot.commands.default".to_string(),
+            app_version: 1,
+        };
+        let loader = Arc::new(bundle_capability_gate::InMemoryGrantLoader::new());
+        loader.set(
+            key.clone(),
+            bundle_capability_gate::GrantSet {
+                permission_snapshot_hash: "v1".to_string(),
+                grants: std::collections::HashMap::from([(
+                    "storage.kv".to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: "storage.kv".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                )]),
+            },
+        );
+        let cache = Arc::new(bundle_capability_gate::GrantCache::new(loader));
+        cache.refresh(&key).await.unwrap();
+        let gate = Arc::new(CapabilityGate::new(
+            cache.clone(),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ));
+        let kv_capabilities = bundle_host_kv::CapabilitySnapshot::new();
+        kv_capabilities.update(
+            "waddles.bot.commands.default",
+            [bundle_host_kv::authorize::KV_PERMISSION_ID.to_string()],
+        );
+        let caps = StageCapabilities::new(
+            FakeRelayQueue::default(),
+            test_egress(),
+            Arc::new(Mutex::new(UsageBatcher::new())),
+            gate,
+        )
+        .with_kv(FakeKvBackend::default(), Arc::new(kv_capabilities));
+
+        caps.handle(
+            &scope(),
+            call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+        )
+        .await
+        .expect("granted before revocation");
+
+        cache.invalidate(&key);
+
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Kv, "get", serde_json::json!({"key": "k"})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
     #[tokio::test]
     async fn deny_all_denies_every_capability() {
         let handler = DenyAllCapabilities;
@@ -2492,5 +3091,193 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    // ---- handle_flags: authorize() allow/deny + op dispatch ------------
+
+    /// `permissive_gate()` grants `flags.read` to this scope's app id --
+    /// the gate's allow branch must fall through to the real
+    /// `crate::flags::resolve_flag` resolution, not short-circuit deny.
+    /// Asserts `true` regardless of `default_value` (rather than asserting
+    /// a specific value derived from it) because this test process has no
+    /// license env vars configured, so `resolve_flag`'s hardcoded-domain
+    /// bypass (`crate::flags`'s own `bypass_active_resolves_true_
+    /// regardless_of_default` test) is what actually answers the call --
+    /// the point here is that `handle_flags` reached that resolution at
+    /// all, not which fallback tier inside it fired.
+    #[tokio::test]
+    async fn flags_enabled_resolves_through_the_gate_when_granted() {
+        let caps = caps(FakeRelayQueue::default());
+        let result = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Flags,
+                    "enabled",
+                    serde_json::json!({"key": "waddles.some-capability", "default_value": false}),
+                ),
+            )
+            .await
+            .expect("flags.read is granted by permissive_gate()");
+        assert_eq!(result["enabled"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn flags_enabled_malformed_args_is_invalid_args() {
+        let caps = caps(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Flags, "enabled", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn flags_unknown_op_is_not_implemented() {
+        let caps = caps(FakeRelayQueue::default());
+        let err = caps
+            .handle(
+                &scope(),
+                call(CapabilityKind::Flags, "bogus-op", serde_json::json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_implemented");
+    }
+
+    // ---- db/JSON value mapping helpers (handle_db's building blocks) ---
+
+    #[test]
+    fn json_to_db_value_maps_every_supported_json_shape() {
+        assert_eq!(
+            json_to_db_value(&serde_json::json!(null)).unwrap(),
+            DbValue::Null
+        );
+        assert_eq!(
+            json_to_db_value(&serde_json::json!(true)).unwrap(),
+            DbValue::Bool(true)
+        );
+        assert_eq!(
+            json_to_db_value(&serde_json::json!(42)).unwrap(),
+            DbValue::Int(42)
+        );
+        assert_eq!(
+            json_to_db_value(&serde_json::json!(1.5)).unwrap(),
+            DbValue::Float(1.5)
+        );
+        assert_eq!(
+            json_to_db_value(&serde_json::json!("hi")).unwrap(),
+            DbValue::Text("hi".to_string())
+        );
+    }
+
+    #[test]
+    fn json_to_db_value_rejects_arrays_and_objects() {
+        assert_eq!(
+            json_to_db_value(&serde_json::json!([1, 2]))
+                .unwrap_err()
+                .code,
+            "invalid_args"
+        );
+        assert_eq!(
+            json_to_db_value(&serde_json::json!({"a": 1}))
+                .unwrap_err()
+                .code,
+            "invalid_args"
+        );
+    }
+
+    #[test]
+    fn parse_order_by_defaults_to_none_when_absent_or_null() {
+        assert_eq!(parse_order_by(&serde_json::json!({})).unwrap(), None);
+        assert_eq!(
+            parse_order_by(&serde_json::json!({"order_by": null})).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_order_by_parses_random() {
+        assert_eq!(
+            parse_order_by(&serde_json::json!({"order_by": {"random": true}})).unwrap(),
+            Some(bundle_host_db::OrderBy::Random)
+        );
+    }
+
+    #[test]
+    fn parse_order_by_parses_a_column_with_explicit_descending() {
+        assert_eq!(
+            parse_order_by(&serde_json::json!({
+                "order_by": {"column": "created_at", "descending": true}
+            }))
+            .unwrap(),
+            Some(bundle_host_db::OrderBy::Column {
+                name: "created_at".to_string(),
+                descending: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_order_by_defaults_descending_to_false() {
+        assert_eq!(
+            parse_order_by(&serde_json::json!({"order_by": {"column": "row_id"}})).unwrap(),
+            Some(bundle_host_db::OrderBy::Column {
+                name: "row_id".to_string(),
+                descending: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_order_by_rejects_a_malformed_order_by_object() {
+        let err = parse_order_by(&serde_json::json!({"order_by": {}})).unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[test]
+    fn db_value_to_json_maps_every_variant() {
+        assert_eq!(db_value_to_json(&DbValue::Null), serde_json::Value::Null);
+        assert_eq!(
+            db_value_to_json(&DbValue::Bool(true)),
+            serde_json::json!(true)
+        );
+        assert_eq!(db_value_to_json(&DbValue::Int(7)), serde_json::json!(7));
+        assert_eq!(
+            db_value_to_json(&DbValue::Float(2.5)),
+            serde_json::json!(2.5)
+        );
+        assert_eq!(
+            db_value_to_json(&DbValue::Text("x".to_string())),
+            serde_json::json!("x")
+        );
+        assert_eq!(
+            db_value_to_json(&DbValue::Bytes(vec![1, 2, 3])),
+            serde_json::json!([1, 2, 3])
+        );
+    }
+
+    #[test]
+    fn row_to_json_shapes_row_id_version_and_columns() {
+        let row = bundle_host_db::Row {
+            row_id: "r1".to_string(),
+            version: 3,
+            columns: vec![("name".to_string(), DbValue::Text("quote".to_string()))],
+        };
+        let json = row_to_json(row);
+        assert_eq!(json["row_id"], serde_json::json!("r1"));
+        assert_eq!(json["version"], serde_json::json!(3));
+        assert_eq!(json["columns"]["name"], serde_json::json!("quote"));
+    }
+
+    #[test]
+    fn db_error_to_host_error_carries_the_stable_reason_code() {
+        let err = db_error_to_host_error(DbError::NoTable);
+        assert_eq!(err.code, "no_table");
+        let err = db_error_to_host_error(DbError::Conflict);
+        assert_eq!(err.code, "conflict");
     }
 }

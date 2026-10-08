@@ -2802,34 +2802,77 @@ def bind_loyalty_tables(dal: Any, *, migrate: bool = False) -> None:
 
 
 def bind_bar_citizen_tables(dal: Any, *, migrate: bool = False) -> None:
-    """Define the Bar Citizen guild-pairing + role-sync group's own tables (migration 0034).
+    """Define the Bar Citizen guild-pairing + role-sync group's own tables (migrations 0034/0035).
 
     Schema is owned by `alembic/versions/0034_bar_citizen_guild_pairing.py`
-    (raw SQL, not this process -- `backend-database.md`: "NO automatic
-    Alembic migrations on startup") -- `migrate=False` in production,
-    this function only maps pydal onto the already-migrated tables, same
-    split every other `bind_*` function in this file follows.
-    `flask_core.models.guild_pairing` mirrors the same columns
-    column-for-column for SQLAlchemy-side FK resolution; this is the
-    pydal-side mapping the service layer (`services/guild_pairing.py`,
-    `services/credential_resolver.py`) actually queries through.
+    + `0035_connection_model_layers.py` (raw SQL, not this process --
+    `backend-database.md`: "NO automatic Alembic migrations on startup")
+    -- `migrate=False` in production, this function only maps pydal onto
+    the already-migrated tables, same split every other `bind_*` function
+    in this file follows. `flask_core.models.guild_pairing` mirrors
+    `tenant_platform_apps`'s columns column-for-column for SQLAlchemy-side
+    FK resolution (still mapped to the pre-0035 name via that migration's
+    compatibility view -- see its own docstring); this is the pydal-side
+    mapping the service layer (`services/guild_pairing.py`,
+    `services/credential_resolver.py`) actually queries through, against
+    the real (renamed) table directly, not the compat view.
+
+    Three-layer connection model (`docs/CONNECTION_MODEL.local.md`,
+    migration 0035): `tenant_platform_apps` (layer 1, renamed from
+    `tenant_platform_credentials`), `platform_connections` (layer 2 --
+    per-resource install tokens), `community_connection_access` (layer 3
+    -- community grant, no tokens). `credential_resolver.py` is the only
+    service-layer caller of layers 2/3 as of this port; no FK is declared
+    pydal-side from `platform_connections` to `tenant_platform_apps` or
+    `community_connection_access` to `communities`/`platform_connections`
+    (plain integer/bigint columns, same "FK-shaped columns, not pydal
+    `reference`" convention `bind_marketplace_catalog_tables()` already
+    documents) -- composite `UNIQUE`s are DB-level only (migration SQL),
+    same precedent the old `tenant_platform_credentials` table already set.
 
     Depends on `bind_auth_tables()` for `tenants`/`communities`/
     `hub_users` (this group's FK targets), same dependency-first pattern
     `bind_platform_tables()` uses. Idempotent per-DAL-instance guard.
     """
-    if "tenant_platform_credentials" in dal.tables:
+    if "tenant_platform_apps" in dal.tables:
         return
 
     bind_auth_tables(dal, migrate=migrate)
 
     dal.define_table(
-        "tenant_platform_credentials",
+        "tenant_platform_apps",
         Field("tenant_id", "integer", notnull=True),
         Field("platform", "string", length=50, notnull=True),
         Field("credentials_ciphertext", "text", notnull=True),
         Field("key_ref", "string", length=255),
         Field("installed_by_user_id", "integer"),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+
+    dal.define_table(
+        "platform_connections",
+        Field("tenant_id", "integer", notnull=True),
+        Field("platform", "string", length=50, notnull=True),
+        Field("resource_type", "string", length=20, notnull=True),
+        Field("resource_id", "string", length=255, notnull=True),
+        Field("access_token", "text", notnull=True),
+        Field("refresh_token", "text"),
+        Field("status", "string", length=20, notnull=True, default="active"),
+        Field("installed_by_user_id", "integer"),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+
+    dal.define_table(
+        "community_connection_access",
+        Field("community_id", "integer", notnull=True),
+        Field("connection_id", "bigint", notnull=True),
+        Field("status", "string", length=20, notnull=True, default="pending"),
+        Field("requested_by_user_id", "integer"),
+        Field("approved_by_user_id", "integer"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
         migrate=migrate,
@@ -2842,6 +2885,10 @@ def bind_bar_citizen_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("direction", "string", length=20, notnull=True),
         Field("sync_enabled", "boolean", notnull=True, default=False),
         Field("role_name_prefix", "string", length=50, notnull=True),
+        #: migration 0039_event_sync_enabled -- independent opt-in from the
+        #: role-sync `sync_enabled` column above; gates
+        #: `event_discord_sync_service.py`'s push engine per pairing.
+        Field("event_sync_enabled", "boolean", notnull=True, default=False),
         Field("created_by_user_id", "integer"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
@@ -2858,6 +2905,64 @@ def bind_bar_citizen_tables(dal: Any, *, migrate: bool = False) -> None:
         # Discord). See 0036's own docstring for the structural loop-prevention argument.
         Field("community_role", "string", length=20),
         Field("discord_role_id", "string", length=255, notnull=True),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+
+
+def bind_calendar_sync_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Define `calendar_events` (legacy, read/write subset) + `calendar_event_discord_syncs`.
+
+    **`calendar_events` is NOT owned by this binding** -- it's the
+    `calendar_interaction_module`'s own legacy table (`action/interactive/
+    calendar_interaction_module/services/calendar_service.py::EventInfo`
+    is the full column list; schema predates this port's numbered
+    migration set and is intentionally left alone here). This function
+    maps only the subset `event_discord_sync_service.py` actually reads/
+    writes: the full Discord-payload field set (title/description/
+    event_date/end_date/timezone/location/status/community_id) plus the
+    three legacy sync-state columns (`discord_event_id`/`sync_status`/
+    `sync_error`) `EventInfo` already documents as existing. `migrate=False`
+    in production for this half -- hub-api never alters this table's shape.
+
+    `calendar_event_discord_syncs` IS owned by this group (migration
+    0039_event_sync_enabled) -- the per-`(event_id, pairing_id)` sync-state
+    table multi-guild push needs (`calendar_events.discord_event_id` is a
+    single column; one event can be live-pushed to N guilds). Idempotent
+    per-DAL-instance guard, same pattern as every other `bind_*` in this file.
+    """
+    if "calendar_event_discord_syncs" in dal.tables:
+        return
+
+    dal.define_table(
+        "calendar_events",
+        Field("community_id", "integer", notnull=True),
+        Field("title", "string", length=255, notnull=True),
+        Field("description", "text"),
+        Field("event_date", "datetime", notnull=True),
+        Field("end_date", "datetime"),
+        Field("timezone", "string", length=100),
+        Field("location", "text"),
+        Field("status", "string", length=20, notnull=True),
+        Field("discord_event_id", "string", length=255),
+        Field("sync_status", "string", length=20, notnull=True, default="pending"),
+        Field("sync_error", "text"),
+        Field("last_sync_at", "datetime"),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+
+    dal.define_table(
+        "calendar_event_discord_syncs",
+        Field("event_id", "integer", notnull=True),
+        Field("pairing_id", "integer", notnull=True),
+        Field("discord_guild_id", "string", length=255, notnull=True),
+        Field("discord_event_id", "string", length=255),
+        Field("sync_status", "string", length=20, notnull=True, default="pending"),
+        Field("sync_error", "text"),
+        Field("last_sync_at", "datetime"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
         migrate=migrate,

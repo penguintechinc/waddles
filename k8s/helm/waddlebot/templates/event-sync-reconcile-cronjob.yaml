@@ -1,0 +1,83 @@
+# Discord event-sync reconcile CronJob -- runs hub_api/services/event_discord_sync_service.py::main(),
+# one reconcile pass per invocation (run_event_sync_reconcile_batch()). Sweeps calendar_events rows
+# left `pending`/`sync_error` by status='approved' -- the backstop for the immediate, webhook-triggered
+# path (POST /api/v1/internal/calendar/events/sync-discord, see blueprints/v1/event_discord_sync.py)
+# that the calendar_interaction_module's own trigger-wiring calls (a SEPARATE follow-up PR). Mirrors
+# core-bundle-seeder-job.yaml's rootless/envFrom/wait-for-hub-api shape -- same hub-api container
+# image (this is hub_api's own module, not a separate container), different entrypoint via
+# `command`/`args` overriding the image's default `hypercorn app:app` CMD.
+#
+# Disabled by default (`pipeline.eventSync.enabled=false`) -- double-gated alongside the engine's own
+# PostHog flag (waddles.calendar.event_discord_sync, also defaulted OFF) until validated.
+{{- if .Values.pipeline.eventSync.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-event-sync-reconcile
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: event-sync-reconcile
+spec:
+  schedule: {{ .Values.pipeline.eventSync.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.pipeline.eventSync.backoffLimit }}
+      activeDeadlineSeconds: {{ .Values.pipeline.eventSync.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: event-sync-reconcile
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+          {{- include "waddlebot.imagePullSecrets" . | nindent 10 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+          {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 10 }}
+          containers:
+          - name: event-sync-reconcile
+            image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.global.imageTag) }}"
+            imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+            command: ["python3", "-m", "services.event_discord_sync_service"]
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 1000
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop:
+                - ALL
+              seccompProfile:
+                type: RuntimeDefault
+            envFrom:
+            - configMapRef:
+                name: {{ include "waddlebot.fullname" . }}-config
+            - secretRef:
+                name: {{ include "waddlebot.fullname" . }}-secrets
+            env:
+            - name: MODULE_NAME
+              value: "event-sync-reconcile"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "waddlebot.fullname" . }}-secrets
+                  key: DATABASE_URL
+            resources:
+              {{- toYaml .Values.pipeline.eventSync.resources | nindent 14 }}
+            volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          volumes:
+          - name: tmp
+            emptyDir: {}
+{{- end }}

@@ -1,7 +1,7 @@
 # Multi-stage build for Interactive Media Service
 # Combines clip, spotify, and youtube_music interaction modules
 
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS builder
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS builder
 WORKDIR /app
 
 # Copy requirements and install dependencies
@@ -13,7 +13,7 @@ COPY libs/flask_core /app/libs/flask_core
 RUN pip install --no-cache-dir /app/libs/flask_core
 
 # Runtime stage
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 WORKDIR /app
 
 # Copy installed packages from builder

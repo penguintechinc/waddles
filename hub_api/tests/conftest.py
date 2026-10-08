@@ -60,6 +60,8 @@ take any `AsyncDAL`-like fixture with a `.dal` attribute, not just
 
 from __future__ import annotations
 
+import base64
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -89,6 +91,7 @@ from services.schema import (
     bind_app_bundle_tables,
     bind_auth_tables,
     bind_bar_citizen_tables,
+    bind_calendar_sync_tables,
     bind_community_authz_tables,
     bind_github_sync_tables,
     bind_lifecycle_tables,
@@ -109,6 +112,51 @@ TENANT_SLUG = "acme-corp"
 
 #: Second tenant slug -- `lifecycle_db`'s cross-tenant IDOR fixture data.
 OTHER_TENANT_SLUG = "other-corp"
+
+#: Test-only Ed25519 signing seed (NEVER a real platform key) -- see
+#: `bundle_signing_test_env` below.
+_TEST_SIGNING_PRIVATE_KEY_B64 = base64.b64encode(b"t" * 32).decode("ascii")
+_TEST_SIGNING_KEY_ID = "test-key-1"
+
+
+@pytest.fixture(autouse=True)
+def bundle_signing_test_env(monkeypatch: Any) -> None:
+    """Every test gets a valid (test-only) Ed25519 artifact-signing key configured.
+
+    `bundle_approval_service.approve_version()` (spec SS5.6, artifact
+    signing) fails closed without `BUNDLE_SIGNING_PRIVATE_KEY`/
+    `BUNDLE_SIGNING_KEY_ID` set -- rather than mock signing away across
+    the ~30 existing `approve_version()`/`seed_one()` call sites in this
+    suite, this autouse fixture makes REAL Ed25519 signing happen on every
+    approval, matching this codebase's own "prove the wiring, don't fake
+    it" standard for security-sensitive code. A test specifically
+    exercising the "no key configured" failure path removes these with
+    `monkeypatch.delenv(...)` itself.
+    """
+    monkeypatch.setenv("BUNDLE_SIGNING_PRIVATE_KEY", _TEST_SIGNING_PRIVATE_KEY_B64)
+    monkeypatch.setenv("BUNDLE_SIGNING_KEY_ID", _TEST_SIGNING_KEY_ID)
+
+
+@pytest.fixture(autouse=True)
+def bundle_signing_sidecar_upload_mock(monkeypatch: Any) -> Any:
+    """Stubs `storage_service.write_bundle_sidecar()` so no test hits a real MinIO/S3 endpoint.
+
+    `approve_version()`'s new post-commit signed-sidecar upload
+    (`bundle_signing_service.upload_signed_sidecar()`) would otherwise
+    reach out for real -- mirrors `test_bundle_version_service.py`'s own
+    `monkeypatch.setattr(svc.storage_service, "upload_bundle_component",
+    ...)` pattern for the same reason. Returns the `AsyncMock` so a test
+    that specifically wants to assert the upload happened (call count/
+    args) can import this fixture and inspect it, or override it again
+    with its own `monkeypatch.setattr` for a real-upload/failure-path test.
+    """
+    from unittest.mock import AsyncMock
+
+    from services import storage_service
+
+    mock = AsyncMock(return_value="bundles/mock/1/mock.json")
+    monkeypatch.setattr(storage_service, "write_bundle_sidecar", mock)
+    return mock
 
 
 @pytest.fixture
@@ -836,6 +884,65 @@ def bar_citizen_db(tmp_path: Any) -> Any:
     dal.close()
 
 
+@pytest.fixture
+def event_sync_db(tmp_path: Any) -> Any:
+    """File-backed pydal DB for the Discord event-sync group (migration 0039_event_sync_enabled).
+
+    Additive on top of `bar_citizen_db`'s own layering pattern --
+    `bind_auth_tables()` + `bind_bar_citizen_tables()` (for `guild_tenant_
+    pairings.event_sync_enabled` + `CredentialResolver`'s tenant lookup)
+    plus this group's own `bind_calendar_sync_tables()` (`calendar_events`
+    + `calendar_event_discord_syncs`). Seeds one regular tenant + one
+    global tenant + one community + one `approved` calendar event under
+    that community, so `event_discord_sync_service.py`'s tests can create
+    a guild pairing and call `sync_event()`/`run_event_sync_reconcile_
+    batch()` without each test re-seeding the base rows.
+
+    Yields `(dal, community_id, tenant_id, global_tenant_id, event_id)`.
+    """
+    async_dal = AsyncDAL(f"sqlite://{tmp_path / 'event_sync_test.db'}", pool_size=1)
+    dal = async_dal.dal
+    dal.define_table(
+        "tenants",
+        Field("slug", unique=True),
+        Field("display_name"),
+        Field("logo_url"),
+        Field("is_global", "boolean", default=False),
+        Field("is_active", "boolean", default=True),
+        Field("config", "json"),
+    )
+    bind_auth_tables(dal, migrate=True)
+    bind_bar_citizen_tables(dal, migrate=True)
+    bind_calendar_sync_tables(dal, migrate=True)
+
+    tenant_id = dal.tenants.insert(
+        slug=TENANT_SLUG, display_name="Acme Corp", is_active=True, is_global=False
+    )
+    global_tenant_id = dal.tenants.insert(
+        slug=GLOBAL_TENANT_SLUG, display_name="Global", is_active=True, is_global=True
+    )
+    community_id = dal.communities.insert(name="test-community", tenant_id=tenant_id)
+    now = datetime.now(UTC)
+    event_id = dal.calendar_events.insert(
+        community_id=community_id,
+        title="Test Event",
+        description="A test event",
+        event_date=now,
+        end_date=None,
+        timezone="UTC",
+        location="",
+        status="approved",
+        sync_status="pending",
+        created_at=now,
+        updated_at=now,
+    )
+    dal.commit()
+    for table_name in dal.tables:
+        dal(dal[table_name]).count()
+    yield dal, community_id, tenant_id, global_tenant_id, event_id
+    dal.close()
+
+
 #: Matches `flask_core.auth.DEFAULT_TENANT_SLUG` -- the always-visible global catalog tenant.
 GLOBAL_TENANT_SLUG = "global"
 #: A second, non-global tenant distinct from `TENANT_SLUG` -- proves the marketplace-catalog
@@ -1396,6 +1503,13 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("license", String(50)),
         Column("license_review_required", Boolean, server_default="0"),
         Column("source_url", Text),
+        # migration 0040 -- artifact signing (spec SS5.6/Gemini review
+        # condition 9), written by bundle_signing_service.py at approval
+        # time (bundle_approval_service._write_approval_and_activate()).
+        Column("artifact_signature", Text),
+        Column("artifact_signature_key_id", String(100)),
+        Column("artifact_signed_approval_id", BigInteger),
+        Column("artifact_signed_at", DateTime),
     )
     Table(
         "app_active_versions",
@@ -1530,6 +1644,98 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("pinned_version_id", BigInteger),
         Column("updated_by", Integer),
         Column("updated_at", DateTime),
+    )
+    # app_permission_requests / app_tenant_permission_restrictions /
+    # community_permission_grants / app_permission_grant_versions /
+    # bundle_reputation_adjustments (migration 0032) -- sqlite-compatible
+    # mirror of the Bundle Permissions & Capability Gate grant-storage
+    # tables (services/bundle_permission_service.py).
+    Table(
+        "app_permission_requests",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("app_id", String(255), nullable=False),
+        Column("version", String(50), nullable=False),
+        Column("permission_id", String(255), nullable=False),
+        Column("risk", String(20), nullable=False),
+        Column("params_json", JSON, server_default="{}"),
+        Column("justification", Text, nullable=False),
+        Column("approved_by", Integer),
+        Column("approval_source", String(50), server_default="human"),
+        Column("approved_at", DateTime),
+    )
+    Table(
+        "app_tenant_permission_restrictions",
+        metadata,
+        Column("tenant_id", Integer, nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("permission_id", String(255), nullable=False),
+        Column("restricted_by", Integer),
+        Column("restricted_at", DateTime),
+    )
+    Table(
+        "community_permission_grants",
+        metadata,
+        Column("community_id", Integer, nullable=False),
+        Column("tenant_id", Integer, nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("permission_id", String(255), nullable=False),
+        Column("params_json", JSON, server_default="{}"),
+        Column("granted_by", Integer),
+        Column("granted_at", DateTime),
+        Column("revoked_by", Integer),
+        Column("revoked_at", DateTime),
+    )
+    Table(
+        "app_permission_grant_versions",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer, nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("version", String(50), nullable=False),
+        Column("grant_version", Integer, nullable=False),
+        Column("permission_snapshot_hash", String(71), nullable=False),
+        Column("effective_at", DateTime),
+    )
+    Table(
+        "bundle_reputation_adjustments",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("app_id", String(255), nullable=False),
+        Column("tenant_id", Integer, nullable=False),
+        Column("community_id", Integer),
+        Column("target_user_uuid", String(36), nullable=False),
+        Column("scope", String(20), nullable=False),
+        Column("delta", Integer, nullable=False),
+        Column("reason_code", String(100), nullable=False),
+        Column("occurred_at", DateTime),
+        Column("reversal_of", BigInteger),
+    )
+    # instance_permission_policies / instance_permission_policy_audit
+    # (migration 0033) -- sqlite-compatible mirror of the instance policy
+    # layer (services/bundle_instance_policy_service.py).
+    Table(
+        "instance_permission_policies",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("permission_key", String(255), nullable=False),
+        Column("param_scope", String(255)),
+        Column("action", String(10), nullable=False),
+        Column("set_by", Integer),
+        Column("set_at", DateTime),
+    )
+    Table(
+        "instance_permission_policy_audit",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("permission_key", String(255), nullable=False),
+        Column("param_scope", String(255)),
+        Column("previous_action", String(10)),
+        Column("new_action", String(10), nullable=False),
+        Column("cascaded_revocations", Integer, server_default="0"),
+        Column("set_by", Integer),
+        Column("set_at", DateTime),
     )
     # `audit_log` is a pre-existing production table (services/schema.py's
     # `bind_admin_tables()`), reflected here as its sqlite-compatible
