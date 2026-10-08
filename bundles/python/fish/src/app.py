@@ -93,7 +93,7 @@ MAX_COOLDOWN_SECONDS = 3600
 
 #: Durable per-community config -- never expires (`ttl_seconds=0`), mirrors
 #: `lurk`'s own `_CONFIG_TTL_SECONDS` convention.
-_COOLDOWN_CONFIG_KEY = "fish:config:cooldown"
+_COOLDOWN_CONFIG_KEY = "fish.config.cooldown"
 
 _USAGE = "Usage: !fish | !fish list | !fish set cooldown <seconds> (set is admin/mod only)"
 _PERMISSION_DENIED_MSG = "only moderators/broadcasters can configure !fish"
@@ -156,17 +156,17 @@ def _pseudonym(actor: str | None) -> str:
 
 def _count_key(pseudonym: str) -> str:
     """Per-(community, caller) total-catches counter key."""
-    return f"fish:count:{pseudonym}"
+    return f"fish.count.{pseudonym}"
 
 
 def _lastcast_key(pseudonym: str) -> str:
     """Per-(community, caller) last-cast-timestamp key (the cooldown gate)."""
-    return f"fish:lastcast:{pseudonym}"
+    return f"fish.lastcast.{pseudonym}"
 
 
 def _biggest_key(pseudonym: str) -> str:
     """Per-(community, caller) biggest-catch record key (JSON: name/rarity/weight_lbs)."""
-    return f"fish:biggest:{pseudonym}"
+    return f"fish.biggest.{pseudonym}"
 
 
 def _format_duration(total_seconds: int) -> str:

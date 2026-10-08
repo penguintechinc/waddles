@@ -476,7 +476,7 @@ def test_set_cooldown_allowed_for_mod_or_broadcaster(
     result = _run(dispatch(envelope, {}, http_client=None))
 
     assert result.detail == "config_set_cooldown"
-    assert fake_host.store[_scoped("fish:config:cooldown")] == b"45"
+    assert fake_host.store[_scoped("fish.config.cooldown")] == b"45"
     provider, message_json = fake_host.relay_calls[-1]
     assert "45" in json.loads(message_json)["text"]
 
@@ -488,7 +488,7 @@ def test_set_cooldown_rejected_for_non_mod(fake_host: _FakeHost) -> None:
     result = _run(dispatch(envelope, {}, http_client=None))
 
     assert result.detail == "config_set_cooldown:denied"
-    assert _scoped("fish:config:cooldown") not in fake_host.store
+    assert _scoped("fish.config.cooldown") not in fake_host.store
     provider, message_json = fake_host.relay_calls[-1]
     assert "only moderators/broadcasters" in json.loads(message_json)["text"]
 
@@ -522,7 +522,7 @@ def test_set_cooldown_rejects_bad_input(
     result = _run(dispatch(envelope, {}, http_client=None))
 
     assert result.detail == "config_set_cooldown"
-    assert _scoped("fish:config:cooldown") not in fake_host.store
+    assert _scoped("fish.config.cooldown") not in fake_host.store
     provider, message_json = fake_host.relay_calls[-1]
     assert expected_fragment in json.loads(message_json)["text"]
 
@@ -536,7 +536,7 @@ def test_set_cooldown_accepts_boundary_values(seconds: int, fake_host: _FakeHost
     )
     result = _run(dispatch(envelope, {}, http_client=None))
     assert result.detail == "config_set_cooldown"
-    assert fake_host.store[_scoped("fish:config:cooldown")] == str(seconds).encode()
+    assert fake_host.store[_scoped("fish.config.cooldown")] == str(seconds).encode()
 
 
 def test_configured_cooldown_is_honored_on_next_cast(fake_host: _FakeHost) -> None:
@@ -555,7 +555,7 @@ def test_configured_cooldown_is_honored_on_next_cast(fake_host: _FakeHost) -> No
 
 
 def test_cooldown_config_corrupt_falls_back_to_default(fake_host: _FakeHost) -> None:
-    fake_host.store[_scoped("fish:config:cooldown")] = b"not-a-number"
+    fake_host.store[_scoped("fish.config.cooldown")] = b"not-a-number"
     _run(dispatch(_sample_envelope("twitch", "cast"), {}, http_client=None))
     fake_host.advance(1)
     _run(dispatch(_sample_envelope("twitch", "cast"), {}, http_client=None))

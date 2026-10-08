@@ -33,10 +33,10 @@ username/actor id -- see `src/app.py::_pseudonym()`), ahead of the PII-tokenizat
 
 | Key | Scope | TTL | Purpose |
 |---|---|---|---|
-| `fish:lastcast:<pseudonym>` | per-(community, caller) | `cooldown` seconds | Cooldown gate -- presence + elapsed time decide allow/deny. |
-| `fish:count:<pseudonym>` | per-(community, caller) | none | Running total catches (`kv.increment`). |
-| `fish:biggest:<pseudonym>` | per-(community, caller) | none | JSON `{name, rarity, weight_lbs}` of the caller's heaviest catch. |
-| `fish:config:cooldown` | per-community | none | Admin-configured cast cooldown in seconds. |
+| `fish.lastcast.<pseudonym>` | per-(community, caller) | `cooldown` seconds | Cooldown gate -- presence + elapsed time decide allow/deny. |
+| `fish.count.<pseudonym>` | per-(community, caller) | none | Running total catches (`kv.increment`). |
+| `fish.biggest.<pseudonym>` | per-(community, caller) | none | JSON `{name, rarity, weight_lbs}` of the caller's heaviest catch. |
+| `fish.config.cooldown` | per-community | none | Admin-configured cast cooldown in seconds. |
 
 ## Deferred to v2 (not stubbed)
 
