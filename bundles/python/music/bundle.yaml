@@ -1,0 +1,69 @@
+schema_version: 2
+app_id: waddles.core.example.music
+name: Song Request Queue Bundle (Python)
+# 1.0.0: initial kv-only v1 -- !sr/!songrequest (add), !music/!queue (show),
+# !music list/remove <id>/next/skip/set max-per-user <n>. See src/app.py's own
+# module docstring for full scope -- a request QUEUE only, no playback/external
+# music-service API call.
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+# Attribution: net-new Waddles content, NOT a literal port -- credited for inspiration
+# only (no original PenguinTwitchBot source or text reused, so no MIT notice
+# reproduction is required; contrast bundles/csharp/superpenguin-roll, an actual
+# line-for-line port, which does carry the full verbatim notice). Same shape as
+# bundles/python/fish and bundles/python/shoutout.
+author: "superpenguintv (Psychoboy)"
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/music
+notice: |
+  Song-request-queue concept inspired by superpenguintv (Psychoboy)'s
+  PenguinTwitchBot song-request feature (https://github.com/Psychoboy/PenguinTwitchBot).
+  This is an original Waddles implementation: the command grammar, queue data
+  shape, and all logic are written fresh for this bundle. No original
+  PenguinTwitchBot source code or text is reused.
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!sr", "!songrequest", "!music", "!queue"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!sr", "!songrequest", "!music", "!queue"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# No `data.tables` -- v1 is kv-only by design (see src/app.py module docstring):
+# the queue is a single per-community JSON array under one kv key, never a
+# cross-community query, so no `db` capability is needed.
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - storage.kv
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

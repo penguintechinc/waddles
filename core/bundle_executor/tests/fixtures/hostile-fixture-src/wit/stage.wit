@@ -119,10 +119,20 @@ interface kv {
   increment: func(key: string, delta: s64, ttl-seconds: u32) -> result<s64, error>;
 }
 
-/// Parameterized SQL executed BY THE STAGE under the bundle's own Postgres
-/// role, restricted to the manifest's `data.tables` and row-level-security
-/// scoped to the envelope's tenant/community. Capability: granted only when
-/// `data.tables` is non-empty.
+/// Structured table ops against the bundle's OWN single table in the
+/// shared Postgres instance (`app_core`/`app_community` schema), enforced
+/// host-side by `core/bundle_host_db` under the least-privilege
+/// `waddles_bundle_runtime` role: every row is scoped server-side to the
+/// invocation's authenticated (tenant, community, app_id) -- a bundle never
+/// supplies a schema/table/column name or a tenant/community argument;
+/// every op implicitly targets this app's own provisioned table.
+/// Capability: granted only when `data.tables` is non-empty (manifest
+/// permission `storage.tables`).
+///
+/// **No raw SQL crosses this boundary, ever** (design doc SS1 round-1
+/// CRITICAL finding) -- this interface replaces the earlier
+/// `execute(statement, params)` raw-SQL shape; see
+/// `core/bundle_host_db`'s own crate doc for the full design rationale.
 interface db {
   variant value {
     null-value,
@@ -133,23 +143,65 @@ interface db {
     bytes-value(list<u8>),
   }
 
-  record rows {
-    columns: list<string>,
-    rows: list<list<value>>,
-    rows-affected: u64,
+  /// One `(column, value)` pair -- WIT has no map type, so `insert`/
+  /// `update`'s column-values are carried as a list of these.
+  record column-value {
+    column: string,
+    value: value,
+  }
+
+  /// `query`'s row ordering. `column` sorts by a declared column or a
+  /// fixed sortable platform column (`row-id`/`version`/`created-at`/
+  /// `updated-at`), validated host-side; `random` is `ORDER BY random()`,
+  /// typically paired with `limit: 1` for a uniformly-random single row
+  /// (e.g. a quote/8-ball-style bundle). Omitted (the `query` func's
+  /// `order-by` param is `option<order-by>`) defaults to stable
+  /// `row-id` ascending.
+  record order-column {
+    name: string,
+    descending: bool,
+  }
+  variant order-by {
+    column(order-column),
+    random,
+  }
+
+  /// One row as returned to the guest: `row-id`/`version` are the
+  /// platform-owned identity/optimistic-concurrency columns; `columns`
+  /// echoes back exactly the declared-column values, never a platform
+  /// column.
+  record row {
+    row-id: string,
+    version: u64,
+    columns: list<column-value>,
   }
 
   variant error {
     denied(string),
-    syntax(string),
+    invalid-column(string),
+    invalid-value(string),
+    not-found,
     conflict(string),
+    quota-exceeded(string),
     timeout,
     backend(string),
   }
 
-  /// Statement text with $1..$n placeholders. String interpolation of
-  /// parameters is impossible across this boundary by construction.
-  execute: func(statement: string, params: list<value>) -> result<rows, error>;
+  /// Inserts one row; returns the platform-assigned `row-id`/`version`
+  /// alongside the stored columns.
+  insert: func(column-values: list<column-value>) -> result<row, error>;
+  /// Fetches one row by its platform `row-id`.
+  get: func(row-id: string) -> result<row, error>;
+  /// Bounded, orderable list of this app's own rows. `limit` is clamped
+  /// host-side regardless of what is requested; `order-by` defaults to
+  /// `row-id` ascending when absent.
+  query: func(limit: u32, offset: u32, order-by: option<order-by>) -> result<list<row>, error>;
+  /// Updates one row, gated on `expected-version` (optimistic concurrency)
+  /// -- a mismatch or missing row returns `conflict`/`not-found`.
+  update: func(row-id: string, expected-version: u64, column-values: list<column-value>)
+    -> result<row, error>;
+  /// Deletes one row, gated on `expected-version` the same way as `update`.
+  delete: func(row-id: string, expected-version: u64) -> result<_, error>;
 }
 
 /// Push onto a provider-scoped outbound relay queue owned by svc-ingest.

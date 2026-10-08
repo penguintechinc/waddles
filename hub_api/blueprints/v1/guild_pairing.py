@@ -281,6 +281,7 @@ async def create_binding(
             sync_scope=str(body.get("sync_scope", "")),
             discord_role_id=str(body.get("discord_role_id", "")),
             subscriber_tier=body.get("subscriber_tier"),
+            community_role=body.get("community_role"),
         )
     except ApiError as exc:
         return _err(exc)

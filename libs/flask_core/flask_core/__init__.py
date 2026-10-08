@@ -65,6 +65,7 @@ from .community_access import (
     require_admin as require_community_admin,
     require_member as require_community_member,
 )
+from .reputation_tiers import REPUTATION_TIERS, reputation_tier
 from .datamodels import (
     CommandRequest,
     CommandResult,
@@ -259,6 +260,8 @@ __all__ = [
     "CommunityAccessError",
     "DEFAULT_ADMIN_METHODS",
     "bind_community_read_tables",
+    "REPUTATION_TIERS",
+    "reputation_tier",
     "decode_caller_user_id",
     "install_community_scoped_auth",
     "require_community_admin",
