@@ -276,6 +276,46 @@ pub fn register_source_binding_supervisor_metrics(
     }
 }
 
+/// Prometheus-backed `circuit_breaker::CircuitBreakerMetrics` impl
+/// (connector spec SS0 condition 5) -- one `IntCounterVec` labeled by
+/// `source`/`action` ("opened"/"closed", the only two transitions the
+/// `circuit_breaker` crate reports), registered once at startup and shared
+/// (behind the trait object) across every `ProcessDeps::breaker`/
+/// `SupervisorDeps::breaker` instance this pod constructs.
+#[derive(Clone)]
+pub struct CircuitBreakerPromMetrics {
+    transitions_total: prometheus::IntCounterVec,
+}
+
+impl circuit_breaker::CircuitBreakerMetrics for CircuitBreakerPromMetrics {
+    fn transition(&self, source: &str, action: &str) {
+        self.transitions_total
+            .with_label_values(&[source, action])
+            .inc();
+    }
+}
+
+/// Registers [`CircuitBreakerPromMetrics`] against `registry`. Must be
+/// called exactly once per `registry` -- see
+/// [`register_bundle_loader_excluded_metrics`]'s identical constraint.
+pub fn register_circuit_breaker_metrics(
+    registry: &prometheus::Registry,
+) -> CircuitBreakerPromMetrics {
+    let transitions_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_process_circuit_breaker_transitions_total",
+            "Per-source circuit breaker open/close transitions, labeled by source and action",
+        ),
+        &["source", "action"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(transitions_total.clone()))
+        .expect("register svc_process_circuit_breaker_transitions_total");
+
+    CircuitBreakerPromMetrics { transitions_total }
+}
+
 /// Prometheus handles for `crate::changelog_consumer` (dataplane scale
 /// design rev 4, §7/§8 step 2 -- multi-tenant, change-log-driven active-set
 /// loader). Histograms/gauges for load/latency and current state come

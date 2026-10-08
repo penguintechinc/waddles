@@ -1963,6 +1963,8 @@ mod tests {
         let executor = Executor::new(&cfg, FixtureSource)?;
         executor
             .on_load(LoadBody {
+                tenant_id: 1,
+                community_id: 0,
                 app_id: "waddles.test.fuel-hog".to_string(),
                 version: "1".to_string(),
                 digest: fixture_digest(),

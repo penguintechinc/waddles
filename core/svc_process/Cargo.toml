@@ -178,6 +178,12 @@ redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp"
 # instead of a second copy. Same same-repo `path`-dependency rationale as
 # `bundle-active-set` above.
 bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
+# Per-source circuit breaker for guest faults (connector spec SS0 condition
+# 5) -- a same-repo `path` dependency (NOT `penguin-libs`: purely generic,
+# no dependency on this repo's schema/wire protocol). `core/svc_action`
+# declares the identical dependency so the breaker logic is written and
+# tested exactly once. See `core/circuit_breaker/Cargo.toml`.
+circuit-breaker = { path = "../circuit_breaker", version = "=0.1.0" }
 # `futures_util::StreamExt`/`join_all`: `grant_gate`'s pub/sub invalidation
 # subscriber (`PubSubStream::into_on_message()`) AND
 # `apply_active_set`'s concurrent per-(session,bundle) Load/Unload dispatch
