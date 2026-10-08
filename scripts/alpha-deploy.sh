@@ -523,6 +523,16 @@ check_images_in_registry
 # correct order instead (db-migrate Job first, Deployment rollouts after),
 # which is race-free by construction.
 # ---------------------------------------------------------------------------
+# fix/seeder-throughput -- core-bundle-seeder-job.yaml is a post-install/
+# post-upgrade Helm hook (helm.sh/hook); Helm always waits on hook completion
+# using the --timeout flag below, a separate mechanism from the omitted flags
+# discussed above (those govern waiting on normal resource readiness, not
+# hooks). The previous default (5m) was shorter than
+# pipeline.coreBundleSeeder.activeDeadlineSeconds (3000s/50min), so `helm
+# upgrade` gave up and errored out while the Job was still healthy and
+# seeding. HELM_ARGS now sets an explicit 60m to give headroom above the
+# Job's own deadline.
+# ---------------------------------------------------------------------------
 helm lint "${HELM_CHART}" -f "${HELM_CHART}/values-alpha.yaml"
 
 HELM_ARGS=(
@@ -531,6 +541,7 @@ HELM_ARGS=(
     --namespace "${NAMESPACE}" --create-namespace
     --values "${HELM_CHART}/values-alpha.yaml"
     --set-string "global.imageTag=${SHA8}"
+    --timeout 60m
 )
 
 info "helm upgrade --dry-run validation"

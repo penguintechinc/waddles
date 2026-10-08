@@ -190,9 +190,19 @@ pipeline:
     # memory.peak) seeding both ping.wasm/pyping.wasm sequentially: ~218Mi.
     # Raised to 256Mi/512Mi (~1.5x peak headroom). Reconcile/drop this block if
     # fix/seeder-memory (PR #515) lands first.
+    #
+    # fix/seeder-throughput: this 100m/300m CPU override (unrelated to the memory
+    # fix above) was the real bottleneck across 3 deploy attempts (13->15->24 of
+    # ~39 bundles seeded) -- real per-bundle work (component inspect/stage/publish,
+    # catalog install, source-binding sync, Ed25519 signing) got throttled to
+    # ~75s/bundle instead of the ~20s assumed by values.yaml's activeDeadlineSeconds
+    # comment, so the Job hit its deadline partway through every run and the
+    # capability-grants phase (which only runs after seeding completes) never
+    # executed. Raised to 1000m/2000m so the one-shot hook can use the alpha
+    # node's spare headroom instead of being CFS-throttled.
     resources:
-      requests: { cpu: "100m", memory: "256Mi" }
-      limits: { cpu: "300m", memory: "512Mi" }
+      requests: { cpu: "1000m", memory: "256Mi" }
+      limits: { cpu: "2000m", memory: "512Mi" }
   hubWebui:
     enabled: true
     replicas: 1

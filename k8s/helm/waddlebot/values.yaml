@@ -784,7 +784,15 @@ pipeline:
     # templates/core-bundle-seeder-job.yaml, which killed the Job via DeadlineExceeded
     # partway through every seed run (only 13-15/39 bundles seeded,
     # community_permission_grants never fully populated).
-    activeDeadlineSeconds: 1800
+    #
+    # fix/seeder-throughput: 1800s still wasn't enough -- values-alpha.yaml's
+    # 100m/300m CPU override throttled the seeder to ~75s/bundle (not the ~20s
+    # assumed above), hitting this deadline at 24/39 bundles with the
+    # capability-grants phase (which runs after seeding) never reached. The CPU
+    # fix below (1000m/2000m) removes the throttling; this bump to 3000s (50min)
+    # is belt-and-suspenders headroom in case CPU alone isn't sufficient on a
+    # loaded alpha node.
+    activeDeadlineSeconds: 3000
     defaultTenantSlug: "global"
     tenantSlugs: ""
     # fix/preexisting-test-failures (2026-10-02): dedicated seeder-owned ingest-source
