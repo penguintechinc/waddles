@@ -20,6 +20,7 @@ gate.md` Sec3 for the full flow this wires up.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -36,6 +37,8 @@ from services.community_authz import authorize_community
 from services.current_user import get_current_user_id
 from services.errors import ApiError
 from services.tenant_service import require_matching_tenant
+
+logger = logging.getLogger(__name__)
 
 bundle_permissions_bp = Blueprint("v1_bundle_permissions", __name__, url_prefix="/api/v1/apps")
 
@@ -155,6 +158,13 @@ async def approve_permissions(
             approved_permissions=frozenset(data.approvedPermissions),
         )
     except ApiError as exc:
+        logger.warning(
+            "approve_permissions failed for %s@%s: %s (%s)",
+            app_id,
+            version,
+            exc.message,
+            exc.code,
+        )
         return _err(exc)
     return MessageResponse(success=True, message=f"permissions approved for {app_id}@{version}")
 
@@ -197,6 +207,14 @@ async def restrict_permissions(
             restricted_by=get_current_user_id(request),
         )
     except ApiError as exc:
+        logger.warning(
+            "restrict_permissions failed for tenant=%s app=%s@%s: %s (%s)",
+            tenant_slug,
+            app_id,
+            version,
+            exc.message,
+            exc.code,
+        )
         return _err(exc)
     return MessageResponse(success=True, message=f"tenant restrictions set for {app_id}")
 
@@ -236,6 +254,14 @@ async def grant_permissions(
             granted_by=get_current_user_id(request),
         )
     except ApiError as exc:
+        logger.warning(
+            "grant_permissions failed for community=%s app=%s@%s: %s (%s)",
+            community_id,
+            app_id,
+            data.version,
+            exc.message,
+            exc.code,
+        )
         return _err(exc)
     return GrantVersionResponse(success=True, grantVersion=new_version), 201
 
@@ -268,6 +294,14 @@ async def revoke_permission(
             deactivated_by=get_current_user_id(request),
         )
     except ApiError as exc:
+        logger.warning(
+            "revoke_permission failed for community=%s app=%s permission=%s: %s (%s)",
+            community_id,
+            app_id,
+            permission_id,
+            exc.message,
+            exc.code,
+        )
         return _err(exc)
     return GrantVersionResponse(success=True, grantVersion=new_version)
 
@@ -286,6 +320,13 @@ async def list_granted_permissions(
     try:
         await authorize_community(request, async_dal, dal, community_id=community_id, admin=False)
     except ApiError as exc:
+        logger.warning(
+            "list_granted_permissions authz failed for community=%s app=%s: %s (%s)",
+            community_id,
+            app_id,
+            exc.message,
+            exc.code,
+        )
         return _err(exc)
     ids = await svc.get_community_granted_ids(install_dal, community_id=community_id, app_id=app_id)
     return PermissionListResponse(success=True, permissionIds=sorted(ids))

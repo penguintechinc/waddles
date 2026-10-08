@@ -44,6 +44,7 @@ unaffected by that crash (a different code path) and may nest freely.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -59,6 +60,8 @@ from services.community_authz import authorize_community
 from services.current_user import get_current_user_id
 from services.errors import ApiError
 from services.tenant_service import require_matching_tenant
+
+logger = logging.getLogger(__name__)
 
 marketplace_lifecycle_bp = Blueprint(
     "v1_marketplace_lifecycle", __name__, url_prefix="/api/v1/marketplace"
@@ -510,6 +513,13 @@ async def make_available(
             install_dal=_install_dal(),
         )
     except ApiError as exc:
+        logger.warning(
+            "make_available failed for tenant=%s app=%s: %s (%s)",
+            tenant_slug,
+            data.appId,
+            exc.message,
+            exc.code,
+        )
         return _err(exc)
     return MessageResponse(success=True, message=f"Bundle {data.appId} made available"), 201
 
@@ -600,6 +610,13 @@ async def activate_bundle(
             install_dal=_install_dal(),
         )
     except ApiError as exc:
+        logger.warning(
+            "activate_bundle failed for community=%s app=%s: %s (%s)",
+            community_id,
+            data.appId,
+            exc.message,
+            exc.code,
+        )
         return _err(exc)
     return MessageResponse(success=True, message=f"Bundle {data.appId} activated"), 201
 

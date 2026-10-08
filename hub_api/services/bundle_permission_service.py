@@ -65,8 +65,8 @@ async def manifest_for_version(
 
 
 #: Every write to a grant table publishes here (spec Sec4). Consumers:
-#: `svc_process`/`svc_action`'s `GrantSnapshot` push-subscriber (a
-#: separate, parallel Rust task -- not implemented by this module).
+#: `svc_process`/`svc_action`'s `GrantSnapshot` push-subscriber, which
+#: lives entirely in a separate, parallel Rust task outside this module.
 GRANT_INVALIDATION_STREAM = "bundle:grants:invalidate"
 
 _SYSTEM_APPROVAL_SOURCE = "system:core-seeder"

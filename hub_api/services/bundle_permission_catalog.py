@@ -23,9 +23,12 @@ egress to the platform's own infrastructure.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
 import re
 from typing import Literal
+
+logger = logging.getLogger(__name__)
 
 Risk = Literal["normal", "dangerous"]
 
@@ -206,7 +209,10 @@ def is_valid_fqdn(host: str) -> bool:
         return False
     try:
         ipaddress.ip_address(host)
-    except ValueError:
+    except ValueError as exc:
+        # Expected: a valid hostname never parses as an IP literal -- this
+        # is the normal, non-error path for every genuine FQDN.
+        logger.debug("is_valid_fqdn: %r is not an IP literal (%s), treating as hostname", host, exc)
         return True
     return False  # parses as a bare IP -- not a hostname
 
@@ -222,7 +228,10 @@ def is_valid_public_ip(value: str) -> bool:
     """
     try:
         ip = ipaddress.ip_address(value)
-    except ValueError:
+    except ValueError as exc:
+        # Expected: a caller-supplied net.http.public-ip value that isn't a
+        # valid IP literal is routine rejection, not a system fault.
+        logger.debug("is_valid_public_ip: %r does not parse as an IP (%s)", value, exc)
         return False
     single = ipaddress.ip_network(f"{ip}/{ip.max_prefixlen}")
     if _overlaps_always_denied(single):
@@ -240,7 +249,12 @@ def is_valid_private_ip_or_cidr(value: str) -> bool:
     """
     try:
         network = ipaddress.ip_network(value, strict=False)
-    except ValueError:
+    except ValueError as exc:
+        # Expected: a caller-supplied net.http.private-ip value that isn't
+        # a valid IP/CIDR is routine rejection, not a system fault.
+        logger.debug(
+            "is_valid_private_ip_or_cidr: %r does not parse as an IP/CIDR (%s)", value, exc
+        )
         return False
     if _overlaps_always_denied(network):
         return False
