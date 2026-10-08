@@ -157,7 +157,7 @@ def _resolve_raffle(rest: str) -> str:
     try:
         parsed = parse_command(normalized, SPEC)
     except CommandUsageError as exc:
-        log.debug("raffle.invalid_command", raw=normalized, error=str(exc))
+        log.debug("raffle.invalid_command", error_type=type(exc).__name__)
         return "usage"
     return _map_parsed(parsed)
 

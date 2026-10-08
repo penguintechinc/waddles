@@ -204,7 +204,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     try:
         parsed = parse_command(stripped, SPEC)
     except CommandUsageError as exc:
-        log.info("first.transform usage_error", error=str(exc))
+        log.info("first.transform usage_error", error_type=type(exc).__name__)
         action, arg = "usage", str(exc)
     else:
         action, arg = _classify(parsed)
