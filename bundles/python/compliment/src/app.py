@@ -242,7 +242,8 @@ def _resolve(rest: str) -> tuple[str, str | None]:
 
     try:
         parsed: ParsedCommand = parse_command(f"!compliment {rest}", SPEC)
-    except CommandUsageError:
+    except CommandUsageError as exc:
+        log.debug("compliment.invalid_grammar", rest=rest, error=str(exc))
         return "usage", None
     if parsed.sub_module is None and parsed.option == "add":
         return "add", parsed.args
