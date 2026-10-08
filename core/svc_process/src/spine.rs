@@ -620,6 +620,34 @@ pub struct ProcessDeps<S: SpineOps> {
     /// [`StageCapabilities`] this loop constructs, so a capability change
     /// is visible to the very next `kv` host-call.
     pub kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
+    /// The standard enforcement gate (spec
+    /// `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+    /// SS5) every per-invoke [`StageCapabilities`] this loop constructs is
+    /// wired with.
+    pub gate: Arc<bundle_capability_gate::CapabilityGate>,
+    /// Numeric `tenants.id`, resolved once at startup
+    /// (`crate::lib::try_start_process_loop`) via `bundle_active_set::
+    /// scope::resolve_scope` when `BUNDLE_SCOPE_TENANT_ID` and a DB reader
+    /// account are configured -- constant across every invoke this loop
+    /// handles, the same way [`ProcessDeps::digest_source`] is. `0` when
+    /// unconfigured (this loop's env-only mode, see that function's doc) --
+    /// fails closed (denies every non-platform permission) rather than
+    /// matching a real tenant's grants.
+    pub tenant_id: i32,
+    /// See [`ProcessDeps::tenant_id`]'s doc. `0` is also the reserved
+    /// tenant-wide sentinel (`bundle_active_set`'s own convention) for a
+    /// genuinely-resolved tenant-wide scope -- distinguished from the
+    /// unconfigured case only by `tenant_id` also being `0` there.
+    pub community_id: i32,
+    /// The live, poll-refreshed `app_id -> (digest, app_versions.id)`
+    /// snapshot -- resolved PER INVOCATION in [`handle_delivered`] against
+    /// whatever [`ProcessDeps::digest_source`] just resolved, never
+    /// captured once at startup: a bundle hot swap (`crate::bundle_loader`'s
+    /// poll tick, which also updates this same snapshot) must be reflected
+    /// on the very next invocation (spec SS4/SS5.1), and an invoke whose
+    /// version can no longer be resolved falls back to the fail-closed `0`
+    /// sentinel rather than running under a stale one.
+    pub app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
     /// The per-process `bundle_host_http::egress::EgressGuard` cloned into
     /// every per-invoke [`crate::capabilities::StageCapabilities`]'s
     /// `http` capability (see that struct's doc for why this is a
@@ -641,6 +669,18 @@ pub struct ProcessDeps<S: SpineOps> {
     ///
     /// [`pii_gate`]: ProcessDeps::pii_gate
     pub pii_minter: Option<Arc<dyn crate::pii_tokenize::IdentityMinter>>,
+    /// The `db` host capability's production wiring
+    /// (`crate::capabilities::StageCapabilities::with_db`), built once at
+    /// startup (`crate::lib::try_build_db_wiring`) and cloned -- cheap,
+    /// `Arc`-backed -- into every per-invoke `StageCapabilities` this loop
+    /// constructs, mirroring [`ProcessDeps::egress`]'s "per-process
+    /// singleton, scope-implicit per call" shape. `None` when
+    /// `BUNDLE_DB_PASSWORD` was never configured on this deployment (every
+    /// `db` call then denies `not_implemented`, same graceful-degradation
+    /// posture as [`ProcessDeps::kv_conn`]) -- see that function's own doc
+    /// for the distinct, louder behavior when the password *was* configured
+    /// but the connection itself failed.
+    pub db_wiring: Option<crate::capabilities::DbWiring>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -786,6 +826,31 @@ async fn handle_delivered<S: SpineOps>(
         return deps.spine.dead_letter(d, &err).await;
     };
 
+    // Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
+    // the `app_versions.id` this invoke's grants are keyed on (spec
+    // SS4/SS5.1), resolved PER INVOCATION against the already-resolved
+    // `digest` -- never a value captured once at startup. `digest_source`
+    // above (not this lookup) already owns every dead-letter decision for
+    // an unresolvable/superseded digest; `app_version_snapshot` is fed by
+    // the exact same active-set reads (`crate::changelog_consumer`/
+    // `crate::bundle_loader`), so it should always agree with whatever
+    // `digest` was just resolved to. A momentary disagreement (the two
+    // live maps refresh independently) fails closed to `0` -- which never
+    // matches a real grant row -- rather than blocking dispatch on it.
+    let app_version = deps
+        .app_version_snapshot
+        .resolve_for_digest(&deps.app_id, &digest)
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                app_id = %deps.app_id,
+                digest_prefix = %bundle_active_set::digest_prefix(&digest),
+                "no app_version found in the active-version snapshot for this digest; \
+                 falling back to the fail-closed 0 sentinel (every non-platform \
+                 permission will deny for this invoke)"
+            );
+            0
+        });
+
     let Some(connection) = deps.connections.active() else {
         // Escalated WARN -> ERROR (fix/executor-link-heartbeat, alpha
         // 2026-10-02 incident: svc-process/svc-action were rolled and each
@@ -871,16 +936,27 @@ async fn handle_delivered<S: SpineOps>(
     // envelope's own (tenant, community, app_id), never a fixed
     // connection-lifetime default. `kv` reuses `deps.kv_conn` (a cheap
     // handle clone, see that field's doc) rather than opening a new
-    // connection on every invoke.
+    // connection on every invoke. `egress` is the shared, per-process
+    // singleton (`ProcessDeps::egress`'s doc). `gate` authorizes every
+    // capability call, `http` included, before the egress guard ever runs
+    // (module doc, `crate::capabilities`'s own module doc).
     let capabilities: Arc<dyn CapabilityHandler> = {
         let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
             d.env.tenant.clone(),
             d.env.community.clone(),
             deps.app_id.clone(),
+            deps.tenant_id,
+            deps.community_id,
+            app_version,
             Arc::clone(&deps.egress),
+            Arc::clone(&deps.gate),
         );
         let caps = match &deps.kv_conn {
             Some(conn) => caps.with_kv(conn.clone(), Arc::clone(&deps.kv_capabilities)),
+            None => caps,
+        };
+        let caps = match &deps.db_wiring {
+            Some(db) => caps.with_db(db.clone()),
             None => caps,
         };
         Arc::new(caps)
@@ -1339,6 +1415,22 @@ mod tests {
         KeyRing::new(vec![("k1".to_string(), vec![9u8; 32])])
     }
 
+    /// A permissive gate for this module's fixtures -- these tests exercise
+    /// the dispatch/DLQ/retry logic, not `crate::capabilities`'s gate
+    /// wiring (that module's own tests cover deny-without-grant behavior).
+    fn test_gate() -> Arc<bundle_capability_gate::CapabilityGate> {
+        Arc::new(bundle_capability_gate::CapabilityGate::new(
+            Arc::new(bundle_capability_gate::GrantCache::new(Arc::new(
+                crate::grant_gate::AlwaysGrantedLoader::new(
+                    bundle_capability_gate::InMemoryGrantLoader::new(),
+                ),
+            ))),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ))
+    }
+
     /// Like [`fixture_delivered`] but with a caller-supplied `event.source`
     /// (`fixture_delivered` hardcodes `source: null`) -- used by the
     /// `carry_inbound_source`/`handle_delivered` tests below that need a
@@ -1663,6 +1755,23 @@ mod tests {
         connections: Arc<ConnectionRegistry>,
     ) -> (ProcessDeps<FakeSpineOps>, Arc<RecordingSpineMetrics>) {
         let metrics = Arc::new(RecordingSpineMetrics::default());
+        // Seeded so the default fixture's `resolve_for_app` (empty
+        // `digest`, the default below) resolves cleanly -- individual
+        // tests that override `digest` to a non-empty value re-seed the
+        // snapshot themselves (matching digest) right after doing so.
+        let app_version_snapshot = bundle_active_set::ActiveVersionSnapshot::new();
+        app_version_snapshot.update(&[bundle_active_set::ActiveBundleRow {
+            app_id: "waddles.bot.commands.default".to_string(),
+            version: "1".to_string(),
+            version_id: 1,
+            digest: String::new(),
+            component_key: String::new(),
+            sidecar_key: String::new(),
+            artifact_signature: None,
+            artifact_signature_key_id: None,
+            artifact_signed_approval_id: None,
+            declared_capabilities: Vec::new(),
+        }]);
         let deps = ProcessDeps {
             app_id: "waddles.bot.commands.default".to_string(),
             // Empty `Static` by default -- see `DigestSource::Static`'s
@@ -1695,6 +1804,10 @@ mod tests {
             // instead of here.
             kv_conn: None,
             kv_capabilities: Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+            gate: test_gate(),
+            tenant_id: 0,
+            community_id: 0,
+            app_version_snapshot,
             // Deny-by-default fixture (empty catalog, see
             // `crate::capabilities::HttpEgressCatalog`'s doc) -- no test in
             // this module exercises `http` through `ProcessDeps` itself
@@ -1728,6 +1841,10 @@ mod tests {
             // ON behavior.
             pii_gate: Arc::new(crate::license::test_support::FixedGate(false)),
             pii_minter: None,
+            // No live Postgres connection in this module's unit tests --
+            // every `db` host-call a fixture invokes sees `not_implemented`,
+            // exercised directly by `capabilities`'s own test suite instead.
+            db_wiring: None,
         };
         (deps, metrics)
     }
@@ -2125,6 +2242,84 @@ mod tests {
         registry
     }
 
+    /// Same as [`connected_registry_with_fake_executor`], but answers
+    /// `invoke_count` invokes with the same `response` -- for tests
+    /// (e.g. the redirect-after-upgrade regression) that drive
+    /// `handle_delivered` more than once against the same live connection.
+    async fn connected_registry_with_fake_executor_multi(
+        response: serde_json::Value,
+        invoke_count: usize,
+    ) -> Arc<ConnectionRegistry> {
+        use crate::capabilities::DenyAllCapabilities;
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, Frame, HelloBody, HelloOkBody, ResultBody, SandboxInfo,
+        };
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            let hello_ok = read_frame(&mut executor_io).await.unwrap();
+            assert!(matches!(hello_ok.message, Message::HelloOk(_)));
+
+            for _ in 0..invoke_count {
+                let invoke = read_frame(&mut executor_io).await.unwrap();
+                write_frame(
+                    &mut executor_io,
+                    &Frame::new(
+                        invoke.id,
+                        Message::Result(ResultBody {
+                            payload: response.clone(),
+                            duration_ms: 1,
+                            fuel_used: 0,
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+            }
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-process".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let registry = Arc::new(ConnectionRegistry::new());
+        registry.set_active(connection);
+        registry
+    }
+
     /// Drives a fake executor over an in-memory duplex that expects `load`
     /// **before** any `invoke`: completes the `hello`/`hello-ok` handshake,
     /// answers exactly one `load` with `loaded` (recording the `LoadBody`
@@ -2263,6 +2458,19 @@ mod tests {
         deps.version = "3".to_string();
         deps.component_key = "bundles/waddles.bot.commands.default/3/deadbeef.wasm".to_string();
         deps.sidecar_key = "bundles/waddles.bot.commands.default/3/deadbeef.json".to_string();
+        deps.app_version_snapshot
+            .update(&[bundle_active_set::ActiveBundleRow {
+                app_id: deps.app_id.clone(),
+                version: deps.version.clone(),
+                version_id: 1,
+                digest: digest.clone(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+                declared_capabilities: Vec::new(),
+            }]);
 
         handle_delivered(&d, &deps).await.unwrap();
 
@@ -2302,9 +2510,23 @@ mod tests {
                 .await;
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, connections);
-        deps.digest_source = DigestSource::Static(format!("sha256:{}", "0".repeat(64)));
+        let digest = format!("sha256:{}", "0".repeat(64));
+        deps.digest_source = DigestSource::Static(digest.clone());
         deps.component_key = "k".to_string();
         deps.sidecar_key = "s".to_string();
+        deps.app_version_snapshot
+            .update(&[bundle_active_set::ActiveBundleRow {
+                app_id: deps.app_id.clone(),
+                version: deps.version.clone(),
+                version_id: 1,
+                digest: digest.clone(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+                declared_capabilities: Vec::new(),
+            }]);
 
         handle_delivered(&d1, &deps).await.unwrap();
         handle_delivered(&d2, &deps).await.unwrap();
@@ -2392,9 +2614,23 @@ mod tests {
         let d = fixture_delivered("acme", Some("main"), &ring, "k1");
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, registry);
-        deps.digest_source = DigestSource::Static(format!("sha256:{}", "0".repeat(64)));
+        let digest = format!("sha256:{}", "0".repeat(64));
+        deps.digest_source = DigestSource::Static(digest.clone());
         deps.component_key = "k".to_string();
         deps.sidecar_key = "s".to_string();
+        deps.app_version_snapshot
+            .update(&[bundle_active_set::ActiveBundleRow {
+                app_id: deps.app_id.clone(),
+                version: deps.version.clone(),
+                version_id: 1,
+                digest: digest.clone(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+                declared_capabilities: Vec::new(),
+            }]);
 
         handle_delivered(&d, &deps).await.unwrap();
 
@@ -2416,6 +2652,112 @@ mod tests {
 
         assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
         assert!(deps.spine.appended.lock().unwrap().is_empty());
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+    }
+
+    /// Regression (gh-433 follow-up 2): source-binding-style resolution
+    /// (empty `digest`, `resolve_for_app`) has no separate "pinned digest"
+    /// to go stale -- a bundle upgrade (the poller's next tick reads a NEW
+    /// digest/version for this SAME app_id, still active in scope) is
+    /// transparently picked up on the very next delivery, never dead-
+    /// lettered: an upgrade must not drop in-flight deliveries.
+    #[tokio::test]
+    async fn handle_delivered_continues_processing_after_an_upgrade_for_app_scoped_resolution() {
+        let ring = test_ring();
+        let d1 = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let connections =
+            connected_registry_with_fake_executor_multi(serde_json::json!(null), 2).await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+
+        // First delivery: the snapshot resolves `deps.app_id` under its
+        // seeded version -- succeeds and acks.
+        handle_delivered(&d1, &deps).await.unwrap();
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 1);
+
+        // Upgrade: the poller's next tick reads a NEW digest/version for
+        // this SAME app_id, still active in scope.
+        deps.app_version_snapshot
+            .update(&[bundle_active_set::ActiveBundleRow {
+                app_id: "waddles.bot.commands.default".to_string(),
+                version: "2".to_string(),
+                version_id: 2,
+                digest: "sha256:new-after-upgrade".to_string(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+                declared_capabilities: Vec::new(),
+            }]);
+
+        let mut d2 = d1.clone();
+        d2.entry_id = "1234567890-1".to_string();
+        handle_delivered(&d2, &deps).await.unwrap();
+
+        assert!(
+            deps.spine.dead_lettered.lock().unwrap().is_empty(),
+            "an upgrade must never dead-letter an app-scoped delivery"
+        );
+        assert_eq!(
+            deps.spine.acked.lock().unwrap().len(),
+            2,
+            "both the pre- and post-upgrade deliveries must be acked"
+        );
+    }
+
+    /// Regression (gh-433 follow-up): `app_version` is resolved PER
+    /// DELIVERY from the live snapshot, never once per connect/startup.
+    /// The first delivery succeeds against the seeded version; a
+    /// deactivation mid-run (`bundle_loader::run_tick`'s own
+    /// `ActiveVersionSnapshot::update`, simulated here directly) that drops
+    /// this app_id out of the active set entirely -- unlike an upgrade
+    /// (tested above), which redirects -- must make the very NEXT delivery
+    /// fail closed (dead-lettered, `HostCallDenied`) rather than keep
+    /// invoking under a version the active set no longer recognizes.
+    #[tokio::test]
+    async fn handle_delivered_falls_back_to_the_fail_closed_app_version_after_deactivation() {
+        let ring = test_ring();
+        let d1 = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let connections =
+            connected_registry_with_fake_executor_multi(serde_json::json!(null), 2).await;
+        let spine = FakeSpineOps::default();
+        let deps = test_deps(spine, connections);
+
+        // First delivery: the snapshot still resolves `deps.app_id` (empty
+        // `digest`, so `resolve_for_app`) -- succeeds and acks.
+        handle_delivered(&d1, &deps).await.unwrap();
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 1);
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+
+        // Deactivation: the poller's next tick reads an active set that no
+        // longer includes this app_id at all (deactivated or revoked).
+        // `digest_source` (not `app_version_snapshot`) owns dead-letter
+        // decisions for the dispatch itself -- a deactivated app's `digest`
+        // is a separate, already-tested failure path
+        // (`handle_delivered_dead_letters_with_no_active_digest_and_never_invokes`).
+        // This snapshot's only job is resolving the `app_versions.id` the
+        // gate keys grants on; losing that entry must fail CLOSED to the
+        // `0` sentinel (never matching a real grant row), not block
+        // dispatch outright.
+        deps.app_version_snapshot.update(&[]);
+        assert_eq!(
+            deps.app_version_snapshot
+                .resolve_for_app("waddles.bot.commands.default"),
+            None,
+            "a deactivated app_id must no longer resolve in the live snapshot"
+        );
+
+        let mut d2 = d1.clone();
+        d2.entry_id = "1234567890-1".to_string();
+        handle_delivered(&d2, &deps).await.unwrap();
+
+        assert_eq!(
+            deps.spine.acked.lock().unwrap().len(),
+            2,
+            "the dispatch itself must still proceed -- app_version_snapshot losing an entry \
+             fails closed on the GRANT lookup (app_version 0), it must never block dispatch"
+        );
         assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
     }
 

@@ -24,6 +24,10 @@ hub_client = { path = "../hub_client", version = "=0.1.0" }
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+# Property/fuzz test (salvaged from PR #427's render.rs proptest, adapted
+# to this crate's single-file detokenize/extract_tokens API) -- see
+# `tests::never_panics_and_never_leaks_a_known_token`.
+proptest = "=1.9.0"
 
 [profile.release]
 opt-level = 3

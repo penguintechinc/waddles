@@ -26,6 +26,10 @@ on:
     branches: ['release/**']
   workflow_dispatch:
 
+concurrency:
+  group: containers-${{ github.event.merge_group.head_sha || github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   packages: write
@@ -263,6 +267,12 @@ jobs:
           ACTION_PLATFORMS: ${{ steps.changes.outputs.action-platforms }}
           ACTION_SERVERLESS: ${{ steps.changes.outputs.action-serverless }}
           LIBS: ${{ steps.changes.outputs.libs }}
+          # workflow_dispatch must still force-build every module -- the
+          # unconditional-emit filter below (gh#ci-mergegroup-optimization)
+          # would otherwise drop every module on a manual run with no real
+          # file changes, same as the step-level `|| github.event_name ==
+          # 'workflow_dispatch'` guards used throughout this workflow.
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
@@ -295,10 +305,21 @@ jobs:
           ENTRIES="[]"
           for m in "${MODULES[@]}"; do
             IFS='|' read -r NAME CHANGED DOCKERFILE PORT <<< "$m"
-            if [ "$CHANGED" = "true" ] || [ "$LIBS" = "true" ]; then
+            if [ "$CHANGED" = "true" ] || [ "$LIBS" = "true" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
               CONDITION="true"
             else
               CONDITION="false"
+            fi
+            # Only emit entries for modules that actually changed (or when
+            # libs/** changed, which affects every module) -- an unchanged
+            # module previously still got a full matrix entry per arch here,
+            # guarded only by the step-level `matrix.condition == 'true'`
+            # checks below, so it still spawned a job/check-run that did
+            # nothing (gh#ci-mergegroup-optimization). Skipping the entry
+            # entirely removes that always-present job for every unchanged
+            # module instead of just no-opping its steps.
+            if [ "$CONDITION" != "true" ]; then
+              continue
             fi
             for ARCH in "${ARCHES[@]}"; do
               if [ "$ARCH" = "amd64" ]; then
