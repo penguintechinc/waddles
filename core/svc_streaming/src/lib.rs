@@ -6,6 +6,7 @@
 //! a subprocess.
 
 pub mod api;
+pub mod billing;
 pub mod config;
 pub mod db;
 pub mod egress;

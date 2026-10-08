@@ -366,6 +366,17 @@ async fn resolve_tenant_slug(db: &DatabaseConnection, community_id: i32) -> anyh
 /// `/live/{community_id}` have something to show the moment a publisher
 /// connects) and gives `Record` its own always-`Copy` profile -- see
 /// [`RECORD_PROFILE`]'s doc comment for why.
+///
+/// **No transcode-token admission here, deliberately**: unlike
+/// `api::lifecycle::start` (which holds the caller's bearer JWT from the
+/// `/start` HTTP request), an ingest-triggered publish has no end-user JWT
+/// to pass through to hub-api's token ledger -- a stream key authenticates
+/// the publisher directly, not an authenticated community member spending
+/// their own tokens. `config.transcode_enabled` is honored here unmetered
+/// until a service-identity credential (SPIFFE mTLS / machine JWT) exists
+/// for this unattended path -- see `crate::billing::token_ledger`'s module
+/// doc comment, which calls this out as explicit follow-up work, not an
+/// oversight.
 async fn build_pipeline_spec_for_ingest(
     db: &DatabaseConnection,
     config: &streaming_config::Model,

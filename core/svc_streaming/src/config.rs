@@ -130,6 +130,27 @@ pub struct CliConfig {
     /// `JWT_HMAC_SECRET` (env-only, see [`Config::load`]) is used instead.
     #[arg(long, env = "JWT_JWKS_URL")]
     pub jwt_jwks_url: Option<String>,
+
+    /// Base URL of hub-api's token ledger (`POST
+    /// /api/v1/marketplace/communities/{id}/tokens/debit`) -- see
+    /// `crate::billing::token_ledger` for the TRANSCODE admission check
+    /// this backs. Not a secret: it's a plain service address.
+    #[arg(long, env = "HUB_API_URL", default_value = "http://hub-api:8204")]
+    pub hub_api_url: String,
+
+    /// Tokens debited per transcode-admission attempt. Mirrors the Python
+    /// alpha's `Config.transcode_token_cost`.
+    #[arg(long, env = "TRANSCODE_TOKEN_COST", default_value_t = 5)]
+    pub transcode_token_cost: i64,
+
+    /// hub-api marketplace product key billed for a transcode-admission
+    /// debit. Mirrors the Python alpha's `Config.transcode_product_key`.
+    #[arg(
+        long,
+        env = "TRANSCODE_PRODUCT_KEY",
+        default_value = "transcoding_minutes"
+    )]
+    pub transcode_product_key: String,
 }
 
 impl CliConfig {
@@ -267,6 +288,9 @@ mod tests {
         assert_eq!(cli.rtmp_port, 1935);
         assert_eq!(cli.srt_port, 9000);
         assert_eq!(cli.webrtc_udp_range, "40000-40100");
+        assert_eq!(cli.hub_api_url, "http://hub-api:8204");
+        assert_eq!(cli.transcode_token_cost, 5);
+        assert_eq!(cli.transcode_product_key, "transcoding_minutes");
         cli.validate().expect("defaults must be valid");
     }
 
