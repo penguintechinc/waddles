@@ -46,7 +46,7 @@ The committed `wit/waddle-bundle/stage.wit` `db` interface has no column-equalit
 `insert`/`get(row_id)`/`query(limit, offset, order_by)`/`update`/`delete`. `loyalty` solved its
 single-row-per-user case with one `kv` key per user pointing at one `row_id`; this bundle owns
 *multiple* rows per user, so its `kv` (`storage.kv`) index value is itself a small JSON object,
-`{item: row_id, ...}`, one key per user: `inventory:dir:<pseudonym>`. This directory is the only
+`{item: row_id, ...}`, one key per user: `inventory.dir.<pseudonym>`. This directory is the only
 way this bundle can answer "list everything this user owns" without an unbounded `db.query()`
 scan across the whole community (also wrong at scale: `query()`'s `limit` is host-clamped to 200
 rows), and it gives O(1) by-item lookup for `give`/`add`/`remove` too.

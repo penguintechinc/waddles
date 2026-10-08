@@ -60,7 +60,7 @@ user's `fish` item" either, other than by its platform-assigned `row_id`.
 `loyalty` solved the single-row-per-user case with one `kv` key per user
 pointing at one `row_id`; this bundle owns *multiple* rows per user, so the
 `kv` value itself is a small JSON object, `{item: row_id, ...}` -- one key
-per user (`inventory:dir:<pseudonym>`), not one key per `(user, item)`
+per user (`inventory.dir.<pseudonym>`), not one key per `(user, item)`
 pair. This directory is the only way this bundle can answer "list every
 item this user owns" (`!inventory`/`!inv <user>`) without an unbounded
 `db.query()` scan across the whole community's rows (also wrong at scale:
@@ -129,7 +129,7 @@ _COMMAND_NAME = "inventory"
 SPEC = CommandSpec(name=_COMMAND_NAME, sub_modules=frozenset())
 
 _ALIASES = ("!inventory", "!inv")
-_DIR_KEY_PREFIX = "inventory:dir:"
+_DIR_KEY_PREFIX = "inventory.dir."
 _MAX_LIST_ITEMS = 25
 #: Bounded optimistic-concurrency retry budget for a single row mutation -- see
 #: `_db_update_with_retry()`. Five attempts absorbs ordinary concurrent-writer contention without
