@@ -1,13 +1,13 @@
 [project]
 name = "waddle-bundle-quote"
 version = "1.0.0"
-description = "`!quote` -> community quote book backed by the shared Postgres `quotes` table (!quote add/list/remove/random/<id>). Ported from core/svc_process/bundles/social_quote_process.py (strangler extraction), modeled on bundles/python/count's hand-built (not bundle_compiler-routed) structure."
+description = "`!quote` -> a per-community quote book (structured db ops + a kv seq->row_id index, see src/app.py's module docstring). `!quote add/list/remove/random/<id>`. Ported from core/svc_process/bundles/social_quote_process.py (strangler extraction), modeled on bundles/python/rank's structured-db + community_kv-index template."
 requires-python = ">=3.13"
 dependencies = []
 
 [project.optional-dependencies]
 build = ["componentize-py==0.25.1"]
-dev = ["pytest==8.3.3", "mypy==1.14.1", "ruff==0.11.0"]
+dev = ["pytest==8.3.3", "mypy==1.14.1", "ruff==0.14.1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -15,10 +15,38 @@ testpaths = ["tests"]
 [tool.mypy]
 strict = true
 
-# `waddle-sdk` ships no `py.typed` marker (a pre-existing SDK packaging gap -- see
-# bundles/python/count/pyproject.toml's own identical override for why). Silencing
-# `import-untyped` here only, so `--strict` still catches real type errors in this
-# bundle's own code.
+# `wit_world` is generated per-build, only inside a real compiled component
+# (see sdk/waddle-sdk/src/waddle_sdk/db.py's own module docstring) -- never
+# pip-installable, so no stub can exist for static analysis to find. Mirrors
+# bundles/python/rank/pyproject.toml's own identical override.
 [[tool.mypy.overrides]]
-module = "waddle_sdk.*"
+module = ["wit_world"]
 ignore_missing_imports = true
+
+# `waddle_sdk` itself ships no `py.typed` marker yet (a pre-existing, SDK-wide gap --
+# every *consumer*, this bundle included, hits it). Without this, mypy --strict refuses to
+# analyze it at all (`import-untyped`) rather than reading its real inline type hints --
+# `_db_*` wrapper return types are narrowed back explicitly in `src/app.py` where that would
+# otherwise surface as `no-any-return`.
+[[tool.mypy.overrides]]
+module = ["waddle_sdk", "waddle_sdk.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "D", "UP", "B", "ASYNC", "S"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Test names are self-documenting (pytest convention); S101 is standard
+# pytest usage; D1xx docstrings are not required on every test function.
+"tests/*" = ["D100", "D101", "D102", "D103", "D104", "S101"]
+# `wit_fake_db.py` reproduces componentize-py's exact generated class names
+# (`Value_NullValue`, `Error_NotFound`, etc.) -- not Python CapWords, by design (see its own
+# module docstring). Same exemption bundles/python/rank/pyproject.toml grants its own.
+"tests/wit_fake_db.py" = ["N801", "N818"]

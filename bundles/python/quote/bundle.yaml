@@ -6,6 +6,9 @@ name: Quote Book Bundle (Python)
 # BUILD-ONLY / INERT: ships flag-OFF and is not yet wired into the strangler
 # cut-over (bot_process._FEATURE_MODULES still owns `quote` live traffic until
 # the activation-gate P4 work lands -- see this bundle's src/app.py docstring).
+# Ported off the retired `waddle_sdk.db` DAL-style facade (create_dal/TableProxy/
+# AsyncQuerySet) onto the structured insert/get/query/update/delete API -- see
+# src/app.py's module docstring for the full rationale.
 version: 1.0.0
 feature: waddles.core.example
 module: core
@@ -39,17 +42,25 @@ stages:
     spec:
       required_config: []
 egress: []
-# `quotes` (config/postgres/migrations/015_add_quote_tables.sql) is a shared
-# Postgres table, also read/written by hub-api -- this bundle never moves it
-# to `kv`. See `permissions` below for the `db` capability grant.
+# One app-owned table (provisioned at install time in app_core/app_community, not the
+# legacy shared `quotes` migration table (config/postgres/migrations/015_add_quote_tables.sql)
+# the retired facade used) -- a non-empty `data.tables` is what grants the `db` capability
+# (hub_api/services/bundle_approval_service.py::_derive_capabilities), never an explicit
+# `storage.tables` permission entry. Columns (informal today, see `rank`'s own bundle.yaml
+# comment for the richer declarative-schema gap this shares): seq int8 not null, quote_text
+# text not null.
 data:
-  tables: ["quotes"]
+  tables:
+    - quote_entries
 limits:
   timeout_ms: 3000
   memory_mb: 64
   egress_rps: 10
+# `storage.kv` -- required for the data plane to grant `kv` at all
+# (hub_api/services/bundle_approval_service.py::KV_PERMISSION_ID); used here as a
+# seq -> row_id lookup index + an atomic sequence counter (see src/app.py).
 permissions:
-  - storage.tables
+  - storage.kv
 config_schema: {}
 compatible_with: []
 incompatible_with: []
