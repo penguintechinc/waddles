@@ -232,7 +232,8 @@ def test_resolve_set_forwards_args() -> None:
     assert _resolve("set be nice") == ("set", "be nice")
 
 
-def test_resolve_unknown_verb_is_usage() -> None:
+def test_resolve_unknown_verb_is_usage(fake_host: _FakeHost) -> None:
+    """Needs `fake_host`: an unknown verb now logs via `log.debug` before the usage fallback."""
     assert _resolve("bogus") == ("usage", None)
 
 
