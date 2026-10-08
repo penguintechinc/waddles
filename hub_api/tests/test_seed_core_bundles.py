@@ -30,6 +30,7 @@ from cli.seed_core_bundles import (
 )
 from services.bundle_approval_service import activate_for_community
 from services.bundle_component_validator import ComponentValidationResult
+from services.bundle_permission_service import get_approved_permission_ids
 from services.bundle_version_service import STATUS_PUBLISHED
 from services.errors import ApiError
 from tests.conftest import TENANT_SLUG
@@ -53,6 +54,10 @@ _MANIFEST: dict[str, Any] = {
         },
         "action": {"entry": "waddle:bundle/action-stage#dispatch"},
     },
+    # Sec3.6 GLOBAL/COMMUNITY-tier self-heal regression coverage (PR #433 blocker)
+    # needs a real declared capability so `_grant_core_bundle_permissions()` has
+    # something to grant -- `storage.kv` matches the review's own reproduction.
+    "permissions": [{"id": "storage.kv", "justification": "Persists per-channel counters."}],
 }
 _COMPONENT_BYTES = b"fake-wasm-ping-component-bytes"
 
@@ -355,6 +360,82 @@ async def test_seed_one_reruns_are_a_no_op(
 
     versions = await install_dal(install_dal.app_versions.app_id == entry.app_id).select()
     assert len(versions) == 1, "a no-op re-run must not publish a second app_versions row"
+
+
+async def test_seed_one_self_heals_permission_grants_for_a_pre_catalog_bundle(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (PR #433 blocker, reviewed and reproduced): backfill GLOBAL + COMMUNITY tiers.
+
+    `_grant_core_bundle_permissions()`'s own docstring already explains the failure mode: a
+    core bundle first installed BEFORE the permission-catalog system existed (count/lurk/rps
+    etc., installed 2026-09-27, one day before the catalog landed 2026-09-28) is
+    `already_installed` forever once re-seeded, and `seed_core_permission_requests()` (the
+    GLOBAL-tier write, `app_permission_requests`) used to run only `if not already_installed:`
+    -- so the GLOBAL tier was never backfilled for it. With the GLOBAL ceiling permanently
+    empty, `grant_community_permissions()` computes `allowed = approved(EMPTY) - restricted`,
+    finds every required permission "not in catalog", and raises
+    `permission_not_in_catalog_grant` (422) -- caught by `_grant_core_bundle_permissions()`'s
+    own `except ApiError` and only logged, so `community_permission_grants` stayed empty
+    forever. Once `bundle_capability_gate::authorize()` (PR #433) is live, that empty grant
+    row makes every `storage.kv` (etc.) host call for that bundle DENY forever.
+
+    This test simulates exactly that pre-existing state: seed once (both tiers populated
+    normally), then delete both tier rows while leaving install/activation state intact --
+    the install/activate steps are then no-ops on a re-run (`already_installed`/`_already_
+    active` both true), isolating the self-heal path under test to the permission-grant calls
+    alone. Must fail on the pre-fix code (GLOBAL tier gated behind `if not already_installed`)
+    and pass after the fix (`seed_core_permission_requests()` called unconditionally every
+    run, `cli/seed_core_bundles.py::seed_one`).
+    """
+    _patch_validator_and_storage(monkeypatch)
+    community_id = await _seed_community(install_dal)
+    entry = _write_bundle(tmp_path, community_id=community_id)
+
+    first = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert [r.outcome for r in first] == ["made_available", "activated"]
+
+    approved_before = await get_approved_permission_ids(
+        install_dal, app_id=entry.app_id, version=entry.version
+    )
+    assert approved_before == frozenset({"storage.kv"})
+    grants_before = await install_dal(
+        (install_dal.community_permission_grants.app_id == entry.app_id)
+        & (install_dal.community_permission_grants.community_id == community_id)
+        & (install_dal.community_permission_grants.revoked_at == None)  # noqa: E711
+    ).select()
+    assert {r.permission_id for r in grants_before} == {"storage.kv"}
+
+    # Simulate a bundle that was installed/activated before the permission-catalog system
+    # existed: wipe BOTH grant tiers, leave `app_global_installs`/`app_active_versions`
+    # (install + activation state) untouched -- `already_installed` and `_already_active`
+    # will both report `True` on the re-run below, exactly like a real pre-existing bundle.
+    await install_dal(install_dal.app_permission_requests.app_id == entry.app_id).delete()
+    await install_dal(install_dal.community_permission_grants.app_id == entry.app_id).delete()
+    assert not await get_approved_permission_ids(
+        install_dal, app_id=entry.app_id, version=entry.version
+    )
+
+    second = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert [r.outcome for r in second] == ["no_op"], "install/activation state is untouched"
+
+    approved_after = await get_approved_permission_ids(
+        install_dal, app_id=entry.app_id, version=entry.version
+    )
+    assert approved_after == frozenset({"storage.kv"}), (
+        "GLOBAL tier (app_permission_requests) must be backfilled on every seeder run, "
+        "not just the first install"
+    )
+    grants_after = await install_dal(
+        (install_dal.community_permission_grants.app_id == entry.app_id)
+        & (install_dal.community_permission_grants.community_id == community_id)
+        & (install_dal.community_permission_grants.revoked_at == None)  # noqa: E711
+    ).select()
+    assert {r.permission_id for r in grants_after} == {"storage.kv"}, (
+        "COMMUNITY tier (community_permission_grants) must be re-granted once the GLOBAL "
+        "ceiling is backfilled -- a pre-existing core bundle must end up with a live grant "
+        "row matching its manifest's declared capabilities"
+    )
 
 
 async def test_seed_one_new_digest_publishes_a_new_version(

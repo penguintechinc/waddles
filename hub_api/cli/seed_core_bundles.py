@@ -636,13 +636,28 @@ async def seed_one(
             installed_by=None,
             install_source=SYSTEM_ACTOR,
         )
-        # spec Sec3.6: pre-grant every permission this core bundle's manifest
-        # declares -- same SYSTEM-actor convention as the install above.
-        # `_guard_core_namespace()` (top of this function) already hard-
-        # guards `entry.app_id` to CORE_NAMESPACE_PREFIX before any DB write.
-        await seed_core_permission_requests(
-            install_dal, app_id=entry.app_id, version=entry.version, manifest=manifest
-        )
+
+    # spec Sec3.6: pre-grant every permission this core bundle's manifest declares --
+    # same SYSTEM-actor convention as the install above. `_guard_core_namespace()` (top
+    # of this function) already hard-guards `entry.app_id` to CORE_NAMESPACE_PREFIX
+    # before any DB write. Called UNCONDITIONALLY every seeder run, not just inside the
+    # `if not already_installed:` branch above (review finding, PR #433 blocker): a core
+    # bundle first installed before the permission-catalog system existed (e.g.
+    # count/lurk/rps, installed 2026-09-27, one day before the catalog landed
+    # 2026-09-28) is `already_installed` forever, so gating this call on that flag left
+    # its GLOBAL tier (`app_permission_requests`) permanently empty. With the GLOBAL
+    # ceiling never backfilled, `_grant_core_bundle_permissions()`'s own COMMUNITY-tier
+    # self-heal below could never succeed either -- `grant_community_permissions()`
+    # computes `allowed = approved(ceiling) - restricted`, finds every required
+    # permission "not in catalog", and raises `permission_not_in_catalog_grant` (422),
+    # caught and logged, never fixed -- so `community_permission_grants` stayed empty
+    # for every pre-existing core bundle. `record_permission_requests()` (what this
+    # calls) is a DELETE-then-INSERT keyed on `(app_id, version)`, so re-running it for
+    # an already-seeded bundle is a safe, idempotent no-op -- it does not touch any
+    # human/vendor-submitted `app_permission_requests` row for a different `app_id`.
+    await seed_core_permission_requests(
+        install_dal, app_id=entry.app_id, version=entry.version, manifest=manifest
+    )
 
     results: list[SeedResult] = []
     for target in targets:
