@@ -42,6 +42,7 @@ import {
   UserPlusIcon,
   AcademicCapIcon,
   LinkIcon,
+  ArrowPathRoundedSquareIcon,
 } from '@heroicons/react/24/outline';
 
 function AdminLayout() {
@@ -124,6 +125,11 @@ function AdminLayout() {
           icon: LinkIcon,
           items: [
             { to: `/admin/${communityId}/connections`, icon: LinkIcon, label: 'Connections' },
+            {
+              to: `/admin/${communityId}/role-sync`,
+              icon: ArrowPathRoundedSquareIcon,
+              label: 'Role Sync',
+            },
           ],
         },
         {

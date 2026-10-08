@@ -53,18 +53,38 @@ check() {
     fi
 }
 
-# wit_world/imports/db.py -- waddle_sdk/db.py's _to_wit_value/_from_wit_value
+# wit_world/imports/db.py -- waddle_sdk/db.py's structured insert/get/query/
+# update/delete ops (the earlier raw-SQL execute()/Rows shape is retired --
+# see db.py's own module docstring).
 check "wit_world/imports/db.py" "class Value_NullValue:" "db.Value_NullValue"
 check "wit_world/imports/db.py" "class Value_BoolValue:" "db.Value_BoolValue"
 check "wit_world/imports/db.py" "class Value_IntValue:" "db.Value_IntValue"
 check "wit_world/imports/db.py" "class Value_FloatValue:" "db.Value_FloatValue"
 check "wit_world/imports/db.py" "class Value_TextValue:" "db.Value_TextValue"
 check "wit_world/imports/db.py" "class Value_BytesValue:" "db.Value_BytesValue"
-check "wit_world/imports/db.py" "class Rows:" "db.Rows"
-check "wit_world/imports/db.py" "columns: List[str]" "db.Rows.columns"
-check "wit_world/imports/db.py" "rows: List[List[Value]]" "db.Rows.rows"
-check "wit_world/imports/db.py" "rows_affected: int" "db.Rows.rows_affected"
-check "wit_world/imports/db.py" "def execute(statement: str, params: List[Value]) -> Rows:" "db.execute signature"
+check "wit_world/imports/db.py" "class ColumnValue:" "db.ColumnValue"
+check "wit_world/imports/db.py" "    column: str" "db.ColumnValue.column"
+check "wit_world/imports/db.py" "    value: Value" "db.ColumnValue.value"
+check "wit_world/imports/db.py" "class OrderColumn:" "db.OrderColumn"
+check "wit_world/imports/db.py" "class OrderBy_Column:" "db.OrderBy_Column"
+check "wit_world/imports/db.py" "class OrderBy_Random:" "db.OrderBy_Random"
+check "wit_world/imports/db.py" "class Row:" "db.Row"
+check "wit_world/imports/db.py" "    row_id: str" "db.Row.row_id"
+check "wit_world/imports/db.py" "    version: int" "db.Row.version"
+check "wit_world/imports/db.py" "    columns: List[ColumnValue]" "db.Row.columns"
+check "wit_world/imports/db.py" "class Error_Denied:" "db.Error_Denied"
+check "wit_world/imports/db.py" "class Error_InvalidColumn:" "db.Error_InvalidColumn"
+check "wit_world/imports/db.py" "class Error_InvalidValue:" "db.Error_InvalidValue"
+check "wit_world/imports/db.py" "class Error_NotFound:" "db.Error_NotFound"
+check "wit_world/imports/db.py" "class Error_Conflict:" "db.Error_Conflict"
+check "wit_world/imports/db.py" "class Error_QuotaExceeded:" "db.Error_QuotaExceeded"
+check "wit_world/imports/db.py" "class Error_Timeout:" "db.Error_Timeout"
+check "wit_world/imports/db.py" "class Error_Backend:" "db.Error_Backend"
+check "wit_world/imports/db.py" "def insert(column_values: List[ColumnValue]) -> Row:" "db.insert signature"
+check "wit_world/imports/db.py" "def get(row_id: str) -> Row:" "db.get signature"
+check "wit_world/imports/db.py" "def query(limit: int, offset: int, order_by: Optional[OrderBy]) -> List[Row]:" "db.query signature"
+check "wit_world/imports/db.py" "def update(row_id: str, expected_version: int, column_values: List[ColumnValue]) -> Row:" "db.update signature"
+check "wit_world/imports/db.py" "def delete(row_id: str, expected_version: int) -> None:" "db.delete signature"
 
 # wit_world/imports/http.py -- waddle_sdk/http.py's Request/Response/error classification
 check "wit_world/imports/http.py" "class Request:" "http.Request"

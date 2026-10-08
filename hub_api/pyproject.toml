@@ -122,6 +122,9 @@ convention = "google"
 "blueprints/v1/platform.py" = ["N815"]
 "blueprints/v1/platform_config.py" = ["N815"]
 "blueprints/v1/public.py" = ["N815"]
+# `installUrl` -- camelCase DTO wire-contract field matching `public.py`'s
+# own convention (this blueprint shares its `/api/v1/public` prefix).
+"blueprints/v1/discord_bot_install.py" = ["N815"]
 # M2 Core Tenancy-Misc group (communityProfileController.js /
 # joinRequestController.js) -- same N815 rationale as the M1 entries
 # above (`avatarUrl`/`socialLinks`/etc are wire-contract field names, not
@@ -229,6 +232,12 @@ convention = "google"
 # bundle_approvals.py above.
 "blueprints/v1/bundle_tenant_availability.py" = ["N815", "S101"]
 "blueprints/v1/bundle_activation.py" = ["N815", "S101"]
+# Bundle Permissions & Capability Gate consent flow -- same camelCase DTO
+# wire contract + tenant_middleware postcondition assert rationale.
+"blueprints/v1/bundle_permissions.py" = ["N815", "S101"]
+# `assert risk is not None` after `_require(risk is not None, ...)` already
+# raised otherwise -- a narrowing assert for mypy, not a runtime guard.
+"services/bundle_manifest_v2.py" = ["S101"]
 # Tenant ingest_sources registry (spec Sec5.2, Sec10.3) -- camelCase DTO
 # fields (sourceId, communityId, nextCursor, ...) match the wire contract
 # every other v1 blueprint's DTOs already use; S101 is the same

@@ -78,6 +78,12 @@ pipeline:
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "500m", memory: "512Mi" }
+    # feature/bundle-artifact-signing -- run `make generate-bundle-signing-key
+    # KEY_ID=<label> KUBE_CONTEXT=dal2-beta NAMESPACE=waddlebot` once before the first
+    # bundle approval on this env (uses the default secret name -- see values.yaml's
+    # pipeline.hubApi.bundleSigning comment). rustDataPlane stays disabled here (base
+    # default), so no bundleSigningPublicKeys override is needed yet -- add one under
+    # pipeline.rustDataPlane.bundleSigningPublicKeys if/when the executor is enabled here.
   hubWebui:
     replicas: 1
     resources:

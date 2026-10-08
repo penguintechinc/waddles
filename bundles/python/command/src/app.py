@@ -169,13 +169,22 @@ def _render(text: str, *, username: str) -> str:
 
 
 def _registry_key(community: str) -> str:
-    """Per-community kv key for the `{name: text}` custom-command registry."""
-    return f"command:registry:{community}"
+    """Per-community kv key for the `{name: text}` custom-command registry.
+
+    Uses `.` as the separator, never `:` (gh-631): the real `kv` host
+    capability (`core/bundle_host_kv/src/scope.rs::is_allowed_key_byte`)
+    reserves `:` as its own namespace separator and rejects any guest key
+    containing one -- see `waddle_sdk.kv.validate_key`.
+    """
+    return f"command.registry.{community}"
 
 
 def _timers_key(community: str) -> str:
-    """Per-community kv key for the `{name: {interval_seconds, enabled}}` timer config map."""
-    return f"command:timers:{community}"
+    """Per-community kv key for the `{name: {interval_seconds, enabled}}` timer config map.
+
+    `.` separator, never `:` -- see `_registry_key`'s docstring (gh-631).
+    """
+    return f"command.timers.{community}"
 
 
 async def _load_registry(community: str) -> dict[str, str]:

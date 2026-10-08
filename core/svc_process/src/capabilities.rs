@@ -28,15 +28,24 @@
 //! ProcessDeps::kv_conn`'s doc) -- and `http`, backed by
 //! [`StageCapabilities::egress`]/[`HttpEgressCatalog`]'s docs for the
 //! shared `bundle_host_http::egress::EgressGuard` pipeline (extracted from
-//! `core/svc_action`, PR #459 follow-up) and the interim capability-gate
-//! seam this stage's own catalog stands in for ahead of PR #433's standard
-//! `core/bundle_capability_gate::authorize` landing. `db` is wired too
-//! (PR #498) -- structured insert/get/update/delete against a bundle's own
+//! `core/svc_action`, PR #459 follow-up). `db` is wired too (PR #498) --
+//! structured insert/get/update/delete against a bundle's own
 //! `app_core`/`app_community` table via [`DbWiring`], gated by
 //! `crate::license::BUNDLE_DB_CAPABILITY_FLAG` (unseen/OFF denies
 //! `feature_disabled`); `query` remains unimplemented (see
-//! `bundle_host_db`'s crate doc). `flags` remains a documented seam -- see
-//! [`StageCapabilities::handle`]'s match arms.
+//! `bundle_host_db`'s crate doc). **Every wired capability, `http` and `db`
+//! included, is authorized by `core/bundle_capability_gate::authorize`
+//! FIRST** (spec SS5, PR #433) -- superseding this stage's own interim
+//! catalog-based capability-gate seam, which remains harmlessly redundant
+//! defense-in-depth until retired in a follow-on cleanup. For `http`
+//! specifically, the extracted host is classified into its
+//! `NetHttpFqdn`/`NetHttpPublicIp`/`NetHttpPrivateIp` permission family
+//! (see [`classify_net_http_permission`]) and run through the gate
+//! *before* the request ever reaches [`StageCapabilities::handle_http`]'s
+//! `EgressGuard` -- the gate is the permission boundary, the guard is the
+//! SSRF/allowlist boundary; both are mandatory and neither substitutes for
+//! the other. Fail-closed, no kill-switch (spec SS5.2). `flags` remains a
+//! documented seam -- see [`StageCapabilities::handle`]'s match arms.
 //! `relay` is never granted to a process-stage bundle at all (spec §6.5:
 //! "Capability: granted only to action-stage bundles") and is denied
 //! unconditionally, not merely unimplemented.
@@ -50,6 +59,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
+use bundle_capability_gate::{
+    AppScopedResource, CapabilityGate, Denied, HostInvokeScopeBuilder, PermissionId, ResourceRef,
+    TenantTier,
+};
 use bundle_host_db::{
     CapabilitySnapshot as DbCapabilitySnapshot, DbError, DbHost, DbScope, DbValue, PostgresBackend,
     SchemaCache,
@@ -59,6 +72,12 @@ use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
 use crate::license::FeatureGate;
+
+/// Maps a gate [`Denied`] onto the `{code, message}` shape every `host-call`
+/// error reply carries (spec SS5.4's stable `reason` vocabulary).
+fn denied_from_gate(err: Denied) -> HostResultError {
+    denied(err.reason_str(), err.to_string())
+}
 
 /// Answers one `host-call` for a given `capability`/`op`. Object-safe (a
 /// manually-boxed future rather than `async fn` in a trait) so the host-API
@@ -127,16 +146,15 @@ fn sanitize_bundle_log_message(raw_message: &str) -> String {
 }
 
 /// Per-`app_id` egress-allowlist source for this stage's `http` capability
-/// -- the interim capability-gate seam (`docs/superpowers/specs/
-/// 2026-09-28-bundle-permissions-and-capability-gate.md`, PR #419/#433).
-/// `core/bundle_capability_gate::authorize(scope, permission, resource)`
-/// (PR #433) is the standard, install-time permission gate this will be
-/// replaced by once it lands; until then, this snapshot is this stage's
-/// own copy of the same interim pattern PR #425 (`core/bundle_host_kv`)
-/// used ahead of the standard gate: **undeclared means denied**. An
-/// `app_id` this snapshot has never been told about (every app, today --
+/// (`docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-
+/// gate.md`). This is the SSRF/allowlist boundary [`EgressGuard`]
+/// enforces *after* `core/bundle_capability_gate::authorize` (PR #433) has
+/// already granted the classified `NetHttpFqdn`/`NetHttpPublicIp`/
+/// `NetHttpPrivateIp` permission -- see the module doc for why both checks
+/// run, in that order, for every `http` call: **undeclared means denied**.
+/// An `app_id` this snapshot has never been told about (every app, today --
 /// no writer populates it yet, same honest gap `crate::capabilities`'s own
-/// module doc already documents for `db`/`kv`/`flags`) resolves to `None`,
+/// module doc already documents for `db`/`flags`) resolves to `None`,
 /// which [`EgressGuard`] treats identically to a declared-but-empty
 /// `egress` list: every `http.send` call is refused `host_not_declared`.
 /// [`HttpEgressCatalog::update`] is the write side a future DB-driven
@@ -198,8 +216,8 @@ pub struct DbWiring {
 /// StageCapabilities` is: `handle_kv`'s argument-parsing/error-mapping is
 /// unit-testable against a fake implementing the public
 /// `bundle_host_kv::KvBackend` trait, with no live Valkey server -- see
-/// this module's `tests::FakeKvBackend`. [`egress`] is the one exception
-/// to "everything scope-implicit, nothing shared" -- it is a
+/// this module's `tests::FakeKvBackend`. [`egress`](Self::new) is the one
+/// exception to "everything scope-implicit, nothing shared" -- it is a
 /// per-*process* singleton (owns rate-limit token buckets keyed by
 /// `app_id` across every invoke, spec §8.2 step 8), built once by this
 /// stage's own startup wiring and cloned (cheap, `Arc`) into every
@@ -208,11 +226,34 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     tenant: String,
     community: Option<String>,
     app_id: String,
+    /// Numeric `tenants.id`/`communities.id` (spec
+    /// `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+    /// SS5.1/SS4 `GrantScopeKey`) -- the caller's already-resolved scope
+    /// (`crate::spine::ProcessDeps::tenant_id`'s doc), set via
+    /// `bundle_active_set::scope::resolve_scope` at startup when
+    /// `BUNDLE_SCOPE_TENANT_ID` and a DB reader account are configured, `0`
+    /// otherwise (this stage's env-only dispatch mode) -- fails closed
+    /// (denies every non-platform permission) rather than silently matching
+    /// the wrong tenant's grants.
+    tenant_id: i32,
+    community_id: i32,
+    /// The resolved `app_versions.id` for the caller's configured bundle
+    /// version -- see `crate::spine::ProcessDeps::app_version`'s doc. `0`
+    /// when no bundle version is configured.
+    app_version: i64,
     /// See [`Self::with_kv`]'s doc; `None` until it is called (a bundle
     /// sees `not_implemented` rather than this loop failing to start if
     /// the Valkey connection for `kv` was never configured).
     kv: Option<KvHost<K>>,
+    /// The shared, per-process [`EgressGuard`] backing the `http`
+    /// capability -- see [`Self::handle_http`].
     egress: Arc<EgressGuard>,
+    /// The standard enforcement gate (spec SS5) every arm of
+    /// [`CapabilityHandler::handle`] calls first, `http` included (see
+    /// the module doc for why both the gate and the egress guard run, in
+    /// that order). Mandatory, never bypassable (spec SS5.2 "no
+    /// kill-switch").
+    gate: Arc<CapabilityGate>,
     /// `None` until `crate::lib`'s startup wiring provisions a live
     /// Postgres pool + flag client -- every `db` call denies
     /// `feature_disabled` in that state, never panics (mirrors every other
@@ -226,21 +267,58 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// every other capability are scope-implicit (spec §5.11: "No bundle
     /// host call accepts a tenant or community argument at all"). `kv`
     /// starts unconfigured; see [`Self::with_kv`]. `egress` is the shared,
-    /// per-process [`EgressGuard`] -- see the struct doc.
+    /// per-process [`EgressGuard`] -- see the struct doc. `gate` is
+    /// mandatory: every arm calls `gate.authorize()` first (spec SS5),
+    /// typically backed by `crate::grant_gate::build_production_gate` so
+    /// `context`/`clock`/`log` stay granted regardless of what the real
+    /// grant tables answer. `tenant_id`/`community_id`/`app_version` are
+    /// the caller's already-resolved numeric scope (`crate::spine::
+    /// ProcessDeps::tenant_id`'s doc) -- never guessed here, and never
+    /// defaulted to `0` internally the way this constructor used to.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         tenant: String,
         community: Option<String>,
         app_id: String,
+        tenant_id: i32,
+        community_id: i32,
+        app_version: i64,
         egress: Arc<EgressGuard>,
+        gate: Arc<CapabilityGate>,
     ) -> Self {
         Self {
             tenant,
             community,
             app_id,
+            tenant_id,
+            community_id,
+            app_version,
             kv: None,
             egress,
+            gate,
             db: None,
         }
+    }
+
+    /// Builds the gate's host-only [`bundle_capability_gate::InvokeScope`]
+    /// from this already-trusted per-invoke scope (spec SS5.1:
+    /// `HostInvokeScopeBuilder` is the sole constructor). `tenant_tier`
+    /// defaults to [`TenantTier::Free`] -- no capability wired in this
+    /// stage today reads it (documented rather than silently guessed, same
+    /// posture `core/svc_action::capabilities::InvokeScope::gate_scope`
+    /// takes).
+    fn gate_scope(&self) -> bundle_capability_gate::InvokeScope {
+        HostInvokeScopeBuilder::new()
+            .tenant_id(self.tenant_id)
+            .community_id(self.community_id)
+            .app_id(self.app_id.clone())
+            .app_version(self.app_version)
+            .tenant_tier(TenantTier::Free)
+            .build()
+            // `app_id` is always non-empty here -- always `deps.app_id`,
+            // itself sourced from a live bundle assignment, never guest
+            // input, never constructed empty.
+            .expect("StageCapabilities::app_id is never empty for a live invocation")
     }
 
     /// Enables the `kv` capability over `backend` (production:
@@ -273,6 +351,12 @@ impl<K: KvBackend> StageCapabilities<K> {
         self
     }
 
+    /// `http.send` (`wit/waddle-bundle/stage.wit` `interface http`) --
+    /// forwards to the shared, per-process [`EgressGuard`] once the caller
+    /// (`CapabilityHandler::handle`'s `Http` arm) has already run the
+    /// classified permission through `self.gate` (module doc). Identical
+    /// wire contract to `core/svc_action::capabilities::StageCapabilities::
+    /// handle_http`.
     async fn handle_http(
         &self,
         args: &serde_json::Value,
@@ -281,6 +365,13 @@ impl<K: KvBackend> StageCapabilities<K> {
     }
 
     fn handle_clock(&self, op: &str) -> Result<serde_json::Value, HostResultError> {
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                PermissionId::PlatformClock,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
         match op {
             "now-millis" => {
                 let millis = std::time::SystemTime::now()
@@ -310,6 +401,13 @@ impl<K: KvBackend> StageCapabilities<K> {
     }
 
     fn handle_context(&self) -> Result<serde_json::Value, HostResultError> {
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                PermissionId::PlatformContext,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
         // Spec §7.4: "Tenant and community come from the key, never from
         // payload." Never includes a credential or secret.
         Ok(serde_json::json!({
@@ -320,6 +418,13 @@ impl<K: KvBackend> StageCapabilities<K> {
     }
 
     fn handle_log(&self, args: &serde_json::Value) -> Result<serde_json::Value, HostResultError> {
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                PermissionId::PlatformLog,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
         let level = args.get("level").and_then(|v| v.as_str()).unwrap_or("info");
         let raw_message = args
             .get("message")
@@ -356,6 +461,18 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// there -- module doc). Tenant/community/app_id come from `self`
     /// (never `call.app_id`).
     async fn handle_kv(&self, call: &HostCallBody) -> Result<serde_json::Value, HostResultError> {
+        // Gate call FIRST (spec SS5) -- `storage.kv`, `AppScoped`. This
+        // supersedes `bundle_host_kv::authorize::authorize_kv`'s interim
+        // always-grant stand-in as the real security boundary; that inner
+        // seam remains harmlessly redundant until it is retired in a
+        // follow-on cleanup.
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                PermissionId::StorageKv,
+                ResourceRef::AppScoped(AppScopedResource::KvState),
+            )
+            .map_err(denied_from_gate)?;
         let Some(kv) = &self.kv else {
             return Err(denied(
                 "not_implemented",
@@ -439,6 +556,17 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// Every value is a JSON scalar (`null`/bool/number/string); `bytes`
     /// values are not supported over this JSON args shape in this landing.
     async fn handle_db(&self, call: &HostCallBody) -> Result<serde_json::Value, HostResultError> {
+        // Gate call FIRST (spec SS5, PR #433), same posture as `http` in
+        // `CapabilityHandler::handle` -- checked before the feature-flag/
+        // wiring state below so an ungranted call always reports
+        // `not_granted`, never `not_implemented`/`feature_disabled`.
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                PermissionId::StorageTables,
+                ResourceRef::AppScoped(AppScopedResource::Table),
+            )
+            .map_err(denied_from_gate)?;
         let Some(db) = &self.db else {
             return Err(denied(
                 "not_implemented",
@@ -515,12 +643,6 @@ impl<K: KvBackend> StageCapabilities<K> {
                     .map_err(db_error_to_host_error);
             }
             "query" => {
-                // Host-side op ready for the proposed `query` WIT shape
-                // (this crate's PR description) -- not yet reachable from
-                // a guest bundle's `stage.wit` bindings in this landing
-                // (no WIT/`bundle_executor` change here), but already
-                // dispatchable at this untyped `{capability, op, args}`
-                // layer the same way insert/get/update/delete are.
                 let limit = call
                     .args
                     .get("limit")
@@ -533,9 +655,20 @@ impl<K: KvBackend> StageCapabilities<K> {
                     .and_then(|v| v.as_u64())
                     .and_then(|v| u32::try_from(v).ok())
                     .unwrap_or(0);
+                let order_by = match parse_order_by(&call.args) {
+                    Ok(o) => o,
+                    Err(e) => return Err(e),
+                };
                 return db
                     .host
-                    .query(&scope, &db.schemas, &db.capabilities, limit, offset)
+                    .query(
+                        &scope,
+                        &db.schemas,
+                        &db.capabilities,
+                        limit,
+                        offset,
+                        order_by,
+                    )
                     .await
                     .map(|rows| {
                         serde_json::json!({
@@ -571,6 +704,14 @@ impl<K: KvBackend> StageCapabilities<K> {
         &self,
         call: &HostCallBody,
     ) -> Result<serde_json::Value, HostResultError> {
+        // Gate call FIRST (spec SS5, PR #433), same posture as `http`/`db`.
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                PermissionId::FlagsRead,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
         match call.op.as_str() {
             "enabled" => {
                 let args: FlagsEnabledArgs =
@@ -634,6 +775,43 @@ fn db_value_to_json(v: &DbValue) -> serde_json::Value {
     }
 }
 
+/// Parses `query`'s optional `order_by` arg: `{"random": true}` or
+/// `{"column": "<name>", "descending": <bool>}` -- `None`/absent means the
+/// backend's own default (`row_id ASC`). Column-name validation itself
+/// happens host-side in `bundle_host_db::backend::order_by_sql` (never
+/// trusted from this JSON alone) -- this function only shapes the
+/// wire-level args into [`bundle_host_db::OrderBy`].
+fn parse_order_by(
+    args: &serde_json::Value,
+) -> Result<Option<bundle_host_db::OrderBy>, HostResultError> {
+    let Some(order_by) = args.get("order_by") else {
+        return Ok(None);
+    };
+    if order_by.is_null() {
+        return Ok(None);
+    }
+    if order_by.get("random").and_then(|v| v.as_bool()) == Some(true) {
+        return Ok(Some(bundle_host_db::OrderBy::Random));
+    }
+    let name = order_by
+        .get("column")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            denied(
+                "invalid_args",
+                "order_by must be {\"random\": true} or {\"column\": string, \"descending\": bool}",
+            )
+        })?;
+    let descending = order_by
+        .get("descending")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok(Some(bundle_host_db::OrderBy::Column {
+        name: name.to_string(),
+        descending,
+    }))
+}
+
 fn row_to_json(row: bundle_host_db::Row) -> serde_json::Value {
     let columns: serde_json::Map<String, serde_json::Value> = row
         .columns
@@ -684,6 +862,52 @@ fn parse_kv_args<T: serde::de::DeserializeOwned>(
         .map_err(|e| denied("invalid_args", format!("malformed kv host-call args: {e}")))
 }
 
+/// Extracts the lowercased host (no scheme, no port, no path) from an
+/// `http.send` call's `url` argument -- a deliberately minimal parse (not
+/// a full URL parser) since only the host is needed to classify the
+/// permission before the request is handed to [`EgressGuard`] (which does
+/// the real parse/DNS-resolution/SSRF work). `None` if `url` is missing,
+/// not a string, or has no host component -- see `core/svc_action::
+/// capabilities::extract_http_host`'s identical helper.
+fn extract_http_host(args: &serde_json::Value) -> Option<String> {
+    let url = args.get("url").and_then(|v| v.as_str())?;
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    let host_port = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host = host_port.split(':').next().unwrap_or(host_port);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+/// Classifies an extracted `http.send` host into the specific
+/// [`PermissionId`] family `bundle_capability_gate`'s catalog actually
+/// grants against (`NetHttpFqdn`/`NetHttpPublicIp`/`NetHttpPrivateIp`) --
+/// see `core/svc_action::capabilities`'s identical helper for the full
+/// rationale (literal IPs classified directly, hostnames as `NetHttpFqdn`;
+/// this is a permission-family choice, not the SSRF wall itself).
+fn classify_net_http_permission(host: &str) -> PermissionId {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            if v4.is_private() || v4.is_loopback() || v4.is_link_local() {
+                PermissionId::NetHttpPrivateIp(host.to_string())
+            } else {
+                PermissionId::NetHttpPublicIp(host.to_string())
+            }
+        }
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let is_unique_local = (v6.segments()[0] & 0xfe00) == 0xfc00;
+            if v6.is_loopback() || v6.is_unicast_link_local() || is_unique_local {
+                PermissionId::NetHttpPrivateIp(host.to_string())
+            } else {
+                PermissionId::NetHttpPublicIp(host.to_string())
+            }
+        }
+        Err(_) => PermissionId::NetHttpFqdn(host.to_string()),
+    }
+}
+
 /// Maps [`KvError`] onto the `{code, message}` shape every `host-call`
 /// error reply carries -- see `core/svc_action::capabilities::
 /// kv_err_to_host`'s identical doc.
@@ -702,38 +926,64 @@ impl<K: KvBackend> CapabilityHandler for StageCapabilities<K> {
                 CapabilityKind::Context => self.handle_context(),
                 CapabilityKind::Log => self.handle_log(&call.args),
                 CapabilityKind::Kv => self.handle_kv(&call).await,
-                // `http` is wired to the shared `bundle_host_http::egress::
-                // EgressGuard` (`self.egress`, see the struct doc) -- `kv`
-                // is wired to `bundle_host_kv::KvHost` above (`self.kv`,
-                // see `Self::with_kv`'s doc).
-                CapabilityKind::Http => self.handle_http(&call.args).await,
-                // `db` needs per-app Postgres schema provisioning
-                // (`app_core.<app_id>`/`app_community.<app_id>`), a
-                // schema-scoped runtime role, and RLS -- designed in
-                // `docs/superpowers/specs/
-                // 2026-09-28-bundle-db-capability-and-schemas.md` (PR
-                // #415), with the grant itself (the `storage.tables`
-                // permission) gated by the standard permission-catalog
-                // design in `docs/superpowers/specs/
-                // 2026-09-28-bundle-permissions-and-capability-gate.md`
-                // (PR #419) -- both in progress, neither landed here yet
-                // (PR #498 wires this next). Denying (never silently
-                // succeeding) is the correct behavior for an unimplemented
-                // capability until it does.
+                // Gate call FIRST (spec SS5, PR #433): the classified
+                // `NetHttpFqdn`/`NetHttpPublicIp`/`NetHttpPrivateIp`
+                // permission must be authorized before the request ever
+                // reaches the shared `EgressGuard` (module doc) -- a
+                // granted call still passes through the guard's own
+                // allowlist/DNS-pinning/redirect-recheck/SSRF checks
+                // (`self.handle_http`), which are enforced regardless of
+                // grant status.
+                CapabilityKind::Http => {
+                    let host = extract_http_host(&call.args).ok_or_else(|| {
+                        denied("invalid_args", "http.send requires a 'url' string")
+                    })?;
+                    self.gate
+                        .authorize(
+                            &self.gate_scope(),
+                            classify_net_http_permission(&host),
+                            ResourceRef::AppScoped(AppScopedResource::None),
+                        )
+                        .map_err(denied_from_gate)?;
+                    self.handle_http(&call.args).await
+                }
+                // `db` is wired to `bundle_host_db::DbHost` (PR #498) --
+                // `handle_db` itself gate-checks FIRST (spec SS5) before
+                // consulting its own feature-flag/wiring state.
                 CapabilityKind::Db => self.handle_db(&call).await,
                 // `enabled` is wired to a real `penguin_licensing::
                 // LicenseClient` (`crate::license::resolve_flag`) -- see
                 // that module's doc for the fallback semantics (live ->
                 // cached -> caller default, never an error). `tier` is
-                // not wired in this landing.
+                // not wired in this landing. `handle_flags` itself
+                // gate-checks FIRST (spec SS5).
                 CapabilityKind::Flags => self.handle_flags(&call).await,
                 // Spec §6.5: "Capability: granted only to action-stage
                 // bundles" -- never granted to a process-stage bundle at
-                // all, so this is a permanent denial, not a seam.
-                CapabilityKind::Relay => Err(denied(
-                    "not_granted",
-                    "relay is an action-stage-only capability, never granted to a process-stage bundle",
-                )),
+                // all. The gate is still consulted first for uniform audit
+                // (module doc), but this arm never trusts a `Granted`
+                // outcome alone: even if a grant somehow existed (a
+                // misconfiguration this stage's own manifest/linker should
+                // never produce), the hard denial below still fires --
+                // belt-and-suspenders against ever running relay
+                // process-side.
+                CapabilityKind::Relay => {
+                    let provider = call
+                        .args
+                        .get("provider")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let _ = self.gate.authorize(
+                        &self.gate_scope(),
+                        PermissionId::ChatSend(provider),
+                        ResourceRef::AppScoped(AppScopedResource::None),
+                    );
+                    Err(denied(
+                        "not_granted",
+                        "relay is an action-stage-only capability, never granted to a process-stage bundle",
+                    ))
+                }
             }
         })
     }
@@ -775,6 +1025,75 @@ mod tests {
     use bundle_host_http::egress::{ReqwestTransport, StaticFlag};
     use std::time::Duration;
 
+    /// Grants every permission this file's existing (pre-gate) tests already
+    /// exercised, at `StageCapabilities::new`'s `(0, 0, 0)` default scope --
+    /// so every happy-path test keeps proving its own capability logic, not
+    /// this landing's gate wiring (the dedicated `gate_*` tests below
+    /// exercise that directly, including the deny-without-grant cases).
+    /// Includes every host the `http` capability's own tests below exercise
+    /// (module doc: the gate runs *before* the `EgressGuard`, so those tests
+    /// need a grant to even reach the guard's allowlist/SSRF checks).
+    fn permissive_gate() -> Arc<CapabilityGate> {
+        let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+        let mut grants = std::collections::HashMap::new();
+        for id in [
+            "platform.context",
+            "platform.clock",
+            "platform.log",
+            "storage.kv",
+            "storage.tables",
+            "flags.read",
+            "net.http.fqdn:example.com",
+            "net.http.fqdn:api.example.com",
+            "net.http.fqdn:evil.example.com",
+            "net.http.private-ip:10.0.0.5",
+            "net.http.public-ip:93.184.216.34",
+            // The `db_flags_capabilities_are_documented_seams` test calls
+            // `Http` with no `url` arg at all in some historical variants --
+            // `extract_http_host` returning `None` now denies `invalid_args`
+            // before the gate is even consulted for that case, but this
+            // entry is kept for any host that resolves to an empty string.
+            "net.http.fqdn:",
+        ] {
+            grants.insert(
+                id.to_string(),
+                bundle_capability_gate::GrantedPermission {
+                    permission_id: id.to_string(),
+                    params: serde_json::json!({}),
+                },
+            );
+        }
+        snapshot.set(
+            bundle_capability_gate::GrantScopeKey {
+                tenant_id: 0,
+                community_id: 0,
+                app_id: "waddles.bot.commands.default".to_string(),
+                app_version: 0,
+            },
+            bundle_capability_gate::GrantSet {
+                permission_snapshot_hash: "test".to_string(),
+                grants,
+            },
+        );
+        Arc::new(CapabilityGate::new(
+            Arc::new(snapshot),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ))
+    }
+
+    /// A gate with an empty snapshot -- every permission fails closed
+    /// `not_granted`, for tests proving the gate is actually consulted.
+    fn deny_all_gate() -> Arc<CapabilityGate> {
+        Arc::new(CapabilityGate::new(
+            Arc::new(bundle_capability_gate::InMemoryGrantSnapshot::new()),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ))
+    }
+
     fn test_egress_metrics() -> prometheus::IntCounterVec {
         prometheus::IntCounterVec::new(
             prometheus::Opts::new("test_svc_process_egress_denied_total", "test"),
@@ -796,15 +1115,14 @@ mod tests {
         }
     }
 
-    /// The default fixture: an empty [`HttpEgressCatalog`] -- every
+    /// A bare [`EgressGuard`] over an empty catalog -- for fixtures that
+    /// don't exercise `http` at all and just need a valid value to satisfy
+    /// [`StageCapabilities::new`]'s required `egress` parameter. Every
     /// `app_id` is undeclared, so `http` denies every call
     /// `host_not_declared` (this stage's deny-by-default posture, see
     /// [`HttpEgressCatalog`]'s doc). Tests exercising a granted call build
-    /// their own guard via [`egress_guard_with`] instead.
-    /// The default fixture's egress guard: an empty [`HttpEgressCatalog`]
-    /// (every `app_id` undeclared, `host_not_declared` on every call) --
-    /// shared by every helper below that doesn't need a declared host.
-    fn test_egress_guard() -> Arc<EgressGuard> {
+    /// their own guard via [`caps_with_egress_rule`] instead.
+    fn test_egress() -> Arc<EgressGuard> {
         Arc::new(EgressGuard::new(
             Arc::new(ReqwestTransport::new()),
             test_egress_limits(),
@@ -814,20 +1132,30 @@ mod tests {
         ))
     }
 
+    /// The default fixture: [`test_egress`] (an empty catalog, so every
+    /// `http` call denies `host_not_declared` once the gate has already
+    /// granted the classified permission) plus a [`permissive_gate`].
     fn caps() -> StageCapabilities {
         StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
-            test_egress_guard(),
+            0,
+            0,
+            0,
+            test_egress(),
+            permissive_gate(),
         )
     }
 
     /// A [`StageCapabilities`] whose `egress` catalog declares exactly one
-    /// `(host, methods)` entry for `waddles.bot.commands.default` -- the
-    /// interim capability-gate "declared" case ([`HttpEgressCatalog`]'s
-    /// doc).
-    fn caps_with_egress_rule(host: &str, methods: &[&str]) -> StageCapabilities {
+    /// `(host, methods)` entry for `waddles.bot.commands.default`, gated by
+    /// `gate`.
+    fn caps_with_egress_rule_and_gate(
+        host: &str,
+        methods: &[&str],
+        gate: Arc<CapabilityGate>,
+    ) -> StageCapabilities {
         let catalog = HttpEgressCatalog::new();
         catalog.update(
             "waddles.bot.commands.default",
@@ -851,7 +1179,88 @@ mod tests {
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
+            0,
+            0,
+            0,
             egress,
+            gate,
+        )
+    }
+
+    /// A [`StageCapabilities`] whose `egress` catalog declares exactly one
+    /// `(host, methods)` entry for `waddles.bot.commands.default`, gated by
+    /// [`permissive_gate`] (same rationale as [`caps`]).
+    fn caps_with_egress_rule(host: &str, methods: &[&str]) -> StageCapabilities {
+        caps_with_egress_rule_and_gate(host, methods, permissive_gate())
+    }
+
+    /// [`permissive_gate`] plus an explicit instance-policy override
+    /// allowing `net.http.private-ip` (deny-by-default instance-wide, see
+    /// `bundle_capability_gate::instance_policy`'s module doc) -- isolates
+    /// the `http_denies_a_declared_host_that_is_actually_a_private_ip` test
+    /// to proving [`EgressGuard`]'s own SSRF address check, not the gate's
+    /// separate (and separately tested, `bundle_capability_gate::gate`'s
+    /// own suite) instance-policy denial.
+    fn permissive_gate_with_private_ip_allowed() -> Arc<CapabilityGate> {
+        let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+        snapshot.set(
+            bundle_capability_gate::GrantScopeKey {
+                tenant_id: 0,
+                community_id: 0,
+                app_id: "waddles.bot.commands.default".to_string(),
+                app_version: 0,
+            },
+            bundle_capability_gate::GrantSet {
+                permission_snapshot_hash: "test".to_string(),
+                grants: std::collections::HashMap::from([(
+                    "net.http.private-ip:10.0.0.5".to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: "net.http.private-ip:10.0.0.5".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                )]),
+            },
+        );
+        let instance_policy = bundle_capability_gate::InMemoryInstancePolicySnapshot::new();
+        instance_policy.set(
+            bundle_capability_gate::PermissionFamily::NetHttpPrivateIp,
+            bundle_capability_gate::InstanceAction::Allow,
+        );
+        Arc::new(CapabilityGate::new(
+            Arc::new(snapshot),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(instance_policy),
+        ))
+    }
+
+    fn caps_denied() -> StageCapabilities {
+        StageCapabilities::new(
+            "acme".to_string(),
+            Some("main".to_string()),
+            "waddles.bot.commands.default".to_string(),
+            0,
+            0,
+            0,
+            test_egress(),
+            deny_all_gate(),
+        )
+    }
+
+    fn caps_denied_with_kv() -> StageCapabilities<FakeKvBackend> {
+        StageCapabilities::new(
+            "acme".to_string(),
+            Some("main".to_string()),
+            "waddles.bot.commands.default".to_string(),
+            0,
+            0,
+            0,
+            test_egress(),
+            deny_all_gate(),
+        )
+        .with_kv(
+            FakeKvBackend::default(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
         )
     }
 
@@ -878,9 +1287,108 @@ mod tests {
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
-            test_egress_guard(),
+            0,
+            0,
+            0,
+            test_egress(),
+            permissive_gate(),
         )
         .with_kv(FakeKvBackend::default(), std::sync::Arc::new(snapshot))
+    }
+
+    /// A gate with a grant seeded under a specific, non-zero `app_version`
+    /// -- models `source_supervisor::resolve_binding_app_version`'s real
+    /// resolved value (never the `0` interim placeholder
+    /// `run_binding_consumer` used to hardcode).
+    fn gate_seeded_at_version(app_version: i64) -> Arc<CapabilityGate> {
+        let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+        snapshot.set(
+            bundle_capability_gate::GrantScopeKey {
+                tenant_id: 7,
+                community_id: 3,
+                app_id: "waddles.bot.commands.default".to_string(),
+                app_version,
+            },
+            bundle_capability_gate::GrantSet {
+                permission_snapshot_hash: "test".to_string(),
+                grants: std::collections::HashMap::from([(
+                    "storage.kv".to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: "storage.kv".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                )]),
+            },
+        );
+        Arc::new(CapabilityGate::new(
+            Arc::new(snapshot),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ))
+    }
+
+    /// Regression (gh-433): a source-binding invocation carrying the
+    /// resolved `app_version` (`source_supervisor::
+    /// resolve_binding_app_version`'s real value) is ALLOWED by a grant
+    /// seeded under that same version.
+    #[tokio::test]
+    async fn source_binding_invocation_with_the_resolved_app_version_is_allowed_by_a_seeded_grant()
+    {
+        let kv_capabilities = bundle_host_kv::CapabilitySnapshot::new();
+        kv_capabilities.update(
+            "waddles.bot.commands.default",
+            [bundle_host_kv::authorize::KV_PERMISSION_ID.to_string()],
+        );
+        let caps = StageCapabilities::new(
+            "acme".to_string(),
+            Some("main".to_string()),
+            "waddles.bot.commands.default".to_string(),
+            7,
+            3,
+            42,
+            test_egress(),
+            gate_seeded_at_version(42),
+        )
+        .with_kv(FakeKvBackend::default(), Arc::new(kv_capabilities));
+        caps.handle(call(
+            CapabilityKind::Kv,
+            "get",
+            serde_json::json!({"key": "k"}),
+        ))
+        .await
+        .expect("a grant seeded under the resolved app_version allows the call");
+    }
+
+    /// Regression (gh-433): an unresolvable/mismatched `app_version` --
+    /// modeled as a scope carrying a different version than any seeded
+    /// grant -- is DENIED, never silently authorized under the wrong
+    /// version's permissions.
+    #[tokio::test]
+    async fn source_binding_invocation_with_an_unresolved_app_version_is_denied() {
+        let caps = StageCapabilities::new(
+            "acme".to_string(),
+            Some("main".to_string()),
+            "waddles.bot.commands.default".to_string(),
+            7,
+            3,
+            999,
+            test_egress(),
+            gate_seeded_at_version(42),
+        )
+        .with_kv(
+            FakeKvBackend::default(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+        );
+        let err = caps
+            .handle(call(
+                CapabilityKind::Kv,
+                "get",
+                serde_json::json!({"key": "k"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
     }
 
     /// A minimal in-memory [`KvBackend`] fake, mirroring
@@ -1130,6 +1638,79 @@ mod tests {
     }
 
     #[test]
+    fn parse_order_by_is_none_when_absent_or_null() {
+        assert!(parse_order_by(&serde_json::json!({})).unwrap().is_none());
+        assert!(parse_order_by(&serde_json::json!({"order_by": null}))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn parse_order_by_parses_random() {
+        let order_by = parse_order_by(&serde_json::json!({"order_by": {"random": true}}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(order_by, bundle_host_db::OrderBy::Random);
+    }
+
+    #[test]
+    fn parse_order_by_parses_column_and_direction() {
+        let order_by = parse_order_by(
+            &serde_json::json!({"order_by": {"column": "score", "descending": true}}),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            order_by,
+            bundle_host_db::OrderBy::Column {
+                name: "score".to_string(),
+                descending: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_order_by_column_defaults_descending_to_false() {
+        let order_by = parse_order_by(&serde_json::json!({"order_by": {"column": "score"}}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            order_by,
+            bundle_host_db::OrderBy::Column {
+                name: "score".to_string(),
+                descending: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_order_by_rejects_a_malformed_order_by() {
+        let err = parse_order_by(&serde_json::json!({"order_by": "not-an-object"})).unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn db_capability_query_op_accepts_order_by_random() {
+        // Proves `order_by` actually reaches `DbHost::query` through the
+        // untyped op layer (denied `no_table`, same as every other query
+        // test above, rather than `invalid_args`).
+        let capabilities = caps().with_db(mock_db_wiring(true));
+        capabilities.db.as_ref().unwrap().capabilities.update(
+            "waddles.bot.commands.default",
+            ["storage.tables".to_string()],
+        );
+        let err = capabilities
+            .handle_db(&call(
+                CapabilityKind::Db,
+                "query",
+                serde_json::json!({"limit": 1, "order_by": {"random": true}}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "no_table");
+    }
+
+    #[test]
     fn sanitize_bundle_log_message_strips_crlf_and_control_characters() {
         assert_eq!(
             sanitize_bundle_log_message("line1\r\nline2\tafter-tab"),
@@ -1241,11 +1822,13 @@ mod tests {
 
     #[tokio::test]
     async fn db_flags_capabilities_are_documented_seams() {
-        // Neither `kv` nor `http` is an unconditional seam any more -- see
+        // `kv` and `http` are no longer unconditional seams -- see
         // `kv_is_not_implemented_when_no_backend_was_configured` for `kv`'s
-        // own (backend-unconfigured) not_implemented case, and the `kv_*`/
-        // `http_*` tests elsewhere in this module for their fully-wired
-        // behavior.
+        // own (backend-unconfigured) not_implemented case, the `kv_*` tests
+        // below for its fully-wired behavior, and the `http_*` tests below
+        // for `http`'s gate-then-egress-guard behavior. `caps()`'s
+        // `permissive_gate()` grants both `storage.tables`/`flags.read`, so
+        // this proves the gate-THEN-not_implemented ordering, not a denial.
         let c = caps();
         for capability in [CapabilityKind::Db, CapabilityKind::Flags] {
             let err = c
@@ -1297,14 +1880,18 @@ mod tests {
     /// is_forbidden_address`'s doc).
     #[tokio::test]
     async fn http_denies_a_declared_host_that_is_actually_a_private_ip() {
-        let err = caps_with_egress_rule("10.0.0.5", &["GET"])
-            .handle(call(
-                CapabilityKind::Http,
-                "send",
-                serde_json::json!({"method": "GET", "url": "https://10.0.0.5/"}),
-            ))
-            .await
-            .unwrap_err();
+        let err = caps_with_egress_rule_and_gate(
+            "10.0.0.5",
+            &["GET"],
+            permissive_gate_with_private_ip_allowed(),
+        )
+        .handle(call(
+            CapabilityKind::Http,
+            "send",
+            serde_json::json!({"method": "GET", "url": "https://10.0.0.5/"}),
+        ))
+        .await
+        .unwrap_err();
         assert_eq!(err.code, "ssrf_blocked_address");
     }
 
@@ -1372,11 +1959,15 @@ mod tests {
             test_egress_metrics(),
             bundle_host_http::egress::boxed(StaticFlag(true)),
         ));
-        let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+        let caps: StageCapabilities = StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
+            0,
+            0,
+            0,
             egress,
+            permissive_gate(),
         );
 
         let result = caps
@@ -1452,11 +2043,15 @@ mod tests {
             test_egress_metrics(),
             bundle_host_http::egress::boxed(StaticFlag(true)),
         ));
-        let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+        let caps: StageCapabilities = StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.bot.commands.default".to_string(),
+            0,
+            0,
+            0,
             egress,
+            permissive_gate(),
         );
 
         caps.handle(call(
@@ -1656,6 +2251,180 @@ mod tests {
     async fn relay_is_permanently_denied_never_granted_to_process() {
         let err = caps()
             .handle(call(CapabilityKind::Relay, "push", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_kv_without_a_grant() {
+        let err = caps_denied_with_kv()
+            .handle(call(
+                CapabilityKind::Kv,
+                "get",
+                serde_json::json!({"key": "k"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_context_clock_log_without_a_grant() {
+        for capability in [
+            CapabilityKind::Context,
+            CapabilityKind::Clock,
+            CapabilityKind::Log,
+        ] {
+            let err = caps_denied()
+                .handle(call(capability, "now-millis", serde_json::json!({})))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_granted");
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_denies_http_db_flags_without_a_grant() {
+        // `Http` needs a well-formed `url` arg to even reach the gate
+        // (`extract_http_host` denies `invalid_args` first otherwise, module
+        // doc) -- `Db`/`Flags` don't parse their args before the gate call.
+        for (capability, args) in [
+            (
+                CapabilityKind::Http,
+                serde_json::json!({"method": "GET", "url": "https://api.example.com/"}),
+            ),
+            (CapabilityKind::Db, serde_json::json!({})),
+            (CapabilityKind::Flags, serde_json::json!({})),
+        ] {
+            let err = caps_denied()
+                .handle(call(capability, "anything", args))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_granted");
+        }
+    }
+
+    /// An undeclared permission (granted set has entries, but not the one
+    /// this call needs) denies exactly like an empty grant set.
+    #[tokio::test]
+    async fn gate_denies_a_permission_the_app_was_never_granted() {
+        let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+        snapshot.set(
+            bundle_capability_gate::GrantScopeKey {
+                tenant_id: 0,
+                community_id: 0,
+                app_id: "waddles.bot.commands.default".to_string(),
+                app_version: 0,
+            },
+            bundle_capability_gate::GrantSet {
+                permission_snapshot_hash: "test".to_string(),
+                grants: std::collections::HashMap::from([(
+                    "flags.read".to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: "flags.read".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                )]),
+            },
+        );
+        let gate = Arc::new(CapabilityGate::new(
+            Arc::new(snapshot),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ));
+        let caps = StageCapabilities::new(
+            "acme".to_string(),
+            Some("main".to_string()),
+            "waddles.bot.commands.default".to_string(),
+            0,
+            0,
+            0,
+            test_egress(),
+            gate,
+        )
+        .with_kv(
+            FakeKvBackend::default(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+        );
+
+        let err = caps
+            .handle(call(
+                CapabilityKind::Kv,
+                "get",
+                serde_json::json!({"key": "k"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+    }
+
+    /// Revocation mid-stream (spec SS4/SS5.3): a grant present at
+    /// construction, then invalidated, denies the very next call.
+    #[tokio::test]
+    async fn gate_revocation_mid_stream_denies_the_next_call() {
+        let key = bundle_capability_gate::GrantScopeKey {
+            tenant_id: 0,
+            community_id: 0,
+            app_id: "waddles.bot.commands.default".to_string(),
+            app_version: 0,
+        };
+        let loader = Arc::new(bundle_capability_gate::InMemoryGrantLoader::new());
+        loader.set(
+            key.clone(),
+            bundle_capability_gate::GrantSet {
+                permission_snapshot_hash: "v1".to_string(),
+                grants: std::collections::HashMap::from([(
+                    "storage.kv".to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: "storage.kv".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                )]),
+            },
+        );
+        let cache = Arc::new(bundle_capability_gate::GrantCache::new(loader));
+        cache.refresh(&key).await.unwrap();
+        let gate = Arc::new(CapabilityGate::new(
+            cache.clone(),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ));
+        let kv_capabilities = bundle_host_kv::CapabilitySnapshot::new();
+        kv_capabilities.update(
+            "waddles.bot.commands.default",
+            [bundle_host_kv::authorize::KV_PERMISSION_ID.to_string()],
+        );
+        let caps = StageCapabilities::new(
+            "acme".to_string(),
+            Some("main".to_string()),
+            "waddles.bot.commands.default".to_string(),
+            0,
+            0,
+            0,
+            test_egress(),
+            gate,
+        )
+        .with_kv(FakeKvBackend::default(), Arc::new(kv_capabilities));
+
+        caps.handle(call(
+            CapabilityKind::Kv,
+            "get",
+            serde_json::json!({"key": "k"}),
+        ))
+        .await
+        .expect("granted before revocation");
+
+        cache.invalidate(&key);
+
+        let err = caps
+            .handle(call(
+                CapabilityKind::Kv,
+                "get",
+                serde_json::json!({"key": "k"}),
+            ))
             .await
             .unwrap_err();
         assert_eq!(err.code, "not_granted");

@@ -69,6 +69,7 @@ pub mod query;
 pub mod reader;
 pub mod scope;
 pub mod session_sync;
+pub mod snapshot;
 
 pub use bindings::{read_source_bindings, SourceBinding};
 pub use changelog::{
@@ -94,3 +95,4 @@ pub use scope::{resolve_scope, ResolvedScope};
 pub use session_sync::{
     pick_session_with_digest, plan_sessions, SessionId, SessionLoaded, SessionSyncPlan,
 };
+pub use snapshot::ActiveVersionSnapshot;

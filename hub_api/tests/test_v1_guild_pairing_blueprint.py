@@ -125,11 +125,13 @@ class TestCreatePairing:
             "direction",
             "sync_enabled",
             "role_name_prefix",
+            "event_sync_enabled",
             "created_by_user_id",
             "created_at",
             "updated_at",
         }
         assert body["pairing"]["sync_enabled"] is False
+        assert body["pairing"]["event_sync_enabled"] is False
 
     async def test_create_wrong_scope_is_403(
         self, client: Any, auth_headers: Any, bar_citizen_db: Any
@@ -249,6 +251,55 @@ class TestRoleSyncBindings:
         body = await list_response.get_json()
         assert len(body["bindings"]) == 1
         assert body["bindings"][0]["subscriber_tier"] == 1
+
+    async def test_create_and_list_community_role_binding(
+        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+    ) -> None:
+        """The hub-api endpoint the webui maps Discord roles -> community scopes through."""
+        _, community_id, _tenant_id, _global_id = bar_citizen_db
+        pairing_id = await self._pairing_id(client, auth_headers, community_id)
+
+        create_response = await client.post(
+            f"/api/v1/communities/{community_id}/guild-pairings/{pairing_id}/role-bindings",
+            headers={
+                **auth_headers(scope="community.guild_pairing:write"),
+                "Content-Type": "application/json",
+            },
+            data=json_module.dumps(
+                {
+                    "sync_scope": "community_role",
+                    "discord_role_id": "901",
+                    "community_role": "moderator",
+                }
+            ),
+        )
+        assert create_response.status_code == 201
+        created_body = await create_response.get_json()
+        assert created_body["binding"]["community_role"] == "moderator"
+
+        list_response = await client.get(
+            f"/api/v1/communities/{community_id}/guild-pairings/{pairing_id}/role-bindings",
+            headers=auth_headers(scope="community.guild_pairing:read"),
+        )
+        body = await list_response.get_json()
+        assert body["bindings"][0]["sync_scope"] == "community_role"
+        assert body["bindings"][0]["community_role"] == "moderator"
+
+    async def test_community_role_missing_role_value_is_400(
+        self, client: Any, auth_headers: Any, bar_citizen_db: Any
+    ) -> None:
+        _, community_id, _tenant_id, _global_id = bar_citizen_db
+        pairing_id = await self._pairing_id(client, auth_headers, community_id)
+
+        response = await client.post(
+            f"/api/v1/communities/{community_id}/guild-pairings/{pairing_id}/role-bindings",
+            headers={
+                **auth_headers(scope="community.guild_pairing:write"),
+                "Content-Type": "application/json",
+            },
+            data=json_module.dumps({"sync_scope": "community_role", "discord_role_id": "901"}),
+        )
+        assert response.status_code == 400
 
     async def test_invalid_scope_tier_combo_is_400(
         self, client: Any, auth_headers: Any, bar_citizen_db: Any

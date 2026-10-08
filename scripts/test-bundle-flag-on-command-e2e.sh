@@ -7,7 +7,7 @@
 #
 # Requires `docker` (to freshly compile bundles/python/eightball to wasm via
 # the exact componentize-py invocation bundles/Dockerfile.core-bundles's
-# python-batch1-builder stage uses) and a Rust 1.97.x toolchain. Already
+# python-bundles-builder stage uses) and a Rust 1.97.x toolchain. Already
 # runs as part of this crate's own `cargo test` gate
 # (.github/workflows/rust-bundle-executor.yml -> rust-crate-ci.yml, FATAL on
 # every push/PR touching core/bundle_executor/**) -- this script is a

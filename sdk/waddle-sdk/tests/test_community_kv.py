@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import sys
-import types
-
 import pytest
 
 import waddle_sdk.community_kv as community_kv
+from waddle_sdk.kv import InvalidKvKeyError
+from waddle_sdk.testing import install_fake_kv_host
 
 
 def _run(coro):
@@ -20,28 +19,7 @@ def _run(coro):
 
 @pytest.fixture
 def fake_kv(monkeypatch: pytest.MonkeyPatch):
-    store: dict[str, bytes] = {}
-
-    def get(key: str):
-        return store.get(key)
-
-    def set_(key: str, value: bytes, ttl_seconds: int) -> None:
-        store[key] = bytes(value)
-
-    def delete(key: str) -> None:
-        store.pop(key, None)
-
-    def increment(key: str, delta: int, ttl_seconds: int) -> int:
-        current = int(store.get(key, b"0"))
-        new_value = current + delta
-        store[key] = str(new_value).encode()
-        return new_value
-
-    kv_mod = types.SimpleNamespace(get=get, set=set_, delete=delete, increment=increment)
-    fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace(kv=kv_mod)  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-    return store
+    return install_fake_kv_host(monkeypatch).store
 
 
 def test_set_then_get_round_trips(fake_kv) -> None:
@@ -74,8 +52,47 @@ def test_increment_is_scoped_per_community(fake_kv) -> None:
     assert _run(community_kv.increment("community-1", "counter", 1)) == 2
 
 
-@pytest.mark.parametrize("bad_id", ["", None])
-def test_missing_community_id_fails_loud(fake_kv, bad_id) -> None:
-    """A falsy community_id raises ValueError rather than silently using a global key."""
+def test_empty_string_community_id_fails_loud(fake_kv) -> None:
+    """An empty-string community_id raises ValueError -- the host never emits one."""
     with pytest.raises(ValueError, match="community_id"):
-        _run(community_kv.get(bad_id, "k"))
+        _run(community_kv.get("", "k"))
+
+
+# regression: this task -- `community_id=None` is the host's own tenant-wide sentinel
+# (`core/bundle_active_set/src/scope.rs::resolve_scope`'s `community_id == 0`, which
+# `core/svc_ingest/src/config.rs::ingest_scope` collapses to `None` before a bundle ever sees
+# it), not a bug -- alpha's only activation shape today routes every invoke through exactly
+# this path, so `community_kv` must scope it, not reject it.
+def test_none_community_id_scopes_under_the_tenant_wide_sentinel(fake_kv) -> None:
+    """`community_id=None` scopes under `TENANT_WIDE_SENTINEL`, never raises."""
+    _run(community_kv.set(None, "k", b"tenant-wide"))
+    assert _run(community_kv.get(None, "k")) == b"tenant-wide"
+    assert _run(community_kv.get(community_kv.TENANT_WIDE_SENTINEL, "k")) == b"tenant-wide"
+
+
+def test_none_and_a_real_community_id_never_collide(fake_kv) -> None:
+    """The tenant-wide sentinel and an actual community both named `"k"` stay independent."""
+    _run(community_kv.set(None, "k", b"tenant-wide"))
+    _run(community_kv.set("community-1", "k", b"scoped"))
+    assert _run(community_kv.get(None, "k")) == b"tenant-wide"
+    assert _run(community_kv.get("community-1", "k")) == b"scoped"
+
+
+# regression: gh-631 -- `_scoped_key` originally built `f"c:{community_id}:{key}"`, which the
+# real `kv` host capability rejects (`core/bundle_host_kv/src/scope.rs` reserves `:` as its own
+# namespace separator). `community_kv` is unused by any shipped bundle today, but it is
+# documented SDK surface (`AUTHORING.md` Sec2) -- it must not model a key shape that fails on
+# the real host the moment a bundle adopts it.
+def test_scoped_key_contains_no_colon() -> None:
+    assert ":" not in community_kv._scoped_key("community-1", "k")
+
+
+def test_scoped_key_satisfies_host_guest_key_charset(fake_kv) -> None:
+    # Raises InvalidKvKeyError if the scoped key the real host would see is invalid.
+    _run(community_kv.set("community-1", "k", b"v"))
+
+
+def test_colon_in_caller_supplied_key_is_rejected(fake_kv) -> None:
+    """A bundle author's own `key` argument is still validated once scoped."""
+    with pytest.raises(InvalidKvKeyError, match="characters outside"):
+        _run(community_kv.set("community-1", "bad:key", b"v"))

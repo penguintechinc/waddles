@@ -8,6 +8,7 @@ import { useAuth } from './contexts/AuthContext';
 const TenantBundleCatalog = lazy(() => import('./pages/tenant/TenantBundleCatalog'));
 const AdminCommunityBundles = lazy(() => import('./pages/admin/AdminCommunityBundles'));
 const SuperAdminSuperCommunities = lazy(() => import('./pages/superadmin/SuperAdminSuperCommunities'));
+const AdminRoleSyncMapping = lazy(() => import('./pages/admin/AdminRoleSyncMapping'));
 
 // Layouts
 import PublicLayout from './layouts/PublicLayout';
@@ -372,6 +373,14 @@ function App() {
           element={
             <Suspense fallback={<LoadingSpinner />}>
               <AdminCommunityBundles />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/admin/:communityId/role-sync"
+          element={
+            <Suspense fallback={<LoadingSpinner />}>
+              <AdminRoleSyncMapping />
             </Suspense>
           }
         />

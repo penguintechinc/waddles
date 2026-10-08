@@ -37,6 +37,7 @@
 
 pub mod authorize;
 pub mod backend;
+pub mod connect;
 mod limits;
 mod metrics;
 pub mod schema;
@@ -45,7 +46,8 @@ pub mod scope;
 use std::time::Instant;
 
 pub use authorize::CapabilitySnapshot;
-pub use backend::{BoxFuture, DbBackend, DbError, DbValue, PostgresBackend, Row};
+pub use backend::{BoxFuture, DbBackend, DbError, DbValue, OrderBy, PostgresBackend, Row};
+pub use connect::{connect as connect_runtime_db, ConnectConfig};
 pub use limits::{
     MAX_JSONB_BYTES, MAX_OPS_PER_INVOKE, MAX_QUERY_LIMIT, MAX_ROWS_PER_APP, MAX_TEXT_BYTES,
 };
@@ -101,14 +103,32 @@ impl<B: DbBackend> DbHost<B> {
                 if matches!(err, DbError::QuotaExceeded(_)) {
                     metrics::record_quota_rejection(&scope.app_id, "row_count");
                 }
-                tracing::info!(
-                    tenant = %scope.tenant,
-                    community = scope.community.as_deref().unwrap_or(""),
-                    app_id = %scope.app_id,
-                    op,
-                    error_kind = kind,
-                    "bundle db op failed"
-                );
+                // Observability (OTel): ERROR is for actionable failures
+                // (`rules/critical-rules.md`) -- `backend`/`timeout` mean
+                // the Postgres connection/role/schema itself is unhealthy
+                // (fail loud, never masquerade as a quiet business-logic
+                // denial); every other kind here is an expected business
+                // state (bad input, quota, version conflict, not granted)
+                // and stays at INFO.
+                if matches!(err, DbError::Backend(_) | DbError::Timeout) {
+                    tracing::error!(
+                        tenant = %scope.tenant,
+                        community = scope.community.as_deref().unwrap_or(""),
+                        app_id = %scope.app_id,
+                        op,
+                        error_kind = kind,
+                        "bundle db op failed: backend/timeout error -- db unavailable or misconfigured"
+                    );
+                } else {
+                    tracing::info!(
+                        tenant = %scope.tenant,
+                        community = scope.community.as_deref().unwrap_or(""),
+                        app_id = %scope.app_id,
+                        op,
+                        error_kind = kind,
+                        "bundle db op failed"
+                    );
+                }
             }
         }
     }
@@ -151,12 +171,11 @@ impl<B: DbBackend> DbHost<B> {
         outcome
     }
 
-    /// Bounded list of `scope`'s rows -- host-side op ready for the
-    /// proposed `query` WIT shape (see this crate's top-level doc and the
-    /// PR description); not yet reachable from a guest bundle in this
-    /// landing's `stage.wit`/`bundle_executor` (no WIT change in this
-    /// slice). `limit` is clamped to [`MAX_QUERY_LIMIT`] by the backend
-    /// regardless of what's requested here.
+    /// Bounded, orderable list of `scope`'s rows -- guest-reachable via the
+    /// WIT `db.query` op (`stage.wit`/`bundle_executor`). `limit` is
+    /// clamped to [`MAX_QUERY_LIMIT`] by the backend regardless of what's
+    /// requested here. `order_by` defaults to stable `row_id ASC` when
+    /// `None` -- see [`OrderBy`]'s own doc.
     pub async fn query(
         &self,
         scope: &DbScope,
@@ -164,11 +183,13 @@ impl<B: DbBackend> DbHost<B> {
         snapshot: &CapabilitySnapshot,
         limit: u32,
         offset: u32,
+        order_by: Option<OrderBy>,
     ) -> Result<Vec<Row>, DbError> {
         let started = Instant::now();
         let outcome = async {
             let schema = self.resolve_and_authorize(scope, schemas, snapshot)?;
-            backend::with_call_deadline(self.backend.query(&schema, scope, limit, offset)).await
+            backend::with_call_deadline(self.backend.query(&schema, scope, limit, offset, order_by))
+                .await
         }
         .await;
         Self::finish("query", scope, started, &outcome.as_ref().map(|_| ()));
@@ -299,6 +320,7 @@ mod tests {
             _scope: &'a DbScope,
             _limit: u32,
             _offset: u32,
+            _order_by: Option<OrderBy>,
         ) -> BoxFuture<'a, Result<Vec<Row>, DbError>> {
             let row = self.row.clone();
             Box::pin(async move { Ok(vec![row]) })

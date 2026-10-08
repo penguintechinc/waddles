@@ -71,6 +71,25 @@ pub struct Row {
     pub columns: Vec<(String, DbValue)>,
 }
 
+/// Row ordering for `query` (coordinator follow-up: the structured client
+/// needs `ORDER BY`/sort, not just `LIMIT`/`offset`, so bundles with a
+/// genuine sort/"pick one at random" need -- a quote/8-ball-style bundle,
+/// "most recent N" lists -- never have to drop to a raw-SQL escape hatch).
+/// `Column` validates `name` against the schema's declared columns (or the
+/// fixed platform columns `row_id`/`version`/`created_at`/`updated_at`) --
+/// never an arbitrary guest-supplied SQL fragment, same defense-in-depth
+/// requirement every other identifier in this crate has
+/// ([`crate::scope::validate_identifier`]). `Random` is `ORDER BY
+/// random()`, the "sample" helper for a uniformly-random single row
+/// (typically paired with `limit: 1`). `query`'s own `order_by:
+/// Option<OrderBy>` defaults to the pre-existing stable `row_id ASC`
+/// keyset order when `None` -- fully backward compatible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrderBy {
+    Column { name: String, descending: bool },
+    Random,
+}
+
 /// The `db` capability's error surface.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum DbError {
@@ -106,6 +125,28 @@ impl DbError {
             DbError::Backend(_) => "backend",
         }
     }
+}
+
+/// Rejects every write op (`insert`/`update`/`delete`) against a table that
+/// opted into the cross-community read exception (`crate::schema::
+/// TableSchema::cross_community_read`) -- the exception is read-only by
+/// design (design note: reputation/user-details are read, never written,
+/// through this capability), so a write attempt here is always a
+/// configuration error (a schema that should never have been marked
+/// cross-community-read for a bundle-writable table), not a race or a
+/// legitimate denial -- logged loudly (ERROR) alongside the returned error.
+fn reject_write_on_cross_community_table(schema: &TableSchema) -> Result<(), DbError> {
+    if schema.cross_community_read {
+        tracing::error!(
+            table = %schema.table,
+            "db capability: refusing a write against a cross-community-read table -- \
+             this exception is read-only by design"
+        );
+        return Err(DbError::InvalidColumn(
+            "this table is cross-community-read-only; writes are not permitted".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn db_value_to_sea_value(v: &DbValue) -> Value {
@@ -272,6 +313,26 @@ async fn lock_quota_scope(txn: &impl ConnectionTrait, scope: &DbScope) -> Result
     Ok(())
 }
 
+/// Resolves the row predicate `get`/`query` actually use: [`tenant_predicate`]
+/// for every ordinary table, or an unconditional `TRUE` (no tenant/community
+/// filtering at all) for a table that opted into the cross-community read
+/// exception (`schema.cross_community_read`, `crate::schema::TableSchema`'s
+/// own doc -- reputation/user-details, never a bundle-controlled choice).
+/// `app_id` scoping is untouched either way: `schema` itself was already
+/// resolved for exactly one `app_id` before this is ever called, so a
+/// cross-community-read table still only ever reads its own app's table.
+fn scope_predicate(
+    schema: &TableSchema,
+    scope: &DbScope,
+    next_param: usize,
+) -> (String, Vec<Value>) {
+    if schema.cross_community_read {
+        ("TRUE".to_string(), Vec::new())
+    } else {
+        tenant_predicate(scope, next_param)
+    }
+}
+
 /// The explicit, independent `tenant_id`/`community_id` predicate every
 /// generated statement below carries in addition to RLS (design doc
 /// SS6.2's "defense in depth" requirement) -- returns the SQL fragment and
@@ -331,19 +392,52 @@ pub trait DbBackend: Send + Sync {
         expected_version: u64,
     ) -> BoxFuture<'a, Result<(), DbError>>;
 
-    /// Bounded list of a scope's rows, ordered by `row_id` for a stable
-    /// keyset-style page boundary. Host-enforced page size (never
-    /// guest-controlled beyond the [`MAX_QUERY_LIMIT`] ceiling) -- see
-    /// module doc "known simplifications": this is the host-side op ready
-    /// for the proposed `query` WIT shape (PR description), not yet wired
-    /// to a guest-reachable op in this landing's `stage.wit`.
+    /// Bounded list of a scope's rows, ordered by `order_by` (default
+    /// `row_id ASC`, a stable keyset-style page boundary, when `None`).
+    /// Host-enforced page size (never guest-controlled beyond the
+    /// [`MAX_QUERY_LIMIT`] ceiling).
     fn query<'a>(
         &'a self,
         schema: &'a TableSchema,
         scope: &'a DbScope,
         limit: u32,
         offset: u32,
+        order_by: Option<OrderBy>,
     ) -> BoxFuture<'a, Result<Vec<Row>, DbError>>;
+}
+
+/// Validates an `order_by` column name against `schema`: must be either a
+/// declared bundle column or one of the fixed platform columns safe to
+/// sort by (`row_id`, `version`, `created_at`, `updated_at` -- `tenant_id`/
+/// `community_id` excluded: sorting by them would leak cross-scope
+/// ordering information with no legitimate bundle use case). Re-validates
+/// the identifier shape too, same defense-in-depth posture as every other
+/// identifier this crate puts into SQL text.
+fn validate_order_column(schema: &TableSchema, name: &str) -> Result<(), DbError> {
+    validate_identifier(name)
+        .map_err(|_| DbError::InvalidColumn(format!("{name:?} is not a valid identifier")))?;
+    const SORTABLE_PLATFORM_COLUMNS: &[&str] = &["row_id", "version", "created_at", "updated_at"];
+    if SORTABLE_PLATFORM_COLUMNS.contains(&name) || schema.column(name).is_some() {
+        Ok(())
+    } else {
+        Err(DbError::InvalidColumn(format!(
+            "{name:?} is not a valid order-by column for this app"
+        )))
+    }
+}
+
+/// Renders `order_by` into an `ORDER BY` SQL fragment (never guest text --
+/// `Column`'s `name` is validated by [`validate_order_column`] first).
+fn order_by_sql(schema: &TableSchema, order_by: &Option<OrderBy>) -> Result<String, DbError> {
+    match order_by {
+        None => Ok("row_id ASC".to_string()),
+        Some(OrderBy::Random) => Ok("random()".to_string()),
+        Some(OrderBy::Column { name, descending }) => {
+            validate_order_column(schema, name)?;
+            let dir = if *descending { "DESC" } else { "ASC" };
+            Ok(format!("{} {dir}", quote_ident(name)))
+        }
+    }
 }
 
 /// The real [`DbBackend`]: SeaORM over the shared `waddles` Postgres
@@ -383,6 +477,7 @@ impl PostgresBackend {
         scope: &DbScope,
         column_values: Vec<(String, DbValue)>,
     ) -> Result<Row, DbError> {
+        reject_write_on_cross_community_table(schema)?;
         validate_column_values(schema, &column_values)?;
 
         let txn = self
@@ -494,8 +589,15 @@ impl PostgresBackend {
         select_cols.extend(declared.iter().cloned());
         let quoted_select: Vec<String> = select_cols.iter().map(|c| quote_ident(c)).collect();
 
-        let (pred_sql, mut pred_values) = tenant_predicate(scope, 2);
+        let (pred_sql, mut pred_values) = scope_predicate(schema, scope, 2);
         pred_values.insert(0, Value::Uuid(Some(row_uuid)));
+        if schema.cross_community_read {
+            tracing::info!(
+                app_id = %scope.app_id,
+                table = %schema.table,
+                "db capability: cross-community read (reputation/user-details exception)"
+            );
+        }
 
         let sql = format!(
             "SELECT {} FROM {} WHERE row_id = $1 AND {}",
@@ -543,6 +645,7 @@ impl PostgresBackend {
         expected_version: u64,
         column_values: Vec<(String, DbValue)>,
     ) -> Result<Row, DbError> {
+        reject_write_on_cross_community_table(schema)?;
         validate_column_values(schema, &column_values)?;
         let row_uuid = Uuid::parse_str(row_id)
             .map_err(|_| DbError::InvalidValue("row_id is not a valid UUID".to_string()))?;
@@ -641,6 +744,7 @@ impl PostgresBackend {
         row_id: &str,
         expected_version: u64,
     ) -> Result<(), DbError> {
+        reject_write_on_cross_community_table(schema)?;
         let row_uuid = Uuid::parse_str(row_id)
             .map_err(|_| DbError::InvalidValue("row_id is not a valid UUID".to_string()))?;
         let expected_version_i64 = i64::try_from(expected_version)
@@ -716,8 +820,10 @@ impl PostgresBackend {
         scope: &DbScope,
         limit: u32,
         offset: u32,
+        order_by: Option<OrderBy>,
     ) -> Result<Vec<Row>, DbError> {
         let bounded_limit = limit.min(MAX_QUERY_LIMIT);
+        let order_sql = order_by_sql(schema, &order_by)?;
 
         let txn = self
             .conn
@@ -731,7 +837,14 @@ impl PostgresBackend {
         select_cols.extend(declared.iter().cloned());
         let quoted_select: Vec<String> = select_cols.iter().map(|c| quote_ident(c)).collect();
 
-        let (pred_sql, pred_values) = tenant_predicate(scope, 1);
+        let (pred_sql, pred_values) = scope_predicate(schema, scope, 1);
+        if schema.cross_community_read {
+            tracing::info!(
+                app_id = %scope.app_id,
+                table = %schema.table,
+                "db capability: cross-community read (reputation/user-details exception)"
+            );
+        }
         let limit_param = pred_values.len() + 1;
         let offset_param = limit_param + 1;
         let mut bind_values = pred_values;
@@ -739,7 +852,7 @@ impl PostgresBackend {
         bind_values.push(Value::BigInt(Some(i64::from(offset))));
 
         let sql = format!(
-            "SELECT {} FROM {} WHERE {} ORDER BY row_id LIMIT ${limit_param} OFFSET ${offset_param}",
+            "SELECT {} FROM {} WHERE {} ORDER BY {order_sql} LIMIT ${limit_param} OFFSET ${offset_param}",
             quoted_select.join(", "),
             schema.qualified_name(),
             pred_sql,
@@ -860,8 +973,9 @@ impl DbBackend for PostgresBackend {
         scope: &'a DbScope,
         limit: u32,
         offset: u32,
+        order_by: Option<OrderBy>,
     ) -> BoxFuture<'a, Result<Vec<Row>, DbError>> {
-        Box::pin(self.query_impl(schema, scope, limit, offset))
+        Box::pin(self.query_impl(schema, scope, limit, offset, order_by))
     }
 }
 
@@ -1001,6 +1115,138 @@ mod tests {
         let (sql, values) = tenant_predicate(&scope, 1);
         assert_eq!(sql, "tenant_id = $1 AND community_id IS NULL");
         assert_eq!(values.len(), 1);
+    }
+
+    #[test]
+    fn scope_predicate_uses_tenant_predicate_for_an_ordinary_table() {
+        let schema = schema_with_user_ref();
+        let scope = DbScope::new("acme", Some("main".to_string()), "app");
+        let (sql, values) = scope_predicate(&schema, &scope, 1);
+        assert_eq!(sql, "tenant_id = $1 AND community_id = $2");
+        assert_eq!(values.len(), 2);
+    }
+
+    #[test]
+    fn scope_predicate_is_unconditional_for_a_cross_community_read_table() {
+        let schema = schema_with_user_ref().with_cross_community_read();
+        let scope = DbScope::new("acme", Some("main".to_string()), "app");
+        let (sql, values) = scope_predicate(&schema, &scope, 1);
+        assert_eq!(sql, "TRUE");
+        assert!(values.is_empty(), "no tenant/community value must be bound");
+    }
+
+    #[test]
+    fn reject_write_on_cross_community_table_allows_an_ordinary_table() {
+        let schema = schema_with_user_ref();
+        assert!(reject_write_on_cross_community_table(&schema).is_ok());
+    }
+
+    #[test]
+    fn reject_write_on_cross_community_table_denies_a_cross_community_read_table() {
+        let schema = schema_with_user_ref().with_cross_community_read();
+        let err = reject_write_on_cross_community_table(&schema).unwrap_err();
+        assert_eq!(err.code(), "invalid_column");
+    }
+
+    #[test]
+    fn order_by_sql_defaults_to_row_id_ascending() {
+        let schema = schema_with_user_ref();
+        assert_eq!(order_by_sql(&schema, &None).unwrap(), "row_id ASC");
+    }
+
+    #[test]
+    fn order_by_sql_renders_random() {
+        let schema = schema_with_user_ref();
+        assert_eq!(
+            order_by_sql(&schema, &Some(OrderBy::Random)).unwrap(),
+            "random()"
+        );
+    }
+
+    #[test]
+    fn order_by_sql_renders_a_declared_column_both_directions() {
+        let schema = schema_with_user_ref();
+        assert_eq!(
+            order_by_sql(
+                &schema,
+                &Some(OrderBy::Column {
+                    name: "score".to_string(),
+                    descending: false
+                })
+            )
+            .unwrap(),
+            "\"score\" ASC"
+        );
+        assert_eq!(
+            order_by_sql(
+                &schema,
+                &Some(OrderBy::Column {
+                    name: "score".to_string(),
+                    descending: true
+                })
+            )
+            .unwrap(),
+            "\"score\" DESC"
+        );
+    }
+
+    #[test]
+    fn order_by_sql_allows_sortable_platform_columns() {
+        let schema = schema_with_user_ref();
+        for col in ["row_id", "version", "created_at", "updated_at"] {
+            assert!(order_by_sql(
+                &schema,
+                &Some(OrderBy::Column {
+                    name: col.to_string(),
+                    descending: false
+                })
+            )
+            .is_ok());
+        }
+    }
+
+    #[test]
+    fn order_by_sql_rejects_tenant_and_community_id() {
+        let schema = schema_with_user_ref();
+        for col in ["tenant_id", "community_id"] {
+            let err = order_by_sql(
+                &schema,
+                &Some(OrderBy::Column {
+                    name: col.to_string(),
+                    descending: false,
+                }),
+            )
+            .unwrap_err();
+            assert_eq!(err.code(), "invalid_column");
+        }
+    }
+
+    #[test]
+    fn order_by_sql_rejects_an_undeclared_column() {
+        let schema = schema_with_user_ref();
+        let err = order_by_sql(
+            &schema,
+            &Some(OrderBy::Column {
+                name: "not_declared".to_string(),
+                descending: false,
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "invalid_column");
+    }
+
+    #[test]
+    fn order_by_sql_rejects_sql_injection_shaped_column_name() {
+        let schema = schema_with_user_ref();
+        let err = order_by_sql(
+            &schema,
+            &Some(OrderBy::Column {
+                name: "score; DROP TABLE fishing_core; --".to_string(),
+                descending: false,
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "invalid_column");
     }
 
     #[test]
