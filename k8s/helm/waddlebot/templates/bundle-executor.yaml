@@ -22,12 +22,32 @@
 #
 # No Service object: this process has no HTTP/gRPC listener of any kind (core/
 # bundle_executor/src/tls.rs's own doc comment -- "this process has no HTTP surface to
-# probe"), so liveness/readiness both use the same `--healthcheck` exec subcommand
-# core/bundle_executor/src/main.rs wires (which only builds the wasmtime Engine/Linker,
-# spec SS12.4/SS12.5 -- it does NOT prove the stage dial below is actually succeeding;
-# core/bundle_executor/src/lib.rs::run() retries that forever with capped exponential
-# backoff rather than exiting, so a broken/missing mTLS cert never crashloops this pod, it
-# just never establishes the executor<->stage link -- see global.hostApiTls's comment).
+# probe"), so every probe below execs this same binary instead of hitting a port.
+#
+# fix/executor-session-liveness: THREE probes now, not one, closing the incident where an
+# executor stayed dialed to a half-open connection to a terminated stage pod (no FIN/RST
+# ever arrived) while every probe kept reporting healthy -- `--healthcheck` (bare, no
+# mode) only ever build-tested the wasmtime Engine/Linker, which says nothing about
+# whether the host-API session is actually alive.
+#   - startupProbe: the OLD liveness check (`--healthcheck`, engine/linker build-test),
+#     kept as a one-time startup gate -- a broken wasmtime toolchain should still fail
+#     fast on boot rather than only being noticed once a session probe eventually fires.
+#   - livenessProbe: `--healthcheck=session --max-age 60` (core/bundle_executor/src/
+#     probe.rs + src/heartbeat.rs) -- fails (and the kubelet restarts the pod) once the
+#     on-disk liveness file is missing/stale for EXECUTOR_GRACE_SECONDS (default 60s).
+#     The heartbeat monitor refreshes that file every EXECUTOR_HEARTBEAT_INTERVAL_SECS
+#     (default 5s) tick as long as the host-API session has received a frame within the
+#     last 3 intervals; a silently stalled session now gets dropped+reconnected on its
+#     own (crate::heartbeat), and if reconnection itself is failing this probe is the
+#     backstop that makes the pod visibly restart rather than staying permanently "Ready"
+#     while dead.
+#   - readinessProbe: same subcommand, a much shorter `--max-age 20` -- pulled out of
+#     traffic quickly if the session goes quiet, without waiting for the full liveness
+#     grace window or a pod restart.
+# core/bundle_executor/src/lib.rs::run() still retries the dial forever with capped
+# exponential backoff rather than exiting on its own; these probes are what makes a
+# truly stuck pod observable and recoverable instead of silently serving nothing forever
+# (see global.hostApiTls's comment for the broken/missing mTLS cert case specifically).
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.bundleExecutor.enabled }}
 {{- if not .Values.pipeline.rustDataPlane.bundleSigningPublicKeys }}
 {{- fail "pipeline.rustDataPlane.bundleSigningPublicKeys is empty: run make generate-bundle-signing-key and set values; see README rollout order" }}
@@ -48,6 +68,14 @@ spec:
       app.kubernetes.io/component: bundle-executor
   template:
     metadata:
+      annotations:
+        # fix/cert-regen-on-identity-change -- rolls every pod when the desired
+        # host-api-tls identity/SANs change, even though the Secret object itself is
+        # reused by name when kept (see templates/host-api-tls-secret.yaml's policy
+        # comment); derived from identity+SANs only, never key material.
+        {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+        checksum/host-api-tls: {{ include "waddlebot.hostApiTlsPodChecksum" . | quote }}
+        {{- end }}
       labels:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: bundle-executor
@@ -56,13 +84,17 @@ spec:
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waits on hub-api's own
+      # /ready before this pod's main container starts (see _helpers.tpl).
+      initContainers:
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: bundle-executor
         # Own image (self-contained full path per environment, no global.imageRegistry
         # concatenation) -- same pattern as .Values.streaming.image/.Values.reputation.image
         # (see those templates' own image lines); using the waddlebot.image helper here
         # would double-prefix alpha's already-registry-qualified repository value.
-        image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag }}"
+        image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag | toString }}"
         # Hardcoded Always -- see templates/svc-process-rust.yaml's comment on this same
         # line for the node-image-cache rationale (identical here). Proven stale in this
         # exact deploy: the running pod was serving invoke.rs's UnimplementedBucketSource
@@ -137,18 +169,30 @@ spec:
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsClientEnv" . | nindent 8 }}
         {{- end }}
-        livenessProbe:
+        startupProbe:
+          # fix/alpha-deploy-executor-and-failfast -- failureThreshold bumped from 12
+          # (62s total) to 65 (~5.5min total: 5 + 5*65) -- a cold `load` JIT-compiling a
+          # 21MB CPython component plus a .NET component via Cranelift (no .cwasm cache
+          # yet, see precompile-cache's own comment) was measured exceeding the old 62s
+          # budget and getting killed/restarted before compilation ever finished.
           exec:
             command: ["/app/bundle-executor", "--healthcheck"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 65
+        livenessProbe:
+          exec:
+            command: ["/app/bundle-executor", "--healthcheck=session", "--max-age", "60"]
           initialDelaySeconds: 10
-          periodSeconds: 30
+          periodSeconds: 15
           timeoutSeconds: 5
           failureThreshold: 3
         readinessProbe:
           exec:
-            command: ["/app/bundle-executor", "--healthcheck"]
+            command: ["/app/bundle-executor", "--healthcheck=session", "--max-age", "20"]
           initialDelaySeconds: 5
-          periodSeconds: 15
+          periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 3
         resources:

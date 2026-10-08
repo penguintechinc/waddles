@@ -1,8 +1,11 @@
 .PHONY: dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
-        verify-csping-fixture generate-bundle-signing-key verify-ping-bundle-reproducible \
-        generate-seaweedfs-sse-key alpha-deploy
+        verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
+        build-superpenguin-roll-bundle test-csharp-bundle-compile \
+        verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
+        test-bundle-flag-on-command-e2e \
+        check-no-stubs generate-bundle-signing-key
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -33,6 +36,32 @@ check-docs:
 # branches land -- a gate that cannot fail is not a gate.
 check-bundle-dal:
 	@bash scripts/check-bundle-dal-imports.sh
+
+# fix/chart-fresh-install-hooks (alpha 2026-10-01) -- regression gates for the
+# fresh-install hook-ordering bug (migrate ran pre-install before postgres
+# existed) and its fix (every non-hub-api workload waits on hub-api's /ready).
+check-helm-hook-phases:
+	@python3 scripts/check_helm_hook_phases.py
+
+check-wait-for-hub-api:
+	@python3 scripts/check_wait_for_hub_api.py
+
+# USER DECISION (2026-10-01, fix/chart-fresh-install-hooks): db-migrate now runs
+# post-install -- helm upgrade --install in alpha-deploy.sh must never pass
+# --wait/--atomic, or a fresh install deadlocks (Deployments wait on hub-api,
+# hub-api waits on db-migrate, db-migrate waits on Helm to stop waiting on
+# Deployments). See scripts/check_alpha_deploy_no_wait.py's module docstring.
+check-alpha-deploy-no-wait:
+	@python3 scripts/check_alpha_deploy_no_wait.py
+
+# No-stubs / no-silent-fallbacks gate (gh-regression: a `flags capability not
+# wired -- TODO(M4+)` stub returned a silent default and shipped as "done",
+# causing a multi-hour alpha outage). Scans non-test core/hub_api/sdk/bundles/
+# frontend source for stub markers + semgrep silent-fallback patterns against
+# .ci/stub-allowlist.yml + .ci/silent-fallback-baseline.json. Requires
+# `semgrep` on PATH (pinned in CI; see scripts/ci/semgrep-silent-fallback.yml).
+check-no-stubs:
+	@bash scripts/ci/check-no-stubs.sh
 
 test:
 	@$(MAKE) test-unit
@@ -100,19 +129,64 @@ run-ai-local: ## Run ai_interaction_module container locally (standalone, 1 work
 	  -p 8005:8005 \
 	  waddlebot/ai-interaction:local
 
-# C#-toolchain spike (spec S18 R13): rebuilds bundles/csharp/csping from
-# source in its pinned, checksum-verified, rootless Dockerfile and asserts
-# byte-identical output against the committed
+# C#-toolchain spike (spec S18 R13), now ported onto waddle-sdk-cs: rebuilds
+# bundles/csharp/csping from source in its pinned, checksum-verified,
+# rootless Dockerfile and asserts byte-identical output against the committed
 # core/bundle_executor/tests/fixtures/csping.wasm + .sha256 -- makes that
 # committed binary auditable instead of a trust-me blob.
 verify-csping-fixture:
 	@bash scripts/verify-csping-fixture.sh
 
-# Proves bundles/rust/ping's WASI 0.2 component build (bundles/Dockerfile.core-bundles's
-# rust-bundle-builder stage) is byte-reproducible -- two independent --no-cache builds must
-# produce an identical sha256. See scripts/verify-ping-bundle-reproducible.sh for why.
-verify-ping-bundle-reproducible:
-	@bash scripts/verify-ping-bundle-reproducible.sh
+# csping: ported onto waddle-sdk-cs (bundles/csharp/csping/CspingLogic.cs/
+# CspingDispatch.cs) -- xUnit tests run in the same pinned containerized
+# .NET SDK image as every other C# build in this repo.
+test-csping:
+	@bash scripts/test-csping.sh
+
+# waddle-sdk-cs: shared C# SDK for Waddles app bundles (sdk/waddle-sdk-cs) --
+# xUnit tests run in the same pinned containerized .NET SDK image as every
+# other C# build in this repo (see scripts/test-waddle-sdk-cs.sh).
+test-waddle-sdk-cs:
+	@bash scripts/test-waddle-sdk-cs.sh
+
+# superpenguin-roll: first C# bundle built on waddle-sdk-cs, ported from
+# PenguinTwitchBot's PastyGames/Roll.cs (MIT, used with permission -- see
+# bundles/csharp/superpenguin-roll/bundle.yaml `notice`).
+test-superpenguin-roll:
+	@bash scripts/test-superpenguin-roll.sh
+
+# Rebuilds bundles/csharp/superpenguin-roll to a real .wasm component and
+# reports its size/sha256 -- see scripts/verify-superpenguin-roll-fixture.sh
+# for why no committed fixture is byte-identity-checked here (unlike
+# verify-csping-fixture, this component is not committed to
+# core/bundle_executor/tests/fixtures/).
+build-superpenguin-roll-bundle:
+	@bash scripts/verify-superpenguin-roll-fixture.sh
+
+# End-to-end: builds the real bundles/csharp/csping spike bundle through
+# CSharpBuilder (core/bundle_compiler/src/build/csharp.rs), the
+# builder_for("csharp") arm now returns -- ignored by default cargo test
+# (needs docker + network, ~1-2 minutes), so this is its only run path.
+test-csharp-bundle-compile:
+	@cd core/bundle_compiler && cargo test --locked builds_csping_via_docker -- --ignored --nocapture
+
+# Proves bundles/Dockerfile.core-bundles's two example-bundle artifacts (ping.wasm from the
+# rust-bundle-builder stage, pyping.wasm from the python-bundle-builder stage) are both
+# byte-reproducible -- two independent --no-cache builds of the full image must produce
+# identical sha256 for each. See scripts/verify-core-bundles-reproducible.sh for why.
+verify-core-bundles-reproducible:
+	@bash scripts/verify-core-bundles-reproducible.sh
+
+# Real-path "flag ON -> command replies, flag OFF -> no reply" regression
+# gate (core/bundle_executor/tests/flag_on_command_e2e.rs): freshly compiles
+# bundles/python/eightball to wasm, loads it into the real bundle-executor
+# wasmtime host with the real `flags` capability wired, drives it through
+# the Docker-ENV flag baseline -- no mocking at the WIT/flags/wasm boundary.
+# Already FATAL via this crate's own `cargo test` gate
+# (.github/workflows/rust-bundle-executor.yml); this target is the direct
+# local/manual entry point.
+test-bundle-flag-on-command-e2e:
+	@bash scripts/test-bundle-flag-on-command-e2e.sh
 
 # Generates the Ed25519 signing keypair for hub-api's per-service machine
 # JWTs (feature/eddsa-machine-jwt) and applies the resulting k8s Secret --
@@ -138,6 +212,23 @@ generate-seaweedfs-sse-key:
 # rejects any other KUBE_CONTEXT before build/push/helm run). Usage: make alpha-deploy [ARGS="--skip-build"]
 alpha-deploy:
 	@bash scripts/alpha-deploy.sh $(ARGS)
+
+# resolve-433 -- alpha-deploy.sh's registry-backed build cache
+# (localhost:32000/waddlebot/buildcache/*) shares disk with the MicroK8s
+# registry's PVC, which was evicted once under DiskPressure. This runs the
+# registry's own garbage-collect (distribution/distribution's
+# `registry garbage-collect`) inside the registry pod via kubectl exec --
+# it does NOT touch alpha-deploy.sh's cache tags themselves (those are
+# already bounded to one overwritten tag per image; this reclaims the
+# now-unreferenced blobs those overwrites leave behind). Never run
+# automatically -- always explicit, always local-alpha only.
+# Usage: make alpha-registry-gc
+alpha-registry-gc:
+	@echo "Running MicroK8s registry garbage collection (context: local-alpha, namespace: container-registry)..."
+	@echo "NOTE: confirm the registry Deployment/config path first if this differs from the microk8s registry addon default:"
+	@echo "  kubectl --context local-alpha get pods -n container-registry"
+	kubectl --context local-alpha exec -n container-registry deploy/registry -- \
+		registry garbage-collect /etc/docker/registry/config.yml
 
 pre-commit:
 	@echo "=== Pre-commit checks ==="

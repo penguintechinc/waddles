@@ -1,7 +1,7 @@
 # Module RTC Dockerfile
 # Multi-stage Go build
 
-FROM golang:1.26-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81 AS builder
+FROM golang:1.26-bookworm@sha256:dc9ad6c05acc7a88e5b71bde60a5fe3bd4b9f0db209011711b464107438a8107 AS builder
 
 WORKDIR /build
 
@@ -21,12 +21,16 @@ COPY core/module_rtc/ .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /build/module_rtc ./cmd/server
 
 # Production stage
-FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 
 WORKDIR /app
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install runtime dependencies. Full apt-get upgrade (not just libpcre2-8-0)
+# clears every fixable HIGH/CRITICAL OS-package CVE the pinned
+# debian:bookworm-slim digest still ships (perl/perl-base, libcap,
+# libgnutls, libpcre2-8-0, ...).
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
     ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 

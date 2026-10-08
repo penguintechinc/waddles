@@ -212,6 +212,12 @@ libc = "=0.2.189"
 penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69e740ce5411d8cd005241fbd829c62e68efb96e", package = "penguin-logging", version = "=0.1.0", features = [
     "testing",
 ] }
+# `ingest::discord::RestPermissionsResolver`'s guild/member REST lookups are
+# tested against a real mock HTTP server, not hand-rolled stubs -- same
+# crate/version `penguin-connector-discord` itself uses for its own
+# `rest.rs` tests (see that crate's `Cargo.toml`), kept in lockstep so a
+# future bump there is a known-compatible precedent here too.
+wiremock = "=0.6.5"
 
 [profile.release]
 opt-level = 3

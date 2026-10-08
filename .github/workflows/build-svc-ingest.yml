@@ -43,6 +43,10 @@ on:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
   workflow_dispatch:
 
+concurrency:
+  group: build-svc-ingest-${{ github.event.merge_group.head_sha || github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -51,6 +55,11 @@ env:
   IMAGE_NAME: ${{ github.repository }}
   MODULE_NAME: svc-ingest-rust
   MODULE_PATH: core/svc_ingest
+  # TEMPORARY amd64-only (user-approved 2026-10-03). Re-enable arm64 near
+  # release / for the mixed-arch Minisforum alpha cluster by setting
+  # BUILD_PLATFORMS=linux/amd64,linux/arm64 (this is the single toggle --
+  # every build-*.yml workflow that builds images keys off the same name).
+  BUILD_PLATFORMS: linux/amd64
 
 jobs:
   determine-version:
@@ -60,6 +69,8 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       suffix: ${{ steps.version.outputs.suffix }}
       is_release: ${{ steps.version.outputs.is_release }}
+      multi_arch: ${{ steps.version.outputs.multi_arch }}
+      matrix: ${{ steps.version.outputs.matrix }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -95,6 +106,25 @@ jobs:
             echo "is_release=false" >> "$GITHUB_OUTPUT"
           fi
 
+          # Derive the whole matrix object + multi_arch flag from the single
+          # BUILD_PLATFORMS toggle (env, top of file). A comma means more
+          # than one platform is requested -- restore arm64 by flipping that
+          # one value back to "linux/amd64,linux/arm64".
+          #
+          # The matrix is emitted as one complete JSON object (not a static
+          # "include:" list plus a dynamic "exclude:" expression) because
+          # mixing a static matrix key with a fromJSON(...)-driven sibling
+          # key resolves to an empty job set -- see gh-577. This is GitHub's
+          # documented "defining a matrix dynamically" pattern instead:
+          # https://docs.github.com/actions/how-tos/write-workflows/choose-what-workflows-do/run-variations-of-jobs-in-a-workflow#defining-a-matrix-dynamically
+          if [[ "$BUILD_PLATFORMS" == *,* ]]; then
+            echo "multi_arch=true" >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[{"platform":"linux/amd64","runner":"ubuntu-latest","suffix":"amd64"},{"platform":"linux/arm64","runner":"ubuntu-24.04-arm","suffix":"arm64"}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo "multi_arch=false" >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[{"platform":"linux/amd64","runner":"ubuntu-latest","suffix":"amd64"}]}' >> "$GITHUB_OUTPUT"
+          fi
+
   # Push-path only -- pull_request/merge_group is handled entirely by
   # build-pr below so packages:write is never granted to a job building an
   # untrusted PR's Dockerfile.
@@ -106,16 +136,18 @@ jobs:
       packages: write
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-            suffix: amd64
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-            suffix: arm64
+      # Whole matrix object computed by determine-version (see that job's
+      # comment) -- a static `include:` plus dynamic `exclude:` resolved to
+      # zero jobs, see gh-577.
+      matrix: ${{ fromJSON(needs.determine-version.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     needs: determine-version
+    outputs:
+      # Only ever set by the single surviving (amd64) matrix entry when
+      # BUILD_PLATFORMS is amd64-only -- trivy-scan falls back to this when
+      # `merge` (below) is skipped, so the gate still runs on a single-arch
+      # build. See `build-container.yml` header for the overall rationale.
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -132,14 +164,42 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Single-platform builds (BUILD_PLATFORMS has no comma) skip the
+      # "Merge Multi-Arch Manifest" job below entirely, so this step must
+      # also publish the plain (and, on release, :latest) tag that job
+      # would otherwise create -- a single-arch build ends up pushing a
+      # normal image, never a manifest list.
+      - name: Compute image tags
+        id: tags
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}
+          VERSION: ${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
+          IS_RELEASE: ${{ needs.determine-version.outputs.is_release }}
+          MULTI_ARCH: ${{ needs.determine-version.outputs.multi_arch }}
+          ARCH_SUFFIX: ${{ matrix.suffix }}
+        run: |
+          TAGS="${IMAGE}:${VERSION}-${ARCH_SUFFIX}"
+          if [ "${MULTI_ARCH}" != "true" ]; then
+            TAGS=$(printf '%s\n%s' "$TAGS" "${IMAGE}:${VERSION}")
+            if [ "${IS_RELEASE}" = "true" ]; then
+              TAGS=$(printf '%s\n%s' "$TAGS" "${IMAGE}:latest")
+            fi
+          fi
+          {
+            echo "list<<TAGEOF"
+            echo "${TAGS}"
+            echo "TAGEOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push image (${{ matrix.platform }})
+        id: build
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         with:
           context: ${{ env.MODULE_PATH }}
           file: ${{ env.MODULE_PATH }}/Dockerfile.rust
           push: true
           platforms: ${{ matrix.platform }}
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ matrix.suffix }}
+          tags: ${{ steps.tags.outputs.list }}
           cache-from: type=gha,scope=${{ env.MODULE_NAME }}-${{ matrix.suffix }}
           cache-to: type=gha,mode=max,scope=${{ env.MODULE_NAME }}-${{ matrix.suffix }}
 
@@ -190,7 +250,14 @@ jobs:
       packages: write
     runs-on: ubuntu-latest
     needs: [determine-version, build-platform]
-    if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
+    # No-ops cleanly when BUILD_PLATFORMS is amd64-only -- build-platform's
+    # "Compute image tags" step already pushed the plain/:latest tags
+    # directly in that case, so there is nothing to merge. trivy-scan below
+    # falls back to build-platform's own digest output in that case.
+    if: >
+      github.event_name != 'pull_request' &&
+      github.event_name != 'merge_group' &&
+      needs.determine-version.outputs.multi_arch == 'true'
     outputs:
       digest: ${{ steps.digest.outputs.digest }}
     steps:
@@ -259,7 +326,16 @@ jobs:
       packages: read
       security-events: write
     runs-on: ubuntu-latest
-    needs: [determine-version, merge]
+    needs: [determine-version, build-platform, merge]
+    # `merge` is intentionally skipped (not failed) when BUILD_PLATFORMS is
+    # amd64-only -- run this gate off build-platform's own digest in that
+    # case instead of letting the skip cascade and silently drop the scan.
+    if: >
+      always() &&
+      needs.build-platform.result == 'success' &&
+      (needs.merge.result == 'success' || needs.merge.result == 'skipped')
+    env:
+      SCAN_DIGEST: ${{ needs.determine-version.outputs.multi_arch == 'true' && needs.merge.outputs.digest || needs.build-platform.outputs.digest }}
     steps:
       - name: Log in to Container Registry
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
@@ -269,13 +345,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run Trivy vulnerability scanner (gate)
-        # Scans by the digest captured in the `merge` job -- never the
-        # mutable tag, which can otherwise point at a stale, already-built
-        # image. See rules/critical-rules.md Verification Integrity.
+        # Scans by the digest captured above -- never the mutable tag, which
+        # can otherwise point at a stale, already-built image. See
+        # rules/critical-rules.md Verification Integrity.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           version: v0.69.3
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}@${{ needs.merge.outputs.digest }}
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}@${{ env.SCAN_DIGEST }}
           format: 'table'
           severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
@@ -286,7 +362,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           version: v0.69.3
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}@${{ needs.merge.outputs.digest }}
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ env.MODULE_NAME }}@${{ env.SCAN_DIGEST }}
           format: 'sarif'
           output: 'trivy-${{ env.MODULE_NAME }}.sarif'
           severity: 'HIGH,CRITICAL'

@@ -20,6 +20,14 @@ spec:
       app.kubernetes.io/component: hub-api
   template:
     metadata:
+      annotations:
+        # fix/valkey-cert-rollout-and-migrate-wait -- see templates/infrastructure/
+        # redis.yaml's identical annotation comment; rolls this client pod in lockstep
+        # with the Valkey server on any identity/SAN change.
+        # regression: valkey cert regenerated but server pod not rolled; clients BadSignature (alpha 2026-10-02)
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        checksum/valkey-tls: {{ include "waddlebot.valkeyTlsPodChecksum" . | quote }}
+        {{- end }}
       labels:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: hub-api
@@ -28,8 +36,10 @@ spec:
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      initContainers:
-      {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- no initContainers: hub-api
+      # bootstraps its own schema in-process at startup (hub_api/bootstrap.py), gated on
+      # its own `/ready` readinessProbe below rather than a pre-run initContainer. hub-api
+      # is the one Deployment in this chart that never waits on itself.
       containers:
       - name: hub-api
         # fix/alpha-helm-deploy -- hub_api/Dockerfile (Python 3.13 + Quart control-plane
@@ -58,6 +68,18 @@ spec:
             name: {{ include "waddlebot.fullname" . }}-config
         - secretRef:
             name: {{ include "waddlebot.fullname" . }}-secrets
+        # feature/alpha-localized-posthog -- POSTHOG_API_KEY/POSTHOG_KEY auto-
+        # provisioned by templates/infrastructure/posthog/bootstrap.yaml once
+        # posthog.enabled=true (alpha). Listed BEFORE platformCredentials below
+        # so an operator-managed POSTHOG_API_KEY there still wins on a name
+        # collision (envFrom: later source wins) -- this is purely a
+        # convenience default for the in-cluster alpha PostHog, never an
+        # override of an operator's explicit choice. `optional: true`: safe to
+        # reference before the bootstrap Job has run, or when posthog.enabled
+        # is false (Secret never created).
+        - secretRef:
+            name: {{ .Values.posthog.bootstrap.secretName | default "posthog-bootstrap-secret" }}
+            optional: true
         # fix/helm-platform-credentials -- OAuth app client IDs/secrets, AWS/GCP,
         # WaddleAI, and PostHog API key (hub_api/services/platform_integrations_crypto.py
         # and Connections OAuth-flow initiation) come from the operator-managed
@@ -103,6 +125,11 @@ spec:
           value: {{ .Values.pipeline.hubApi.port | quote }}
         - name: GRPC_PORT
           value: {{ .Values.pipeline.hubApi.grpcPort | quote }}
+        # fix/hub-grpc-tls-and-ca-trust (PR #570 review blocker 1) -- without these,
+        # hub_api/grpc_internal/server.py::_load_server_credentials raises KeyError on
+        # os.environ["GRPC_TLS_CERT_PATH"]/["GRPC_TLS_KEY_PATH"] and the internal gRPC
+        # listener never starts (TLS is mandatory there, no insecureDev escape hatch).
+        {{- include "waddlebot.hubApiGrpcTlsServerEnv" . | nindent 8 }}
         # ONE-WAY AI kill-switch (hub_api/config.py's WADDLES_AI_ENABLED) --
         # lets this Deployment run with no Ollama/model backend reachable;
         # never grants access on its own, see values.yaml's own comment.
@@ -163,6 +190,26 @@ spec:
               name: {{ .Values.pipeline.hubApi.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
               key: BUNDLE_SIGNING_KEY_ID
               optional: true
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        # regression: seeder VALKEY_URL REPLACE_ME / missing TLS wiring -- hub-api itself
+        # calls hub_api/services/valkey_admin_client.py::build_client() (via
+        # bundle_approval_service.py/bundle_version_service.py/usage_aggregator_service.py,
+        # consumer-group provisioning), the same function the core-bundle-seeder Job calls
+        # (see templates/core-bundle-seeder-job.yaml's identical block) -- without this
+        # override this container inherits the plaintext VALKEY_URL from envFrom's
+        # secretRef above and crashes the first time any of those call sites run, with
+        # "VALKEY_URL must use rediss://" (SECURITY_TRANSPORT_TLS defaults true).
+        - name: VALKEY_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: VALKEY_URL_TLS
+        - name: VALKEY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: REDIS_PASSWORD
+        {{- end }}
         {{- if .Values.modules.bot.enabled }}
         - name: MODULE_LOAD_BOT
           value: "true"
@@ -188,8 +235,13 @@ spec:
           timeoutSeconds: 5
           failureThreshold: 3
         readinessProbe:
+          # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- /ready (hub_api/app.py),
+          # not /health: gated on BootstrapStatus.is_ready so K8s never routes traffic to
+          # hub-api until the schema is confirmed at head. livenessProbe stays on
+          # flask_core's /health above -- a schema that's legitimately SCHEMA_BEHIND
+          # (waiting on an operator-run migrate hook) must not get this pod killed.
           httpGet:
-            path: /health
+            path: /ready
             port: http
           initialDelaySeconds: 10
           periodSeconds: 5
@@ -202,11 +254,19 @@ spec:
           mountPath: /var/log/waddlebotlog
         - name: tmp
           mountPath: /tmp
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
+        {{- end }}
+        {{- include "waddlebot.hubApiGrpcTlsVolumeMount" . | nindent 8 }}
       volumes:
       - name: logs
         emptyDir: {}
       - name: tmp
         emptyDir: {}
+      {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+      {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
+      {{- end }}
+      {{- include "waddlebot.hubApiGrpcTlsVolume" . | nindent 6 }}
 ---
 apiVersion: v1
 kind: Service

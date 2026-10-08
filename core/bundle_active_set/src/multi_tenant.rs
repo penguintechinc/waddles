@@ -291,6 +291,7 @@ mod tests {
             app_id: app_id.to_string(),
             version: version.to_string(),
             superseded_by: None,
+            summary_json: sea_orm::JsonValue::Null,
         }
     }
 
@@ -330,13 +331,23 @@ mod tests {
     #[tokio::test]
     async fn read_active_set_all_runs_its_three_reads_in_one_transaction(
     ) -> Result<(), ActiveSetError> {
-        let digest = format!("sha256:{}", "a".repeat(64));
+        // Bare-hex -- what `app_versions.artifact_digest` actually stores
+        // (regression: multi_tenant path sent bare-hex digest to Invoke,
+        // UnknownBundle despite loaded bundle (alpha 2026-10-03); a
+        // `sha256:`-prefixed fixture here would mask that bug exactly like
+        // it did before this fix).
+        let digest = "a".repeat(64);
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
             .append_query_results([vec![version_row(10, "waddles.a", "1", &digest)]])
             .append_query_results([vec![approval_row(1, None, "waddles.a", "1")]])
             .into_connection();
-        read_active_set_all(&db).await?;
+        let by_scope = read_active_set_all(&db).await?;
+        assert_eq!(
+            by_scope[&(1, 0)].rows[0].digest,
+            format!("sha256:{digest}"),
+            "a bare-hex DB digest must be canonicalized to sha256: form on the multi-tenant path"
+        );
         let log = db.into_transaction_log();
         assert_eq!(
             log.len(),
@@ -378,8 +389,12 @@ mod tests {
 
     #[tokio::test]
     async fn read_active_set_all_buckets_rows_by_their_own_scope() -> Result<(), ActiveSetError> {
-        let digest_a = format!("sha256:{}", "a".repeat(64));
-        let digest_b = format!("sha256:{}", "b".repeat(64));
+        // Bare-hex fixtures -- see the sibling
+        // `read_active_set_all_runs_its_three_reads_in_one_transaction`
+        // test's comment for why a `sha256:`-prefixed fixture would mask
+        // the regression this crate guards against.
+        let digest_a = "a".repeat(64);
+        let digest_b = "b".repeat(64);
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![
                 active_row("waddles.a", 1, 0, 10),
@@ -399,8 +414,16 @@ mod tests {
         assert_eq!(by_scope.len(), 2);
         assert_eq!(by_scope[&(1, 0)].rows.len(), 1);
         assert_eq!(by_scope[&(1, 0)].rows[0].app_id, "waddles.a");
+        assert_eq!(
+            by_scope[&(1, 0)].rows[0].digest,
+            format!("sha256:{digest_a}")
+        );
         assert_eq!(by_scope[&(2, 5)].rows.len(), 1);
         assert_eq!(by_scope[&(2, 5)].rows[0].app_id, "waddles.b");
+        assert_eq!(
+            by_scope[&(2, 5)].rows[0].digest,
+            format!("sha256:{digest_b}")
+        );
         Ok(())
     }
 
@@ -412,7 +435,10 @@ mod tests {
     #[tokio::test]
     async fn read_active_set_all_does_not_cross_match_approvals_across_tenants(
     ) -> Result<(), ActiveSetError> {
-        let digest = format!("sha256:{}", "c".repeat(64));
+        // Bare-hex -- see
+        // `read_active_set_all_runs_its_three_reads_in_one_transaction`'s
+        // comment.
+        let digest = "c".repeat(64);
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![
                 active_row("waddles.shared", 1, 0, 10),
@@ -428,6 +454,7 @@ mod tests {
 
         let by_scope = read_active_set_all(&db).await?;
         assert_eq!(by_scope[&(1, 0)].rows.len(), 1, "tenant 1 is approved");
+        assert_eq!(by_scope[&(1, 0)].rows[0].digest, format!("sha256:{digest}"));
         assert!(
             by_scope[&(2, 0)].rows.is_empty(),
             "tenant 2 must not inherit tenant 1's approval"
@@ -487,6 +514,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            declared_capabilities: Vec::new(),
         }
     }
 
@@ -572,5 +600,58 @@ mod tests {
     #[test]
     fn tenant_active_app_counts_is_empty_for_an_empty_map() {
         assert!(tenant_active_app_counts(&HashMap::new()).is_empty());
+    }
+
+    /// End-to-end-ish regression test (regression: multi_tenant path sent
+    /// bare-hex digest to Invoke, UnknownBundle despite loaded bundle
+    /// (alpha 2026-10-03)): the exact same bare-hex `app_versions.
+    /// artifact_digest` DB row must produce an IDENTICAL canonical digest
+    /// string whether it is read via the single-scope `crate::query::
+    /// read_active_set` path (what `svc_process`/`svc_action`'s
+    /// `bundle_loader::run_tick` sends in its `Load` call, and what each
+    /// service's own per-scope incremental re-read uses) or via this
+    /// module's `read_active_set_all` -> `scoped_active_rows` path (what
+    /// `changelog_consumer::apply_active_set` sends in ITS `Load` call, and
+    /// what `state.loaded` -- later compared against on every `Invoke` --
+    /// is populated from). Before this fix these two paths could diverge
+    /// (one canonicalized, one didn't); after it both single-source from
+    /// `crate::query::assemble_active_set`, so they are structurally
+    /// incapable of disagreeing -- this test pins that down with a live
+    /// assertion rather than trusting the refactor.
+    #[tokio::test]
+    async fn bare_hex_db_digest_matches_across_the_single_scope_and_multi_tenant_read_paths(
+    ) -> Result<(), ActiveSetError> {
+        let bare_hex_digest = "f".repeat(64);
+        let expected = format!("sha256:{bare_hex_digest}");
+
+        let single_scope_db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.ping", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.ping", "1", &bare_hex_digest)]])
+            .append_query_results([vec![approval_row(1, None, "waddles.ping", "1")]])
+            .into_connection();
+        let single_scope_result =
+            crate::query::read_active_set(&single_scope_db, 1, 0, None).await?;
+        assert_eq!(single_scope_result.rows.len(), 1);
+        let load_path_digest = single_scope_result.rows[0].digest.clone();
+
+        let multi_tenant_db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.ping", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.ping", "1", &bare_hex_digest)]])
+            .append_query_results([vec![approval_row(1, None, "waddles.ping", "1")]])
+            .into_connection();
+        let by_scope = read_active_set_all(&multi_tenant_db).await?;
+        let invoke_path_rows = scoped_active_rows(&by_scope);
+        let invoke_path_digest = invoke_path_rows[&(1, 0, "waddles.ping".to_string())]
+            .digest
+            .clone();
+
+        assert_eq!(load_path_digest, expected);
+        assert_eq!(invoke_path_digest, expected);
+        assert_eq!(
+            load_path_digest, invoke_path_digest,
+            "single-scope (Load) and multi-tenant (Invoke) read paths must agree on the exact \
+             same bare-hex DB row's canonical digest string"
+        );
+        Ok(())
     }
 }

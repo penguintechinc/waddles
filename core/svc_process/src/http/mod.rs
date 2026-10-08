@@ -31,22 +31,59 @@ pub struct AppState {
     pub metrics: Arc<prometheus::Registry>,
     pub request_metrics: RequestMetrics,
     pub started_at: Instant,
+    /// `true` once the legacy single-consumer drain loop
+    /// (`crate::lib::try_start_process_loop`) is connected and actively
+    /// reading -- defaults `true` (nothing to wait for) when
+    /// `PROCESS_APP_ID` is unset, so an un-configured loop never blocks
+    /// readiness. Backs `GET /healthz`'s `consumer_loop` dependency
+    /// (combined with `connections` below: readiness is loop-running AND
+    /// executor-connected). regression: drain loop exited on NOGROUP
+    /// (alpha 2026-10-02)
+    pub consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
+    /// `true` once `crate::lib::run_with_shutdown` has selected the
+    /// multi-tenant, change-log-driven consumer path
+    /// (`crate::changelog_consumer::run`) -- set once, synchronously, before
+    /// the HTTP server starts serving, so `GET /healthz` can gate on
+    /// `consumer_loop_ready` for THIS path too, not just the legacy
+    /// `PROCESS_APP_ID` one. Defaults `false` (nothing to wait for) exactly
+    /// like `consumer_loop_ready`'s own "unconfigured never blocks
+    /// readiness" convention.
+    // regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+    // -- readiness previously had no signal at all for this path (`GET
+    // /healthz` only ever checked `PROCESS_APP_ID`, which the multi-tenant
+    // path doesn't set), so the pod stayed `Ready` with no consumer running.
+    pub multi_tenant_consumer_configured: Arc<std::sync::atomic::AtomicBool>,
+    /// Fix/executor-link-heartbeat: `/health`/`/healthz` read this directly
+    /// so liveness/readiness reflect whether an executor session is
+    /// actually live, not just "the HTTP server is answering" -- the alpha
+    /// 2026-10-02 incident this exists to catch left every pod
+    /// `Running`/`Ready` while silently dead-lettering everything.
+    pub connections: Arc<crate::host_api::ConnectionRegistry>,
 }
 
 impl AppState {
-    /// Builds the shared application state from a loaded [`Config`] and the
-    /// Prometheus [`prometheus::Registry`] created during telemetry init.
-    /// Registers this service's base request metrics against `metrics` --
-    /// see [`crate::telemetry::register_request_metrics`]. Must be called
+    /// Builds the shared application state from a loaded [`Config`], the
+    /// Prometheus [`prometheus::Registry`] created during telemetry init,
+    /// and the host-API [`crate::host_api::ConnectionRegistry`] (so health
+    /// probes can read live executor-session state). Registers this
+    /// service's base request metrics against `metrics` -- see
+    /// [`crate::telemetry::register_request_metrics`]. Must be called
     /// exactly once per `metrics` registry (a `prometheus::Registry` panics
     /// on duplicate registration).
-    pub fn new(config: Config, metrics: prometheus::Registry) -> Self {
+    pub fn new(
+        config: Config,
+        metrics: prometheus::Registry,
+        connections: Arc<crate::host_api::ConnectionRegistry>,
+    ) -> Self {
         let request_metrics = crate::telemetry::register_request_metrics(&metrics);
         Self {
             config: Arc::new(config),
             metrics: Arc::new(metrics),
             request_metrics,
             started_at: Instant::now(),
+            consumer_loop_ready: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            multi_tenant_consumer_configured: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            connections,
         }
     }
 }
@@ -117,8 +154,13 @@ mod tests {
             service_api_key: Secret::new("x"),
             envelope_binding_keys: None,
             db_reader_password: None,
+            bundle_db_password: None,
         };
-        AppState::new(config, prometheus::Registry::new())
+        AppState::new(
+            config,
+            prometheus::Registry::new(),
+            Arc::new(crate::host_api::ConnectionRegistry::new()),
+        )
     }
 
     #[tokio::test]
@@ -137,7 +179,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn healthz_route_returns_200() {
+    async fn healthz_route_returns_ok_with_no_executor() {
+        // regression: readiness gated on executor connection deadlocked
+        // rollouts (alpha 2026-10-02) -- readiness must stay `ok` with zero
+        // executor sessions; see `crate::http::health`'s own transition
+        // tests for the full before/after coverage.
         let app = router(test_state());
         let resp = app
             .oneshot(

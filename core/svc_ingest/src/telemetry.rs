@@ -123,6 +123,16 @@ pub struct IngestMetrics {
     /// (load/latency histograms first, not just a counter).
     pub eventsub_request_duration_seconds: prometheus::HistogramVec,
     pub receiver_connection_healthy: prometheus::IntGaugeVec,
+    /// Total spine (Valkey) connect attempts made by `crate::lib::
+    /// connect_spine_with_retry`, labeled by receiver -- every retry
+    /// increments this, so a flat line here means a receiver is stuck
+    /// retrying forever (or never started). Regression: one-shot valkey
+    /// probe disabled discord receiver (alpha 2026-10-02).
+    pub spine_connect_attempts_total: prometheus::IntCounterVec,
+    /// 1 while a receiver's spine connection is up and its loop is
+    /// running, 0 while it's down/retrying -- labeled by receiver, backs
+    /// `crate::http::health::readyz`'s per-receiver readiness report.
+    pub consumer_loop_running: prometheus::IntGaugeVec,
 }
 
 /// Registers this service's ingest-path metrics against `registry`. Must be
@@ -217,6 +227,32 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         .register(Box::new(receiver_connection_healthy.clone()))
         .expect("register svc_ingest_receiver_connection_healthy");
 
+    let spine_connect_attempts_total = prometheus::IntCounterVec::new(
+        prometheus::Opts::new(
+            "svc_ingest_spine_connect_attempts_total",
+            "Total spine (Valkey) connect attempts made by a receiver's connect-retry loop, \
+             labeled by receiver",
+        ),
+        &["receiver"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(spine_connect_attempts_total.clone()))
+        .expect("register svc_ingest_spine_connect_attempts_total");
+
+    let consumer_loop_running = prometheus::IntGaugeVec::new(
+        prometheus::Opts::new(
+            "svc_ingest_consumer_loop_running",
+            "1 while a receiver's spine connection is up and its loop is running, 0 while \
+             down/retrying, labeled by receiver",
+        ),
+        &["receiver"],
+    )
+    .expect("valid metric definition");
+    registry
+        .register(Box::new(consumer_loop_running.clone()))
+        .expect("register svc_ingest_consumer_loop_running");
+
     IngestMetrics {
         events_published_total,
         publish_errors_total,
@@ -225,6 +261,8 @@ pub fn register_ingest_metrics(registry: &prometheus::Registry) -> IngestMetrics
         eventsub_dedup_hits_total,
         eventsub_request_duration_seconds,
         receiver_connection_healthy,
+        spine_connect_attempts_total,
+        consumer_loop_running,
     }
 }
 
@@ -251,6 +289,22 @@ impl IngestMetrics {
         self.eventsub_request_duration_seconds
             .with_label_values(&[outcome])
             .observe(seconds);
+    }
+
+    /// Records one spine-connect attempt for `receiver` --
+    /// `crate::lib::connect_spine_with_retry`.
+    pub fn record_spine_connect_attempt(&self, receiver: &str) {
+        self.spine_connect_attempts_total
+            .with_label_values(&[receiver])
+            .inc();
+    }
+
+    /// Sets `receiver`'s consumer-loop-running gauge to 1 (connected) or 0
+    /// (down/retrying) -- `crate::lib::connect_spine_with_retry`.
+    pub fn set_consumer_loop_running(&self, receiver: &str, running: bool) {
+        self.consumer_loop_running
+            .with_label_values(&[receiver])
+            .set(i64::from(running));
     }
 }
 

@@ -18,14 +18,21 @@ path = "src/lib.rs"
 # crates -- both already depend on this exact `sea-orm` version, so a path
 # dependency on this crate introduces no second pin of the same package.
 [dependencies]
+# "with-json" added for `app_install_approvals.summary_json` (`storage.kv`
+# gating, coordinator fix on PR #425) -- `Json`/`JsonValue` column support.
 sea-orm = { version = "=2.0.2", default-features = false, features = [
     "sqlx-postgres",
     "runtime-tokio-rustls",
     "macros",
+    "with-json",
     "with-chrono",
 ] }
 thiserror = "=2.0.20"
 tracing = "=0.1.44"
+# Parses `app_install_approvals.summary_json`'s `"capabilities"` array
+# (`crate::query::read_active_set`) -- same exact version pin
+# `core/bundle_host_kv`/every other crate in this repo uses.
+serde_json = "=1.0.151"
 # `bundle_active_set_changes.changed_at`/`bundle_active_set_watermark.
 # computed_at` (crate::changelog) -- same exact version pin
 # core/svc_process's and core/svc_action's own Cargo.toml already use, so a

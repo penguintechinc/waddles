@@ -1,12 +1,16 @@
-# Reproducible, containerized build for the `csping` C#-toolchain
-# feasibility spike bundle (spec
+# Reproducible, containerized build for the `csping` bundle (originally the
+# C#-toolchain feasibility spike, spec
 # docs/superpowers/specs/2026-09-14-rust-data-plane-design.md S18 R13 /
-# D35). Mirrors core/bundle_executor/Dockerfile.rust's role for this
-# bundle: a pinned, from-scratch build with no reliance on host machine
-# .NET/componentize-dotnet setup (rules/client.md Build & Distribution:
-# "All client builds must use containerized toolchain").
+# D35; now also built on `sdk/waddle-sdk-cs` -- see this bundle's README).
+# Mirrors core/bundle_executor/Dockerfile.rust's role for this bundle: a
+# pinned, from-scratch build with no reliance on host machine .NET/
+# componentize-dotnet setup (rules/client.md Build & Distribution: "All
+# client builds must use containerized toolchain"). Identical to
+# bundles/csharp/superpenguin-roll/Dockerfile other than the bundle path and
+# output assembly name.
 #
-# Build (context = repo root; needs the sibling wit/ directory):
+# Build (context = repo root; needs the sibling wit/ and sdk/waddle-sdk-cs/
+# directories):
 #   docker build -f bundles/csharp/csping/Dockerfile \
 #     -t waddles/bundle-csping-build:spike .
 #
@@ -83,6 +87,7 @@ RUN curl -fsSL -o /tmp/wasi-sdk.tar.gz \
 
 WORKDIR /repo
 COPY wit wit
+COPY sdk/waddle-sdk-cs sdk/waddle-sdk-cs
 COPY bundles/csharp/csping bundles/csharp/csping
 RUN chown -R builder:builder /repo
 WORKDIR /repo/bundles/csharp/csping

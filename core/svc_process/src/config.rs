@@ -148,6 +148,22 @@ pub struct CliConfig {
     /// (spec SS7.3).
     #[arg(long, env = "EXECUTOR_CALL_TIMEOUT_MS", default_value_t = 2000)]
     pub executor_call_timeout_ms: u64,
+    /// Host-API heartbeat interval: how often the stage sends `ping` to
+    /// each connected executor session (fix/executor-link-heartbeat, alpha
+    /// 2026-10-02 incident: a rolled svc pod left the executor bound to a
+    /// terminated peer with no liveness signal at all). A session is
+    /// dropped after `HEARTBEAT_MISSED_LIMIT` consecutive missed `pong`s.
+    #[arg(long, env = "HEARTBEAT_INTERVAL_MS", default_value_t = 5000)]
+    pub heartbeat_interval_ms: u64,
+    /// Threshold for `crate::host_api::run_zero_executor_watchdog`'s
+    /// periodic ERROR log: how long zero live executor sessions must
+    /// persist before the watchdog starts logging loudly on its fixed
+    /// cadence. Deliberately NOT wired into `/healthz`/`/health` -- see
+    /// `rules/critical-rules.md` Observability and the regression noted on
+    /// those handlers: readiness gated on executor connection deadlocked
+    /// rollouts (alpha 2026-10-02).
+    #[arg(long, env = "EXECUTOR_GRACE_SECONDS", default_value_t = 60)]
+    pub executor_grace_seconds: u64,
 
     /// Interim, env-driven substitute for the `GET /api/v1/distribution/
     /// bundles?stage=process` grant list (spec SS4.2/SS6.7) -- **TODO(M4+)**:
@@ -212,6 +228,26 @@ pub struct CliConfig {
     /// grants this role needs.
     #[arg(long, env = "DB_READER_USER", default_value = "svc_process_ro")]
     pub db_reader_user: String,
+
+    /// Production wiring for the bundle `db` host capability
+    /// (`crate::capabilities::DbWiring`, `bundle_host_db::connect`) --
+    /// connects as the least-privilege, read-write `waddles_bundle_runtime`
+    /// role (`alembic/versions/0030_bundle_app_schemas.py`), distinct from
+    /// both `DB_USER` (primary) and `DB_READER_USER` (read-only loader)
+    /// above. Defaults match the same shared `waddles` Postgres instance
+    /// those connect to -- a deployment with a dedicated bundle-db host/
+    /// port/name overrides these independently.
+    #[arg(long, env = "BUNDLE_DB_HOST", default_value = "localhost")]
+    pub bundle_db_host: String,
+    #[arg(long, env = "BUNDLE_DB_PORT", default_value_t = 5432)]
+    pub bundle_db_port: u16,
+    #[arg(long, env = "BUNDLE_DB_NAME", default_value = "waddlebot")]
+    pub bundle_db_name: String,
+    /// The role `0030_bundle_app_schemas.py` provisions -- never the
+    /// primary `DB_USER` account (least privilege: DML-only on
+    /// `app_core`/`app_community`, no DDL, no access to any other schema).
+    #[arg(long, env = "BUNDLE_DB_USER", default_value = "waddles_bundle_runtime")]
+    pub bundle_db_user: String,
     /// Poll interval, in whole seconds, for the change-log consumer's
     /// incremental tick (`bundle_active_set::read_safe_seq`/`read_changes`)
     /// -- the full active-set re-read only runs for scopes the change-log
@@ -234,6 +270,7 @@ pub struct CliConfig {
     )]
     pub bundle_config_full_reconcile_minutes: i64,
 
+    // regression: #425 dropped cluster denylist
     /// Interim, config-sourced instance-wide private-IP egress policy
     /// (`bundle_host_http::egress::InstanceEgressPolicy`, Justin's
     /// decision: "private-ip is also subject to the INSTANCE policy --
@@ -261,6 +298,64 @@ pub struct CliConfig {
     /// `DEPLOYMENT_TIER` explicitly via the ConfigMap regardless.
     #[arg(long, env = "DEPLOYMENT_TIER", default_value = "alpha")]
     pub deployment_tier: String,
+
+    /// hub-api's internal gRPC endpoint (`waddles.hub.internal.v1`,
+    /// `core/hub_client::HubClient::connect`'s `endpoint`), e.g.
+    /// `https://waddlebot-hub-api-v3:50204`. Empty (the default) means "not
+    /// configured" -- [`crate::build_hub_client`] fails loud at startup
+    /// rather than starting and silently dead-lettering every event when
+    /// PII tokenization is enabled and this is unset (user requirement:
+    /// "fail loud, not silent dead-letter").
+    #[arg(long, env = "HUB_API_GRPC_ENDPOINT", default_value = "")]
+    pub hub_api_grpc_endpoint: String,
+    /// hub-api's machine-JWT bootstrap endpoint
+    /// (`hub_api/blueprints/service_jwt_bp.py`'s `POST /internal/
+    /// service-token`, `service_auth::MachineJwtClient`'s `token_endpoint`),
+    /// e.g. `http://waddlebot-hub-api-v3:8204/internal/service-token`.
+    /// Empty (the default) means "not configured" -- same fail-loud
+    /// contract as [`Self::hub_api_grpc_endpoint`].
+    #[arg(long, env = "SERVICE_JWT_TOKEN_ENDPOINT", default_value = "")]
+    pub service_jwt_token_endpoint: String,
+    /// Path to this pod's projected Kubernetes ServiceAccount token, read
+    /// by [`service_auth::MachineJwtClient`] to bootstrap a machine JWT --
+    /// same default every other machine-JWT bootstrap in this repo uses
+    /// (`libs/flask_core/flask_core/service_jwt.py`).
+    #[arg(
+        long,
+        env = "SERVICE_JWT_SA_TOKEN_PATH",
+        default_value = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    )]
+    pub service_jwt_sa_token_path: String,
+    /// Path to the PEM CA bundle that signed hub-api's internal gRPC server
+    /// cert (`k8s/helm/waddlebot/templates/hub-api-grpc-tls-secret.yaml`'s
+    /// `ca.crt`, mounted by `templates/svc-process-rust.yaml`), passed as
+    /// `core/hub_client::HubClient::connect`'s `ca_cert_path`. Empty (the
+    /// default) falls back to `connect`'s system/webpki trust store --
+    /// never correct against this chart's self-signed internal CA, but
+    /// kept as the permissive default for tests/local runs that dial a
+    /// publicly-rooted endpoint instead.
+    #[arg(long, env = "HUB_API_GRPC_CA_FILE", default_value = "")]
+    pub hub_api_grpc_ca_file: String,
+
+    /// Plain env/values off-switch for inbound PII tokenization
+    /// (`crate::build_hub_client`'s gate), independent of the
+    /// `waddles.core.disable-pii-tokenization` PostHog kill-switch --
+    /// `rules/critical-rules.md` Feature Flags & License Tiers' opt-out
+    /// kill-switch principle ("keeps unseen-flags-OFF without stranding
+    /// air-gapped deploys"). PostHog alone can't be toggled in an
+    /// environment with no in-cluster PostHog (e.g. alpha), which would
+    /// otherwise strand that deployment behind the fail-loud gate whenever
+    /// hub-api's internal gRPC isn't reachable yet. `None` (unset, the
+    /// default) leaves the existing PostHog-gated, default-ENABLED,
+    /// fail-loud-when-unreachable behavior completely unchanged --
+    /// `Some(false)` is the only value this crate's startup gate treats
+    /// specially (see [`crate::run_with_shutdown`]'s call site): tokenization
+    /// runs disabled, `hub_client` is never connected, and startup never
+    /// fails loud. This is an explicit, loudly-logged operator escape hatch
+    /// for dev/air-gapped deployments -- never a silent bypass, and never the
+    /// default in a production tenant.
+    #[arg(long, env = "PII_TOKENIZATION_ENABLED")]
+    pub pii_tokenization_enabled_override: Option<bool>,
 }
 
 impl CliConfig {
@@ -289,6 +384,18 @@ impl CliConfig {
             return Err(ConfigError::InvalidValue {
                 field: "host_api_server_cert_file/host_api_server_key_file",
                 reason: "must be set together".to_string(),
+            });
+        }
+        if self.heartbeat_interval_ms == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "heartbeat_interval_ms",
+                reason: "must be positive".to_string(),
+            });
+        }
+        if self.executor_grace_seconds == 0 {
+            return Err(ConfigError::InvalidValue {
+                field: "executor_grace_seconds",
+                reason: "must be positive".to_string(),
             });
         }
         let denylist = self.cluster_cidr_denylist()?;
@@ -348,6 +455,18 @@ impl CliConfig {
             (self.bundle_config_full_reconcile_minutes.max(1) as u64) * 60,
         )
     }
+
+    /// [`Self::heartbeat_interval_ms`] as a [`std::time::Duration`] --
+    /// `validate` already rejects `0`, but this floors at 1ms anyway rather
+    /// than ever constructing a zero-length sleep/timeout.
+    pub fn heartbeat_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.heartbeat_interval_ms.max(1))
+    }
+
+    /// [`Self::executor_grace_seconds`] as a [`std::time::Duration`].
+    pub fn executor_grace(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.executor_grace_seconds.max(1))
+    }
 }
 
 /// Fully-loaded runtime configuration: operational settings plus secrets
@@ -375,6 +494,15 @@ pub struct Config {
     /// unset, the same graceful-degradation contract as
     /// `envelope_binding_keys` above.
     pub db_reader_password: Option<Secret>,
+    /// `BUNDLE_DB_PASSWORD` for the bundle `db` host capability's
+    /// `waddles_bundle_runtime` connection (`crate::capabilities::DbWiring`).
+    /// `Option`, same rationale as `db_reader_password`: `BUNDLE_DB_CAPABILITY_FLAG`
+    /// defaults OFF, so a fresh deployment that hasn't provisioned the role
+    /// yet must not fail startup over it -- `crate::lib::try_build_db_wiring`
+    /// logs and leaves the capability unwired (every `db` call then denies
+    /// `not_implemented`) when this is unset. Once set, a connection
+    /// *failure* is a different, louder case -- see that function's doc.
+    pub bundle_db_password: Option<Secret>,
 }
 
 impl fmt::Debug for Config {
@@ -390,6 +518,10 @@ impl fmt::Debug for Config {
             .field(
                 "db_reader_password",
                 &self.db_reader_password.as_ref().map(|_| Secret::new("")),
+            )
+            .field(
+                "bundle_db_password",
+                &self.bundle_db_password.as_ref().map(|_| Secret::new("")),
             )
             .field(
                 "envelope_binding_keys",
@@ -429,6 +561,12 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .map(Secret::new);
+        // Same "Helm always renders the secret key, empty until
+        // provisioned" treatment as `db_reader_password` above.
+        let bundle_db_password = std::env::var("BUNDLE_DB_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(Secret::new);
         Ok(Self {
             cli,
             db_password,
@@ -436,6 +574,7 @@ impl Config {
             service_api_key,
             envelope_binding_keys,
             db_reader_password,
+            bundle_db_password,
         })
     }
 }
@@ -460,6 +599,7 @@ mod tests {
             "SERVICE_API_KEY",
             "ENVELOPE_BINDING_KEYS",
             "DB_READER_PASSWORD",
+            "BUNDLE_DB_PASSWORD",
         ] {
             // SAFETY: serialized by ENV_LOCK, no concurrent readers/writers
             // of these specific variables within the test process.

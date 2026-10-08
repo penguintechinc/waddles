@@ -19,14 +19,22 @@ spec:
   secretName: {{ include "waddlebot.fullname" . }}-host-api-tls
   duration: {{ .Values.global.hostApiTls.certManager.duration | default "2160h" | quote }}
   renewBefore: {{ .Values.global.hostApiTls.certManager.renewBefore | default "360h" | quote }}
+  # fix/chart-host-api-stage-identity -- MUST equal the CN templates/host-api-tls-secret.yaml's
+  # genSignedCert path sets (waddlebot.hostApiStageIdentity in _helpers.tpl) -- the executor's
+  # HOST_API_STAGE_IDENTITY pins to this exact string via PinnedIdentityVerifier's CN fallback
+  # (core/bundle_executor/src/tls.rs), and both provisioning paths must stay interchangeable.
+  commonName: {{ include "waddlebot.hostApiStageIdentity" . | quote }}
   usages:
     - server auth
     - client auth
+  # fix/cert-regen-on-identity-change -- sourced from the same
+  # waddlebot.hostApiTlsDesiredDnsNames helper templates/host-api-tls-secret.yaml's
+  # genSignedCert path uses, so the cert-manager and alpha/local-generate provisioning
+  # paths can never drift apart on SANs either.
   dnsNames:
-    - {{ include "waddlebot.fullname" . }}-svc-process-rust
-    - {{ include "waddlebot.fullname" . }}-svc-action-rust
-    - {{ include "waddlebot.fullname" . }}-bundle-executor
-    - "*.{{ .Values.namespace }}.svc.cluster.local"
+    {{- range include "waddlebot.hostApiTlsDesiredDnsNames" . | splitList "," }}
+    - {{ . | quote }}
+    {{- end }}
   issuerRef:
     name: {{ .Values.global.hostApiTls.certManager.issuerName }}
     kind: {{ .Values.global.hostApiTls.certManager.issuerKind | default "ClusterIssuer" }}

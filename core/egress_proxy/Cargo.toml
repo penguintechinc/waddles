@@ -1,0 +1,110 @@
+[package]
+name = "egress-proxy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Network-level egress gateway (feature/bundle-egress-gateway PR #463 skeleton) -- the sole enforcement point data-plane pods (svc-ingest/svc-process/svc-action) dial outbound through. Re-validates the signed per-tenant/app/community net.http.{fqdn,public-ip,private-ip} assertion the in-process guard (core/bundle_host_http) already checked, re-resolves DNS itself, and always denies loopback/link-local/metadata/cluster CIDRs regardless of assertion."
+
+[lib]
+name = "egress_proxy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "egress-proxy"
+path = "src/main.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- rules/critical-rules.md
+# Dependency Pinning. Cargo.lock is committed alongside this file. Pins
+# shared with core/service_auth / core/bundle_host_http (the two same-repo
+# path dependencies below) are copied verbatim so no dependent crate
+# resolves a second version of the same package.
+[dependencies]
+tokio = { version = "=1.53.1", features = ["full"] }
+hyper = { version = "=1.11.1", features = ["full"] }
+hyper-util = { version = "=0.1.19", features = ["full"] }
+http-body-util = "=0.1.3"
+http = "=1.5.0"
+# =1.11.1 (not =1.11.0) -- RUSTSEC-2026-0007, an integer-overflow UB in
+# `BytesMut::reserve`'s unique-reclaim path, fixed in 1.11.1.
+bytes = "=1.11.1"
+axum = "=0.8.9"
+tower-http = { version = "=0.7.1", features = ["trace"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+# =2.0.20 (not =2.0.21, service_auth's own pin) -- penguin-bundle-host
+# (git dep of core/bundle_host_http, transitively pulled in here) pins
+# thiserror =2.0.20 exactly; matching it avoids a second resolved version.
+thiserror = "=2.0.20"
+anyhow = "=1.0.104"
+tracing = "=0.1.44"
+# `penguin-logging` (spec SS4.9) owns the tracing-subscriber/OTel logs+
+# traces+metrics stack -- same rev core/svc_process, core/svc_action and
+# core/svc_ingest already pin. Reused verbatim rather than hand-rolling a
+# second OTLP setup: standard OTEL_EXPORTER_OTLP_* env vars, graceful
+# degradation (unset endpoint or a failed exporter build never panics or
+# blocks proxying), stdout JSON always works. See src/telemetry.rs.
+penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "69e740ce5411d8cd005241fbd829c62e68efb96e", package = "penguin-logging", version = "=0.1.0" }
+# Same versions penguin-logging itself pins (its own Cargo.toml) --
+# needed directly here for `tracing_opentelemetry::OpenTelemetrySpanExt`
+# (attaching an extracted parent trace context to a request span) and
+# `opentelemetry_sdk::propagation::TraceContextPropagator` (W3C
+# traceparent extraction from the calling service's request headers).
+opentelemetry = "=0.32.0"
+opentelemetry_sdk = "=0.32.1"
+tracing-opentelemetry = "=0.33.0"
+clap = { version = "=4.6.6", features = ["derive", "env"] }
+prometheus = "=0.14.0"
+ipnet = "=2.11.0"
+# Same `aws_lc_rs` backend rationale as core/service_auth's Cargo.toml (no
+# `rsa` crate in the graph -- RUSTSEC-2023-0071 Marvin timing sidechannel,
+# see that crate's Cargo.toml comment). `src/assertion.rs` only needs
+# `jsonwebtoken::decode_header` directly (to read the assertion's `kid`
+# before looking its public key up in `service_auth::TrustBundle`, the
+# same JWKS trust bundle already used for the machine JWT); the actual
+# signature/claims verification is `egress_assertion::verify_with_key`
+# (see that path dependency below), so no `use_pem` feature is needed here
+# -- this crate never loads key material from a PEM file itself.
+jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs"] }
+async-trait = "=0.1.89"
+
+# hub-api-issued per-service EdDSA machine JWT verifier (PR #438,
+# feature/eddsa-machine-jwt) -- authenticates every caller (svc-ingest/
+# svc-process/svc-action) before the assertion or destination is even
+# parsed. Same-repo path dependency (not a penguin-libs crate): mirrors
+# core/svc_action's `bundle-host-http` path-dependency pattern.
+service_auth = { path = "../service_auth", version = "=0.1.0" }
+# Shared SSRF-hardened address-category checks (`is_forbidden_address`:
+# loopback/link-local/unspecified/multicast/broadcast/cloud-metadata/
+# RFC1918+ULA private/CGNAT), extracted in core/bundle_host_http so this
+# proxy enforces the exact same address policy as the in-process guard
+# instead of a second, divergent copy -- this crate only adds what that
+# crate's own module doc explicitly defers to "the upstream egress proxy":
+# the three-permission-family (fqdn/public-ip/private-ip) category-crossing
+# check and the deployment's cluster pod/service/node CIDR denylist (see
+# src/ip_policy.rs).
+bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
+# The shared wire format for the signed per-request allowlist assertion
+# (`EgressAssertion`, `DestinationCategory`, header names, `verify_with_key`)
+# -- single source of truth with `core/bundle_host_http`'s signer (PR
+# #468) so the two crates on either side of this hop can never silently
+# drift apart. This crate keeps only what's specific to being the
+# verifying side: JWKS `kid` lookup via `service_auth::TrustBundle`, the
+# replay cache, the CIDR-aware `PrivateIp` destination match this proxy's
+# grants need (the shared crate's own `destination_matches` is a plain
+# string comparison -- sufficient for `bundle_host_http`'s single-host
+# guard, not for this proxy's CIDR grants), and DNS-rebinding
+# re-validation against the *resolved* address (`assertion::
+# resolved_matches`) -- see src/assertion.rs.
+egress-assertion = { path = "../egress_assertion", version = "=0.1.0" }
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+tower = { version = "=0.5.3", features = ["util"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

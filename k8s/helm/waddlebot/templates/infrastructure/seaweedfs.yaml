@@ -192,7 +192,17 @@ spec:
                   "Read:{{ .Values.infrastructure.seaweedfs.bucketName }}",
                   "Write:{{ .Values.infrastructure.seaweedfs.bucketName }}",
                   "List:{{ .Values.infrastructure.seaweedfs.bucketName }}",
-                  "Tagging:{{ .Values.infrastructure.seaweedfs.bucketName }}"
+                  "Tagging:{{ .Values.infrastructure.seaweedfs.bucketName }}",
+                  {{/* regression: bundle publish/fetch bucket split after SeaweedFS migration
+                  (#508/#509) -- hub_api/services/storage_service.py's upload_bundle_component()
+                  (and the core-bundle-seeder, which shares this identity) writes bundle
+                  components/sidecars to pipeline.rustDataPlane.bundleExecutor.bucketName
+                  ("waddles-bundles"), NOT bucketName above -- without a grant here every
+                  publish 403s even though bundle-executor's own Read/List-only grant on this
+                  SAME bucket (below) is correctly scoped. */}}
+                  "Read:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}",
+                  "Write:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}",
+                  "List:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}"
                 ]
               },
               {

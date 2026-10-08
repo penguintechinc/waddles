@@ -22,6 +22,7 @@
 //! is read -- see this module's tests for all three.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::WebPkiServerVerifier;
@@ -149,6 +150,7 @@ impl ServerCertVerifier for PinnedIdentityVerifier {
 /// `crate::wire::run_connection` can frame directly.
 pub async fn dial_stage(cfg: &CliConfig) -> Result<TlsStream<TcpStream>, ExecutorError> {
     let tcp = TcpStream::connect(&cfg.stage_host_api_addr).await?;
+    configure_keepalive(&tcp)?;
     let tls_config = build_client_config(cfg)?;
     let connector = TlsConnector::from(Arc::new(tls_config));
 
@@ -158,6 +160,29 @@ pub async fn dial_stage(cfg: &CliConfig) -> Result<TlsStream<TcpStream>, Executo
         .await
         .map_err(ExecutorError::Io)?;
     Ok(stream)
+}
+
+/// Enables TCP keepalive on the just-dialed socket, OS-level detection of
+/// the exact half-open-connection incident this PR exists to fix
+/// (regression: executor stuck on terminated svc pod after rollout, alpha
+/// 2026-10-02) -- a since-terminated stage pod's network namespace can
+/// vanish without ever sending a FIN/RST, leaving the executor's socket
+/// looking perfectly healthy until something tries to use it. Default
+/// Linux keepalive settings (2 HOUR idle time) are far too slow to matter
+/// in practice -- that is precisely why this incident went unnoticed;
+/// these values detect a dead peer within roughly `10s + 5s * 3 = 25s`.
+/// Needs no wire-protocol cooperation from the stage at all, unlike
+/// `crate::heartbeat`'s frame-level check, so this alone already closes
+/// the gap even before the companion `fix/executor-link-heartbeat` PR
+/// (svc-side) lands.
+fn configure_keepalive(tcp: &TcpStream) -> Result<(), ExecutorError> {
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(10))
+        .with_interval(Duration::from_secs(5))
+        .with_retries(3);
+    socket2::SockRef::from(tcp)
+        .set_tcp_keepalive(&keepalive)
+        .map_err(ExecutorError::Io)
 }
 
 fn server_name_from_addr(addr: &str) -> Result<ServerName<'static>, ExecutorError> {

@@ -9,26 +9,65 @@ db = SQLAlchemy()
 
 # Import all models AFTER db is defined to avoid circular imports.
 # Each submodule does `from flask_core.models import db`.
-from flask_core.models.auth import Role, User, roles_users  # noqa: E402
-from flask_core.models.community import Community  # noqa: E402
-from flask_core.models.hub_user import HubUser  # noqa: E402
-from flask_core.models.engagement import (  # noqa: E402
-    CommunityPoll, PollOption, PollVote,
-    CommunityForm, FormField, FormSubmission, FormFieldValue,
+from flask_core.models.auth import Role, User, roles_users
+from flask_core.models.community import Community
+from flask_core.models.engagement import (
+    CommunityForm,
+    CommunityPoll,
+    FormField,
+    FormFieldValue,
+    FormSubmission,
+    PollOption,
+    PollVote,
 )
-from flask_core.models.video import (  # noqa: E402
-    VideoStreamConfig, VideoStreamDestination, VideoStreamSession,
-    CommunityCallRoom, CommunityCallParticipant, CallRaisedHand,
-    CallAnnotation, VideoFeatureUsage,
+from flask_core.models.guild_pairing import (
+    CommunityConnectionAccess,
+    CommunityRoleSyncBinding,
+    GuildTenantPairing,
+    PlatformConnection,
+    TenantPlatformApp,
+    TenantPlatformCredential,
+)
+from flask_core.models.hub_user import HubUser
+from flask_core.models.tenant import Tenant
+from flask_core.models.video import (
+    CallAnnotation,
+    CallRaisedHand,
+    CommunityCallParticipant,
+    CommunityCallRoom,
+    VideoFeatureUsage,
+    VideoStreamConfig,
+    VideoStreamDestination,
+    VideoStreamSession,
 )
 
 __all__ = [
+    'CallAnnotation',
+    'CallRaisedHand',
+    'Community',
+    'CommunityCallParticipant',
+    'CommunityCallRoom',
+    'CommunityConnectionAccess',
+    'CommunityForm',
+    'CommunityPoll',
+    'CommunityRoleSyncBinding',
+    'FormField',
+    'FormFieldValue',
+    'FormSubmission',
+    'GuildTenantPairing',
+    'HubUser',
+    'PlatformConnection',
+    'PollOption',
+    'PollVote',
+    'Role',
+    'Tenant',
+    'TenantPlatformApp',
+    'TenantPlatformCredential',
+    'User',
+    'VideoFeatureUsage',
+    'VideoStreamConfig',
+    'VideoStreamDestination',
+    'VideoStreamSession',
     'db',
-    'Role', 'User', 'roles_users',
-    'Community', 'HubUser',
-    'CommunityPoll', 'PollOption', 'PollVote',
-    'CommunityForm', 'FormField', 'FormSubmission', 'FormFieldValue',
-    'VideoStreamConfig', 'VideoStreamDestination', 'VideoStreamSession',
-    'CommunityCallRoom', 'CommunityCallParticipant', 'CallRaisedHand',
-    'CallAnnotation', 'VideoFeatureUsage',
+    'roles_users',
 ]

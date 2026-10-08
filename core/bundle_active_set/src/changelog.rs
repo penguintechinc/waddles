@@ -29,7 +29,8 @@ use crate::entities::{bundle_active_set_changes, bundle_active_set_watermark};
 use crate::query::ActiveSetError;
 
 /// The single watermark row's `id` (dataplane scale design §7: "one row").
-const WATERMARK_ROW_ID: i32 = 1;
+// regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+const WATERMARK_ROW_ID: i16 = 1;
 
 /// The primary's published `safe_seq` horizon AND `min_retained_seq` (hub-api
 /// migration `0026_bundle_active_set_changelog`, waddles PR #397, requires
@@ -141,11 +142,29 @@ pub async fn read_safe_seq(conn: &DatabaseConnection) -> Result<i64, ActiveSetEr
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChangeRow {
     pub seq: i64,
-    pub tenant_id: i32,
-    pub community_id: i32,
+    /// `None` for a non-tenant-scoped change (e.g. an `app_versions`
+    /// publish -- that table has no `tenant_id` column, so the trigger logs
+    /// `NULL`; see `crate::entities::bundle_active_set_changes`'s doc).
+    pub tenant_id: Option<i32>,
+    pub community_id: Option<i32>,
     pub entity: String,
     pub entity_id: String,
     pub op: String,
+}
+
+impl ChangeRow {
+    /// Resolves this row's `(tenant_id, community_id)` [`crate::ScopeKey`],
+    /// or `None` when the row isn't tenant-scoped at all (`tenant_id IS
+    /// NULL`) -- there is no scope to incrementally re-read in that case;
+    /// the periodic full reconcile is what actually picks up an
+    /// `app_versions` change (see this module's own doc). A present
+    /// `tenant_id` with a `NULL` `community_id` resolves to the `0`
+    /// tenant-wide sentinel, matching `app_active_versions.community_id`'s
+    /// own convention.
+    pub fn scope_key(&self) -> Option<(i32, i32)> {
+        self.tenant_id
+            .map(|tenant_id| (tenant_id, self.community_id.unwrap_or(0)))
+    }
 }
 
 impl From<bundle_active_set_changes::Model> for ChangeRow {
@@ -161,10 +180,48 @@ impl From<bundle_active_set_changes::Model> for ChangeRow {
     }
 }
 
+/// Column-projected shape of [`read_changes`]'s own `SELECT` -- deliberately
+/// omits `writer_xid` and `changed_at`, neither of which [`ChangeRow`] (or
+/// any caller) ever reads. regression: `writer_xid xid8` decoded as
+/// `Option<i64>` (`bundle_active_set_changes::Model`'s full-row shape) made
+/// sqlx reject every single poll with "mismatched types ... INT8 ... is not
+/// compatible with SQL type xid8" (alpha rev 34, 2026-10-04) -- Postgres's
+/// `xid8` has no `sqlx-postgres` decode support at all (not even a `String`
+/// fallback: the driver's OID-compatibility check fails before any value
+/// conversion runs), so the only correct fix is to never ask the driver to
+/// decode that column here. `writer_xid` remains `xid8 NOT NULL` on the
+/// entity/table for the primary-side safe-horizon job's own native-`xid8`
+/// comparison (`hub_api/services/bundle_active_set_watermark_job.py`,
+/// `CAST(:horizon AS xid8)`) -- that job never goes through this crate's
+/// `Entity`/sqlx decode path, so it is unaffected either way.
+#[derive(Debug, FromQueryResult)]
+struct ChangeRowColumns {
+    seq: i64,
+    tenant_id: Option<i32>,
+    community_id: Option<i32>,
+    entity: String,
+    entity_id: String,
+    op: String,
+}
+
+impl From<ChangeRowColumns> for ChangeRow {
+    fn from(c: ChangeRowColumns) -> Self {
+        Self {
+            seq: c.seq,
+            tenant_id: c.tenant_id,
+            community_id: c.community_id,
+            entity: c.entity,
+            entity_id: c.entity_id,
+            op: c.op,
+        }
+    }
+}
+
 /// Reads every change row with `since_seq < seq <= safe_seq`, ordered by
 /// `seq` -- **never reads past `safe_seq`** (the caller-supplied horizon
 /// is a hard upper bound, not a hint), matching the design's own polling
-/// contract verbatim (§7).
+/// contract verbatim (§7). Column-projected (see [`ChangeRowColumns`]) to
+/// avoid ever decoding `writer_xid`, which sqlx cannot decode at all.
 pub async fn read_changes(
     conn: &DatabaseConnection,
     since_seq: i64,
@@ -174,9 +231,17 @@ pub async fn read_changes(
         return Ok(Vec::new());
     }
     let rows = bundle_active_set_changes::Entity::find()
+        .select_only()
+        .column(bundle_active_set_changes::Column::Seq)
+        .column(bundle_active_set_changes::Column::TenantId)
+        .column(bundle_active_set_changes::Column::CommunityId)
+        .column(bundle_active_set_changes::Column::Entity)
+        .column(bundle_active_set_changes::Column::EntityId)
+        .column(bundle_active_set_changes::Column::Op)
         .filter(bundle_active_set_changes::Column::Seq.gt(since_seq))
         .filter(bundle_active_set_changes::Column::Seq.lte(safe_seq))
         .order_by_asc(bundle_active_set_changes::Column::Seq)
+        .into_model::<ChangeRowColumns>()
         .all(conn)
         .await?;
     Ok(rows.into_iter().map(ChangeRow::from).collect())
@@ -190,7 +255,7 @@ pub async fn read_changes(
 pub fn affected_scopes(changes: &[ChangeRow]) -> Vec<(i32, i32)> {
     changes
         .iter()
-        .map(|c| (c.tenant_id, c.community_id))
+        .filter_map(ChangeRow::scope_key)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -269,6 +334,17 @@ mod tests {
     }
 
     fn change_row(seq: i64, tenant_id: i32, community_id: i32) -> bundle_active_set_changes::Model {
+        change_row_scoped(seq, Some(tenant_id), Some(community_id))
+    }
+
+    /// Like [`change_row`] but allows a `NULL` `tenant_id`/`community_id`,
+    /// exactly as a real `app_versions` change row reads (migration 0028's
+    /// trigger logs `NULL` for a table with no `tenant_id` column).
+    fn change_row_scoped(
+        seq: i64,
+        tenant_id: Option<i32>,
+        community_id: Option<i32>,
+    ) -> bundle_active_set_changes::Model {
         bundle_active_set_changes::Model {
             seq,
             tenant_id,
@@ -410,8 +486,86 @@ mod tests {
         let changes = read_changes(&db, 10, 12).await?;
         assert_eq!(changes.len(), 2);
         assert_eq!(changes[0].seq, 11);
-        assert_eq!(changes[1].tenant_id, 2);
+        assert_eq!(changes[1].tenant_id, Some(2));
         Ok(())
+    }
+
+    /// regression: watermark id INT2 vs i32 decode killed active-set consumer (alpha 2026-10-02)
+    /// A `NULL` `tenant_id`/`community_id` row (real shape of an
+    /// `app_versions` change, migration 0028) must decode without error --
+    /// before the `Option<i32>` fix this crashed the same way the
+    /// watermark `id` INT2 mismatch did.
+    #[tokio::test]
+    async fn read_changes_decodes_a_non_tenant_scoped_row_without_error(
+    ) -> Result<(), ActiveSetError> {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![change_row_scoped(20, None, None)]])
+            .into_connection();
+        let changes = read_changes(&db, 10, 20).await?;
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].tenant_id, None);
+        assert_eq!(changes[0].community_id, None);
+        assert_eq!(
+            changes[0].scope_key(),
+            None,
+            "a non-tenant-scoped row has no scope to incrementally re-read"
+        );
+        Ok(())
+    }
+
+    /// regression: `writer_xid xid8` decoded as `Option<i64>` made every
+    /// `read_changes` poll fail with a sqlx OID-mismatch error (alpha rev 34,
+    /// 2026-10-04), which starved the tracker's `last_seq` advance and
+    /// eventually forced a full reconcile on *every* tick via the
+    /// `min_retained_seq` retention-exceeded check above. `MockDatabase`
+    /// decodes from an in-memory `sea_orm::Value` map, not real Postgres wire
+    /// bytes, so it cannot reproduce the actual OID-compatibility failure --
+    /// this test instead asserts directly on the SQL `read_changes` builds:
+    /// `writer_xid` (sqlx-postgres has no `xid8` decode support at all, for
+    /// any Rust type) must never appear in the column list, which is the
+    /// only way to guarantee sqlx is never asked to decode it.
+    #[test]
+    fn read_changes_query_never_selects_writer_xid() {
+        use sea_orm::{DbBackend, QueryTrait};
+
+        let sql = bundle_active_set_changes::Entity::find()
+            .select_only()
+            .column(bundle_active_set_changes::Column::Seq)
+            .column(bundle_active_set_changes::Column::TenantId)
+            .column(bundle_active_set_changes::Column::CommunityId)
+            .column(bundle_active_set_changes::Column::Entity)
+            .column(bundle_active_set_changes::Column::EntityId)
+            .column(bundle_active_set_changes::Column::Op)
+            .filter(bundle_active_set_changes::Column::Seq.gt(0))
+            .filter(bundle_active_set_changes::Column::Seq.lte(10))
+            .order_by_asc(bundle_active_set_changes::Column::Seq)
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(
+            !sql.contains("writer_xid"),
+            "read_changes must never select writer_xid (undecodable xid8 column); got: {sql}"
+        );
+        assert!(
+            sql.contains("\"seq\""),
+            "sanity: the projected query must still select seq; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn affected_scopes_skips_non_tenant_scoped_rows() {
+        let changes = vec![
+            change_row(1, 1, 0),
+            change_row_scoped(2, None, None),
+            change_row_scoped(3, Some(1), None),
+        ]
+        .into_iter()
+        .map(ChangeRow::from)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            affected_scopes(&changes),
+            vec![(1, 0)],
+            "a NULL tenant_id row contributes no scope; NULL community_id resolves to the 0 sentinel"
+        );
     }
 
     #[test]

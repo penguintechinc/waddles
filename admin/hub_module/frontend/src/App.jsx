@@ -1,5 +1,14 @@
+import { lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useParams } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
+
+// Wave-1 route stubs (S0 foundation) -- lazy so later slices only need to
+// fill in the component file; the import line and <Route> below are
+// pre-registered to avoid App.jsx merge conflicts between parallel slices.
+const TenantBundleCatalog = lazy(() => import('./pages/tenant/TenantBundleCatalog'));
+const AdminCommunityBundles = lazy(() => import('./pages/admin/AdminCommunityBundles'));
+const SuperAdminSuperCommunities = lazy(() => import('./pages/superadmin/SuperAdminSuperCommunities'));
+const AdminRoleSyncMapping = lazy(() => import('./pages/admin/AdminRoleSyncMapping'));
 
 // Layouts
 import PublicLayout from './layouts/PublicLayout';
@@ -358,6 +367,23 @@ function App() {
         <Route path="/admin/:communityId/roles" element={<AdminCommunityRoles />} />
         <Route path="/admin/:communityId/members/:userId/analytics" element={<AdminMemberAnalytics />} />
         <Route path="/admin/:communityId/ai-knowledge" element={<AdminAIKnowledge />} />
+        {/* Wave-1 stub: community bundles slice */}
+        <Route
+          path="/admin/:communityId/bundles"
+          element={
+            <Suspense fallback={<LoadingSpinner />}>
+              <AdminCommunityBundles />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/admin/:communityId/role-sync"
+          element={
+            <Suspense fallback={<LoadingSpinner />}>
+              <AdminRoleSyncMapping />
+            </Suspense>
+          }
+        />
       </Route>
 
       {/* Platform admin routes */}
@@ -406,6 +432,15 @@ function App() {
         <Route path="/superadmin/analytics" element={<SuperAdminAnalytics />} />
         <Route path="/superadmin/tenants" element={<SuperAdminTenants />} />
         <Route path="/superadmin/marketplace-settings" element={<SuperAdminMarketplaceSettings />} />
+        {/* Wave-1 stub: super communities (1:N model) slice */}
+        <Route
+          path="/superadmin/super-communities"
+          element={
+            <Suspense fallback={<LoadingSpinner />}>
+              <SuperAdminSuperCommunities />
+            </Suspense>
+          }
+        />
       </Route>
 
       {/* Tenant admin routes */}
@@ -420,6 +455,15 @@ function App() {
         <Route path="/tenant/:tenantSlug/modules" element={<TenantModules />} />
         <Route path="/tenant/:tenantSlug/admins" element={<TenantAdmins />} />
         <Route path="/tenant/:tenantSlug/communities" element={<TenantCommunities />} />
+        {/* Wave-1 stub: tenant bundle catalog slice */}
+        <Route
+          path="/tenant/:tenantSlug/bundles"
+          element={
+            <Suspense fallback={<LoadingSpinner />}>
+              <TenantBundleCatalog />
+            </Suspense>
+          }
+        />
       </Route>
 
       {/* Catch all - redirect to home */}
