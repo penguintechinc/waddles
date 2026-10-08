@@ -5,7 +5,7 @@
         build-superpenguin-roll-bundle test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs
+        check-no-stubs generate-bundle-signing-key
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -108,6 +108,16 @@ deploy-dev:
 
 deploy-prod:
 	$(error deploy-prod requires CI — tag a release to trigger the production pipeline)
+
+# Generates a fresh Ed25519 platform bundle-signing keypair and creates/updates the
+# BUNDLE_SIGNING_PRIVATE_KEY/BUNDLE_SIGNING_KEY_ID Secret hub-api reads -- see
+# scripts/generate-bundle-signing-key.sh and the chart README's rollout-order section.
+# Usage: make generate-bundle-signing-key KEY_ID=2026-09-key1 KUBE_CONTEXT=dal2-beta NAMESPACE=waddlebot
+generate-bundle-signing-key:
+	@test -n "$(KEY_ID)" || { echo "KEY_ID is required" >&2; exit 1; }
+	@test -n "$(KUBE_CONTEXT)" || { echo "KUBE_CONTEXT is required" >&2; exit 1; }
+	@test -n "$(NAMESPACE)" || { echo "NAMESPACE is required" >&2; exit 1; }
+	@bash scripts/generate-bundle-signing-key.sh "$(KEY_ID)" "$(KUBE_CONTEXT)" "$(NAMESPACE)" $(SECRET_NAME)
 
 run-ai-local: ## Run ai_interaction_module container locally (standalone, 1 worker)
 	docker build -f action/interactive/ai_interaction_module/Dockerfile -t waddlebot/ai-interaction:local . && \

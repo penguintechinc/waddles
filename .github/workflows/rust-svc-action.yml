@@ -6,6 +6,7 @@ on:
     paths:
       - 'core/svc_action/**'
       - 'core/bundle_host_kv/**'
+      - 'core/bundle_capability_gate/**'
       - 'core/hub_client/**'
       - 'core/egress_detokenizer/**'
       - '.github/workflows/rust-svc-action.yml'
@@ -15,6 +16,7 @@ on:
     paths:
       - 'core/svc_action/**'
       - 'core/bundle_host_kv/**'
+      - 'core/bundle_capability_gate/**'
       - 'core/hub_client/**'
       - 'core/egress_detokenizer/**'
   workflow_dispatch:
