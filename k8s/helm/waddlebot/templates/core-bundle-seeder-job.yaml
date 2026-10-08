@@ -31,7 +31,13 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: {{ .Values.pipeline.coreBundleSeeder.backoffLimit }}
-  activeDeadlineSeconds: 300
+  # fix/seeder-deadline: was a hardcoded 300s. The seeder does real per-bundle work
+  # (component inspect/stage/publish, catalog install, source-binding sync, tenant
+  # activation, Ed25519 signing) at ~20s/bundle; with ~39 core bundles that's 13+ min,
+  # so 300s killed the Job via DeadlineExceeded after only 13-15 bundles seeded,
+  # leaving community_permission_grants empty for the rest. Value-driven so it can be
+  # tuned per environment without another hardcoded edit here.
+  activeDeadlineSeconds: {{ .Values.pipeline.coreBundleSeeder.activeDeadlineSeconds | default 1800 }}
   template:
     metadata:
       annotations:

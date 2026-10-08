@@ -777,6 +777,14 @@ pipeline:
   coreBundleSeeder:
     enabled: true
     backoffLimit: 2
+    # fix/seeder-deadline: real per-bundle work (component inspect/stage/publish,
+    # catalog install, source-binding sync, tenant activation, Ed25519 signing) runs
+    # ~20s/bundle; ~39 first-party core bundles need 13+ min end to end. 1800s (30min)
+    # gives comfortable headroom over that real workload -- was hardcoded at 300s in
+    # templates/core-bundle-seeder-job.yaml, which killed the Job via DeadlineExceeded
+    # partway through every seed run (only 13-15/39 bundles seeded,
+    # community_permission_grants never fully populated).
+    activeDeadlineSeconds: 1800
     defaultTenantSlug: "global"
     tenantSlugs: ""
     # fix/preexisting-test-failures (2026-10-02): dedicated seeder-owned ingest-source
