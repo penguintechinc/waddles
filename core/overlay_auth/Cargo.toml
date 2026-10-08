@@ -1,0 +1,59 @@
+[package]
+name = "overlay_auth"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Unified overlay-auth contract (C4) for the streaming/overlay Rust rewrite: a per-community, rotatable, hashed-at-rest VIEW credential for browser-source GET routes, plus a community-scoped PUSH credential (built on `service_auth` machine JWTs) replacing the static `PRESENTATION_PUSH_TOKEN` bearer. Owned by the future svc-presentation-rust; P4/P5 (view routes) and the action-stage push path both consume this crate instead of re-implementing overlay auth."
+
+[lib]
+name = "overlay_auth"
+path = "src/lib.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- rules/critical-rules.md
+# Dependency Pinning.
+[dependencies]
+# Path dependency, not a re-implementation: PUSH credentials are
+# `service_auth` machine JWTs scoped via a community-specific `scope`
+# claim (`push::push_scope()`) -- see src/push.rs module doc. Mirrors the
+# "don't re-invent auth" requirement directly: zero new JWT/crypto code
+# in this crate.
+service_auth = { path = "../service_auth", version = "=0.1.0" }
+axum = "=0.8.9"
+serde = { version = "=1.0.229", features = ["derive"] }
+thiserror = "=2.0.20"
+tracing = "=0.1.44"
+# =0.1.89 (not =0.1.92) -- service_auth (path dependency below) pins
+# async-trait =0.1.89 exactly; aligning here avoids an unresolvable
+# two-exact-versions conflict in the shared dependency graph, same
+# precedent core/service_auth/Cargo.toml's own thiserror comment documents.
+async-trait = "=0.1.89"
+chrono = { version = "=0.4.45", features = ["serde"] }
+# CSPRNG for the opaque VIEW token (`rand::rngs::OsRng`, OS entropy source)
+# -- not hand-rolled, matches rules/backend-rust.md "vetted crate, not
+# hand-rolled". sha2 hashes the token before it is ever persisted (view
+# credentials are stored hashed-at-rest, never plaintext -- see
+# config/postgres/migrations/100_overlay_view_credentials.sql).
+# =0.8.8 (not =0.8.5) -- RUSTSEC-2026-0097 (rand <0.8.6 unsound ThreadRng
+# reseed-under-custom-logger interaction); this crate only ever uses
+# `OsRng` directly (never `rand::rng()`/`thread_rng()`), so the unsound
+# path doesn't apply to this crate's usage, but cargo-deny flags the
+# vulnerable version regardless -- staying current avoids relying on that
+# distinction.
+rand = "=0.8.8"
+sha2 = "=0.10.9"
+hex = "=0.4.3"
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["macros", "rt", "rt-multi-thread"] }
+# Test-only: signs fixture JWTs to exercise `service_auth::verify` through
+# this crate's scoping layer. Same version/feature pin as
+# core/service_auth/Cargo.toml so cargo-deny sees one resolved version,
+# not two.
+jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs"] }
+# Test-only: `ServiceExt::oneshot` to drive the Axum middleware guards
+# (`require_view_credential`/`require_push_credential`) end-to-end against
+# a real `Router`, not just their underlying `validate_view_token`/
+# `service_auth::verify` logic.
+tower = { version = "=0.5.3", features = ["util"] }
