@@ -270,7 +270,7 @@ def _resolve_amount(
     try:
         value = int(raw.strip())
     except ValueError as exc:
-        log.debug("count.invalid_amount", raw=raw, error=str(exc))
+        log.debug("count.invalid_amount", error_type=type(exc).__name__)
         return None, f"'{raw}' isn't a whole number"
     if not (_S64_MIN <= value <= _S64_MAX):
         return None, f"'{raw}' is out of range"

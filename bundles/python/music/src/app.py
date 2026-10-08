@@ -186,7 +186,7 @@ def _resolve(rest: str) -> tuple[str, str | None]:
     try:
         parsed = parse_command(normalized, SPEC)
     except CommandUsageError as exc:
-        log.debug("music.invalid_command", raw=normalized, error=str(exc))
+        log.debug("music.invalid_command", error_type=type(exc).__name__)
         return "usage", None
     return _map_parsed(parsed)
 
@@ -481,7 +481,7 @@ async def _handle_remove(
     try:
         target_id = int(cleaned)
     except ValueError as exc:
-        log.debug("music.invalid_request_id", raw=cleaned, error=str(exc))
+        log.debug("music.invalid_request_id", error_type=type(exc).__name__)
         return f"'{cleaned}' isn't a valid request id"
 
     queue = await _load_queue(community, provider=provider, channel_id=channel_id)
@@ -526,7 +526,7 @@ async def _handle_config_set(
     try:
         value = int(parts[1])
     except ValueError as exc:
-        log.debug("music.invalid_max_per_user", raw=parts[1], error=str(exc))
+        log.debug("music.invalid_max_per_user", error_type=type(exc).__name__)
         return f"'{parts[1]}' isn't a whole number"
     if not (MIN_MAX_PER_USER <= value <= MAX_MAX_PER_USER):
         return f"max-per-user must be between {MIN_MAX_PER_USER} and {MAX_MAX_PER_USER}"
