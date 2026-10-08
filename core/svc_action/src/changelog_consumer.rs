@@ -437,7 +437,8 @@ async fn apply_active_set(
     // community)` scope `active` itself still preserves) is safe ONLY
     // because `crate::dispatch`'s own dispatch loop is itself still
     // single-`app_id`-per-pod, hardcoded to the `global` tenant scope
-    // (`crate::lib::try_start_dispatch`'s own TODO(M3+)) -- this does NOT
+    // (`crate::lib::try_start_dispatch`'s own documented M3+ milestone seam,
+    // tracked gh-598) -- this does NOT
     // reintroduce the retired multi-tenant collapse bug this module's own
     // doc warns about, since that bug was about the executor load/unload
     // signaling above, which stays scope-preserving via `plan_scoped`.

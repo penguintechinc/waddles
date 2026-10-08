@@ -18,9 +18,12 @@
 //! [`ActiveVersionSnapshot::resolve_for_app`] -- never a captured `i64`.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use crate::query::ActiveBundleRow;
+
+/// Map type held behind the shared lock -- `app_id -> (digest, version_id)`.
+type ActiveMap = HashMap<String, (String, i64)>;
 
 /// Cheap, `Clone`-able handle over a shared `app_id -> (digest,
 /// version_id)` map -- see the module doc.
@@ -46,8 +49,42 @@ impl ActiveVersionSnapshot {
             .collect();
         // A poisoned lock (a panic elsewhere while holding the write
         // guard) recovers with the poisoned map rather than propagating --
-        // a stale snapshot must never become permanently unusable.
-        *self.0.write().unwrap_or_else(|e| e.into_inner()) = map;
+        // a stale snapshot must never become permanently unusable. Logged
+        // at WARN (not silently swallowed) since a panic elsewhere while
+        // holding this lock is itself a real, actionable bug.
+        let mut guard = match self.0.write() {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "ActiveVersionSnapshot write lock poisoned (panic elsewhere while \
+                     held) -- recovering inner map rather than propagating, to avoid a \
+                     permanently unusable snapshot"
+                );
+                e.into_inner()
+            }
+        };
+        *guard = map;
+    }
+
+    /// Acquires the read lock, recovering a poisoned lock (a panic
+    /// elsewhere while the write guard was held) rather than propagating --
+    /// a stale snapshot must never become permanently unusable. Centralizes
+    /// the poison-recovery log so every read call site logs identically
+    /// instead of swallowing the underlying panic's error silently.
+    fn read_lock(&self) -> RwLockReadGuard<'_, ActiveMap> {
+        match self.0.read() {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "ActiveVersionSnapshot read lock poisoned (panic elsewhere while \
+                     held) -- recovering inner map rather than propagating, to avoid a \
+                     permanently unusable snapshot"
+                );
+                e.into_inner()
+            }
+        }
     }
 
     /// Resolves `app_id`'s current `app_versions.id` ONLY if its
@@ -57,7 +94,7 @@ impl ActiveVersionSnapshot {
     /// must fail closed (`None`), never be handed the NEWER digest's
     /// version for the OLD one it is actually about to run.
     pub fn resolve_for_digest(&self, app_id: &str, digest: &str) -> Option<i64> {
-        let map = self.0.read().unwrap_or_else(|e| e.into_inner());
+        let map = self.read_lock();
         map.get(app_id).and_then(|(active_digest, version_id)| {
             (active_digest == digest).then_some(*version_id)
         })
@@ -69,9 +106,7 @@ impl ActiveVersionSnapshot {
     /// a digest at all; `crate::bundle_loader`/`crate::source_supervisor`'s
     /// own `bundle_loader` half owns load/unload independently).
     pub fn resolve_for_app(&self, app_id: &str) -> Option<i64> {
-        self.0
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+        self.read_lock()
             .get(app_id)
             .map(|(_, version_id)| *version_id)
     }
@@ -86,11 +121,7 @@ impl ActiveVersionSnapshot {
     /// means the app is no longer active in this scope at all
     /// (deactivated/revoked) -- the only case a caller should fail closed.
     pub fn current_digest_and_version(&self, app_id: &str) -> Option<(String, i64)> {
-        self.0
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(app_id)
-            .cloned()
+        self.read_lock().get(app_id).cloned()
     }
 }
 
