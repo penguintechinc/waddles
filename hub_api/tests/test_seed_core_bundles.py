@@ -25,8 +25,10 @@ from cli.seed_core_bundles import (
     CatalogEntry,
     CoreBundleSeederError,
     load_catalog,
+    reconcile_removed_core_bundles,
     seed_one,
 )
+from services.bundle_approval_service import activate_for_community
 from services.bundle_component_validator import ComponentValidationResult
 from services.bundle_version_service import STATUS_PUBLISHED
 from services.errors import ApiError
@@ -1279,3 +1281,214 @@ async def test_run_registers_platform_connection_and_binds_tenant_wide_to_discor
     assert {b.platform for b in bindings} == {"discord"}
     assert bindings.first().source_id == "dg-474965105759748096"
     assert bindings.first().community_id == seeder.TENANT_WIDE_COMMUNITY_SENTINEL
+
+
+# ---------------------------------------------------------------------------
+# `reconcile_removed_core_bundles()` -- regression for the uninstall/scale-
+# sync symmetry gap (requirement, Justin: "uninstall should delete them just
+# like install adds them, otherwise our scale will get out of sync" --
+# horizontally-scaled hub-api replicas, and the Rust data plane, all read
+# `app_active_versions` directly). Scoping to `approval_source="system:
+# core-seeder"` CURRENT rows is the safety boundary under test here.
+# ---------------------------------------------------------------------------
+
+
+async def _seeded_system_activation(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    app_id: str = "waddles.core.example.ping",
+) -> tuple[str, int]:
+    """Seed one SYSTEM-owned COMMUNITY-tier activation via the real `seed_one()` path.
+
+    Returns `(app_id, community_id)` -- the caller drives `reconcile_removed_core_bundles()`
+    against it directly, rather than through `_run()`'s own catalog-loading/looping layer.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    community_id = await _seed_community(install_dal)
+    entry = _write_bundle(
+        tmp_path, manifest={**_MANIFEST, "app_id": app_id}, community_id=community_id
+    )
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    return app_id, community_id
+
+
+async def _active_row(install_dal: Any, *, app_id: str, community_id: int) -> Any:
+    return (
+        await install_dal(
+            (install_dal.app_active_versions.app_id == app_id)
+            & (install_dal.app_active_versions.community_id == community_id)
+        ).select()
+    ).first()
+
+
+async def test_reconcile_removed_core_bundles_deletes_a_dropped_system_bundle(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`app_id` dropped from the catalog -- its SYSTEM-owned `app_active_versions` row is GONE.
+
+    Regression for the requirement itself: before this fix the seeder only ever activated,
+    never uninstalled, so a bundle removed from `bundles/core-bundles.yaml` left a stale row
+    behind forever -- exactly the horizontal-scale drift the requirement names.
+    """
+    app_id, community_id = await _seeded_system_activation(install_dal, tmp_path, monkeypatch)
+    assert await _active_row(install_dal, app_id=app_id, community_id=community_id) is not None
+
+    results, failures = await reconcile_removed_core_bundles(
+        install_dal,
+        catalog_app_ids=frozenset(),  # app_id no longer in the catalog
+    )
+
+    assert failures == 0
+    assert [r.outcome for r in results] == ["uninstalled_reconcile"]
+    assert results[0].app_id == app_id
+    assert await _active_row(install_dal, app_id=app_id, community_id=community_id) is None
+
+
+async def test_reconcile_removed_core_bundles_preserves_an_app_still_in_the_catalog(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The common case every real seeder run hits: nothing dropped, nothing deleted."""
+    app_id, community_id = await _seeded_system_activation(install_dal, tmp_path, monkeypatch)
+
+    results, failures = await reconcile_removed_core_bundles(
+        install_dal, catalog_app_ids=frozenset({app_id})
+    )
+
+    assert failures == 0
+    assert results == []
+    assert await _active_row(install_dal, app_id=app_id, community_id=community_id) is not None
+
+
+async def test_reconcile_removed_core_bundles_never_touches_a_human_reactivated_app(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CRITICAL scoping test: a human-owned activation must never be deleted by this sweep.
+
+    A community-admin who later re-activates a dropped core bundle through the human-gated
+    `activate_for_community()` path supersedes the SYSTEM-owned `app_install_approvals` row
+    with their own `approval_source="human"` one -- the exact same upsert `activate_for_
+    community()` already performs on `app_active_versions` for a re-activation. The reconcile
+    sweep's query predicate (`approval_source == SYSTEM_ACTOR`) must no longer match this row,
+    by construction, even though `app_id` is still absent from the catalog.
+    """
+    app_id, community_id = await _seeded_system_activation(install_dal, tmp_path, monkeypatch)
+
+    # A human community-admin takes ownership of the same (tenant, community, app_id).
+    await activate_for_community(
+        install_dal,
+        tenant_id=1,
+        community_id=community_id,
+        app_id=app_id,
+        activated_by=7,  # a real human actor id -- never SYSTEM
+    )
+    approval_row = (
+        await install_dal(
+            (install_dal.app_install_approvals.app_id == app_id)
+            & (install_dal.app_install_approvals.superseded_by == None)  # noqa: E711
+        ).select()
+    ).first()
+    assert approval_row.approval_source == "human"
+
+    results, failures = await reconcile_removed_core_bundles(
+        install_dal,
+        catalog_app_ids=frozenset(),  # still absent from the catalog
+    )
+
+    assert failures == 0
+    assert results == []  # never matched -- the human row is not a reconcile candidate at all
+    assert await _active_row(install_dal, app_id=app_id, community_id=community_id) is not None
+
+
+async def test_reconcile_removed_core_bundles_kill_switch_on_preserves_legacy_behavior(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`waddles.disable-seeder-uninstall-reconcile` ON reverts to the legacy activate-only seeder.
+
+    Opt-out kill-switch (critical-rules.md "Core platform mechanisms... opt-out kill-switch"):
+    ON is the escape hatch for a same-day mitigation without a redeploy, never the default.
+    """
+    app_id, community_id = await _seeded_system_activation(install_dal, tmp_path, monkeypatch)
+    monkeypatch.setattr(seeder, "feature_enabled", AsyncMock(return_value=True))
+
+    results, failures = await reconcile_removed_core_bundles(
+        install_dal, catalog_app_ids=frozenset()
+    )
+
+    assert failures == 0
+    assert results == []  # kill-switch ON -- no deletes performed
+    assert await _active_row(install_dal, app_id=app_id, community_id=community_id) is not None
+
+
+async def test_reconcile_removed_core_bundles_is_idempotent_on_rerun(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second sweep over an already-deleted row is a clean no-op, never a failure."""
+    app_id, community_id = await _seeded_system_activation(install_dal, tmp_path, monkeypatch)
+
+    first_results, first_failures = await reconcile_removed_core_bundles(
+        install_dal, catalog_app_ids=frozenset()
+    )
+    assert first_failures == 0
+    assert len(first_results) == 1
+
+    second_results, second_failures = await reconcile_removed_core_bundles(
+        install_dal, catalog_app_ids=frozenset()
+    )
+    assert second_failures == 0
+    assert second_results == []  # already gone -- NOT_FOUND swallowed, not re-reported
+
+
+async def test_run_wires_the_reconcile_sweep_end_to_end(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_run()` itself, not just the unit, performs the sweep.
+
+    A dropped bundle's second `helm upgrade` run deletes its stale `app_active_versions`
+    row with a clean (0) exit code.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    _patch_run_dependencies(install_dal, monkeypatch)
+    community_id = await _seed_community(install_dal)
+    _write_bundle(tmp_path, community_id=community_id)  # ping.manifest.yaml + ping.wasm
+
+    first_catalog = tmp_path / "core-bundles.yaml"
+    first_catalog.write_text(
+        yaml.safe_dump(
+            {
+                "bundles": [
+                    {
+                        "app_id": "waddles.core.example.ping",
+                        "version": "1.0.0",
+                        "language": "rust",
+                        "manifest_path": "ping.manifest.yaml",
+                        "artifact_path": "ping.wasm",
+                        "activation_targets": [
+                            {"tenant_slug": TENANT_SLUG, "community_id": community_id}
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert await seeder._run(tmp_path, first_catalog) == 0
+    assert (
+        await _active_row(
+            install_dal, app_id="waddles.core.example.ping", community_id=community_id
+        )
+        is not None
+    )
+
+    # Second run: the catalog no longer lists the bundle at all (dropped entirely).
+    second_catalog = tmp_path / "core-bundles-empty.yaml"
+    second_catalog.write_text(yaml.safe_dump({"bundles": []}), encoding="utf-8")
+
+    assert await seeder._run(tmp_path, second_catalog) == 0
+    assert (
+        await _active_row(
+            install_dal, app_id="waddles.core.example.ping", community_id=community_id
+        )
+        is None
+    )
