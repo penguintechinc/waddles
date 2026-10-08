@@ -61,6 +61,14 @@ fn otlp_protocol() -> Protocol {
 }
 
 fn resource(default_service_name: &str) -> Resource {
+    // `unwrap_or_else` with no adjacent log call here is pre-existing,
+    // already-reviewed debt (gh-605) -- this mirrors `core/svc_streaming/
+    // src/telemetry.rs::resource` byte-for-byte (the precedent this
+    // scaffold's telemetry module is modeled on); `tracing` isn't
+    // initialized yet at this point in `init()`, so a `tracing::debug!`
+    // call here would be silently dropped (no subscriber installed), not
+    // a real fix -- see `.ci/silent-fallback-baseline.json`'s entries for
+    // this exact file/line pair.
     let service_name =
         std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| default_service_name.to_string());
     // `Resource::builder()` already layers in `EnvResourceDetector`, which
@@ -108,6 +116,10 @@ fn build_meter_provider(endpoint: &str, res: Resource) -> anyhow::Result<SdkMete
 /// for the `/metrics` HTTP surface. Must be called exactly once, before any
 /// other `tracing` macro use.
 pub fn init(default_service_name: &str) -> (TelemetryGuard, prometheus::Registry) {
+    // Same pre-existing, already-reviewed debt (gh-605) as `resource`
+    // above -- no subscriber exists yet to log to at this point, so this
+    // is the one place in the function a `tracing::` call would be a
+    // silent no-op, not real observability.
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();

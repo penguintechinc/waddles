@@ -6,9 +6,9 @@
 //! `Unimplemented` is declared (mirrors `core/svc_streaming/src/error.rs`)
 //! for P2-P4 to use once they add real overlay render/push handlers, but
 //! P1 never constructs it: this scaffold mounts no route that could need
-//! it (`rules/general.md` Red Flags -- "Partial features with 'TODO'
-//! placeholders"; a route returning `Unimplemented` on every call is
-//! exactly that, so P1 mounts zero such routes rather than one).
+//! it -- `rules/general.md` Red Flags forbids a placeholder feature that
+//! isn't actually done yet; a route returning `Unimplemented` on every
+//! call is exactly that, so P1 mounts zero such routes rather than one.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
