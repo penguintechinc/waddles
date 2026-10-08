@@ -83,28 +83,49 @@ ENV SOURCE_DATE_EPOCH=1704067200 \
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
 # ---------------------------------------------------------------------------
-# Stage 2: waddles.core.example.pyping (Python) -> WASI 0.2 component
+# Stage 2: every `language: python` entry in bundles/core-bundles.yaml -> WASI 0.2
+# components, driven ENTIRELY by the catalog (bundles/build_python_bundles.py).
+#
+# Replaces the former per-bundle `COPY bundles/python/<name>/src` + `RUN componentize-py`
+# stanzas (one pair per bundle, hand-added by every bundle PR -- the recurring conflict
+# surface this genericization removes). Adding a new first-party Python bundle now needs
+# ONLY a new bundles/core-bundles.yaml entry (with its own `source_dir`) plus the bundle's
+# own `bundles/python/<name>/` directory -- no Dockerfile edit, ever.
+#
+# `COPY bundles/python bundles/python` below is intentionally the WHOLE tree, not a
+# per-bundle path, so a brand-new `bundles/python/<name>/` directory is picked up with zero
+# Dockerfile changes; build_python_bundles.py then reads bundles/core-bundles.yaml itself to
+# decide which `<name>/src` + `<name>/hub-manifest.yaml` to actually componentize. Same base
+# image, componentize-py version, and reproducible-build env pins as the two stages this
+# replaces (python-bundle-builder for pyping, python-batch1-builder for the eightball/
+# roll/lurk/count/command batch) -- see their original per-variable rationale below,
+# unchanged; each bundle still gets its own `-p` source dir and its own `componentize-py
+# componentize` invocation (now issued by the script, not hand-written per bundle), so every
+# .wasm output is the same fully-independent artifact it always was.
 # ---------------------------------------------------------------------------
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS python-bundle-builder
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS python-bundles-builder
 
-RUN pip install --no-cache-dir componentize-py==0.25.1
+RUN pip install --no-cache-dir componentize-py==0.25.1 pyyaml==6.0.3
 
 WORKDIR /repo
 COPY wit wit
 COPY sdk/waddle-sdk/src sdk/waddle-sdk/src
-COPY bundles/python/pyping/src bundles/python/pyping/src
+COPY bundles/python bundles/python
+COPY bundles/core-bundles.yaml bundles/core-bundles.yaml
+COPY bundles/build_python_bundles.py bundles/build_python_bundles.py
 # waddle_sdk._component_entry -- the shared SDK entry module every Python bundle points
 # componentize-py at (PR #382, fix/python-sdk-two-export-entry, merged into release/v3.0.X);
-# supersedes this bundle's own now-deleted _wit_app.py stand-in. bundles/python/pyping/src/
-# _entry_wiring.py (added by that same merge) supplies the static bundle_transform/
+# supersedes each bundle's own now-deleted _wit_app.py stand-in. Each bundle's own
+# src/_entry_wiring.py (added by that same merge) supplies the static bundle_transform/
 # bundle_dispatch wiring _component_entry.py expects from the bundle's own source directory.
 #
 # Reproducible-build pins (same proof requirement as rust-bundle-builder above --
-# scripts/verify-core-bundles-reproducible.sh / `make verify-core-bundles-reproducible`).
-# componentize-py wizens a real CPython interpreter (imports every bundled module, then
-# snapshots its post-import state into the component's linear memory), so unlike a plain
-# compiler invocation, ambient Python hashing/locale/clock state is directly bakeable into
-# the emitted component bytes:
+# scripts/verify-core-bundles-reproducible.sh / `make verify-core-bundles-reproducible`;
+# waddles.core.example.pyping and the batch bundles remain intentionally EXCLUDED from that
+# gate, see that script's own header comment). componentize-py wizens a real CPython
+# interpreter (imports every bundled module, then snapshots its post-import state into the
+# component's linear memory), so unlike a plain compiler invocation, ambient Python
+# hashing/locale/clock state is directly bakeable into the emitted component bytes:
 #   - PYTHONHASHSEED=0: str/bytes hashing is randomized per-process by default (PYTHONHASHSEED
 #     unset picks a random seed at interpreter start) -- that seed drives internal dict/set
 #     bucket layout, which the wizened snapshot's iteration order (module __dict__ enumeration,
@@ -125,66 +146,7 @@ ENV PYTHONHASHSEED=0 \
     SOURCE_DATE_EPOCH=1704067200 \
     TZ=UTC \
     LC_ALL=C.UTF-8
-RUN componentize-py \
-        -d wit/waddle-bundle -w stage \
-        componentize -p sdk/waddle-sdk/src -p bundles/python/pyping/src \
-        waddle_sdk._component_entry \
-        -o pyping.wasm
-
-# ---------------------------------------------------------------------------
-# Stage 2b: waddles.core.example.{eightball,roll,lurk,count} (Python) -> WASI 0.2 components
-#
-# PR batch 1 (2026-10-03) of first-party token-safe command bundles -- same base image,
-# componentize-py version, and reproducible-build env pins as python-bundle-builder above (see
-# that stage's own comment for the full per-variable rationale); consolidated into one stage
-# rather than four separate `FROM` stages purely to avoid re-installing componentize-py and
-# re-declaring the same ENV block four times -- each bundle still gets its own `-p` source dir
-# and its own `componentize-py componentize` invocation, so the four .wasm outputs are fully
-# independent artifacts, not a shared component.
-# ---------------------------------------------------------------------------
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS python-batch1-builder
-
-RUN pip install --no-cache-dir componentize-py==0.25.1
-
-WORKDIR /repo
-COPY wit wit
-COPY sdk/waddle-sdk/src sdk/waddle-sdk/src
-COPY bundles/python/eightball/src bundles/python/eightball/src
-COPY bundles/python/roll/src bundles/python/roll/src
-COPY bundles/python/lurk/src bundles/python/lurk/src
-COPY bundles/python/count/src bundles/python/count/src
-COPY bundles/python/quote/src bundles/python/quote/src
-
-ENV PYTHONHASHSEED=0 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    SOURCE_DATE_EPOCH=1704067200 \
-    TZ=UTC \
-    LC_ALL=C.UTF-8
-RUN componentize-py \
-        -d wit/waddle-bundle -w stage \
-        componentize -p sdk/waddle-sdk/src -p bundles/python/eightball/src \
-        waddle_sdk._component_entry \
-        -o eightball.wasm
-RUN componentize-py \
-        -d wit/waddle-bundle -w stage \
-        componentize -p sdk/waddle-sdk/src -p bundles/python/roll/src \
-        waddle_sdk._component_entry \
-        -o roll.wasm
-RUN componentize-py \
-        -d wit/waddle-bundle -w stage \
-        componentize -p sdk/waddle-sdk/src -p bundles/python/lurk/src \
-        waddle_sdk._component_entry \
-        -o lurk.wasm
-RUN componentize-py \
-        -d wit/waddle-bundle -w stage \
-        componentize -p sdk/waddle-sdk/src -p bundles/python/count/src \
-        waddle_sdk._component_entry \
-        -o count.wasm
-RUN componentize-py \
-        -d wit/waddle-bundle -w stage \
-        componentize -p sdk/waddle-sdk/src -p bundles/python/quote/src \
-        waddle_sdk._component_entry \
-        -o quote.wasm
+RUN python3 bundles/build_python_bundles.py
 
 # ---------------------------------------------------------------------------
 # Stage 3: waddles.core.example.csping (C#) -> WASI 0.2 component
@@ -201,7 +163,7 @@ RUN componentize-py \
 # defensively (same rationale as the other two stages), but that alone does not establish
 # reproducibility for an AOT/LLVM toolchain (parallel codegen ordering, embedded build paths
 # in NativeAOT metadata, etc. are unverified here). Treat this stage the same as
-# python-bundle-builder: intentionally excluded from the gate, not silently passing it. If a
+# python-bundles-builder: intentionally excluded from the gate, not silently passing it. If a
 # future change proves two independent builds byte-identical, add it to
 # scripts/verify-core-bundles-reproducible.sh's check_artifact calls and drop this comment.
 # ---------------------------------------------------------------------------
@@ -260,7 +222,7 @@ RUN dotnet build -c Release
 # hub_api/Dockerfile's builder stage verbatim, same pinned base per
 # devops-containers.md ("never a second pinned digest for the same tag").
 # ---------------------------------------------------------------------------
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS hub-deps-builder
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS hub-deps-builder
 WORKDIR /app
 
 COPY hub_api/requirements.txt .
@@ -290,7 +252,7 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 # Final: hub-api runtime + the two built components + their manifests + the catalog.
 # ---------------------------------------------------------------------------
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 WORKDIR /app
 
 COPY --from=hub-deps-builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
@@ -303,21 +265,14 @@ COPY hub_api/cli ./cli
 RUN mkdir -p /core-bundles
 COPY bundles/core-bundles.yaml /core-bundles/core-bundles.yaml
 COPY bundles/rust/ping/hub-manifest.yaml /core-bundles/ping.manifest.yaml
-COPY bundles/python/pyping/hub-manifest.yaml /core-bundles/pyping.manifest.yaml
 COPY bundles/csharp/csping/hub-manifest.yaml /core-bundles/csping.manifest.yaml
-COPY bundles/python/eightball/hub-manifest.yaml /core-bundles/eightball.manifest.yaml
-COPY bundles/python/roll/hub-manifest.yaml /core-bundles/roll.manifest.yaml
-COPY bundles/python/lurk/hub-manifest.yaml /core-bundles/lurk.manifest.yaml
-COPY bundles/python/count/hub-manifest.yaml /core-bundles/count.manifest.yaml
-COPY bundles/python/quote/hub-manifest.yaml /core-bundles/quote.manifest.yaml
 COPY --from=rust-bundle-builder /repo/bundles/rust/ping/target/wasm32-wasip2/release/waddle_bundle_ping_rust.wasm /core-bundles/ping.wasm
-COPY --from=python-bundle-builder /repo/pyping.wasm /core-bundles/pyping.wasm
 COPY --from=csharp-bundle-builder /repo/bundles/csharp/csping/bin/Release/net10.0/wasi-wasm/publish/csping.wasm /core-bundles/csping.wasm
-COPY --from=python-batch1-builder /repo/eightball.wasm /core-bundles/eightball.wasm
-COPY --from=python-batch1-builder /repo/roll.wasm /core-bundles/roll.wasm
-COPY --from=python-batch1-builder /repo/lurk.wasm /core-bundles/lurk.wasm
-COPY --from=python-batch1-builder /repo/count.wasm /core-bundles/count.wasm
-COPY --from=python-batch1-builder /repo/quote.wasm /core-bundles/quote.wasm
+# Every `language: python` bundle's manifest + .wasm, generated by build_python_bundles.py
+# (python-bundles-builder stage) into one flat dist/ dir keyed by the catalog's own
+# manifest_path/artifact_path filenames -- a single directory COPY instead of one
+# COPY-per-bundle pair, so a new catalog entry needs no COPY line added here either.
+COPY --from=python-bundles-builder /repo/dist/. /core-bundles/
 
 ENV CORE_BUNDLES_DIR=/core-bundles
 

@@ -5,7 +5,21 @@ name: Lurk Toggle Example Bundle (Python)
 # 1.0.3 (feature/lurk-v1): stateful lurk/unlurk rewrite -- per-community message
 # templates, 24h TTL lurk-start state, and broadcaster/mod-only config commands
 # (`set`/`enable ai`/`disable ai`/`reset`). See src/app.py's own module docstring.
-version: 1.0.3
+# 1.0.4 (fix/bump-count-lurk-1.0.4): version-only bump to republish the colon-free `kv` key
+# fix (gh-631, #638) -- app_versions is immutable per (app_id, version).
+# 1.0.5 (fix/lurk-silent-missing-community, gh-655): dispatch() now replies to chat before
+# raising on the "no community" path (fail-loud, matching `_fail_kv`'s own shape), instead of
+# only logging -- the tenant-wide activation (`community_id: null`) hit this on every message,
+# leaving `!lurk` totally silent in Discord.
+# 1.0.6 (this task): dispatch() now actually FUNCTIONS under the tenant-wide sentinel
+# (`community=None`) instead of only replying with an error -- `community is None` is the
+# host's own deliberate tenant-wide signal (`core/bundle_active_set/src/scope.rs::
+# resolve_scope`'s `community_id == 0`), not a bug, and is scoped under
+# `waddle_sdk.community_kv.TENANT_WIDE_SENTINEL` ("0"), same as `community_kv` itself now
+# does. Only an empty-string `community` (never emitted by the host) still fails loud.
+# app_versions is immutable per (app_id, version), so this bump is required to republish the
+# fixed wasm.
+version: 1.0.6
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -53,6 +67,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.3"
-  min_version: "1.0.3"
+  tested_with: "1.0.6"
+  min_version: "1.0.6"
   max_version: null

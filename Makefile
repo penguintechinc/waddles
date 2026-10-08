@@ -4,7 +4,8 @@
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
         build-superpenguin-roll-bundle test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
-        test-bundle-flag-on-command-e2e
+        test-bundle-flag-on-command-e2e \
+        check-no-stubs
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -52,6 +53,15 @@ check-wait-for-hub-api:
 # Deployments). See scripts/check_alpha_deploy_no_wait.py's module docstring.
 check-alpha-deploy-no-wait:
 	@python3 scripts/check_alpha_deploy_no_wait.py
+
+# No-stubs / no-silent-fallbacks gate (gh-regression: a `flags capability not
+# wired -- TODO(M4+)` stub returned a silent default and shipped as "done",
+# causing a multi-hour alpha outage). Scans non-test core/hub_api/sdk/bundles/
+# frontend source for stub markers + semgrep silent-fallback patterns against
+# .ci/stub-allowlist.yml + .ci/silent-fallback-baseline.json. Requires
+# `semgrep` on PATH (pinned in CI; see scripts/ci/semgrep-silent-fallback.yml).
+check-no-stubs:
+	@bash scripts/ci/check-no-stubs.sh
 
 test:
 	@$(MAKE) test-unit

@@ -15,7 +15,9 @@ import types
 from typing import Any
 
 import pytest
+from waddle_sdk.community_kv import TENANT_WIDE_SENTINEL
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.kv import validate_key
 
 from app import (
     DEFAULT_LURK_TEMPLATE,
@@ -38,7 +40,7 @@ def _run(coro: Any) -> Any:
 
 def _expected_state_key(community: str, actor: str | None) -> str:
     pseudonym = hashlib.sha256((actor or "anonymous").encode()).hexdigest()
-    return f"lurk:state:{community}:{pseudonym}"
+    return f"lurk.state.{community}.{pseudonym}"
 
 
 def _sample_event(
@@ -93,29 +95,39 @@ def _install(
     kv_delete_raises: Exception | None = None,
 ) -> None:
     def kv_get(key: str) -> bytes | None:
+        # regression: gh-631 -- validates exactly like the real `bundle_host_kv`
+        # host capability (`core/bundle_host_kv/src/scope.rs::is_allowed_key_byte`,
+        # mirrored by `waddle_sdk.kv.validate_key`). The old fake accepted any
+        # key, including the `:`-containing ones lurk originally shipped, so a
+        # production-breaking key passed every test here -- never again.
+        validate_key(key)
         host.kv_calls.append(("get", key))
         if kv_get_raises is not None:
             raise kv_get_raises
         return host.store.get(key)
 
     def kv_set(key: str, value: bytes, ttl: int) -> None:
+        validate_key(key)
         host.kv_calls.append(("set", key, bytes(value), ttl))
         if kv_set_raises is not None:
             raise kv_set_raises
         host.store[key] = bytes(value)
 
     def kv_delete(key: str) -> None:
+        validate_key(key)
         host.kv_calls.append(("delete", key))
         if kv_delete_raises is not None:
             raise kv_delete_raises
         host.store.pop(key, None)
 
+    def kv_increment(key: str, delta: int, ttl: int) -> int:
+        validate_key(key)
+        return 1
+
     flags_mod = types.SimpleNamespace(
         enabled=lambda key, default_value: True, tier=lambda: host.tier
     )
-    kv_mod = types.SimpleNamespace(
-        get=kv_get, set=kv_set, delete=kv_delete, increment=lambda k, d, t: 1
-    )
+    kv_mod = types.SimpleNamespace(get=kv_get, set=kv_set, delete=kv_delete, increment=kv_increment)
     # `waddle_sdk.relay.push` already serializes `message` to canonical JSON text
     # before calling this import -- `msg` here is already a JSON string, not a dict.
     relay_mod = types.SimpleNamespace(
@@ -326,11 +338,54 @@ def test_dispatch_uses_the_communitys_custom_lurk_template(fake_host: _FakeHost)
 # -- community scoping --------------------------------------------------------
 
 
-def test_dispatch_raises_when_community_is_missing(fake_host: _FakeHost) -> None:
+def test_dispatch_functions_under_the_tenant_wide_sentinel(fake_host: _FakeHost) -> None:
+    """Regression: this task -- alpha's tenant-wide activation must make `!lurk` reply.
+
+    Alpha's only activation (`community_id: null` -> `envelope.community=None`) must make
+    `!lurk` actually reply, not merely fail less silently. Supersedes gh-655/1.0.5, which
+    replied with an error and still raised.
+    """
     envelope = _sample_envelope("twitch", "lurk", community=None)
+    result = _run(dispatch(envelope, {}, http_client=None))
+
+    assert result.detail == "lurk"
+    op, key, _value, _ttl = fake_host.kv_calls[0]
+    assert op == "set"
+    assert key == _expected_state_key(TENANT_WIDE_SENTINEL, "viewer-1")
+    provider, message_json = fake_host.relay_calls[0]
+    assert provider == "twitch"
+    assert json.loads(message_json) == {
+        "channel": "12345",
+        "text": "viewer-1 is now lurking \U0001f440",
+    }
+
+
+def test_dispatch_raises_and_replies_when_community_is_empty_string(
+    fake_host: _FakeHost,
+) -> None:
+    """An empty-string `community` is still fatal, unlike `None`.
+
+    The host never emits an empty string (only `None`, the tenant-wide sentinel, does), so
+    this can only be a caller-side bug.
+
+    Regression: gh-655 -- `!lurk` was completely silent in chat under this path.
+    The tenant-wide sentinel (`community=None`) used to hit this exact guard and
+    log `lurk.missing_community` without ever calling `relay.push`, so the caller
+    saw nothing at all; `None` now takes the tenant-wide path above instead, but
+    `""` still exercises this fail-loud guard (same shape as `_fail_kv`): log AND
+    reply, then raise.
+    """
+    envelope = _sample_envelope("twitch", "lurk", community="")
     with pytest.raises(ValueError, match="community"):
         _run(dispatch(envelope, {}, http_client=None))
+
     assert fake_host.kv_calls == []
+    assert fake_host.relay_calls, "lurk must never fail silently -- a chat reply is required"
+    provider, message_json = fake_host.relay_calls[-1]
+    assert provider == "twitch"
+    assert "community" in json.loads(message_json)["text"].lower()
+    error_logs = [(lvl, m) for lvl, m, _f in fake_host.log_calls if m == "lurk.missing_community"]
+    assert error_logs
 
 
 def test_different_communities_never_share_lurk_state(fake_host: _FakeHost) -> None:
@@ -688,3 +743,33 @@ def test_unlurk_usage_reply_for_unrecognized_subcommand(fake_host: _FakeHost) ->
     assert result.detail == "usage"
     provider, message_json = fake_host.relay_calls[-1]
     assert "Usage" in json.loads(message_json)["text"]
+
+
+# regression: gh-631 -- `_state_key`/`_message_key`/`_ai_key` originally used `:` as their
+# segment separator (`"lurk:state:{community}:{pseudonym}"`, etc). The real `bundle_host_kv`
+# host capability (`core/bundle_host_kv/src/scope.rs::is_allowed_key_byte`) reserves `:` as
+# its own namespace separator and rejects any guest key containing one -- every real `kv`
+# call this bundle made failed in production with `kv.error::backend`, invisible to this
+# whole test suite because the old fake `kv` host accepted any key. `fake_host` (via
+# `_install`'s `validate_key()` calls) now enforces the same charset as the real host, so a
+# regression back to `:` fails here, not in production.
+def test_kv_key_helpers_contain_no_colon() -> None:
+    assert ":" not in _state_key("comm-1", "viewer-1")
+    assert ":" not in _message_key("comm-1")
+    assert ":" not in _ai_key("comm-1")
+
+
+def test_kv_key_helpers_satisfy_host_guest_key_charset() -> None:
+    # Raises if any byte falls outside the real host's allowed charset.
+    validate_key(_state_key("comm-1", "viewer-1"))
+    validate_key(_message_key("comm-1"))
+    validate_key(_ai_key("comm-1"))
+
+
+def test_colon_key_is_rejected_before_any_host_call() -> None:
+    """A colon-containing key fails fast at the SDK boundary, exactly like the real host."""
+    from waddle_sdk import kv
+    from waddle_sdk.kv import InvalidKvKeyError
+
+    with pytest.raises(InvalidKvKeyError, match="characters outside"):
+        _run(kv.get(f"lurk:state:comm-1:{'x' * 10}"))

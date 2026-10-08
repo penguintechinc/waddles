@@ -907,9 +907,20 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                     .and_then(|v| v.as_u64())
                     .and_then(|v| u32::try_from(v).ok())
                     .unwrap_or(0);
+                let order_by = match parse_order_by(&call.args) {
+                    Ok(o) => o,
+                    Err(e) => return Err(e),
+                };
                 return db
                     .host
-                    .query(&db_scope, &db.schemas, &db.capabilities, limit, offset)
+                    .query(
+                        &db_scope,
+                        &db.schemas,
+                        &db.capabilities,
+                        limit,
+                        offset,
+                        order_by,
+                    )
                     .await
                     .map(|rows| {
                         serde_json::json!({
@@ -989,6 +1000,45 @@ fn json_to_db_value(v: &serde_json::Value) -> Result<DbValue, HostResultError> {
             ))
         }
     })
+}
+
+/// Parses `query`'s optional `order_by` arg: `{"random": true}` or
+/// `{"column": "<name>", "descending": <bool>}` -- `None`/absent means the
+/// backend's own default (`row_id ASC`). Column-name validation itself
+/// happens host-side in `bundle_host_db::backend::order_by_sql` (never
+/// trusted from this JSON alone) -- this function only shapes the
+/// wire-level args into [`bundle_host_db::OrderBy`]. Mirrors
+/// `svc_process::capabilities::parse_order_by` (not shared/exported from
+/// `bundle_host_db`, so duplicated here).
+fn parse_order_by(
+    args: &serde_json::Value,
+) -> Result<Option<bundle_host_db::OrderBy>, HostResultError> {
+    let Some(order_by) = args.get("order_by") else {
+        return Ok(None);
+    };
+    if order_by.is_null() {
+        return Ok(None);
+    }
+    if order_by.get("random").and_then(|v| v.as_bool()) == Some(true) {
+        return Ok(Some(bundle_host_db::OrderBy::Random));
+    }
+    let name = order_by
+        .get("column")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            denied(
+                "invalid_args",
+                "order_by must be {\"random\": true} or {\"column\": string, \"descending\": bool}",
+            )
+        })?;
+    let descending = order_by
+        .get("descending")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok(Some(bundle_host_db::OrderBy::Column {
+        name: name.to_string(),
+        descending,
+    }))
 }
 
 fn db_value_to_json(v: &DbValue) -> serde_json::Value {

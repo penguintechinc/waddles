@@ -382,7 +382,7 @@ class TestRouter:
             await dal.close()
         assert result is not None
         assert result.payload["text"] == (
-            "\U0001f427 penguinzplays — Global: 600 (Trusted) · waddlebot: 720 (Respected)"
+            "\U0001f427 penguinzplays — Tenant: 600 (Trusted) · waddlebot: 720 (Respected)"
         )
 
     async def test_rep_alias_dispatches_to_the_same_reputation_bundle(self) -> None:
@@ -410,7 +410,7 @@ class TestRouter:
             await dal.close()
         assert result is not None
         assert result.payload["text"] == (
-            "\U0001f427 stranger — Global: 600 (Trusted) · community 4: 600 (Trusted)"
+            "\U0001f427 stranger — Tenant: 600 (Trusted) · community 4: 600 (Trusted)"
         )
 
     async def test_reputation_lookup_failure_is_swallowed_gracefully(self) -> None:
@@ -626,10 +626,16 @@ async def _reputation_dal(*, seeded: bool) -> AsyncDB:
             )
         )
         await conn.execute(
-            sa_text("CREATE TABLE communities (id INTEGER, display_name TEXT, name TEXT)")
+            sa_text(
+                "CREATE TABLE communities (id INTEGER, display_name TEXT, name TEXT, "
+                "tenant_id INTEGER)"
+            )
         )
         await conn.execute(
-            sa_text("CREATE TABLE reputation_global (hub_user_id TEXT, score INTEGER)")
+            sa_text(
+                "CREATE TABLE reputation_tenant (tenant_id INTEGER, hub_user_id TEXT, "
+                "score INTEGER)"
+            )
         )
         if seeded:
             await conn.execute(
@@ -638,8 +644,10 @@ async def _reputation_dal(*, seeded: bool) -> AsyncDB:
                     "(4, 'twitch', 'penguinzplays', 'penguinzplays', 720, '42')"
                 )
             )
-            await conn.execute(sa_text("INSERT INTO communities VALUES (4, 'waddlebot', 'wb')"))
-            await conn.execute(sa_text("INSERT INTO reputation_global VALUES ('42', 600)"))
+            await conn.execute(
+                sa_text("INSERT INTO communities VALUES (4, 'waddlebot', 'wb', 900)")
+            )
+            await conn.execute(sa_text("INSERT INTO reputation_tenant VALUES (900, '42', 600)"))
     await db.reflect()
     return db
 

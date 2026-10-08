@@ -12,7 +12,7 @@
 # rust-bundle-builder stage to close that gap (see that file's own comment block for what each
 # pin closes).
 #
-# waddles.core.example.pyping (python-bundle-builder stage, componentize-py) is INTENTIONALLY
+# waddles.core.example.pyping (python-bundles-builder stage, componentize-py) is INTENTIONALLY
 # EXCLUDED from this gate -- it is NOT currently reproducible even with
 # PYTHONHASHSEED/SOURCE_DATE_EPOCH/TZ/LC_ALL pinned (suspected CPython/componentize-py
 # "wizening" heap-snapshot sensitivity to ASLR-driven memory addresses, not a hash-seed issue;

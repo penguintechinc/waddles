@@ -302,6 +302,9 @@ pipeline:
         FLAG_WADDLES_COMMAND_ROLL: "true"
         FLAG_WADDLES_COMMAND_LURK: "true"
         FLAG_WADDLES_COMMAND_COUNT: "true"
+        # PR #615 (waddles.core.example.command, custom text commands/timers) --
+        # same Docker ENV baseline convention as the 4 flags above.
+        FLAG_WADDLES_COMMAND_CUSTOMCOMMANDS: "true"
       resources:
         requests: { cpu: "100m", memory: "128Mi" }
         limits: { cpu: "500m", memory: "512Mi" }

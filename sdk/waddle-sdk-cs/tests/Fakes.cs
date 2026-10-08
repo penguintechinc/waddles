@@ -55,8 +55,13 @@ public sealed class DenyingKvClient : IKvClient
 
 public sealed class DenyingDbClient : IDbClient
 {
-    public DbRows Execute(string statement, IReadOnlyList<DbValue> parameters) =>
-        throw new WaddleDbException(DbErrorKind.Denied, "db capability denied by host");
+    private static WaddleDbException Denied() => new(DbErrorKind.Denied, "db capability denied by host");
+
+    public DbRow Insert(IReadOnlyList<DbColumnValue> columnValues) => throw Denied();
+    public DbRow Get(string rowId) => throw Denied();
+    public IReadOnlyList<DbRow> Query(uint limit, uint offset, DbOrderBy? orderBy = null) => throw Denied();
+    public DbRow Update(string rowId, ulong expectedVersion, IReadOnlyList<DbColumnValue> columnValues) => throw Denied();
+    public void Delete(string rowId, ulong expectedVersion) => throw Denied();
 }
 
 /// <summary>An <see cref="IKvClient"/> that throws a caller-supplied exception from
@@ -87,12 +92,69 @@ public sealed class FakeRelayClient : IRelayClient
     }
 }
 
+/// <summary>
+/// In-memory <see cref="IDbClient"/> fake -- one table, string-keyed by a
+/// counter-assigned `RowId`, enforcing `Update`/`Delete`'s `expectedVersion`
+/// optimistic-concurrency gate the same way the real host does.
+/// </summary>
 public sealed class FakeDbClient : IDbClient
 {
-    public DbRows? NextResult { get; set; }
+    private readonly Dictionary<string, (ulong Version, List<DbColumnValue> Columns)> _rows = [];
+    private int _nextRowId = 1;
 
-    public DbRows Execute(string statement, IReadOnlyList<DbValue> parameters) =>
-        NextResult ?? new DbRows([], [], 0);
+    public DbRow Insert(IReadOnlyList<DbColumnValue> columnValues)
+    {
+        var rowId = (_nextRowId++).ToString();
+        var columns = new List<DbColumnValue>(columnValues);
+        _rows[rowId] = (1, columns);
+        return new DbRow(rowId, 1, columns);
+    }
+
+    public DbRow Get(string rowId) =>
+        _rows.TryGetValue(rowId, out var row)
+            ? new DbRow(rowId, row.Version, row.Columns)
+            : throw new WaddleDbException(DbErrorKind.NotFound, $"row {rowId} not found");
+
+    public IReadOnlyList<DbRow> Query(uint limit, uint offset, DbOrderBy? orderBy = null) =>
+        _rows
+            .OrderBy(kv => int.Parse(kv.Key))
+            .Skip((int)offset)
+            .Take((int)limit)
+            .Select(kv => new DbRow(kv.Key, kv.Value.Version, kv.Value.Columns))
+            .ToList();
+
+    public DbRow Update(string rowId, ulong expectedVersion, IReadOnlyList<DbColumnValue> columnValues)
+    {
+        if (!_rows.TryGetValue(rowId, out var row))
+        {
+            throw new WaddleDbException(DbErrorKind.NotFound, $"row {rowId} not found");
+        }
+
+        if (row.Version != expectedVersion)
+        {
+            throw new WaddleDbException(DbErrorKind.Conflict, $"expected version {expectedVersion}, actual {row.Version}");
+        }
+
+        var nextVersion = row.Version + 1;
+        var columns = new List<DbColumnValue>(columnValues);
+        _rows[rowId] = (nextVersion, columns);
+        return new DbRow(rowId, nextVersion, columns);
+    }
+
+    public void Delete(string rowId, ulong expectedVersion)
+    {
+        if (!_rows.TryGetValue(rowId, out var row))
+        {
+            throw new WaddleDbException(DbErrorKind.NotFound, $"row {rowId} not found");
+        }
+
+        if (row.Version != expectedVersion)
+        {
+            throw new WaddleDbException(DbErrorKind.Conflict, $"expected version {expectedVersion}, actual {row.Version}");
+        }
+
+        _rows.Remove(rowId);
+    }
 }
 
 public sealed class FakeHttpClient : IHttpClient

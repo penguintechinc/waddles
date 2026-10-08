@@ -272,3 +272,149 @@ class TestRoleSyncBindings:
     ) -> None:
         dal, community_id, _tenant_id, _global_id = bar_citizen_db
         assert svc.delete_binding(dal, community_id, pairing_id, 9999) is False
+
+
+class TestCommunityRoleBindings:
+    """`sync_scope="community_role"` (migration 0036) -- the Discord -> platform direction."""
+
+    @pytest.fixture
+    def pairing_id(self, bar_citizen_db: Any) -> int:
+        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        pairing = svc.create_pairing(
+            dal,
+            community_id,
+            discord_guild_id="334",
+            direction="discord_to_twitch",
+            role_name_prefix="[CR]",
+            actor_user_id=None,
+        )
+        return pairing.id
+
+    def test_create_community_role_binding(self, bar_citizen_db: Any, pairing_id: int) -> None:
+        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        binding = svc.create_binding(
+            dal,
+            community_id,
+            pairing_id,
+            sync_scope="community_role",
+            discord_role_id="901",
+            community_role="moderator",
+        )
+        assert binding.sync_scope == "community_role"
+        assert binding.community_role == "moderator"
+        assert binding.subscriber_tier is None
+
+    def test_community_role_requires_role_value(self, bar_citizen_db: Any, pairing_id: int) -> None:
+        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        with pytest.raises(ApiError) as excinfo:
+            svc.create_binding(
+                dal, community_id, pairing_id, sync_scope="community_role", discord_role_id="1"
+            )
+        assert excinfo.value.status_code == 400
+
+    def test_community_role_rejects_unknown_role_name(
+        self, bar_citizen_db: Any, pairing_id: int
+    ) -> None:
+        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        with pytest.raises(ApiError) as excinfo:
+            svc.create_binding(
+                dal,
+                community_id,
+                pairing_id,
+                sync_scope="community_role",
+                discord_role_id="1",
+                community_role="community-owner",
+            )
+        assert excinfo.value.status_code == 400
+
+    def test_community_role_rejects_tier_value(self, bar_citizen_db: Any, pairing_id: int) -> None:
+        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        with pytest.raises(ApiError) as excinfo:
+            svc.create_binding(
+                dal,
+                community_id,
+                pairing_id,
+                sync_scope="community_role",
+                discord_role_id="1",
+                community_role="member",
+                subscriber_tier=1,
+            )
+        assert excinfo.value.status_code == 400
+
+    def test_distinct_discord_roles_may_map_to_same_or_different_community_roles(
+        self, bar_citizen_db: Any, pairing_id: int
+    ) -> None:
+        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        svc.create_binding(
+            dal,
+            community_id,
+            pairing_id,
+            sync_scope="community_role",
+            discord_role_id="1",
+            community_role="member",
+        )
+        svc.create_binding(
+            dal,
+            community_id,
+            pairing_id,
+            sync_scope="community_role",
+            discord_role_id="2",
+            community_role="community-admin",
+        )
+        result = svc.list_bindings(dal, community_id, pairing_id)
+        assert {(b.discord_role_id, b.community_role) for b in result} == {
+            ("1", "member"),
+            ("2", "community-admin"),
+        }
+
+    def test_duplicate_discord_role_as_community_role_is_conflict(
+        self, bar_citizen_db: Any, pairing_id: int
+    ) -> None:
+        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        svc.create_binding(
+            dal,
+            community_id,
+            pairing_id,
+            sync_scope="community_role",
+            discord_role_id="1",
+            community_role="member",
+        )
+        with pytest.raises(ApiError) as excinfo:
+            svc.create_binding(
+                dal,
+                community_id,
+                pairing_id,
+                sync_scope="community_role",
+                discord_role_id="1",
+                community_role="vip",
+            )
+        assert excinfo.value.status_code == 409
+
+    def test_same_discord_role_cannot_be_bound_both_directions(
+        self, bar_citizen_db: Any, pairing_id: int
+    ) -> None:
+        """Structural loop-prevention (migration 0036): one role, one direction, per pairing."""
+        dal, community_id, _tenant_id, _global_id = bar_citizen_db
+        svc.create_binding(
+            dal, community_id, pairing_id, sync_scope="moderator", discord_role_id="999"
+        )
+        with pytest.raises(ApiError) as excinfo:
+            svc.create_binding(
+                dal,
+                community_id,
+                pairing_id,
+                sync_scope="community_role",
+                discord_role_id="999",
+                community_role="member",
+            )
+        assert excinfo.value.status_code == 409
+
+        with pytest.raises(ApiError) as excinfo2:
+            svc.create_binding(
+                dal,
+                community_id,
+                pairing_id,
+                sync_scope="moderator",
+                discord_role_id="999",
+            )
+        assert excinfo2.value.status_code == 409

@@ -26,7 +26,7 @@ impl ProcessGuest for Component {
                 format!("{:?}", got.map(|v| String::from_utf8_lossy(&v).into_owned()))
             }
             "db-roundtrip" => {
-                let result = db::execute("SELECT 1", &[]);
+                let result = db::insert(&[]);
                 format!("{:?}", result.is_ok())
             }
             "log-write" => {
