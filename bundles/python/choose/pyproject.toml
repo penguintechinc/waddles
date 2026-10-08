@@ -1,0 +1,13 @@
+[project]
+name = "waddle-bundle-choose"
+version = "1.0.0"
+description = "`!choose a | b | c` (or space-separated) -> a random pick from the caller's own options. Relay only, no kv/db state. Python equivalent of bundles/python/pyping, modeled on its hand-built (not bundle_compiler-routed) structure, same shape as bundles/python/eightball."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
