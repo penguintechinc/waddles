@@ -549,6 +549,7 @@ async def _decrement_item(
             row_id, _mutate_decrement, provider=provider, channel_id=channel_id
         )
     except _InsufficientQuantityError:
+        log.debug("inventory.decrement_skipped", row_id=row_id, reason="already_zero")
         return None
     new_quantity = int(updated["quantity"])
     if new_quantity == 0:
