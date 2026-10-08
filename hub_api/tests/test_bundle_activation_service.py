@@ -22,6 +22,7 @@ from services.bundle_approval_service import (
     activate_for_community,
     activate_tenant_wide,
     deactivate_for_community,
+    deactivate_tenant_wide,
 )
 from services.bundle_install_dal import raw_sql_rows
 from services.errors import ApiError
@@ -843,3 +844,78 @@ async def test_activate_tenant_wide_zero_matching_sources_binds_nothing(install_
 
     assert not await _bindings(install_dal, app_id="waddles.socials.music.default")
     fake_client.xgroup_create.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# `deactivate_tenant_wide()` -- symmetric sibling of `activate_tenant_wide()`
+# (requirement: "uninstall should delete them just like install adds them,
+# otherwise our scale will get out of sync" -- the sentinel-write path needs
+# the same hard-delete-the-runtime-row guarantee `deactivate_for_community()`
+# already provides for a real community id).
+# ---------------------------------------------------------------------------
+
+
+async def test_deactivate_tenant_wide_unknown_raises_404(install_dal: Any) -> None:
+    with pytest.raises(ApiError) as exc:
+        await deactivate_tenant_wide(
+            install_dal,
+            tenant_id=1,
+            app_id="waddles.socials.music.default",
+            deactivated_by=None,
+        )
+    assert exc.value.status_code == 404
+
+
+async def test_deactivate_tenant_wide_removes_pointer(install_dal: Any) -> None:
+    """The sentinel `app_active_versions` row (community_id=0) is HARD-deleted, not disabled."""
+    await _install_and_make_available(install_dal)
+    await activate_tenant_wide(
+        install_dal,
+        tenant_id=1,
+        app_id="waddles.socials.music.default",
+        activated_by=None,
+        valkey_client=AsyncMock(),
+    )
+    active_before = (
+        await install_dal(
+            (install_dal.app_active_versions.app_id == "waddles.socials.music.default")
+            & (install_dal.app_active_versions.tenant_id == 1)
+            & (install_dal.app_active_versions.community_id == TENANT_WIDE_COMMUNITY_SENTINEL)
+        ).select()
+    ).first()
+    assert active_before is not None
+
+    await deactivate_tenant_wide(
+        install_dal,
+        tenant_id=1,
+        app_id="waddles.socials.music.default",
+        deactivated_by=None,
+    )
+
+    active_after = await install_dal(
+        (install_dal.app_active_versions.app_id == "waddles.socials.music.default")
+        & (install_dal.app_active_versions.tenant_id == 1)
+        & (install_dal.app_active_versions.community_id == TENANT_WIDE_COMMUNITY_SENTINEL)
+    ).select()
+    assert not active_after  # regression: the row must be GONE, not merely disabled
+
+
+async def test_deactivate_tenant_wide_clears_bindings(install_dal: Any) -> None:
+    await _install_and_make_available(install_dal)
+    await _seed_ingest_source(install_dal, community_id=None, source_id="tw-a")
+    await activate_tenant_wide(
+        install_dal,
+        tenant_id=1,
+        app_id="waddles.socials.music.default",
+        activated_by=None,
+        valkey_client=AsyncMock(),
+    )
+    assert await _bindings(install_dal, app_id="waddles.socials.music.default")
+
+    await deactivate_tenant_wide(
+        install_dal,
+        tenant_id=1,
+        app_id="waddles.socials.music.default",
+        deactivated_by=None,
+    )
+    assert not await _bindings(install_dal, app_id="waddles.socials.music.default")
