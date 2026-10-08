@@ -164,6 +164,22 @@ pub struct CliConfig {
     #[arg(long, env = "BUNDLE_MAX_COMPONENT_BYTES", default_value_t = 33_554_432)]
     pub bundle_max_component_bytes: u64,
 
+    /// JSON object mapping `key_id -> base64(32-byte Ed25519 public key)`
+    /// (spec SS5.6/Gemini condition 9) -- the platform key(s)
+    /// `crate::signing::verify_artifact_signature` checks a bundle's
+    /// signed sidecar against, supporting rotation via multiple entries.
+    /// `Option` (rather than required) for the same reason
+    /// `bundle_bucket_endpoint` is: every existing test's `CliConfig`
+    /// fixture keeps parsing without setting it, and `crate::invoke::
+    /// Executor::new` treats an unset/blank value as "verification off"
+    /// (`crate::signing::PlatformPublicKeys::from_cli`) -- but the real
+    /// production path (`crate::lib::run`, via `PlatformPublicKeys::
+    /// from_cli_required`) fails closed at startup if it's unset, so that
+    /// "off" state is never reachable outside a test that never claimed
+    /// to enforce signatures in the first place.
+    #[arg(long, env = "BUNDLE_SIGNING_PUBLIC_KEYS")]
+    pub bundle_signing_public_keys: Option<String>,
+
     /// Interval between `crate::heartbeat`'s liveness checks (and, when
     /// `EXECUTOR_SELF_PING_ENABLED` is set, this executor's own `ping`
     /// frames). A connection is declared stale after
@@ -240,6 +256,7 @@ impl CliConfig {
             bundle_bucket_ca_file: None,
             bundle_fetch_timeout_s: 30,
             bundle_max_component_bytes: 33_554_432,
+            bundle_signing_public_keys: None,
             executor_heartbeat_interval_secs: 5,
             executor_heartbeat_enabled: true,
             executor_self_ping_enabled: false,
@@ -342,6 +359,7 @@ mod tests {
         assert_eq!(cfg.bundle_bucket_region, "us-east-1");
         assert_eq!(cfg.bundle_fetch_timeout_s, 30);
         assert_eq!(cfg.bundle_max_component_bytes, 33_554_432);
+        assert!(cfg.bundle_signing_public_keys.is_none());
         Ok(())
     }
 
@@ -357,6 +375,20 @@ mod tests {
         assert!(cfg.bundle_bucket_secret_access_key.is_none());
         assert!(cfg.bundle_bucket_ca_file.is_none());
         assert_eq!(cfg.bundle_bucket_region, "us-east-1");
+        assert!(cfg.bundle_signing_public_keys.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn bundle_signing_public_keys_parses_from_its_env_flag(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut args = base_args();
+        args.extend_from_slice(&["--bundle-signing-public-keys", r#"{"k1":"AAAA"}"#]);
+        let cfg = CliConfig::try_parse_from(args)?;
+        assert_eq!(
+            cfg.bundle_signing_public_keys.as_deref(),
+            Some(r#"{"k1":"AAAA"}"#)
+        );
         Ok(())
     }
 
