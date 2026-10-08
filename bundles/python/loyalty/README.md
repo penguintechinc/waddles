@@ -38,7 +38,7 @@ username) and `balance` (integer point total).
 
 The committed `wit/waddle-bundle/stage.wit` `db` interface has no column-equality lookup -- only
 `insert`/`get(row_id)`/`query(limit, offset, order_by)`/`update`/`delete`. This bundle therefore
-also uses `kv` (`storage.kv`) as a lookup index, `loyalty:rowid:<pseudonym> -> row_id`, so a
+also uses `kv` (`storage.kv`) as a lookup index, `loyalty.rowid.<pseudonym> -> row_id`, so a
 single user's balance lookup/adjustment is an O(1) kv read + an exact `db.get`/`db.update`
 rather than an unbounded table scan (`db.query()`'s `limit` is host-clamped to 200 rows). The
 leaderboard is the one operation that genuinely needs `db.query(order_by="balance",

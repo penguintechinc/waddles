@@ -44,7 +44,7 @@ older design-doc revision that described a richer `indexed-column` filter
 that was not what actually landed). There is therefore no way to look up
 "the row for this specific user" by anything other than its platform-
 assigned `row_id`. This bundle keeps a `community_kv` index,
-`loyalty:rowid:<pseudonym> -> row_id`, so a single user's balance lookup/
+`loyalty.rowid.<pseudonym> -> row_id`, so a single user's balance lookup/
 adjustment is an O(1) kv read followed by an exact `db.get`/`db.update`,
 never an unbounded table scan (which would also be wrong at scale: `db
 .query()`'s `limit` is host-clamped to 200 rows,
@@ -102,7 +102,7 @@ FLAG_KEY = "waddles.command-loyalty"
 #: documented `!points <user>` shape the shared grammar alone cannot express.
 SPEC = CommandSpec(name="points", sub_modules=frozenset({"top"}))
 
-_INDEX_KEY_PREFIX = "loyalty:rowid:"
+_INDEX_KEY_PREFIX = "loyalty.rowid."
 _LEADERBOARD_SIZE = 10
 #: Bounded optimistic-concurrency retry budget for `!points add/sub` -- see
 #: `_db_update_with_retry()`. Five attempts absorbs ordinary concurrent-writer
