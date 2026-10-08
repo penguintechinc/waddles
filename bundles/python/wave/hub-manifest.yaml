@@ -1,0 +1,37 @@
+# hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
+# waddles.core.example.wave -- see bundles/python/pyping/hub-manifest.yaml's own header for why
+# this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
+schema_version: 2
+app_id: waddles.core.example.wave
+name: Wave Example Bundle (Python)
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+language: python
+artifact: prebuilt
+execution_model: native
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!wave"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!wave"]
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions: []
+routes_to: []
