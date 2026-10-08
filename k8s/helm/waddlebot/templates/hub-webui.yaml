@@ -119,4 +119,31 @@ spec:
   selector:
     {{- include "waddlebot.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: hub-webui-v3
+{{- if .Values.pipeline.hubWebui.nodePort.enabled }}
+---
+# Alpha-only direct host-IP exposure (no /etc/hosts or Host-header routing needed),
+# mirroring how svc-streaming.yaml templates svc-streaming-media's second Service. A
+# second, separate Service rather than switching the ClusterIP Service above to NodePort,
+# so the hostname Ingress path (waddles.localhost.local) keeps working unchanged. Gated on
+# pipeline.hubWebui.nodePort.enabled, which only values-alpha.yaml sets true -- base/beta/
+# gamma/production stay ClusterIP+Ingress-only (no NodePort in prod per security.md).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-hub-webui-hostip
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: hub-webui-v3
+spec:
+  type: NodePort
+  ports:
+  - port: {{ .Values.pipeline.hubWebui.port }}
+    targetPort: http
+    protocol: TCP
+    name: http
+    nodePort: {{ .Values.pipeline.hubWebui.nodePort.port }}
+  selector:
+    {{- include "waddlebot.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: hub-webui-v3
+{{- end }}
 {{- end }}
