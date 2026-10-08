@@ -75,6 +75,7 @@ pub mod distribution;
 pub mod egress;
 pub mod error;
 pub mod flags;
+pub mod grant_gate;
 pub mod hop;
 pub mod host_api;
 pub mod http;
@@ -296,6 +297,15 @@ where
     let bundle_loader_excluded_metric =
         telemetry::register_bundle_loader_excluded_metrics(&prom_registry);
     let changelog_consumer_metrics = telemetry::register_changelog_consumer_metrics(&prom_registry);
+    // Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
+    // the live, poll-refreshed `app_id -> (digest, app_versions.id)`
+    // snapshot `dispatch::handle_delivered` resolves PER INVOCATION so
+    // `bundle_capability_gate::authorize()` is never called with a
+    // hardcoded `app_version: 0` -- see `dispatch::DispatchDeps::
+    // app_version_snapshot`'s doc. Fed by `try_start_changelog_consumer`
+    // below on every tick; `try_start_dispatch` seeds a one-shot sentinel
+    // when the DB-driven path is unconfigured.
+    let app_version_snapshot = bundle_active_set::ActiveVersionSnapshot::new();
     // regression: svc-action had no multi-tenant dispatch consumers; replies
     // never sent after legacy env removal (alpha 2026-10-03)
     let dispatch_supervisor_metrics =
@@ -352,6 +362,7 @@ where
         Arc::clone(&kv_capabilities),
         egress_denied_total,
         license.clone(),
+        config.db_reader_password.clone(),
         host_api_metrics,
         hub_client_conn,
     );
@@ -416,6 +427,7 @@ where
                 dispatch_supervisor_metrics,
                 Arc::clone(&usage),
                 changelog_consumer_ready,
+                app_version_snapshot.clone(),
             );
         }
         PathDecision::NoDbConfig | PathDecision::KillSwitchOn => {
@@ -439,6 +451,7 @@ where
                 Arc::clone(&connections),
                 Arc::clone(&usage),
                 license.clone(),
+                app_version_snapshot.clone(),
                 drain_loop_metrics,
                 consumer_loop_ready,
             );
@@ -567,6 +580,60 @@ fn flag_or_closed(
     }
 }
 
+/// Builds (never connects) a [`redis::Client`] from `cfg`'s `VALKEY_URL`/
+/// username/password/TLS/CA-file settings -- the same client-construction
+/// logic as `crate::usage::connect` (duplicated rather than shared: that
+/// function also opens the connection and returns
+/// `Result<MultiplexedConnection, UsageError>`, not the reusable
+/// `redis::Client` `grant_gate::build_production_gate`'s caller needs to
+/// hand to `run_grant_gate_refresh_loop`). `None` (logged) on a malformed
+/// `VALKEY_URL` or a TLS client-build failure.
+fn build_redis_client(cfg: &penguin_spine::SpineConfig) -> Option<redis::Client> {
+    use redis::IntoConnectionInfo;
+
+    let info: redis::ConnectionInfo = match cfg.valkey_url.as_str().into_connection_info() {
+        Ok(info) => info,
+        Err(err) => {
+            tracing::warn!(error = %err, "invalid VALKEY_URL; Valkey-backed features disabled");
+            return None;
+        }
+    };
+    let mut settings = info.redis_settings().clone();
+    if let Some(username) = &cfg.valkey_username {
+        settings = settings.set_username(username);
+    }
+    if let Some(password) = &cfg.valkey_password {
+        settings = settings.set_password(password);
+    }
+    let info = info.set_redis_settings(settings);
+
+    if cfg.security_transport_tls {
+        crate::crypto::ensure_crypto_provider_installed();
+        let root_cert = std::fs::read(&cfg.valkey_ca_file).ok();
+        match redis::Client::build_with_tls(
+            info,
+            redis::TlsCertificates {
+                client_tls: None,
+                root_cert,
+            },
+        ) {
+            Ok(client) => Some(client),
+            Err(err) => {
+                tracing::warn!(error = %err, "TLS Valkey client build failed; Valkey-backed features disabled");
+                None
+            }
+        }
+    } else {
+        match redis::Client::open(info) {
+            Ok(client) => Some(client),
+            Err(err) => {
+                tracing::warn!(error = %err, "Valkey client build failed; Valkey-backed features disabled");
+                None
+            }
+        }
+    }
+}
+
 /// Builds the production `http` capability's [`egress::EgressGuard`],
 /// wired with the cluster CIDR denylist and instance-wide private-IP
 /// egress policy (`cli.cluster_cidr_denylist()`/`cli.
@@ -635,6 +702,7 @@ async fn build_stage_capabilities(
     kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     egress_denied_total: prometheus::IntCounterVec,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
+    db_reader_password: Option<config::Secret>,
     hub_client_conn: Option<Arc<hub_client::HubClient>>,
 ) -> Option<Arc<dyn capabilities::CapabilityHandler>> {
     let spine_cfg = match penguin_spine::SpineConfig::from_env() {
@@ -674,8 +742,49 @@ async fn build_stage_capabilities(
     // never on the per-op hot path (`bundle_host_kv::policy`'s doc).
     let policy_check = bundle_host_kv::policy::check_maxmemory_policy(&mut kv_conn).await;
     bundle_host_kv::policy::log_and_record(&policy_check);
+    // `core/bundle_capability_gate::CapabilityGate` (spec
+    // `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
+    // SS5): `PgGrantLoader` against the RO-replica reader account when
+    // `DB_READER_PASSWORD` is configured (the same account
+    // `crate::changelog_consumer`'s DB-driven path uses),
+    // `InMemoryGrantLoader` (always denies every non-platform permission)
+    // otherwise -- `build_production_gate` unions the always-granted
+    // platform trio over either and spawns the push-invalidation/poll-
+    // refresh loop against this same Valkey connection's client.
+    let redis_client = build_redis_client(&spine_cfg);
+    let poll_interval = cli.bundle_config_poll_interval();
+    let gate = match db_reader_password {
+        Some(password) => {
+            let reader_cfg = bundle_active_set::ReaderConfig {
+                host: cli.db_reader_host.clone(),
+                port: cli.db_reader_port,
+                name: cli.db_reader_name.clone(),
+                user: cli.db_reader_user.clone(),
+            };
+            match bundle_active_set::reader::connect(&reader_cfg, password.expose()).await {
+                Ok(db) => grant_gate::build_production_gate(
+                    grant_gate::PgGrantLoader::new(db),
+                    redis_client,
+                    poll_interval,
+                ),
+                Err(err) => {
+                    tracing::warn!(error = %err, "grant-gate db-reader connection failed; every non-platform permission denies until the next connection attempt");
+                    grant_gate::build_production_gate(
+                        bundle_capability_gate::InMemoryGrantLoader::new(),
+                        redis_client,
+                        poll_interval,
+                    )
+                }
+            }
+        }
+        None => grant_gate::build_production_gate(
+            bundle_capability_gate::InMemoryGrantLoader::new(),
+            redis_client,
+            poll_interval,
+        ),
+    };
     let caps = capabilities::StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
-        relay_conn, egress, usage,
+        relay_conn, egress, usage, gate,
     )
     .with_kv(kv_conn, kv_capabilities);
     // Discord relay send (spec: relay providers, `discord`) -- graceful
@@ -730,6 +839,7 @@ fn try_start_host_api(
     kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     egress_denied_total: prometheus::IntCounterVec,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
+    db_reader_password: Option<config::Secret>,
     metrics: telemetry::HostApiMetrics,
     hub_client_conn: Option<Arc<hub_client::HubClient>>,
 ) -> Arc<host_api::ConnectionRegistry> {
@@ -751,6 +861,7 @@ fn try_start_host_api(
             kv_capabilities,
             egress_denied_total,
             license,
+            db_reader_password,
             hub_client_conn,
         )
         .await
@@ -995,6 +1106,12 @@ fn try_start_changelog_consumer(
     // starts, so neither health check hangs waiting on a loop that was
     // never going to run.
     changelog_consumer_ready: Arc<std::sync::atomic::AtomicBool>,
+    // Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
+    // fed to `changelog_consumer::run` below, kept current every tick so
+    // `dispatch::handle_delivered` never resolves grants against a stale
+    // `app_versions.id`. See `dispatch::DispatchDeps::app_version_snapshot`'s
+    // doc.
+    app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
@@ -1142,6 +1259,7 @@ fn try_start_changelog_consumer(
                                 rust_data_plane,
                                 active_digests: Arc::clone(&active_digests),
                                 loaded_sessions: Arc::clone(&loaded_sessions),
+                                app_version_snapshot: app_version_snapshot.clone(),
                             });
                             Some(Arc::new(dispatch_supervisor::SpineConsumerSupervisor {
                                 deps,
@@ -1188,6 +1306,7 @@ fn try_start_changelog_consumer(
             changelog_consumer_ready,
             active_digests,
             loaded_sessions,
+            app_version_snapshot,
             shutdown_rx,
         )
         .await;
@@ -1216,6 +1335,12 @@ fn try_start_dispatch(
     connections: Arc<host_api::ConnectionRegistry>,
     usage: Arc<Mutex<usage::UsageBatcher>>,
     license: Option<Arc<penguin_licensing::LicenseClient>>,
+    // Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
+    // fed the `0`-sentinel fallback below when the DB-driven changelog
+    // consumer is unconfigured, so `dispatch::handle_delivered` still has
+    // a (fail-closed) value to key grants on. See `DispatchDeps::
+    // app_version_snapshot`'s doc.
+    app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
     drain_loop_metrics: telemetry::DrainLoopMetrics,
     consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
 ) {
@@ -1255,6 +1380,30 @@ fn try_start_dispatch(
             }
         };
         let (digest, config_json) = resolve_initial_bundle(&config.cli.action_bundle_digest);
+        // `app_version_snapshot` is resolved PER INVOCATION in
+        // `dispatch::handle_delivered`, never captured once here (a bundle
+        // hot-swap must be reflected on the very next invocation, spec
+        // SS4/SS5.1). When the DB-driven changelog consumer path is
+        // unconfigured (`DB_READER_PASSWORD` unset -- `try_start_changelog_
+        // consumer`'s own gate), no poller ever populates the snapshot for
+        // this `app_id`, so seed it ONCE with the `0` sentinel here --
+        // identical posture to `core/svc_process::lib::
+        // try_start_process_loop`'s own documented unconfigured-mode
+        // fallback.
+        if config.db_reader_password.is_none() {
+            app_version_snapshot.update(&[bundle_active_set::ActiveBundleRow {
+                app_id: app_id.clone(),
+                version: String::new(),
+                version_id: 0,
+                digest: digest.clone(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+                declared_capabilities: Vec::new(),
+            }]);
+        }
         // TODO(M3+): tenant/community scope is hardcoded to the
         // tenant-wide `global` activation until multi-bundle scheduling
         // (module doc) resolves the real set of (tenant, community,
@@ -1361,6 +1510,7 @@ fn try_start_dispatch(
                 consumer_id: spine_cfg.consumer_id.clone(),
                 spine,
                 metrics: metrics.clone(),
+                app_version_snapshot: app_version_snapshot.clone(),
             };
 
             let (inner_tx, inner_rx) = tokio::sync::oneshot::channel();
@@ -1904,6 +2054,7 @@ mod tests {
             connections,
             usage,
             None,
+            bundle_active_set::ActiveVersionSnapshot::new(),
             telemetry::register_drain_loop_metrics(&prometheus::Registry::new()),
             Arc::new(std::sync::atomic::AtomicBool::new(true)),
         );
@@ -1948,6 +2099,7 @@ mod tests {
             test_dispatch_supervisor_metrics(),
             usage,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bundle_active_set::ActiveVersionSnapshot::new(),
         );
     }
 
