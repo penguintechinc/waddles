@@ -303,9 +303,7 @@ def _load_active(raw: bytes | None, *, community: str) -> dict[str, str] | None:
     return data
 
 
-async def _load_score_registry(
-    *, community: str, provider: str, channel_id: str
-) -> list[str]:
+async def _load_score_registry(*, community: str, provider: str, channel_id: str) -> list[str]:
     """Return every pseudonym that has ever scored in this community, or `[]`.
 
     Mirrors `first`'s own `_load_leaderboard_registry` -- corrupt registry
@@ -379,9 +377,7 @@ async def _handle_answer(
     text: str, *, community: str, actor: str | None, username: str, provider: str, channel_id: str
 ) -> str:
     """Check `text` against the active question; first correct guess wins and ends the round."""
-    raw = await _kv_get(
-        _ACTIVE_KEY, community=community, provider=provider, channel_id=channel_id
-    )
+    raw = await _kv_get(_ACTIVE_KEY, community=community, provider=provider, channel_id=channel_id)
     active = _load_active(raw, community=community)
     if active is None:
         return _NO_ACTIVE_QUESTION
@@ -423,7 +419,9 @@ async def _handle_score(
     scored: list[tuple[int, str]] = []
     for other_pseudonym in registry:
         other_raw = await _kv_get(
-            _score_key(other_pseudonym), community=community, provider=provider,
+            _score_key(other_pseudonym),
+            community=community,
+            provider=provider,
             channel_id=channel_id,
         )
         other_score = _parse_int(other_raw, context="other_score", community=community)
@@ -473,7 +471,9 @@ async def dispatch(
         text = payload.get("arg")
         reply_text = text if isinstance(text, str) and text else _USAGE
     elif action == "start":
-        reply_text = await _handle_start(community=community, provider=provider, channel_id=channel_id)
+        reply_text = await _handle_start(
+            community=community, provider=provider, channel_id=channel_id
+        )
     elif action == "answer":
         answer_text = payload.get("arg")
         reply_text = await _handle_answer(

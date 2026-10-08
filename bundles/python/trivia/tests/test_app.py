@@ -22,11 +22,11 @@ from waddle_sdk.kv import validate_key
 from waddle_sdk.testing import FakeKvHost, install_fake_kv_host
 
 from app import (
-    QUESTION_BANK,
+    _ACTIVE_KEY,
     _NO_ACTIVE_QUESTION,
     _SCORE_REGISTRY_KEY,
     _USAGE,
-    _ACTIVE_KEY,
+    QUESTION_BANK,
     _display_handle,
     _pseudonym,
     _score_key,
@@ -235,7 +235,9 @@ def test_correct_answer_wins_increments_score_and_ends_round(
     monkeypatch.setattr("app.random.choice", lambda seq: seq[0])
     _run(dispatch(_envelope("start"), {}, http_client=None))
 
-    result = _run(dispatch(_envelope("answer", actor="viewer-1", arg="Paris"), {}, http_client=None))
+    result = _run(
+        dispatch(_envelope("answer", actor="viewer-1", arg="Paris"), {}, http_client=None)
+    )
     assert result.detail == "answer"
     text = _relay_text(fake_host)
     assert "Correct, viewer-1" in text
@@ -278,7 +280,9 @@ def test_second_correct_answerer_loses_to_the_first(
     _run(dispatch(_envelope("answer", actor="viewer-1", arg="Paris"), {}, http_client=None))
 
     # round already ended -- viewer-2's later correct-shaped guess has nothing active to match
-    result = _run(dispatch(_envelope("answer", actor="viewer-2", arg="Paris"), {}, http_client=None))
+    result = _run(
+        dispatch(_envelope("answer", actor="viewer-2", arg="Paris"), {}, http_client=None)
+    )
     assert result.detail == "answer"
     assert _relay_text(fake_host) == _NO_ACTIVE_QUESTION
 
