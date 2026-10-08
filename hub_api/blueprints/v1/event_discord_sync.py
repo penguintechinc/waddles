@@ -6,6 +6,19 @@ approve/update/cancel) is a SEPARATE follow-up PR -- this file defines
 the clean internal contract that follow-up calls against, same split
 `event_discord_sync_service.py`'s own module docstring describes.
 
+**This follow-up PR also adds ONE more internal route here**: `POST
+.../calendar/guild-pairings/event-sync`, the write side `services.
+guild_pairing.list_event_sync_enabled_pairings()` (the push engine's own
+fan-out read) was missing -- the public, tenant-JWT-gated `PATCH
+/api/v1/communities/<id>/guild-pairings/<pairing_id>` route
+(`blueprints/v1/guild_pairing.py`) doesn't thread `event_sync_enabled`
+through yet, and `calendar_interaction_module` never holds a user JWT to
+call it anyway (hub-api's own `EventCalendarProxyClient` forwards only
+`X-API-Key` + `X-User-Context` downstream, see `services/event_calendar_
+proxy.py`). Community-wide (every paired guild at once) rather than
+per-`pairing_id`, matching the calendar module's own `/<community_id>/
+sync/enable` route shape (no `pairing_id` in that path).
+
 Service-to-service only (`X-Service-Key` against `SERVICE_API_KEY`,
 `services.community_common.is_valid_service_key()`) -- same mechanism
 every other internal blueprint in this port uses (`community_loyalty.py`'s
@@ -42,6 +55,7 @@ from typing import Any, cast
 from quart import Blueprint, current_app, request
 
 from services import event_discord_sync_service as sync_svc
+from services import guild_pairing as pairing_svc
 from services.community_common import is_valid_service_key
 from services.errors import ApiError, bad_request, not_found
 from services.schema import bind_calendar_sync_tables
@@ -101,6 +115,45 @@ async def sync_discord_event() -> tuple[dict[str, Any], int]:
 
     result = await sync_svc.sync_event(dal, event_row, action=cast(Any, action))
     return _envelope(asdict(result))
+
+
+@event_discord_sync_internal_bp.route("/calendar/guild-pairings/event-sync", methods=["POST"])
+async def set_event_sync_enabled() -> tuple[dict[str, Any], int]:
+    """`POST /api/v1/internal/calendar/guild-pairings/event-sync`.
+
+    Body: `{"community_id": int, "enabled": bool}`. Toggles `event_sync_
+    enabled` on every `guild_tenant_pairings` row under `community_id` --
+    the push engine (`event_discord_sync_service.py`'s `DiscordScheduled
+    EventTarget`) fans out to exactly the set `list_event_sync_enabled_
+    pairings()` returns, so this is the one write path that actually
+    changes what that fan-out does. Same service-key gate as the route
+    above; 404 if the community has no guild pairings at all (nothing to
+    toggle), never silently a no-op success.
+    """
+    if not is_valid_service_key(request):
+        return {"success": False, "error": "Invalid service key"}, 401
+
+    body = await request.get_json(force=True, silent=True) or {}
+    community_id = body.get("community_id")
+    enabled = body.get("enabled")
+    if not isinstance(community_id, int) or not isinstance(enabled, bool):
+        return _err(bad_request("community_id (int) and enabled (bool) are required"))
+
+    dal = _dal()
+    pairings = pairing_svc.list_pairings(dal, community_id)
+    if not pairings:
+        return _err(not_found(f"no guild pairings for community {community_id}"))
+
+    for pairing in pairings:
+        pairing_svc.update_pairing(dal, community_id, pairing.id, event_sync_enabled=enabled)
+
+    return _envelope(
+        {
+            "community_id": community_id,
+            "event_sync_enabled": enabled,
+            "pairings_updated": len(pairings),
+        }
+    )
 
 
 BLUEPRINTS = [event_discord_sync_internal_bp]
