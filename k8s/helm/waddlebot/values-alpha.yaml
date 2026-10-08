@@ -241,6 +241,11 @@ pipeline:
   # Rust stack below. Still requires, via --reuse-values or an ephemeral
   # secrets file (never committed, critical-rules.md Token & Secret Hygiene):
   #   1. global.envelopeBindingKeys (kid e2e1) -- HMAC key material, secret, never committed.
+  #   2. feature/bundle-artifact-signing -- `make generate-bundle-signing-key KEY_ID=... \
+  #      KUBE_CONTEXT=local-prealpha NAMESPACE=waddlebot` BEFORE this executor starts (it
+  #      fails closed with no configured platform key, `PlatformPublicKeys::
+  #      from_cli_required`), then set pipeline.rustDataPlane.bundleSigningPublicKeys below
+  #      to the printed `key_id: public_key` pair -- see the chart README's rollout order.
   # global.hostApiTls real mTLS material is NO LONGER a manual --set-file requirement here
   # (fix/alpha-host-api-tls) -- templates/host-api-tls-secret.yaml self-provisions it on
   # alpha/local (lookup-then-generate, same policy as global.valkeyTls), so
@@ -248,6 +253,11 @@ pipeline:
   # insecureDev escape hatch needed (unlike global.grpcTls).
   rustDataPlane:
     enabled: true
+    # OVERRIDE REQUIRED via --set/--set-file before the executor(s) will start signature
+    # verification successfully -- see the numbered comment above (item 3) and
+    # scripts/generate-bundle-signing-key.sh. Left empty here (never a real key
+    # committed): e.g. --set pipeline.rustDataPlane.bundleSigningPublicKeys.e2e1=<base64 pubkey>
+    bundleSigningPublicKeys: {}
     svcIngest:
       replicas: 1
       # kid `e2e1` -- must match a key present in global.envelopeBindingKeys (secret,

@@ -1,6 +1,6 @@
 [project]
 name = "waddle-sdk"
-version = "0.1.0"
+version = "0.1.1"
 description = "Waddles bundle SDK: penguin-dal-compatible facade + flask_core/waddle_transports compatibility shims over the waddle:bundle/stage@1.0.0 WIT world"
 readme = "README.md"
 requires-python = ">=3.13"

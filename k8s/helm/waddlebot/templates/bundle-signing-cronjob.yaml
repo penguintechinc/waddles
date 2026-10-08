@@ -1,0 +1,77 @@
+# feature/bundle-artifact-signing -- MEDIUM security-review finding: reconciliation
+# CronJob for hub_api/cli/reconcile_signed_sidecars.py, catching a signed `app_versions`
+# row whose bucket sidecar upload previously failed (see that module's own docstring).
+# Same rootless Job shape as templates/bundle-signing-backfill-job.yaml, wrapped in a
+# CronJob rather than a Helm hook since this must keep running on a schedule, not just once
+# per rollout.
+{{- if .Values.pipeline.hubApi.bundleSigningReconciler.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-bundle-signing-reconciler
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bundle-signing-reconciler
+spec:
+  schedule: {{ .Values.pipeline.hubApi.bundleSigningReconciler.schedule | quote }}
+  concurrencyPolicy: {{ .Values.pipeline.hubApi.bundleSigningReconciler.concurrencyPolicy }}
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.pipeline.hubApi.bundleSigningReconciler.backoffLimit }}
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          labels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: bundle-signing-reconciler
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+          {{- include "waddlebot.imagePullSecrets" . | nindent 10 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: bundle-signing-reconciler
+            image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.global.imageTag) }}"
+            imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+            command: ["python3", "-m", "cli.reconcile_signed_sidecars"]
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 1000
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop:
+                - ALL
+              seccompProfile:
+                type: RuntimeDefault
+            envFrom:
+            - configMapRef:
+                name: {{ include "waddlebot.fullname" . }}-config
+            - secretRef:
+                name: {{ include "waddlebot.fullname" . }}-secrets
+            env:
+            - name: MODULE_NAME
+              value: "bundle-signing-reconciler"
+            # Read-path only (upload_signed_sidecar() re-uploads a signature already
+            # recorded in Postgres -- see that function's own docstring). Confirmed
+            # `upload_signed_sidecar()` never calls `PlatformSigner.from_env()` --
+            # only `sign_and_record_version()` does, and this CLI never imports or
+            # calls that function -- so the private signing key is NOT mounted here.
+            # This container never needs to hold key material at all.
+            resources:
+              {{- toYaml .Values.pipeline.hubApi.bundleSigningReconciler.resources | nindent 14 }}
+            volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          volumes:
+          - name: tmp
+            emptyDir: {}
+{{- end }}
