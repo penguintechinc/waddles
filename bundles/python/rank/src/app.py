@@ -79,7 +79,7 @@ same reply, never persisted. `!rank top` has no such live name for each
 ranked row, so it renders a short, stable `player-<hash prefix>` tag
 instead -- a deliberate, PII-compliant scope decision, not a stub.
 
-**Follow-up, not implemented here: automatic per-message XP accrual.**
+**Follow-up, out of scope for this bundle: automatic per-message XP accrual.**
 Today, XP only changes via the `add`/`sub` admin commands below -- there is
 no message-received hook awarding XP per chat line. Wiring that requires a
 `process-stage` path that runs on every chat message regardless of command
@@ -94,7 +94,7 @@ Code Paths -- there is simply no such code path yet to call).
 `loyalty`'s own module docstring documents: the richer declarative
 `data.table.columns[]` schema (`hub_api/services/bundle_data_schema.py`)
 that would let hub-api provision this bundle's table columns automatically
-is, by that module's own docstring, "not wired into onboarding yet" --
+is, by that module's own docstring, pending onboarding integration --
 wiring `bundle_manifest_v2.py`/`bundle_approval_service.py` to it is a
 separate, already-tracked follow-on phase.
 
