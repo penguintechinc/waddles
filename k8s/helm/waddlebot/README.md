@@ -806,33 +806,29 @@ ingress:
 
 `feature/bundle-artifact-signing`: hub-api signs each approved bundle with a
 platform Ed25519 key; the bundle-executor(s) verify that signature before
-instantiating any component and fail closed with no configured key. Deploy in
-this exact order, per environment:
+instantiating any component and fail closed with no configured key.
 
-1. **Create the signing key Secret**, before hub-api is deployed with signing
-   enabled:
-   ```bash
-   make generate-bundle-signing-key KEY_ID=<label> KUBE_CONTEXT=<context> NAMESPACE=waddlebot
-   ```
-   This generates a fresh Ed25519 keypair, creates/updates the
-   `<release>-bundle-signing` Secret (`BUNDLE_SIGNING_PRIVATE_KEY`/
-   `BUNDLE_SIGNING_KEY_ID`) via `kubectl apply`, and prints the `key_id`/public
-   key pair. The private key never touches stdout, a repo file, or a CLI arg.
-2. **Deploy/upgrade hub-api** (`helm upgrade`) -- it reads the Secret created
-   in step 1 via `secretKeyRef` (`optional: true`, so a hub-api deploy that
-   predates the Secret still starts; approvals just fail closed at sign time
-   until the Secret exists).
-3. **Run the backfill Job once**, for any already-approved version signed
+**fix/chart-autogen-bundle-signing-key: steps 1 and 4 below are now automatic in
+every environment** -- `templates/auto-provisioned-keys-job.yaml`'s pre-install/
+pre-upgrade hook keeps the `<release>-bundle-signing` Secret and
+`<release>-bundle-signing-public` ConfigMap in sync on every `helm install`/
+`helm upgrade` (generating the Secret itself on a miss in alpha/local; requiring
+a pre-created Secret or `externalSecret: true` elsewhere), and
+`bundle-executor`/`bundle-executor-action` now source `BUNDLE_SIGNING_PUBLIC_KEYS`
+from that ConfigMap by default -- see "Self-provisioned platform keys" above.
+`make generate-bundle-signing-key` and
+`pipeline.rustDataPlane.bundleSigningPublicKeys` remain available as an explicit
+override (multi-key rotation, or pre-creating the Secret yourself in beta/
+gamma/production), but a plain `helm upgrade` with no manual step now succeeds
+end-to-end. Remaining manual step, per environment:
+
+1. **Run the backfill Job once**, for any already-approved version signed
    before this feature existed:
    ```bash
    helm upgrade <release> . -f values-<env>.yaml --set pipeline.hubApi.bundleSigningBackfill.enabled=true
    # then flip it back to false for the next normal upgrade
    ```
    Idempotent -- a stray extra run is a no-op for every already-signed row.
-4. **Deploy the executor(s)** with `pipeline.rustDataPlane.bundleSigningPublicKeys`
-   set to the `key_id: public_key` pair step 1 printed (see
-   `values-<env>.yaml`'s own comment on that key) -- the executor fails closed
-   at startup with no configured key.
 
 The `<release>-bundle-signing-reconciler` CronJob (enabled by default, every 30
 minutes) separately catches a signed-in-Postgres row whose bucket sidecar

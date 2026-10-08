@@ -49,12 +49,27 @@
 # truly stuck pod observable and recoverable instead of silently serving nothing forever
 # (see global.hostApiTls's comment for the broken/missing mTLS cert case specifically).
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.bundleExecutor.enabled }}
-{{- $bsepTier := .Values.global.deploymentTier }}
-{{- if not .Values.pipeline.rustDataPlane.bundleSigningPublicKeys }}
-{{- if not (or (eq $bsepTier "alpha") (eq $bsepTier "local")) }}
-{{- fail (printf "pipeline.rustDataPlane.bundleSigningPublicKeys is empty and global.deploymentTier=%q is outside alpha/local: run make generate-bundle-signing-key and set values; see README rollout order" $bsepTier) }}
-{{- end }}
-{{- end }}
+{{- /*
+fix/chart-autogen-bundle-signing-key -- the old render-time `fail` guard here
+required a human to run `make generate-bundle-signing-key` and hand-paste the
+printed public key into pipeline.rustDataPlane.bundleSigningPublicKeys before
+ANY deploy could succeed, in every environment. That's no longer true: the
+`{{ fullname }}-bundle-signing-public` ConfigMap (templates/
+auto-provisioned-keys-job.yaml, BUNDLE_SIGNING_PUBLIC_KEYS key) is populated
+by that pre-install/pre-upgrade hook in every environment -- tier only gates
+whether the hook may *generate* a missing private key (alpha/local), never
+whether it publishes the public-key ConfigMap from whatever private key is
+present. BUNDLE_SIGNING_PUBLIC_KEYS below now sources from that ConfigMap by
+default; the values override remains fully supported (e.g. multi-key
+rotation, or a manually-run scripts/generate-bundle-signing-key.sh) and wins
+when set. If the ConfigMap key is genuinely missing at pod start (hook never
+ran, or the hook's own underlying Secret doesn't exist yet in an
+externalSecret: true flow), kubelet fails the pod loudly
+(CreateContainerConfigError) rather than silently starting unsigned --
+preserving the executor's fail-closed posture without a template-render-time
+guess.
+*/}}
+{{- $bsepCmName := .Values.autoProvisionedKeys.bundleSigning.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" (include "waddlebot.fullname" .)) }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -141,8 +156,19 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.sandboxGvisor | quote }}
         # feature/bundle-artifact-signing -- shared platform key set, see values.yaml's
         # pipeline.rustDataPlane.bundleSigningPublicKeys comment (not secret; public keys).
+        # fix/chart-autogen-bundle-signing-key -- explicit values override wins when set
+        # (backward compat); otherwise sourced at pod-start from the auto-provisioned
+        # ConfigMap (see this file's header comment) so no manual step is required.
+        {{- if .Values.pipeline.rustDataPlane.bundleSigningPublicKeys }}
         - name: BUNDLE_SIGNING_PUBLIC_KEYS
           value: {{ .Values.pipeline.rustDataPlane.bundleSigningPublicKeys | toJson | quote }}
+        {{- else }}
+        - name: BUNDLE_SIGNING_PUBLIC_KEYS
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $bsepCmName }}
+              key: BUNDLE_SIGNING_PUBLIC_KEYS
+        {{- end }}
         # BUNDLE_BUCKET_* (core/bundle_executor/src/bucket.rs) -- the executor's one
         # sanctioned credentialed egress path, alongside the mTLS stage dial above. In-cluster
         # SeaweedFS is plain http:// here, so no BUNDLE_BUCKET_CA_FILE is required (bucket.rs only

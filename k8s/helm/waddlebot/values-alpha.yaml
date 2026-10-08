@@ -241,11 +241,14 @@ pipeline:
   # Rust stack below. Still requires, via --reuse-values or an ephemeral
   # secrets file (never committed, critical-rules.md Token & Secret Hygiene):
   #   1. global.envelopeBindingKeys (kid e2e1) -- HMAC key material, secret, never committed.
-  #   2. feature/bundle-artifact-signing -- `make generate-bundle-signing-key KEY_ID=... \
-  #      KUBE_CONTEXT=local-prealpha NAMESPACE=waddlebot` BEFORE this executor starts (it
-  #      fails closed with no configured platform key, `PlatformPublicKeys::
-  #      from_cli_required`), then set pipeline.rustDataPlane.bundleSigningPublicKeys below
-  #      to the printed `key_id: public_key` pair -- see the chart README's rollout order.
+  # fix/chart-autogen-bundle-signing-key -- item 2 (feature/bundle-artifact-signing's
+  # manual `make generate-bundle-signing-key` + hand-set bundleSigningPublicKeys below)
+  # is REMOVED: templates/auto-provisioned-keys-job.yaml's pre-install/pre-upgrade hook
+  # now generates the `waddlebot-bundle-signing` Secret itself on alpha/local and
+  # publishes its public key into the `waddlebot-bundle-signing-public` ConfigMap, which
+  # templates/bundle-executor.yaml/bundle-executor-action.yaml source
+  # BUNDLE_SIGNING_PUBLIC_KEYS from directly -- no manual step before the executor(s)
+  # start. See the chart README's "Bundle Artifact Signing Rollout Order" section.
   # global.hostApiTls real mTLS material is NO LONGER a manual --set-file requirement here
   # (fix/alpha-host-api-tls) -- templates/host-api-tls-secret.yaml self-provisions it on
   # alpha/local (lookup-then-generate, same policy as global.valkeyTls), so
@@ -253,10 +256,10 @@ pipeline:
   # insecureDev escape hatch needed (unlike global.grpcTls).
   rustDataPlane:
     enabled: true
-    # OVERRIDE REQUIRED via --set/--set-file before the executor(s) will start signature
-    # verification successfully -- see the numbered comment above (item 3) and
-    # scripts/generate-bundle-signing-key.sh. Left empty here (never a real key
-    # committed): e.g. --set pipeline.rustDataPlane.bundleSigningPublicKeys.e2e1=<base64 pubkey>
+    # Left empty: no longer required (see comment above) -- the executor(s) now source
+    # BUNDLE_SIGNING_PUBLIC_KEYS from the auto-provisioned ConfigMap by default. Only
+    # set this explicitly to pin a specific key (e.g. multi-key rotation): e.g.
+    # --set pipeline.rustDataPlane.bundleSigningPublicKeys.e2e1=<base64 pubkey>
     bundleSigningPublicKeys: {}
     svcIngest:
       replicas: 1

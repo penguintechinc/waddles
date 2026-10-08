@@ -139,10 +139,19 @@ spec:
                 alpha|local) can_generate=true ;;
               esac
 
-              # provision_ed25519 <secret> <cm> <key-id> <external-flag> <priv-key-name> <kid-key-name> <pub-key-name>
+              # provision_ed25519 <secret> <cm> <key-id> <external-flag> <priv-key-name> <kid-key-name> <pub-key-name> [<pub-keys-json-key-name>]
+              # The optional 8th arg additionally publishes a JSON-map-shaped entry
+              # (`{"<kid>":"<pub_b64>"}`) into the same ConfigMap -- fix/chart-autogen-
+              # bundle-signing-key: core/bundle_executor/src/signing.rs's
+              # BUNDLE_SIGNING_PUBLIC_KEYS env var expects a JSON object (supports
+              # multiple keys for rotation), not the single raw base64 value the kid/pub
+              # literals above hold. serviceJwt's call below omits this arg -- hub-api
+              # consumes that key set differently (per-kid SERVICE_JWT_PUBLIC_KEY_<kid>
+              # literals sourced from values, see hub-api.yaml), so no JSON shape is
+              # needed there.
               provision_ed25519() {
                 local secret="$1" cm="$2" key_id="$3" external="$4"
-                local priv_key="$5" kid_key="$6" pub_key="$7"
+                local priv_key="$5" kid_key="$6" pub_key="$7" pub_keys_json_key="${8:-}"
 
                 if kubectl -n "${NAMESPACE}" get secret "${secret}" >/dev/null 2>&1; then
                   echo "keep: secret/${secret} already exists, leaving untouched"
@@ -198,15 +207,25 @@ spec:
                 local pub_b64 actual_kid
                 pub_b64="$(tail -c 32 "${wd2}/pub.der" | base64 | tr -d '\n')"
                 actual_kid="$(kubectl -n "${NAMESPACE}" get secret "${secret}" -o jsonpath="{.data.${kid_key}}" | base64 -d)"
-                kubectl -n "${NAMESPACE}" create configmap "${cm}" \
-                  --from-literal="${kid_key}=${actual_kid}" \
-                  --from-literal="${pub_key}=${pub_b64}" \
-                  --dry-run=client -o yaml | kubectl -n "${NAMESPACE}" apply -f -
+                if [ -n "${pub_keys_json_key}" ]; then
+                  local pub_keys_json
+                  pub_keys_json="$(printf '{"%s":"%s"}' "${actual_kid}" "${pub_b64}")"
+                  kubectl -n "${NAMESPACE}" create configmap "${cm}" \
+                    --from-literal="${kid_key}=${actual_kid}" \
+                    --from-literal="${pub_key}=${pub_b64}" \
+                    --from-literal="${pub_keys_json_key}=${pub_keys_json}" \
+                    --dry-run=client -o yaml | kubectl -n "${NAMESPACE}" apply -f -
+                else
+                  kubectl -n "${NAMESPACE}" create configmap "${cm}" \
+                    --from-literal="${kid_key}=${actual_kid}" \
+                    --from-literal="${pub_key}=${pub_b64}" \
+                    --dry-run=client -o yaml | kubectl -n "${NAMESPACE}" apply -f -
+                fi
                 echo "published: configmap/${cm} (public key only, kid=${actual_kid})"
               }
 
               provision_ed25519 "${BUNDLE_SIGNING_SECRET}" "${BUNDLE_SIGNING_CM}" "${BUNDLE_SIGNING_KEY_ID}" "${BUNDLE_SIGNING_EXTERNAL}" \
-                BUNDLE_SIGNING_PRIVATE_KEY BUNDLE_SIGNING_KEY_ID BUNDLE_SIGNING_PUBLIC_KEY
+                BUNDLE_SIGNING_PRIVATE_KEY BUNDLE_SIGNING_KEY_ID BUNDLE_SIGNING_PUBLIC_KEY BUNDLE_SIGNING_PUBLIC_KEYS
 
               provision_ed25519 "${SERVICE_JWT_SECRET}" "${SERVICE_JWT_CM}" "${SERVICE_JWT_KEY_ID}" "${SERVICE_JWT_EXTERNAL}" \
                 SERVICE_JWT_PRIVATE_KEY SERVICE_JWT_ACTIVE_KID SERVICE_JWT_PUBLIC_KEY

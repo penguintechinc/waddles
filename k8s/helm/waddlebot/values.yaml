@@ -1113,12 +1113,19 @@ pipeline:
     # the same platform key set regardless of which stage it dials). Map of
     # `key_id -> base64(32-byte Ed25519 public key)` -- NOT secret (public keys), so this
     # is safe to carry directly in values (unlike hubApi.bundleSigning's private-key
-    # secretKeyRef above). Rendered into the container env as a JSON object. Empty by
-    # default; `crate::signing::PlatformPublicKeys::from_cli_required` (the real
-    # production path, `crate::lib::run`) fails closed at startup if this is unset once
-    # `pipeline.rustDataPlane.enabled` is true -- set per-environment via
-    # values-{alpha,beta,gamma,production}.yaml once `make generate-bundle-signing-key`
-    # has printed the corresponding public key.
+    # secretKeyRef above). Rendered into the container env as a JSON object.
+    #
+    # fix/chart-autogen-bundle-signing-key -- empty by default is now the NORMAL,
+    # zero-manual-step path: templates/bundle-executor.yaml and
+    # bundle-executor-action.yaml fall back to sourcing BUNDLE_SIGNING_PUBLIC_KEYS from
+    # the `{{ fullname }}-bundle-signing-public` ConfigMap that templates/
+    # auto-provisioned-keys-job.yaml's pre-install/pre-upgrade hook keeps in sync with
+    # whatever private key lives in autoProvisionedKeys.bundleSigning.secretName, in
+    # every environment (see that values key's own comment). Only set this map
+    # explicitly for a multi-key rotation window or to pin a value printed by a manual
+    # `make generate-bundle-signing-key` run -- an explicit value here always wins over
+    # the ConfigMap. `crate::signing::PlatformPublicKeys::from_cli_required` still fails
+    # closed at startup with zero keys configured either way.
     bundleSigningPublicKeys: {}
 
     # feature/hub-grpc-env-wiring -- closes #569's startup seam: svc-process-rust/

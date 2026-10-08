@@ -24,8 +24,11 @@ pipeline:
     # Reconciler stays enabled at the base default (values.yaml) -- production is exactly
     # where a missed sidecar re-upload matters most.
   rustDataPlane:
-    # OVERRIDE REQUIRED before the executor starts here -- paste the `key_id: public_key`
-    # pair `generate-bundle-signing-key.sh` prints for THIS environment's own key, e.g.:
+    # fix/chart-autogen-bundle-signing-key -- no longer required before the executor
+    # starts here: it sources BUNDLE_SIGNING_PUBLIC_KEYS from the auto-provisioned
+    # ConfigMap by default (derived+published from whatever Secret
+    # pipeline.hubApi.bundleSigning above points at). Only set this explicitly to pin
+    # THIS environment's own key, e.g.:
     #   bundleSigningPublicKeys:
     #     2026-09-prod-key1: "<base64 32-byte Ed25519 public key>"
     bundleSigningPublicKeys: {}
