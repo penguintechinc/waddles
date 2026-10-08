@@ -157,7 +157,11 @@ def _resolve_community_id(ctx: BundleContext) -> int | None:
         return None
     try:
         return int(ctx.community)
-    except ValueError:
+    except ValueError as exc:
+        # Expected-input skip, not a fault -- some transports bind a non-numeric
+        # `ctx.community` (e.g. a slug). Never log the raw value (PII/platform-ID
+        # boundary); only the fact that parsing was skipped and why.
+        log.debug("chat.community_id_unparseable", error_type=type(exc).__name__)
         return None
 
 
