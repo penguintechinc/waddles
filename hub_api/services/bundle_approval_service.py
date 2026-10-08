@@ -100,7 +100,13 @@ from services import (
     bundle_signing_service,
     valkey_admin_client,
 )
-from services.bundle_manifest_v2 import BundleManifestV2, ConsumeRule, EgressRule, Limits
+from services.bundle_manifest_v2 import (
+    BundleManifestV2,
+    ConsumeRule,
+    EgressRule,
+    Limits,
+    parse_permission_declarations,
+)
 from services.bundle_version_service import STATUS_PUBLISHED, STATUS_REJECTED, advance_state
 from services.errors import ApiError, conflict, not_found
 from services.permission_summary_service import build_permission_summary, permission_hash
@@ -131,6 +137,9 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         for e in raw.get("egress") or []
     )
     limits_raw = raw.get("limits") or {}
+    permission_declarations = parse_permission_declarations(
+        [e for e in (raw.get("permissions") or ()) if isinstance(e, dict)]
+    )
     return BundleManifestV2(
         schema_version=raw["schema_version"],
         app_id=raw["app_id"],
@@ -151,7 +160,8 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
             memory_mb=int(limits_raw.get("memory_mb", 64)),
             egress_rps=int(limits_raw.get("egress_rps", 10)),
         ),
-        permissions=tuple(raw.get("permissions") or ()),
+        permissions=tuple(e for e in raw.get("permissions") or () if isinstance(e, str)),
+        permission_declarations=permission_declarations,
         routes_to=tuple(raw.get("routes_to") or ()),
         consumes=consumes,
         author=raw.get("author"),
