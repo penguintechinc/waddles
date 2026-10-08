@@ -96,8 +96,13 @@ impl ComponentSource for FixtureSource {
         &self,
         _component_key: &str,
         _sidecar_key: &str,
-    ) -> Result<Vec<u8>, bundle_executor::error::ExecutorError> {
-        Ok(self.wasm.clone())
+    ) -> Result<(Vec<u8>, Vec<u8>), bundle_executor::error::ExecutorError> {
+        // `test_config()` below sets no `bundle_signing_public_keys`, so
+        // `Executor::on_load` skips signature verification -- this `{}`
+        // stub sidecar (the same one `storage_service.
+        // upload_bundle_component()` writes before an artifact is signed)
+        // is never parsed. Same convention as `tests/host_bridge_integration.rs`.
+        Ok((self.wasm.clone(), b"{}".to_vec()))
     }
 }
 

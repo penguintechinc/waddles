@@ -288,6 +288,7 @@ pub async fn detokenize_resolving(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::strategy::Strategy as _;
 
     fn names(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
@@ -441,5 +442,78 @@ mod tests {
         let out = detokenize_resolving("no tokens here", "tenant-1", &resolver, Sink::Twitch).await;
         assert_eq!(out.text, "no tokens here");
         assert!(out.unresolved_tokens.is_empty());
+    }
+
+    // Salvaged from PR #427 (`feature/egress-detokenizer`, closed as
+    // superseded by this crate's shipped single-file design): two edge
+    // cases the PR's multi-file `grammar.rs`/`render.rs` covered that this
+    // crate's own test module did not yet assert directly.
+
+    #[test]
+    fn nested_placeholder_in_input_resolves_only_the_inner_one() {
+        // `{user:{user:a}}` -- the outer `{user:` attempt fails because
+        // the next byte (`{`) is not a valid token char, so it falls back
+        // to literal text; the inner `{user:a}` is a well-formed
+        // placeholder and resolves normally; the leftover trailing `}` is
+        // literal. Regression for PR #427's
+        // `nested_placeholder_resolves_only_the_inner_valid_one`.
+        let out = detokenize("{user:{user:a}}", &names(&[("a", "Alice")]), Sink::Twitch);
+        assert_eq!(out.text, "{user:Alice}");
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        /// `detokenize` must never panic, and no raw token that resolved
+        /// to a name may leave its literal `{user:<token>}` text in the
+        /// output -- checked over 256 randomly generated inputs per run.
+        /// Adapted from PR #427's `render.rs`
+        /// `never_panics_and_never_leaks_a_valid_uuid` fuzz test to this
+        /// crate's single-pass `detokenize` API.
+        #[test]
+        fn never_panics_and_never_leaks_a_known_token(
+            pieces in proptest::collection::vec(
+                proptest::prop_oneof![
+                    "[a-zA-Z0-9 !?.,{}\\\\]{0,12}".prop_map(|s: String| (false, s)),
+                    proptest::prelude::any::<u16>()
+                        .prop_map(|n| (true, format!("{{user:tok-{n}}}"))),
+                ],
+                0..12,
+            ),
+            sink_idx in 0u8..3,
+        ) {
+            let sink = match sink_idx {
+                0 => Sink::Discord,
+                1 => Sink::Twitch,
+                _ => Sink::Overlay,
+            };
+            let mut input = String::new();
+            let mut placeholder_tokens = Vec::new();
+            for (is_placeholder, text) in &pieces {
+                input.push_str(text);
+                if *is_placeholder {
+                    // text is `{user:tok-<n>}`; the raw token is `tok-<n>`.
+                    let token = text
+                        .trim_start_matches("{user:")
+                        .trim_end_matches('}')
+                        .to_string();
+                    placeholder_tokens.push(token);
+                }
+            }
+            let resolved = names(&[("tok-1", "Alice"), ("tok-2", "Bob")]);
+            let out = detokenize(&input, &resolved, sink);
+            for token in &placeholder_tokens {
+                if resolved.contains_key(token) {
+                    let needle = format!("{{user:{token}}}");
+                    proptest::prop_assert!(
+                        !out.text.contains(&needle),
+                        "raw placeholder {} leaked into output {:?} for input {:?}",
+                        needle,
+                        out.text,
+                        input
+                    );
+                }
+            }
+        }
     }
 }
