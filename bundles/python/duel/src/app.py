@@ -481,6 +481,7 @@ async def _handle_set_cooldown(
     try:
         seconds = int(parts[1])
     except ValueError:
+        log.debug("duel.set_cooldown_invalid_seconds", community=community)
         return f"'{parts[1]}' isn't a whole number of seconds"
     if not (MIN_COOLDOWN_SECONDS <= seconds <= MAX_COOLDOWN_SECONDS):
         return f"cooldown must be between {MIN_COOLDOWN_SECONDS} and {MAX_COOLDOWN_SECONDS} seconds"
