@@ -379,6 +379,22 @@ mod tests {
         ));
     }
 
+    /// Distinct from `keyring_parse_rejects_malformed_entry` above (no
+    /// colon at all): a colon IS present, but one side is empty -- its own
+    /// `if kid.is_empty() || hexkey.is_empty()` branch, not the
+    /// `split_once` `None` case.
+    #[test]
+    fn keyring_parse_rejects_entry_with_empty_kid_or_hexkey() {
+        assert!(matches!(
+            KeyRing::parse(":deadbeef"),
+            Err(KeyRingError::MalformedEntry(_))
+        ));
+        assert!(matches!(
+            KeyRing::parse("k1:"),
+            Err(KeyRingError::MalformedEntry(_))
+        ));
+    }
+
     #[test]
     fn keyring_parse_rejects_invalid_hex() {
         assert!(matches!(

@@ -5,12 +5,20 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'core/svc_action/**'
+      - 'core/bundle_host_kv/**'
+      - 'core/bundle_capability_gate/**'
+      - 'core/hub_client/**'
+      - 'core/egress_detokenizer/**'
       - '.github/workflows/rust-svc-action.yml'
       - '.github/workflows/rust-crate-ci.yml'
   pull_request:
     branches: [main, 'release/**']
     paths:
       - 'core/svc_action/**'
+      - 'core/bundle_host_kv/**'
+      - 'core/bundle_capability_gate/**'
+      - 'core/hub_client/**'
+      - 'core/egress_detokenizer/**'
   workflow_dispatch:
 
 permissions:
@@ -23,6 +31,7 @@ jobs:
     with:
       crate_name: svc-action
       working_directory: core/svc_action
-      # ring needs a C compiler to build its crypto primitives.
-      extra_apt_packages: build-essential
-      extra_apt_reason: 'for ring (C compiler)'
+      # ring needs a C compiler to build its crypto primitives; protoc is
+      # needed by hub_client's build.rs (tonic-prost-build).
+      extra_apt_packages: build-essential protobuf-compiler
+      extra_apt_reason: 'for ring (C compiler) + hub_client (protoc)'

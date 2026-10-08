@@ -245,21 +245,83 @@ fn kv_error_from(err: ExecutorError) -> kv::Error {
 }
 
 impl db::Host for ExecState {
-    async fn execute(
+    async fn insert(&mut self, column_values: Vec<db::ColumnValue>) -> Result<db::Row, db::Error> {
+        let args = serde_json::json!({ "column_values": column_values_to_json(&column_values) });
+        db_call(self, "insert", args).await
+    }
+
+    async fn get(&mut self, row_id: String) -> Result<db::Row, db::Error> {
+        let args = serde_json::json!({ "row_id": row_id });
+        db_call(self, "get", args).await
+    }
+
+    async fn query(
         &mut self,
-        statement: String,
-        params: Vec<db::Value>,
-    ) -> Result<db::Rows, db::Error> {
+        limit: u32,
+        offset: u32,
+        order_by: Option<db::OrderBy>,
+    ) -> Result<Vec<db::Row>, db::Error> {
         let args = serde_json::json!({
-            "statement": statement,
-            "params": params.iter().map(db_value_to_json).collect::<Vec<_>>(),
+            "limit": limit,
+            "offset": offset,
+            "order_by": order_by.map(order_by_to_json),
         });
-        match call(self, CapabilityKind::Db, "execute", args).await {
-            Ok(value) => serde_json::from_value::<DbRowsWire>(value)
-                .map(Into::into)
+        match call(self, CapabilityKind::Db, "query", args).await {
+            Ok(value) => serde_json::from_value::<DbQueryWire>(value)
+                .map(|w| w.rows.into_iter().map(Into::into).collect())
                 .map_err(|e| db::Error::Backend(format!("malformed host-result: {e}"))),
             Err(e) => Err(db_error_from(e)),
         }
+    }
+
+    async fn update(
+        &mut self,
+        row_id: String,
+        expected_version: u64,
+        column_values: Vec<db::ColumnValue>,
+    ) -> Result<db::Row, db::Error> {
+        let args = serde_json::json!({
+            "row_id": row_id,
+            "expected_version": expected_version,
+            "column_values": column_values_to_json(&column_values),
+        });
+        db_call(self, "update", args).await
+    }
+
+    async fn delete(&mut self, row_id: String, expected_version: u64) -> Result<(), db::Error> {
+        let args = serde_json::json!({ "row_id": row_id, "expected_version": expected_version });
+        call(self, CapabilityKind::Db, "delete", args)
+            .await
+            .map(|_| ())
+            .map_err(db_error_from)
+    }
+}
+
+/// Shapes a WIT `db.order-by` into the JSON `{"random": true}` /
+/// `{"column": name, "descending": bool}` shape `core/svc_process::
+/// capabilities::parse_order_by` parses at the untyped host-call layer.
+fn order_by_to_json(order_by: db::OrderBy) -> serde_json::Value {
+    match order_by {
+        db::OrderBy::Random => serde_json::json!({ "random": true }),
+        db::OrderBy::Column(col) => {
+            serde_json::json!({ "column": col.name, "descending": col.descending })
+        }
+    }
+}
+
+/// Shared by every `db` op that answers with a single row
+/// (`insert`/`get`/`update`) -- `query` decodes its own `{rows: [...]}`
+/// envelope separately (see [`db::Host::query`]).
+async fn db_call(
+    state: &mut ExecState,
+    op: &'static str,
+    args: serde_json::Value,
+) -> Result<db::Row, db::Error> {
+    match call(state, CapabilityKind::Db, op, args).await {
+        Ok(value) => serde_json::from_value::<DbRowWire>(value)
+            .map(Into::into)
+            .map_err(|e| db::Error::Backend(format!("malformed host-result: {e}"))),
+        Err(e) => Err(db_error_from(e)),
     }
 }
 
@@ -300,33 +362,57 @@ fn json_to_db_value(v: &serde_json::Value) -> db::Value {
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct DbRowsWire {
-    columns: Vec<String>,
-    rows: Vec<Vec<serde_json::Value>>,
-    rows_affected: u64,
+/// `host-call`'s `column_values` arg: a JSON object, `{column: value, ...}`
+/// -- matches `core/svc_process::capabilities::StageCapabilities::handle_db`'s
+/// own `column_values` parsing (`args.get("column_values").as_object()`).
+fn column_values_to_json(column_values: &[db::ColumnValue]) -> serde_json::Value {
+    let mut obj = serde_json::Map::with_capacity(column_values.len());
+    for cv in column_values {
+        obj.insert(cv.column.clone(), db_value_to_json(&cv.value));
+    }
+    serde_json::Value::Object(obj)
 }
 
-impl From<DbRowsWire> for db::Rows {
-    fn from(w: DbRowsWire) -> Self {
-        db::Rows {
-            columns: w.columns,
-            rows: w
-                .rows
+#[derive(Debug, serde::Deserialize)]
+struct DbRowWire {
+    row_id: String,
+    version: u64,
+    columns: serde_json::Map<String, serde_json::Value>,
+}
+
+impl From<DbRowWire> for db::Row {
+    fn from(w: DbRowWire) -> Self {
+        db::Row {
+            row_id: w.row_id,
+            version: w.version,
+            columns: w
+                .columns
                 .into_iter()
-                .map(|row| row.iter().map(json_to_db_value).collect())
+                .map(|(column, value)| db::ColumnValue {
+                    column,
+                    value: json_to_db_value(&value),
+                })
                 .collect(),
-            rows_affected: w.rows_affected,
         }
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DbQueryWire {
+    rows: Vec<DbRowWire>,
 }
 
 fn db_error_from(err: ExecutorError) -> db::Error {
     match &err {
         ExecutorError::HostCallDenied { code, message, .. } => match code.as_str() {
-            "denied" => db::Error::Denied(message.clone()),
-            "syntax" => db::Error::Syntax(message.clone()),
+            "denied" | "not_granted" | "feature_disabled" | "not_implemented" => {
+                db::Error::Denied(message.clone())
+            }
+            "invalid_column" => db::Error::InvalidColumn(message.clone()),
+            "invalid_value" | "invalid_args" => db::Error::InvalidValue(message.clone()),
+            "not_found" => db::Error::NotFound,
             "conflict" => db::Error::Conflict(message.clone()),
+            "quota_exceeded" => db::Error::QuotaExceeded(message.clone()),
             "timeout" => db::Error::Timeout,
             _ => db::Error::Backend(message.clone()),
         },
@@ -701,34 +787,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn db_execute_decodes_rows_and_maps_every_error_code() {
+    async fn db_insert_decodes_a_row_and_maps_every_error_code() {
         let bridge = one_shot_bridge(Ok(serde_json::json!({
-            "columns": ["a"], "rows": [[1], [null], ["x"], [true], [[1,2]]], "rows_affected": 5
+            "row_id": "00000000-0000-0000-0000-000000000000",
+            "version": 1,
+            "columns": {"score": 42, "note": null, "name": "x", "flag": true},
         })));
         let mut state = state_with(bridge);
-        let rows = db::Host::execute(&mut state, "SELECT 1".to_string(), vec![])
+        let row = db::Host::insert(&mut state, vec![])
             .await
-            .expect("execute ok");
-        assert_eq!(rows.rows_affected, 5);
-        assert_eq!(rows.rows.len(), 5);
+            .expect("insert ok");
+        assert_eq!(row.row_id, "00000000-0000-0000-0000-000000000000");
+        assert_eq!(row.version, 1);
+        assert_eq!(row.columns.len(), 4);
 
         for (code, check) in [
             ("denied", "denied"),
-            ("syntax", "syntax"),
+            ("invalid_column", "invalid_column"),
+            ("invalid_value", "invalid_value"),
+            ("not_found", "not_found"),
             ("conflict", "conflict"),
+            ("quota_exceeded", "quota_exceeded"),
             ("timeout", "timeout"),
             ("backend", "backend"),
         ] {
             let bridge = one_shot_bridge(Err(denied(code, "nope")));
             let mut state = state_with(bridge);
-            let err = db::Host::execute(&mut state, "SELECT 1".to_string(), vec![])
+            let err = db::Host::insert(&mut state, vec![])
                 .await
                 .expect_err("must be denied");
             let matches = matches!(
                 (&err, check),
                 (db::Error::Denied(_), "denied")
-                    | (db::Error::Syntax(_), "syntax")
+                    | (db::Error::InvalidColumn(_), "invalid_column")
+                    | (db::Error::InvalidValue(_), "invalid_value")
+                    | (db::Error::NotFound, "not_found")
                     | (db::Error::Conflict(_), "conflict")
+                    | (db::Error::QuotaExceeded(_), "quota_exceeded")
                     | (db::Error::Timeout, "timeout")
                     | (db::Error::Backend(_), "backend")
             );
@@ -740,12 +835,122 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn db_execute_reports_malformed_host_result() {
+    async fn db_insert_reports_malformed_host_result() {
         let bridge = one_shot_bridge(Ok(serde_json::json!("nope")));
         let mut state = state_with(bridge);
         assert!(matches!(
-            db::Host::execute(&mut state, "SELECT 1".to_string(), vec![]).await,
+            db::Host::insert(&mut state, vec![]).await,
             Err(db::Error::Backend(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn db_get_decodes_a_row() {
+        let bridge = one_shot_bridge(Ok(serde_json::json!({
+            "row_id": "00000000-0000-0000-0000-000000000000",
+            "version": 3,
+            "columns": {"score": 7},
+        })));
+        let mut state = state_with(bridge);
+        let row = db::Host::get(
+            &mut state,
+            "00000000-0000-0000-0000-000000000000".to_string(),
+        )
+        .await
+        .expect("get ok");
+        assert_eq!(row.version, 3);
+        assert_eq!(row.columns[0].column, "score");
+        assert!(matches!(row.columns[0].value, db::Value::IntValue(7)));
+    }
+
+    #[tokio::test]
+    async fn db_query_decodes_a_rows_envelope() {
+        let bridge = one_shot_bridge(Ok(serde_json::json!({
+            "rows": [
+                {"row_id": "00000000-0000-0000-0000-000000000001", "version": 1, "columns": {}},
+                {"row_id": "00000000-0000-0000-0000-000000000002", "version": 1, "columns": {}},
+            ]
+        })));
+        let mut state = state_with(bridge);
+        let rows = db::Host::query(&mut state, 10, 0, None)
+            .await
+            .expect("query ok");
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn db_query_accepts_an_order_by() {
+        let bridge = one_shot_bridge(Ok(serde_json::json!({ "rows": [] })));
+        let mut state = state_with(bridge);
+        let rows = db::Host::query(&mut state, 10, 0, Some(db::OrderBy::Random))
+            .await
+            .expect("query ok");
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn order_by_to_json_renders_random() {
+        assert_eq!(
+            order_by_to_json(db::OrderBy::Random),
+            serde_json::json!({ "random": true })
+        );
+    }
+
+    #[test]
+    fn order_by_to_json_renders_a_column() {
+        assert_eq!(
+            order_by_to_json(db::OrderBy::Column(db::OrderColumn {
+                name: "score".to_string(),
+                descending: true,
+            })),
+            serde_json::json!({ "column": "score", "descending": true })
+        );
+    }
+
+    #[tokio::test]
+    async fn db_update_sends_row_id_expected_version_and_column_values() {
+        let bridge = one_shot_bridge(Ok(serde_json::json!({
+            "row_id": "00000000-0000-0000-0000-000000000000",
+            "version": 2,
+            "columns": {},
+        })));
+        let mut state = state_with(bridge);
+        let row = db::Host::update(
+            &mut state,
+            "00000000-0000-0000-0000-000000000000".to_string(),
+            1,
+            vec![db::ColumnValue {
+                column: "score".to_string(),
+                value: db::Value::IntValue(9),
+            }],
+        )
+        .await
+        .expect("update ok");
+        assert_eq!(row.version, 2);
+    }
+
+    #[tokio::test]
+    async fn db_delete_success_and_denied() {
+        let bridge = one_shot_bridge(Ok(serde_json::json!({})));
+        let mut state = state_with(bridge);
+        db::Host::delete(
+            &mut state,
+            "00000000-0000-0000-0000-000000000000".to_string(),
+            1,
+        )
+        .await
+        .expect("delete ok");
+
+        let bridge = one_shot_bridge(Err(denied("conflict", "version mismatch")));
+        let mut state = state_with(bridge);
+        assert!(matches!(
+            db::Host::delete(
+                &mut state,
+                "00000000-0000-0000-0000-000000000000".to_string(),
+                1
+            )
+            .await,
+            Err(db::Error::Conflict(_))
         ));
     }
 

@@ -113,6 +113,97 @@ impl BundleSink for ExecutorSink {
     }
 }
 
+/// Per-session counterpart to [`BundleSink`] -- every call names the exact
+/// [`bundle_active_set::SessionId`] it targets, rather than being bound to
+/// one connection for the sink's whole lifetime. Required by the per-session
+/// loading fix (regression: bundles loaded only onto a terminating executor
+/// during rollout; live executor got none, alpha 2026-10-03): a full sync
+/// must drive `Load`/`Unload` against EVERY live session independently, so
+/// the sink itself must be able to address any of them, not just whichever
+/// one `ConnectionRegistry::active()` happened to pick for the whole tick.
+/// Direct port of `core/svc_process/src/bundle_loader.rs::SessionBundleSink`
+/// -- used by `crate::changelog_consumer`'s multi-tenant path only; this
+/// module's own [`BundleSink`]/single-tenant [`run_tick`] below are
+/// unchanged.
+pub trait SessionBundleSink: Send + Sync {
+    fn load<'a>(
+        &'a self,
+        session: bundle_active_set::SessionId,
+        tenant_id: i32,
+        community_id: i32,
+        row: &'a ActiveBundleRow,
+    ) -> BoxFuture<'a, Result<(), InvokeError>>;
+    fn unload<'a>(
+        &'a self,
+        session: bundle_active_set::SessionId,
+        tenant_id: i32,
+        community_id: i32,
+        app_id: &'a str,
+        digest: &'a str,
+    ) -> BoxFuture<'a, Result<(), InvokeError>>;
+}
+
+/// Production [`SessionBundleSink`]: resolves `session` against the live
+/// [`crate::host_api::ConnectionRegistry`] on every call (never cached), so
+/// a session that closes between two calls in the same tick simply fails
+/// that one call (`InvokeError::NoExecutor`) -- the caller leaves it
+/// unloaded for that session and retries next tick, it never panics or
+/// silently targets a different session.
+pub struct RegistrySink {
+    pub registry: Arc<crate::host_api::ConnectionRegistry>,
+    pub call_timeout_ms: u64,
+}
+
+impl SessionBundleSink for RegistrySink {
+    fn load<'a>(
+        &'a self,
+        session: bundle_active_set::SessionId,
+        tenant_id: i32,
+        community_id: i32,
+        row: &'a ActiveBundleRow,
+    ) -> BoxFuture<'a, Result<(), InvokeError>> {
+        Box::pin(async move {
+            let Some(connection) = self.registry.get(session) else {
+                return Err(InvokeError::NoExecutor);
+            };
+            crate::dispatch::ensure_loaded(
+                &connection,
+                tenant_id,
+                community_id,
+                &row.app_id,
+                &row.version,
+                &row.digest,
+                &row.component_key,
+                &row.sidecar_key,
+                penguin_bundle_host::wire::LoadLimits {
+                    timeout_ms: self.call_timeout_ms,
+                    memory_mb: 64,
+                },
+            )
+            .await
+            .map(|_| ())
+        })
+    }
+
+    fn unload<'a>(
+        &'a self,
+        session: bundle_active_set::SessionId,
+        tenant_id: i32,
+        community_id: i32,
+        app_id: &'a str,
+        digest: &'a str,
+    ) -> BoxFuture<'a, Result<(), InvokeError>> {
+        Box::pin(async move {
+            let Some(connection) = self.registry.get(session) else {
+                return Err(InvokeError::NoExecutor);
+            };
+            crate::dispatch::ensure_unloaded(&connection, tenant_id, community_id, app_id, digest)
+                .await
+                .map(|_| ())
+        })
+    }
+}
+
 /// One poll tick's worth of work, split out from [`run`] so it is directly
 /// testable against a `MockDatabase`-backed `DatabaseConnection`, a fake
 /// [`FeatureFlag`], and a fake [`BundleSink`]. See
@@ -129,6 +220,7 @@ pub async fn run_tick(
     loaded: &mut HashMap<String, String>,
     sink: Option<&dyn BundleSink>,
     excluded_metric: &prometheus::IntCounterVec,
+    kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
     snapshot: &bundle_active_set::ActiveVersionSnapshot,
 ) {
     if !flag.enabled().await {
@@ -187,6 +279,21 @@ pub async fn run_tick(
     // SS5.1) must see a superseded digest stop resolving the instant the
     // active set moves, not just after this tick's load/unload completes.
     snapshot.update(&active);
+    // Coordinator fix on PR #425: refresh every active app's declared-
+    // capability snapshot on every tick, not just the diffed to_load set
+    // -- a manifest re-approval that changes `summary_json.capabilities`
+    // without a digest bump (unusual, but not impossible) must still be
+    // observed, and this is a cheap in-memory hashmap write, not a Valkey
+    // round trip. `bundle_host_kv::authorize`'s own doc: an app this
+    // snapshot has never seen denies `kv` by default, so a bundle that
+    // drops out of the active set (excluded above) simply stops being
+    // refreshed here -- its last-known grant lingers until process
+    // restart, an accepted staleness window matching every other
+    // in-memory snapshot this crate keeps (`crate::distribution::
+    // BundleCatalog`'s identical shape).
+    for row in &active {
+        kv_capabilities.update(row.app_id.clone(), row.declared_capabilities.clone());
+    }
 
     let plan = diff::plan(loaded, &active);
     if plan.is_empty() {
@@ -245,6 +352,7 @@ pub async fn run(
     flag: Arc<dyn FeatureFlag>,
     connections: Arc<crate::host_api::ConnectionRegistry>,
     excluded_metric: prometheus::IntCounterVec,
+    kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
     snapshot: bundle_active_set::ActiveVersionSnapshot,
 ) {
@@ -269,7 +377,8 @@ pub async fn run(
                     &mut loaded,
                     sink.as_ref().map(|s| s as &dyn BundleSink),
                     &excluded_metric,
-                &snapshot,
+                    &kv_capabilities,
+                    &snapshot,
                 )
                 .await;
             }
@@ -283,6 +392,55 @@ mod tests {
     use crate::flags::StaticFlag;
     use sea_orm::{DatabaseBackend, MockDatabase};
     use std::sync::Mutex as StdMutex;
+
+    /// `RegistrySink` resolves `session` against the live registry on every
+    /// call -- a session with no live connection (never registered, already
+    /// removed, or closed) fails that one call with
+    /// `InvokeError::NoExecutor`, never panics and never silently targets a
+    /// different session. regression: bundles loaded only onto a
+    /// terminating executor during rollout; live executor got none (alpha
+    /// 2026-10-03)
+    mod registry_sink {
+        use super::*;
+        use crate::host_api::ConnectionRegistry;
+
+        fn test_row(digest: &str) -> ActiveBundleRow {
+            ActiveBundleRow {
+                app_id: "waddles.a".to_string(),
+                version: "1".to_string(),
+                version_id: 1,
+                digest: digest.to_string(),
+                component_key: "k".to_string(),
+                sidecar_key: "s".to_string(),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+                declared_capabilities: Vec::new(),
+            }
+        }
+
+        #[tokio::test]
+        async fn load_fails_closed_for_an_unknown_session() {
+            let registry = Arc::new(ConnectionRegistry::new());
+            let sink = RegistrySink {
+                registry,
+                call_timeout_ms: 1000,
+            };
+            let result = sink.load(99, 1, 0, &test_row("sha256:aa")).await;
+            assert!(matches!(result, Err(InvokeError::NoExecutor)));
+        }
+
+        #[tokio::test]
+        async fn unload_fails_closed_for_an_unknown_session() {
+            let registry = Arc::new(ConnectionRegistry::new());
+            let sink = RegistrySink {
+                registry,
+                call_timeout_ms: 1000,
+            };
+            let result = sink.unload(99, 1, 0, "waddles.a", "sha256:aa").await;
+            assert!(matches!(result, Err(InvokeError::NoExecutor)));
+        }
+    }
 
     /// Records every `load`/`unload` call it receives and answers each
     /// with a fixed, caller-chosen result -- no network, no wasmtime, no
@@ -378,6 +536,9 @@ mod tests {
             scan_status: "scanned".to_string(),
             component_key: Some(format!("bundles/{app_id}/{version}/{hex}.wasm")),
             sidecar_key: Some(format!("bundles/{app_id}/{version}/{hex}.json")),
+            artifact_signature: None,
+            artifact_signature_key_id: None,
+            artifact_signed_approval_id: None,
         }
     }
 
@@ -399,12 +560,28 @@ mod tests {
             scan_status: "scanned".to_string(),
             component_key: None,
             sidecar_key: None,
+            artifact_signature: None,
+            artifact_signature_key_id: None,
+            artifact_signed_approval_id: None,
         }
     }
 
     fn approval_row(
         app_id: &str,
         version: &str,
+    ) -> bundle_active_set::entities::app_install_approvals::Model {
+        // `summary_json` declares `storage.kv` by default -- every test in
+        // this module other than the `kv_capabilities_*` ones below is
+        // testing load/unload/diff behavior, not the capability snapshot,
+        // so they should not incidentally start failing a `kv` grant check
+        // elsewhere in this crate's test suite.
+        approval_row_with_capabilities(app_id, version, &["storage.kv"])
+    }
+
+    fn approval_row_with_capabilities(
+        app_id: &str,
+        version: &str,
+        capabilities: &[&str],
     ) -> bundle_active_set::entities::app_install_approvals::Model {
         bundle_active_set::entities::app_install_approvals::Model {
             id: 1,
@@ -413,6 +590,7 @@ mod tests {
             app_id: app_id.to_string(),
             version: version.to_string(),
             superseded_by: None,
+            summary_json: serde_json::json!({ "capabilities": capabilities }),
         }
     }
 
@@ -447,6 +625,7 @@ mod tests {
             &mut loaded,
             None,
             &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
             &test_snapshot(),
         )
         .await;
@@ -485,6 +664,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &metric,
+            &bundle_host_kv::CapabilitySnapshot::new(),
             &test_snapshot(),
         )
         .await;
@@ -497,6 +677,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &metric,
+            &bundle_host_kv::CapabilitySnapshot::new(),
             &test_snapshot(),
         )
         .await;
@@ -506,6 +687,96 @@ mod tests {
             vec![format!("load:waddles.a:{digest}")],
             "tick 2's unchanged watermark must skip the full read -- the trap row must never load"
         );
+    }
+
+    /// A watermark-read DB error must be logged and swallowed -- `run_tick`
+    /// returns early, leaving `loaded` untouched, never panicking or
+    /// propagating the error to the caller (the poll loop must keep
+    /// ticking on the next interval regardless).
+    #[tokio::test]
+    async fn run_tick_returns_when_watermark_read_fails() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_errors([sea_orm::DbErr::Custom("simulated".to_string())])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        run_tick(
+            &db,
+            1,
+            0,
+            &StaticFlag(true),
+            &mut tracker,
+            &mut loaded,
+            None,
+            &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            &test_snapshot(),
+        )
+        .await;
+        assert!(loaded.is_empty());
+    }
+
+    /// Same early-return/swallow contract as the watermark-read failure
+    /// above, but for the full active-set read that follows a changed
+    /// watermark.
+    #[tokio::test]
+    async fn run_tick_returns_when_active_set_read_fails() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
+            .append_query_errors([sea_orm::DbErr::Custom("simulated".to_string())])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        run_tick(
+            &db,
+            1,
+            0,
+            &StaticFlag(true),
+            &mut tracker,
+            &mut loaded,
+            None,
+            &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            &test_snapshot(),
+        )
+        .await;
+        assert!(loaded.is_empty());
+    }
+
+    /// An unchanged diff (nothing to load or unload) returns before ever
+    /// consulting `sink` -- distinct from
+    /// `run_tick_defers_when_no_executor_connection_is_active` below, which
+    /// covers a *non-empty* diff with `sink: None`.
+    #[tokio::test]
+    async fn run_tick_returns_early_when_the_diff_is_empty() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
+            .append_query_results([vec![approval_row("waddles.a", "1")]])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        // Pre-seed `loaded` to already match the active set -- `diff::plan`
+        // reports empty, so the sink (`None` here) must never be consulted.
+        let mut loaded = HashMap::new();
+        loaded.insert("waddles.a".to_string(), digest.clone());
+        run_tick(
+            &db,
+            1,
+            0,
+            &StaticFlag(true),
+            &mut tracker,
+            &mut loaded,
+            None,
+            &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            &test_snapshot(),
+        )
+        .await;
+        assert_eq!(loaded.get("waddles.a"), Some(&digest));
     }
 
     #[tokio::test]
@@ -529,6 +800,7 @@ mod tests {
             &mut loaded,
             None,
             &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
             &test_snapshot(),
         )
         .await;
@@ -560,11 +832,129 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
             &test_snapshot(),
         )
         .await;
         assert_eq!(loaded.get("waddles.a"), Some(&digest));
         assert_eq!(sink.calls(), vec![format!("load:waddles.a:{digest}")]);
+    }
+
+    /// Contract test (regression: DB bare-hex digest rejected by executor
+    /// Load (malformed digest), UnknownBundle, alpha 2026-10-03): direct
+    /// port of `core/svc_process/src/bundle_loader.rs`'s identically-named
+    /// test -- `app_versions.artifact_digest` is stored bare-hex by the
+    /// control plane; `bundle_active_set::canonical_digest` (the sole
+    /// normalization boundary) must turn that into the `sha256:`-prefixed
+    /// form before it ever reaches [`BundleSink::load`], which is what the
+    /// live executor's wire protocol requires
+    /// (`core/bundle_executor/src/invoke.rs::verify_digest`).
+    #[tokio::test]
+    async fn run_tick_sends_a_canonical_digest_to_the_sink_for_a_bare_hex_db_row() {
+        let hex = "d".repeat(64);
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([vec![version_row("waddles.a", 10, "1", &hex)]])
+            .append_query_results([vec![approval_row("waddles.a", "1")]])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        let sink = FakeSink::default();
+        run_tick(
+            &db,
+            1,
+            0,
+            &StaticFlag(true),
+            &mut tracker,
+            &mut loaded,
+            Some(&sink as &dyn BundleSink),
+            &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            &test_snapshot(),
+        )
+        .await;
+        let canonical = format!("sha256:{hex}");
+        assert_eq!(
+            loaded.get("waddles.a"),
+            Some(&canonical),
+            "loaded-state map must record the canonical (prefixed) form, never the bare DB value"
+        );
+        assert_eq!(
+            sink.calls(),
+            vec![format!("load:waddles.a:{canonical}")],
+            "the sink (and therefore the executor Load wire request) must see the sha256:-prefixed form"
+        );
+    }
+
+    /// Loaded-state comparisons match across forms end to end -- direct port
+    /// of `core/svc_process/src/bundle_loader.rs`'s identically-named test.
+    /// A bundle loaded from a bare-hex DB row (canonicalized on the way in)
+    /// is correctly recognized as "still active, unchanged" on a later tick
+    /// whose active set moved for an unrelated reason (a second app
+    /// activating) -- `diff::plan`'s `current_digest == &row.digest` check
+    /// never spuriously reloads `waddles.a` because one side was prefixed
+    /// and the other wasn't.
+    #[tokio::test]
+    async fn run_tick_does_not_reload_an_unchanged_bare_hex_digest_on_the_next_tick() {
+        let hex_a = "e".repeat(64);
+        let hex_b = "f".repeat(64);
+        let active_b = bundle_active_set::entities::app_active_versions::Model {
+            app_id: "waddles.b".to_string(),
+            tenant_id: 1,
+            community_id: 0,
+            version_id: 20,
+        };
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            // Tick 1: only `waddles.a` active.
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([vec![version_row("waddles.a", 10, "1", &hex_a)]])
+            .append_query_results([vec![approval_row("waddles.a", "1")]])
+            // Tick 2: `waddles.b` newly activates (moves the watermark);
+            // `waddles.a`'s row is byte-for-byte identical to tick 1.
+            .append_query_results([vec![active_row("waddles.a"), active_b.clone()]])
+            .append_query_results([empty_bindings()])
+            .append_query_results([vec![active_row("waddles.a"), active_b]])
+            .append_query_results([vec![
+                version_row("waddles.a", 10, "1", &hex_a),
+                version_row("waddles.b", 20, "1", &hex_b),
+            ]])
+            .append_query_results([vec![
+                approval_row("waddles.a", "1"),
+                approval_row("waddles.b", "1"),
+            ]])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        let sink = FakeSink::default();
+        for _ in 0..2 {
+            run_tick(
+                &db,
+                1,
+                0,
+                &StaticFlag(true),
+                &mut tracker,
+                &mut loaded,
+                Some(&sink as &dyn BundleSink),
+                &test_metric(),
+                &bundle_host_kv::CapabilitySnapshot::new(),
+                &test_snapshot(),
+            )
+            .await;
+        }
+        assert_eq!(
+            sink.calls(),
+            vec![
+                format!("load:waddles.a:sha256:{hex_a}"),
+                format!("load:waddles.b:sha256:{hex_b}"),
+            ],
+            "waddles.a's unchanged bare-hex digest must compare equal to the canonical form \
+             already recorded and never trigger a redundant reload, even though the watermark \
+             moved for waddles.b's sake"
+        );
     }
 
     #[tokio::test]
@@ -591,6 +981,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
             &test_snapshot(),
         )
         .await;
@@ -624,6 +1015,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &test_metric(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
             &test_snapshot(),
         )
         .await;
@@ -674,6 +1066,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &metric,
+            &bundle_host_kv::CapabilitySnapshot::new(),
             &test_snapshot(),
         )
         .await;
@@ -729,6 +1122,7 @@ mod tests {
             &mut loaded,
             Some(&sink as &dyn BundleSink),
             &metric,
+            &bundle_host_kv::CapabilitySnapshot::new(),
             &test_snapshot(),
         )
         .await;
@@ -749,6 +1143,122 @@ mod tests {
                 .get(),
             1,
             "a NULL component_key must increment the shared metric with the degraded reason"
+        );
+    }
+
+    /// Coordinator fix on PR #425: `run_tick` must populate the shared
+    /// `CapabilitySnapshot` from every active row's `summary_json`-derived
+    /// `declared_capabilities`, so `storage.kv` becomes checkable by
+    /// `bundle_host_kv::authorize::authorize_kv` at the host-call layer.
+    #[tokio::test]
+    async fn run_tick_populates_the_capability_snapshot_from_declared_capabilities() {
+        let digest = format!("sha256:{}", "9".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
+            .append_query_results([vec![approval_row_with_capabilities(
+                "waddles.a",
+                "1",
+                &["context", "kv", "flags", "log", "clock"],
+            )]])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        let sink = FakeSink::default();
+        let kv_capabilities = bundle_host_kv::CapabilitySnapshot::new();
+        run_tick(
+            &db,
+            1,
+            0,
+            &StaticFlag(true),
+            &mut tracker,
+            &mut loaded,
+            Some(&sink as &dyn BundleSink),
+            &test_metric(),
+            &kv_capabilities,
+            &test_snapshot(),
+        )
+        .await;
+        assert!(kv_capabilities.declares("waddles.a", "kv"));
+        assert!(!kv_capabilities.declares("waddles.a", "storage.kv"));
+    }
+
+    /// A bundle whose approved manifest never declares `kv` at all must
+    /// leave the snapshot without that grant -- proves this isn't a
+    /// blanket "every active row grants everything" bug.
+    #[tokio::test]
+    async fn run_tick_never_grants_kv_for_a_bundle_that_did_not_declare_it() {
+        let digest = format!("sha256:{}", "8".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([empty_bindings()])
+            .append_query_results([vec![active_row("waddles.a")]])
+            .append_query_results([vec![version_row("waddles.a", 10, "1", &digest)]])
+            .append_query_results([vec![approval_row_with_capabilities(
+                "waddles.a",
+                "1",
+                &["context", "flags", "log", "clock", "http"],
+            )]])
+            .into_connection();
+        let mut tracker = WatermarkTracker::new();
+        let mut loaded = HashMap::new();
+        let sink = FakeSink::default();
+        let kv_capabilities = bundle_host_kv::CapabilitySnapshot::new();
+        run_tick(
+            &db,
+            1,
+            0,
+            &StaticFlag(true),
+            &mut tracker,
+            &mut loaded,
+            Some(&sink as &dyn BundleSink),
+            &test_metric(),
+            &kv_capabilities,
+            &test_snapshot(),
+        )
+        .await;
+        assert!(!kv_capabilities.declares("waddles.a", "kv"));
+    }
+
+    /// The live `run()` loop, never previously exercised: with the
+    /// kill-switch flag permanently OFF, `run_tick` returns before ever
+    /// touching the DB (its own first check), so an empty `MockDatabase`
+    /// (no queued results at all -- any query would panic) is sufficient to
+    /// prove the interval/shutdown `tokio::select!` itself works -- ticks
+    /// repeatedly (1ms interval, far shorter than the 50ms shutdown delay)
+    /// and returns promptly once `shutdown` resolves instead of hanging.
+    #[tokio::test]
+    async fn run_ticks_and_returns_promptly_on_shutdown() {
+        let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = shutdown_tx.send(());
+        });
+
+        let flag: Arc<dyn FeatureFlag> = Arc::new(StaticFlag(false));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(
+                db,
+                1,
+                0,
+                std::time::Duration::from_millis(1),
+                2000,
+                flag,
+                Arc::new(crate::host_api::ConnectionRegistry::new()),
+                test_metric(),
+                Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+                shutdown_rx,
+                test_snapshot(),
+            ),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "run() must return promptly once shutdown resolves, not hang"
         );
     }
 }

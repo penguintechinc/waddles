@@ -45,6 +45,23 @@ pub const MAX_OPS_PER_INVOKE: u32 = 64;
 /// outlives the invocation it is scoped to, without lingering indefinitely.
 pub const RATE_LIMIT_WINDOW_SECONDS: u64 = 30;
 
+/// How long the self-heal reconciliation lock
+/// (`KvScope::reconcile_lock_key`) is held, in milliseconds -- bounds a
+/// stuck/crashed reconciler's lock lifetime, and doubles as the de facto
+/// rate limit on how often one app can trigger a full `SCAN` (at most once
+/// per this window, since the lock is only released early on success, and
+/// a successful reconciliation makes `count_key` present again so no
+/// subsequent write re-triggers reconciliation until it is evicted again).
+pub const RECONCILE_LOCK_TTL_MS: u64 = 5_000;
+
+/// Upper bound on how many keys [`crate::backend`]'s self-heal `SCAN`
+/// counts before giving up and reporting this ceiling itself -- bounds the
+/// one-shot Lua script's own runtime against a pathological namespace, and
+/// naturally saturates at "quota already exceeded" for an app that
+/// somehow holds far more live keys than [`MAX_KEYS_PER_APP`] should ever
+/// allow (a defensive ceiling, not an expected steady-state count).
+pub const RECONCILE_SCAN_LIMIT: u64 = MAX_KEYS_PER_APP * 2;
+
 /// Clamps a guest-supplied `ttl_seconds` to [`MAX_TTL_SECONDS`], preserving
 /// the WIT-documented `0` = "no expiry" sentinel unchanged.
 pub fn clamp_ttl_seconds(ttl_seconds: u32) -> u32 {

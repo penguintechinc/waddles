@@ -24,6 +24,11 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # TEMPORARY amd64-only (user-approved 2026-10-03). Re-enable arm64 near
+  # release / for the mixed-arch Minisforum alpha cluster by setting
+  # BUILD_PLATFORMS=linux/amd64,linux/arm64 (this is the single toggle --
+  # every build-*.yml workflow that builds images keys off the same name).
+  BUILD_PLATFORMS: linux/amd64
 
 jobs:
   determine-version:
@@ -33,6 +38,8 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       suffix: ${{ steps.version.outputs.suffix }}
       is_release: ${{ steps.version.outputs.is_release }}
+      multi_arch: ${{ steps.version.outputs.multi_arch }}
+      matrix: ${{ steps.version.outputs.matrix }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -71,6 +78,25 @@ jobs:
             echo "is_release=false" >> $GITHUB_OUTPUT
           fi
 
+          # Derive the whole matrix object + multi_arch flag from the single
+          # BUILD_PLATFORMS toggle (env, top of file). A comma means more
+          # than one platform is requested -- restore arm64 by flipping that
+          # one value back to "linux/amd64,linux/arm64".
+          #
+          # The matrix is emitted as one complete JSON object (not a static
+          # "include:" list plus a dynamic "exclude:" expression) because
+          # mixing a static matrix key with a fromJSON(...)-driven sibling
+          # key resolves to an empty job set -- see gh-577. This is GitHub's
+          # documented "defining a matrix dynamically" pattern instead:
+          # https://docs.github.com/actions/how-tos/write-workflows/choose-what-workflows-do/run-variations-of-jobs-in-a-workflow#defining-a-matrix-dynamically
+          if [[ "${BUILD_PLATFORMS}" == *,* ]]; then
+            echo "multi_arch=true" >> $GITHUB_OUTPUT
+            echo 'matrix={"include":[{"platform":"linux/amd64","runner":"ubuntu-latest"},{"platform":"linux/arm64","runner":"ubuntu-24.04-arm"}]}' >> $GITHUB_OUTPUT
+          else
+            echo "multi_arch=false" >> $GITHUB_OUTPUT
+            echo 'matrix={"include":[{"platform":"linux/amd64","runner":"ubuntu-latest"}]}' >> $GITHUB_OUTPUT
+          fi
+
   # Build each platform in parallel on native runners. Push-path only --
   # pull_request/merge_group is handled entirely by build-pr below so this
   # job's packages:write permission (needed for the real registry push) is
@@ -80,12 +106,10 @@ jobs:
     if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
+      # Whole matrix object computed by determine-version (see that job's
+      # comment) -- a static `include:` plus dynamic `exclude:` resolved to
+      # zero jobs, see gh-577.
+      matrix: ${{ fromJSON(needs.determine-version.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     needs: determine-version
     steps:
@@ -116,6 +140,33 @@ jobs:
             echo "suffix=arm64" >> $GITHUB_OUTPUT
           fi
 
+      # Single-platform builds (BUILD_PLATFORMS has no comma) skip the
+      # "Merge Multi-Arch Manifest" job below entirely, so this step must
+      # also publish the plain (and, on release, :latest) tag that job
+      # would otherwise create -- a single-arch build ends up pushing a
+      # normal image, never a manifest list.
+      - name: Compute image tags
+        id: tags
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ inputs.module_name }}
+          VERSION: ${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
+          IS_RELEASE: ${{ needs.determine-version.outputs.is_release }}
+          MULTI_ARCH: ${{ needs.determine-version.outputs.multi_arch }}
+          ARCH_SUFFIX: ${{ steps.arch.outputs.suffix }}
+        run: |
+          TAGS="${IMAGE}:${VERSION}-${ARCH_SUFFIX}"
+          if [ "${MULTI_ARCH}" != "true" ]; then
+            TAGS=$(printf '%s\n%s' "$TAGS" "${IMAGE}:${VERSION}")
+            if [ "${IS_RELEASE}" = "true" ]; then
+              TAGS=$(printf '%s\n%s' "$TAGS" "${IMAGE}:latest")
+            fi
+          fi
+          {
+            echo "list<<TAGEOF"
+            echo "${TAGS}"
+            echo "TAGEOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push image (${{ matrix.platform }})
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         with:
@@ -123,7 +174,7 @@ jobs:
           file: ./${{ inputs.module_path }}/Dockerfile
           push: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
           load: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && matrix.platform == 'linux/amd64' }}
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ inputs.module_name }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ steps.arch.outputs.suffix }}
+          tags: ${{ steps.tags.outputs.list }}
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=${{ inputs.module_name }}-${{ steps.arch.outputs.suffix }}
           cache-to: type=gha,mode=max,scope=${{ inputs.module_name }}-${{ steps.arch.outputs.suffix }}
@@ -179,7 +230,13 @@ jobs:
     name: Merge Multi-Arch Manifest
     runs-on: ubuntu-latest
     needs: [determine-version, build-platform]
-    if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
+    # No-ops cleanly when BUILD_PLATFORMS is amd64-only -- build-platform's
+    # "Compute image tags" step already pushed the plain/:latest tags
+    # directly in that case, so there is nothing to merge.
+    if: >
+      github.event_name != 'pull_request' &&
+      github.event_name != 'merge_group' &&
+      needs.determine-version.outputs.multi_arch == 'true'
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4

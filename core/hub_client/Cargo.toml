@@ -26,7 +26,11 @@ tonic-prost = "=0.14.6"
 prost = "=0.14.4"
 tower = { version = "=0.5.3", features = ["util", "retry", "timeout"] }
 tracing = "=0.1.44"
-thiserror = "=2.0.21"
+# =2.0.20 (not =2.0.21): matches every other crate in this repo that now
+# depends on this one as a path dependency (svc_process/svc_action's own
+# pin, and their `bundle-active-set`/`bundle-host-*` siblings) -- a single
+# dependency graph can only resolve one version of a crate.
+thiserror = "=2.0.20"
 async-trait = "=0.1.89"
 # Machine-JWT bootstrap + injection (feature/eddsa-machine-jwt) -- see
 # module docs in src/lib.rs for why this crate depends on it directly
@@ -35,6 +39,15 @@ service_auth = { path = "../service_auth", version = "=0.1.0" }
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+# CA-trust test only (fix/hub-grpc-tls-and-ca-trust) -- exercises a real local TLS
+# handshake proving the loaded CA trusts a cert it signed and rejects one it didn't,
+# same versions core/bundle_executor/Cargo.toml and core/svc_action/Cargo.toml already
+# pin (rcgen generates throwaway test PKI, no committed key material; rustls/tokio-rustls/
+# rustls-pki-types match tonic's own tls-ring rustls line so there's one resolved version).
+rcgen = "=0.14.10"
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "tls12"] }
+tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
+rustls-pki-types = "=1.15.1"
 
 [profile.release]
 opt-level = 3

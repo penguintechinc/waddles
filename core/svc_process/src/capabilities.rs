@@ -19,32 +19,36 @@
 //!
 //! This landing wires `context`/`clock`/`log` fully (the three
 //! capabilities every bundle needs regardless of manifest declarations,
-//! spec §6.5's capability table: "Always granted"), `kv`, backed by
+//! spec §6.5's capability table: "Always granted"), plus `kv` -- backed by
 //! `bundle_host_kv::KvHost` (the crate shared with `core/svc_action` --
 //! see that crate's own module doc for the key-derivation/isolation/quota
 //! design) over a direct Valkey connection opened once at startup
 //! (`crate::lib::connect_kv`) and cloned into every per-invoke
 //! [`StageCapabilities`] this loop constructs (`crate::spine::
-//! ProcessDeps::kv_conn`'s doc), and `http`, backed by the shared
-//! `bundle_host_http::egress::EgressGuard` pipeline (extracted from
-//! `core/svc_action`, PR #459 follow-up) -- see
-//! [`StageCapabilities::egress`]/[`HttpEgressCatalog`]'s docs. **Every one
-//! of these, `http` included, is authorized by
-//! `core/bundle_capability_gate::authorize` FIRST** (spec SS5, PR #433):
-//! for `http` specifically, the extracted host is classified into its
+//! ProcessDeps::kv_conn`'s doc) -- and `http`, backed by
+//! [`StageCapabilities::egress`]/[`HttpEgressCatalog`]'s docs for the
+//! shared `bundle_host_http::egress::EgressGuard` pipeline (extracted from
+//! `core/svc_action`, PR #459 follow-up). `db` is wired too (PR #498) --
+//! structured insert/get/update/delete against a bundle's own
+//! `app_core`/`app_community` table via [`DbWiring`], gated by
+//! `crate::license::BUNDLE_DB_CAPABILITY_FLAG` (unseen/OFF denies
+//! `feature_disabled`); `query` remains unimplemented (see
+//! `bundle_host_db`'s crate doc). **Every wired capability, `http` and `db`
+//! included, is authorized by `core/bundle_capability_gate::authorize`
+//! FIRST** (spec SS5, PR #433) -- superseding this stage's own interim
+//! catalog-based capability-gate seam, which remains harmlessly redundant
+//! defense-in-depth until retired in a follow-on cleanup. For `http`
+//! specifically, the extracted host is classified into its
 //! `NetHttpFqdn`/`NetHttpPublicIp`/`NetHttpPrivateIp` permission family
 //! (see [`classify_net_http_permission`]) and run through the gate
 //! *before* the request ever reaches [`StageCapabilities::handle_http`]'s
 //! `EgressGuard` -- the gate is the permission boundary, the guard is the
 //! SSRF/allowlist boundary; both are mandatory and neither substitutes for
-//! the other. Fail-closed, no kill-switch (spec SS5.2). `db`/`flags`
-//! remain documented seams -- see [`StageCapabilities::handle`]'s match
-//! arms -- since a real `db` wiring needs the manifest's `data.tables`
-//! allowlist plus per-bundle-role RLS (`SET LOCAL waddles.tenant`/
-//! `waddles.community`, spec §7.4/§11.10), tracked as a separate design in
-//! progress. `relay` is never granted to a process-stage bundle at all
-//! (spec §6.5: "Capability: granted only to action-stage bundles") and is
-//! denied unconditionally, not merely unimplemented.
+//! the other. Fail-closed, no kill-switch (spec SS5.2). `flags` remains a
+//! documented seam -- see [`StageCapabilities::handle`]'s match arms.
+//! `relay` is never granted to a process-stage bundle at all (spec §6.5:
+//! "Capability: granted only to action-stage bundles") and is denied
+//! unconditionally, not merely unimplemented.
 //!
 //! A bundle never holds a platform credential or a tenant/community
 //! argument (spec §4.3, §5.11): every capability here resolves its own
@@ -59,9 +63,15 @@ use bundle_capability_gate::{
     AppScopedResource, CapabilityGate, Denied, HostInvokeScopeBuilder, PermissionId, ResourceRef,
     TenantTier,
 };
+use bundle_host_db::{
+    CapabilitySnapshot as DbCapabilitySnapshot, DbError, DbHost, DbScope, DbValue, PostgresBackend,
+    SchemaCache,
+};
 use bundle_host_http::egress::{EgressGuard, EgressRuleRow, EgressRuleSource};
 use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
+
+use crate::license::FeatureGate;
 
 /// Maps a gate [`Denied`] onto the `{code, message}` shape every `host-call`
 /// error reply carries (spec SS5.4's stable `reason` vocabulary).
@@ -180,6 +190,24 @@ impl EgressRuleSource for HttpEgressCatalog {
     }
 }
 
+/// Everything `handle_db` needs, shared across every invocation this
+/// process serves -- constructed once at startup (never per-invoke, unlike
+/// [`StageCapabilities`] itself) and cloned cheaply into each one via
+/// `Arc` (`crate::spine`'s call site). `schemas`/`capabilities` are
+/// refreshed by this service's own `bundle_loader` poll (not wired in this
+/// landing -- see `bundle_host_db`'s crate doc "remaining work"); an
+/// `app_id` neither has ever heard of fails closed by construction
+/// ([`DbHost`]'s own resolve-then-authorize order).
+#[derive(Clone)]
+pub struct DbWiring {
+    pub host: Arc<DbHost<PostgresBackend>>,
+    pub schemas: Arc<SchemaCache>,
+    pub capabilities: Arc<DbCapabilitySnapshot>,
+    /// `crate::license::BUNDLE_DB_CAPABILITY_FLAG` gate -- OFF denies every
+    /// `db` call `feature_disabled` before any schema/authorize lookup.
+    pub flag: Arc<dyn FeatureGate>,
+}
+
 /// The real capability implementation this stage wires today, scoped to
 /// exactly one invocation's `(tenant, community, app_id)` -- see the
 /// module doc for why this is constructed per-invoke, never per-connection.
@@ -226,6 +254,12 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// that order). Mandatory, never bypassable (spec SS5.2 "no
     /// kill-switch").
     gate: Arc<CapabilityGate>,
+    /// `None` until `crate::lib`'s startup wiring provisions a live
+    /// Postgres pool + flag client -- every `db` call denies
+    /// `feature_disabled` in that state, never panics (mirrors every other
+    /// unimplemented-seam capability's fail-closed default in
+    /// [`Self::handle`]).
+    db: Option<DbWiring>,
 }
 
 impl<K: KvBackend> StageCapabilities<K> {
@@ -262,6 +296,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             kv: None,
             egress,
             gate,
+            db: None,
         }
     }
 
@@ -293,8 +328,26 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// Builder-style so a deployment where the Valkey connection failed to
     /// open at startup can still construct every other capability and
     /// simply skip this call.
-    pub fn with_kv(mut self, backend: K) -> Self {
-        self.kv = Some(KvHost::new(backend));
+    ///
+    /// `capabilities` is the manifest-declared-capability snapshot
+    /// `bundle_host_kv::authorize::authorize_kv` checks -- the same
+    /// `Arc<CapabilitySnapshot>` `crate::bundle_loader`'s DB-driven poll
+    /// loop updates every tick.
+    pub fn with_kv(
+        mut self,
+        backend: K,
+        capabilities: std::sync::Arc<bundle_host_kv::CapabilitySnapshot>,
+    ) -> Self {
+        self.kv = Some(KvHost::new(backend, capabilities));
+        self
+    }
+
+    /// Attaches the `db` capability's live wiring -- called once at
+    /// startup (`crate::lib`) with the shared, process-wide [`DbWiring`],
+    /// never per-invoke. Builder-style so existing `StageCapabilities::new`
+    /// call sites (including every current test) are unaffected.
+    pub fn with_db(mut self, db: DbWiring) -> Self {
+        self.db = Some(db);
         self
     }
 
@@ -481,6 +534,303 @@ impl<K: KvBackend> StageCapabilities<K> {
             )),
         }
     }
+
+    /// Structured insert/get/update/delete against this app's own
+    /// `app_core`/`app_community` table (design doc
+    /// `docs/superpowers/specs/2026-09-28-bundle-db-capability-and-schemas.md`).
+    /// `query` is not implemented in this landing -- returns `not_implemented`
+    /// (see `bundle_host_db`'s crate doc "remaining work").
+    ///
+    /// Op/args shape (host-API `{capability, op, args}` dispatch, ahead of
+    /// a corresponding `stage.wit`/`bundle_executor` change -- see this
+    /// PR's description for the proposed WIT shape):
+    /// - `insert`: `args.column_values` = `{col: value, ...}` -> `{row_id, version, columns}`
+    /// - `get`: `args.row_id` (string) -> `{row_id, version, columns}`
+    /// - `update`: `args.row_id`, `args.expected_version` (u64), `args.column_values` -> `{row_id, version, columns}`
+    /// - `delete`: `args.row_id`, `args.expected_version` (u64) -> `{}`
+    /// - `query`: `args.limit`/`args.offset` (both optional u32, clamped to
+    ///   `MAX_QUERY_LIMIT`) -> `{rows: [{row_id, version, columns}, ...]}`
+    ///   -- host-side op ready for the proposed WIT shape, not yet
+    ///   guest-reachable in this landing (see this PR's description)
+    ///
+    /// Every value is a JSON scalar (`null`/bool/number/string); `bytes`
+    /// values are not supported over this JSON args shape in this landing.
+    async fn handle_db(&self, call: &HostCallBody) -> Result<serde_json::Value, HostResultError> {
+        // Gate call FIRST (spec SS5, PR #433), same posture as `http` in
+        // `CapabilityHandler::handle` -- checked before the feature-flag/
+        // wiring state below so an ungranted call always reports
+        // `not_granted`, never `not_implemented`/`feature_disabled`.
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                PermissionId::StorageTables,
+                ResourceRef::AppScoped(AppScopedResource::Table),
+            )
+            .map_err(denied_from_gate)?;
+        let Some(db) = &self.db else {
+            return Err(denied(
+                "not_implemented",
+                "db capability is not wired in this build -- TODO(M4+)",
+            ));
+        };
+
+        if !db.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "db capability is disabled (waddles.bundle-db-capability is OFF)",
+            ));
+        }
+
+        let scope = DbScope::new(
+            self.tenant.clone(),
+            self.community.clone(),
+            self.app_id.clone(),
+        );
+
+        let column_values =
+            |args: &serde_json::Value| -> Result<Vec<(String, DbValue)>, HostResultError> {
+                let obj = args
+                    .get("column_values")
+                    .and_then(|v| v.as_object())
+                    .ok_or_else(|| denied("invalid_args", "column_values must be a JSON object"))?;
+                obj.iter()
+                    .map(|(k, v)| Ok((k.clone(), json_to_db_value(v)?)))
+                    .collect()
+            };
+
+        let row_id = |args: &serde_json::Value| -> Result<String, HostResultError> {
+            args.get("row_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| denied("invalid_args", "row_id must be a string"))
+        };
+
+        let expected_version = |args: &serde_json::Value| -> Result<u64, HostResultError> {
+            args.get("expected_version")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| denied("invalid_args", "expected_version must be a u64"))
+        };
+
+        let result = match call.op.as_str() {
+            "insert" => {
+                let values = column_values(&call.args)?;
+                db.host
+                    .insert(&scope, &db.schemas, &db.capabilities, values)
+                    .await
+            }
+            "get" => {
+                let id = row_id(&call.args)?;
+                db.host
+                    .get(&scope, &db.schemas, &db.capabilities, &id)
+                    .await
+            }
+            "update" => {
+                let id = row_id(&call.args)?;
+                let version = expected_version(&call.args)?;
+                let values = column_values(&call.args)?;
+                db.host
+                    .update(&scope, &db.schemas, &db.capabilities, &id, version, values)
+                    .await
+            }
+            "delete" => {
+                let id = row_id(&call.args)?;
+                let version = expected_version(&call.args)?;
+                return db
+                    .host
+                    .delete(&scope, &db.schemas, &db.capabilities, &id, version)
+                    .await
+                    .map(|()| serde_json::json!({}))
+                    .map_err(db_error_to_host_error);
+            }
+            "query" => {
+                let limit = call
+                    .args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                    .unwrap_or(bundle_host_db::MAX_QUERY_LIMIT);
+                let offset = call
+                    .args
+                    .get("offset")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                    .unwrap_or(0);
+                let order_by = match parse_order_by(&call.args) {
+                    Ok(o) => o,
+                    Err(e) => return Err(e),
+                };
+                return db
+                    .host
+                    .query(
+                        &scope,
+                        &db.schemas,
+                        &db.capabilities,
+                        limit,
+                        offset,
+                        order_by,
+                    )
+                    .await
+                    .map(|rows| {
+                        serde_json::json!({
+                            "rows": rows.into_iter().map(row_to_json).collect::<Vec<_>>(),
+                        })
+                    })
+                    .map_err(db_error_to_host_error);
+            }
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("db op {other:?} not supported"),
+                ))
+            }
+        };
+
+        result.map(row_to_json).map_err(db_error_to_host_error)
+    }
+
+    /// `enabled` op: `{"key": String, "default_value": bool}` ->
+    /// `{"enabled": bool}` -- un-stubs the `flags` WIT capability
+    /// (`core/bundle_executor::host::imports::flags::Host::enabled`'s own
+    /// `call(...)` host-call) via `crate::license::resolve_flag`'s real
+    /// `penguin_licensing::LicenseClient`-backed fallback chain (live ->
+    /// cached -> this call's own `default_value`, see that function's
+    /// doc). Never returns an error for a well-formed call -- a flag
+    /// lookup failure must fail open to `default_value`, not deny the
+    /// host-call (spec §7.4/§6.5's "fail-open to the supplied
+    /// `default-value` on a flag-server outage, never an exception",
+    /// `core/bundle_executor::host::imports::flags::Host::enabled`'s own
+    /// doc). `tier` is not wired in this landing.
+    async fn handle_flags(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        // Gate call FIRST (spec SS5, PR #433), same posture as `http`/`db`.
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                PermissionId::FlagsRead,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
+        match call.op.as_str() {
+            "enabled" => {
+                let args: FlagsEnabledArgs =
+                    serde_json::from_value(call.args.clone()).map_err(|e| {
+                        denied(
+                            "invalid_args",
+                            format!("malformed flags.enabled host-call args: {e}"),
+                        )
+                    })?;
+                let value = crate::license::resolve_flag(&args.key, args.default_value).await;
+                Ok(serde_json::json!({ "enabled": value }))
+            }
+            other => Err(denied(
+                "not_implemented",
+                format!("flags op {other:?} is not wired in this build -- TODO(M4+)"),
+            )),
+        }
+    }
+}
+
+/// `{"key": String, "default_value": bool}` -- `flags.enabled`'s args
+/// (`core/bundle_executor::host::imports::flags::Host::enabled`'s own
+/// `serde_json::json!` shape).
+#[derive(serde::Deserialize)]
+struct FlagsEnabledArgs {
+    key: String,
+    default_value: bool,
+}
+
+fn json_to_db_value(v: &serde_json::Value) -> Result<DbValue, HostResultError> {
+    Ok(match v {
+        serde_json::Value::Null => DbValue::Null,
+        serde_json::Value::Bool(b) => DbValue::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                DbValue::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                DbValue::Float(f)
+            } else {
+                return Err(denied("invalid_args", "unsupported numeric value"));
+            }
+        }
+        serde_json::Value::String(s) => DbValue::Text(s.clone()),
+        _ => {
+            return Err(denied(
+                "invalid_args",
+                "unsupported value shape (array/object)",
+            ))
+        }
+    })
+}
+
+fn db_value_to_json(v: &DbValue) -> serde_json::Value {
+    match v {
+        DbValue::Null => serde_json::Value::Null,
+        DbValue::Bool(b) => serde_json::json!(b),
+        DbValue::Int(i) => serde_json::json!(i),
+        DbValue::Float(f) => serde_json::json!(f),
+        DbValue::Text(s) => serde_json::json!(s),
+        DbValue::Bytes(b) => serde_json::json!(b),
+    }
+}
+
+/// Parses `query`'s optional `order_by` arg: `{"random": true}` or
+/// `{"column": "<name>", "descending": <bool>}` -- `None`/absent means the
+/// backend's own default (`row_id ASC`). Column-name validation itself
+/// happens host-side in `bundle_host_db::backend::order_by_sql` (never
+/// trusted from this JSON alone) -- this function only shapes the
+/// wire-level args into [`bundle_host_db::OrderBy`].
+fn parse_order_by(
+    args: &serde_json::Value,
+) -> Result<Option<bundle_host_db::OrderBy>, HostResultError> {
+    let Some(order_by) = args.get("order_by") else {
+        return Ok(None);
+    };
+    if order_by.is_null() {
+        return Ok(None);
+    }
+    if order_by.get("random").and_then(|v| v.as_bool()) == Some(true) {
+        return Ok(Some(bundle_host_db::OrderBy::Random));
+    }
+    let name = order_by
+        .get("column")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            denied(
+                "invalid_args",
+                "order_by must be {\"random\": true} or {\"column\": string, \"descending\": bool}",
+            )
+        })?;
+    let descending = order_by
+        .get("descending")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok(Some(bundle_host_db::OrderBy::Column {
+        name: name.to_string(),
+        descending,
+    }))
+}
+
+fn row_to_json(row: bundle_host_db::Row) -> serde_json::Value {
+    let columns: serde_json::Map<String, serde_json::Value> = row
+        .columns
+        .into_iter()
+        .map(|(k, v)| (k, db_value_to_json(&v)))
+        .collect();
+    serde_json::json!({
+        "row_id": row.row_id,
+        "version": row.version,
+        "columns": columns,
+    })
+}
+
+/// Maps [`DbError`] to the `{code, message}` shape the executor forwards
+/// to the guest -- never leaks a raw SQL error string beyond `DbError`'s
+/// own already-sanitized `Backend` variant (no row data or PII in any
+/// `DbError` variant to begin with, `bundle_host_db`'s own doc).
+fn db_error_to_host_error(err: DbError) -> HostResultError {
+    denied(err.code(), err.to_string())
 }
 
 /// `{"key": String}` -- `kv.get`/`kv.delete`'s args.
@@ -597,41 +947,17 @@ impl<K: KvBackend> CapabilityHandler for StageCapabilities<K> {
                         .map_err(denied_from_gate)?;
                     self.handle_http(&call.args).await
                 }
-                // `db` needs the manifest's `data.tables` allowlist plus
-                // per-bundle-role Postgres RLS (`SET LOCAL waddles.tenant`/
-                // `waddles.community`, spec §7.4/§11.10), and is being
-                // extended further (single-statement -> transactional
-                // `db.execute-batch`, a manifest `capabilities` allowlist)
-                // by a separate, in-progress design -- see
-                // `docs/superpowers/specs/2026-09-28-wit-stage-v1-1-design.md`
-                // §3/§4. Gate call FIRST (spec SS5), same posture as `http`
-                // above.
-                CapabilityKind::Db => {
-                    self.gate
-                        .authorize(
-                            &self.gate_scope(),
-                            PermissionId::StorageTables,
-                            ResourceRef::AppScoped(AppScopedResource::Table),
-                        )
-                        .map_err(denied_from_gate)?;
-                    Err(denied(
-                        "not_implemented",
-                        "db capability is not wired in this build",
-                    ))
-                }
-                CapabilityKind::Flags => {
-                    self.gate
-                        .authorize(
-                            &self.gate_scope(),
-                            PermissionId::FlagsRead,
-                            ResourceRef::AppScoped(AppScopedResource::None),
-                        )
-                        .map_err(denied_from_gate)?;
-                    Err(denied(
-                        "not_implemented",
-                        "flags capability is not wired in this build -- TODO(M4+)",
-                    ))
-                }
+                // `db` is wired to `bundle_host_db::DbHost` (PR #498) --
+                // `handle_db` itself gate-checks FIRST (spec SS5) before
+                // consulting its own feature-flag/wiring state.
+                CapabilityKind::Db => self.handle_db(&call).await,
+                // `enabled` is wired to a real `penguin_licensing::
+                // LicenseClient` (`crate::license::resolve_flag`) -- see
+                // that module's doc for the fallback semantics (live ->
+                // cached -> caller default, never an error). `tier` is
+                // not wired in this landing. `handle_flags` itself
+                // gate-checks FIRST (spec SS5).
+                CapabilityKind::Flags => self.handle_flags(&call).await,
                 // Spec §6.5: "Capability: granted only to action-stage
                 // bundles" -- never granted to a process-stage bundle at
                 // all. The gate is still consulted first for uniform audit
@@ -791,7 +1117,11 @@ mod tests {
 
     /// A bare [`EgressGuard`] over an empty catalog -- for fixtures that
     /// don't exercise `http` at all and just need a valid value to satisfy
-    /// [`StageCapabilities::new`]'s required `egress` parameter.
+    /// [`StageCapabilities::new`]'s required `egress` parameter. Every
+    /// `app_id` is undeclared, so `http` denies every call
+    /// `host_not_declared` (this stage's deny-by-default posture, see
+    /// [`HttpEgressCatalog`]'s doc). Tests exercising a granted call build
+    /// their own guard via [`caps_with_egress_rule`] instead.
     fn test_egress() -> Arc<EgressGuard> {
         Arc::new(EgressGuard::new(
             Arc::new(ReqwestTransport::new()),
@@ -802,21 +1132,10 @@ mod tests {
         ))
     }
 
-    /// The default fixture: an empty [`HttpEgressCatalog`] and a
-    /// [`permissive_gate`] -- every `app_id` is undeclared in the catalog,
-    /// so `http` denies every call `host_not_declared` once the gate has
-    /// already granted the classified permission (this stage's deny-by-
-    /// default posture, see [`HttpEgressCatalog`]'s doc). Tests exercising
-    /// a granted call build their own guard via [`caps_with_egress_rule`]
-    /// instead.
+    /// The default fixture: [`test_egress`] (an empty catalog, so every
+    /// `http` call denies `host_not_declared` once the gate has already
+    /// granted the classified permission) plus a [`permissive_gate`].
     fn caps() -> StageCapabilities {
-        let egress = Arc::new(EgressGuard::new(
-            Arc::new(ReqwestTransport::new()),
-            test_egress_limits(),
-            HttpEgressCatalog::new(),
-            test_egress_metrics(),
-            bundle_host_http::egress::boxed(StaticFlag(true)),
-        ));
         StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
@@ -824,7 +1143,7 @@ mod tests {
             0,
             0,
             0,
-            egress,
+            test_egress(),
             permissive_gate(),
         )
     }
@@ -939,10 +1258,31 @@ mod tests {
             test_egress(),
             deny_all_gate(),
         )
-        .with_kv(FakeKvBackend::default())
+        .with_kv(
+            FakeKvBackend::default(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+        )
     }
 
+    /// Grants `storage.kv` to `"waddles.bot.commands.default"` -- the
+    /// `app_id` every `caps()`/`call()` helper in this module uses -- so
+    /// every existing `kv_*` test below (testing `handle_kv`'s argument
+    /// parsing/error mapping, not the gate itself) is unaffected by the
+    /// "undeclared means denied" default.
+    /// `kv_call_is_denied_when_storage_kv_is_undeclared` below is the one
+    /// test exercising an ungranted app.
     fn caps_with_kv() -> StageCapabilities<FakeKvBackend> {
+        caps_with_kv_and_capabilities(&["waddles.bot.commands.default"])
+    }
+
+    fn caps_with_kv_and_capabilities(granted_app_ids: &[&str]) -> StageCapabilities<FakeKvBackend> {
+        let snapshot = bundle_host_kv::CapabilitySnapshot::new();
+        for app_id in granted_app_ids {
+            snapshot.update(
+                *app_id,
+                [bundle_host_kv::authorize::KV_PERMISSION_ID.to_string()],
+            );
+        }
         StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
@@ -953,7 +1293,7 @@ mod tests {
             test_egress(),
             permissive_gate(),
         )
-        .with_kv(FakeKvBackend::default())
+        .with_kv(FakeKvBackend::default(), std::sync::Arc::new(snapshot))
     }
 
     /// A gate with a grant seeded under a specific, non-zero `app_version`
@@ -995,6 +1335,11 @@ mod tests {
     #[tokio::test]
     async fn source_binding_invocation_with_the_resolved_app_version_is_allowed_by_a_seeded_grant()
     {
+        let kv_capabilities = bundle_host_kv::CapabilitySnapshot::new();
+        kv_capabilities.update(
+            "waddles.bot.commands.default",
+            [bundle_host_kv::authorize::KV_PERMISSION_ID.to_string()],
+        );
         let caps = StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
@@ -1005,7 +1350,7 @@ mod tests {
             test_egress(),
             gate_seeded_at_version(42),
         )
-        .with_kv(FakeKvBackend::default());
+        .with_kv(FakeKvBackend::default(), Arc::new(kv_capabilities));
         caps.handle(call(
             CapabilityKind::Kv,
             "get",
@@ -1031,7 +1376,10 @@ mod tests {
             test_egress(),
             gate_seeded_at_version(42),
         )
-        .with_kv(FakeKvBackend::default());
+        .with_kv(
+            FakeKvBackend::default(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+        );
         let err = caps
             .handle(call(
                 CapabilityKind::Kv,
@@ -1146,6 +1494,22 @@ mod tests {
             // argument parsing/error mapping, not re-prove the limiter.
             Box::pin(async move { Ok(1) })
         }
+
+        fn reconcile_count_if_missing<'a>(
+            &'a self,
+            _count_key: &'a str,
+            _data_scan_pattern: &'a str,
+            _lock_key: &'a str,
+            _lock_ttl_ms: u64,
+            _scan_limit: u64,
+        ) -> bundle_host_kv::BoxFuture<'a, Result<bundle_host_kv::ReconcileOutcome, String>>
+        {
+            // Always "already present" -- the eviction self-heal path is
+            // `bundle_host_kv`'s own responsibility, covered by that
+            // crate's tests; this module only needs argument parsing/error
+            // mapping.
+            Box::pin(async move { Ok(bundle_host_kv::ReconcileOutcome::AlreadyPresent) })
+        }
     }
 
     fn call(capability: CapabilityKind, op: &str, args: serde_json::Value) -> HostCallBody {
@@ -1156,6 +1520,194 @@ mod tests {
             args,
             call_id: 1,
         }
+    }
+
+    fn mock_db_wiring(flag_on: bool) -> DbWiring {
+        let conn = sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection();
+        DbWiring {
+            host: Arc::new(DbHost::new(bundle_host_db::PostgresBackend::new(conn))),
+            schemas: Arc::new(SchemaCache::new()),
+            capabilities: Arc::new(DbCapabilitySnapshot::new()),
+            flag: Arc::new(crate::license::test_support::FixedGate(flag_on)),
+        }
+    }
+
+    #[tokio::test]
+    async fn db_capability_denies_not_implemented_when_never_wired() {
+        let capabilities = caps();
+        let err = capabilities
+            .handle_db(&call(
+                CapabilityKind::Db,
+                "get",
+                serde_json::json!({"row_id": "x"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_implemented");
+    }
+
+    #[tokio::test]
+    async fn db_capability_denies_feature_disabled_when_flag_is_off() {
+        let capabilities = caps().with_db(mock_db_wiring(false));
+        let err = capabilities
+            .handle_db(&call(
+                CapabilityKind::Db,
+                "get",
+                serde_json::json!({"row_id": "x"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "feature_disabled");
+    }
+
+    #[tokio::test]
+    async fn db_capability_denies_no_table_when_flag_on_but_unprovisioned() {
+        let capabilities = caps().with_db(mock_db_wiring(true));
+        capabilities.db.as_ref().unwrap().capabilities.update(
+            "waddles.bot.commands.default",
+            ["storage.tables".to_string()],
+        );
+        let err = capabilities
+            .handle_db(&call(
+                CapabilityKind::Db,
+                "get",
+                serde_json::json!({"row_id": "00000000-0000-0000-0000-000000000000"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "no_table");
+    }
+
+    #[tokio::test]
+    async fn db_capability_rejects_an_unknown_op() {
+        let capabilities = caps().with_db(mock_db_wiring(true));
+        let err = capabilities
+            .handle_db(&call(CapabilityKind::Db, "truncate", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "unknown_op");
+    }
+
+    #[tokio::test]
+    async fn db_capability_rejects_missing_row_id_for_get() {
+        let capabilities = caps().with_db(mock_db_wiring(true));
+        let err = capabilities
+            .handle_db(&call(CapabilityKind::Db, "get", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn db_capability_query_op_denies_no_table_when_unprovisioned() {
+        // `query` is dispatched the same as insert/get/update/delete at
+        // this untyped op layer -- proves the new arm actually reaches
+        // `DbHost::query` (resolve-then-authorize denies `no_table` here,
+        // same as every other op against an unprovisioned schema) rather
+        // than falling through to `unknown_op`.
+        let capabilities = caps().with_db(mock_db_wiring(true));
+        capabilities.db.as_ref().unwrap().capabilities.update(
+            "waddles.bot.commands.default",
+            ["storage.tables".to_string()],
+        );
+        let err = capabilities
+            .handle_db(&call(
+                CapabilityKind::Db,
+                "query",
+                serde_json::json!({"limit": 10, "offset": 0}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "no_table");
+    }
+
+    #[tokio::test]
+    async fn db_capability_query_op_defaults_limit_and_offset_when_omitted() {
+        // No `limit`/`offset` in args must not be `invalid_args` -- both
+        // are optional, defaulting to MAX_QUERY_LIMIT/0 respectively.
+        let capabilities = caps().with_db(mock_db_wiring(true));
+        let err = capabilities
+            .handle_db(&call(CapabilityKind::Db, "query", serde_json::json!({})))
+            .await
+            .unwrap_err();
+        // Not `invalid_args` -- both args are optional and were accepted;
+        // this app simply never declared `storage.tables`
+        // (`DbHost::resolve_and_authorize` maps a denied authorize() to
+        // `DbError::InvalidColumn`, whose `code()` is `"invalid_column"`).
+        assert_eq!(err.code, "invalid_column");
+    }
+
+    #[test]
+    fn parse_order_by_is_none_when_absent_or_null() {
+        assert!(parse_order_by(&serde_json::json!({})).unwrap().is_none());
+        assert!(parse_order_by(&serde_json::json!({"order_by": null}))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn parse_order_by_parses_random() {
+        let order_by = parse_order_by(&serde_json::json!({"order_by": {"random": true}}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(order_by, bundle_host_db::OrderBy::Random);
+    }
+
+    #[test]
+    fn parse_order_by_parses_column_and_direction() {
+        let order_by = parse_order_by(
+            &serde_json::json!({"order_by": {"column": "score", "descending": true}}),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            order_by,
+            bundle_host_db::OrderBy::Column {
+                name: "score".to_string(),
+                descending: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_order_by_column_defaults_descending_to_false() {
+        let order_by = parse_order_by(&serde_json::json!({"order_by": {"column": "score"}}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            order_by,
+            bundle_host_db::OrderBy::Column {
+                name: "score".to_string(),
+                descending: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_order_by_rejects_a_malformed_order_by() {
+        let err = parse_order_by(&serde_json::json!({"order_by": "not-an-object"})).unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+
+    #[tokio::test]
+    async fn db_capability_query_op_accepts_order_by_random() {
+        // Proves `order_by` actually reaches `DbHost::query` through the
+        // untyped op layer (denied `no_table`, same as every other query
+        // test above, rather than `invalid_args`).
+        let capabilities = caps().with_db(mock_db_wiring(true));
+        capabilities.db.as_ref().unwrap().capabilities.update(
+            "waddles.bot.commands.default",
+            ["storage.tables".to_string()],
+        );
+        let err = capabilities
+            .handle_db(&call(
+                CapabilityKind::Db,
+                "query",
+                serde_json::json!({"limit": 1, "order_by": {"random": true}}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "no_table");
     }
 
     #[test]
@@ -1274,7 +1826,9 @@ mod tests {
         // `kv_is_not_implemented_when_no_backend_was_configured` for `kv`'s
         // own (backend-unconfigured) not_implemented case, the `kv_*` tests
         // below for its fully-wired behavior, and the `http_*` tests below
-        // for `http`'s gate-then-egress-guard behavior.
+        // for `http`'s gate-then-egress-guard behavior. `caps()`'s
+        // `permissive_gate()` grants both `storage.tables`/`flags.read`, so
+        // this proves the gate-THEN-not_implemented ordering, not a denial.
         let c = caps();
         for capability in [CapabilityKind::Db, CapabilityKind::Flags] {
             let err = c
@@ -1534,6 +2088,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kv_call_is_denied_when_storage_kv_is_undeclared() {
+        // A configured `kv` backend, but the app's `CapabilitySnapshot`
+        // grants nothing -- "undeclared means denied", distinct from
+        // `kv_is_not_implemented_when_no_backend_was_configured`'s
+        // "backend never configured at all" case.
+        let c = caps_with_kv_and_capabilities(&[]);
+        let err = c
+            .handle(call(
+                CapabilityKind::Kv,
+                "get",
+                serde_json::json!({"key": "k"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "backend"); // KvError::wire_code() collapse
+    }
+
+    #[tokio::test]
+    async fn kv_call_succeeds_when_storage_kv_is_declared() {
+        let c = caps_with_kv_and_capabilities(&["waddles.bot.commands.default"]);
+        c.handle(call(
+            CapabilityKind::Kv,
+            "set",
+            serde_json::json!({"key": "k", "value": [1], "ttl_seconds": 0}),
+        ))
+        .await
+        .expect("set succeeds when storage.kv is declared");
+    }
+
+    #[tokio::test]
     async fn kv_set_then_get_round_trips_through_the_handler() {
         let c = caps_with_kv();
         c.handle(call(
@@ -1760,7 +2344,10 @@ mod tests {
             test_egress(),
             gate,
         )
-        .with_kv(FakeKvBackend::default());
+        .with_kv(
+            FakeKvBackend::default(),
+            Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+        );
 
         let err = caps
             .handle(call(
@@ -1805,6 +2392,11 @@ mod tests {
             Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
             Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
         ));
+        let kv_capabilities = bundle_host_kv::CapabilitySnapshot::new();
+        kv_capabilities.update(
+            "waddles.bot.commands.default",
+            [bundle_host_kv::authorize::KV_PERMISSION_ID.to_string()],
+        );
         let caps = StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
@@ -1815,7 +2407,7 @@ mod tests {
             test_egress(),
             gate,
         )
-        .with_kv(FakeKvBackend::default());
+        .with_kv(FakeKvBackend::default(), Arc::new(kv_capabilities));
 
         caps.handle(call(
             CapabilityKind::Kv,

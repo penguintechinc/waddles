@@ -3,7 +3,7 @@
 # Multi-stage, rootless. Base digest reused from services/interactive-social/
 # Dockerfile (already pinned in this repo -- devops-containers.md forbids
 # inventing a second one for the same python:3.13-slim-bookworm tag).
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26 AS builder
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS builder
 WORKDIR /app
 
 COPY hub_api/requirements.txt .
@@ -38,17 +38,23 @@ RUN set -eux; \
     install -m 0755 "/tmp/wasm-tools-${WASM_TOOLS_VERSION}-${wt_arch}-linux/wasm-tools" /usr/local/bin/wasm-tools; \
     rm -rf /tmp/wasm-tools.tar.gz "/tmp/wasm-tools-${WASM_TOOLS_VERSION}-${wt_arch}-linux"
 
-FROM python:3.13-slim-bookworm@sha256:2325bb286ec344af3e5898cc224b5844e2707ac6e26b1632516fd3edc84a5e26
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-COPY hub_api/app.py hub_api/config.py ./
+COPY hub_api/app.py hub_api/config.py hub_api/bootstrap.py ./
 COPY hub_api/blueprints ./blueprints
 COPY hub_api/routers ./routers
 COPY hub_api/openapi ./openapi
 COPY hub_api/services ./services
 COPY hub_api/grpc_internal ./grpc_internal
+# bootstrap.py's ScriptDirectory call only ever statically parses this
+# directory's revision/down_revision graph -- it never executes alembic/
+# env.py (see bootstrap.py's module docstring for why that matters in this
+# process). script.py.mako/alembic.ini/tests are revision-authoring/CI-only,
+# not needed at runtime.
+COPY alembic/versions ./alembic/versions
 
 EXPOSE 8204
 # Internal-only gRPC listener (waddles.hub.internal.v1) -- ClusterIP +

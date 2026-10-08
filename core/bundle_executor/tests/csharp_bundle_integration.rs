@@ -26,6 +26,7 @@
 use std::sync::Arc;
 
 use bundle_executor::config::CliConfig;
+use bundle_executor::heartbeat::Heartbeat;
 use bundle_executor::invoke::{ComponentSource, Executor};
 use bundle_executor::wire::run_connection;
 use penguin_bundle_host::wire::{
@@ -48,8 +49,13 @@ impl ComponentSource for FixtureSource {
         &self,
         _component_key: &str,
         _sidecar_key: &str,
-    ) -> Result<Vec<u8>, bundle_executor::error::ExecutorError> {
-        Ok(FIXTURE_WASM.to_vec())
+    ) -> Result<(Vec<u8>, Vec<u8>), bundle_executor::error::ExecutorError> {
+        // `test_config()` below sets no `bundle_signing_public_keys`, so
+        // `Executor::on_load` skips signature verification -- this `{}`
+        // stub sidecar (the same one `storage_service.
+        // upload_bundle_component()` writes before an artifact is signed)
+        // is never parsed.
+        Ok((FIXTURE_WASM.to_vec(), b"{}".to_vec()))
     }
 }
 
@@ -270,7 +276,14 @@ async fn csharp_component_loads_and_runs_transform_and_dispatch_through_the_real
     });
 
     let executor_task = tokio::spawn(async move {
-        run_connection(executor_io, hello_body(), Arc::clone(&executor)).await
+        run_connection(
+            executor_io,
+            hello_body(),
+            Arc::clone(&executor),
+            "test-peer",
+            Heartbeat::disabled(),
+        )
+        .await
     });
 
     let (transform_payload, dispatch_payloads) = stage.await.expect("stage task");

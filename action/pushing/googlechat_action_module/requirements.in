@@ -10,9 +10,9 @@ cryptography==50.0.1
 httplib2==0.32.0
 idna==3.19
 pyasn1==0.6.4
-pyjwt==2.13.0
+pyjwt==2.15.0
 setuptools==84.0.0
-urllib3==2.7.0
+urllib3==2.8.0
 psycopg2-binary==2.9.12
 asyncio==3.4.3
 python-dotenv==1.2.3

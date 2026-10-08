@@ -14,6 +14,7 @@ any compiler Job would be created.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -27,6 +28,15 @@ from flask_core.bundle_attribution import (
     valid_alternative_to_entry,
     valid_notice,
 )
+
+from services.bundle_permission_catalog import (
+    NET_HTTP_IP_PREFIXES,
+    NET_HTTP_PREFIXES,
+    is_valid_egress_host,
+    resolve_risk,
+)
+
+logger = logging.getLogger(__name__)
 
 _SEGMENT = r"[a-z0-9][a-z0-9_-]*"
 _APP_ID_RE = re.compile(rf"^waddles\.{_SEGMENT}\.{_SEGMENT}\.{_SEGMENT}$")
@@ -45,7 +55,7 @@ _ALLOWED_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"})
 _RESERVED_TABLES = frozenset(
     {"users", "tenants", "communities", "app_catalog", "app_activations", "app_tenant_availability"}
 )
-_ALLOWED_LANGUAGES = frozenset({"python", "rust", "javascript", "typescript", "other"})
+_ALLOWED_LANGUAGES = frozenset({"python", "rust", "javascript", "typescript", "csharp", "other"})
 _ALLOWED_STAGES = frozenset({"process", "action", "presentation"})
 _MAX_TIMEOUT_MS = 10000
 _MAX_MEMORY_MB = 256
@@ -89,6 +99,22 @@ class Limits:
 
 
 @dataclass(slots=True, frozen=True)
+class PermissionDeclaration:
+    """One structured `permissions:` entry (spec Sec2.1) -- id, justification, per-id params.
+
+    Replaces the dead free-form `permissions: []` string-list parsing
+    (spec Sec2.4) -- `id` is a catalog member (`bundle_permission_catalog.
+    resolve_risk`), `justification` is mandatory 1-280 chars of plain text,
+    `params` is the permission-specific dict validated per Sec2.2.
+    """
+
+    id: str
+    risk: str
+    justification: str
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True, frozen=True)
 class BundleManifestV2:
     """A validated `bundle.yaml` v2 manifest -- the shape every downstream reader consumes."""
 
@@ -124,6 +150,12 @@ class BundleManifestV2:
     homepage_url: str | None = None
     notice: str | None = None
     category: str | None = None
+    # spec Sec2.1 -- the structured permission-catalog block, replacing the
+    # dead `permissions: []` string-list parsing above. Defaulted so every
+    # pre-existing direct `BundleManifestV2(...)` construction site (test
+    # fixtures, `bundle_approval_service._reparse_trusted`) keeps working
+    # unchanged; `parse_bundle_manifest_v2` always passes it explicitly.
+    permission_declarations: tuple[PermissionDeclaration, ...] = ()
 
 
 def _require(condition: bool, reason: str, detail: str) -> None:
@@ -174,6 +206,121 @@ def _parse_consumes(
             )
         )
     return tuple(rules)
+
+
+_MAX_JUSTIFICATION_LEN = 280
+_MAX_OVERLAY_DURATION_S = 30
+_MAX_REPUTATION_DELTA = 5
+_REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_.]*$")
+
+
+def parse_permission_declarations(
+    raw_entries: list[dict[str, Any]],
+) -> tuple[PermissionDeclaration, ...]:
+    """Validate+build every structured `permissions:` entry (spec Sec2.1/2.2/2.3).
+
+    The catalog is closed (`unknown_permission` on anything `resolve_risk`
+    doesn't recognize); every `dangerous`-risk entry requires a non-empty
+    `justification` (Sec2.3); `storage.tables` requires `params.schema` and
+    vice versa (Sec2.3's mutual-requirement rule); `overlay.media` requires
+    a non-empty `allowed_hosts` and a `max_duration_seconds` within the
+    catalog ceiling; `reputation.*.write` bounds `delta_min`/`delta_max`
+    within `|delta| <= 5` and validates every `reason_codes` entry.
+    `interaction.pii.receive` (raw PII in form/modal/interaction inputs,
+    DEFAULT NO/`dangerous`) takes no special `params` -- like any other
+    dangerous, non-parameterized catalog entry it only needs the
+    justification above; the host's default-filter behavior when it is
+    NOT granted is enforced at delivery time, not at manifest-parse time.
+    """
+    declarations: list[PermissionDeclaration] = []
+    for entry in raw_entries:
+        permission_id = entry.get("id", "")
+        risk = resolve_risk(permission_id)
+        _require(risk is not None, "unknown_permission", f"{permission_id!r}")
+        assert risk is not None  # nosec B101 -- _require already raised above otherwise
+
+        justification = entry.get("justification", "")
+        _require(
+            0 < len(justification) <= _MAX_JUSTIFICATION_LEN,
+            "missing_justification",
+            f"{permission_id!r} requires justification (1-{_MAX_JUSTIFICATION_LEN} chars)",
+        )
+
+        params = dict(entry.get("params") or {})
+
+        if permission_id.startswith(NET_HTTP_PREFIXES):
+            methods = params.get("methods")
+            _require(
+                isinstance(methods, list) and bool(methods) and set(methods) <= _ALLOWED_METHODS,
+                "invalid_net_http_method",
+                f"{permission_id!r} params.methods must be a non-empty subset of "
+                f"{sorted(_ALLOWED_METHODS)}, got {methods!r}",
+            )
+            if permission_id.startswith(NET_HTTP_IP_PREFIXES):
+                logger.warning(
+                    "bundle manifest declares an IP-literal outbound permission %r -- "
+                    "prefer net.http.fqdn:<host> where a stable hostname is available; "
+                    "net.http.public-ip/private-ip are dangerous-risk and require explicit "
+                    "per-tenant/community re-consent",
+                    permission_id,
+                )
+        elif "methods" in params:
+            _require(
+                False,
+                "invalid_net_http_method",
+                "params.methods is only valid for a net.http.fqdn/public-ip/private-ip permission",
+            )
+
+        if permission_id == "storage.tables":
+            _require(
+                bool(params.get("schema")),
+                "storage_tables_requires_schema",
+                "storage.tables requires params.schema",
+            )
+        elif "schema" in params:
+            _require(
+                False,
+                "storage_tables_requires_schema",
+                "params.schema is only valid for storage.tables",
+            )
+
+        if permission_id == "overlay.media":
+            allowed_hosts = params.get("allowed_hosts") or []
+            _require(
+                bool(allowed_hosts), "invalid_overlay_hosts", "overlay.media requires allowed_hosts"
+            )
+            for host in allowed_hosts:
+                _require(
+                    is_valid_egress_host(host, allow_wildcard=False),
+                    "invalid_overlay_hosts",
+                    f"{host!r} is not a valid, non-wildcard host",
+                )
+            max_duration = int(params.get("max_duration_seconds", 0))
+            _require(
+                0 < max_duration <= _MAX_OVERLAY_DURATION_S,
+                "invalid_overlay_duration",
+                f"max_duration_seconds={max_duration}",
+            )
+
+        if permission_id in ("reputation.community.write", "reputation.tenant.write"):
+            delta_min = int(params.get("delta_min", 0))
+            delta_max = int(params.get("delta_max", 0))
+            _require(
+                -_MAX_REPUTATION_DELTA <= delta_min <= 0 <= delta_max <= _MAX_REPUTATION_DELTA,
+                "delta_out_of_bounds",
+                f"delta_min={delta_min} delta_max={delta_max}",
+            )
+            reason_codes = params.get("reason_codes") or []
+            _require(bool(reason_codes), "missing_reason_codes", f"{permission_id!r}")
+            for code in reason_codes:
+                _require(bool(_REASON_CODE_RE.match(code)), "invalid_reason_code", f"{code!r}")
+
+        declarations.append(
+            PermissionDeclaration(
+                id=permission_id, risk=risk, justification=justification, params=params
+            )
+        )
+    return tuple(declarations)
 
 
 def parse_bundle_manifest_v2(
@@ -355,6 +502,15 @@ def parse_bundle_manifest_v2(
         )
         tables.append(table)
 
+    permission_entries = raw.get("permissions") or []
+    # Back-compat: a pre-existing bare string-list `permissions: [...]`
+    # (the dead, never-enforced shape, spec Sec2.4) parses to zero
+    # structured declarations rather than erroring -- only dict entries
+    # (the new, real schema) are validated against the catalog.
+    permission_declarations = parse_permission_declarations(
+        [e for e in permission_entries if isinstance(e, dict)]
+    )
+
     raw_limits = raw.get("limits") or {}
     timeout_ms = int(raw_limits.get("timeout_ms", 2000))
     memory_mb = int(raw_limits.get("memory_mb", 64))
@@ -379,7 +535,8 @@ def parse_bundle_manifest_v2(
         egress=tuple(egress_rules),
         data_tables=tuple(tables),
         limits=Limits(timeout_ms=timeout_ms, memory_mb=memory_mb, egress_rps=egress_rps),
-        permissions=tuple(raw.get("permissions") or []),
+        permissions=tuple(e for e in permission_entries if isinstance(e, str)),
+        permission_declarations=permission_declarations,
         routes_to=tuple(raw.get("routes_to") or []),
         consumes=consumes,
         author=author,

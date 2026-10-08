@@ -1,0 +1,49 @@
+# fix/no-empty-kept-secrets -- test-only ConfigMap probing _helpers.tpl's
+# waddlebot.secretKeyNonEmpty / waddlebot.tlsSecretComplete helpers directly against
+# synthetic `dict` literals built in-template, never via `lookup` -- `lookup` always
+# returns empty outside a real `helm install`/`upgrade` against a live cluster (no API
+# server to query in `helm template`/`--dry-run` mode, see auto-provisioned-secrets.yaml's
+# header comment), so it cannot exercise the "existing Secret has an EMPTY value" branch
+# this fix added. Testing the shared helper logic directly, independent of `lookup`,
+# is the only way to assert the empty-is-missing behavior from a `helm template` run --
+# see k8s/helm/waddlebot/tests/test_no_empty_kept_secrets_render.py.
+#
+# Gated by debugHelperProbe.enabled (values.yaml, default false) -- NEVER true in any
+# real values-*.yaml, only via --set in the test above.
+{{- if .Values.debugHelperProbe.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-helper-probe
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: debug-helper-probe
+data:
+  # waddlebot.secretKeyNonEmpty
+  nonEmptySingle: {{ include "waddlebot.secretKeyNonEmpty" (dict "existing" (dict "data" (dict "FOO" (b64enc "bar"))) "key" "FOO") | quote }}
+  emptyValueSingle: {{ include "waddlebot.secretKeyNonEmpty" (dict "existing" (dict "data" (dict "FOO" (b64enc ""))) "key" "FOO") | quote }}
+  missingKeySingle: {{ include "waddlebot.secretKeyNonEmpty" (dict "existing" (dict "data" (dict "BAR" (b64enc "x"))) "key" "FOO") | quote }}
+  nilExistingSingle: {{ include "waddlebot.secretKeyNonEmpty" (dict "existing" nil "key" "FOO") | quote }}
+  # waddlebot.tlsSecretComplete
+  completeTls: {{ include "waddlebot.tlsSecretComplete" (dict "existing" (dict "data" (dict "ca.crt" (b64enc "ca") "tls.crt" (b64enc "crt") "tls.key" (b64enc "key")))) | quote }}
+  emptyKeyTls: {{ include "waddlebot.tlsSecretComplete" (dict "existing" (dict "data" (dict "ca.crt" (b64enc "ca") "tls.crt" (b64enc "crt") "tls.key" (b64enc "")))) | quote }}
+  partialTls: {{ include "waddlebot.tlsSecretComplete" (dict "existing" (dict "data" (dict "ca.crt" (b64enc "ca")))) | quote }}
+  nilExistingTls: {{ include "waddlebot.tlsSecretComplete" (dict "existing" nil) | quote }}
+  # fix/cert-regen-on-identity-change -- waddlebot.tlsSecretIdentityMatches /
+  # waddlebot.tlsSecretStaleFailsClosed. The reference identity/sansSha256 pair below
+  # ("spiffe://penguintech.io/alpha/waddlebot-host-api-probe" / "deadbeef") is arbitrary --
+  # only its exact-match-or-not relationship to each synthetic $existing matters.
+  identityMatchKeeps: {{ include "waddlebot.tlsSecretIdentityMatches" (dict "existing" (dict "metadata" (dict "annotations" (dict "waddlebot.io/cert-identity" "spiffe://penguintech.io/alpha/waddlebot-host-api-probe" "waddlebot.io/cert-sans-sha256" "deadbeef")) "data" (dict "ca.crt" (b64enc "ca") "tls.crt" (b64enc "crt") "tls.key" (b64enc "key"))) "identity" "spiffe://penguintech.io/alpha/waddlebot-host-api-probe" "sansSha256" "deadbeef") | quote }}
+  identityMismatchCN: {{ include "waddlebot.tlsSecretIdentityMatches" (dict "existing" (dict "metadata" (dict "annotations" (dict "waddlebot.io/cert-identity" "waddlebot" "waddlebot.io/cert-sans-sha256" "deadbeef")) "data" (dict "ca.crt" (b64enc "ca") "tls.crt" (b64enc "crt") "tls.key" (b64enc "key"))) "identity" "spiffe://penguintech.io/alpha/waddlebot-host-api-probe" "sansSha256" "deadbeef") | quote }}
+  identityMismatchSans: {{ include "waddlebot.tlsSecretIdentityMatches" (dict "existing" (dict "metadata" (dict "annotations" (dict "waddlebot.io/cert-identity" "spiffe://penguintech.io/alpha/waddlebot-host-api-probe" "waddlebot.io/cert-sans-sha256" "stale")) "data" (dict "ca.crt" (b64enc "ca") "tls.crt" (b64enc "crt") "tls.key" (b64enc "key"))) "identity" "spiffe://penguintech.io/alpha/waddlebot-host-api-probe" "sansSha256" "deadbeef") | quote }}
+  identityMissingAnnotations: {{ include "waddlebot.tlsSecretIdentityMatches" (dict "existing" (dict "metadata" (dict "annotations" (dict)) "data" (dict "ca.crt" (b64enc "ca") "tls.crt" (b64enc "crt") "tls.key" (b64enc "key"))) "identity" "spiffe://penguintech.io/alpha/waddlebot-host-api-probe" "sansSha256" "deadbeef") | quote }}
+  identityIncompleteTlsIgnored: {{ include "waddlebot.tlsSecretIdentityMatches" (dict "existing" (dict "metadata" (dict "annotations" (dict "waddlebot.io/cert-identity" "spiffe://penguintech.io/alpha/waddlebot-host-api-probe" "waddlebot.io/cert-sans-sha256" "deadbeef")) "data" (dict "ca.crt" (b64enc "ca"))) "identity" "spiffe://penguintech.io/alpha/waddlebot-host-api-probe" "sansSha256" "deadbeef") | quote }}
+  staleFailsClosedOnMatch: {{ include "waddlebot.tlsSecretStaleFailsClosed" (dict "existing" (dict "metadata" (dict "annotations" (dict "waddlebot.io/cert-identity" "spiffe://penguintech.io/alpha/waddlebot-host-api-probe" "waddlebot.io/cert-sans-sha256" "deadbeef")) "data" (dict "ca.crt" (b64enc "ca") "tls.crt" (b64enc "crt") "tls.key" (b64enc "key"))) "identity" "spiffe://penguintech.io/alpha/waddlebot-host-api-probe" "sansSha256" "deadbeef" "canGenerate" false) | quote }}
+  staleFailsClosedMismatchBeta: {{ include "waddlebot.tlsSecretStaleFailsClosed" (dict "existing" (dict "metadata" (dict "annotations" (dict "waddlebot.io/cert-identity" "waddlebot" "waddlebot.io/cert-sans-sha256" "deadbeef")) "data" (dict "ca.crt" (b64enc "ca") "tls.crt" (b64enc "crt") "tls.key" (b64enc "key"))) "identity" "spiffe://penguintech.io/alpha/waddlebot-host-api-probe" "sansSha256" "deadbeef" "canGenerate" false) | quote }}
+  staleFailsClosedMismatchAlpha: {{ include "waddlebot.tlsSecretStaleFailsClosed" (dict "existing" (dict "metadata" (dict "annotations" (dict "waddlebot.io/cert-identity" "waddlebot" "waddlebot.io/cert-sans-sha256" "deadbeef")) "data" (dict "ca.crt" (b64enc "ca") "tls.crt" (b64enc "crt") "tls.key" (b64enc "key"))) "identity" "spiffe://penguintech.io/alpha/waddlebot-host-api-probe" "sansSha256" "deadbeef" "canGenerate" true) | quote }}
+  staleFailsClosedMissingAnnotationsBeta: {{ include "waddlebot.tlsSecretStaleFailsClosed" (dict "existing" (dict "metadata" (dict "annotations" (dict)) "data" (dict "ca.crt" (b64enc "ca") "tls.crt" (b64enc "crt") "tls.key" (b64enc "key"))) "identity" "spiffe://penguintech.io/alpha/waddlebot-host-api-probe" "sansSha256" "deadbeef" "canGenerate" false) | quote }}
+  staleFailsClosedMissingAnnotationsAlpha: {{ include "waddlebot.tlsSecretStaleFailsClosed" (dict "existing" (dict "metadata" (dict "annotations" (dict)) "data" (dict "ca.crt" (b64enc "ca") "tls.crt" (b64enc "crt") "tls.key" (b64enc "key"))) "identity" "spiffe://penguintech.io/alpha/waddlebot-host-api-probe" "sansSha256" "deadbeef" "canGenerate" true) | quote }}
+  staleFailsClosedNilExisting: {{ include "waddlebot.tlsSecretStaleFailsClosed" (dict "existing" nil "identity" "spiffe://penguintech.io/alpha/waddlebot-host-api-probe" "sansSha256" "deadbeef" "canGenerate" false) | quote }}
+  staleFailsClosedIncompleteIgnored: {{ include "waddlebot.tlsSecretStaleFailsClosed" (dict "existing" (dict "metadata" (dict "annotations" (dict "waddlebot.io/cert-identity" "waddlebot" "waddlebot.io/cert-sans-sha256" "deadbeef")) "data" (dict "ca.crt" (b64enc "ca"))) "identity" "spiffe://penguintech.io/alpha/waddlebot-host-api-probe" "sansSha256" "deadbeef" "canGenerate" false) | quote }}
+{{- end }}

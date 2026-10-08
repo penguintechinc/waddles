@@ -22,7 +22,13 @@ trap cleanup EXIT
 # Stub docker/helm/kubectl on PATH -- each just logs its invocation and exits
 # 0 (`kubectl ... config current-context` additionally prints local-alpha, so
 # the "unset KUBE_CONTEXT" default path has something to validate).
-for tool in docker helm kubectl; do
+#
+# `helm template` additionally renders one fake image so alpha-deploy.sh's
+# check_images_in_registry preflight (fix/alpha-deploy-hub-webui) has a
+# non-empty image list to find -- this test is about context allowlisting,
+# not the preflight itself (see test_alpha_deploy_image_preflight.sh), so it
+# must not trip the "zero images rendered" denominator guard.
+for tool in docker kubectl; do
     stub="$STUB_DIR/$tool"
     {
         echo '#!/usr/bin/env bash'
@@ -33,6 +39,35 @@ for tool in docker helm kubectl; do
     } > "$stub"
     chmod +x "$stub"
 done
+
+cat > "$STUB_DIR/helm" <<EOS
+#!/usr/bin/env bash
+echo "STUB-CALLED helm \$*" >> "$LOG_FILE"
+if [ "\$1" = "template" ]; then
+    cat <<'YAML'
+---
+# Source: waddlebot/templates/hub-api.yaml
+    containers:
+      - name: hub-api
+        image: "localhost:32000/waddlebot/hub-api:faketag"
+YAML
+    exit 0
+fi
+# fix/alpha-deploy-executor-and-failfast -- the post-upgrade helm-status
+# verification needs valid JSON with status=deployed to pass through.
+if [ "\$1" = "status" ]; then
+    echo '{"info":{"status":"deployed"},"version":1}'
+    exit 0
+fi
+exit 0
+EOS
+
+cat > "$STUB_DIR/curl" <<'EOS'
+#!/usr/bin/env bash
+echo "200"
+EOS
+
+chmod +x "$STUB_DIR/helm" "$STUB_DIR/curl"
 
 run_case() {
     # run_case <label> <kube_context_or_empty> <expected_exit_zero:0|1>

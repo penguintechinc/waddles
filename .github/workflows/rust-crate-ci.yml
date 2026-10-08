@@ -50,6 +50,7 @@ jobs:
   lint-test:
     name: "${{ inputs.crate_name }}: fmt + clippy + deny + coverage"
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
@@ -59,14 +60,32 @@ jobs:
         with:
           persist-credentials: false
 
+      # Bounded retry + per-attempt timeout: a hung apt mirror/lock used to
+      # stall this step for 90-100+ min with zero progress, which in turn
+      # timed out the aggregate ci-gate (~105 min) and wedged the release
+      # merge queue. noninteractive + Dpkg::Use-Pty=0 avoid a tty prompt
+      # stalling non-interactively; the loop fails loudly (exit 1) if every
+      # attempt fails/hangs -- never masked with `|| true`.
       - name: Install build deps (${{ inputs.extra_apt_reason }})
         if: inputs.extra_apt_packages != ''
+        timeout-minutes: 10
         env:
           EXTRA_APT_PACKAGES: ${{ inputs.extra_apt_packages }}
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y $EXTRA_APT_PACKAGES
+          export DEBIAN_FRONTEND=noninteractive
+          for i in 1 2 3; do
+            if timeout 180 sudo -E apt-get -y -o Dpkg::Use-Pty=0 update \
+               && timeout 300 sudo -E apt-get -y -o Dpkg::Use-Pty=0 install --no-install-recommends $EXTRA_APT_PACKAGES; then
+              break
+            fi
+            echo "apt attempt $i failed/timed out" >&2
+            if [ "$i" -eq 3 ]; then
+              echo "all 3 apt attempts failed/timed out -- failing loudly" >&2
+              exit 1
+            fi
+            sleep 10
+          done
 
       - name: Install Rust 1.97.1 (rustfmt, clippy, llvm-tools-preview)
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot

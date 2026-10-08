@@ -36,6 +36,49 @@ pub struct ActiveBundleRow {
     pub digest: String,
     pub component_key: String,
     pub sidecar_key: String,
+    /// Artifact-signature columns (spec SS5.6/Gemini review condition 9,
+    /// migration `0040_bundle_artifact_signature`) -- surfaced here for
+    /// observability/audit only. The AUTHORITATIVE check is
+    /// `core/bundle_executor/src/signing.rs`'s verification of the signed
+    /// `.json` sidecar fetched from the bucket at `sidecar_key`, not a
+    /// comparison against these columns directly (see
+    /// `entities::app_versions`'s module doc for why: the wire protocol's
+    /// `LoadBody` has no field to carry them to the executor).
+    pub artifact_signature: Option<String>,
+    pub artifact_signature_key_id: Option<String>,
+    pub artifact_signed_approval_id: Option<i64>,
+    /// The install-time consent summary's derived `"capabilities"` array
+    /// (`app_install_approvals.summary_json`, `crate::entities::
+    /// app_install_approvals`'s doc) -- e.g. `["context","kv","flags",
+    /// "log","clock","http"]`. Each service's own `bundle_loader` folds
+    /// this into a per-`app_id` declared-capability snapshot
+    /// (`bundle_host_kv::authorize::CapabilitySnapshot`) that
+    /// `authorize_kv` checks before granting `kv` (coordinator fix on PR
+    /// #425: "undeclared means denied", no more unconditional grant).
+    /// Empty (never `None`) if `summary_json` was missing the key, was not
+    /// an array of strings, or failed to parse -- a malformed/absent
+    /// summary denies every capability it might have granted, the correct
+    /// fail-closed direction for a consent record this crate cannot
+    /// validate further than "is this valid JSON shaped like the summary
+    /// schema".
+    pub declared_capabilities: Vec<String>,
+}
+
+/// Extracts `summary_json.capabilities` (a JSON array of strings) as a
+/// plain `Vec<String>`, or `vec![]` for any malformed/missing shape (this
+/// function's own doc: fail closed, never fail the whole active-set read
+/// over one bundle's malformed consent record).
+fn declared_capabilities_from_summary(summary_json: &sea_orm::JsonValue) -> Vec<String> {
+    summary_json
+        .get("capabilities")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A cheap change signal for one `(tenant_id, community_id)` scope: a
@@ -154,6 +197,51 @@ pub fn derive_component_keys(digest: &str) -> (String, String) {
     )
 }
 
+/// A digest that is neither bare 64-hex nor `sha256:<64 hex>` -- see
+/// [`canonical_digest`]'s doc for why this is a typed, fail-loud error
+/// rather than a silent pass-through.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("malformed digest {0:?}: expected 64 hex chars, optionally prefixed with \"sha256:\"")]
+pub struct DigestError(pub String);
+
+/// Canonicalizes a digest to the `sha256:<64 lowercase hex>` form the
+/// executor's `Load`/`Unload`/`Invoke` wire protocol requires
+/// (`core/bundle_executor/src/invoke.rs::verify_digest`'s own parse:
+/// `strip_prefix("sha256:")`, `hex.len() == 64`, `is_ascii_hexdigit`) --
+/// this is a deliberate, commented duplicate of that validation, not an
+/// independent reimplementation; `bundle_executor` pulls in `wasmtime`, so
+/// it cannot be a dependency of this crate or of `svc_process`/`svc_action`
+/// without pulling `wasmtime` into their `cargo deny` scope (an earlier
+/// attempt did exactly that and broke `svc_action`'s deny gate).
+///
+/// **The one normalization point for every digest crossing the svc<->
+/// executor boundary** -- [`assemble_active_set`] is the sole caller, so
+/// every `ActiveBundleRow::digest` this crate ever produces (consumed by
+/// both `core/svc_process` and `core/svc_action`'s `bundle_loader::
+/// ExecutorSink::load`/`unload`, their `loaded: HashMap<app_id, digest>`
+/// state, and `crate::diff::plan`'s digest-equality check) is already
+/// canonical. `app_versions.artifact_digest` is stored as bare 64-hex by
+/// the control plane -- the legacy `PROCESS_BUNDLE_DIGEST`/
+/// `ACTION_BUNDLE_DIGEST` env path has always sent the `sha256:`-prefixed
+/// form directly to the executor without going through this crate at all,
+/// which is why the mismatch never surfaced until the DB-driven path
+/// shipped. Accepts either input form so both are idempotently normalized;
+/// lowercases hex so a canonical-form comparison never misses a match over
+/// case alone. Storage-key derivation ([`derive_component_keys`]) keeps
+/// using the bare-hex form it has always used -- it strips any `sha256:`
+/// prefix itself, so feeding it this function's canonical (prefixed) output
+/// is unaffected.
+///
+/// regression: DB bare-hex digest rejected by executor Load (malformed
+/// digest), UnknownBundle (alpha 2026-10-03)
+pub fn canonical_digest(input: &str) -> Result<String, DigestError> {
+    let hex = input.strip_prefix("sha256:").unwrap_or(input);
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(DigestError(input.to_string()));
+    }
+    Ok(format!("sha256:{}", hex.to_ascii_lowercase()))
+}
+
 /// Why one `app_active_versions` row was excluded from
 /// [`ActiveSetRead::rows`] -- ops-visibility fix (security review):
 /// exclusion used to be a `debug!`/`warn!` log line only, easy to miss when
@@ -174,6 +262,13 @@ pub enum ExclusionReason {
     /// The `app_versions` row has no `artifact_digest` yet (not published,
     /// or a race with a concurrent publish).
     MissingDigest,
+    /// `app_versions.artifact_digest` failed [`canonical_digest`] -- neither
+    /// bare 64-hex nor `sha256:<64 hex>`. Logged at `ERROR` (not `warn!`
+    /// like the other reasons) by [`assemble_active_set`): a malformed
+    /// digest the control plane itself wrote is a data-integrity bug, not
+    /// routine rollout/approval-lifecycle noise. Logged by
+    /// [`assemble_active_set`].
+    MalformedDigest,
 }
 
 impl ExclusionReason {
@@ -184,6 +279,7 @@ impl ExclusionReason {
             Self::MissingVersionRow => "missing_version_row",
             Self::NoApproval => "no_approval",
             Self::MissingDigest => "missing_digest",
+            Self::MalformedDigest => "malformed_digest",
         }
     }
 }
@@ -329,14 +425,14 @@ pub(crate) fn assemble_active_set(
             continue;
         };
 
-        let approved = approval_rows.iter().any(|appr| {
+        let approval = approval_rows.iter().find(|appr| {
             appr.tenant_id == active.tenant_id
                 && appr.app_id == active.app_id
                 && appr.version == version_row.version
                 && (appr.community_id == Some(active.community_id)
                     || (appr.community_id.is_none() && active.community_id == 0))
         });
-        if !approved {
+        if approval.is_none() {
             // Ops-visibility fix (security review): a bundle silently
             // losing its approval is a feature going dark, not routine
             // background noise -- this was `debug!` and easy to miss.
@@ -350,7 +446,7 @@ pub(crate) fn assemble_active_set(
             continue;
         }
 
-        let Some(digest) = version_row.artifact_digest.clone() else {
+        let Some(raw_digest) = version_row.artifact_digest.clone() else {
             tracing::warn!(
                 app_id = %active.app_id,
                 version = %version_row.version,
@@ -359,6 +455,29 @@ pub(crate) fn assemble_active_set(
             );
             excluded.push((active.app_id.clone(), ExclusionReason::MissingDigest));
             continue;
+        };
+        // Digest-format contract fix (regression: DB bare-hex digest
+        // rejected by executor Load (malformed digest), UnknownBundle
+        // (alpha 2026-10-03)): `artifact_digest` is stored bare-hex by the
+        // control plane but the executor's wire protocol requires
+        // `sha256:<64 hex>` -- canonicalize once here, the sole boundary
+        // every downstream `ActiveBundleRow::digest` consumer shares. Fail
+        // loud (not the `warn!` the other exclusion reasons use): a
+        // malformed digest the control plane itself wrote is a
+        // data-integrity bug.
+        let digest = match canonical_digest(&raw_digest) {
+            Ok(digest) => digest,
+            Err(err) => {
+                tracing::error!(
+                    app_id = %active.app_id,
+                    version = %version_row.version,
+                    error = %err,
+                    reason = ExclusionReason::MalformedDigest.as_str(),
+                    "excluding from active set: artifact_digest is malformed"
+                );
+                excluded.push((active.app_id.clone(), ExclusionReason::MalformedDigest));
+                continue;
+            }
         };
 
         // component_key contract (data-plane half; hub-api half is the
@@ -390,6 +509,30 @@ pub(crate) fn assemble_active_set(
                 derive_component_keys(&digest)
             }
         };
+        // `approval` is `Some` here -- the `None` arm above always
+        // `continue`s before this point.
+        let declared_capabilities = approval
+            .map(|appr| declared_capabilities_from_summary(&appr.summary_json))
+            .unwrap_or_default();
+        // Structural guard (regression: multi_tenant path sent bare-hex
+        // digest to Invoke, UnknownBundle despite loaded bundle (alpha
+        // 2026-10-03)): this is the ONE sanctioned production construction
+        // site for `ActiveBundleRow` in this crate -- every other caller
+        // (`crate::multi_tenant::read_active_set_all`, every service's
+        // `changelog_consumer`/`bundle_loader`) only ever clones a row this
+        // function already produced, never builds one from a raw
+        // `app_versions.artifact_digest` value directly. `ActiveBundleRow`
+        // can't be made a private-field/newtype-enforced type without a
+        // wide `bundle_active_set`/`svc_process`/`svc_action` test-fixture
+        // refactor out of this fix's scope -- this `debug_assert` plus
+        // `active_bundle_row_is_only_ever_constructed_from_canonical_digest_in_this_module`
+        // (below) are the cheaper structural substitute: any future
+        // construction site added outside this function's test-gated
+        // fixtures fails that scan test immediately.
+        debug_assert!(
+            digest.starts_with("sha256:") && digest.len() == 71,
+            "ActiveBundleRow::digest must always be canonical_digest()'s output, got {digest:?}"
+        );
         rows.push(ActiveBundleRow {
             app_id: active.app_id.clone(),
             version: version_row.version.clone(),
@@ -397,6 +540,10 @@ pub(crate) fn assemble_active_set(
             digest,
             component_key,
             sidecar_key,
+            artifact_signature: version_row.artifact_signature.clone(),
+            artifact_signature_key_id: version_row.artifact_signature_key_id.clone(),
+            artifact_signed_approval_id: version_row.artifact_signed_approval_id,
+            declared_capabilities,
         });
     }
 
@@ -691,6 +838,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([Vec::<app_install_approvals::Model>::new()])
             .into_connection();
@@ -730,6 +880,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -741,6 +894,7 @@ mod tests {
                 app_id: "waddles.test.app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
             }]])
             .into_connection();
         let result = read_active_set(&db, 1, 0, None).await?;
@@ -786,6 +940,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: Some(real_component_key.clone()),
                 sidecar_key: Some(real_sidecar_key.clone()),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -794,6 +951,7 @@ mod tests {
                 app_id: "waddles.test.app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
             }]])
             .into_connection();
         let result = read_active_set(&db, 1, 0, None).await?;
@@ -809,6 +967,104 @@ mod tests {
             result.degraded.is_empty(),
             "a present component_key must never be recorded as degraded"
         );
+        Ok(())
+    }
+
+    /// Artifact-signature columns (migration `0040_bundle_artifact_
+    /// signature`) pass through `ActiveBundleRow` verbatim -- surfaced for
+    /// observability only, the authoritative check lives in
+    /// `core/bundle_executor/src/signing.rs` against the bucket sidecar
+    /// (see `entities::app_versions`'s module doc).
+    #[tokio::test]
+    async fn read_active_set_surfaces_the_artifact_signature_columns() -> Result<(), ActiveSetError>
+    {
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.test.app".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(digest),
+                scan_status: "scanned".to_string(),
+                component_key: Some("bundles/waddles.test.app/1/real.wasm".to_string()),
+                sidecar_key: Some("bundles/waddles.test.app/1/real.json".to_string()),
+                artifact_signature: Some("c2lnbmF0dXJl".to_string()),
+                artifact_signature_key_id: Some("platform-2026-09".to_string()),
+                artifact_signed_approval_id: Some(42),
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 42,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].artifact_signature.as_deref(),
+            Some("c2lnbmF0dXJl")
+        );
+        assert_eq!(
+            result.rows[0].artifact_signature_key_id.as_deref(),
+            Some("platform-2026-09")
+        );
+        assert_eq!(result.rows[0].artifact_signed_approval_id, Some(42));
+        Ok(())
+    }
+
+    /// A not-yet-signed row (pre-migration backfill, or approved before
+    /// hub-api's signing step ran) surfaces `None` for all three columns
+    /// rather than erroring or excluding the row -- `bundle_executor`'s own
+    /// sidecar-based check is what fails closed on a genuinely missing
+    /// signature, not this crate.
+    #[tokio::test]
+    async fn read_active_set_surfaces_none_when_artifact_signature_columns_are_unset(
+    ) -> Result<(), ActiveSetError> {
+        let digest = format!("sha256:{}", "e".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.test.app".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(digest),
+                scan_status: "scanned".to_string(),
+                component_key: Some("bundles/waddles.test.app/1/real.wasm".to_string()),
+                sidecar_key: Some("bundles/waddles.test.app/1/real.json".to_string()),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 1,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert_eq!(result.rows.len(), 1);
+        assert!(result.rows[0].artifact_signature.is_none());
+        assert!(result.rows[0].artifact_signature_key_id.is_none());
+        assert!(result.rows[0].artifact_signed_approval_id.is_none());
         Ok(())
     }
 
@@ -836,6 +1092,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: Some(real_component_key.clone()),
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -844,6 +1103,7 @@ mod tests {
                 app_id: "waddles.test.app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
             }]])
             .into_connection();
         let result = read_active_set(&db, 1, 0, None).await?;
@@ -882,6 +1142,9 @@ mod tests {
                 scan_status: "scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             // Approval belongs to tenant 2, not tenant 1 -- same app_id/
             // version/community sentinel otherwise.
@@ -892,6 +1155,7 @@ mod tests {
                 app_id: "waddles.shared".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
             }]])
             .into_connection();
         let result = read_active_set(&db, 1, 0, None).await?;
@@ -923,6 +1187,9 @@ mod tests {
                 scan_status: "not_scanned".to_string(),
                 component_key: None,
                 sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
             }]])
             .append_query_results([vec![app_install_approvals::Model {
                 id: 1,
@@ -931,6 +1198,7 @@ mod tests {
                 app_id: "waddles.test.app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
             }]])
             .into_connection();
         let result = read_active_set(&db, 1, 0, None).await?;
@@ -943,5 +1211,475 @@ mod tests {
             )]
         );
         Ok(())
+    }
+
+    // -- `canonical_digest` contract (regression: DB bare-hex digest
+    // rejected by executor Load (malformed digest), UnknownBundle (alpha
+    // 2026-10-03)) --------------------------------------------------------
+
+    /// Mirrors `core/bundle_executor/src/invoke.rs::verify_digest`'s own
+    /// accept case -- an already-`sha256:`-prefixed, already-lowercase
+    /// digest is returned unchanged.
+    #[test]
+    fn canonical_digest_leaves_an_already_prefixed_lowercase_digest_unchanged() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        assert_eq!(canonical_digest(&digest).unwrap(), digest);
+    }
+
+    /// The exact bug this function exists to fix: `app_versions.
+    /// artifact_digest` is stored bare-hex by the control plane; the
+    /// executor's wire protocol rejects anything without the `sha256:`
+    /// prefix (`error "executor reported error LoadFailed: malformed digest
+    /// ...: expected sha256:<64 hex chars>"`, alpha 2026-10-03).
+    #[test]
+    fn canonical_digest_prefixes_a_bare_hex_digest() {
+        let hex = "b".repeat(64);
+        assert_eq!(canonical_digest(&hex).unwrap(), format!("sha256:{hex}"));
+    }
+
+    /// Lowercases hex so a canonical-form comparison (`diff::plan`'s
+    /// `loaded` map, `LoadState::is_loaded_on`) never misses a match over
+    /// case alone -- mirrors `verify_digest`'s `eq_ignore_ascii_case`
+    /// tolerance on the compare side by normalizing on the way in instead.
+    #[test]
+    fn canonical_digest_lowercases_mixed_case_hex_in_either_input_form() {
+        let upper_hex = "C".repeat(64);
+        let expected = format!("sha256:{}", "c".repeat(64));
+        assert_eq!(canonical_digest(&upper_hex).unwrap(), expected);
+        assert_eq!(
+            canonical_digest(&format!("sha256:{upper_hex}")).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn canonical_digest_rejects_the_wrong_hex_length() {
+        assert!(canonical_digest("deadbeef").is_err());
+        assert!(canonical_digest(&format!("sha256:{}", "a".repeat(63))).is_err());
+        assert!(canonical_digest(&format!("sha256:{}", "a".repeat(65))).is_err());
+    }
+
+    #[test]
+    fn canonical_digest_rejects_non_hex_characters() {
+        assert!(canonical_digest(&format!("sha256:{}z", "a".repeat(63))).is_err());
+    }
+
+    #[test]
+    fn canonical_digest_rejects_an_empty_string() {
+        assert!(canonical_digest("").is_err());
+    }
+
+    /// The DB-path contract end to end: a bare-hex `artifact_digest` (what
+    /// the control plane actually stores) produces a `sha256:`-prefixed
+    /// `ActiveBundleRow::digest` -- the form the executor's `Load` wire
+    /// request requires. Storage-key derivation keeps using the bare hex it
+    /// has always used (`derive_component_keys` strips the prefix itself).
+    #[tokio::test]
+    async fn read_active_set_canonicalizes_a_bare_hex_artifact_digest() -> Result<(), ActiveSetError>
+    {
+        let hex = "1".repeat(64);
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.test.app".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(hex.clone()),
+                scan_status: "scanned".to_string(),
+                component_key: None,
+                sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 1,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].digest, format!("sha256:{hex}"));
+        // Storage keys derive from the bare hex, never double-prefixed.
+        assert_eq!(
+            result.rows[0].component_key,
+            format!("bundles/{hex}/component.wasm")
+        );
+        assert_eq!(
+            result.rows[0].sidecar_key,
+            format!("bundles/{hex}/sidecar.json")
+        );
+        Ok(())
+    }
+
+    /// regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    /// emptied svc-action dispatch digest (alpha 2026-10-03). `app_versions`
+    /// can hold an older, now-inactive version row sharing the EXACT same
+    /// `artifact_digest` as the currently-active version (#537 dropped the
+    /// global digest-unique constraint, allowing manifest-only re-releases
+    /// that don't change the artifact at all) -- `read_active_set` must
+    /// still resolve to the ACTIVE `version_id`'s own row (never confuse the
+    /// two just because their digests match), and the result must carry a
+    /// real, non-empty canonical digest.
+    #[tokio::test]
+    async fn read_active_set_resolves_the_active_version_even_when_an_inactive_sibling_version_shares_its_digest(
+    ) -> Result<(), ActiveSetError> {
+        let shared_digest = "2".repeat(64);
+        // `app_active_versions` points at version_id 20 (the newer "1.0.3")
+        // -- version_id 10 ("1.0.2", the old, now-inactive version sharing
+        // the same digest) is never referenced from the active row at all,
+        // so the second query (`Id.is_in(version_ids)`) only ever fetches
+        // version_id 20 in production; this fixture exercises that exact
+        // join, not a hypothetical where both ids leak through.
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "ping".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 20,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 20,
+                app_id: "ping".to_string(),
+                version: "1.0.3".to_string(),
+                artifact_digest: Some(shared_digest.clone()),
+                scan_status: "scanned".to_string(),
+                component_key: None,
+                sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 2,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "ping".to_string(),
+                version: "1.0.3".to_string(),
+                superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
+            }]])
+            .into_connection();
+
+        let result = read_active_set(&db, 1, 0, None).await?;
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].version, "1.0.3");
+        assert_eq!(result.rows[0].digest, format!("sha256:{shared_digest}"));
+        assert!(!result.rows[0].digest.is_empty());
+        assert!(result.excluded.is_empty());
+        Ok(())
+    }
+
+    /// Same scenario, driven directly through [`assemble_active_set`] with
+    /// BOTH version rows present in `versions_by_id` (the inactive 1.0.2
+    /// sibling included, simulating a future caller that over-fetches) --
+    /// proves the join keys strictly on `active.version_id`, never
+    /// incidentally matching the OTHER row just because it shares a digest.
+    #[test]
+    fn assemble_active_set_keys_strictly_on_version_id_not_on_a_shared_digest() {
+        let shared_digest = "3".repeat(64);
+        let active_rows = vec![app_active_versions::Model {
+            app_id: "ping".to_string(),
+            tenant_id: 1,
+            community_id: 0,
+            version_id: 20,
+        }];
+        let mut versions_by_id = std::collections::HashMap::new();
+        versions_by_id.insert(
+            10,
+            app_versions::Model {
+                id: 10,
+                app_id: "ping".to_string(),
+                version: "1.0.2".to_string(),
+                artifact_digest: Some(shared_digest.clone()),
+                scan_status: "scanned".to_string(),
+                component_key: None,
+                sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+            },
+        );
+        versions_by_id.insert(
+            20,
+            app_versions::Model {
+                id: 20,
+                app_id: "ping".to_string(),
+                version: "1.0.3".to_string(),
+                artifact_digest: Some(shared_digest.clone()),
+                scan_status: "scanned".to_string(),
+                component_key: None,
+                sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+            },
+        );
+        let approval_rows = vec![app_install_approvals::Model {
+            id: 2,
+            tenant_id: 1,
+            community_id: None,
+            app_id: "ping".to_string(),
+            version: "1.0.3".to_string(),
+            superseded_by: None,
+            summary_json: sea_orm::JsonValue::Null,
+        }];
+
+        let result = assemble_active_set(&active_rows, &versions_by_id, &approval_rows);
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].version, "1.0.3");
+        assert_eq!(result.rows[0].digest, format!("sha256:{shared_digest}"));
+    }
+
+    /// An `artifact_digest` that is neither bare 64-hex nor `sha256:<64
+    /// hex>` must exclude the row (fail loud, never load a bundle the
+    /// executor is guaranteed to reject) rather than pass a malformed value
+    /// through to the wire.
+    #[tokio::test]
+    async fn read_active_set_excludes_a_malformed_artifact_digest() -> Result<(), ActiveSetError> {
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.test.app".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some("not-a-digest".to_string()),
+                scan_status: "scanned".to_string(),
+                component_key: None,
+                sidecar_key: None,
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 1,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+                summary_json: sea_orm::JsonValue::Null,
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert!(result.rows.is_empty());
+        assert_eq!(
+            result.excluded,
+            vec![(
+                "waddles.test.app".to_string(),
+                ExclusionReason::MalformedDigest
+            )]
+        );
+        Ok(())
+    }
+
+    /// `declared_capabilities_from_summary`'s own contract, exercised
+    /// standalone (no database) -- `summary_json.capabilities` renders
+    /// verbatim as `Vec<String>`.
+    #[test]
+    fn declared_capabilities_from_summary_reads_the_capabilities_array() {
+        let summary: sea_orm::JsonValue = serde_json::json!({
+            "capabilities": ["context", "kv", "flags", "log", "clock", "http"],
+            "egress": [],
+        });
+        assert_eq!(
+            declared_capabilities_from_summary(&summary),
+            vec!["context", "kv", "flags", "log", "clock", "http"]
+        );
+    }
+
+    #[test]
+    fn declared_capabilities_from_summary_is_empty_for_every_malformed_shape() {
+        for summary in [
+            sea_orm::JsonValue::Null,
+            serde_json::json!({}),
+            serde_json::json!({"capabilities": "kv"}),
+            serde_json::json!({"capabilities": [1, 2, 3]}),
+            serde_json::json!("not even an object"),
+        ] {
+            assert_eq!(
+                declared_capabilities_from_summary(&summary),
+                Vec::<String>::new(),
+                "expected an empty result for {summary:?}"
+            );
+        }
+    }
+
+    /// End-to-end through [`read_active_set`]: a real `summary_json` with a
+    /// `"capabilities"` array containing `"kv"` surfaces on the resulting
+    /// [`ActiveBundleRow::declared_capabilities`] -- the field
+    /// `bundle_host_kv::authorize::CapabilitySnapshot` is populated from.
+    #[tokio::test]
+    async fn read_active_set_surfaces_declared_capabilities_from_summary_json(
+    ) -> Result<(), ActiveSetError> {
+        let digest = format!("sha256:{}", "d".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.test.app".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(digest.clone()),
+                scan_status: "scanned".to_string(),
+                component_key: Some("bundles/waddles.test.app/1/c.wasm".to_string()),
+                sidecar_key: Some("bundles/waddles.test.app/1/s.json".to_string()),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 1,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+                summary_json: serde_json::json!({
+                    "capabilities": ["context", "kv", "flags", "log", "clock"]
+                }),
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].declared_capabilities,
+            vec!["context", "kv", "flags", "log", "clock"]
+        );
+        Ok(())
+    }
+
+    /// A row whose approval's `summary_json` never declares `"kv"` (the
+    /// entire point of the coordinator fix on PR #425 -- `kv` is no longer
+    /// unconditionally present in every bundle's derived capability set)
+    /// surfaces an empty/absent-`kv` list, never a fabricated grant.
+    #[tokio::test]
+    async fn read_active_set_reflects_a_bundle_that_never_declared_kv() -> Result<(), ActiveSetError>
+    {
+        let digest = format!("sha256:{}", "e".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![app_active_versions::Model {
+                app_id: "waddles.test.app".to_string(),
+                tenant_id: 1,
+                community_id: 0,
+                version_id: 10,
+            }]])
+            .append_query_results([vec![app_versions::Model {
+                id: 10,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                artifact_digest: Some(digest.clone()),
+                scan_status: "scanned".to_string(),
+                component_key: Some("bundles/waddles.test.app/1/c.wasm".to_string()),
+                sidecar_key: Some("bundles/waddles.test.app/1/s.json".to_string()),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+            }]])
+            .append_query_results([vec![app_install_approvals::Model {
+                id: 1,
+                tenant_id: 1,
+                community_id: None,
+                app_id: "waddles.test.app".to_string(),
+                version: "1".to_string(),
+                superseded_by: None,
+                summary_json: serde_json::json!({
+                    "capabilities": ["context", "flags", "log", "clock", "http"]
+                }),
+            }]])
+            .into_connection();
+        let result = read_active_set(&db, 1, 0, None).await?;
+        assert_eq!(result.rows.len(), 1);
+        assert!(!result.rows[0]
+            .declared_capabilities
+            .iter()
+            .any(|c| c == "kv"));
+        Ok(())
+    }
+
+    /// Structural regression guard (regression: multi_tenant path sent
+    /// bare-hex digest to Invoke, UnknownBundle despite loaded bundle
+    /// (alpha 2026-10-03)) -- `ActiveBundleRow` can't be made
+    /// newtype/private-field-enforced without a wide cross-crate test-
+    /// fixture refactor (see the `debug_assert` at this module's own
+    /// construction site), so this is the cheaper substitute: a textual
+    /// scan proving `assemble_active_set` (above, the sole canonicalizing
+    /// constructor) is still the ONLY place any of these five sibling
+    /// files builds an `ActiveBundleRow { .. }` outside their own
+    /// `#[cfg(test)] mod tests` fixtures. A future caller that copies
+    /// `app_versions::Model::artifact_digest` straight into a new
+    /// `ActiveBundleRow` literal -- bypassing `canonical_digest()` exactly
+    /// like the original bug -- fails this test immediately instead of
+    /// waiting for another alpha incident.
+    #[test]
+    fn active_bundle_row_is_only_ever_constructed_from_canonical_digest_outside_tests() {
+        // (file contents, byte offset of the file's own `mod tests` marker)
+        // -- every `ActiveBundleRow {` occurrence in a given file must come
+        // AFTER that file's `mod tests`, i.e. live only inside test
+        // fixtures. `include_str!` paths are resolved relative to this
+        // file (`src/query.rs`).
+        let files: &[(&str, &str)] = &[
+            (
+                "bundle_active_set/src/multi_tenant.rs",
+                include_str!("multi_tenant.rs"),
+            ),
+            (
+                "bundle_active_set/src/full_sync.rs",
+                include_str!("full_sync.rs"),
+            ),
+            ("bundle_active_set/src/diff.rs", include_str!("diff.rs")),
+            (
+                "svc_process/src/changelog_consumer.rs",
+                include_str!("../../svc_process/src/changelog_consumer.rs"),
+            ),
+            (
+                "svc_action/src/changelog_consumer.rs",
+                include_str!("../../svc_action/src/changelog_consumer.rs"),
+            ),
+        ];
+        let mut scanned = 0usize;
+        for (name, contents) in files {
+            let test_mod_at = contents
+                .find("mod tests")
+                .unwrap_or_else(|| panic!("{name}: expected a `mod tests` marker to scan against"));
+            for (idx, _) in contents.match_indices("ActiveBundleRow {") {
+                scanned += 1;
+                assert!(
+                    idx > test_mod_at,
+                    "{name}: found an `ActiveBundleRow {{` construction at byte {idx}, \
+                     before this file's `mod tests` (byte {test_mod_at}) -- a production \
+                     construction site outside `crate::query::assemble_active_set` must \
+                     canonicalize its digest via `canonical_digest()` or it will reproduce \
+                     the alpha 2026-10-03 UnknownBundle regression"
+                );
+            }
+        }
+        assert!(
+            scanned > 0,
+            "expected to find at least one ActiveBundleRow {{ construction across the scanned \
+             files (all currently test-only) -- a zero count means the scan itself is broken, \
+             not that the invariant holds"
+        );
     }
 }

@@ -138,6 +138,21 @@ pub struct CliConfig {
     /// local fake gateway (`crate::lib::try_start_discord`).
     #[arg(long, env = "DISCORD_GATEWAY_URL", default_value = "")]
     pub discord_gateway_url: String,
+
+    /// Cap on the exponential backoff between spine-connect retries
+    /// (`crate::lib::connect_spine_with_retry`) -- 1s/2s/4s/.../capped here,
+    /// never unboundedly long. Regression: a one-shot Valkey probe used to
+    /// permanently disable the Discord/Twitch receivers on a fresh-install
+    /// cluster where Valkey wasn't up yet (alpha 2026-10-02).
+    #[arg(long, env = "SPINE_CONNECT_BACKOFF_MAX_SECS", default_value_t = 30)]
+    pub spine_connect_backoff_max_secs: u64,
+
+    /// How long a receiver keeps retrying its spine connect before this
+    /// process gives up and exits non-zero so Kubernetes restarts it
+    /// visibly (`crate::lib::connect_spine_with_retry`) -- a receiver that
+    /// never connects must never leave the pod looking healthy forever.
+    #[arg(long, env = "SPINE_CONNECT_GRACE_SECS", default_value_t = 120)]
+    pub spine_connect_grace_secs: u64,
 }
 
 impl CliConfig {

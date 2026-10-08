@@ -80,6 +80,18 @@ pub enum ExecutorError {
     #[error("configuration error: {0}")]
     Config(String),
 
+    /// `crate::heartbeat`'s monitor saw no frame from the stage (including
+    /// the stage's own periodic `ping`, once `fix/executor-link-heartbeat`
+    /// lands) for `STALE_INTERVAL_MULTIPLIER` heartbeat intervals -- a
+    /// half-open TCP connection to a since-terminated stage pod looks
+    /// identical to a healthy one until something tries to use it
+    /// (regression: executor stuck on terminated svc pod after rollout,
+    /// alpha 2026-10-02). Fatal for the connection it occurred on, same as
+    /// any other `ExecutorError` from `run_connection` -- `crate::run`'s
+    /// existing backoff loop reconnects.
+    #[error("host-api session stalled: no frame from {peer} in {age_secs}s")]
+    SessionStale { peer: String, age_secs: u64 },
+
     /// `crate::bucket::BucketComponentSource`'s bucket GET failed: network
     /// error, non-200 status, missing/oversized `Content-Length`, or a
     /// malformed HTTP response from the bucket (spec SS7.6). Always
@@ -89,6 +101,16 @@ pub enum ExecutorError {
     /// process's own configuration was invalid".
     #[error("bucket fetch failed: {0}")]
     BucketFetch(String),
+
+    /// `crate::signing::verify_artifact_signature` refused a `load`: the
+    /// sidecar was missing/malformed, its claimed `app_id`/`version`/
+    /// `digest` did not match the load frame, its `key_id` is not among
+    /// the configured platform public keys, or its Ed25519 signature did
+    /// not verify (spec SS5.6, Gemini review condition 9). Always
+    /// surfaces to the stage as `LOAD_FAILED` -- fail closed, never a
+    /// degraded warning.
+    #[error("artifact signature invalid: {0}")]
+    SignatureInvalid(String),
 }
 
 /// `wasmtime::Error` does not implement `std::error::Error` in this

@@ -74,7 +74,9 @@ pub mod publish;
 pub mod telemetry;
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::signal;
 
@@ -82,6 +84,131 @@ use tokio::signal;
 /// target and the resource `service.name` when `OTEL_SERVICE_NAME` is
 /// unset.
 pub const SERVICE_NAME: &str = "svc-ingest";
+
+/// One receiver's spine-connect readiness: `enabled` is set once (true the
+/// moment the receiver's own config checks pass and it starts attempting a
+/// connect); `ready` tracks the live connect state and flips back to
+/// `false` on every disconnect/retry. A receiver that was never enabled
+/// (not configured) is always considered "ok" -- it was never supposed to
+/// start, so it can't block readiness.
+///
+/// Regression: one-shot valkey probe disabled discord receiver (alpha
+/// 2026-10-02) -- the pod stayed `Running 1/1` forever because nothing
+/// tracked whether a receiver that decided to start ever actually
+/// connected.
+#[derive(Default)]
+pub struct ReceiverFlag {
+    enabled: AtomicBool,
+    ready: AtomicBool,
+}
+
+impl ReceiverFlag {
+    pub fn mark_enabled(&self) {
+        self.enabled.store(true, Ordering::Relaxed);
+    }
+
+    pub fn set_ready(&self, ready: bool) {
+        self.ready.store(ready, Ordering::Relaxed);
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Relaxed)
+    }
+
+    /// `true` if this receiver was never enabled (nothing to wait for), or
+    /// it's enabled AND connected.
+    fn ok(&self) -> bool {
+        !self.is_enabled() || self.is_ready()
+    }
+}
+
+/// Aggregates every fixed-platform receiver's [`ReceiverFlag`] -- shared
+/// between `crate::http::AppState` (backing `GET /readyz`) and this
+/// module's `try_start_*` functions (which flip each flag as they attempt/
+/// succeed/lose a spine connection).
+#[derive(Default)]
+pub struct ReceiverReadiness {
+    pub twitch_irc: ReceiverFlag,
+    pub discord: ReceiverFlag,
+    pub twitch_outbound: ReceiverFlag,
+}
+
+impl ReceiverReadiness {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `true` only when every *enabled* receiver is also connected --
+    /// `GET /readyz`'s overall status.
+    pub fn all_ready(&self) -> bool {
+        self.twitch_irc.ok() && self.discord.ok() && self.twitch_outbound.ok()
+    }
+}
+
+/// Capped exponential backoff for [`connect_spine_with_retry`]'s retry
+/// delay: 1s, 2s, 4s, 8s, 16s, then `max` thereafter.
+fn backoff_for_attempt(attempt: u32, max: Duration) -> Duration {
+    let secs = 1u64
+        .checked_shl(attempt.saturating_sub(1).min(16))
+        .unwrap_or(u64::MAX);
+    Duration::from_secs(secs).min(max)
+}
+
+/// Connects to the spine with capped exponential backoff, logging every
+/// attempt at `WARN` with the attempt number and the error -- never a
+/// one-shot probe. Updates `readiness` and `metrics.consumer_loop_running`
+/// on every transition. Returns `Some(client)` on success, or `None` once
+/// `grace_deadline` has passed without a successful connect -- the caller
+/// treats that as fatal (see `run_with_shutdown`'s `process::exit(1)`
+/// escalation): a receiver that never connects must never leave the pod
+/// looking healthy forever.
+///
+/// Regression: one-shot valkey probe disabled discord receiver (alpha
+/// 2026-10-02).
+async fn connect_spine_with_retry(
+    cfg: penguin_spine::SpineConfig,
+    spine_metrics: Arc<dyn penguin_spine::SpineMetrics>,
+    ingest_metrics: &telemetry::IngestMetrics,
+    receiver: &'static str,
+    readiness: &ReceiverFlag,
+    backoff_max: Duration,
+    grace_deadline: Instant,
+) -> Option<penguin_spine::SpineClient> {
+    readiness.mark_enabled();
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        ingest_metrics.record_spine_connect_attempt(receiver);
+        match penguin_spine::SpineClient::connect(cfg.clone(), spine_metrics.clone()).await {
+            Ok(client) => {
+                readiness.set_ready(true);
+                ingest_metrics.set_consumer_loop_running(receiver, true);
+                return Some(client);
+            }
+            Err(err) => {
+                readiness.set_ready(false);
+                ingest_metrics.set_consumer_loop_running(receiver, false);
+                tracing::warn!(
+                    receiver,
+                    attempt,
+                    error = %err,
+                    "spine connect failed, retrying"
+                );
+                let now = Instant::now();
+                if now >= grace_deadline {
+                    return None;
+                }
+                let wait = backoff_for_attempt(attempt, backoff_max)
+                    .min(grace_deadline.saturating_duration_since(now));
+                tokio::time::sleep(wait).await;
+            }
+        }
+    }
+}
 
 /// Runs the service: loads config, bootstraps telemetry, builds the
 /// control-plane + metrics routers, and serves both until SIGINT/SIGTERM
@@ -124,6 +251,7 @@ where
 
     let ingest_metrics = Arc::new(telemetry::register_ingest_metrics(&prom_registry));
     let mut state = http::AppState::new(config.clone(), prom_registry);
+    let receiver_readiness = Arc::clone(&state.receiver_readiness);
 
     // `waddles.core.rust-data-plane` (spec S13.5): OFF (default until
     // validated) means serve /health + /metrics and start nothing below --
@@ -141,8 +269,16 @@ where
         // YouTube/Kick receivers, the generic webhook/JWT intake, and D31
         // usage metering are `// TODO(M5)` -- not started here, see this
         // module's doc comment.
-        try_start_twitch_irc(&config, ingest_metrics.clone());
-        try_start_discord(&config, ingest_metrics.clone());
+        try_start_twitch_irc(
+            &config,
+            ingest_metrics.clone(),
+            Arc::clone(&receiver_readiness),
+        );
+        try_start_discord(
+            &config,
+            ingest_metrics.clone(),
+            Arc::clone(&receiver_readiness),
+        );
         try_start_twitch_outbound(&config);
         state.eventsub = try_build_eventsub_state(&config, ingest_metrics.clone()).await;
     } else {
@@ -186,7 +322,16 @@ where
 ///   ([`resolve_binding_keyring`])
 /// - `penguin_spine::SpineConfig::from_env()` fails (e.g. `VALKEY_URL`
 ///   unset)
-fn try_start_twitch_irc(config: &config::Config, metrics: Arc<telemetry::IngestMetrics>) {
+///
+/// Once started, the spine connect itself is never one-shot: see
+/// [`connect_spine_with_retry`] -- regression: one-shot valkey probe
+/// disabled discord receiver (alpha 2026-10-02), fixed identically here for
+/// its Twitch IRC sibling.
+fn try_start_twitch_irc(
+    config: &config::Config,
+    metrics: Arc<telemetry::IngestMetrics>,
+    readiness: Arc<ReceiverReadiness>,
+) {
     if !config.twitch_irc_enabled() {
         tracing::info!(
             "TWITCH_IRC_NICK/_CHANNEL/_OAUTH_TOKEN not fully set; twitch irc receiver not started"
@@ -225,6 +370,8 @@ fn try_start_twitch_irc(config: &config::Config, metrics: Arc<telemetry::IngestM
     let nick = config.cli.twitch_irc_nick.clone();
     let active_kid = config.cli.binding_active_kid.clone();
     let scope = config.ingest_scope();
+    let backoff_max = Duration::from_secs(config.cli.spine_connect_backoff_max_secs);
+    let grace = Duration::from_secs(config.cli.spine_connect_grace_secs);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
@@ -233,12 +380,24 @@ fn try_start_twitch_irc(config: &config::Config, metrics: Arc<telemetry::IngestM
     });
     tokio::spawn(async move {
         let spine_metrics: Arc<dyn penguin_spine::SpineMetrics> = metrics.clone();
-        let appender = match penguin_spine::SpineClient::connect(spine_cfg, spine_metrics).await {
-            Ok(client) => client,
-            Err(err) => {
-                tracing::error!(error = %err, "spine connect failed; twitch irc receiver not started");
-                return;
-            }
+        let grace_deadline = Instant::now() + grace;
+        let Some(appender) = connect_spine_with_retry(
+            spine_cfg,
+            spine_metrics,
+            metrics.as_ref(),
+            "twitch_irc",
+            &readiness.twitch_irc,
+            backoff_max,
+            grace_deadline,
+        )
+        .await
+        else {
+            tracing::error!(
+                grace_secs = grace.as_secs(),
+                "spine connect still failing after grace period; exiting so Kubernetes restarts \
+                 this pod visibly (twitch irc receiver never started)"
+            );
+            std::process::exit(1);
         };
         ingest::twitch::run(
             irc_cfg,
@@ -259,8 +418,15 @@ fn try_start_twitch_irc(config: &config::Config, metrics: Arc<telemetry::IngestM
 /// (`crate::ingest::discord::run`) as its own background task and returns
 /// immediately either way -- same three-reason graceful-degradation
 /// contract as [`try_start_twitch_irc`] (bot token, binding keyring, spine
-/// config).
-fn try_start_discord(config: &config::Config, metrics: Arc<telemetry::IngestMetrics>) {
+/// config). The spine connect itself retries with backoff rather than
+/// giving up after one attempt -- regression: one-shot valkey probe
+/// disabled discord receiver, leaving the pod `Running 1/1` forever (alpha
+/// 2026-10-02). See [`connect_spine_with_retry`].
+fn try_start_discord(
+    config: &config::Config,
+    metrics: Arc<telemetry::IngestMetrics>,
+    readiness: Arc<ReceiverReadiness>,
+) {
     if !config.discord_enabled() {
         tracing::info!("DISCORD_BOT_TOKEN not set; discord gateway receiver not started");
         return;
@@ -291,6 +457,8 @@ fn try_start_discord(config: &config::Config, metrics: Arc<telemetry::IngestMetr
     }
     let active_kid = config.cli.binding_active_kid.clone();
     let scope = config.ingest_scope();
+    let backoff_max = Duration::from_secs(config.cli.spine_connect_backoff_max_secs);
+    let grace = Duration::from_secs(config.cli.spine_connect_grace_secs);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
@@ -299,12 +467,25 @@ fn try_start_discord(config: &config::Config, metrics: Arc<telemetry::IngestMetr
     });
     tokio::spawn(async move {
         let spine_metrics: Arc<dyn penguin_spine::SpineMetrics> = metrics.clone();
-        let appender = match penguin_spine::SpineClient::connect(spine_cfg, spine_metrics).await {
-            Ok(client) => client,
-            Err(err) => {
-                tracing::error!(error = %err, "spine connect failed; discord gateway receiver not started");
-                return;
-            }
+        let grace_deadline = Instant::now() + grace;
+        // regression: one-shot valkey probe disabled discord receiver (alpha 2026-10-02)
+        let Some(appender) = connect_spine_with_retry(
+            spine_cfg,
+            spine_metrics,
+            metrics.as_ref(),
+            "discord_gateway",
+            &readiness.discord,
+            backoff_max,
+            grace_deadline,
+        )
+        .await
+        else {
+            tracing::error!(
+                grace_secs = grace.as_secs(),
+                "spine connect still failing after grace period; exiting so Kubernetes restarts \
+                 this pod visibly (discord gateway receiver never started)"
+            );
+            std::process::exit(1);
         };
         ingest::discord::run(
             gateway_cfg,
@@ -329,6 +510,13 @@ fn try_start_discord(config: &config::Config, metrics: Arc<telemetry::IngestMetr
 /// Unlike the two receivers above, no binding keyring is needed here --
 /// the outbound drain never mints or `XADD`s an envelope, it only relays a
 /// chat send.
+///
+/// **Known gap, out of scope for this fix** (not named in the alpha
+/// 2026-10-02 incident this module's other two `try_start_*` functions
+/// fix): `outbound::run`'s own initial Valkey connect is still a one-shot
+/// `?` with no retry -- see that function's doc. `ReceiverReadiness::
+/// twitch_outbound` is therefore never marked enabled here and always
+/// reports `ok` on `/readyz`.
 fn try_start_twitch_outbound(config: &config::Config) {
     let Some(oauth_token) = config
         .twitch_irc_oauth_token
@@ -643,9 +831,107 @@ mod tests {
         }
     }
 
+    fn test_readiness() -> Arc<ReceiverReadiness> {
+        Arc::new(ReceiverReadiness::new())
+    }
+
     fn test_ingest_metrics() -> Arc<telemetry::IngestMetrics> {
         let registry = prometheus::Registry::new();
         Arc::new(telemetry::register_ingest_metrics(&registry))
+    }
+
+    /// Capped exponential sequence identical to `svc_action`/`svc_process`'s
+    /// own `backoff_for_attempt` -- 1s, 2s, 4s, 8s, 16s, then pinned at
+    /// `max` thereafter.
+    #[test]
+    fn backoff_for_attempt_doubles_then_caps_at_max() {
+        let max = Duration::from_secs(30);
+        assert_eq!(backoff_for_attempt(1, max), Duration::from_secs(1));
+        assert_eq!(backoff_for_attempt(2, max), Duration::from_secs(2));
+        assert_eq!(backoff_for_attempt(5, max), Duration::from_secs(16));
+        assert_eq!(backoff_for_attempt(6, max), max);
+        assert_eq!(backoff_for_attempt(1000, max), max);
+    }
+
+    fn unreachable_spine_cfg() -> penguin_spine::SpineConfig {
+        // A malformed URL fails `SpineClient::connect` immediately on parse
+        // -- no real network attempt, no delay -- so `grace_deadline`
+        // already-expired tests below return deterministically fast.
+        penguin_spine::SpineConfig {
+            valkey_url: "not a valid url".to_string(),
+            valkey_username: None,
+            valkey_password: None,
+            valkey_ca_file: std::path::PathBuf::from("/nonexistent-ca.crt"),
+            security_transport_tls: false,
+            security_transport_auth: false,
+            consumer_id: "test".to_string(),
+            stream_maxlen: 100,
+            read_count: 1,
+            block_ms: 1_000,
+            claim_idle_ms: 30_000,
+            claim_interval_ms: 15_000,
+            stats_interval_ms: 10_000,
+            pel_alert: 5_000,
+            dlq_maxlen: 100,
+            max_deliveries: 5,
+            drain_socket_timeout_s: 65,
+            relay_block_timeout_s: 30,
+        }
+    }
+
+    /// `grace_deadline` already in the past: exactly one connect attempt,
+    /// then the grace-exhaustion path returns `None` without ever sleeping
+    /// -- the escalation path `run_with_shutdown` treats as fatal.
+    #[tokio::test]
+    async fn connect_spine_with_retry_returns_none_once_grace_is_exhausted() {
+        let metrics = test_ingest_metrics();
+        let spine_metrics: Arc<dyn penguin_spine::SpineMetrics> = metrics.clone();
+        let readiness = ReceiverFlag::default();
+        readiness.set_ready(true); // prove it flips back to `false` on failure.
+
+        let result = connect_spine_with_retry(
+            unreachable_spine_cfg(),
+            spine_metrics,
+            metrics.as_ref(),
+            "test_receiver",
+            &readiness,
+            Duration::from_secs(30),
+            Instant::now(), // already expired
+        )
+        .await;
+
+        assert!(result.is_none());
+        assert!(readiness.is_enabled());
+        assert!(!readiness.is_ready());
+    }
+
+    /// `grace_deadline` slightly in the future: the loop retries at least
+    /// once (bounded by the tiny `backoff_max`) before the deadline passes,
+    /// proving the retry path itself runs, not just the single-attempt
+    /// exhaustion case above.
+    #[tokio::test]
+    async fn connect_spine_with_retry_retries_until_grace_expires() {
+        let metrics = test_ingest_metrics();
+        let spine_metrics: Arc<dyn penguin_spine::SpineMetrics> = metrics.clone();
+        let readiness = ReceiverFlag::default();
+
+        let grace_deadline = Instant::now() + Duration::from_millis(30);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            connect_spine_with_retry(
+                unreachable_spine_cfg(),
+                spine_metrics,
+                metrics.as_ref(),
+                "test_receiver",
+                &readiness,
+                Duration::from_millis(5),
+                grace_deadline,
+            ),
+        )
+        .await
+        .expect("must not hang past the 5s test timeout");
+
+        assert!(result.is_none());
     }
 
     #[tokio::test]
@@ -654,12 +940,12 @@ mod tests {
         // `run.rs`'s own doc on why only one test per binary calls
         // `telemetry::init`) -- `tracing::info!`/`warn!` are harmless
         // no-ops without one.
-        try_start_twitch_irc(&base_config(), test_ingest_metrics());
+        try_start_twitch_irc(&base_config(), test_ingest_metrics(), test_readiness());
     }
 
     #[tokio::test]
     async fn try_start_discord_noop_when_not_configured() {
-        try_start_discord(&base_config(), test_ingest_metrics());
+        try_start_discord(&base_config(), test_ingest_metrics(), test_readiness());
     }
 
     #[tokio::test]
@@ -674,7 +960,7 @@ mod tests {
         config.cli.twitch_irc_channel = "somechannel".to_string();
         config.twitch_irc_oauth_token = Some(crate::config::Secret::new("test-token"));
         // envelope_binding_keys stays None -> must not start.
-        try_start_twitch_irc(&config, test_ingest_metrics());
+        try_start_twitch_irc(&config, test_ingest_metrics(), test_readiness());
     }
 
     #[tokio::test]
@@ -683,7 +969,7 @@ mod tests {
         config.discord_bot_token = Some(crate::config::Secret::new("test-token"));
         config.envelope_binding_keys = Some(crate::config::Secret::new("k1:aabbcc"));
         // binding_active_kid stays "" -> must not start.
-        try_start_discord(&config, test_ingest_metrics());
+        try_start_discord(&config, test_ingest_metrics(), test_readiness());
     }
 
     #[tokio::test]
@@ -710,7 +996,7 @@ mod tests {
         config.envelope_binding_keys = Some(crate::config::Secret::new(
             "k1:0102030405060708090a0b0c0d0e0f10",
         ));
-        try_start_twitch_irc(&config, test_ingest_metrics());
+        try_start_twitch_irc(&config, test_ingest_metrics(), test_readiness());
     }
 
     #[tokio::test]
@@ -760,7 +1046,7 @@ mod tests {
             config.envelope_binding_keys = Some(crate::config::Secret::new(
                 "k1:0102030405060708090a0b0c0d0e0f10",
             ));
-            try_start_twitch_irc(&config, test_ingest_metrics());
+            try_start_twitch_irc(&config, test_ingest_metrics(), test_readiness());
             unsafe {
                 std::env::remove_var("VALKEY_URL");
                 std::env::remove_var("VALKEY_PASSWORD");
@@ -788,7 +1074,7 @@ mod tests {
             config.envelope_binding_keys = Some(crate::config::Secret::new(
                 "k1:0102030405060708090a0b0c0d0e0f10",
             ));
-            try_start_discord(&config, test_ingest_metrics());
+            try_start_discord(&config, test_ingest_metrics(), test_readiness());
             unsafe {
                 std::env::remove_var("VALKEY_URL");
                 std::env::remove_var("VALKEY_PASSWORD");

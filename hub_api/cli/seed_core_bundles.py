@@ -68,20 +68,44 @@ from penguin_dal import AsyncDB
 
 from config import HubAPIConfig
 from services import vendor_bundle_authz
-from services.bundle_approval_service import activate_for_community, install_version_globally
+from services.app_source_binding_service import TENANT_WIDE_COMMUNITY_SENTINEL
+from services.bundle_approval_service import (
+    activate_for_community,
+    activate_tenant_wide,
+    deactivate_for_community,
+    deactivate_tenant_wide,
+    install_version_globally,
+)
 from services.bundle_install_dal import build_install_dal, raw_sql_write
 from services.bundle_manifest_v2 import BundleManifestV2, parse_bundle_manifest_v2
+from services.bundle_permission_service import seed_core_permission_requests
 from services.bundle_telemetry import get_meter
 from services.bundle_version_service import create_version, process_prebuilt_component
 from services.errors import ApiError
 from services.ingest_source_service import ensure_ingest_source
 from services.tenant_app_availability_service import set_available
 
+# Guarded the same way `services/role_sync_service.py`/`services/event_discord_sync_service.py`
+# already do -- this module's own tests monkeypatch the module-level `feature_enabled` name
+# directly (no live PostHog/license server needed); `None` only outside a real `flask_core`
+# install (never production).
+try:
+    from flask_core.feature_flags import feature_enabled
+except ImportError:  # pragma: no cover -- exercised only outside the real flask_core install
+    feature_enabled = None
+
 logger = logging.getLogger("waddles.hub_api.core_bundle_seeder")
 
 #: The SYSTEM actor string persisted to `app_install_approvals.approval_source`
 #: (migration 0026) -- see this module's own docstring.
 SYSTEM_ACTOR = "system:core-seeder"
+
+#: Opt-out kill-switch (critical-rules.md "Core platform mechanisms... opt-out kill-switch"):
+#: unseen/OFF performs the reconcile-uninstall sweep below (`reconcile_removed_core_bundles()`,
+#: the default -- requirement: "uninstall should delete them just like install adds them,
+#: otherwise our scale will get out of sync"); ON reverts to the legacy activate-only seeder
+#: (no deletes) -- a same-day mitigation if the sweep ever misbehaves, without a redeploy.
+FLAG_DISABLE_SEEDER_UNINSTALL_RECONCILE = "waddles.disable-seeder-uninstall-reconcile"
 
 #: Where the built catalog + manifests + `.wasm` artifacts live inside the seeder image
 #: (`bundles/Dockerfile.core-bundles`'s final stage) -- overridable for local/dev runs
@@ -105,14 +129,39 @@ _PLATFORM_CONNECTIONS_ENV = "CORE_BUNDLES_PLATFORM_CONNECTIONS"
 #: used one). Deliberately ASCII-only -- see `_guard_core_namespace()`'s own docstring.
 _APP_ID_CHARSET_RE = re.compile(r"^[a-z0-9]+(\.[a-z0-9-]+)+$")
 
+#: `ApiError.code` values that must NOT abort the whole Helm hook (gh-576: "seeder fails
+#: whole hook on one conflict"). Today this is exactly `digest_conflict` --
+#: `_resolve_or_publish_version()`'s own immutable-version guard -- which recurs
+#: indefinitely for `language: python` bundles specifically: `componentize-py` is a KNOWN,
+#: pre-approved non-reproducible build (see this repo's own mem0 note
+#: "python-bundle-snapshot-fallback" / `scripts/verify-core-bundles-reproducible.sh`'s
+#: Rust-only repro gate) -- an unrelated image rebuild (e.g. a different bundle's Dockerfile
+#: stage changing) can legitimately produce new `pyping.wasm` bytes under an UNCHANGED
+#: `core-bundles.yaml` version string, 409-ing forever against the one row that already
+#: published successfully. The already-published row keeps serving correctly either way --
+#: there is nothing an operator can act on except "bump the version", which does not even
+#: fix the underlying non-reproducibility for the NEXT rebuild. Treating this one code as a
+#: WARNING + skip (never a hard failure) stops a cosmetic artifact-byte drift from blocking
+#: every subsequent `helm upgrade` indefinitely; every OTHER `ApiError` code (tenant_not_
+#: found, stalled_core_bundle_upload, ...) still fails the run -- those genuinely need a
+#: human to intervene before the row they describe can ever resolve itself.
+RECOVERABLE_API_ERROR_CODES = frozenset({"digest_conflict"})
+
 
 @dataclass(slots=True, frozen=True)
 class ActivationTarget:
     """One `(tenant, community)` pair to seed.
 
-    `community_id=None` means TENANT-tier availability only (no
-    COMMUNITY-tier activation for this target; see the 3-tier split,
-    `services/bundle_approval_service.py`'s own module docstring).
+    `community_id=None` means TENANT-WIDE activation (`bundle_approval_
+    service.activate_tenant_wide()`, the schema's own sentinel convention
+    -- `app_active_versions.community_id=0`/`app_install_approvals.
+    community_id=NULL`) -- NOT a skip. Regression: seeder skipped
+    activation for community_id null (alpha 2026-10-02) -- every core
+    bundle's catalog entry declares `community_id: null` and the seeder
+    used to `continue` past COMMUNITY-tier activation entirely for it,
+    leaving `app_active_versions`/`app_source_bindings` empty forever. See
+    `services/bundle_approval_service.py`'s own module docstring for the
+    3-tier split and why this sentinel path is SYSTEM-actor-only.
     """
 
     tenant_slug: str
@@ -323,7 +372,18 @@ async def _ensure_app_catalog_row(install_dal: AsyncDB, manifest: BundleManifest
     )
     logger.info(
         "core-bundle-seeder: app_catalog row created",
-        extra={"app_id": manifest.app_id, "module": manifest.module},
+        # "module" collides with logging.LogRecord's own reserved `module` attribute
+        # (the calling module's name, always present on every record) -- passing it
+        # via `extra` unconditionally raises `KeyError: "Attempt to overwrite 'module'
+        # in LogRecord"` from Logger.makeRecord(), regardless of handler/formatter.
+        # This crashed EVERY first-time seed of a catalog entry (the only time this
+        # branch's log call fires -- a pre-existing app_catalog row skips it entirely),
+        # surfacing as a generic "bundle failed" ApiError-shaped failure on a genuinely
+        # fresh install. Renamed to bundle_module -- never reuse a LogRecord reserved
+        # name (message/asctime/name/msg/args/levelname/levelno/pathname/filename/
+        # module/exc_info/exc_text/stack_info/lineno/funcName/created/msecs/
+        # relativeCreated/thread/threadName/processName/process) in any `extra` dict.
+        extra={"app_id": manifest.app_id, "bundle_module": manifest.module},
     )
 
 
@@ -573,6 +633,13 @@ async def seed_one(
             installed_by=None,
             install_source=SYSTEM_ACTOR,
         )
+        # spec Sec3.6: pre-grant every permission this core bundle's manifest
+        # declares -- same SYSTEM-actor convention as the install above.
+        # `_guard_core_namespace()` (top of this function) already hard-
+        # guards `entry.app_id` to CORE_NAMESPACE_PREFIX before any DB write.
+        await seed_core_permission_requests(
+            install_dal, app_id=entry.app_id, version=entry.version, manifest=manifest
+        )
 
     results: list[SeedResult] = []
     for target in targets:
@@ -589,8 +656,44 @@ async def seed_one(
             )
 
         if target.community_id is None:
-            # TIER-2 only for this target -- catalog config declares no
-            # community to activate in (see `ActivationTarget`'s own docstring).
+            # TENANT-WIDE activation -- see `ActivationTarget`'s own docstring
+            # (regression: seeder skipped activation for community_id null,
+            # alpha 2026-10-02). The DB-side sentinel is 0
+            # (`TENANT_WIDE_COMMUNITY_SENTINEL`), so `_already_active` is
+            # checked against that, not a literal `None`.
+            if await _already_active(
+                install_dal,
+                app_id=entry.app_id,
+                tenant_id=tenant_id,
+                community_id=TENANT_WIDE_COMMUNITY_SENTINEL,
+                version_id=version_id,
+            ):
+                results.append(
+                    SeedResult(
+                        entry.app_id,
+                        entry.version,
+                        "no_op",
+                        f"already active tenant-wide for tenant={target.tenant_slug!r}",
+                    )
+                )
+                continue
+
+            await activate_tenant_wide(
+                install_dal,
+                tenant_id=tenant_id,
+                app_id=entry.app_id,
+                activated_by=None,
+                approval_source=SYSTEM_ACTOR,
+                valkey_client=valkey_client,
+            )
+            results.append(
+                SeedResult(
+                    entry.app_id,
+                    entry.version,
+                    "activated",
+                    f"tenant={target.tenant_slug!r} community_id=tenant-wide",
+                )
+            )
             continue
 
         if await _already_active(
@@ -631,6 +734,165 @@ async def seed_one(
     return results
 
 
+async def _tenant_slug_for_id(install_dal: AsyncDB, tenant_id: int) -> str:
+    """`tenants.slug` for `tenant_id` -- local to this module, only needed for the flag check."""
+    rows = await install_dal(install_dal.tenants.id == tenant_id).select()
+    row = rows.first()
+    if row is None or not row.slug:
+        raise ApiError(f"tenant {tenant_id} has no slug configured", 500, "tenant_slug_missing")
+    return str(row.slug)
+
+
+async def _reconcile_uninstall_disabled(tenant_slug: str) -> bool:
+    """Whether `FLAG_DISABLE_SEEDER_UNINSTALL_RECONCILE` is ON for `tenant_slug`.
+
+    Unseen/OFF (the overwhelming common case, including every env with no PostHog reachable --
+    `feature_enabled()`'s own outage degradation returns `default`) means the kill-switch is OFF
+    and the reconcile sweep stays ON. `feature_enabled is None` only outside a real `flask_core`
+    install (never production).
+    """
+    if feature_enabled is None:  # pragma: no cover -- only in a flask_core-less environment
+        return False
+    return bool(await feature_enabled(FLAG_DISABLE_SEEDER_UNINSTALL_RECONCILE, tenant=tenant_slug))
+
+
+async def reconcile_removed_core_bundles(
+    install_dal: AsyncDB, *, catalog_app_ids: frozenset[str]
+) -> tuple[list[SeedResult], int]:
+    """Hard-delete every SYSTEM-seeded `app_active_versions` row dropped from the catalog.
+
+    Requirement (Justin): "uninstall should delete them just like install adds them, otherwise
+    our scale will get out of sync" -- the Rust data plane (`core/bundle_active_set/src/
+    query.rs::read_active_set()`) reads `app_active_versions` directly on every hub-api replica,
+    so a `waddles.core.*` bundle removed from `bundles/core-bundles.yaml` must have its row
+    actually DELETED here, the same way `seed_one()` above INSERTs it on the way in -- a row
+    left behind drifts horizontally-scaled replicas (and the data plane) out of sync with each
+    other.
+
+    **Scope -- the safety boundary is the query predicate itself, not a post-hoc filter.** Only
+    `app_install_approvals` rows with `approval_source == SYSTEM_ACTOR` (migration 0026) AND
+    `superseded_by IS NULL` (the CURRENT row) are ever candidates. A user who later re-activates
+    a dropped core bundle through the human COMMUNITY-admin path supersedes that row with their
+    own `approval_source="human"` one (`_write_approval_and_activate()`'s own `previous_id`
+    supersession is unconditional on actor) -- this function then no longer sees it, by
+    construction of the join predicate, never by filtering a human-owned row out after matching
+    it. A vendor-approved or any other human-installed activation is NEVER touched here for the
+    exact same reason: it simply never satisfies the `approval_source` predicate in the first
+    place.
+
+    Idempotent across repeated runs: once `deactivate_for_community()`/`deactivate_tenant_wide()`
+    removes the `app_active_versions` row, a `NOT_FOUND` from either call (already gone, e.g. a
+    previous run already swept it) is treated as a no-op here, not a failure.
+
+    Transactional per-row (each `deactivate_*` call is already its own `engine.begin()`
+    transaction) -- one row's failure is logged and counted, never aborts the rest of the sweep
+    (same best-effort-cascade convention `bundle_approval_service.uninstall_globally()`/
+    `tenant_app_availability_service.unset_available()` already use for their own cascades).
+    """
+    rows = await install_dal(
+        (install_dal.app_install_approvals.approval_source == SYSTEM_ACTOR)
+        & (install_dal.app_install_approvals.superseded_by == None)  # noqa: E711
+    ).select()
+
+    results: list[SeedResult] = []
+    failures = 0
+    seen: set[tuple[int, int | None, str]] = set()
+    flag_cache: dict[str, bool] = {}
+
+    for row in rows:
+        app_id = str(row.app_id)
+        if app_id in catalog_app_ids:
+            continue
+        tenant_id = int(row.tenant_id)
+        community_id = int(row.community_id) if row.community_id is not None else None
+        key = (tenant_id, community_id, app_id)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        try:
+            tenant_slug = await _tenant_slug_for_id(install_dal, tenant_id)
+            if tenant_slug not in flag_cache:
+                flag_cache[tenant_slug] = await _reconcile_uninstall_disabled(tenant_slug)
+            if flag_cache[tenant_slug]:
+                logger.info(
+                    "core-bundle-seeder: reconcile-uninstall skipped (kill-switch ON)",
+                    extra={
+                        "app_id": app_id,
+                        "tenant_id": tenant_id,
+                        "community_id": community_id,
+                    },
+                )
+                continue
+
+            if community_id is None:
+                await deactivate_tenant_wide(
+                    install_dal, tenant_id=tenant_id, app_id=app_id, deactivated_by=None
+                )
+            else:
+                await deactivate_for_community(
+                    install_dal,
+                    tenant_id=tenant_id,
+                    community_id=community_id,
+                    app_id=app_id,
+                    deactivated_by=None,
+                )
+        except ApiError as exc:
+            if exc.code == "NOT_FOUND":
+                continue  # already gone -- idempotent no-op, not a failure
+            logger.error(
+                f"core-bundle-seeder: reconcile-uninstall failed "
+                f"({app_id}, tenant_id={tenant_id}, community_id={community_id}, "
+                f"{exc.code}): {exc.message}",
+                extra={
+                    "app_id": app_id,
+                    "tenant_id": tenant_id,
+                    "community_id": community_id,
+                    "error_code": exc.code,
+                    "error": exc.message,
+                    "reason": "seeder-reconcile",
+                },
+                exc_info=True,
+            )
+            failures += 1
+            continue
+        except Exception as exc:  # noqa: BLE001 -- one row's failure must not abort the sweep
+            logger.error(
+                f"core-bundle-seeder: reconcile-uninstall failed "
+                f"({type(exc).__name__}: {exc}, app_id={app_id})",
+                extra={
+                    "app_id": app_id,
+                    "tenant_id": tenant_id,
+                    "community_id": community_id,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "reason": "seeder-reconcile",
+                },
+                exc_info=True,
+            )
+            failures += 1
+            continue
+
+        logger.info(
+            "core-bundle-seeder: reconcile-uninstall deleted stale activation",
+            extra={
+                "app_id": app_id,
+                "tenant_id": tenant_id,
+                "community_id": community_id,
+                "reason": "seeder-reconcile",
+            },
+        )
+        results.append(
+            SeedResult(
+                app_id,
+                str(row.version),
+                "uninstalled_reconcile",
+                f"tenant_id={tenant_id} community_id={community_id!r} (dropped from catalog)",
+            )
+        )
+    return results, failures
+
+
 async def _run(bundles_dir: Path, catalog_path: Path) -> int:
     config = HubAPIConfig.from_env()
     install_dal = await build_install_dal(config.database_url, pool_size=2)
@@ -641,6 +903,10 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
 
     failures = 0
     seeded = 0
+    #: `(app_id, version, code)` strings for every RECOVERABLE_API_ERROR_CODES hit this run --
+    #: never counted in `failures` (see that constant's own docstring), but always surfaced in
+    #: the final summary log so an operator/dashboard sees it without the Job failing.
+    skipped_conflicts: list[str] = []
     try:
         entries = load_catalog(catalog_path)
         connections = load_platform_connections(catalog_path)
@@ -681,8 +947,9 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                 results = await seed_one(install_dal, entry, bundles_dir)
             except CoreBundleSeederError as exc:
                 logger.error(
-                    "core-bundle-seeder: refused",
+                    f"core-bundle-seeder: refused ({entry.app_id}@{entry.version}): {exc}",
                     extra={"app_id": entry.app_id, "version": entry.version, "reason": str(exc)},
+                    exc_info=True,
                 )
                 counter.add(1, {"app_id": entry.app_id, "outcome": "refused"})
                 failures += 1
@@ -694,13 +961,29 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                 # exactly the operator-facing clarity gap this branch exists to close.
                 # `exc.code` (e.g. "digest_conflict") is a stable, actionable outcome label --
                 # keep it in both the log and the metric so an operator/dashboard sees the
-                # SAME word, not a generic "failed" that hides why. This is fail-closed by
-                # construction: the exception already means no DB write happened for this
-                # entry, and `failures += 1` below guarantees a non-zero process exit code
-                # (see main()/_run()'s own `return 1 if failures else 0`) -- a seeding run
-                # that hits this branch must never be reported as a clean success.
-                logger.error(
-                    "core-bundle-seeder: bundle failed",
+                # SAME word, not a generic "failed" that hides why.
+                #
+                # Alpha incident (2026-10-03): this branch logged `extra={"error_code": ...,
+                # "error": exc.message, ...}` ONLY -- never embedded in the message string
+                # itself. `main()` wires nothing but `logging.basicConfig()` (default format
+                # "%(levelname)s:%(name)s:%(message)s"), which silently drops every `extra`
+                # key from the rendered line: `caplog` (this module's own test suite) sees
+                # `extra` regardless of formatter, masking the gap in CI, but a plain
+                # `kubectl logs` tail (this Job's only real-world observability) rendered a
+                # bare "core-bundle-seeder: bundle failed" with NO app_id, no code, no
+                # message -- see test_run_reports_a_clear_digest_conflict_and_nonzero_exit's
+                # updated docstring. The app_id/version/code/message are therefore put
+                # directly in the message string itself, same fix already applied to the
+                # generic Exception branch below. `exc_info=True` attaches the real
+                # traceback to the rendered line too (Python's logging renders a record's
+                # traceback unconditionally when `exc_info` is set, independent of the
+                # format string).
+                recoverable = exc.code in RECOVERABLE_API_ERROR_CODES
+                log_fn = logger.warning if recoverable else logger.error
+                verb = "skipped (recoverable conflict, gh-576)" if recoverable else "failed"
+                log_fn(
+                    f"core-bundle-seeder: bundle {verb} "
+                    f"({entry.app_id}@{entry.version}, {exc.code}): {exc.message}",
                     extra={
                         "app_id": entry.app_id,
                         "version": entry.version,
@@ -708,14 +991,46 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                         "status_code": exc.status_code,
                         "error": exc.message,
                     },
+                    exc_info=True,
                 )
-                counter.add(1, {"app_id": entry.app_id, "outcome": exc.code.lower()})
-                failures += 1
+                if recoverable:
+                    # Never counted in `failures` -- see RECOVERABLE_API_ERROR_CODES's own
+                    # docstring. Still surfaced in the final summary (never silent).
+                    skipped_conflicts.append(f"{entry.app_id}@{entry.version} ({exc.code})")
+                    counter.add(1, {"app_id": entry.app_id, "outcome": "skipped_" + exc.code})
+                else:
+                    # This is fail-closed by construction: the exception already means no DB
+                    # write happened for this entry, and `failures += 1` guarantees a
+                    # non-zero process exit code (see `_run()`'s own `return 1 if failures
+                    # else 0`) -- a seeding run that hits this branch must never be reported
+                    # as a clean success.
+                    counter.add(1, {"app_id": entry.app_id, "outcome": exc.code.lower()})
+                    failures += 1
                 continue
             except Exception as exc:  # noqa: BLE001 -- one bundle's failure must not abort the batch or hide the exit code
+                # regression: this branch was the actual alpha !ping blocker -- a boto3
+                # ClientError (bad S3 credentials / bucket-grant mismatch) landed here and
+                # rendered as a bare "core-bundle-seeder: bundle failed" with NO detail: this
+                # module's own `main()` wires only `logging.basicConfig()` (default format
+                # "%(levelname)s:%(name)s:%(message)s"), which silently drops every `extra`
+                # key from the rendered line -- `extra=` still reaches a structured consumer
+                # (e.g. pytest's `caplog`) via the LogRecord's attributes, but a plain
+                # `kubectl logs` tail (this Job's only real-world observability today) never
+                # sees them. The exception's type AND message are therefore put directly in
+                # the message string itself -- sanitized by construction: `str(exc)` on a
+                # botocore ClientError/any stdlib exception never embeds the S3 secret key
+                # (boto3 never puts credentials in an exception message), only the operation,
+                # bucket/key, and the server's error code. `exc_info=True` attaches the full
+                # traceback to the rendered line too, not only to `extra`.
                 logger.error(
-                    "core-bundle-seeder: bundle failed",
-                    extra={"app_id": entry.app_id, "version": entry.version, "error": str(exc)},
+                    f"core-bundle-seeder: bundle failed ({type(exc).__name__}: {exc})",
+                    extra={
+                        "app_id": entry.app_id,
+                        "version": entry.version,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                    exc_info=True,
                 )
                 counter.add(1, {"app_id": entry.app_id, "outcome": "failed"})
                 failures += 1
@@ -734,13 +1049,44 @@ async def _run(bundles_dir: Path, catalog_path: Path) -> int:
                 counter.add(1, {"app_id": result.app_id, "outcome": result.outcome})
                 seeded += 1
 
+        # Reconcile-uninstall sweep (see `reconcile_removed_core_bundles()`'s own docstring) --
+        # runs AFTER every catalog entry above has been seeded/no-op'd, so `catalog_app_ids`
+        # reflects this run's full, current catalog. A failure in the sweep itself (not a
+        # single row) must still surface in the final summary and exit code, never silently
+        # swallowed -- it is reported exactly like any other bundle failure above.
+        catalog_app_ids = frozenset(entry.app_id for entry in entries)
+        reconcile_results: list[SeedResult] = []
+        try:
+            reconcile_results, reconcile_failures = await reconcile_removed_core_bundles(
+                install_dal, catalog_app_ids=catalog_app_ids
+            )
+        except Exception as exc:  # noqa: BLE001 -- the sweep itself must not abort the summary/exit code
+            logger.error(
+                "core-bundle-seeder: reconcile-uninstall sweep failed "
+                f"({type(exc).__name__}: {exc})",
+                extra={"error_type": type(exc).__name__, "error": str(exc)},
+                exc_info=True,
+            )
+            counter.add(1, {"app_id": "reconcile", "outcome": "failed"})
+            failures += 1
+        else:
+            failures += reconcile_failures
+            for result in reconcile_results:
+                counter.add(1, {"app_id": result.app_id, "outcome": result.outcome})
+                seeded += 1
+
         logger.info(
-            "core-bundle-seeder: summary",
+            "core-bundle-seeder: summary "
+            f"(examined={len(connections) + len(entries)}, results={seeded}, "
+            f"failures={failures}, skipped_conflicts={skipped_conflicts}, "
+            f"reconcile_uninstalled={len(reconcile_results)})",
             extra={
                 "connections_examined": len(connections),
                 "bundles_examined": len(entries),
                 "results": seeded,
                 "failures": failures,
+                "skipped_conflicts": skipped_conflicts,
+                "reconcile_uninstalled": len(reconcile_results),
             },
         )
     finally:

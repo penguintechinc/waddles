@@ -86,7 +86,7 @@ Usage: {{ include "waddlebot.image" (dict "image" .Values.modules.router "global
 {{- define "waddlebot.image" -}}
 {{- $registry := .global.imageRegistry | default "" }}
 {{- $repository := .image.repository | required "image.repository is required" }}
-{{- $tag := .image.tag | default .defaultTag | default "latest" }}
+{{- $tag := .image.tag | default .defaultTag | default "latest" | toString }}
 {{- if $registry }}
 {{- printf "%s/%s:%s" $registry $repository $tag }}
 {{- else }}
@@ -195,7 +195,7 @@ Usage: {{ include "waddlebot.moduleImage" (dict "root" . "module" "router" "tag"
 {{- define "waddlebot.moduleImage" -}}
 {{- $registry := .root.Values.global.imageRegistry | default "" }}
 {{- $repository := .module | required "module name is required" }}
-{{- $tag := .tag | default .root.Chart.AppVersion | default "latest" }}
+{{- $tag := .tag | default .root.Chart.AppVersion | default "latest" | toString }}
 {{- if $registry }}
 {{- printf "%s/%s:%s" $registry $repository $tag }}
 {{- else }}
@@ -212,7 +212,7 @@ Usage: {{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "action-
 {{- define "waddlebot.legacyModuleImage" -}}
 {{- $registry := .root.Values.global.imageRegistry | default "" }}
 {{- $repository := .module | required "module name is required" }}
-{{- $tag := .imageTag | default .root.Values.global.imageTag | default "latest" }}
+{{- $tag := .imageTag | default .root.Values.global.imageTag | default "latest" | toString }}
 {{- if $registry }}
 {{- printf "%s/%s:%s" $registry $repository $tag }}
 {{- else }}
@@ -402,76 +402,109 @@ cert-manager.io/issuer: {{ .Values.ingress.certManager.issuer.name }}
 {{- end }}
 
 {{/*
-DB Migration initContainer
-Runs database migrations before the application container starts.
-Uses advisory locking to handle concurrent pod startup safely.
+fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waddlebot.dbMigrateInitContainer
+(ran the migrations image as a per-pod initContainer on hub-api/svc-process-rust/
+svc-action-rust, including the CWE-798 PR #256 INITIAL_ADMIN_EMAIL/PASSWORD seed step)
+REMOVED. hub-api now bootstraps its own schema at startup (hub_api/bootstrap.py); every
+other pod that needs the schema waits on hub-api's own `/ready` instead
+(waddlebot.waitForHubApiInitContainer below) rather than each independently re-running
+migrations against the same advisory lock. The migrations image itself still exists and
+still runs the full migration directory + the admin-seed step -- now ONLY via
+templates/migrations-job.yaml's pre-upgrade hook, never per-pod.
 
-Also carries INITIAL_ADMIN_EMAIL/INITIAL_ADMIN_PASSWORD (PR #256,
-CWE-798): this is the chart's one shared init path, mirroring
-docker-compose.yml's db-migrations service, which is the actual live
-first-run super-admin bootstrap trigger (config/postgres/migrations/
-081_seed_default_hub_admin.sql via run-migrations.sh) --
-admin/hub_module/backend's own adminBootstrap.js is a forward-compatible
-fallback for if SKIP_DB_INIT is ever unset, not the primary path. Both
-keys default to "" in templates/secrets.yaml; empty/unset means no admin
-account is created (fail closed) -- exactly the desired default for
-beta/gamma/production until an operator sets them.
-Usage: {{- include "waddlebot.dbMigrateInitContainer" . | nindent 6 }}
+KNOWN GAP this removal surfaces (reported, not fixed here -- see PR description): the
+INITIAL_ADMIN_EMAIL/INITIAL_ADMIN_PASSWORD seed step lived inside the migrations image's
+run path, which a fresh install no longer runs at all (hub-api's create_all()+stamp
+bootstrap never executes config/postgres/migrations/081_seed_default_hub_admin.sql or any
+other raw-SQL migration body). A fresh install therefore gets no seeded admin account
+until the first `helm upgrade` actually fires the pre-upgrade migrate hook.
 */}}
-{{- define "waddlebot.dbMigrateInitContainer" -}}
-{{- $registry := .Values.global.imageRegistry | default "" }}
-{{- $repository := .Values.modules.migrations.image | default "waddlebot-migrations" }}
-{{- $tag := .Values.global.imageTag }}
-- name: db-migrate
-  {{- if $registry }}
-  image: "{{ $registry }}/{{ $repository }}:{{ $tag }}"
-  {{- else }}
-  image: "{{ $repository }}:{{ $tag }}"
-  {{- end }}
-  imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+
+{{/*
+Wait-for-hub-api initContainer -- every non-hub-api, non-infrastructure pod in this chart
+(Deployments and Jobs alike) waits on hub-api's own `/ready` endpoint before its main
+container starts, since hub-api is now the one place that creates/validates the schema
+(hub_api/bootstrap.py) and every other service depends on it being there first. Infra
+(Postgres/Valkey/SeaweedFS) and hub-api itself are the only exceptions -- hub-api cannot
+wait on itself, and infra has no schema dependency to wait for.
+
+Requires N consecutive successful reads (not just one) before exiting 0, so a pod isn't
+released the instant hub-api's readiness flips (which could still be mid-rollout/
+restarting) -- see waitForHubApi.stableChecks/stableIntervalSeconds in values.yaml.
+Exponential backoff (capped) between failed attempts, DEBUG-logged, so a slow hub-api
+start doesn't spam logs at full speed. Pinned to the same python:3.13-slim-bookworm
+digest hub-api's own Dockerfile already uses (Debian-only base per
+devops-containers.md -- curlimages/curl and similar lightweight options are Alpine-based
+and excluded on that basis) -- stdlib `urllib.request` only, no extra dependency.
+Usage: {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
+*/}}
+{{- define "waddlebot.waitForHubApiInitContainer" -}}
+{{- $url := printf "http://%s-hub-api-v3.%s.svc.cluster.local:%v/ready" (include "waddlebot.fullname" .) .Values.namespace .Values.pipeline.hubApi.port }}
+- name: wait-for-hub-api
+  image: "{{ .Values.waitForHubApi.image }}"
+  imagePullPolicy: IfNotPresent
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
   env:
-  - name: DATABASE_URL
-    valueFrom:
-      secretKeyRef:
-        name: {{ include "waddlebot.fullname" . }}-secrets
-        key: DATABASE_URL
-  - name: INITIAL_ADMIN_EMAIL
-    valueFrom:
-      secretKeyRef:
-        name: {{ include "waddlebot.fullname" . }}-secrets
-        key: INITIAL_ADMIN_EMAIL
-        optional: true
-  - name: INITIAL_ADMIN_PASSWORD
-    valueFrom:
-      secretKeyRef:
-        name: {{ include "waddlebot.fullname" . }}-secrets
-        key: INITIAL_ADMIN_PASSWORD
-        optional: true
-  # Bundle app-schema roles (alembic/versions/0030_bundle_app_schemas.py) --
-  # this initContainer is the actual consumer: the migration bridges these
-  # into CREATE/ALTER ROLE ... PASSWORD statements for waddles_bundle_migrator/
-  # waddles_bundle_runtime. optional: true, matching INITIAL_ADMIN_* above --
-  # an unset value means the migration creates/leaves each role LOGIN with
-  # no usable password yet, never a migration failure.
-  - name: BUNDLE_MIGRATOR_PASSWORD
-    valueFrom:
-      secretKeyRef:
-        name: {{ include "waddlebot.fullname" . }}-secrets
-        key: BUNDLE_MIGRATOR_PASSWORD
-        optional: true
-  - name: BUNDLE_RUNTIME_PASSWORD
-    valueFrom:
-      secretKeyRef:
-        name: {{ include "waddlebot.fullname" . }}-secrets
-        key: BUNDLE_RUNTIME_PASSWORD
-        optional: true
+  - name: HUB_API_READY_URL
+    value: {{ $url | quote }}
+  - name: STABLE_CHECKS
+    value: {{ .Values.waitForHubApi.stableChecks | quote }}
+  - name: STABLE_INTERVAL_SECONDS
+    value: {{ .Values.waitForHubApi.stableIntervalSeconds | quote }}
+  - name: MAX_BACKOFF_SECONDS
+    value: {{ .Values.waitForHubApi.maxBackoffSeconds | quote }}
+  command: ["python3", "-c"]
+  args:
+    - |
+      import os, time, random, sys, urllib.request, urllib.error
+
+      url = os.environ["HUB_API_READY_URL"]
+      need = int(os.environ["STABLE_CHECKS"])
+      interval = float(os.environ["STABLE_INTERVAL_SECONDS"])
+      max_backoff = float(os.environ["MAX_BACKOFF_SECONDS"])
+
+      def debug(msg):
+          print(f"DEBUG wait-for-hub-api: {msg}", file=sys.stderr, flush=True)
+
+      consecutive = 0
+      backoff = 1.0
+      attempt = 0
+      while consecutive < need:
+          attempt += 1
+          try:
+              with urllib.request.urlopen(url, timeout=3) as resp:
+                  ok = resp.status == 200
+          except (urllib.error.URLError, OSError) as exc:
+              ok = False
+              debug(f"attempt {attempt} failed: {exc}")
+          if ok:
+              consecutive += 1
+              backoff = 1.0
+              debug(f"attempt {attempt} ok ({consecutive}/{need} consecutive)")
+              if consecutive < need:
+                  time.sleep(interval)
+          else:
+              consecutive = 0
+              sleep_for = min(backoff, max_backoff) * (0.8 + 0.4 * random.random())
+              debug(f"attempt {attempt} not ready, backing off {sleep_for:.1f}s")
+              time.sleep(sleep_for)
+              backoff = min(backoff * 2, max_backoff)
+      print(f"wait-for-hub-api: hub-api stable after {attempt} attempt(s)")
   resources:
     requests:
-      cpu: "50m"
-      memory: "64Mi"
+      cpu: "25m"
+      memory: "32Mi"
     limits:
-      cpu: "200m"
-      memory: "128Mi"
+      cpu: "100m"
+      memory: "64Mi"
 {{- end }}
 
 {{/*
@@ -571,16 +604,20 @@ hatch -- see global.hostApiTls's values.yaml comment.
 */}}
 
 {{/*
-True only when real cert material will exist in the {{ fullname }}-host-api-tls Secret at
-deploy time -- either cert-manager mints it or a full CA+cert/key was supplied via values.
-Callers gate rendering the volume/env blocks on this so a missing Secret produces the
-Rust side's own clear "HOST_API_SERVER_CERT_FILE and HOST_API_SERVER_KEY_FILE must both be
-set" config error at startup (host-api listener disabled, rest of the pod keeps serving --
-see host_api.rs's graceful-degradation comment) instead of a mounted-but-empty file
-producing an opaque low-level TLS parse error.
+fix/alpha-host-api-tls -- True only when real cert material will exist in the
+{{ fullname }}-host-api-tls Secret at deploy time. Mirrors waddlebot.valkeyTlsMaterialAvailable's
+gate-on-the-enabling-flag-not-raw-crt-material fix: templates/host-api-tls-secret.yaml now
+guarantees the Secret exists (kept, explicitly supplied, cert-manager-owned, delegated to an
+ExternalSecret, generated alpha/local, or the whole release fails to render) whenever
+pipeline.rustDataPlane.enabled is true, so gating on .Values.global.hostApiTls.*.crt being
+non-empty (the old check) wrongly stayed false on the generate path -- this is exactly what
+left alpha's svc-process-rust/svc-action-rust host-api listeners permanently disabled even
+though a Secret existed live (see host-api-tls-secret.yaml's KEEP branch). Gate on the
+enabling flag alone; callers still get the Rust side's own clear config-error/graceful-
+degradation behavior if this is somehow false while the Secret is genuinely missing.
 */}}
 {{- define "waddlebot.hostApiTlsMaterialAvailable" -}}
-{{- if or .Values.global.hostApiTls.certManager.enabled (and .Values.global.hostApiTls.ca.crt .Values.global.hostApiTls.tls.crt .Values.global.hostApiTls.tls.key) -}}
+{{- if .Values.pipeline.rustDataPlane.enabled -}}
 true
 {{- end -}}
 {{- end }}
@@ -603,6 +640,136 @@ true
   value: /etc/waddlebot/host-api-tls/tls.crt
 - name: HOST_API_CLIENT_KEY_FILE
   value: /etc/waddlebot/host-api-tls/tls.key
+# fix/chart-host-api-stage-identity -- core/bundle_executor/src/config.rs::
+# validate_host_api_tls hard-requires this (Config error, immediate crashloop, if unset);
+# core/bundle_executor/src/tls.rs's PinnedIdentityVerifier matches it against the stage
+# cert's URI SAN / DNS SAN / Subject CN. Both bundle-executor.yaml and
+# bundle-executor-action.yaml pull this helper, so they always get the SAME identity -- the
+# shared host-api-tls Secret's one identity cert serves both stages (see that Secret's own
+# "one identity cert ... serves both roles" comment), so one expected identity is correct
+# for both executors regardless of which stage (svc-process-rust/svc-action-rust) they dial.
+- name: HOST_API_STAGE_IDENTITY
+  value: {{ include "waddlebot.hostApiStageIdentity" . | quote }}
+{{- end }}
+
+{{/*
+fix/hub-grpc-tls-and-ca-trust -- hub-api's internal gRPC listener (`hub_api/grpc_internal/
+server.py`, TLS mandatory, no insecureDev escape hatch unlike the flask_core grpc_tls.py
+servers the waddlebot.grpcTls* helpers above serve) gets its OWN identity cert/Secret
+(templates/hub-api-grpc-tls-secret.yaml), mirroring templates/infrastructure/
+valkey-tls-secret.yaml's lookup/generate/require policy exactly (not repeated here) rather
+than reusing the shared `{{ fullname }}-grpc-tls` Secret, which has no alpha/local
+auto-generate fallback and would leave hub-api's mandatory-TLS gRPC server unable to start
+in alpha at all. SAN is the hub-api gRPC Service's own DNS name
+(`{{ fullname }}-hub-api-v3`) so `core/hub_client::HubClient::connect` can verify it by
+hostname with no wildcard. Gated on pipeline.hubApi.enabled alone (like
+waddlebot.hostApiTlsMaterialAvailable) -- the Secret template guarantees real material
+whenever hub-api itself is enabled.
+*/}}
+
+{{- define "waddlebot.hubApiGrpcTlsDesiredDnsNames" -}}
+{{- $svcName := printf "%s-hub-api-v3" (include "waddlebot.fullname" .) -}}
+{{- $ns := .Values.namespace -}}
+{{- list $svcName (printf "%s.%s" $svcName $ns) (printf "%s.%s.svc" $svcName $ns) (printf "%s.%s.svc.cluster.local" $svcName $ns) | sortAlpha | join "," -}}
+{{- end }}
+
+{{- define "waddlebot.hubApiGrpcTlsSansSha256" -}}
+{{- include "waddlebot.hubApiGrpcTlsDesiredDnsNames" . | sha256sum -}}
+{{- end }}
+
+{{- define "waddlebot.hubApiGrpcTlsMaterialAvailable" -}}
+{{- if .Values.pipeline.hubApi.enabled -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/* Server-role env for hub-api's own container -- matches hub_api/grpc_internal/
+server.py::_load_server_credentials exactly (GRPC_TLS_CERT_PATH/GRPC_TLS_KEY_PATH only;
+GRPC_TLS_CLIENT_CA_PATH stays unset -- client-cert verification is an opt-in SPIFFE/mTLS
+end state, see that function's own docstring). */}}
+{{- define "waddlebot.hubApiGrpcTlsServerEnv" -}}
+- name: GRPC_TLS_CERT_PATH
+  value: /etc/waddlebot/hub-api-grpc-tls/tls.crt
+- name: GRPC_TLS_KEY_PATH
+  value: /etc/waddlebot/hub-api-grpc-tls/tls.key
+{{- end }}
+
+{{- define "waddlebot.hubApiGrpcTlsVolume" -}}
+- name: hub-api-grpc-tls
+  secret:
+    secretName: {{ include "waddlebot.fullname" . }}-hub-api-grpc-tls
+    defaultMode: 0440
+{{- end }}
+
+{{- define "waddlebot.hubApiGrpcTlsVolumeMount" -}}
+- name: hub-api-grpc-tls
+  mountPath: /etc/waddlebot/hub-api-grpc-tls
+  readOnly: true
+{{- end }}
+
+{{/* Client-role CA-only mount for core/hub_client's Rust callers (svc-process-rust,
+svc-action-rust) -- never the server's own tls.crt/tls.key, only the ca.crt that signed
+hub-api's gRPC server cert, consumed by HubClient::connect's HUB_API_GRPC_CA_FILE. */}}
+{{- define "waddlebot.hubApiGrpcCaEnv" -}}
+- name: HUB_API_GRPC_CA_FILE
+  value: /etc/waddlebot/hub-api-grpc-ca/ca.crt
+{{- end }}
+
+{{- define "waddlebot.hubApiGrpcCaVolume" -}}
+- name: hub-api-grpc-ca
+  secret:
+    secretName: {{ include "waddlebot.fullname" . }}-hub-api-grpc-tls
+    items:
+      - key: ca.crt
+        path: ca.crt
+    defaultMode: 0440
+{{- end }}
+
+{{- define "waddlebot.hubApiGrpcCaVolumeMount" -}}
+- name: hub-api-grpc-ca
+  mountPath: /etc/waddlebot/hub-api-grpc-ca
+  readOnly: true
+{{- end }}
+
+{{/*
+fix/chart-host-api-stage-identity -- the single source of truth for the host-api-tls
+identity cert's CN (and `HOST_API_STAGE_IDENTITY`), read together with this file's
+waddlebot.hostApiTls* helpers above and templates/host-api-tls-secret.yaml's/
+host-api-tls-certificate.yaml's own comments. Used as:
+  - the CN argument to genSignedCert in templates/host-api-tls-secret.yaml (alpha/local
+    auto-generate path)
+  - the `commonName` field in templates/host-api-tls-certificate.yaml (cert-manager path)
+  - HOST_API_STAGE_IDENTITY in waddlebot.hostApiTlsClientEnv above (bundle-executor and
+    bundle-executor-action, the two consumers of that helper)
+so whichever provisioning path is live, the cert's CN and the executor's expected identity
+are byte-for-byte the same string and can never drift apart.
+
+**Why CN, not a real SPIFFE URI SAN:** sprig's genSignedCert/genCA (the alpha/local path)
+has no URI SAN support, so a true X.509-SVID URI SAN per security.md's
+`spiffe://penguintech.io/<env>/<service>` base isn't achievable there. Rather than carry
+two different identity *forms* across the two provisioning paths, both pin by Subject CN;
+the CN value itself is still written in the org's SPIFFE-style naming convention for
+operator readability, but PinnedIdentityVerifier matches it via its CN-exact-string
+fallback, not its URI-SAN branch. If genSignedCert ever gains URI SAN support (or the
+cert-manager path alone is extended with a `uris:` SAN), this is the one helper to change.
+
+**Fail-closed:** global.hostApiTls.stageIdentity is an explicit override, REQUIRED when
+neither chart-controlled provisioning path applies -- i.e. real material supplied directly
+via global.hostApiTls.ca.crt/tls.crt/tls.key, or global.hostApiTls.externalSecret: true --
+because in both cases an out-of-band CA mints the cert and this chart has no way to know
+what identity is actually baked into it. Mirrors templates/host-api-tls-secret.yaml's own
+`fail` for the same "chart doesn't control this material" cases.
+*/}}
+{{- define "waddlebot.hostApiStageIdentity" -}}
+{{- $ht := .Values.global.hostApiTls -}}
+{{- $tier := .Values.global.deploymentTier -}}
+{{- if $ht.stageIdentity -}}
+{{- $ht.stageIdentity -}}
+{{- else if or $ht.certManager.enabled (or (eq $tier "alpha") (eq $tier "local")) -}}
+{{- printf "spiffe://penguintech.io/%s/%s-host-api" $tier (include "waddlebot.fullname" .) -}}
+{{- else -}}
+{{- fail (printf "global.hostApiTls.stageIdentity is required when global.hostApiTls material is supplied directly (ca.crt/tls.crt/tls.key) or delegated to global.hostApiTls.externalSecret -- this chart does not mint that certificate, so it cannot derive HOST_API_STAGE_IDENTITY/the expected CN itself. Set global.hostApiTls.stageIdentity to the exact identity (SPIFFE URI SAN or Subject CN) that certificate actually carries.") -}}
+{{- end -}}
 {{- end }}
 
 {{/* Cert volume, sourced from the chart-managed {{ fullname }}-host-api-tls Secret. */}}
@@ -617,6 +784,84 @@ true
 - name: host-api-tls
   mountPath: /etc/waddlebot/host-api-tls
   readOnly: true
+{{- end }}
+
+{{/*
+fix/cert-regen-on-identity-change -- the exact SAN list every host-api-tls provisioning
+path (alpha/local genSignedCert in templates/host-api-tls-secret.yaml, cert-manager's
+Certificate in templates/host-api-tls-certificate.yaml) must carry, centralized so the two
+paths and the stale-cert detector below can never drift apart. Returned sorted + comma-
+joined: a stable hash input for waddlebot.hostApiTlsSansSha256, and directly
+`splitList ","`-able back into a real list for genSignedCert's dnsNames argument.
+*/}}
+{{- define "waddlebot.hostApiTlsDesiredDnsNames" -}}
+{{- $fullname := include "waddlebot.fullname" . -}}
+{{- $ns := .Values.namespace -}}
+{{- list (printf "%s-svc-process-rust" $fullname) (printf "%s-svc-action-rust" $fullname) (printf "%s-bundle-executor" $fullname) (printf "*.%s.svc.cluster.local" $ns) | sortAlpha | join "," -}}
+{{- end }}
+
+{{/* sha256 of waddlebot.hostApiTlsDesiredDnsNames -- the waddlebot.io/cert-sans-sha256
+annotation value host-api-tls-secret.yaml writes/compares, and half of
+waddlebot.hostApiTlsPodChecksum's input. */}}
+{{- define "waddlebot.hostApiTlsSansSha256" -}}
+{{- include "waddlebot.hostApiTlsDesiredDnsNames" . | sha256sum -}}
+{{- end }}
+
+{{/*
+fix/cert-regen-on-identity-change -- true only when an existing (lookup result) TLS Secret
+is COMPLETE (waddlebot.tlsSecretComplete) AND its waddlebot.io/cert-identity /
+waddlebot.io/cert-sans-sha256 annotations byte-for-byte match the identity/SANs this
+render currently wants. A missing annotation (Secret pre-dates this fix) or a mismatched
+one (desired identity/SANs changed since the Secret was minted -- e.g.
+fix/chart-host-api-stage-identity's CN pin) both count as NOT matching: this is the exact
+gap that let alpha's `waddlebot-host-api-tls` Secret, minted under the OLD `waddlebot` CN,
+be kept forever after the executors started requiring the new pinned identity.
+
+Args (dict): existing (lookup result), identity (string), sansSha256 (string).
+
+# regression: kept host-api cert with stale CN after identity pin change (alpha 2026-10-02)
+*/}}
+{{- define "waddlebot.tlsSecretIdentityMatches" -}}
+{{- $existing := .existing -}}
+{{- if include "waddlebot.tlsSecretComplete" (dict "existing" $existing) -}}
+{{- $annotations := dict -}}
+{{- if and $existing $existing.metadata -}}
+{{- $annotations = $existing.metadata.annotations | default dict -}}
+{{- end -}}
+{{- if and (eq (get $annotations "waddlebot.io/cert-identity") .identity) (eq (get $annotations "waddlebot.io/cert-sans-sha256") .sansSha256) -}}
+true
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+fix/cert-regen-on-identity-change -- true only when an existing Secret is COMPLETE but
+stale (waddlebot.tlsSecretIdentityMatches is false) AND global.deploymentTier is outside
+alpha/local (canGenerate false) -- the exact condition templates/host-api-tls-secret.yaml
+and templates/infrastructure/valkey-tls-secret.yaml both `fail` rendering on. Kept as its
+own testable boolean (rather than only inline in those templates' `if`/`else if` chains)
+so tests/test_cert_regen_on_identity_change_render.py can assert the regenerate-vs-fail
+decision directly via templates/debug-helper-probe.yaml, without triggering the real
+`fail` call (which would abort the whole render).
+
+Args (dict): existing, identity, sansSha256 (same as waddlebot.tlsSecretIdentityMatches),
+canGenerate (bool-ish -- global.deploymentTier is alpha/local).
+*/}}
+{{- define "waddlebot.tlsSecretStaleFailsClosed" -}}
+{{- $existing := .existing -}}
+{{- $isComplete := include "waddlebot.tlsSecretComplete" (dict "existing" $existing) -}}
+{{- $matches := include "waddlebot.tlsSecretIdentityMatches" (dict "existing" $existing "identity" .identity "sansSha256" .sansSha256) -}}
+{{- if and $existing $isComplete (not $matches) (not .canGenerate) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/* checksum/host-api-tls pod-template annotation value -- derived from the desired
+identity+SANs ONLY, never key material, so an identity/SAN change rolls every consumer pod
+(svc-process-rust, svc-action-rust, bundle-executor, bundle-executor-action) even though
+the Secret object itself is reused by name when kept. */}}
+{{- define "waddlebot.hostApiTlsPodChecksum" -}}
+{{- printf "%s|%s" (include "waddlebot.hostApiStageIdentity" .) (include "waddlebot.hostApiTlsSansSha256" .) | sha256sum -}}
 {{- end }}
 
 {{/*
@@ -650,6 +895,43 @@ true
 {{- end }}
 
 {{/*
+fix/cert-regen-on-identity-change -- valkey-tls counterpart of
+waddlebot.hostApiTlsDesiredDnsNames/SansSha256 above, same rationale: centralizes the
+exact SAN list templates/infrastructure/valkey-tls-secret.yaml's genSignedCert path must
+carry so the stale-cert detector (waddlebot.tlsSecretIdentityMatches) can never drift from
+what that template actually mints.
+*/}}
+{{- define "waddlebot.valkeyTlsDesiredDnsNames" -}}
+{{- $svcName := .Values.infrastructure.redis.service.name -}}
+{{- $ns := .Values.namespace -}}
+{{- list $svcName (printf "%s.%s" $svcName $ns) (printf "%s.%s.svc" $svcName $ns) (printf "%s.%s.svc.cluster.local" $svcName $ns) | sortAlpha | join "," -}}
+{{- end }}
+
+{{- define "waddlebot.valkeyTlsSansSha256" -}}
+{{- include "waddlebot.valkeyTlsDesiredDnsNames" . | sha256sum -}}
+{{- end }}
+
+{{/*
+fix/valkey-cert-rollout-and-migrate-wait -- the pod-template `checksum/valkey-tls`
+annotation every Valkey-TLS workload (the server in templates/infrastructure/redis.yaml,
+plus every client Deployment/Job mounting the CA via waddlebot.valkeyTlsCaVolumeMount:
+hub-api, svc-ingest-rust, svc-process-rust, svc-action-rust, core-bundle-seeder-job) must
+carry, mirroring waddlebot.hostApiTlsPodChecksum's identity-input (never key-material-input)
+design: derived from the SAME desired identity ($svcName, templates/infrastructure/
+valkey-tls-secret.yaml's $desiredIdentity) + SANs hash this file's
+waddlebot.tlsSecretIdentityMatches compares against. Because every consumer calls this one
+helper with the same two inputs, the server and every client always compute the identical
+checksum value and roll together on any identity/SAN change -- regardless of whether the
+`{{ fullname }}-valkey-tls` Secret itself was KEPT (same object, no new resourceVersion) or
+regenerated, closing the gap where #541 added the drift *detection*
+(waddlebot.tlsSecretIdentityMatches) but no template actually rolled a pod on it.
+# regression: valkey cert regenerated but server pod not rolled; clients BadSignature (alpha 2026-10-02)
+*/}}
+{{- define "waddlebot.valkeyTlsPodChecksum" -}}
+{{- printf "%s|%s" .Values.infrastructure.redis.service.name (include "waddlebot.valkeyTlsSansSha256" .) | sha256sum -}}
+{{- end }}
+
+{{/*
 fix/helm-alpha-self-provisioning -- lookup-then-generate-or-require for a single key
 inside the monolithic waddlebot-secrets Secret (templates/secrets.yaml). Mirrors
 templates/auto-provisioned-secrets.yaml's KEEP-vs-GENERATE policy but at per-key
@@ -677,7 +959,7 @@ rotated) > fresh random generation (alpha/local only) > fail closed elsewhere.
 {{- $tier := $ctx.Values.global.deploymentTier -}}
 {{- $canGenerate := or (eq $tier "alpha") (eq $tier "local") -}}
 {{- $existing := lookup "v1" "Secret" $ctx.Values.namespace "waddlebot-secrets" -}}
-{{- if and $existing $existing.data (hasKey $existing.data $key) -}}
+{{- if (include "waddlebot.secretKeyNonEmpty" (dict "existing" $existing "key" $key)) -}}
 {{- index $existing.data $key | b64dec -}}
 {{- else if $canGenerate -}}
 {{- if $hex -}}
@@ -721,3 +1003,50 @@ rotated) > fresh random generation (alpha/local only) > fail closed elsewhere.
   mountPath: /etc/waddles/ca
   readOnly: true
 {{- end }}
+
+{{/*
+fix/no-empty-kept-secrets -- shared "is this lookup-KEEP candidate actually usable"
+predicates. Every auto-provisioned Secret in this chart (waddlebot-secrets per-key
+fields via waddlebot.autoSecretValue above, auto-provisioned-secrets.yaml's symmetric
+keys, host-api-tls-secret.yaml, infrastructure/valkey-tls-secret.yaml) follows the same
+lookup(KEEP)-then-generate(alpha/local)-or-require(else) policy, and ALL of them had the
+same latent bug: `lookup` finding an existing Secret/key was treated as sufficient to
+KEEP, even when the stored value was the empty string (e.g. shipped by an earlier
+`readerPassword | default ""` render). An empty kept value silently disables whatever it
+gates (DB_READER_PASSWORD -> multi-app path off) forever, since KEEP always wins and
+generation/fail-closed never fires again. These helpers make "empty" count as "missing"
+everywhere a lookup result is consulted, so a pre-existing empty value is regenerated in
+alpha/local and fails chart rendering (actionable message) in beta/gamma/production,
+exactly like a Secret that never existed at all.
+
+waddlebot.secretKeyNonEmpty -- single scalar key. Args (dict): existing (a `lookup "v1"
+"Secret" ...` result, may be nil/empty outside a real cluster -- see
+auto-provisioned-secrets.yaml's header comment on `lookup` under `helm template`), key
+(data key name). Returns non-empty "true" only when the key is present AND decodes to a
+non-empty string.
+*/}}
+{{- define "waddlebot.secretKeyNonEmpty" -}}
+{{- $existing := .existing -}}
+{{- $key := .key -}}
+{{- if and $existing $existing.data (hasKey $existing.data $key) -}}
+{{- if ne (index $existing.data $key | b64dec) "" -}}
+true
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+waddlebot.tlsSecretComplete -- full ca.crt/tls.crt/tls.key bundle (host-api-tls-secret.yaml,
+infrastructure/valkey-tls-secret.yaml). Args (dict): existing (the `lookup` result).
+Returns non-empty "true" only when all three keys are present AND every one decodes to a
+non-empty string -- a partially-populated or empty-valued bundle counts as MISSING, same
+empty-is-missing rule as waddlebot.secretKeyNonEmpty.
+*/}}
+{{- define "waddlebot.tlsSecretComplete" -}}
+{{- $existing := .existing -}}
+{{- if and $existing $existing.data (hasKey $existing.data "ca.crt") (hasKey $existing.data "tls.crt") (hasKey $existing.data "tls.key") -}}
+{{- if and (ne (index $existing.data "ca.crt" | b64dec) "") (ne (index $existing.data "tls.crt" | b64dec) "") (ne (index $existing.data "tls.key" | b64dec) "") -}}
+true
+{{- end -}}
+{{- end -}}
+{{- end -}}

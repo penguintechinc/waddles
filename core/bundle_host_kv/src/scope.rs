@@ -126,6 +126,24 @@ impl KvScope {
         format!("{}:count", self.app_prefix())
     }
 
+    /// The `SCAN MATCH` pattern covering every live data key for this app
+    /// -- used only by `crate::backend`'s self-heal reconciliation
+    /// (`count_key` missing, e.g. evicted under `allkeys-*` memory
+    /// pressure -- `crate::policy`'s doc) to recompute the true live-key
+    /// count. Never used on the per-op hot path.
+    pub fn data_scan_pattern(&self) -> String {
+        format!("{}:data:*", self.app_prefix())
+    }
+
+    /// The reconciliation mutex (`SET NX`) guarding
+    /// [`Self::data_scan_pattern`]'s `SCAN` -- one reconciliation in
+    /// flight per app at a time; a caller that fails to acquire it must
+    /// fail closed (deny the write), never proceed against a
+    /// known-possibly-stale `count_key`.
+    pub fn reconcile_lock_key(&self) -> String {
+        format!("{}:reconcile-lock", self.app_prefix())
+    }
+
     /// The per-invocation op-count key the rate limit is enforced against
     /// (task quota: "per-invocation op rate limit"). Scoped by the
     /// host-API `call_id` (`penguin_bundle_host::wire::HostCallBody::call_id`,

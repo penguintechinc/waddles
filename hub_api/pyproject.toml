@@ -30,6 +30,16 @@ convention = "google"
 # `get_tenant_context()` -- the pattern every ported controller group
 # was documented to repeat (see platform.py's own per-file-ignore above).
 "blueprints/v1/community_*.py" = ["S101"]
+# Bar Citizen guild-pairing/role-sync group (migration 0034) -- same
+# `_feature_gate_and_tenant_check()` tenant_middleware postcondition assert
+# (`get_tenant_context()` always non-None after `tenant_middleware` already
+# ran) as the `community_*.py` glob above.
+"blueprints/v1/guild_pairing.py" = ["S101"]
+# Bar Citizen Twitch bot-install flow (migration 0034) -- same
+# tenant_middleware postcondition assert (`get_tenant_context()` always
+# non-None after `tenant_middleware` already ran) as the `guild_pairing.py`
+# entry above.
+"blueprints/v1/tenant_twitch_install.py" = ["S101"]
 # Bot module (M5): DTO/service-dataclass field names are deliberately
 # camelCase to byte-match admin/hub_module/frontend/src/services/api.js's
 # frozen /api/v1 JSON contract (soEnabled, platformUsername, createdAt,
@@ -112,6 +122,9 @@ convention = "google"
 "blueprints/v1/platform.py" = ["N815"]
 "blueprints/v1/platform_config.py" = ["N815"]
 "blueprints/v1/public.py" = ["N815"]
+# `installUrl` -- camelCase DTO wire-contract field matching `public.py`'s
+# own convention (this blueprint shares its `/api/v1/public` prefix).
+"blueprints/v1/discord_bot_install.py" = ["N815"]
 # M2 Core Tenancy-Misc group (communityProfileController.js /
 # joinRequestController.js) -- same N815 rationale as the M1 entries
 # above (`avatarUrl`/`socialLinks`/etc are wire-contract field names, not
@@ -219,6 +232,12 @@ convention = "google"
 # bundle_approvals.py above.
 "blueprints/v1/bundle_tenant_availability.py" = ["N815", "S101"]
 "blueprints/v1/bundle_activation.py" = ["N815", "S101"]
+# Bundle Permissions & Capability Gate consent flow -- same camelCase DTO
+# wire contract + tenant_middleware postcondition assert rationale.
+"blueprints/v1/bundle_permissions.py" = ["N815", "S101"]
+# `assert risk is not None` after `_require(risk is not None, ...)` already
+# raised otherwise -- a narrowing assert for mypy, not a runtime guard.
+"services/bundle_manifest_v2.py" = ["S101"]
 # Tenant ingest_sources registry (spec Sec5.2, Sec10.3) -- camelCase DTO
 # fields (sourceId, communityId, nextCursor, ...) match the wire contract
 # every other v1 blueprint's DTOs already use; S101 is the same

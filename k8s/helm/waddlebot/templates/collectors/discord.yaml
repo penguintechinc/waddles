@@ -24,7 +24,8 @@ spec:
     spec:
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       initContainers:
-      {{- include "waddlebot.dbMigrateInitContainer" . | nindent 8 }}
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waits on hub-api's own /ready.
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 8 }}
       containers:
         - name: discord-collector
           image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.modules.collectors.discord.image) "imageTag" .Values.modules.collectors.discord.imageTag) }}"

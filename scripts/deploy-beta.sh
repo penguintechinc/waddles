@@ -459,7 +459,7 @@ do_deploy() {
         --namespace ${NAMESPACE} \
         -f ${HELM_CHART}/values.yaml \
         -f ${HELM_CHART}/values-beta.yaml \
-        --set global.imageTag=${TAG} \
+        --set-string global.imageTag=${TAG} \
         --force-conflicts \
         --timeout 10m \
         --wait"

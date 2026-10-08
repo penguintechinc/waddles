@@ -127,6 +127,10 @@ mod tests {
             digest: digest.to_string(),
             component_key: format!("bundles/{digest}/component.wasm"),
             sidecar_key: format!("bundles/{digest}/sidecar.json"),
+            artifact_signature: None,
+            artifact_signature_key_id: None,
+            artifact_signed_approval_id: None,
+            declared_capabilities: Vec::new(),
         }
     }
 

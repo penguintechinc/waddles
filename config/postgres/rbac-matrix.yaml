@@ -36,6 +36,18 @@ tables:
   - app_source_bindings
   - app_global_installs
   - bundle_tenant_availability
+  - app_permission_requests
+  - app_tenant_permission_restrictions
+  - community_permission_grants
+  - app_permission_grant_versions
+  - bundle_reputation_adjustments
+  - tenant_platform_credentials
+  - guild_tenant_pairings
+  - calendar_event_discord_syncs
+  - community_role_sync_bindings
+  - tenant_platform_apps
+  - platform_connections
+  - community_connection_access
 grants:
   # app_versions: exactly two writers (spec Sec6.10). Every other role
   # gets zero privileges -- listed explicitly so the equality check
@@ -408,4 +420,324 @@ grants:
     privileges: []
   - role: migration_runner
     table: bundle_tenant_availability
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # --- migration 0032 (Bundle Permissions & Capability Gate grant storage,
+  #     services/bundle_permission_service.py) --- hub-api is the only RW
+  # path for all five tables (spec Sec4); the data plane's own read-only
+  # access is `waddles_bundle_reader`, granted separately in the migration
+  # itself (not part of this matrix, same precedent as migrations
+  # 0025/0028's own `_BUNDLE_READER_ROLE` guarded grants).
+  - role: hub_api
+    table: app_permission_requests
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: app_permission_requests
+    privileges: []
+  - role: svc_ingest
+    table: app_permission_requests
+    privileges: []
+  - role: svc_process
+    table: app_permission_requests
+    privileges: []
+  - role: svc_action
+    table: app_permission_requests
+    privileges: []
+  - role: svc_streaming
+    table: app_permission_requests
+    privileges: []
+  - role: webui
+    table: app_permission_requests
+    privileges: []
+  - role: migration_runner
+    table: app_permission_requests
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: app_tenant_permission_restrictions
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: app_tenant_permission_restrictions
+    privileges: []
+  - role: svc_ingest
+    table: app_tenant_permission_restrictions
+    privileges: []
+  - role: svc_process
+    table: app_tenant_permission_restrictions
+    privileges: []
+  - role: svc_action
+    table: app_tenant_permission_restrictions
+    privileges: []
+  - role: svc_streaming
+    table: app_tenant_permission_restrictions
+    privileges: []
+  - role: webui
+    table: app_tenant_permission_restrictions
+    privileges: []
+  - role: migration_runner
+    table: app_tenant_permission_restrictions
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: community_permission_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: community_permission_grants
+    privileges: []
+  - role: svc_ingest
+    table: community_permission_grants
+    privileges: []
+  - role: svc_process
+    table: community_permission_grants
+    privileges: []
+  - role: svc_action
+    table: community_permission_grants
+    privileges: []
+  - role: svc_streaming
+    table: community_permission_grants
+    privileges: []
+  - role: webui
+    table: community_permission_grants
+    privileges: []
+  - role: migration_runner
+    table: community_permission_grants
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: app_permission_grant_versions
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: app_permission_grant_versions
+    privileges: []
+  - role: svc_ingest
+    table: app_permission_grant_versions
+    privileges: []
+  - role: svc_process
+    table: app_permission_grant_versions
+    privileges: []
+  - role: svc_action
+    table: app_permission_grant_versions
+    privileges: []
+  - role: svc_streaming
+    table: app_permission_grant_versions
+    privileges: []
+  - role: webui
+    table: app_permission_grant_versions
+    privileges: []
+  - role: migration_runner
+    table: app_permission_grant_versions
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: bundle_reputation_adjustments
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: bundle_reputation_adjustments
+    privileges: []
+  - role: svc_ingest
+    table: bundle_reputation_adjustments
+    privileges: []
+  - role: svc_process
+    table: bundle_reputation_adjustments
+    privileges: []
+  - role: svc_action
+    table: bundle_reputation_adjustments
+    privileges: []
+  - role: svc_streaming
+    table: bundle_reputation_adjustments
+    privileges: []
+  - role: webui
+    table: bundle_reputation_adjustments
+    privileges: []
+  - role: migration_runner
+    table: bundle_reputation_adjustments
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # Bar Citizen guild-pairing + role-sync schema (migration
+  # 0034_bar_citizen_guild_pairing). hub_api is the sole writer -- these
+  # are hub-api-owned control-plane tables; no data-plane service reads
+  # them directly yet.
+  #
+  # tenant_platform_credentials is, as of 0035_connection_model_layers,
+  # a compatibility VIEW over the renamed tenant_platform_apps table (see
+  # that migration's docstring) -- same grants apply to a view as a table.
+  - role: hub_api
+    table: tenant_platform_credentials
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: tenant_platform_credentials
+    privileges: []
+  - role: svc_ingest
+    table: tenant_platform_credentials
+    privileges: []
+  - role: svc_process
+    table: tenant_platform_credentials
+    privileges: []
+  - role: svc_action
+    table: tenant_platform_credentials
+    privileges: []
+  - role: svc_streaming
+    table: tenant_platform_credentials
+    privileges: []
+  - role: webui
+    table: tenant_platform_credentials
+    privileges: []
+  - role: migration_runner
+    table: tenant_platform_credentials
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: guild_tenant_pairings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: guild_tenant_pairings
+    privileges: []
+  - role: svc_ingest
+    table: guild_tenant_pairings
+    privileges: []
+  - role: svc_process
+    table: guild_tenant_pairings
+    privileges: []
+  - role: svc_action
+    table: guild_tenant_pairings
+    privileges: []
+  - role: svc_streaming
+    table: guild_tenant_pairings
+    privileges: []
+  - role: webui
+    table: guild_tenant_pairings
+    privileges: []
+  - role: migration_runner
+    table: guild_tenant_pairings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: community_role_sync_bindings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: community_role_sync_bindings
+    privileges: []
+  - role: svc_ingest
+    table: community_role_sync_bindings
+    privileges: []
+  - role: svc_process
+    table: community_role_sync_bindings
+    privileges: []
+  - role: svc_action
+    table: community_role_sync_bindings
+    privileges: []
+  - role: svc_streaming
+    table: community_role_sync_bindings
+    privileges: []
+  - role: webui
+    table: community_role_sync_bindings
+    privileges: []
+  - role: migration_runner
+    table: community_role_sync_bindings
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # Discord event-sync push engine (migration 0039_event_sync_enabled).
+  # hub_api is the sole writer -- same control-plane convention as 0034's
+  # three tables above; no data-plane service reads this directly.
+  - role: hub_api
+    table: calendar_event_discord_syncs
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: calendar_event_discord_syncs
+    privileges: []
+  - role: svc_ingest
+    table: calendar_event_discord_syncs
+    privileges: []
+  - role: svc_process
+    table: calendar_event_discord_syncs
+    privileges: []
+  - role: svc_action
+    table: calendar_event_discord_syncs
+    privileges: []
+  - role: svc_streaming
+    table: calendar_event_discord_syncs
+    privileges: []
+  - role: webui
+    table: calendar_event_discord_syncs
+    privileges: []
+  - role: migration_runner
+    table: calendar_event_discord_syncs
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # Three-layer platform-connection model (migration
+  # 0035_connection_model_layers). hub_api is the sole writer -- same
+  # control-plane convention as the Bar Citizen tables above.
+  - role: hub_api
+    table: tenant_platform_apps
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: tenant_platform_apps
+    privileges: []
+  - role: svc_ingest
+    table: tenant_platform_apps
+    privileges: []
+  - role: svc_process
+    table: tenant_platform_apps
+    privileges: []
+  - role: svc_action
+    table: tenant_platform_apps
+    privileges: []
+  - role: svc_streaming
+    table: tenant_platform_apps
+    privileges: []
+  - role: webui
+    table: tenant_platform_apps
+    privileges: []
+  - role: migration_runner
+    table: tenant_platform_apps
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: platform_connections
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: platform_connections
+    privileges: []
+  - role: svc_ingest
+    table: platform_connections
+    privileges: []
+  - role: svc_process
+    table: platform_connections
+    privileges: []
+  - role: svc_action
+    table: platform_connections
+    privileges: []
+  - role: svc_streaming
+    table: platform_connections
+    privileges: []
+  - role: webui
+    table: platform_connections
+    privileges: []
+  - role: migration_runner
+    table: platform_connections
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  - role: hub_api
+    table: community_connection_access
+    privileges: [SELECT, INSERT, UPDATE, DELETE]
+  - role: waddles_publisher
+    table: community_connection_access
+    privileges: []
+  - role: svc_ingest
+    table: community_connection_access
+    privileges: []
+  - role: svc_process
+    table: community_connection_access
+    privileges: []
+  - role: svc_action
+    table: community_connection_access
+    privileges: []
+  - role: svc_streaming
+    table: community_connection_access
+    privileges: []
+  - role: webui
+    table: community_connection_access
+    privileges: []
+  - role: migration_runner
+    table: community_connection_access
     privileges: [SELECT, INSERT, UPDATE, DELETE]

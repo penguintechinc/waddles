@@ -6,12 +6,20 @@
 # stageTarget=svc-process-rust) keeps serving svc-process; this one is pinned to
 # pipeline.rustDataPlane.bundleExecutorAction.stageTarget (default svc-action-rust).
 #
-# Byte-for-byte the same D9/D10 credential-less posture, securityContext, health-check
-# shape, and hostApiTls client wiring as templates/bundle-executor.yaml -- see that file's
-# header comment for the full rationale (not repeated here). Gated on the top-level
-# pipeline.rustDataPlane.enabled flag (default false) plus this module's own .enabled
-# sub-flag.
+# Byte-for-byte the same D9/D10 credential-less posture, securityContext, and hostApiTls
+# client wiring as templates/bundle-executor.yaml -- see that file's header comment for
+# the full rationale (not repeated here), INCLUDING the fix/executor-session-liveness
+# three-probe shape (startupProbe = engine build-test, liveness/readinessProbe =
+# `--healthcheck=session` against core/bundle_executor/src/probe.rs's on-disk liveness
+# file). Gated on the top-level pipeline.rustDataPlane.enabled flag (default false) plus
+# this module's own .enabled sub-flag.
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.bundleExecutorAction.enabled }}
+{{- $bseaTier := .Values.global.deploymentTier }}
+{{- if not .Values.pipeline.rustDataPlane.bundleSigningPublicKeys }}
+{{- if not (or (eq $bseaTier "alpha") (eq $bseaTier "local")) }}
+{{- fail (printf "pipeline.rustDataPlane.bundleSigningPublicKeys is empty and global.deploymentTier=%q is outside alpha/local: run make generate-bundle-signing-key and set values; see README rollout order" $bseaTier) }}
+{{- end }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -28,6 +36,14 @@ spec:
       app.kubernetes.io/component: bundle-executor-action
   template:
     metadata:
+      annotations:
+        # fix/cert-regen-on-identity-change -- rolls every pod when the desired
+        # host-api-tls identity/SANs change, even though the Secret object itself is
+        # reused by name when kept (see templates/host-api-tls-secret.yaml's policy
+        # comment); derived from identity+SANs only, never key material.
+        {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
+        checksum/host-api-tls: {{ include "waddlebot.hostApiTlsPodChecksum" . | quote }}
+        {{- end }}
       labels:
         {{- include "waddlebot.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: bundle-executor-action
@@ -36,11 +52,15 @@ spec:
       {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # fix/chart-fresh-install-hooks (alpha 2026-10-01) -- waits on hub-api's own
+      # /ready before this pod's main container starts (see _helpers.tpl).
+      initContainers:
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: bundle-executor
         # Same image as templates/bundle-executor.yaml -- literally the same crate/binary,
         # pointed at a different stage purely via env vars below.
-        image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag }}"
+        image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag | toString }}"
         imagePullPolicy: Always
         securityContext:
           runAsNonRoot: true
@@ -75,6 +95,10 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.wasmCollector | quote }}
         - name: WADDLES_SANDBOX_GVISOR
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.sandboxGvisor | quote }}
+        # feature/bundle-artifact-signing -- shared platform key set, see values.yaml's
+        # pipeline.rustDataPlane.bundleSigningPublicKeys comment (not secret; public keys).
+        - name: BUNDLE_SIGNING_PUBLIC_KEYS
+          value: {{ .Values.pipeline.rustDataPlane.bundleSigningPublicKeys | toJson | quote }}
         - name: BUNDLE_BUCKET_ENDPOINT
           value: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
         - name: BUNDLE_BUCKET_NAME
@@ -98,18 +122,28 @@ spec:
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsClientEnv" . | nindent 8 }}
         {{- end }}
-        livenessProbe:
+        startupProbe:
+          # fix/alpha-deploy-executor-and-failfast -- see templates/bundle-executor.yaml's
+          # identical comment on this same probe for the full rationale (same binary, same
+          # cold-compile workload): failureThreshold bumped from 12 (62s) to 65 (~5.5min).
           exec:
             command: ["/app/bundle-executor", "--healthcheck"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 65
+        livenessProbe:
+          exec:
+            command: ["/app/bundle-executor", "--healthcheck=session", "--max-age", "60"]
           initialDelaySeconds: 10
-          periodSeconds: 30
+          periodSeconds: 15
           timeoutSeconds: 5
           failureThreshold: 3
         readinessProbe:
           exec:
-            command: ["/app/bundle-executor", "--healthcheck"]
+            command: ["/app/bundle-executor", "--healthcheck=session", "--max-age", "20"]
           initialDelaySeconds: 5
-          periodSeconds: 15
+          periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 3
         resources:

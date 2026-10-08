@@ -62,6 +62,12 @@ path = "src/main.rs"
 # or `cargo deny check` fails closed on `unknown-git` (see that file).
 [dependencies]
 tokio = { version = "=1.53.1", features = ["full"] }
+# Host-API acceptor TCP keepalive (fix/executor-link-heartbeat, alpha
+# 2026-10-02 incident: a rolled svc pod left the executor's socket
+# half-open with no OS-level signal) -- already resolves to this exact
+# version transitively (tokio/rustls), pinned directly here so
+# `SockRef::set_tcp_keepalive` is available without bumping anything else.
+socket2 = { version = "=0.6.5", features = ["all"] }
 axum = "=0.8.9"
 tower = { version = "=0.5.3", features = ["util"] }
 tower-http = { version = "=0.7.1", features = ["trace", "cors"] }
@@ -154,15 +160,17 @@ bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0" }
 # (`docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
 # SS5, `src/capabilities.rs`).
 bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0" }
+# The shared `db` bundle host-capability implementation (insert/get/update/
+# delete against a bundle's own `app_core`/`app_community` table) -- a
+# same-repo path dependency, same rationale as `bundle-active-set` above:
+# this crate's identifier-safety/tenant-isolation rules are owned by this
+# repo's own bundle-db-capability design doc, not penguin-libs.
+bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
 # `kv` host capability (`src/lib.rs`'s `connect_kv`, `src/capabilities.rs`):
 # a direct Valkey connection, same crate/feature pins `core/svc_action`
 # uses for its own direct `relay`/usage connection, and the same version
 # already pulled in transitively via `penguin-spine`.
 redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp"] }
-# `futures_util::StreamExt` for `grant_gate`'s pub/sub invalidation
-# subscriber (`PubSubStream::into_on_message()`) -- same exact version pin
-# `core/svc_action` already uses for the identical purpose.
-futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
 # The bundle `http` host capability's shared, SSRF-hardened egress guard
 # (`src/capabilities.rs`'s `StageCapabilities::egress`) -- extracted from
 # `core/svc_action` (PR #459 follow-up) so this stage enforces the
@@ -170,6 +178,30 @@ futures-util = { version = "=0.3.34", default-features = false, features = ["std
 # instead of a second copy. Same same-repo `path`-dependency rationale as
 # `bundle-active-set` above.
 bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
+# `futures_util::StreamExt`/`join_all`: `grant_gate`'s pub/sub invalidation
+# subscriber (`PubSubStream::into_on_message()`) AND
+# `apply_active_set`'s concurrent per-(session,bundle) Load/Unload dispatch
+# (`src/changelog_consumer.rs`, fix/svc-process-load-reliability-and-
+# symmetry, porting fix/action-per-session-load-reliability #554) both use
+# this crate -- same exact version pin `core/svc_action` uses.
+futures-util = { version = "=0.3.34", default-features = false, features = ["std"] }
+# Inbound PII-tokenization pre-dispatch pass (`src/pii_tokenize.rs`):
+# Discord structured-mention / Twitch-IRC handle-mention scanning in
+# free-text chat payloads. Same pin `core/bundle_compiler` already uses.
+regex = "=1.13.1"
+# `waddles.hub.internal.v1.IdentityService.MintEphemeralPseudonyms` client
+# (feature/hub-api-internal-grpc foundation) -- `src/pii_tokenize.rs`'s
+# `HubClientMinter` adapter. Same-repo path dependency (not penguin-libs):
+# this proto contract is owned by this repo, not penguin-libs.
+hub_client = { path = "../hub_client", version = "=0.1.0" }
+# `src/pii_tokenize.rs`'s `sanitize_mint_key` (sec review 2026-10-03): hashes
+# the raw handle out of a `handle:<raw username>` fallback mint key before
+# it can ever reach a `TokenizeError`/log line -- never the raw value.
+# Already resolved transitively at this exact version (sha2 0.10.9, via
+# `penguin-spine`/`rustls`'s own dependency graph); pinned directly here so
+# this module's use of it doesn't depend on that staying true. Same pin
+# `core/svc_ingest`/`core/svc_action`/`core/bundle_compiler` use.
+sha2 = "=0.10.9"
 
 [dev-dependencies]
 http-body-util = "=0.1.3"

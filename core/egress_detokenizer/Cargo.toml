@@ -1,0 +1,36 @@
+[package]
+name = "egress_detokenizer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Single-pass, non-recursive {user:<token>} output detokenizer -- substitutes real display names back into egress text ONLY at the final chat/overlay send (core/svc_action), per-sink-escaped. The PII boundary's outbound half of core/svc_process/src/pii_tokenize.rs's inbound tokenization pass."
+
+[lib]
+name = "egress_detokenizer"
+path = "src/lib.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- see rules/critical-rules.md
+# Dependency Pinning.
+[dependencies]
+thiserror = "=2.0.20"
+tracing = "=0.1.44"
+# `waddles.hub.internal.v1.IdentityService.ResolveDisplayNames` client
+# (feature/hub-api-internal-grpc foundation) -- `src/resolver.rs`'s
+# `HubClientResolver` adapter. Same-repo path dependency, same rationale as
+# `core/svc_process`'s identical dependency on this crate.
+hub_client = { path = "../hub_client", version = "=0.1.0" }
+
+[dev-dependencies]
+tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+# Property/fuzz test (salvaged from PR #427's render.rs proptest, adapted
+# to this crate's single-file detokenize/extract_tokens API) -- see
+# `tests::never_panics_and_never_leaks_a_known_token`.
+proptest = "=1.9.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

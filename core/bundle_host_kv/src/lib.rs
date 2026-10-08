@@ -30,13 +30,16 @@ pub mod authorize;
 pub mod backend;
 mod limits;
 mod metrics;
+pub mod policy;
 pub mod scope;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-pub use backend::{BoxFuture, KvBackend, QuotaOutcome};
+pub use authorize::CapabilitySnapshot;
+pub use backend::{BoxFuture, KvBackend, QuotaOutcome, ReconcileOutcome};
 pub use limits::{
     MAX_GUEST_KEY_LEN, MAX_KEYS_PER_APP, MAX_OPS_PER_INVOKE, MAX_TTL_SECONDS, MAX_VALUE_BYTES,
 };
@@ -70,6 +73,12 @@ pub enum KvError {
     /// [`MAX_OPS_PER_INVOKE`] was exceeded by this invocation.
     #[error("rate limited: {0}")]
     RateLimited(String),
+    /// [`backend::ReconcileOutcome::Locked`]: `count_key` was missing and
+    /// another caller already holds the reconciliation lock -- fail
+    /// closed rather than guess a count (low-severity fix, PR #425
+    /// security review: `count_key` eviction self-heal).
+    #[error("quota reconciliation in progress: {0}")]
+    Reconciling(String),
     /// Valkey itself failed (network, protocol, script error).
     #[error("backend error: {0}")]
     Backend(String),
@@ -101,6 +110,7 @@ impl KvError {
             | KvError::InvalidKey(m)
             | KvError::QuotaExceeded(m)
             | KvError::RateLimited(m)
+            | KvError::Reconciling(m)
             | KvError::Backend(m) => m.clone(),
         }
     }
@@ -116,6 +126,7 @@ impl KvError {
             KvError::TooLarge(_) => "too_large",
             KvError::QuotaExceeded(_) => "quota_exceeded",
             KvError::RateLimited(_) => "rate_limited",
+            KvError::Reconciling(_) => "reconciling",
             KvError::Backend(_) => "backend",
         }
     }
@@ -207,11 +218,57 @@ fn finish<T>(
 /// fake) share every byte of orchestration logic below.
 pub struct KvHost<B: KvBackend> {
     backend: B,
+    /// The manifest-declared-capability snapshot [`authorize::authorize_kv`]
+    /// checks -- see that module's doc for where it comes from and why
+    /// "undeclared means denied" is the default for any `app_id` it has
+    /// never been told about.
+    capabilities: Arc<CapabilitySnapshot>,
 }
 
 impl<B: KvBackend> KvHost<B> {
-    pub fn new(backend: B) -> Self {
-        Self { backend }
+    pub fn new(backend: B, capabilities: Arc<CapabilitySnapshot>) -> Self {
+        Self {
+            backend,
+            capabilities,
+        }
+    }
+
+    /// Self-heal, low-severity fix (PR #425 security review): if
+    /// `count_key` is missing (e.g. evicted under an `allkeys-*`
+    /// `maxmemory-policy`, `crate::policy`'s doc), reconciles it against a
+    /// bounded `SCAN` before the caller's quota-checked write proceeds.
+    /// Fails closed (denies the write) if another caller already holds
+    /// the reconciliation lock, rather than racing a second `SCAN` or
+    /// guessing a count.
+    async fn ensure_count_reconciled(&self, scope: &KvScope) -> Result<(), KvError> {
+        match self
+            .backend
+            .reconcile_count_if_missing(
+                &scope.count_key(),
+                &scope.data_scan_pattern(),
+                &scope.reconcile_lock_key(),
+                limits::RECONCILE_LOCK_TTL_MS,
+                limits::RECONCILE_SCAN_LIMIT,
+            )
+            .await
+            .map_err(KvError::Backend)?
+        {
+            ReconcileOutcome::AlreadyPresent => Ok(()),
+            ReconcileOutcome::Reconciled(count) => {
+                tracing::warn!(
+                    tenant = %scope.tenant,
+                    community = scope.community.as_deref().unwrap_or(""),
+                    app_id = %scope.app_id,
+                    reconciled_count = count,
+                    "bundle kv: count_key was missing (evicted?), reconciled via SCAN"
+                );
+                Ok(())
+            }
+            ReconcileOutcome::Locked => Err(KvError::Reconciling(format!(
+                "app {} kv key-count is being reconciled; retry shortly",
+                scope.app_id
+            ))),
+        }
     }
 
     async fn check_rate(&self, scope: &KvScope, call_id: u64) -> Result<(), KvError> {
@@ -249,7 +306,8 @@ impl<B: KvBackend> KvHost<B> {
         call_id: u64,
         key: &str,
     ) -> Result<Option<Vec<u8>>, KvError> {
-        authorize::authorize_kv(scope).map_err(|d| KvError::NotGranted(d.message))?;
+        authorize::authorize_kv(scope, &self.capabilities)
+            .map_err(|d| KvError::NotGranted(d.message))?;
         validate_key(key)?;
         self.check_rate(scope, call_id).await?;
         self.backend
@@ -285,12 +343,14 @@ impl<B: KvBackend> KvHost<B> {
         value: &[u8],
         ttl_seconds: u32,
     ) -> Result<(), KvError> {
-        authorize::authorize_kv(scope).map_err(|d| KvError::NotGranted(d.message))?;
+        authorize::authorize_kv(scope, &self.capabilities)
+            .map_err(|d| KvError::NotGranted(d.message))?;
         validate_key(key)?;
         if value.len() > limits::MAX_VALUE_BYTES {
             return Err(KvError::TooLarge(value.len() as u64));
         }
         self.check_rate(scope, call_id).await?;
+        self.ensure_count_reconciled(scope).await?;
         let ttl = limits::clamp_ttl_seconds(ttl_seconds);
         match self
             .backend
@@ -322,7 +382,8 @@ impl<B: KvBackend> KvHost<B> {
     }
 
     async fn delete_inner(&self, scope: &KvScope, call_id: u64, key: &str) -> Result<(), KvError> {
-        authorize::authorize_kv(scope).map_err(|d| KvError::NotGranted(d.message))?;
+        authorize::authorize_kv(scope, &self.capabilities)
+            .map_err(|d| KvError::NotGranted(d.message))?;
         validate_key(key)?;
         self.check_rate(scope, call_id).await?;
         self.backend
@@ -359,9 +420,11 @@ impl<B: KvBackend> KvHost<B> {
         delta: i64,
         ttl_seconds: u32,
     ) -> Result<i64, KvError> {
-        authorize::authorize_kv(scope).map_err(|d| KvError::NotGranted(d.message))?;
+        authorize::authorize_kv(scope, &self.capabilities)
+            .map_err(|d| KvError::NotGranted(d.message))?;
         validate_key(key)?;
         self.check_rate(scope, call_id).await?;
+        self.ensure_count_reconciled(scope).await?;
         let ttl = limits::clamp_ttl_seconds(ttl_seconds);
         match self
             .backend
@@ -401,9 +464,30 @@ mod tests {
         KvScope::new("globex", Some("main".to_string()), "waddles.bot.a")
     }
 
+    /// A [`CapabilitySnapshot`] granting `storage.kv` to every `app_id`
+    /// listed -- what a real deployment's `bundle_loader` would have
+    /// populated from an approved manifest declaring it. Every test in
+    /// this module other than the `authorize_*` ones below is testing
+    /// something *other* than the gate itself, so they all grant up front.
+    fn granting(app_ids: &[&str]) -> Arc<CapabilitySnapshot> {
+        let snapshot = CapabilitySnapshot::new();
+        for app_id in app_ids {
+            snapshot.update(*app_id, [authorize::KV_PERMISSION_ID.to_string()]);
+        }
+        Arc::new(snapshot)
+    }
+
+    fn host_for(backend: FakeBackend, app_ids: &[&str]) -> KvHost<FakeBackend> {
+        KvHost::new(backend, granting(app_ids))
+    }
+
+    fn host(app_ids: &[&str]) -> KvHost<FakeBackend> {
+        host_for(FakeBackend::new(), app_ids)
+    }
+
     #[tokio::test]
     async fn set_then_get_round_trips_the_value() {
-        let host = KvHost::new(FakeBackend::new());
+        let host = host(&["waddles.bot.a"]);
         let scope = scope_a();
         host.set(&scope, 1, "counter", b"hello", 0).await.unwrap();
         let got = host.get(&scope, 2, "counter").await.unwrap();
@@ -412,14 +496,14 @@ mod tests {
 
     #[tokio::test]
     async fn get_of_an_absent_key_is_none_not_an_error() {
-        let host = KvHost::new(FakeBackend::new());
+        let host = host(&["waddles.bot.a"]);
         let scope = scope_a();
         assert_eq!(host.get(&scope, 1, "absent").await.unwrap(), None);
     }
 
     #[tokio::test]
     async fn delete_then_get_returns_none() {
-        let host = KvHost::new(FakeBackend::new());
+        let host = host(&["waddles.bot.a"]);
         let scope = scope_a();
         host.set(&scope, 1, "counter", b"v", 0).await.unwrap();
         host.delete(&scope, 2, "counter").await.unwrap();
@@ -428,14 +512,14 @@ mod tests {
 
     #[tokio::test]
     async fn delete_of_an_absent_key_is_not_an_error() {
-        let host = KvHost::new(FakeBackend::new());
+        let host = host(&["waddles.bot.a"]);
         let scope = scope_a();
         host.delete(&scope, 1, "never-existed").await.unwrap();
     }
 
     #[tokio::test]
     async fn increment_from_absent_starts_at_delta() {
-        let host = KvHost::new(FakeBackend::new());
+        let host = host(&["waddles.bot.a"]);
         let scope = scope_a();
         let v = host.increment(&scope, 1, "hits", 5, 0).await.unwrap();
         assert_eq!(v, 5);
@@ -445,18 +529,44 @@ mod tests {
 
     #[tokio::test]
     async fn increment_accepts_negative_deltas() {
-        let host = KvHost::new(FakeBackend::new());
+        let host = host(&["waddles.bot.a"]);
         let scope = scope_a();
         host.increment(&scope, 1, "hits", 10, 0).await.unwrap();
         let v = host.increment(&scope, 2, "hits", -3, 0).await.unwrap();
         assert_eq!(v, 7);
     }
 
+    // -- authorize(): declared -> allowed, undeclared -> denied --
+    // (`crate::authorize`'s own tests cover `authorize_kv` directly against
+    // a bare `CapabilitySnapshot`; these exercise the identical contract
+    // through the full `KvHost` call path.)
+
+    #[tokio::test]
+    async fn kv_call_succeeds_when_the_app_declares_storage_kv() {
+        let host = host(&["waddles.bot.a"]);
+        host.set(&scope_a(), 1, "k", b"v", 0).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn kv_call_is_denied_when_the_app_never_declared_storage_kv() {
+        let host = host(&[]); // no app_id granted anything
+        let err = host.set(&scope_a(), 1, "k", b"v", 0).await.unwrap_err();
+        assert_eq!(err.code(), "not_granted");
+    }
+
+    #[tokio::test]
+    async fn kv_call_is_denied_for_an_app_id_the_snapshot_has_never_seen() {
+        // Granting a *different* app_id must not accidentally grant this one.
+        let host = host(&["waddles.bot.other"]);
+        let err = host.get(&scope_a(), 1, "k").await.unwrap_err();
+        assert_eq!(err.code(), "not_granted");
+    }
+
     // -- Isolation: cross-app and cross-tenant --
 
     #[tokio::test]
     async fn one_app_cannot_read_another_apps_key_in_the_same_community() {
-        let host = KvHost::new(FakeBackend::new());
+        let host = host(&["waddles.bot.a", "waddles.bot.b"]);
         host.set(&scope_a(), 1, "secret", b"a-only", 0)
             .await
             .unwrap();
@@ -469,7 +579,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_app_cannot_delete_another_apps_key() {
-        let host = KvHost::new(FakeBackend::new());
+        let host = host(&["waddles.bot.a", "waddles.bot.b"]);
         host.set(&scope_a(), 1, "secret", b"a-only", 0)
             .await
             .unwrap();
@@ -483,7 +593,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_app_id_in_a_different_tenant_is_a_fully_separate_namespace() {
-        let host = KvHost::new(FakeBackend::new());
+        let host = host(&["waddles.bot.a"]);
         host.set(&scope_a(), 1, "secret", b"acme-value", 0)
             .await
             .unwrap();
@@ -496,7 +606,7 @@ mod tests {
 
     #[tokio::test]
     async fn increment_counters_are_isolated_per_app() {
-        let host = KvHost::new(FakeBackend::new());
+        let host = host(&["waddles.bot.a", "waddles.bot.b"]);
         host.increment(&scope_a(), 1, "hits", 100, 0).await.unwrap();
         let b = host
             .increment(&scope_b_app(), 1, "hits", 1, 0)
@@ -512,7 +622,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_key_containing_a_colon_is_rejected_not_silently_namespaced_elsewhere() {
-        let host = KvHost::new(FakeBackend::new());
+        let host = host(&["waddles.bot.a"]);
         let err = host
             .set(&scope_a(), 1, "waddles.bot.b:data:secret", b"x", 0)
             .await
@@ -527,7 +637,7 @@ mod tests {
         // it after `bundlekv:{tenant}:{community}:{app_id}:data:`, so it
         // could only ever shadow a key inside the caller's own namespace --
         // but the leading colon is rejected outright regardless.
-        let host = KvHost::new(FakeBackend::new());
+        let host = host(&["waddles.bot.a"]);
         let err = host
             .set(
                 &scope_a(),
@@ -543,7 +653,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_oversized_key_is_rejected_as_too_large() {
-        let host = KvHost::new(FakeBackend::new());
+        let host = host(&["waddles.bot.a"]);
         let long_key = "a".repeat(MAX_GUEST_KEY_LEN + 1);
         let err = host
             .set(&scope_a(), 1, &long_key, b"x", 0)
@@ -559,7 +669,7 @@ mod tests {
         let backend = FakeBackend::new();
         let scope = scope_a();
         backend.seed_count(&scope.count_key(), MAX_KEYS_PER_APP);
-        let host = KvHost::new(backend);
+        let host = host_for(backend, &["waddles.bot.a"]);
         let err = host
             .set(&scope, 1, "one-too-many", b"x", 0)
             .await
@@ -576,7 +686,7 @@ mod tests {
         // independent of the counter.
         backend.seed_existing(&scope.data_key("existing"), b"v1");
         backend.seed_count(&scope.count_key(), MAX_KEYS_PER_APP);
-        let host = KvHost::new(backend);
+        let host = host_for(backend, &["waddles.bot.a"]);
 
         // Overwriting the already-existing key succeeds despite the quota
         // being full: it never allocates a new slot.
@@ -593,7 +703,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_value_over_the_size_quota_is_rejected_as_too_large() {
-        let host = KvHost::new(FakeBackend::new());
+        let host = host(&["waddles.bot.a"]);
         let big = vec![0u8; MAX_VALUE_BYTES + 1];
         let err = host.set(&scope_a(), 1, "k", &big, 0).await.unwrap_err();
         assert_eq!(err, KvError::TooLarge((MAX_VALUE_BYTES + 1) as u64));
@@ -601,7 +711,7 @@ mod tests {
 
     #[tokio::test]
     async fn exceeding_the_per_invocation_op_rate_limit_is_rejected() {
-        let host = KvHost::new(FakeBackend::new());
+        let host = host(&["waddles.bot.a"]);
         let scope = scope_a();
         let call_id = 42;
         for _ in 0..MAX_OPS_PER_INVOKE {
@@ -613,7 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_rate_limit_is_scoped_per_invocation_not_per_app() {
-        let host = KvHost::new(FakeBackend::new());
+        let host = host(&["waddles.bot.a"]);
         let scope = scope_a();
         for _ in 0..MAX_OPS_PER_INVOKE {
             host.get(&scope, 1, "k").await.unwrap();
@@ -621,5 +731,91 @@ mod tests {
         // A fresh call_id (a new invocation) is unaffected by call_id 1's
         // exhausted budget.
         host.get(&scope, 2, "k").await.unwrap();
+    }
+
+    // -- Self-heal: count_key eviction reconciliation --
+
+    #[tokio::test]
+    async fn set_reconciles_a_missing_count_key_before_admitting_a_new_key() {
+        let backend = FakeBackend::new();
+        let scope = scope_a();
+        // A brand-new app: count_key has never existed at all.
+        backend.seed_existing(&scope.data_key("pre-existing"), b"v");
+        let host = host_for(backend, &["waddles.bot.a"]);
+
+        // A brand-new key still succeeds -- reconciliation seeds count to
+        // the true live count (1), well under quota.
+        host.set(&scope, 1, "brand-new", b"x", 0).await.unwrap();
+        assert_eq!(
+            host.get(&scope, 2, "brand-new").await.unwrap(),
+            Some(b"x".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_recomputes_a_genuinely_evicted_counter_to_the_true_live_count() {
+        // Direct backend-level test (bypassing KvHost/quota, which can't
+        // itself distinguish a reconciled count of 0 vs. 2 without
+        // artificially hitting a 10,000-key quota) -- proves
+        // `evict_count` (simulating a live counter actually lost to
+        // Valkey eviction, not merely "never existed") is recomputed to
+        // the *true* live-key count, not reset to 0.
+        let backend = FakeBackend::new();
+        let scope = scope_a();
+        backend.seed_existing(&scope.data_key("existing-1"), b"v1");
+        backend.seed_existing(&scope.data_key("existing-2"), b"v2");
+        backend.seed_count(&scope.count_key(), 2);
+        backend.evict_count(&scope.count_key());
+
+        let outcome = backend
+            .reconcile_count_if_missing(
+                &scope.count_key(),
+                &scope.data_scan_pattern(),
+                &scope.reconcile_lock_key(),
+                limits::RECONCILE_LOCK_TTL_MS,
+                limits::RECONCILE_SCAN_LIMIT,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, ReconcileOutcome::Reconciled(2));
+    }
+
+    #[tokio::test]
+    async fn increment_reconciles_an_evicted_count_key_the_same_way() {
+        let host = host(&["waddles.bot.a"]);
+        let scope = scope_a();
+        // No prior seeding at all -- count_key has never existed, the
+        // "brand-new app" shape of the same reconciliation path.
+        let v = host.increment(&scope, 1, "hits", 1, 0).await.unwrap();
+        assert_eq!(v, 1);
+    }
+
+    #[tokio::test]
+    async fn a_write_fails_closed_while_another_caller_holds_the_reconcile_lock() {
+        let backend = FakeBackend::new();
+        let scope = scope_a();
+        backend.hold_lock(&scope.reconcile_lock_key());
+        let host = host_for(backend, &["waddles.bot.a"]);
+
+        let err = host.set(&scope, 1, "k", b"v", 0).await.unwrap_err();
+        assert_eq!(err.code(), "reconciling");
+    }
+
+    #[tokio::test]
+    async fn a_healthy_count_key_never_triggers_reconciliation() {
+        // A count_key already at the quota ceiling: if reconciliation ran
+        // anyway, it would recompute from a `SCAN` of the (empty) data
+        // keyspace and wrongly reset the count to 0, admitting a key that
+        // must actually be rejected -- proves `AlreadyPresent` short-
+        // circuits before any `SCAN` when the counter is healthy.
+        let backend = FakeBackend::new();
+        let scope = scope_a();
+        backend.seed_count(&scope.count_key(), MAX_KEYS_PER_APP);
+        let host = host_for(backend, &["waddles.bot.a"]);
+        let err = host
+            .set(&scope, 1, "one-too-many", b"x", 0)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "quota_exceeded");
     }
 }

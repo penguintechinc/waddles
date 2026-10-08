@@ -36,11 +36,106 @@ use penguin_spine::{
 };
 use serde::Deserialize;
 
+use crate::active_digests::{ActiveDigests, LoadedSessions};
 use crate::capabilities::InvokeScope;
 use crate::hop::KeyRing;
 use crate::host_api::{Connection, ConnectionRegistry, HostApiError};
 use crate::retry::{dispatch_with_retry, AttemptOutcome, DispatchRecord, Jitter};
 use crate::usage::UsageBatcher;
+
+/// Where [`DispatchDeps`] gets the digest to `load`/`invoke` with on every
+/// single delivered entry -- direct port of `core/svc_process/src/
+/// spine.rs::DigestSource` under this stage's own module. See that type's
+/// doc for the full rationale; reproduced narrowly here since the two
+/// crates don't share a dependency this seam could live in.
+#[derive(Clone)]
+pub enum DigestSource {
+    /// The legacy, single-bundle-per-pod, env-configured path
+    /// (`crate::lib::try_start_dispatch`'s `ACTION_BUNDLE_DIGEST`) --
+    /// unchanged behavior from before this change. Empty disables nothing
+    /// by itself: an empty digest is simply sent as-is and the executor
+    /// reports `UNKNOWN_BUNDLE`, mapped to a non-retryable attempt like any
+    /// other unloaded-bundle invoke. This variant must never be selected by
+    /// the multi-tenant path (`crate::dispatch_supervisor`'s own doc).
+    Static(String),
+    /// The DB-driven multi-tenant path: the CURRENT canonical digest for
+    /// this consumer's own `(tenant_id, community_id, app_id)` scope, read
+    /// fresh from `crate::changelog_consumer`'s shared [`ActiveDigests`]
+    /// map on every single invoke -- never a value captured once at spawn
+    /// time, so a hot-swapped bundle takes effect on the very next message
+    /// with no consumer restart. [`DigestSource::current`] returns `None`
+    /// when this scope has no active digest right now (never seen,
+    /// unloaded, or its scope is currently failing to resolve); callers
+    /// MUST dead-letter rather than ever invoke with an empty digest.
+    ///
+    /// regression: svc-action had no multi-tenant dispatch consumers;
+    /// replies never sent after legacy env removal (alpha 2026-10-03)
+    ///
+    /// `sessions` is the per-session counterpart `crate::changelog_consumer`
+    /// writes to in lock-step with `digests` -- [`DigestSource::session_for`]
+    /// uses it to pick a live executor session that actually has the
+    /// resolved digest loaded, never just whichever connection
+    /// `ConnectionRegistry::active()` calls "newest" (regression: bundles
+    /// loaded only onto a terminating executor during rollout; live
+    /// executor got none, alpha 2026-10-03).
+    Active {
+        scope: bundle_active_set::AppScope,
+        digests: Arc<ActiveDigests>,
+        sessions: Arc<LoadedSessions>,
+    },
+}
+
+impl DigestSource {
+    /// Resolves the digest to `invoke` with right now. See each variant's
+    /// own doc for what `None`/empty means.
+    fn current(&self) -> Option<String> {
+        match self {
+            DigestSource::Static(d) => Some(d.clone()),
+            DigestSource::Active { scope, digests, .. } => digests.get(scope),
+        }
+    }
+
+    /// Like [`Self::current`], but additionally treats an `Active`-path
+    /// digest that resolved to an empty string the same as "no active
+    /// digest known" (`None`) -- the one call [`handle_delivered`]'s own
+    /// `NO_ACTIVE_DIGEST` guard must use, never [`Self::current`] directly,
+    /// so that guard can never be bypassed by an empty-but-`Some` digest
+    /// (regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    /// emptied svc-action dispatch digest -- `digest_prefix=""` reached
+    /// `invoke_dispatch` and failed non-retryably as `UnknownBundle` instead
+    /// of dead-lettering pre-flight, alpha 2026-10-03).
+    ///
+    /// `DigestSource::Static`'s own intentionally-empty "no bundle
+    /// configured yet" sentinel is deliberately left untouched here (see
+    /// that variant's own doc) -- only the multi-tenant `Active` path's
+    /// "never invoke with an empty digest" invariant is enforced, since an
+    /// empty `ActiveDigests` entry is never valid under any circumstance
+    /// (unlike `Static`'s legacy env-unset case).
+    fn usable_digest(&self) -> Option<String> {
+        match self {
+            DigestSource::Active { .. } => self.current().filter(|d| !d.is_empty()),
+            DigestSource::Static(_) => self.current(),
+        }
+    }
+
+    /// The live executor session (if any) that should serve this `digest` --
+    /// `DigestSource::Static` has no per-session tracking at all (the
+    /// legacy, single-bundle-per-pod path predates multi-session executors)
+    /// so it is not resolvable here; `handle_delivered` falls back to
+    /// `ConnectionRegistry::active()` for that variant only, unchanged from
+    /// before this fix. `DigestSource::Active` MUST use this instead of
+    /// `ConnectionRegistry::active()` -- picking a live session that merely
+    /// happens to be newest, without checking it actually has `digest`
+    /// loaded, is exactly the alpha 2026-10-03 failure mode.
+    fn session_for_digest(&self, digest: &str) -> Option<bundle_active_set::SessionId> {
+        match self {
+            DigestSource::Static(_) => None,
+            DigestSource::Active {
+                scope, sessions, ..
+            } => sessions.pick_session_with_digest(scope, digest),
+        }
+    }
+}
 
 /// Tunables `run()` needs beyond what `penguin_spine::SpineConfig` already
 /// covers (spec §4.3).
@@ -449,23 +544,24 @@ impl SpineOps for SpineClient {
 /// ever-growing parameter list.
 pub struct DispatchDeps<A: AuditSink, T: TenantResolver, S: SpineOps> {
     pub app_id: String,
-    pub digest: String,
+    /// See [`DigestSource`]'s own doc -- resolved fresh on every single
+    /// delivered entry, never captured once at spawn time (regression:
+    /// svc-action had no multi-tenant dispatch consumers; replies never
+    /// sent after legacy env removal, alpha 2026-10-03).
+    pub digest_source: DigestSource,
     /// The live, poll-refreshed `app_id -> (digest, app_versions.id)`
-    /// snapshot (`crate::lib::try_start_dispatch`'s shared handle,
-    /// populated every tick by `crate::bundle_loader::run_tick`) --
-    /// resolved PER INVOCATION in [`handle_delivered`], never captured once
-    /// as a plain `i64`: a bundle hot-swap must be reflected on the very
-    /// next invocation (spec SS4/SS5.1). When `digest` has been superseded
-    /// but `app_id` is STILL active in this scope, the delivery is
-    /// redirected onto the app's current digest/version (a bundle upgrade
-    /// must never silently drop in-flight deliveries) rather than
-    /// dead-lettered -- fail-closed is reserved for an `app_id` no longer
-    /// active at all (deactivated/revoked). See [`handle_delivered`]'s doc.
+    /// snapshot (`crate::lib::try_start_dispatch`/`try_start_changelog_
+    /// consumer`'s shared handle, populated every tick by
+    /// `crate::bundle_loader`/`crate::changelog_consumer`) -- resolved PER
+    /// INVOCATION in [`handle_delivered`] against whatever digest
+    /// [`DigestSource`] just picked, never captured once as a plain `i64`:
+    /// a bundle hot-swap must be reflected on the very next invocation
+    /// (spec SS4/SS5.1). [`DigestSource`] (not this snapshot) owns
+    /// dead-letter-vs-redirect decisions for a superseded/absent digest --
+    /// this snapshot's only job is resolving the matching `app_versions.id`
+    /// for the gate's `GrantScopeKey`, fail-closed to `0` (never matches a
+    /// real grant row) if the two maps ever briefly disagree.
     pub app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
-    /// Incremented once per redirected delivery (see
-    /// `app_version_snapshot`'s doc) -- `crate::telemetry::
-    /// register_redirect_metrics`.
-    pub redirected_metric: prometheus::IntCounterVec,
     pub config_json: String,
     pub key_ring: KeyRing,
     pub connections: Arc<ConnectionRegistry>,
@@ -510,82 +606,133 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
             code: "TENANT_BOUNDARY".to_string(),
             message: reason.to_string(),
             detail: None,
-            artifact_digest: Some(deps.digest.clone()),
+            artifact_digest: deps.digest_source.current(),
             consumer_id: deps.consumer_id.clone(),
         };
         return deps.spine.dead_letter(d, &err).await;
     }
 
-    // Resolved PER INVOCATION against the live, poll-refreshed snapshot
-    // (`DispatchDeps::app_version_snapshot`'s doc) -- never a value
-    // captured once at startup, and checked BEFORE the executor-connection
-    // gate below (an in-memory, no-I/O check; no reason to require a live
-    // connection just to discover this invoke can't be authorized anyway).
-    //
-    // Three outcomes, in order:
-    // 1. `deps.digest` is still the app's current active digest -- invoke
-    //    normally under it.
-    // 2. `deps.digest` was superseded (a hot swap moved this app_id onto a
-    //    NEW digest), but the app_id is STILL active in this scope --
-    //    REDIRECT: invoke under the app's CURRENT digest/version instead of
-    //    dead-lettering. A bundle upgrade must never silently drop an
-    //    in-flight delivery just because this pod's own load pointer hasn't
-    //    caught up yet; grants are still checked against the CURRENT
-    //    version (`app_version` below), never the stale one.
-    // 3. The app_id is no longer active in this scope at all (deactivated
-    //    or revoked) -- fail closed by dead-lettering, the only case this
-    //    entry can never be safely processed.
-    let (invoke_digest, app_version) = match deps
-        .app_version_snapshot
-        .resolve_for_digest(&deps.app_id, &deps.digest)
-    {
-        Some(app_version) => (deps.digest.clone(), app_version),
-        None => match deps
-            .app_version_snapshot
-            .current_digest_and_version(&deps.app_id)
-        {
-            Some((current_digest, app_version)) => {
-                tracing::info!(
-                    app_id = %deps.app_id,
-                    pinned_digest = %deps.digest,
-                    current_digest = %current_digest,
-                    app_version,
-                    "pinned digest superseded by a hot swap; app is still active -- \
-                     redirecting to the current digest/version"
-                );
-                deps.redirected_metric
-                    .with_label_values(&[&deps.app_id])
-                    .inc();
-                (current_digest, app_version)
-            }
-            None => {
-                tracing::warn!(
-                    app_id = %deps.app_id,
-                    digest = %deps.digest,
-                    "app_id is no longer active in this scope (deactivated or revoked), \
-                     dead-lettering"
-                );
-                let err = penguin_spine::DlqError {
-                    kind: penguin_spine::DlqErrorKind::HostCallDenied,
-                    code: "APP_NO_LONGER_ACTIVE".to_string(),
-                    message: "app_id is not active in the current active-set snapshot".to_string(),
-                    detail: None,
-                    artifact_digest: Some(deps.digest.clone()),
-                    consumer_id: deps.consumer_id.clone(),
-                };
-                return deps.spine.dead_letter(d, &err).await;
-            }
-        },
+    // Resolve the digest to invoke with BEFORE ever checking for an
+    // executor connection -- "if no active digest is known for an app when
+    // a message arrives, log ERROR and dead-letter for redelivery; never
+    // invoke with an empty digest" (regression: svc-action had no
+    // multi-tenant dispatch consumers; replies never sent after legacy env
+    // removal, alpha 2026-10-03). `DigestSource::Static` always resolves
+    // (possibly to an intentionally empty string, unchanged legacy
+    // behavior); only `DigestSource::Active` with no entry for this scope
+    // yields `None` here.
+    let Some(digest) = deps.digest_source.usable_digest() else {
+        tracing::error!(
+            app_id = %deps.app_id,
+            tenant = %d.env.tenant,
+            community = ?d.env.community,
+            "no active bundle digest known for this app's scope; dead-lettering for redelivery"
+        );
+        let err = penguin_spine::DlqError {
+            kind: penguin_spine::DlqErrorKind::BundleError,
+            code: "NO_ACTIVE_DIGEST".to_string(),
+            message: "no active bundle digest known for this (tenant, community, app) scope"
+                .to_string(),
+            detail: None,
+            artifact_digest: None,
+            consumer_id: deps.consumer_id.clone(),
+        };
+        return deps.spine.dead_letter(d, &err).await;
     };
 
-    let Some(connection) = deps.connections.active() else {
-        tracing::warn!(app_id = %deps.app_id, "no executor connection available, dead-lettering for redelivery");
+    // Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
+    // the `app_versions.id` this invoke's grants are keyed on (spec
+    // SS4/SS5.1), resolved PER INVOCATION against the already-chosen
+    // `digest` -- never a value captured once at startup. `digest_source`
+    // above (not this lookup) already owns every dead-letter-vs-redirect
+    // decision for a superseded/absent digest; `app_version_snapshot` is
+    // fed by the exact same active-set reads (`crate::changelog_consumer`/
+    // `crate::bundle_loader`), so it should always agree with whatever
+    // `digest` was just resolved to. A momentary disagreement (the two
+    // live maps refresh independently) fails closed to `0` -- which never
+    // matches a real grant row -- rather than blocking dispatch on it.
+    let app_version = deps
+        .app_version_snapshot
+        .resolve_for_digest(&deps.app_id, &digest)
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                app_id = %deps.app_id,
+                digest_prefix = %bundle_active_set::digest_prefix(&digest),
+                "no app_version found in the active-version snapshot for this digest; \
+                 falling back to the fail-closed 0 sentinel (every non-platform \
+                 permission will deny for this invoke)"
+            );
+            0
+        });
+
+    // Pick the executor session to invoke on. `DigestSource::Active` MUST
+    // pick a live session that actually has `digest` loaded
+    // (`bundle_active_set::pick_session_with_digest`, via `DigestSource::
+    // session_for_digest`), never just whichever connection
+    // `ConnectionRegistry::active()` calls "newest" -- that is exactly the
+    // alpha 2026-10-03 failure mode (a rolling pod's about-to-terminate
+    // executor session briefly "newest", so every invoke routed there and
+    // got `UnknownBundle`/silence while the real live executor held
+    // everything). `DigestSource::Static` has no per-session tracking at all
+    // (the legacy, single-bundle-per-pod path predates multi-session
+    // executors) and keeps the unchanged `ConnectionRegistry::active()`
+    // fallback.
+    let no_loaded_session = matches!(deps.digest_source, DigestSource::Active { .. })
+        && deps.digest_source.session_for_digest(&digest).is_none();
+    let connection = if no_loaded_session {
+        None
+    } else {
+        match deps.digest_source.session_for_digest(&digest) {
+            Some(session_id) => deps.connections.get(session_id),
+            None => deps.connections.active(),
+        }
+    };
+
+    let Some(connection) = connection else {
+        if no_loaded_session {
+            // Fail-closed, distinct from "no executor at all" below: at
+            // least one executor is connected, but none of them has this
+            // exact digest loaded right now -- never invoke a session that
+            // lacks the bundle (regression: bundles loaded only onto a
+            // terminating executor during rollout; live executor got none,
+            // alpha 2026-10-03).
+            tracing::error!(
+                app_id = %deps.app_id,
+                digest_prefix = %bundle_active_set::digest_prefix(&digest),
+                "no live executor session has this bundle's digest loaded; dead-lettering for redelivery"
+            );
+            let err = penguin_spine::DlqError {
+                kind: penguin_spine::DlqErrorKind::ExecutorUnavailable,
+                code: "NO_LOADED_EXECUTOR".to_string(),
+                message: "no live executor session has the target digest loaded".to_string(),
+                detail: None,
+                artifact_digest: Some(digest.clone()),
+                consumer_id: deps.consumer_id.clone(),
+            };
+            return deps.spine.dead_letter(d, &err).await;
+        }
+        // Escalated WARN -> ERROR (fix/executor-link-heartbeat, alpha
+        // 2026-10-02 incident: svc-process/svc-action were rolled and each
+        // bundle-executor stayed bound to its old, terminated pod; the new
+        // svc had zero executors and silently dead-lettered every entry at
+        // WARN -- nobody noticed until a user reported it). The outage
+        // duration is named in the rendered message itself, not only a
+        // structured field, per the "over-log, never swallow errors" rule.
+        let app_id = &deps.app_id;
+        let no_executor_for_s = deps.connections.duration_without_executor().as_secs();
+        deps.connections.record_dead_letter_no_executor();
+        tracing::error!(
+            app_id = %app_id,
+            no_executor_for_s,
+            "no executor connection available for {no_executor_for_s}s (app_id {app_id}), \
+             dead-lettering for redelivery"
+        );
         let err = penguin_spine::DlqError {
             kind: penguin_spine::DlqErrorKind::ExecutorUnavailable,
             code: "EXECUTOR_UNAVAILABLE".to_string(),
             message: "no active host-api connection".to_string(),
             detail: None,
-            artifact_digest: Some(deps.digest.clone()),
+            artifact_digest: Some(digest.clone()),
             consumer_id: deps.consumer_id.clone(),
         };
         return deps.spine.dead_letter(d, &err).await;
@@ -600,10 +747,11 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
     // error) is distinct from the bundle's own classified
     // retryable/non-retryable outcome; this landing records it as a
     // non-retryable attempt (detail names the invoke failure) rather than
-    // a separate DLQ path -- `deps.connections.active()` above already
-    // catches the "no executor at all" case before ever entering this
-    // loop, which is the one infra failure worth a distinct DLQ kind at
-    // this stage's current scope.
+    // a separate DLQ path -- the connection resolution above already
+    // catches the "no executor at all"/"no session has this digest" cases
+    // before ever entering this loop, which is the one infra failure worth
+    // a distinct DLQ kind at this stage's current scope.
+    //
     // Resolved once per delivered envelope (memoized by `deps.tenants` after
     // the first lookup for this `(tenant, community)` pair) and threaded
     // into every capability `authorize()` call this invoke makes (spec
@@ -623,7 +771,7 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
             match invoke_dispatch(
                 &connection,
                 &deps.app_id,
-                &invoke_digest,
+                &digest,
                 &d.env,
                 &deps.config_json,
                 deps.retry_policy.call_timeout_ms,
@@ -634,10 +782,27 @@ async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
             .await
             {
                 Ok(p) => interpret_dispatch_payload(&p, "irc_relay"),
-                Err(e) => AttemptOutcome::NonRetryable {
-                    http_status: None,
-                    detail: format!("invoke failed: {e}"),
-                },
+                Err(e) => {
+                    // Diagnosability fix (regression: multi_tenant path
+                    // sent bare-hex digest to Invoke, UnknownBundle despite
+                    // loaded bundle (alpha 2026-10-03)): `UnknownBundle`'s
+                    // `message` IS the digest the executor echoed back
+                    // (`bundle_executor::invoke::on_invoke`'s
+                    // `error_body`), so an empty/unresolved digest renders
+                    // here with nothing to grep on -- log the resolved
+                    // digest's own prefix explicitly, matching
+                    // `core/svc_process/src/spine.rs`'s identical fix.
+                    tracing::error!(
+                        app_id = %deps.app_id,
+                        digest_prefix = bundle_active_set::digest_prefix(&digest),
+                        error = %e,
+                        "action invoke failed, recording non-retryable attempt"
+                    );
+                    AttemptOutcome::NonRetryable {
+                        http_status: None,
+                        detail: format!("invoke failed: {e}"),
+                    }
+                }
             }
         },
         deps.retry_policy.max_retries,
@@ -748,10 +913,237 @@ pub async fn run<A: AuditSink, T: TenantResolver>(
     drain_loop(reader, stream_key, deps, rust_data_plane, shutdown).await
 }
 
+/// Builds a raw `redis::Client` for `cfg`'s transport -- the same
+/// connection-building logic as `core/svc_ingest/src/outbound.rs::
+/// build_redis_client`/`core/svc_process/src/spine.rs::build_raw_client`
+/// (duplicated rather than imported: `penguin_spine`'s own equivalent is
+/// `pub(crate)` to that crate). Used only by [`ensure_consumer_group`].
+fn build_raw_client(cfg: &SpineConfig) -> Result<redis::Client, redis::RedisError> {
+    let base: redis::ConnectionInfo =
+        redis::IntoConnectionInfo::into_connection_info(cfg.valkey_url.as_str())?;
+    let mut settings = base.redis_settings().clone();
+    if let Some(username) = &cfg.valkey_username {
+        settings = settings.set_username(username);
+    }
+    if let Some(password) = &cfg.valkey_password {
+        settings = settings.set_password(password);
+    }
+    let info = base.set_redis_settings(settings);
+
+    if cfg.security_transport_tls {
+        crate::crypto::ensure_crypto_provider_installed();
+        let root_cert = std::fs::read(&cfg.valkey_ca_file).ok();
+        redis::Client::build_with_tls(
+            info,
+            redis::TlsCertificates {
+                client_tls: None,
+                root_cert,
+            },
+        )
+    } else {
+        redis::Client::open(info)
+    }
+}
+
+/// Idempotently ensures `group` exists on `stream` via `XGROUP CREATE
+/// <stream> <group> $ MKSTREAM` -- `BUSYGROUP` (already exists) is treated
+/// as success, never an error. Called once at startup and again as the
+/// self-heal step whenever a [`is_nogroup_error`] error surfaces mid-drain
+/// (`crate::lib::try_start_dispatch`'s retry wrapper) -- on a fresh Valkey
+/// nothing else in this env-driven single-bundle path ever creates the
+/// group. Returns `Ok(true)` if newly created, `Ok(false)` if it already
+/// existed (`BUSYGROUP`).
+///
+/// regression: drain loop exited on NOGROUP (alpha 2026-10-02) -- same bug
+/// class as `core/svc_process`'s legacy process loop, fixed identically.
+pub(crate) async fn ensure_consumer_group(
+    cfg: &SpineConfig,
+    stream: &str,
+    group: &str,
+) -> Result<bool, SpineError> {
+    let client = build_raw_client(cfg)?;
+    let mut conn = client.get_multiplexed_async_connection().await?;
+    let result: Result<(), redis::RedisError> = redis::cmd("XGROUP")
+        .arg("CREATE")
+        .arg(stream)
+        .arg(group)
+        .arg("$")
+        .arg("MKSTREAM")
+        .query_async(&mut conn)
+        .await;
+    match result {
+        Ok(()) => Ok(true),
+        Err(e) if e.code() == Some("BUSYGROUP") => Ok(false),
+        Err(e) => Err(SpineError::from(e)),
+    }
+}
+
+/// `true` when `err` is Valkey's `NOGROUP` reply -- matches on
+/// [`redis::RedisError::code`], same rationale as `core/svc_process::
+/// source_supervisor::is_nogroup_error`'s identical check.
+pub(crate) fn is_nogroup_error(err: &SpineError) -> bool {
+    matches!(err, SpineError::Redis(e) if e.code() == Some("NOGROUP"))
+}
+
+/// Test-only helpers mirroring `core/svc_process/src/spine.rs::
+/// test_support` -- a real local Valkey/Redis on the default port when one
+/// happens to be reachable, skipped honestly (never a failure) otherwise.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::SpineConfig;
+
+    pub(crate) fn local_valkey_config() -> Option<SpineConfig> {
+        let client = redis::Client::open("redis://127.0.0.1:6379/").ok()?;
+        let mut conn = client.get_connection().ok()?;
+        let _: String = redis::cmd("PING").query(&mut conn).ok()?;
+        Some(SpineConfig {
+            valkey_url: "redis://127.0.0.1:6379/".to_string(),
+            valkey_username: None,
+            valkey_password: None,
+            valkey_ca_file: std::path::PathBuf::from("/nonexistent-ca.crt"),
+            security_transport_tls: false,
+            security_transport_auth: false,
+            consumer_id: "test-consumer".to_string(),
+            stream_maxlen: 1_000,
+            read_count: 16,
+            block_ms: 200,
+            claim_idle_ms: 30_000,
+            claim_interval_ms: 15_000,
+            stats_interval_ms: 10_000,
+            pel_alert: 5_000,
+            dlq_maxlen: 1_000,
+            max_deliveries: 5,
+            drain_socket_timeout_s: 5,
+            relay_block_timeout_s: 5,
+        })
+    }
+
+    pub(crate) fn unique_key(prefix: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("waddles:test:{prefix}:{nanos}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::hop::BoundaryReason;
+
+    // regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    // emptied svc-action dispatch digest (alpha 2026-10-03)
+    mod digest_source_usable_digest {
+        use super::*;
+
+        #[test]
+        fn active_with_no_entry_is_none() {
+            let src = DigestSource::Active {
+                scope: (1, 0, "waddles.a".to_string()),
+                digests: Arc::new(ActiveDigests::new()),
+                sessions: Arc::new(LoadedSessions::new()),
+            };
+            assert_eq!(src.usable_digest(), None);
+        }
+
+        #[test]
+        fn active_with_a_real_digest_returns_it() {
+            let digests = Arc::new(ActiveDigests::new());
+            let scope = (1, 0, "waddles.a".to_string());
+            digests.set(scope.clone(), "sha256:aa".to_string());
+            let src = DigestSource::Active {
+                scope,
+                digests,
+                sessions: Arc::new(LoadedSessions::new()),
+            };
+            assert_eq!(src.usable_digest(), Some("sha256:aa".to_string()));
+        }
+
+        /// The exact bypass this fix closes: an `Active` entry that somehow
+        /// resolved to an empty string must be treated identically to "no
+        /// entry at all" -- never passed through as a `Some("")` that
+        /// `handle_delivered`'s `None`-only guard would have let through.
+        #[test]
+        fn active_with_an_empty_digest_is_treated_as_none() {
+            let digests = Arc::new(ActiveDigests::new());
+            let scope = (1, 0, "waddles.a".to_string());
+            digests.force_set_for_test(scope.clone(), String::new());
+            let src = DigestSource::Active {
+                scope,
+                digests,
+                sessions: Arc::new(LoadedSessions::new()),
+            };
+            assert_eq!(src.usable_digest(), None);
+        }
+
+        /// `Static`'s own intentionally-empty "no bundle configured" legacy
+        /// sentinel is unchanged by this fix -- only the multi-tenant
+        /// `Active` path's empty-digest invariant is enforced.
+        #[test]
+        fn static_with_an_empty_digest_is_unchanged_legacy_behavior() {
+            let src = DigestSource::Static(String::new());
+            assert_eq!(src.usable_digest(), Some(String::new()));
+        }
+
+        #[test]
+        fn static_with_a_real_digest_returns_it() {
+            let src = DigestSource::Static("sha256:aa".to_string());
+            assert_eq!(src.usable_digest(), Some("sha256:aa".to_string()));
+        }
+    }
+
+    // regression: drain loop exited on NOGROUP (alpha 2026-10-02)
+    #[test]
+    fn is_nogroup_error_matches_on_the_redis_error_code_not_message_wording() {
+        let err = SpineError::Redis(redis::make_extension_error(
+            "NOGROUP".to_string(),
+            Some(
+                "No such key 'waddles:t:global:c:_tenant:app:waddles.a:action' or consumer \
+                 group 'waddles.a' in XREADGROUP with GROUP option"
+                    .to_string(),
+            ),
+        ));
+        assert!(is_nogroup_error(&err));
+    }
+
+    #[test]
+    fn is_nogroup_error_rejects_a_different_redis_error_code() {
+        let err = SpineError::Redis(redis::make_extension_error(
+            "WRONGTYPE".to_string(),
+            Some("Operation against a key holding the wrong kind of value".to_string()),
+        ));
+        assert!(!is_nogroup_error(&err));
+    }
+
+    #[test]
+    fn is_nogroup_error_rejects_a_non_redis_spine_error() {
+        let err = SpineError::Config("unrelated config error".to_string());
+        assert!(!is_nogroup_error(&err));
+    }
+
+    // regression: drain loop exited on NOGROUP (alpha 2026-10-02) -- proves
+    // `ensure_consumer_group` self-heals on a fresh Valkey (no group, no
+    // stream) rather than ever surfacing NOGROUP to the dispatch loop.
+    #[tokio::test]
+    async fn ensure_consumer_group_creates_the_group_and_stream_on_a_fresh_valkey() {
+        let Some(cfg) = test_support::local_valkey_config() else {
+            eprintln!("skipping: no local Valkey reachable at 127.0.0.1:6379");
+            return;
+        };
+        let stream = test_support::unique_key("action-ensure-group-stream");
+        let group = test_support::unique_key("action-ensure-group-group");
+
+        let created = ensure_consumer_group(&cfg, &stream, &group)
+            .await
+            .expect("first create succeeds");
+        assert!(created);
+
+        let created_again = ensure_consumer_group(&cfg, &stream, &group)
+            .await
+            .expect("second create (BUSYGROUP) must not error");
+        assert!(!created_again);
+    }
 
     #[test]
     fn envelope_to_wire_json_matches_the_wit_stage_envelope_shape() {
@@ -1086,14 +1478,6 @@ mod tests {
         }
     }
 
-    fn test_redirected_metric() -> prometheus::IntCounterVec {
-        prometheus::IntCounterVec::new(
-            prometheus::Opts::new("test_svc_action_redirected_after_upgrade_total", "test"),
-            &["app_id"],
-        )
-        .expect("valid metric definition")
-    }
-
     fn test_deps(
         spine: FakeSpineOps,
         connections: Arc<ConnectionRegistry>,
@@ -1106,12 +1490,15 @@ mod tests {
             digest: "sha256:00".to_string(),
             component_key: String::new(),
             sidecar_key: String::new(),
+            artifact_signature: None,
+            artifact_signature_key_id: None,
+            artifact_signed_approval_id: None,
+            declared_capabilities: Vec::new(),
         }]);
         DispatchDeps {
             app_id: "waddles.bot.commands.default".to_string(),
-            digest: "sha256:00".to_string(),
+            digest_source: DigestSource::Static("sha256:00".to_string()),
             app_version_snapshot,
-            redirected_metric: test_redirected_metric(),
             config_json: "{}".to_string(),
             key_ring: test_ring(),
             connections,
@@ -1258,9 +1645,10 @@ mod tests {
     }
 
     /// Same as [`connected_registry_with_fake_executor`], but answers
-    /// `invoke_count` invokes with the same `response` -- for tests
-    /// (e.g. the redirect-after-upgrade regression) that drive
-    /// `handle_delivered` more than once against the same live connection.
+    /// `invoke_count` invokes with the same `response` -- for tests that
+    /// drive `handle_delivered` more than once against the same live
+    /// connection (e.g. the app-version-resolution-per-invocation
+    /// regression).
     async fn connected_registry_with_fake_executor_multi(
         response: serde_json::Value,
         invoke_count: usize,
@@ -1358,81 +1746,127 @@ mod tests {
         assert_eq!(deps.usage.lock().unwrap().pending_len(), 1);
     }
 
-    /// Regression (gh-433 follow-up): `app_version` is resolved PER
-    /// INVOCATION from the live snapshot, never captured once. The first
-    /// delivery succeeds against the seeded version; a hot swap mid-run
-    /// (`bundle_loader::run_tick`'s own `ActiveVersionSnapshot::update`,
-    /// simulated here directly) that supersedes this pod's pinned digest
-    /// must make the very NEXT delivery fail closed (dead-lettered,
-    /// `HostCallDenied`) rather than keep invoking under a version the
-    /// active set no longer recognizes.
+    // regression: svc-action had no multi-tenant dispatch consumers; replies
+    // never sent after legacy env removal (alpha 2026-10-03)
     #[tokio::test]
-    async fn handle_delivered_redirects_to_the_current_version_after_an_upgrade() {
+    async fn handle_delivered_dead_letters_with_no_active_digest_and_never_invokes() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
         let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
         let stream_key = d.stream.clone();
 
-        // Two invokes expected: the pre-swap delivery, then the
-        // post-swap delivery redirected onto the new digest/version.
-        let connections = connected_registry_with_fake_executor_multi(
+        // Empty `ActiveDigests`: this (tenant, community, app) scope has no
+        // active digest known -- `connections` is deliberately a registry
+        // with NO fake executor at all, proving the digest check happens
+        // (and dead-letters) BEFORE any invoke is ever attempted.
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
+        deps.digest_source = DigestSource::Active {
+            scope: (1, 0, "waddles.bot.commands.default".to_string()),
+            digests: Arc::new(ActiveDigests::new()),
+            sessions: Arc::new(LoadedSessions::new()),
+        };
+
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 0);
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, penguin_spine::DlqErrorKind::BundleError);
+        assert_eq!(dead_lettered[0].2, deps.consumer_id);
+    }
+
+    /// regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
+    /// emptied svc-action dispatch digest (alpha 2026-10-03). An `Active`
+    /// scope whose `ActiveDigests` entry somehow resolves to an empty
+    /// string (adversarial seam: `ActiveDigests::set`'s own non-empty guard
+    /// is a SEPARATE layer -- this proves `handle_delivered` independently
+    /// never invokes with it) must be treated exactly like "no active
+    /// digest known": `NO_ACTIVE_DIGEST`, dead-lettered BEFORE ever reaching
+    /// `invoke_dispatch` -- never the `digest_prefix=""` / `UnknownBundle`
+    /// non-retryable failure the live alpha incident recorded.
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_no_active_digest_when_the_resolved_digest_is_empty() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
+
+        // A connection IS live (proving the empty-digest guard fires before
+        // ANY connection/session resolution is even attempted, not just
+        // before invoke) -- unlike the "no entry at all" test above, which
+        // uses no executor.
+        let connections = connected_registry_with_fake_executor(
             serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
-            2,
         )
         .await;
+        let scope = (1, 0, "waddles.bot.commands.default".to_string());
+        let digests = Arc::new(ActiveDigests::new());
+        digests.force_set_for_test(scope.clone(), String::new());
         let spine = FakeSpineOps::default();
-        let deps = test_deps(spine, connections);
+        let mut deps = test_deps(spine, connections);
+        deps.digest_source = DigestSource::Active {
+            scope,
+            digests,
+            sessions: Arc::new(LoadedSessions::new()),
+        };
 
-        // First delivery: the snapshot still resolves `deps.digest` ->
-        // version 1 (seeded by `test_deps`) -- succeeds and acks.
         handle_delivered(&d, &stream_key, &deps).await.unwrap();
-        assert_eq!(deps.spine.dead_lettered.lock().unwrap().len(), 0);
-        assert_eq!(deps.spine.acked.lock().unwrap().len(), 1);
 
-        // Mid-run hot swap (an upgrade): the poller's next tick reads a NEW
-        // digest/version for this SAME app_id, still active in scope --
-        // `deps.digest` (this pod's pinned digest) is no longer current.
-        deps.app_version_snapshot
-            .update(&[bundle_active_set::ActiveBundleRow {
-                app_id: "waddles.bot.commands.default".to_string(),
-                version: "2".to_string(),
-                version_id: 2,
-                digest: "sha256:new-after-swap".to_string(),
-                component_key: String::new(),
-                sidecar_key: String::new(),
-            }]);
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 0);
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
+        assert_eq!(dead_lettered[0].1, penguin_spine::DlqErrorKind::BundleError);
+        assert_eq!(dead_lettered[0].2, deps.consumer_id);
+    }
 
-        // Second delivery, same pinned digest: must be REDIRECTED onto the
-        // current digest/version and still succeed -- an upgrade must never
-        // silently drop an in-flight delivery.
-        let mac2 = mac_for(&ring, "acme");
-        let d2 = fixture_delivered("acme", "waddles.bot.commands.default", mac2, "k1");
-        handle_delivered(&d2, &stream_key, &deps).await.unwrap();
+    /// Fail-closed requirement: at least one executor is connected, but no
+    /// live session has this scope's active digest loaded -- must
+    /// dead-letter `NO_LOADED_EXECUTOR`, never fall back to `ConnectionRegistry::
+    /// active()` and invoke a session that lacks the bundle (regression:
+    /// bundles loaded only onto a terminating executor during rollout; live
+    /// executor got none, alpha 2026-10-03).
+    #[tokio::test]
+    async fn handle_delivered_dead_letters_no_loaded_executor_when_no_session_has_the_digest() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
 
-        assert!(
-            deps.spine.dead_lettered.lock().unwrap().is_empty(),
-            "a redirected delivery must never be dead-lettered"
+        // A connection IS live (unlike the "no executor at all" test above),
+        // but `sessions` has nothing loaded for this scope/digest at all.
+        let connections = connected_registry_with_fake_executor(
+            serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+        )
+        .await;
+        let digests = Arc::new(ActiveDigests::new());
+        digests.set(
+            (1, 0, "waddles.bot.commands.default".to_string()),
+            "sha256:aa".to_string(),
         );
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.digest_source = DigestSource::Active {
+            scope: (1, 0, "waddles.bot.commands.default".to_string()),
+            digests,
+            sessions: Arc::new(LoadedSessions::new()),
+        };
+
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 0);
+        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
+        assert_eq!(dead_lettered.len(), 1);
         assert_eq!(
-            deps.spine.acked.lock().unwrap().len(),
-            2,
-            "both the pre- and post-upgrade deliveries must be acked"
-        );
-        assert_eq!(
-            deps.redirected_metric
-                .with_label_values(&["waddles.bot.commands.default"])
-                .get(),
-            1,
-            "exactly one delivery was redirected after the upgrade"
+            dead_lettered[0].1,
+            penguin_spine::DlqErrorKind::ExecutorUnavailable
         );
     }
 
-    /// Regression (gh-433 follow-up 2): unlike an upgrade (redirect, tested
-    /// above), an app_id no longer active in scope at all -- deactivated or
-    /// revoked -- must still fail closed by dead-lettering, never redirect
-    /// to a nonexistent "current" version.
+    // regression: svc-action had no multi-tenant dispatch consumers; replies
+    // never sent after legacy env removal (alpha 2026-10-03)
     #[tokio::test]
-    async fn handle_delivered_dead_letters_after_the_app_is_deactivated() {
+    async fn handle_delivered_active_digest_source_invokes_with_the_scopes_active_digest() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
         let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
@@ -1442,39 +1876,89 @@ mod tests {
             serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
         )
         .await;
+        let scope = (1, 0, "waddles.bot.commands.default".to_string());
+        let digests = Arc::new(ActiveDigests::new());
+        digests.set(scope.clone(), "sha256:aa".to_string());
+        // `pick_session_with_digest` must find the fake executor's session
+        // holding exactly this digest -- never fall back to `ConnectionRegistry::
+        // active()` alone (regression: bundles loaded only onto a
+        // terminating executor during rollout; live executor got none,
+        // alpha 2026-10-03).
+        let sessions = Arc::new(LoadedSessions::new());
+        let session_id = connections
+            .live_session_ids()
+            .into_iter()
+            .next()
+            .expect("the fake executor registered exactly one live session");
+        sessions.mark_loaded(session_id, scope.clone(), "sha256:aa".to_string());
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.digest_source = DigestSource::Active {
+            scope,
+            digests,
+            sessions,
+        };
+
+        handle_delivered(&d, &stream_key, &deps).await.unwrap();
+
+        assert_eq!(deps.spine.dead_lettered.lock().unwrap().len(), 0);
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+    }
+
+    /// Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4)
+    /// regression: `app_version` must be resolved PER INVOCATION against the
+    /// live `app_version_snapshot`, never a value captured once -- a hot
+    /// swap (the poller's next tick seeding a NEW `app_versions.id` for this
+    /// SAME digest/app_id) must be reflected on the very next delivery
+    /// without a consumer restart.
+    #[tokio::test]
+    async fn handle_delivered_resolves_app_version_from_the_live_snapshot_per_invocation() {
+        let ring = test_ring();
+        let mac = mac_for(&ring, "acme");
+        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let stream_key = d.stream.clone();
+
+        let connections = connected_registry_with_fake_executor_multi(
+            serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
+            2,
+        )
+        .await;
         let spine = FakeSpineOps::default();
         let deps = test_deps(spine, connections);
 
-        // First delivery: succeeds and acks.
+        // `test_deps` seeds `app_version_snapshot` with version_id 1 for
+        // digest "sha256:00" (the `Static` digest it also configures) --
+        // the first delivery must succeed under that resolved version.
         handle_delivered(&d, &stream_key, &deps).await.unwrap();
         assert_eq!(deps.spine.acked.lock().unwrap().len(), 1);
 
-        // Deactivation: the app_id drops out of the active set entirely
-        // (never a "new digest" -- an empty active set).
-        deps.app_version_snapshot.update(&[]);
+        // Hot swap: the poller's next tick seeds a NEW version_id for the
+        // SAME digest -- the very next delivery must resolve the NEW
+        // version, never a value cached from the first call.
+        deps.app_version_snapshot
+            .update(&[bundle_active_set::ActiveBundleRow {
+                app_id: "waddles.bot.commands.default".to_string(),
+                version: "2".to_string(),
+                version_id: 2,
+                digest: "sha256:00".to_string(),
+                component_key: String::new(),
+                sidecar_key: String::new(),
+                artifact_signature: None,
+                artifact_signature_key_id: None,
+                artifact_signed_approval_id: None,
+                declared_capabilities: Vec::new(),
+            }]);
+        assert_eq!(
+            deps.app_version_snapshot
+                .resolve_for_digest("waddles.bot.commands.default", "sha256:00"),
+            Some(2),
+            "the live snapshot must reflect the hot swap immediately"
+        );
 
         let mac2 = mac_for(&ring, "acme");
         let d2 = fixture_delivered("acme", "waddles.bot.commands.default", mac2, "k1");
         handle_delivered(&d2, &stream_key, &deps).await.unwrap();
-
-        assert_eq!(
-            deps.spine.acked.lock().unwrap().len(),
-            1,
-            "the post-deactivation delivery must never be acked"
-        );
-        let dead_lettered = deps.spine.dead_lettered.lock().unwrap();
-        assert_eq!(dead_lettered.len(), 1);
-        assert_eq!(
-            dead_lettered[0].1,
-            penguin_spine::DlqErrorKind::HostCallDenied
-        );
-        assert_eq!(
-            deps.redirected_metric
-                .with_label_values(&["waddles.bot.commands.default"])
-                .get(),
-            0,
-            "a deactivation must never increment the redirect counter"
-        );
+        assert_eq!(deps.spine.acked.lock().unwrap().len(), 2);
     }
 
     /// A [`crate::usage::UsageSink`] that records every delta it is asked
@@ -1762,5 +2246,179 @@ mod tests {
         .expect("load succeeds");
         assert_eq!(loaded.app_id, "waddles.bot.commands.default");
         assert_eq!(loaded.exports, vec!["dispatch".to_string()]);
+    }
+
+    /// `Message::Error` reply to a `load` request maps to
+    /// `InvokeError::ExecutorError` -- distinct from the `Loaded` success
+    /// path above, never previously exercised.
+    #[tokio::test]
+    async fn ensure_loaded_returns_executor_error_on_error_reply() {
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, ErrorBody, ErrorCode, Frame, HelloBody, HelloOkBody,
+            SandboxInfo,
+        };
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            read_frame(&mut executor_io).await.unwrap();
+
+            let load = read_frame(&mut executor_io).await.unwrap();
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    load.id,
+                    Message::Error(ErrorBody {
+                        code: ErrorCode::DigestMismatch,
+                        message: "digest mismatch".to_string(),
+                        detail: None,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(crate::capabilities::DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let err = ensure_loaded(
+            &connection,
+            1,
+            0,
+            "waddles.bot.commands.default",
+            "1",
+            "sha256:00",
+            "component-key",
+            "sidecar-key",
+            LoadLimits {
+                timeout_ms: 2000,
+                memory_mb: 64,
+            },
+        )
+        .await
+        .expect_err("executor error reply must surface as an error");
+        match err {
+            InvokeError::ExecutorError { code, message } => {
+                assert_eq!(code, "DigestMismatch");
+                assert_eq!(message, "digest mismatch");
+            }
+            other => panic!("expected ExecutorError, got {other:?}"),
+        }
+    }
+
+    /// `ensure_unloaded`'s own success path -- never previously exercised
+    /// (mirrors `ensure_loaded_sends_load_and_returns_the_loaded_reply`
+    /// above exactly, swapped for `unload`/`Unloaded`).
+    #[tokio::test]
+    async fn ensure_unloaded_sends_unload_and_returns_the_unloaded_reply() {
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, Frame, HelloBody, HelloOkBody, SandboxInfo, UnloadedBody,
+        };
+
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            read_frame(&mut executor_io).await.unwrap();
+
+            let unload = read_frame(&mut executor_io).await.unwrap();
+            let unload_body = match unload.message {
+                Message::Unload(b) => b,
+                other => panic!("expected unload, got {other:?}"),
+            };
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    unload.id,
+                    Message::Unloaded(UnloadedBody {
+                        app_id: unload_body.app_id,
+                        digest: unload_body.digest,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-action".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(crate::capabilities::DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+
+        let unloaded = ensure_unloaded(
+            &connection,
+            1,
+            0,
+            "waddles.bot.commands.default",
+            "sha256:00",
+        )
+        .await
+        .expect("unload succeeds");
+        assert_eq!(unloaded.app_id, "waddles.bot.commands.default");
+        assert_eq!(unloaded.digest, "sha256:00");
     }
 }

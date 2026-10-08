@@ -21,6 +21,7 @@ sync S3 I/O directly on the event loop.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -53,6 +54,20 @@ def _client() -> Any:
 
 def _bucket() -> str:
     return os.getenv("S3_BUCKET_NAME", "waddlebot-assets")
+
+
+def _bundle_bucket() -> str:
+    """The bucket `core/bundle_executor`'s `BUNDLE_BUCKET_NAME` reads from -- NEVER `_bucket()`.
+
+    regression: bundle publish/fetch bucket split after SeaweedFS migration (#508/#509).
+    `_bucket()` (`S3_BUCKET_NAME`, default `waddlebot-assets`) and this bucket diverged once
+    the SeaweedFS migration split identities per-workload: the bundle-executor's Rust
+    `BucketConfig` reads `BUNDLE_BUCKET_NAME` (Helm `pipeline.rustDataPlane.bundleExecutor.
+    bucketName`, `waddles-bundles`), so a component staged to `_bucket()` instead publishes
+    successfully but 404s for every executor fetch. Default matches that chart value exactly
+    so a local/dev run without the env var set still agrees with the executor's own default.
+    """
+    return os.getenv("BUNDLE_BUCKET_NAME", "waddles-bundles")
 
 
 def _public_base_url() -> str:
@@ -148,14 +163,14 @@ async def upload_bundle_component(app_id: str, version: str, sha256_hex: str, da
     def _put() -> None:
         client = _client()
         client.put_object(
-            Bucket=_bucket(),
+            Bucket=_bundle_bucket(),
             Key=key,
             Body=data,
             ContentType="application/wasm",
             ServerSideEncryption="AES256",  # security.md: default server-side encryption
         )
         client.put_object(
-            Bucket=_bucket(),
+            Bucket=_bundle_bucket(),
             Key=sidecar_key,
             Body=b"{}",
             ContentType="application/json",
@@ -164,6 +179,86 @@ async def upload_bundle_component(app_id: str, version: str, sha256_hex: str, da
 
     await asyncio.to_thread(_put)
     return key
+
+
+async def write_bundle_sidecar(
+    app_id: str, version: str, sha256_hex: str, document: dict[str, Any]
+) -> str:
+    """Overwrites the `.json` sidecar object at `bundle_sidecar_key()` with `document`.
+
+    `upload_bundle_component()` writes the pre-signing `{}` stub sidecar at
+    ADDRESSING time (spec Sec9.1); `services/bundle_signing_service.py`
+    calls this to replace it with the real Ed25519-signed document once
+    hub-api approves the version (spec SS5.6, Gemini review condition 9) --
+    same bucket/key convention, a later write to the same key. Canonical
+    (sorted-key, no-whitespace) JSON so the object's bytes are
+    deterministic across repeated writes of the same document, matching
+    `permission_summary_service.canonical_json()`'s own convention.
+    """
+    key = bundle_sidecar_key(app_id, version, sha256_hex)
+    body = json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    def _put() -> None:
+        _client().put_object(
+            Bucket=_bucket(),
+            Key=key,
+            Body=body,
+            ContentType="application/json",
+            ServerSideEncryption="AES256",  # security.md: default server-side encryption
+        )
+
+    await asyncio.to_thread(_put)
+    return key
+
+
+async def read_bundle_sidecar(app_id: str, version: str, sha256_hex: str) -> dict[str, Any] | None:
+    """GETs the `.json` sidecar at `bundle_sidecar_key()`. Returns `None` if the object is missing.
+
+    Used by `cli/reconcile_signed_sidecars.py` to distinguish "never
+    uploaded"/"deleted out-of-band" (bucket 404 -- `NoSuchKey`) from "still
+    the pre-signing `{}` stub" (object exists but has no `signature` field)
+    from "already correctly signed" -- both of the first two cases are
+    reconciled by re-running `write_bundle_sidecar()`, the last is a no-op.
+    Any other bucket error propagates (this is a read used to decide
+    whether to re-upload, not a best-effort cleanup like `delete_object()`).
+    """
+    key = bundle_sidecar_key(app_id, version, sha256_hex)
+
+    def _get() -> dict[str, Any] | None:
+        try:
+            resp = _client().get_object(Bucket=_bucket(), Key=key)
+        except _client().exceptions.NoSuchKey:
+            logger.debug(
+                "bundle sidecar not found (typed NoSuchKey): bucket=%s key=%s",
+                _bucket(),
+                key,
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001 -- botocore raises a generic ClientError for
+            # some backends' 404s (MinIO) rather than the typed NoSuchKey subclass
+            if "NoSuchKey" in str(exc) or "404" in str(exc):
+                logger.debug(
+                    "bundle sidecar not found (generic ClientError 404/NoSuchKey): "
+                    "bucket=%s key=%s exc_type=%s exc=%s",
+                    _bucket(),
+                    key,
+                    type(exc).__name__,
+                    exc,
+                )
+                return None
+            logger.error(
+                "bundle sidecar read failed: bucket=%s key=%s exc_type=%s exc=%s",
+                _bucket(),
+                key,
+                type(exc).__name__,
+                exc,
+            )
+            raise
+        body = resp["Body"].read()
+        result: dict[str, Any] = json.loads(body)
+        return result
+
+    return await asyncio.to_thread(_get)
 
 
 async def delete_object(url: str) -> None:

@@ -1,0 +1,51 @@
+# hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
+# waddles.core.example.count -- see bundles/python/pyping/hub-manifest.yaml's own header for why
+# this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
+#
+# 1.0.0 is permanently retired -- fix/bump-command-bundles-1.0.1. The deployed wasm was
+# compiled against an older world missing the `flags` WIT import (feature_enabled() crashes/
+# degrades at runtime), while current source compiles correctly WITH it; app_versions enforces
+# an immutable digest per (app_id, version), so re-seeding 1.0.0 with the recompiled bytes
+# would 409 as digest_conflict and the seeder's #582 resilience change treats that as a
+# non-fatal SKIP, leaving the stale wasm active. 1.0.1 is the first version built from the
+# flags-enabled source. Mirrors bundles/csharp/csping/hub-manifest.yaml's own 1.0.0/1.0.1
+# retirement comment (fix/csping-version-bump, #575).
+# 1.0.3: promoted from a trivial self-counter to dynamic, per-community named counters --
+# see this bundle's src/app.py module docstring (feature/count-dynamic-counters).
+# 1.0.4 (fix/bump-count-lurk-1.0.4): version-only bump to republish the colon-free `kv` key
+# fix (gh-631, #638) -- app_versions is immutable per (app_id, version).
+schema_version: 2
+app_id: waddles.core.example.count
+name: Dynamic Counter Bundle (Python)
+version: 1.0.4
+feature: waddles.core.example
+module: core
+provider: builtin
+language: python
+artifact: prebuilt
+execution_model: native
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!count"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!count"]
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - storage.kv
+routes_to: []
