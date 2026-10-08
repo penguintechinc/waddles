@@ -1109,6 +1109,71 @@ async def deactivate_for_community(
     )
 
 
+async def deactivate_tenant_wide(
+    install_dal: AsyncDB,
+    *,
+    tenant_id: int,
+    app_id: str,
+    deactivated_by: int | None,
+) -> None:
+    """TENANT-WIDE sibling of `deactivate_for_community()` -- SYSTEM actor only.
+
+    Symmetric with `activate_tenant_wide()` (requirement: "uninstall should delete them
+    just like install adds them, otherwise our scale will get out of sync" --
+    `core/bundle_active_set` reads this same `app_active_versions` row on every replica,
+    so a stale sentinel row drifts horizontally-scaled hub-api replicas out of sync with
+    each other exactly the same way a stale per-community row would).
+
+    404 if `app_id` is not currently active tenant-wide for `tenant_id`. Matches the sentinel
+    `app_active_versions.community_id = TENANT_WIDE_COMMUNITY_SENTINEL` (0) row `_write_tenant_
+    wide_approval_and_activate()` wrote, rather than a real community id. `app_source_binding_
+    service.sync_bindings()`'s own `active_community_id` resolution writes `app_source_bindings`
+    under that SAME sentinel for a tenant-wide approval (`community_id=None` passed in, see its
+    own docstring + `test_activate_tenant_wide_auto_binds_every_source_of_the_consumed_platform`'s
+    assertion), so `clear_bindings()` here is called with the sentinel too -- the bindings
+    table's own stored value, never the logical `None` the `app_install_approvals` table uses
+    for the same scope (the sentinel-mismatch convention this module's own docstring names).
+
+    Never wired to any HTTP route (no community-admin or tenant-admin surface can reach this --
+    same restriction `activate_tenant_wide()`'s own docstring states) -- today's only caller is
+    `hub_api/cli/seed_core_bundles.py`'s reconcile sweep, uninstalling a `waddles.core.*` bundle
+    dropped from `bundles/core-bundles.yaml`.
+    """
+    active_table = install_dal.metadata.tables["app_active_versions"]
+    sentinel = app_source_binding_service.TENANT_WIDE_COMMUNITY_SENTINEL
+    active_where = (
+        (active_table.c.app_id == app_id)
+        & (active_table.c.tenant_id == tenant_id)
+        & (active_table.c.community_id == sentinel)
+    )
+
+    async with install_dal.engine.begin() as conn:
+        existing = (await conn.execute(select(active_table.c.app_id).where(active_where))).first()
+        if existing is None:
+            raise not_found(f"{app_id!r} is not activated tenant-wide for this tenant")
+        await conn.execute(active_table.delete().where(active_where))
+        await app_source_binding_service.clear_bindings(
+            conn,
+            tenant_id=tenant_id,
+            community_id=sentinel,
+            app_id=app_id,
+            bindings_table=install_dal.metadata.tables["app_source_bindings"],
+        )
+
+    await bundle_audit.record(
+        install_dal,
+        actor_id=deactivated_by,
+        action="app_deactivated_tenant_wide",
+        target_type="app_active_versions",
+        target_id=app_id,
+        details={"tenant_id": tenant_id, "community_id": None},
+    )
+    logger.info(
+        "bundle activation: deactivated tenant-wide",
+        extra={"app_id": app_id, "tenant_id": tenant_id},
+    )
+
+
 async def list_community_activations(install_dal: AsyncDB, *, community_id: int) -> list[Any]:
     """Every `app_active_versions` row currently activated for `community_id`."""
     rows = await install_dal(install_dal.app_active_versions.community_id == community_id).select(
