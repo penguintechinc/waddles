@@ -49,6 +49,12 @@
 # truly stuck pod observable and recoverable instead of silently serving nothing forever
 # (see global.hostApiTls's comment for the broken/missing mTLS cert case specifically).
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.bundleExecutor.enabled }}
+{{- $bsepTier := .Values.global.deploymentTier }}
+{{- if not .Values.pipeline.rustDataPlane.bundleSigningPublicKeys }}
+{{- if not (or (eq $bsepTier "alpha") (eq $bsepTier "local")) }}
+{{- fail (printf "pipeline.rustDataPlane.bundleSigningPublicKeys is empty and global.deploymentTier=%q is outside alpha/local: run make generate-bundle-signing-key and set values; see README rollout order" $bsepTier) }}
+{{- end }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -133,6 +139,10 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.wasmCollector | quote }}
         - name: WADDLES_SANDBOX_GVISOR
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutor.sandboxGvisor | quote }}
+        # feature/bundle-artifact-signing -- shared platform key set, see values.yaml's
+        # pipeline.rustDataPlane.bundleSigningPublicKeys comment (not secret; public keys).
+        - name: BUNDLE_SIGNING_PUBLIC_KEYS
+          value: {{ .Values.pipeline.rustDataPlane.bundleSigningPublicKeys | toJson | quote }}
         # BUNDLE_BUCKET_* (core/bundle_executor/src/bucket.rs) -- the executor's one
         # sanctioned credentialed egress path, alongside the mTLS stage dial above. In-cluster
         # SeaweedFS is plain http:// here, so no BUNDLE_BUCKET_CA_FILE is required (bucket.rs only

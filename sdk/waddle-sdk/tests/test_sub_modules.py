@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import sys
-import types
-
 import pytest
 
 from waddle_sdk.command import CommandUsageError, ParsedCommand
 from waddle_sdk.sub_modules import SubModuleGate
+from waddle_sdk.testing import install_fake_kv_host
 
 
 def _run(coro):
@@ -21,28 +19,7 @@ def _run(coro):
 
 @pytest.fixture
 def fake_kv(monkeypatch: pytest.MonkeyPatch):
-    store: dict[str, bytes] = {}
-
-    def get(key: str):
-        return store.get(key)
-
-    def set_(key: str, value: bytes, ttl_seconds: int) -> None:
-        store[key] = bytes(value)
-
-    def delete(key: str) -> None:
-        store.pop(key, None)
-
-    def increment(key: str, delta: int, ttl_seconds: int) -> int:
-        current = int(store.get(key, b"0"))
-        new_value = current + delta
-        store[key] = str(new_value).encode()
-        return new_value
-
-    kv_mod = types.SimpleNamespace(get=get, set=set_, delete=delete, increment=increment)
-    fake_wit_world = types.ModuleType("wit_world")
-    fake_wit_world.imports = types.SimpleNamespace(kv=kv_mod)  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
-    return store
+    return install_fake_kv_host(monkeypatch).store
 
 
 def test_submodule_is_disabled_by_default(fake_kv) -> None:
@@ -111,3 +88,14 @@ def test_apply_toggle_missing_submodule_raises(fake_kv) -> None:
     parsed = ParsedCommand(command="lurk", sub_module=None, option="enable", args=None)
     with pytest.raises(CommandUsageError, match="no sub-module to toggle"):
         _run(gate.apply_toggle("community-1", parsed))
+
+
+def test_key_contains_no_colon() -> None:
+    """regression: gh-631 -- `_key` originally used `:`, rejected by the real `kv` host."""
+    gate = SubModuleGate(command="shoutout")
+    assert ":" not in gate._key("auto")
+
+
+def test_enable_satisfies_host_guest_key_charset(fake_kv) -> None:
+    gate = SubModuleGate(command="shoutout")
+    _run(gate.enable("community-1", "auto"))  # raises InvalidKvKeyError if the key is bad

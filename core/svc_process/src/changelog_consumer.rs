@@ -446,6 +446,7 @@ async fn apply_active_set(
     kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
     metrics: &ChangelogConsumerMetrics,
     full_sync_reason: Option<FullSyncReason>,
+    app_version_snapshot: &bundle_active_set::ActiveVersionSnapshot,
 ) {
     // Scope-preserving: NEVER collapses two different `(tenant, community)`
     // scopes' independently-active digests for the same `app_id` onto one
@@ -462,6 +463,11 @@ async fn apply_active_set(
     for row in active.values() {
         kv_capabilities.update(row.app_id.clone(), row.declared_capabilities.clone());
     }
+    // Feeds `crate::spine::ProcessDeps::app_version_snapshot` (bundle
+    // capability-gate wiring, spec SS12 Phase 4) -- see
+    // `core/svc_action::changelog_consumer::apply_active_set`'s identical
+    // feed for why flattening onto `app_id` here is safe.
+    app_version_snapshot.update(&active.values().cloned().collect::<Vec<_>>());
     for active_set in state.by_scope.values() {
         for (app_id, reason) in &active_set.excluded {
             excluded_metric
@@ -761,6 +767,7 @@ pub async fn run_incremental_tick(
     binding_metrics: &crate::telemetry::SourceBindingSupervisorMetrics,
     metrics: &ChangelogConsumerMetrics,
     kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
+    app_version_snapshot: &bundle_active_set::ActiveVersionSnapshot,
 ) {
     let start = Instant::now();
     let watermark =
@@ -800,6 +807,7 @@ pub async fn run_incremental_tick(
                 kv_capabilities,
                 metrics,
                 Some(FullSyncReason::Diverged),
+                app_version_snapshot,
             )
             .await;
             update_tenant_gauges(state, metrics);
@@ -837,6 +845,7 @@ pub async fn run_incremental_tick(
             metrics,
             kv_capabilities,
             FullSyncReason::Reconcile,
+            app_version_snapshot,
         )
         .await;
         state.tracker.advance(safe_seq);
@@ -878,6 +887,7 @@ pub async fn run_incremental_tick(
                 metrics,
                 kv_capabilities,
                 FullSyncReason::Reconcile,
+                app_version_snapshot,
             )
             .await;
             state.tracker.advance(safe_seq);
@@ -989,6 +999,7 @@ pub async fn run_incremental_tick(
         kv_capabilities,
         metrics,
         None,
+        app_version_snapshot,
     )
     .await;
     update_tenant_gauges(state, metrics);
@@ -1027,6 +1038,7 @@ pub async fn run_full_reconcile(
     metrics: &ChangelogConsumerMetrics,
     kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
     reason: FullSyncReason,
+    app_version_snapshot: &bundle_active_set::ActiveVersionSnapshot,
 ) {
     let start = Instant::now();
     match bundle_active_set::read_active_set_all(db).await {
@@ -1078,6 +1090,7 @@ pub async fn run_full_reconcile(
         kv_capabilities,
         metrics,
         Some(reason),
+        app_version_snapshot,
     )
     .await;
     update_tenant_gauges(state, metrics);
@@ -1113,6 +1126,7 @@ pub async fn drain_pending_full_sync(
     kv_capabilities: &bundle_host_kv::CapabilitySnapshot,
     now: Instant,
     debounce: Duration,
+    app_version_snapshot: &bundle_active_set::ActiveVersionSnapshot,
 ) {
     let Some(reason) = state.pending_full_sync else {
         return;
@@ -1134,6 +1148,7 @@ pub async fn drain_pending_full_sync(
         metrics,
         kv_capabilities,
         reason,
+        app_version_snapshot,
     )
     .await;
     state.last_full_send = Some(now);
@@ -1217,6 +1232,12 @@ pub async fn run(
     // consumers invoked with empty legacy digest, UnknownBundle (alpha
     // 2026-10-03).
     active_digests: Arc<ActiveDigests>,
+    // Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
+    // the SAME instance `crate::lib::try_start_changelog_consumer` hands to
+    // `source_supervisor::SupervisorDeps`/`crate::spine::handle_delivered`
+    // -- kept current here every tick via `apply_active_set` so grants are
+    // never resolved against a stale `app_versions.id`.
+    app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
     consumer_loop_ready.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1263,6 +1284,14 @@ pub async fn run(
     };
     state.active_digests = active_digests;
     consumer_loop_ready.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Seed from the same startup full read, before the first tick -- see
+    // `apply_active_set`'s doc for why flattening onto `app_id` is safe.
+    app_version_snapshot.update(
+        &bundle_active_set::scoped_active_rows(&state.by_scope)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
 
     let mut poll_tick = tokio::time::interval(poll_interval);
     poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1316,6 +1345,7 @@ pub async fn run(
             &kv_capabilities,
             Instant::now(),
             FULL_SEND_DEBOUNCE,
+            &app_version_snapshot,
         )
         .await;
     }
@@ -1384,6 +1414,7 @@ pub async fn run(
             &kv_capabilities,
             Instant::now(),
             FULL_SEND_DEBOUNCE,
+            &app_version_snapshot,
         )
         .await;
 
@@ -1406,7 +1437,7 @@ pub async fn run(
                 }
                 run_incremental_tick(
                     &db, &mut state, sink_ref, &live_sessions, spawner.as_deref(), &excluded_metric,
-                    &binding_metrics, &metrics, &kv_capabilities,
+                    &binding_metrics, &metrics, &kv_capabilities, &app_version_snapshot,
                 ).await;
             }
             _ = reconcile_tick.tick() => {
@@ -1416,6 +1447,7 @@ pub async fn run(
                 run_full_reconcile(
                     &db, &mut state, sink_ref, &live_sessions, spawner.as_deref(), &excluded_metric,
                     &binding_metrics, &metrics, &kv_capabilities, FullSyncReason::Reconcile,
+                    &app_version_snapshot,
                 ).await;
             }
         }
@@ -1496,6 +1528,9 @@ mod tests {
             scan_status: "scanned".to_string(),
             component_key: None,
             sidecar_key: None,
+            artifact_signature: None,
+            artifact_signature_key_id: None,
+            artifact_signed_approval_id: None,
         }
     }
 
@@ -1745,6 +1780,7 @@ mod tests {
             &test_binding_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
 
@@ -1779,6 +1815,7 @@ mod tests {
             &test_binding_metrics(),
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert!(sink.calls().is_empty());
@@ -1816,6 +1853,7 @@ mod tests {
             &test_binding_metrics(),
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -1879,6 +1917,7 @@ mod tests {
             &test_binding_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -1941,6 +1980,7 @@ mod tests {
             &test_binding_metrics(),
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(state.running_len(), 1, "one consumer must be spawned");
@@ -1979,6 +2019,7 @@ mod tests {
             &test_binding_metrics(),
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(state.last_seq(), 120);
@@ -2014,6 +2055,7 @@ mod tests {
             &test_binding_metrics(),
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -2052,6 +2094,7 @@ mod tests {
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
             FullSyncReason::Reconcile,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -2087,6 +2130,7 @@ mod tests {
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
             FullSyncReason::Reconcile,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         let mut calls = sink.calls();
@@ -2196,6 +2240,7 @@ mod tests {
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
             FullSyncReason::Reconcile,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -2347,6 +2392,7 @@ mod tests {
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
             FullSyncReason::Reconcile,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         let elapsed = start.elapsed();
@@ -2434,6 +2480,7 @@ mod tests {
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
             FullSyncReason::Reconcile,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -2463,6 +2510,7 @@ mod tests {
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
             FullSyncReason::Reconcile,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -2507,6 +2555,7 @@ mod tests {
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
             FullSyncReason::Reconcile,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -2551,6 +2600,7 @@ mod tests {
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
             FullSyncReason::Reconcile,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         for app in ["ping", "csping"] {
@@ -2740,6 +2790,7 @@ mod tests {
             &test_binding_metrics(),
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -2775,9 +2826,13 @@ mod tests {
                 rows: vec![bundle_active_set::ActiveBundleRow {
                     app_id: "waddles.a".to_string(),
                     version: "1".to_string(),
+                    version_id: 0,
                     digest: "sha256:00".to_string(),
                     component_key: "k".to_string(),
                     sidecar_key: "s".to_string(),
+                    artifact_signature: None,
+                    artifact_signature_key_id: None,
+                    artifact_signed_approval_id: None,
                     declared_capabilities: Vec::new(),
                 }],
                 excluded: Vec::new(),
@@ -2806,6 +2861,7 @@ mod tests {
             &test_binding_metrics(),
             &test_changelog_metrics(),
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
 
@@ -2862,6 +2918,7 @@ mod tests {
             &test_binding_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
 
@@ -2918,6 +2975,7 @@ mod tests {
             &test_binding_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
 
@@ -2982,9 +3040,13 @@ mod tests {
                 rows: vec![bundle_active_set::ActiveBundleRow {
                     app_id: "waddles.a".to_string(),
                     version: "1".to_string(),
+                    version_id: 1,
                     digest: digest.to_string(),
                     component_key: "k".to_string(),
                     sidecar_key: "s".to_string(),
+                    artifact_signature: None,
+                    artifact_signature_key_id: None,
+                    artifact_signed_approval_id: None,
                     declared_capabilities: Vec::new(),
                 }],
                 excluded: Vec::new(),
@@ -3045,6 +3107,7 @@ mod tests {
             &bundle_host_kv::CapabilitySnapshot::new(),
             Instant::now(),
             Duration::from_millis(20),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(sink.calls(), vec![format!("load:1:waddles.a:{digest}")]);
@@ -3078,6 +3141,7 @@ mod tests {
             &bundle_host_kv::CapabilitySnapshot::new(),
             Instant::now(),
             Duration::from_millis(20),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -3124,6 +3188,7 @@ mod tests {
             &bundle_host_kv::CapabilitySnapshot::new(),
             t0,
             debounce,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(sink.calls(), vec![format!("load:1:waddles.a:{digest_a}")]);
@@ -3143,6 +3208,7 @@ mod tests {
             &bundle_host_kv::CapabilitySnapshot::new(),
             t0 + Duration::from_millis(5),
             debounce,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -3170,6 +3236,7 @@ mod tests {
             &bundle_host_kv::CapabilitySnapshot::new(),
             t0 + Duration::from_millis(25),
             debounce,
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -3220,6 +3287,7 @@ mod tests {
             &test_binding_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -3268,6 +3336,7 @@ mod tests {
             &test_binding_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert!(
@@ -3293,6 +3362,7 @@ mod tests {
             &test_binding_metrics(),
             &metrics,
             &bundle_host_kv::CapabilitySnapshot::new(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
         )
         .await;
         assert_eq!(
@@ -3368,6 +3438,7 @@ mod tests {
                 test_changelog_metrics(),
                 Arc::clone(&consumer_loop_ready),
                 Arc::new(ActiveDigests::new()),
+                bundle_active_set::ActiveVersionSnapshot::new(),
                 shutdown_rx,
             ),
         )
