@@ -5,7 +5,7 @@
 schema_version: 2
 app_id: waddles.core.example.music
 name: Song Request Queue Bundle (Python)
-version: 1.0.0
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -46,5 +46,8 @@ limits:
 # `storage.kv` -- required for the data plane to grant `kv` at all
 # (hub_api/services/bundle_approval_service.py::KV_PERMISSION_ID).
 permissions:
-  - storage.kv
+  - id: storage.kv
+    justification: "persists the per-community song-request queue, sequence and limits config"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-music feature flag"
 routes_to: []

@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-rank"
-version = "1.0.0"
+version = "1.0.2"
 description = "`!rank` -> a community-scoped chat XP/level ledger, DB-backed (structured db ops + a kv lookup index). Inspired by superpenguintv (Psychoboy)'s PenguinTwitchBot rank feature -- original implementation, no code/text reused. Uses the shared waddle_sdk.command grammar parser (#618) plus a documented single-bare-token extension for `!rank <user>`."
 requires-python = ">=3.13"
 dependencies = []

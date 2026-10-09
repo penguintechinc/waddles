@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-countdown"
-version = "1.0.0"
+version = "1.0.2"
 description = "`!countdown` -> a per-community single countdown target (!countdown set <ISO-or-relative-time> [label], bare !countdown reports remaining/elapsed time, !countdown reset clears it). Modeled on bundles/python/first's waddle_sdk.community_kv/waddle_sdk.command structure."
 requires-python = ">=3.13"
 dependencies = []

@@ -1478,6 +1478,35 @@ presentation:
   # public hostname when unset (never a broken/empty player src). Alpha overrides to the
   # svc-streaming media NodePort's LAN URL -- see values-alpha.yaml.
   publicStreamingUrl: ""
+  # chore/deploy-svc-presentation-rust-alpha -- Rust svc-presentation (core/svc_presentation,
+  # Dockerfile.rust) replaces the Python Deployment above WHEN enabled: same Deployment/
+  # Service names (in-place swap, Service/NodePort unchanged), templates/svc-presentation-
+  # rust.yaml renders instead of templates/svc-presentation.yaml. Default false (Python
+  # stays the base/beta/prod path until the overlay PRs land and the cutover is approved);
+  # values-alpha.yaml flips it on. Image repo is a bare name resolved via global.imageRegistry
+  # + global.imageTag (per-commit tag built by scripts/alpha-deploy.sh), like svc-action-rust.
+  rust:
+    enabled: false
+    imageRepository: "svc-presentation-rust"
+    # Alpha-only on-host access to the overlay view/SSE port: when true the Service becomes
+    # NodePort (presentation.rust.nodePort.port). Base/beta/prod stay ClusterIP
+    # (devops-kubernetes.md: no NodePort outside alpha).
+    nodePort:
+      enabled: false
+      port: 31032
+    # Overlay image bucket (IMAGE_BUCKET_*). Credentials are NEVER set here -- they are
+    # sourced via secretKeyRef from the existing <release>-secrets Secret's
+    # HUB_API_S3_ACCESS_KEY_ID/HUB_API_S3_SECRET_ACCESS_KEY (the hub-api SeaweedFS identity,
+    # which already holds Read/Write/List/Tagging on infrastructure.seaweedfs.bucketName).
+    # Empty bucketName falls back to infrastructure.seaweedfs.bucketName.
+    imageBucket:
+      bucketName: ""
+      prefix: "overlay-images"
+      region: "us-east-1"
+    # Empty = OTLP export disabled (svc-presentation degrades to local logs/metrics; a dead
+    # or absent exporter never breaks the app). Set per environment, never hardcoded.
+    otlpEndpoint: ""
+    otlpProtocol: "grpc"
 
 # v3.0.x — Rust svc-streaming image (Issue #287). Own Dockerfile
 # (core/svc_streaming/Dockerfile.rust), not the shared pipeline.pythonBaseImage
@@ -2292,11 +2321,16 @@ ingress:
           pathType: Prefix
           service: interactive-media
           port: 8105
-        # Interactive Productivity consolidated routes (calendar, memories, translate)
+        # SECURITY: calendar routed through hub-api (NOT interactive-productivity
+        # directly) -- hub-api's scope-gated event_calendar_bp +
+        # EventCalendarProxyClient are the only legitimate JWT-validators/
+        # setters of the X-User-Context/X-API-Key headers
+        # calendar_interaction_module trusts (live authz bypass, fixed 2026-10).
         - path: /api/v1/calendar
           pathType: Prefix
-          service: interactive-productivity
-          port: 8030
+          service: hub
+          port: 8060
+        # Interactive Productivity consolidated routes (memories, translate)
         - path: /api/v1/memories
           pathType: Prefix
           service: interactive-productivity

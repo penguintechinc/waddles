@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-raffle"
-version = "1.0.0"
+version = "1.0.2"
 description = "`!raffle`/`!enter` -> a per-community giveaway/raffle (open/close/draw/list), kv-only. Original Waddles implementation, not a port."
 requires-python = ">=3.13"
 dependencies = []
