@@ -285,9 +285,12 @@ where
         try_start_discord_outbound(&config);
         state.eventsub = try_build_eventsub_state(&config, ingest_metrics.clone()).await;
     } else {
-        tracing::info!(
+        // WARN, not INFO: with the flag OFF no outbound drain runs, so
+        // `svc_action` refuses every Discord chat.delete/dm.send (no
+        // drain-ready key) -- that must be visible to an operator.
+        tracing::warn!(
             flag = license::RUST_DATA_PLANE_FLAG,
-            "flag is OFF; receive/produce/outbound-drain not started"
+            "flag is OFF; receive/produce/outbound-drain NOT started -- discord chat.delete/dm.send bundle ops will be refused until it is ON"
         );
     }
 
@@ -564,26 +567,32 @@ fn try_start_twitch_outbound(config: &config::Config) {
 
 /// Attempts to start the Discord outbound drain (`crate::outbound::
 /// run_discord`): executes `chat.send`/`chat.delete`/`dm.send` queued by
-/// `svc_action` over the bot-token REST client. Never starts (logged, not an
-/// error) when `DISCORD_BOT_TOKEN` is unset or the spine/Valkey config is
-/// unavailable. The token is read from the same `DISCORD_BOT_TOKEN` the
-/// Gateway receiver uses and is never logged.
+/// `svc_action` over the bot-token REST client, and advertises readiness
+/// (`outbound::DISCORD_DRAIN_READY_KEY`) while it runs. Never starts (and
+/// never panics) when `DISCORD_BOT_TOKEN` is unset or the spine/Valkey config
+/// is unavailable -- but each of those is logged at WARN/ERROR, never INFO:
+/// without the drain `svc_action` refuses every Discord `chat.delete`/
+/// `dm.send` (no readiness key), so an operator must be able to see why. The
+/// token is read from the same `DISCORD_BOT_TOKEN` the Gateway receiver uses
+/// and is never logged.
 fn try_start_discord_outbound(config: &config::Config) {
     let Some(token) = config.discord_bot_token.clone() else {
-        tracing::info!("DISCORD_BOT_TOKEN not set; discord outbound drain not started");
+        tracing::warn!(
+            "DISCORD_BOT_TOKEN not set; discord outbound drain NOT started -- bundle chat.delete/dm.send ops (e.g. !secret) will be refused until it is configured"
+        );
         return;
     };
     let spine_cfg = match penguin_spine::SpineConfig::from_env() {
         Ok(cfg) => cfg,
         Err(err) => {
-            tracing::warn!(error = %err, "spine config unavailable; discord outbound drain not started");
+            tracing::error!(error = %err, "spine config unavailable; discord outbound drain NOT started -- bundle chat.delete/dm.send ops will be refused");
             return;
         }
     };
     let rest = match discord_rest::DiscordRestClient::new(token, discord_rest::DEFAULT_API_BASE) {
         Ok(rest) => rest,
         Err(err) => {
-            tracing::error!(error = %err, "discord REST client build failed; discord outbound drain not started");
+            tracing::error!(error = %err, "discord REST client build failed; discord outbound drain NOT started -- bundle chat.delete/dm.send ops will be refused");
             return;
         }
     };
@@ -594,7 +603,7 @@ fn try_start_discord_outbound(config: &config::Config) {
     });
     tokio::spawn(async move {
         if let Err(err) = outbound::run_discord(&spine_cfg, &rest, shutdown_rx).await {
-            tracing::error!(error = %err, "discord outbound drain exited");
+            tracing::error!(error = %err, "discord outbound drain exited; bundle chat.delete/dm.send ops will be refused once its readiness key expires");
         }
     });
 }

@@ -24,6 +24,10 @@ TARGET_UUID = "11111111-1111-1111-1111-111111111111"
 CONFIG = {"hub_api_url": "https://hub-api.penguintech.cloud", "webui_url": "https://waddles.example"}
 
 
+class HostRelayError(Exception):
+    """Stand-in for the guest-side `Err` the WIT `relay.push` raises on a host error."""
+
+
 def _run(coro):
     return asyncio.run(coro)
 
@@ -66,6 +70,7 @@ def host(monkeypatch: pytest.MonkeyPatch):
     logs: list[tuple[str, str, str]] = []
     state = types.SimpleNamespace(
         events=events, relayed=relayed, logs=logs, fail_op=None, flags=True,
+        unconfirmed_ops=set(), unconfirmed_detail="relay_unconfirmed",
         kv={"c.7." + _target_key(USERNAME): json.dumps(
             {"uuid": TARGET_UUID, "platform_user_id": "424242"}).encode()},
     )
@@ -76,6 +81,11 @@ def host(monkeypatch: pytest.MonkeyPatch):
             raise RuntimeError("boom")
         events.append(d["op"])
         relayed.append(d)
+        if d["op"] in state.unconfirmed_ops:
+            # The host ACCEPTED the op into its outbound queue but never got the
+            # platform's confirmation (drain down / wedged / dropped it). The WIT
+            # `relay.push` returns nothing, so raising is the host's only signal.
+            raise HostRelayError(state.unconfirmed_detail)
 
     wit = types.ModuleType("wit_world")
     wit.imports = types.SimpleNamespace(
@@ -127,6 +137,47 @@ def test_delete_failure_skips_dm(host) -> None:
         _run(dispatch(_envelope(_secret_event()), CONFIG, http_client=FakeHttp()))
     assert "dm.send" not in host.events
     assert "NOT delivered" in host.relayed[-1]["text"]
+
+
+def test_unconfirmed_delete_skips_dm_and_tells_the_sender(host) -> None:
+    """Async-drop regression (adversarial review, HIGH): the delete was accepted but never
+    confirmed, so the plaintext may still be public. No DM, no "delivered", sender told."""
+    host.unconfirmed_ops = {"chat.delete"}
+    http = FakeHttp(events=host.events)
+    with pytest.raises(SecretFlowError) as ei:
+        _run(dispatch(_envelope(_secret_event()), CONFIG, http_client=http))
+    assert ei.value.step == "delete"
+    # The delete WAS accepted by the host (queued) -- and the flow still stopped.
+    assert host.events == ["store", "chat.delete", "chat.send"]
+    assert "dm.send" not in host.events
+    reply = host.relayed[-1]["text"]
+    assert "NOT delivered" in reply and "delete your message yourself" in reply
+    assert "Secret delivered" not in reply
+    assert SECRET_TEXT not in reply
+
+
+def test_unconfirmed_dm_is_reported_failed_never_delivered(host) -> None:
+    """A DM the host could not confirm (closed DMs, target outside the community, throttled,
+    drain down) is a failure the sender hears about -- never the success notice."""
+    host.unconfirmed_ops = {"dm.send"}
+    with pytest.raises(SecretFlowError) as ei:
+        _run(dispatch(_envelope(_secret_event()), CONFIG, http_client=FakeHttp()))
+    assert ei.value.step == "dm"
+    assert host.events == ["chat.delete", "dm.send", "chat.send"]
+    reply = host.relayed[-1]["text"]
+    assert "DM failed" in reply and "Secret delivered" not in reply
+
+
+def test_unconfirmed_ops_never_leak_host_error_text_into_logs(host) -> None:
+    """The host's error text is never logged (only the exception type)."""
+    host.unconfirmed_ops = {"chat.delete"}
+    host.unconfirmed_detail = f"{SECRET_TEXT} {USERNAME} {TOKEN} 424242"
+    with pytest.raises(SecretFlowError):
+        _run(dispatch(_envelope(_secret_event()), CONFIG, http_client=FakeHttp()))
+    blob = repr(host.logs)
+    assert host.logs
+    for needle in (SECRET_TEXT, USERNAME, TOKEN, "424242"):
+        assert needle not in blob
 
 
 def test_dm_failure_fails_loud(host) -> None:

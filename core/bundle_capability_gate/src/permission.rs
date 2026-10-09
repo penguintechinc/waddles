@@ -449,7 +449,10 @@ impl PermissionFamily {
                 family: *self,
                 risk: Risk::Dangerous,
                 capability_kind: CapabilityKind::Moderation,
-                default_quota: Quota::Descriptive("existing relay-authz + UsageBatcher"),
+                default_quota: Quota::Descriptive(
+                    "confirmed per-op (host waits for the platform); targets only the \
+                     triggering event's own channel; UsageBatcher is metering only",
+                ),
                 notes: "Destructive moderation-class action; op `chat.delete` of the \
                         provider-framework outbound schema (issue #719)",
             },
@@ -457,7 +460,11 @@ impl PermissionFamily {
                 family: *self,
                 risk: Risk::Dangerous,
                 capability_kind: CapabilityKind::Relay,
-                default_quota: Quota::Descriptive("existing relay rate limits (UsageBatcher)"),
+                default_quota: Quota::Descriptive(
+                    "enforced in svc_action: 10/min per (tenant, community, app) + 3/min per \
+                     recipient; target must be a member of the triggering event's guild \
+                     (UsageBatcher is metering only)",
+                ),
                 notes: "Highest-risk outbound family: reaches a user outside any public \
                         channel, PII-adjacent; op `dm.send` (issue #719)",
             },

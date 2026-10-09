@@ -7,7 +7,7 @@
 //! ```json
 //! {"v":1,"op":"chat.send","platform":"twitch","channel":"#c","text":"hi"}
 //! {"v":1,"op":"chat.delete","platform":"twitch","channel":"#c","message_id":"m1"}
-//! {"v":1,"op":"dm.send","platform":"discord","user_id":"u1","text":"hi"}
+//! {"v":1,"op":"dm.send","platform":"discord","user_id":"u1","text":"hi","origin_channel":"c1"}
 //! ```
 //!
 //! * `v` -- schema version. Absent = the legacy text-only
@@ -19,6 +19,16 @@
 //! * `platform` -- optional on the wire (legacy omits it); when present it
 //!   must equal the queue's own platform or the entry is rejected as
 //!   misrouted.
+//! * `origin_channel` -- required for `dm.send`: the channel of the event
+//!   that triggered the bundle. The sender binds the DM target to that
+//!   channel's community (a bundle names the recipient, so without this a
+//!   bundle could DM any user the shared bot reaches).
+//! * `op_id` / `exp_ms` -- optional confirmation handshake. When `op_id` is
+//!   present the producer is waiting for a result: the drain executes the
+//!   op and posts the outcome under that id (see `crate::outbound`). `exp_ms`
+//!   is the epoch-millisecond deadline after which the producer has stopped
+//!   waiting; the drain drops an entry that is already past it instead of
+//!   executing an op the producer has reported as failed.
 //!
 //! Forward compat: unknown extra fields are ignored, so the new
 //! `svc_action` producer keeps `channel`/`text` top-level and an *old*
@@ -26,7 +36,7 @@
 //!
 //! **Dispatch.** [`route`] sends a parsed [`OutboundAction`] to the named
 //! platform's [`PlatformSender`]; an unknown platform or an op the platform
-//! has not implemented is [`SenderError::Unsupported`] -- fail loud, never a
+//! has no sender for is [`SenderError::Unsupported`] -- fail loud, never a
 //! silent no-op. The Twitch `chat.delete`/`dm.send` implementations below
 //! are still deliberate stubs returning `Unsupported` (Helix client
 //! follow-up); Discord implements all three over `crate::discord_rest`.
@@ -48,8 +58,13 @@ pub enum OutboundAction {
     /// `chat.delete` -- delete message `message_id` in `channel`.
     ChatDelete { channel: String, message_id: String },
     /// `dm.send` -- send `text` as a direct message to platform user
-    /// `user_id`.
-    DmSend { user_id: String, text: String },
+    /// `user_id`, who must belong to the community of `origin_channel` (the
+    /// channel of the event that triggered the bundle).
+    DmSend {
+        user_id: String,
+        text: String,
+        origin_channel: String,
+    },
 }
 
 impl OutboundAction {
@@ -105,6 +120,35 @@ struct WireEnvelope {
     message_id: Option<String>,
     #[serde(default)]
     user_id: Option<String>,
+    #[serde(default)]
+    origin_channel: Option<String>,
+    #[serde(default)]
+    op_id: Option<String>,
+    #[serde(default)]
+    exp_ms: Option<u64>,
+}
+
+/// Longest accepted `op_id` (it becomes part of a Valkey key).
+const MAX_OP_ID_LEN: usize = 64;
+
+/// A parsed queue entry: the action plus the optional confirmation
+/// handshake fields (see the module doc's `op_id` / `exp_ms`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutboundEntry {
+    /// The validated action to execute.
+    pub action: OutboundAction,
+    /// Present when the producer is waiting for this op's outcome.
+    pub op_id: Option<String>,
+    /// Epoch-ms deadline after which the producer stopped waiting.
+    pub exp_ms: Option<u64>,
+}
+
+/// `true` for a safe `op_id`: 1..=[`MAX_OP_ID_LEN`] ASCII alphanumerics or
+/// `-`, so it can never smuggle a key separator into the ack key.
+fn is_valid_op_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_OP_ID_LEN
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 fn require(
@@ -128,8 +172,29 @@ pub fn parse_outbound(
     raw: &str,
     queue_platform: &str,
 ) -> Result<OutboundAction, OutboundParseError> {
+    parse_outbound_entry(raw, queue_platform).map(|entry| entry.action)
+}
+
+/// [`parse_outbound`] plus the confirmation-handshake fields (`op_id`,
+/// `exp_ms`) the Discord drain needs to answer a waiting producer.
+///
+/// # Errors
+/// As [`parse_outbound`], plus [`OutboundParseError::Malformed`] for an
+/// `op_id` that is not a safe identifier.
+pub fn parse_outbound_entry(
+    raw: &str,
+    queue_platform: &str,
+) -> Result<OutboundEntry, OutboundParseError> {
     let wire: WireEnvelope =
         serde_json::from_str(raw).map_err(|e| OutboundParseError::Malformed(e.to_string()))?;
+    if let Some(op_id) = &wire.op_id {
+        if !is_valid_op_id(op_id) {
+            return Err(OutboundParseError::Malformed(
+                "op_id is not a safe identifier".to_string(),
+            ));
+        }
+    }
+    let (op_id, exp_ms) = (wire.op_id.clone(), wire.exp_ms);
     if let Some(v) = wire.v {
         if v > SCHEMA_VERSION {
             return Err(OutboundParseError::UnsupportedVersion(v));
@@ -144,21 +209,27 @@ pub fn parse_outbound(
         }
     }
     // Legacy (no `op`) is chat.send; an explicit unknown op never defaults.
-    match wire.op.as_deref().unwrap_or("chat.send") {
-        "chat.send" => Ok(OutboundAction::ChatSend {
+    let action = match wire.op.as_deref().unwrap_or("chat.send") {
+        "chat.send" => OutboundAction::ChatSend {
             channel: require(wire.channel, "chat.send", "channel")?,
             text: require(wire.text, "chat.send", "text")?,
-        }),
-        "chat.delete" => Ok(OutboundAction::ChatDelete {
+        },
+        "chat.delete" => OutboundAction::ChatDelete {
             channel: require(wire.channel, "chat.delete", "channel")?,
             message_id: require(wire.message_id, "chat.delete", "message_id")?,
-        }),
-        "dm.send" => Ok(OutboundAction::DmSend {
+        },
+        "dm.send" => OutboundAction::DmSend {
             user_id: require(wire.user_id, "dm.send", "user_id")?,
             text: require(wire.text, "dm.send", "text")?,
-        }),
-        other => Err(OutboundParseError::UnknownOp(other.to_string())),
-    }
+            origin_channel: require(wire.origin_channel, "dm.send", "origin_channel")?,
+        },
+        other => return Err(OutboundParseError::UnknownOp(other.to_string())),
+    };
+    Ok(OutboundEntry {
+        action,
+        op_id,
+        exp_ms,
+    })
 }
 
 /// A platform sender failure.
@@ -175,6 +246,29 @@ pub enum SenderError {
         op: &'static str,
         message: String,
     },
+    /// The sender refused the action on policy grounds before attempting it
+    /// (e.g. a DM target outside the triggering community). `reason` is a
+    /// stable machine code the producer maps to its own error.
+    #[error("{platform} {op} refused: {reason}")]
+    Rejected {
+        platform: &'static str,
+        op: &'static str,
+        reason: &'static str,
+    },
+}
+
+impl SenderError {
+    /// The stable code posted back to a waiting producer in the ack
+    /// handshake (`crate::outbound`): `unsupported`, `failed`, or the
+    /// [`Self::Rejected`] reason. Never contains message content or ids.
+    #[must_use]
+    pub fn ack_code(&self) -> &'static str {
+        match self {
+            Self::Unsupported { .. } => "unsupported",
+            Self::Failed { .. } => "failed",
+            Self::Rejected { reason, .. } => reason,
+        }
+    }
 }
 
 /// One platform's outbound adapter. Discord/Twitch (and later Slack/Kick/
@@ -190,8 +284,16 @@ pub trait PlatformSender: Send + Sync {
     async fn send_chat(&self, channel: &str, text: &str) -> Result<(), SenderError>;
     /// `chat.delete`.
     async fn delete_chat(&self, channel: &str, message_id: &str) -> Result<(), SenderError>;
-    /// `dm.send`.
-    async fn send_dm(&self, user_id: &str, text: &str) -> Result<(), SenderError>;
+    /// `dm.send`. `origin_channel` is the channel of the event that
+    /// triggered the bundle; the adapter must refuse (as
+    /// [`SenderError::Rejected`]) a `user_id` outside that channel's
+    /// community, or one it cannot verify belongs there.
+    async fn send_dm(
+        &self,
+        user_id: &str,
+        text: &str,
+        origin_channel: &str,
+    ) -> Result<(), SenderError>;
 }
 
 /// Invokes the `PlatformSender` method matching `action`'s op.
@@ -208,7 +310,11 @@ pub async fn dispatch_to<S: PlatformSender>(
             channel,
             message_id,
         } => sender.delete_chat(channel, message_id).await,
-        OutboundAction::DmSend { user_id, text } => sender.send_dm(user_id, text).await,
+        OutboundAction::DmSend {
+            user_id,
+            text,
+            origin_channel,
+        } => sender.send_dm(user_id, text, origin_channel).await,
     }
 }
 
@@ -275,7 +381,12 @@ impl<S: IrcOutbound> PlatformSender for TwitchSender<'_, S> {
         })
     }
 
-    async fn send_dm(&self, _user_id: &str, _text: &str) -> Result<(), SenderError> {
+    async fn send_dm(
+        &self,
+        _user_id: &str,
+        _text: &str,
+        _origin_channel: &str,
+    ) -> Result<(), SenderError> {
         // STUB: needs the Helix whisper client (follow-up).
         Err(SenderError::Unsupported {
             platform: "twitch".to_string(),
@@ -316,8 +427,17 @@ impl<'a> DiscordSender<'a> {
     }
 }
 
-/// Maps a REST failure to the loud, content-free [`SenderError::Failed`].
+/// Maps a REST failure to the loud, content-free [`SenderError::Failed`]; a
+/// community-binding refusal is the distinct [`SenderError::Rejected`] so the
+/// producer can tell "policy said no" from "Discord failed".
 fn discord_failed(op: &'static str, err: &DiscordRestError) -> SenderError {
+    if matches!(err, DiscordRestError::NotInCommunity) {
+        return SenderError::Rejected {
+            platform: "discord",
+            op,
+            reason: "not_in_community",
+        };
+    }
     SenderError::Failed {
         platform: "discord",
         op,
@@ -358,9 +478,14 @@ impl PlatformSender for DiscordSender<'_> {
         Ok(())
     }
 
-    async fn send_dm(&self, user_id: &str, text: &str) -> Result<(), SenderError> {
+    async fn send_dm(
+        &self,
+        user_id: &str,
+        text: &str,
+        origin_channel: &str,
+    ) -> Result<(), SenderError> {
         let rest = self.client("dm.send")?;
-        rest.send_dm(user_id, text)
+        rest.send_dm_in_community(origin_channel, user_id, text)
             .await
             .map_err(|e| discord_failed("dm.send", &e))?;
         tracing::info!(platform = "discord", op = "dm.send", "sent direct message");
@@ -422,11 +547,97 @@ mod tests {
             }
         );
         let dm = parse_outbound(
-            r#"{"v":1,"op":"dm.send","user_id":"u1","text":"hi"}"#,
+            r#"{"v":1,"op":"dm.send","user_id":"u1","text":"hi","origin_channel":"c1"}"#,
             "twitch",
         )
         .unwrap();
-        assert_eq!(dm.op(), "dm.send");
+        assert_eq!(
+            dm,
+            OutboundAction::DmSend {
+                user_id: "u1".into(),
+                text: "hi".into(),
+                origin_channel: "c1".into()
+            }
+        );
+    }
+
+    /// A `dm.send` without the triggering channel is refused at parse time:
+    /// the community binding cannot be enforced without it.
+    #[test]
+    fn dm_send_requires_origin_channel() {
+        assert!(matches!(
+            parse_outbound(
+                r#"{"v":1,"op":"dm.send","user_id":"u1","text":"hi"}"#,
+                "discord"
+            ),
+            Err(OutboundParseError::MissingField {
+                op: "dm.send",
+                field: "origin_channel"
+            })
+        ));
+    }
+
+    #[test]
+    fn entry_carries_the_confirmation_handshake_fields() {
+        let entry = parse_outbound_entry(
+            r#"{"v":1,"op":"chat.delete","platform":"discord","channel":"1","message_id":"2","op_id":"abc-123","exp_ms":1700000000000}"#,
+            "discord",
+        )
+        .unwrap();
+        assert_eq!(entry.op_id.as_deref(), Some("abc-123"));
+        assert_eq!(entry.exp_ms, Some(1_700_000_000_000));
+        assert_eq!(entry.action.op(), "chat.delete");
+        let legacy = parse_outbound_entry(r##"{"channel":"#c","text":"hi"}"##, "twitch").unwrap();
+        assert_eq!((legacy.op_id, legacy.exp_ms), (None, None));
+    }
+
+    /// `op_id` becomes part of a Valkey key: anything but a short
+    /// alphanumeric/dash identifier is refused (no key-separator smuggling).
+    #[test]
+    fn unsafe_op_id_is_rejected() {
+        for bad in ["", "a:b", "../x", "a b", &"x".repeat(MAX_OP_ID_LEN + 1)] {
+            let raw = format!(
+                r#"{{"v":1,"op":"chat.delete","channel":"1","message_id":"2","op_id":{}}}"#,
+                serde_json::json!(bad)
+            );
+            assert!(
+                matches!(
+                    parse_outbound_entry(&raw, "discord"),
+                    Err(OutboundParseError::Malformed(_))
+                ),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ack_codes_are_stable_and_content_free() {
+        assert_eq!(
+            SenderError::Unsupported {
+                platform: "x".into(),
+                op: "dm.send"
+            }
+            .ack_code(),
+            "unsupported"
+        );
+        assert_eq!(
+            SenderError::Failed {
+                platform: "discord",
+                op: "dm.send",
+                message: "m".into()
+            }
+            .ack_code(),
+            "failed"
+        );
+        assert_eq!(
+            SenderError::Rejected {
+                platform: "discord",
+                op: "dm.send",
+                reason: "not_in_community"
+            }
+            .ack_code(),
+            "not_in_community"
+        );
     }
 
     #[test]
@@ -505,6 +716,7 @@ mod tests {
         let dm = OutboundAction::DmSend {
             user_id: "u".into(),
             text: "t".into(),
+            origin_channel: "c".into(),
         };
         for (platform, action, op) in [
             ("twitch", &del, "chat.delete"),
@@ -555,6 +767,26 @@ mod tests {
         DiscordRestClient::new(crate::config::Secret::new("tok"), server.uri()).unwrap()
     }
 
+    /// Mounts the community lookup the DM binding performs: origin channel
+    /// `1` belongs to guild `20`, in which user `3` is a member.
+    async fn mount_member_of_guild(server: &wiremock::MockServer) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        Mock::given(method("GET"))
+            .and(path("/channels/1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id":"1","guild_id":"20"})),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/guilds/20/members/3"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(server)
+            .await;
+    }
+
     /// The three Discord ops route through `PlatformSender` to the REST
     /// client (this is the "no longer Unsupported" proof).
     #[tokio::test]
@@ -586,6 +818,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
+        mount_member_of_guild(&server).await;
         let client = rest(&server);
         let irc = RecordingIrc::default();
         let twitch = TwitchSender::new(&irc);
@@ -602,6 +835,7 @@ mod tests {
             OutboundAction::DmSend {
                 user_id: "3".into(),
                 text: "hi".into(),
+                origin_channel: "1".into(),
             },
         ] {
             route("discord", &action, &twitch, &discord).await.unwrap();
@@ -618,9 +852,10 @@ mod tests {
             .respond_with(ResponseTemplate::new(403))
             .mount(&server)
             .await;
+        mount_member_of_guild(&server).await;
         let client = rest(&server);
         let err = DiscordSender::new(&client)
-            .send_dm("3", "secret body")
+            .send_dm("3", "secret body", "1")
             .await
             .unwrap_err();
         match err {
@@ -662,8 +897,56 @@ mod tests {
             })
         ));
         assert!(matches!(
-            d.send_dm("1", "x").await,
+            d.send_dm("1", "x", "1").await,
             Err(SenderError::Failed { op: "dm.send", .. })
         ));
+    }
+
+    /// A DM target outside the triggering community is the distinct
+    /// `Rejected { not_in_community }` outcome, never a send and never a
+    /// generic `Failed`.
+    #[tokio::test]
+    async fn discord_dm_to_a_non_member_is_rejected_and_never_sent() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/channels/1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id":"1","guild_id":"20"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/guilds/20/members/3"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_json(serde_json::json!({"code":10007})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/users/@me/channels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"5"})))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let client = rest(&server);
+        let err = DiscordSender::new(&client)
+            .send_dm("3", "x", "1")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SenderError::Rejected {
+                    platform: "discord",
+                    op: "dm.send",
+                    reason: "not_in_community"
+                }
+            ),
+            "{err}"
+        );
+        assert_eq!(err.ack_code(), "not_in_community");
     }
 }

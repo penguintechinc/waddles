@@ -8,7 +8,14 @@
 //! |---------------|-----------------------------------------------------------------------|
 //! | `chat.send`   | `POST /channels/{channel_id}/messages`                                |
 //! | `chat.delete` | `DELETE /channels/{channel_id}/messages/{message_id}`                 |
-//! | `dm.send`     | `POST /users/@me/channels {recipient_id}` then `POST` to that channel |
+//! | `dm.send`     | `GET /channels/{origin}` -> `guild_id`, `GET /guilds/{guild}/members/{user}` (membership gate), then `POST /users/@me/channels {recipient_id}` and `POST` to that channel |
+//!
+//! **DM target binding.** A bundle names the DM recipient, so on its own it
+//! could DM any user the shared bot account can reach, across tenants. The
+//! community-bound send ([`DiscordRestClient::send_dm_in_community`]) only
+//! delivers to a user who is a member of the guild the triggering event's
+//! channel belongs to; a non-member, a channel with no guild, or a failed
+//! membership lookup is refused (fail closed) before any DM channel is opened.
 //!
 //! **Token handling.** The token is a [`Secret`] (redacted `Debug`), is only
 //! ever placed in the `Authorization` header, and never appears in a log
@@ -52,6 +59,19 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// no shared guild / blocked).
 const CODE_CANNOT_DM_USER: u64 = 50007;
 
+/// Discord error codes for "Unknown Member" / "Unknown User" -- the
+/// membership lookup's "this user is not in the guild" answer.
+const CODE_UNKNOWN_MEMBER: u64 = 10007;
+const CODE_UNKNOWN_USER: u64 = 10013;
+
+/// How long a channel -> guild resolution is cached. A channel never moves
+/// between guilds, so this only bounds staleness after a channel deletion.
+const GUILD_CACHE_TTL: Duration = Duration::from_secs(600);
+
+/// Upper bound on cached channel -> guild entries; the cache is cleared
+/// wholesale when full (it is a latency optimisation, never a source of truth).
+const GUILD_CACHE_MAX: usize = 1024;
+
 /// A Discord REST call failure. `Display` never includes the token or any
 /// message content.
 #[derive(Debug, thiserror::Error)]
@@ -66,6 +86,11 @@ pub enum DiscordRestError {
     /// The recipient cannot be DM'd (closed DMs, blocked, no shared guild).
     #[error("discord user cannot be direct-messaged (status {status}, code {code:?})")]
     CannotDm { status: u16, code: Option<u64> },
+    /// The DM target is not a member of the guild the triggering event's
+    /// channel belongs to (or that channel has no guild at all). Policy
+    /// refusal, raised before any DM channel is opened.
+    #[error("discord dm target is not a member of the triggering community")]
+    NotInCommunity,
     /// Rate limited and the bounded retry budget/wait was exhausted.
     #[error("discord rate limited (retry_after {retry_after_ms}ms, {attempts} attempts)")]
     RateLimited { retry_after_ms: u64, attempts: u32 },
@@ -95,6 +120,8 @@ pub struct DiscordRestClient {
     max_wait: Duration,
     /// Route key -> instant before which the bucket is exhausted.
     buckets: Mutex<HashMap<String, Instant>>,
+    /// Channel id -> (guild id, cached-at); see [`GUILD_CACHE_TTL`].
+    guilds: Mutex<HashMap<String, (String, Instant)>>,
 }
 
 impl DiscordRestClient {
@@ -116,6 +143,7 @@ impl DiscordRestClient {
             max_retries: MAX_RATE_LIMIT_RETRIES,
             max_wait: MAX_RETRY_WAIT,
             buckets: Mutex::new(HashMap::new()),
+            guilds: Mutex::new(HashMap::new()),
         })
     }
 
@@ -207,6 +235,120 @@ impl DiscordRestClient {
             )
             .await?;
         ensure_success(&sent, true)
+    }
+
+    /// `dm.send` bound to a community: delivers `text` to `user_id` only if
+    /// `user_id` is a member of the guild that `origin_channel_id` (the
+    /// channel of the event that triggered the bundle) belongs to.
+    ///
+    /// # Errors
+    /// [`DiscordRestError::NotInCommunity`] when the channel has no guild or
+    /// the user is not a member; any lookup failure (permissions, 5xx,
+    /// transport) is returned as-is and nothing is sent -- fail closed.
+    /// Otherwise as for [`Self::send_dm`].
+    pub async fn send_dm_in_community(
+        &self,
+        origin_channel_id: &str,
+        user_id: &str,
+        text: &str,
+    ) -> Result<(), DiscordRestError> {
+        require_snowflake(origin_channel_id, "origin_channel_id")?;
+        require_snowflake(user_id, "user_id")?;
+        require_content(text)?;
+        let Some(guild_id) = self.guild_of_channel(origin_channel_id).await? else {
+            tracing::warn!(
+                platform = "discord",
+                op = "dm.send",
+                channel_id = origin_channel_id,
+                "dm target refused: origin channel has no guild"
+            );
+            return Err(DiscordRestError::NotInCommunity);
+        };
+        if !self.is_guild_member(&guild_id, user_id).await? {
+            tracing::warn!(
+                platform = "discord",
+                op = "dm.send",
+                guild_id = %guild_id,
+                "dm target refused: not a member of the triggering guild"
+            );
+            return Err(DiscordRestError::NotInCommunity);
+        }
+        self.send_dm(user_id, text).await
+    }
+
+    /// Resolves the guild a channel belongs to (`GET /channels/{id}` ->
+    /// `guild_id`), cached for [`GUILD_CACHE_TTL`]. `None` for a channel
+    /// with no guild (a DM / group DM).
+    async fn guild_of_channel(&self, channel_id: &str) -> Result<Option<String>, DiscordRestError> {
+        if let Some((guild_id, cached_at)) = self
+            .guilds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(channel_id)
+            .cloned()
+        {
+            if cached_at.elapsed() < GUILD_CACHE_TTL {
+                return Ok(Some(guild_id));
+            }
+        }
+        let resp = self
+            .execute(
+                "dm.send",
+                Method::GET,
+                format!("/channels/{channel_id}"),
+                "GET /channels".to_string(),
+                None,
+            )
+            .await?;
+        ensure_success(&resp, false)?;
+        let guild_id = serde_json::from_slice::<serde_json::Value>(&resp.body)
+            .map_err(|_| DiscordRestError::BadResponse("channel response is not JSON"))?
+            .get("guild_id")
+            .and_then(|g| g.as_str())
+            .map(str::to_string);
+        match guild_id {
+            Some(guild_id) if is_snowflake(&guild_id) => {
+                let mut cache = self
+                    .guilds
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if cache.len() >= GUILD_CACHE_MAX {
+                    cache.clear();
+                }
+                cache.insert(channel_id.to_string(), (guild_id.clone(), Instant::now()));
+                Ok(Some(guild_id))
+            }
+            Some(_) => Err(DiscordRestError::BadResponse("channel guild_id malformed")),
+            None => Ok(None),
+        }
+    }
+
+    /// Whether `user_id` is a member of `guild_id`
+    /// (`GET /guilds/{guild}/members/{user}`): `200` yes; `404` with Discord's
+    /// "Unknown Member"/"Unknown User" code no; anything else is an error
+    /// (never read as "no" or "yes").
+    async fn is_guild_member(
+        &self,
+        guild_id: &str,
+        user_id: &str,
+    ) -> Result<bool, DiscordRestError> {
+        let resp = self
+            .execute(
+                "dm.send",
+                Method::GET,
+                format!("/guilds/{guild_id}/members/{user_id}"),
+                format!("GET /guilds/{guild_id}/members"),
+                None,
+            )
+            .await?;
+        let code = serde_json::from_slice::<serde_json::Value>(&resp.body)
+            .ok()
+            .and_then(|v| v.get("code").and_then(serde_json::Value::as_u64));
+        if resp.status == 404 && matches!(code, Some(CODE_UNKNOWN_MEMBER | CODE_UNKNOWN_USER)) {
+            return Ok(false);
+        }
+        ensure_success(&resp, false)?;
+        Ok(true)
     }
 
     /// Sends one request honoring the per-route bucket and bounded `429`
@@ -713,5 +855,167 @@ mod tests {
     fn retry_after_defaults_to_one_second_when_absent() {
         let h = reqwest::header::HeaderMap::new();
         assert_eq!(parse_retry_after(&h, b"not json"), Duration::from_secs(1));
+    }
+
+    /// Mounts the origin-channel -> guild lookup (`channel` 100 -> guild 200).
+    async fn mount_guild_lookup(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/channels/100"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id":"100","guild_id":"200"})),
+            )
+            .mount(server)
+            .await;
+    }
+
+    /// Mounts the open-DM + post-to-DM-channel pair, each expected `times`.
+    async fn mount_dm_pair(server: &MockServer, times: u64) {
+        Mock::given(method("POST"))
+            .and(path("/users/@me/channels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"999"})))
+            .expect(times)
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/channels/999/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"5"})))
+            .expect(times)
+            .mount(server)
+            .await;
+    }
+
+    /// A member of the triggering guild is DM'd: channel -> guild ->
+    /// membership -> open DM -> post, each exactly once.
+    #[tokio::test]
+    async fn send_dm_in_community_delivers_to_a_guild_member() {
+        let server = MockServer::start().await;
+        mount_guild_lookup(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/guilds/200/members/777"))
+            .and(header("Authorization", format!("Bot {TOKEN}").as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_dm_pair(&server, 1).await;
+        client(&server)
+            .send_dm_in_community("100", "777", "psst")
+            .await
+            .unwrap();
+    }
+
+    /// Cross-tenant DM regression: a user who is NOT in the triggering
+    /// guild is refused with `NotInCommunity` and no DM channel is opened.
+    #[tokio::test]
+    async fn send_dm_in_community_refuses_a_non_member_and_opens_no_dm() {
+        let server = MockServer::start().await;
+        mount_guild_lookup(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/guilds/200/members/777"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_json(serde_json::json!({"code":10007})),
+            )
+            .mount(&server)
+            .await;
+        mount_dm_pair(&server, 0).await;
+        let err = client(&server)
+            .send_dm_in_community("100", "777", "psst")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DiscordRestError::NotInCommunity));
+    }
+
+    /// An origin channel with no guild (a DM / group DM) can never be a
+    /// community: refused, nothing sent.
+    #[tokio::test]
+    async fn send_dm_in_community_refuses_a_channel_without_a_guild() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/channels/100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"100"})))
+            .mount(&server)
+            .await;
+        mount_dm_pair(&server, 0).await;
+        let err = client(&server)
+            .send_dm_in_community("100", "777", "psst")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DiscordRestError::NotInCommunity));
+    }
+
+    /// Fail closed: a membership lookup that errors (here a 403 "Missing
+    /// Access") is neither "member" nor "non-member" -- it is returned as an
+    /// error and nothing is sent.
+    #[tokio::test]
+    async fn send_dm_in_community_fails_closed_when_membership_lookup_errors() {
+        let server = MockServer::start().await;
+        mount_guild_lookup(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/guilds/200/members/777"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_json(serde_json::json!({"code":50001})),
+            )
+            .mount(&server)
+            .await;
+        mount_dm_pair(&server, 0).await;
+        let err = client(&server)
+            .send_dm_in_community("100", "777", "psst")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            DiscordRestError::Status {
+                status: 403,
+                code: Some(50001)
+            }
+        ));
+    }
+
+    /// The channel -> guild resolution is cached: two DMs from the same
+    /// channel cost one `GET /channels/{id}`.
+    #[tokio::test]
+    async fn guild_lookup_is_cached_across_dms() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/channels/100"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id":"100","guild_id":"200"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/guilds/200/members/777"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(2)
+            .mount(&server)
+            .await;
+        mount_dm_pair(&server, 2).await;
+        let c = client(&server);
+        c.send_dm_in_community("100", "777", "a").await.unwrap();
+        c.send_dm_in_community("100", "777", "b").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn send_dm_in_community_validates_ids_before_any_request() {
+        let server = MockServer::start().await; // no mocks: any request would 404
+        let c = client(&server);
+        assert!(matches!(
+            c.send_dm_in_community("../x", "777", "hi").await,
+            Err(DiscordRestError::InvalidId {
+                field: "origin_channel_id"
+            })
+        ));
+        assert!(matches!(
+            c.send_dm_in_community("100", "u", "hi").await,
+            Err(DiscordRestError::InvalidId { field: "user_id" })
+        ));
+        assert!(matches!(
+            c.send_dm_in_community("100", "777", "").await,
+            Err(DiscordRestError::EmptyContent)
+        ));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }

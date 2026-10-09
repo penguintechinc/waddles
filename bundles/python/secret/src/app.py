@@ -11,13 +11,27 @@ secret is safely stored):
    `secret_messaging:create`, service token injected by the stage as the
    `Authorization` header via secret-ref -- it never enters the guest);
    failure -> error reply, original message untouched;
-3. emit a `chat.delete` op for the event's message; failure -> error reply and
-   NO DM (the text is still public, tell the sender);
+3. emit a `chat.delete` op for the event's message and require its
+   CONFIRMATION; anything short of confirmed -> error reply and NO DM (the
+   text may still be public, tell the sender);
 4. emit a `dm.send` op with `<webui>/secret#<token>` -- the token rides in the
-   URL fragment (never sent to a server/access log) of the webui page (#721).
+   URL fragment (never sent to a server/access log) of the webui page (#721) --
+   and require its confirmation too.
 
-If the DM fails after the delete, the sender is told delivery failed; the
-stored secret simply expires (its link was never shared).
+**"Queued" is not "done".** The WIT `relay.push` returns nothing to the guest;
+it only raises. For `chat.delete`/`dm.send` the host does not return from
+`relay.push` until the platform has CONFIRMED the op (the outbound drain
+executes it and reports back), and it raises when the drain is not running, the
+platform refuses (e.g. the DM target is not in this community, DMs closed, rate
+limit), or no confirmation arrives in time. So a normal return from `_push` IS
+the confirmation, and every other outcome lands in the `except` below -- this
+bundle therefore never DMs a link while the plaintext may still be public, and
+never tells the sender "delivered" for a DM that was not.
+
+If the delete is unconfirmed the sender is told the secret was NOT delivered
+and to delete their message themselves; the stored secret simply expires (its
+link was never shared). If the DM fails after the delete, the sender is told
+delivery failed; the same expiry applies.
 
 Identity limitation (hub-UUID resolver #429 not landed): `<username>` is
 resolved through a community-kv index `secret.target.<sha256(lower(name))>`
@@ -65,7 +79,10 @@ _MAX_MESSAGE_CHARS = 4000
 _ERR_UNSUPPORTED = "Secret messaging isn't supported on this platform; nothing was sent."
 _ERR_TARGET = "That user isn't linked for secret messaging; nothing was sent."
 _ERR_STORE = "Couldn't store the secret; your message was left as-is."
-_ERR_DELETE = "Couldn't remove your message, so the secret was NOT delivered."
+_ERR_DELETE = (
+    "Couldn't confirm your message was removed, so the secret was NOT delivered; "
+    "please delete your message yourself."
+)
 _ERR_DM = "Your message was removed but the DM failed; please resend."
 _OK = "Secret delivered by DM."
 
@@ -183,7 +200,13 @@ async def _store_secret(
 
 
 async def _push(platform: str, op: dict[str, Any], *, community: str, fail: SecretFlowError) -> None:
-    """Emit one outbound op over `relay`; any failure becomes `fail` (PII-free log)."""
+    """Emit one outbound op over `relay` and return only once the host CONFIRMED it.
+
+    The host call blocks until the platform confirmed the op and raises
+    otherwise (drain down, platform refusal, no confirmation in time), so a
+    normal return means "done", not merely "queued". Any raise becomes `fail`
+    (PII-free log: op / community / exception type only).
+    """
     try:
         await relay.push(platform, {"v": 1, "platform": platform, **op})
     except Exception as exc:  # noqa: BLE001 -- host error union, classified by type name only

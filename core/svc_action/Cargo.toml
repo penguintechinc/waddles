@@ -116,7 +116,15 @@ rustls-pki-types = "=1.15.1"
 # operation is envelope-typed (`SpineClient::append` requires a
 # `StageEnvelope`), so this is a second, direct `redis` connection, same
 # crate/feature pins `penguin-spine` itself uses internally.
-redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp"] }
+# `script` for the atomic fixed-window counter behind the `dm.send` throttle
+# (`capabilities::INCR_WINDOW_SCRIPT`) -- already compiled in via
+# `bundle-host-kv`'s own redis dependency; declared here too so this crate
+# never relies on cargo feature unification for it.
+redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp", "script"] }
+# Unguessable id for each queued Discord op's confirmation handshake
+# (`capabilities::handle_discord_queued_op`'s `op_id`). Already in this
+# crate's lockfile transitively at the same exact version.
+uuid = { version = "=1.26.1", features = ["v4"] }
 # The DB-driven active-bundle loader's shared, read-only Postgres query +
 # diff logic (`src/bundle_loader.rs`) -- a same-repo `path` dependency, NOT
 # a `penguin-libs` git dependency: this schema
