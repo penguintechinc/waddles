@@ -86,6 +86,7 @@ module's own lazy-bind call pattern.
 
 from __future__ import annotations
 
+import uuid as _uuid
 from typing import Any
 
 from pydal import Field
@@ -117,7 +118,16 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         # gen_random_uuid()`; bound here as `string` (not a pydal-native
         # `uuid` type) to stay portable to the sqlite test backend, which
         # has no UUID column type of its own.
-        Field("uuid", "string", length=36, notnull=True, unique=True),
+        # `default` mints a v4 UUID client-side so every insert path (sqlite
+        # test backend, which has no server-side default) satisfies NOT NULL.
+        Field(
+            "uuid",
+            "string",
+            length=36,
+            notnull=True,
+            unique=True,
+            default=lambda: str(_uuid.uuid4()),
+        ),
         Field("display_name", "string", length=255),
         Field("username", "string", length=255),
         Field("email", "string", length=255),
