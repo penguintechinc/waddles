@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-social"
-version = "1.0.0"
+version = "1.0.2"
 description = "`!hug`/`!highfive`/`!pat <user>` -> fun social interaction commands, community-scoped, kv-only v1 (flavor-text reply, given/received counters, `!social stats` rollup). Inspired by PenguinTwitchBot's social command category, original implementation."
 requires-python = ">=3.13"
 dependencies = []

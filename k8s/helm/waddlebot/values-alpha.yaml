@@ -82,9 +82,17 @@ infrastructure:
       type: ClusterIP
     persistence:
       size: 2Gi
+    # fix/seaweedfs-mem-httpprobe -- the former 512Mi limit OOMKilled under
+    # bundle-seed load (observed twice on alpha); on restart the S3 HTTP
+    # handler on s3Port wedged (TCP accepts, HTTP hangs) while the old
+    # tcpSocket-only probes stayed green, stalling the seeder's .wasm
+    # uploads. Raised to match values.yaml's base tier (proven-good via a
+    # live patch + restart: fast HTTP 403 confirmed, no more OOMKill under
+    # the same seed load) rather than carrying a separate, lower alpha tier
+    # for this one service.
     resources:
-      requests: { cpu: "50m", memory: "128Mi" }
-      limits: { cpu: "300m", memory: "512Mi" }
+      requests: { cpu: "200m", memory: "256Mi" }
+      limits: { cpu: "1000m", memory: "1Gi" }
     # feature/seaweedfs-object-storage -- alpha is exempt from the beta/gamma/production
     # fail guard (templates/infrastructure/seaweedfs.yaml) and may reference this
     # well-known secret name; the Secret itself is never committed -- provision it once
@@ -190,12 +198,29 @@ pipeline:
     # memory.peak) seeding both ping.wasm/pyping.wasm sequentially: ~218Mi.
     # Raised to 256Mi/512Mi (~1.5x peak headroom). Reconcile/drop this block if
     # fix/seeder-memory (PR #515) lands first.
+    #
+    # fix/seeder-throughput: this 100m/300m CPU override (unrelated to the memory
+    # fix above) was the real bottleneck across 3 deploy attempts (13->15->24 of
+    # ~39 bundles seeded) -- real per-bundle work (component inspect/stage/publish,
+    # catalog install, source-binding sync, Ed25519 signing) got throttled to
+    # ~75s/bundle instead of the ~20s assumed by values.yaml's activeDeadlineSeconds
+    # comment, so the Job hit its deadline partway through every run and the
+    # capability-grants phase (which only runs after seeding completes) never
+    # executed. Raised to 1000m/2000m so the one-shot hook can use the alpha
+    # node's spare headroom instead of being CFS-throttled.
     resources:
-      requests: { cpu: "100m", memory: "256Mi" }
-      limits: { cpu: "300m", memory: "512Mi" }
+      requests: { cpu: "1000m", memory: "256Mi" }
+      limits: { cpu: "2000m", memory: "512Mi" }
   hubWebui:
     enabled: true
     replicas: 1
+    # Direct host-IP access for testers (http://<node-ip>:30879, no /etc/hosts or
+    # Host-header needed) -- port matches webui.publicUrl/connectionsCallbackBaseUrl
+    # above, which already assumed this NodePort. Ingress (waddles.localhost.local)
+    # keeps working unchanged alongside it -- see templates/hub-webui.yaml.
+    nodePort:
+      enabled: true
+      port: 30879
     resources:
       requests: { cpu: "50m", memory: "64Mi" }
       limits: { cpu: "200m", memory: "256Mi" }
@@ -241,11 +266,14 @@ pipeline:
   # Rust stack below. Still requires, via --reuse-values or an ephemeral
   # secrets file (never committed, critical-rules.md Token & Secret Hygiene):
   #   1. global.envelopeBindingKeys (kid e2e1) -- HMAC key material, secret, never committed.
-  #   2. feature/bundle-artifact-signing -- `make generate-bundle-signing-key KEY_ID=... \
-  #      KUBE_CONTEXT=local-prealpha NAMESPACE=waddlebot` BEFORE this executor starts (it
-  #      fails closed with no configured platform key, `PlatformPublicKeys::
-  #      from_cli_required`), then set pipeline.rustDataPlane.bundleSigningPublicKeys below
-  #      to the printed `key_id: public_key` pair -- see the chart README's rollout order.
+  # fix/chart-autogen-bundle-signing-key -- item 2 (feature/bundle-artifact-signing's
+  # manual `make generate-bundle-signing-key` + hand-set bundleSigningPublicKeys below)
+  # is REMOVED: templates/auto-provisioned-keys-job.yaml's pre-install/pre-upgrade hook
+  # now generates the `waddlebot-bundle-signing` Secret itself on alpha/local and
+  # publishes its public key into the `waddlebot-bundle-signing-public` ConfigMap, which
+  # templates/bundle-executor.yaml/bundle-executor-action.yaml source
+  # BUNDLE_SIGNING_PUBLIC_KEYS from directly -- no manual step before the executor(s)
+  # start. See the chart README's "Bundle Artifact Signing Rollout Order" section.
   # global.hostApiTls real mTLS material is NO LONGER a manual --set-file requirement here
   # (fix/alpha-host-api-tls) -- templates/host-api-tls-secret.yaml self-provisions it on
   # alpha/local (lookup-then-generate, same policy as global.valkeyTls), so
@@ -253,10 +281,10 @@ pipeline:
   # insecureDev escape hatch needed (unlike global.grpcTls).
   rustDataPlane:
     enabled: true
-    # OVERRIDE REQUIRED via --set/--set-file before the executor(s) will start signature
-    # verification successfully -- see the numbered comment above (item 3) and
-    # scripts/generate-bundle-signing-key.sh. Left empty here (never a real key
-    # committed): e.g. --set pipeline.rustDataPlane.bundleSigningPublicKeys.e2e1=<base64 pubkey>
+    # Left empty: no longer required (see comment above) -- the executor(s) now source
+    # BUNDLE_SIGNING_PUBLIC_KEYS from the auto-provisioned ConfigMap by default. Only
+    # set this explicitly to pin a specific key (e.g. multi-key rotation): e.g.
+    # --set pipeline.rustDataPlane.bundleSigningPublicKeys.e2e1=<base64 pubkey>
     bundleSigningPublicKeys: {}
     svcIngest:
       replicas: 1
@@ -397,6 +425,15 @@ presentation:
   # Matches pipeline.svcStreaming.publicBaseUrl above -- same media NodePort host, so
   # live_stream.py's browser-facing HLS URLs resolve off-laptop like svc-streaming's own.
   publicStreamingUrl: "http://192.168.10.75:31208"
+  # chore/deploy-svc-presentation-rust-alpha -- deploy the Rust svc-presentation (overlay +
+  # image surface) instead of the Python one. Overlay view/SSE port reachable on-host at
+  # localhost:31032 (same NodePort the Python service held). Image built by
+  # scripts/alpha-deploy.sh as svc-presentation-rust:<SHA8> (global.imageTag).
+  rust:
+    enabled: true
+    nodePort:
+      enabled: true
+      port: 31032
 
 # Issue #287 -- svc-streaming (Rust) image, built locally + pushed to the local registry
 # (no CI image for it yet), same as every other alpha module.

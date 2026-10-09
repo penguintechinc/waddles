@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-slap"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!slap [target]` -> a lighthearted, comically-harmless slap-with-a-trout flavor-text reply, relayed back to the caller's own origin platform. Relay only, no kv/db state. Python equivalent of bundles/python/pyping, modeled on bundles/python/eightball's hand-built structure."
 requires-python = ">=3.13"
 dependencies = []

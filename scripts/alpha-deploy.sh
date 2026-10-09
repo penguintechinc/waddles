@@ -254,7 +254,9 @@ service_dockerfile() {
         svc-action) echo "core/svc_action/Dockerfile.rust" ;;
         waddlebot-egress-proxy) echo "core/egress_proxy/Dockerfile.rust" ;;
         reputation-module) echo "core/reputation_module/Dockerfile" ;;
-        svc-presentation) echo "core/svc_presentation/Dockerfile" ;;
+        # chore/deploy-svc-presentation-rust-alpha -- Rust svc-presentation (values-alpha.yaml
+        # presentation.rust.enabled); Dockerfile.rust builds from the "core" context.
+        svc-presentation) echo "core/svc_presentation/Dockerfile.rust" ;;
         svc-streaming) echo "core/svc_streaming/Dockerfile.rust" ;;
         # fix/alpha-deploy-executor-and-failfast -- core/bundle_executor/Dockerfile.rust
         # now exists; this crate backs BOTH the bundle-executor and bundle-executor-action
@@ -269,9 +271,9 @@ service_context() {
     case "$1" in
         # bundle-executor's Dockerfile COPYs core/bundle_executor AND wit/ from the repo
         # root (see its own header comment) -- same "." context as hub-api et al.
-        hub-api|hub-webui|waddlebot-migrations|core-bundle-seeder|reputation-module|svc-presentation|bundle-executor) echo "." ;;
+        hub-api|hub-webui|waddlebot-migrations|core-bundle-seeder|reputation-module|bundle-executor) echo "." ;;
         svc-ingest) echo "core/svc_ingest" ;;
-        svc-process|svc-action|waddlebot-egress-proxy) echo "core" ;;
+        svc-process|svc-action|waddlebot-egress-proxy|svc-presentation) echo "core" ;;
         svc-streaming) echo "core/svc_streaming" ;;
         *) err "unknown service: $1"; exit 1 ;;
     esac
@@ -285,6 +287,7 @@ service_image_repo() {
         svc-ingest) echo "svc-ingest-rust" ;;
         svc-process) echo "svc-process-rust" ;;
         svc-action) echo "svc-action-rust" ;;
+        svc-presentation) echo "svc-presentation-rust" ;;
         *) echo "$1" ;;
     esac
 }
@@ -298,7 +301,7 @@ service_image_repo() {
 # stale-mutable-`:alpha`-tag bug this fix addresses.
 service_image_tag() {
     case "$1" in
-        reputation-module|svc-presentation|svc-streaming) echo "alpha" ;;
+        reputation-module|svc-streaming) echo "alpha" ;;
         *) echo "${SHA8}" ;;
     esac
 }
@@ -523,6 +526,16 @@ check_images_in_registry
 # correct order instead (db-migrate Job first, Deployment rollouts after),
 # which is race-free by construction.
 # ---------------------------------------------------------------------------
+# fix/seeder-throughput -- core-bundle-seeder-job.yaml is a post-install/
+# post-upgrade Helm hook (helm.sh/hook); Helm always waits on hook completion
+# using the --timeout flag below, a separate mechanism from the omitted flags
+# discussed above (those govern waiting on normal resource readiness, not
+# hooks). The previous default (5m) was shorter than
+# pipeline.coreBundleSeeder.activeDeadlineSeconds (3000s/50min), so `helm
+# upgrade` gave up and errored out while the Job was still healthy and
+# seeding. HELM_ARGS now sets an explicit 60m to give headroom above the
+# Job's own deadline.
+# ---------------------------------------------------------------------------
 helm lint "${HELM_CHART}" -f "${HELM_CHART}/values-alpha.yaml"
 
 HELM_ARGS=(
@@ -531,6 +544,7 @@ HELM_ARGS=(
     --namespace "${NAMESPACE}" --create-namespace
     --values "${HELM_CHART}/values-alpha.yaml"
     --set-string "global.imageTag=${SHA8}"
+    --timeout 60m
 )
 
 info "helm upgrade --dry-run validation"

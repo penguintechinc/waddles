@@ -60,6 +60,7 @@ import re
 import sys
 import unicodedata
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -83,7 +84,15 @@ from services.bundle_permission_service import (
     seed_core_permission_requests,
 )
 from services.bundle_telemetry import get_meter
-from services.bundle_version_service import create_version, process_prebuilt_component
+from services.bundle_version_service import (
+    STATUS_ADDRESSING,
+    STATUS_INSPECTING,
+    STATUS_REJECTED,
+    STATUS_UPLOADED,
+    STATUS_VALIDATING,
+    create_version,
+    process_prebuilt_component,
+)
 from services.errors import ApiError
 from services.ingest_source_service import ensure_ingest_source
 from services.tenant_app_availability_service import set_available
@@ -149,6 +158,124 @@ _APP_ID_CHARSET_RE = re.compile(r"^[a-z0-9]+(\.[a-z0-9-]+)+$")
 #: found, stalled_core_bundle_upload, ...) still fails the run -- those genuinely need a
 #: human to intervene before the row they describe can ever resolve itself.
 RECOVERABLE_API_ERROR_CODES = frozenset({"digest_conflict"})
+
+#: Env var: how old (seconds) an orphaned `waddles.core.*` `app_version_uploads` row's own
+#: `status_changed_at` must be before `_recover_stalled_core_upload()` resets it, rather than
+#: deferring to the generic `stalled_core_bundle_upload` fail-loud path below.
+#:
+#: Deliberately far shorter than `bundle_version_service.BUNDLE_UPLOAD_STALL_TIMEOUT_SECONDS`
+#: (15m default, sized for vendor uploads where multiple human/API clients can genuinely be
+#: mid-upload at once): this seeder is a single-shot, non-concurrent CLI process -- `seed_one()`
+#: is called exactly once per catalog entry per run, and `_resolve_or_publish_version()` is the
+#: FIRST write this process ever attempts against a given `(app_id, version)`'s own upload row.
+#: Any pre-existing non-terminal row found here was therefore left behind by a DIFFERENT process
+#: invocation -- the real alpha incident this fixes: a prior seeder pod crashed mid-INSPECTING
+#: (e.g. after a SeaweedFS blip), Kubernetes restarted the Job per its own `backoffLimit` within
+#: minutes, well inside the 15m general-purpose window above, which never got a chance to fire
+#: and self-heal it first. The short grace window below is pure defense-in-depth against a
+#: genuinely-overlapping SECOND seeder Job (e.g. a Helm hook firing twice) -- it is not there to
+#: wait out this run's own in-flight work, which never reaches this branch to begin with.
+CORE_SEEDER_STALL_RECOVERY_SECONDS_ENV = "CORE_BUNDLE_SEEDER_STALL_RECOVERY_SECONDS"
+_DEFAULT_CORE_SEEDER_STALL_RECOVERY_SECONDS = 30
+
+#: Non-terminal `app_version_uploads.status` values the core-bundle seeder's own pre-built-
+#: component path (`bundle_version_service.process_prebuilt_component()`: UPLOADED ->
+#: VALIDATING -> INSPECTING -> ADDRESSING -> PUBLISHED) can ever leave a row at mid-pipeline.
+#: Listed explicitly, never "anything not PUBLISHED/REJECTED" -- a state-machine change
+#: elsewhere must not silently widen what this seeder is willing to auto-recover.
+_RECOVERABLE_UPLOAD_STATUSES = frozenset(
+    {STATUS_UPLOADED, STATUS_VALIDATING, STATUS_INSPECTING, STATUS_ADDRESSING}
+)
+
+
+def _core_seeder_stall_recovery_seconds() -> int:
+    """The configurable grace window (default 30s), re-read per call so tests can monkeypatch."""
+    raw = os.environ.get(CORE_SEEDER_STALL_RECOVERY_SECONDS_ENV, "")
+    try:
+        return int(raw) if raw else _DEFAULT_CORE_SEEDER_STALL_RECOVERY_SECONDS
+    except ValueError:
+        # A malformed env var is an operator misconfiguration, not an expected empty/unset
+        # value (that path never reaches `int(raw)` -- see the `if raw` guard above) -- logged
+        # so a bad deploy-time override is visible instead of silently reverting to the
+        # default with no trace (critical-rules.md Fail-Loud Code Paths).
+        logger.warning(
+            "core-bundle-seeder: invalid %s=%r, falling back to default %ds",
+            CORE_SEEDER_STALL_RECOVERY_SECONDS_ENV,
+            raw,
+            _DEFAULT_CORE_SEEDER_STALL_RECOVERY_SECONDS,
+            extra={"env_var": CORE_SEEDER_STALL_RECOVERY_SECONDS_ENV, "raw_value": raw},
+        )
+        return _DEFAULT_CORE_SEEDER_STALL_RECOVERY_SECONDS
+
+
+async def _recover_stalled_core_upload(install_dal: AsyncDB, *, app_id: str, version: str) -> bool:
+    """Reset an orphaned, genuinely-stalled `app_version_uploads` row so re-seeding can proceed.
+
+    Called only after `create_version()` has already refused `(app_id, version)` with a 409
+    `CONFLICT` -- i.e. a row for this core bundle exists and is not already `REJECTED`. Returns
+    `True` once the row has been reset to `REJECTED` (safe to retry `create_version()`, which
+    then takes the already-tested REJECTED-row-reuse path -- see that function's own docstring),
+    `False` if this row is NOT a safe self-heal candidate, in which case the caller must fail
+    loudly rather than ever guessing.
+
+    Refuses to touch anything except exactly the shape this seeder itself could have left
+    behind:
+
+      - Exactly one matching row -- `app_version_uploads` has `UNIQUE(app_id, version)`, so more
+        than one is a schema-level impossibility, treated as ambiguous rather than picking one.
+      - `status` is one of `_RECOVERABLE_UPLOAD_STATUSES`. A `PUBLISHED` upload row is the one
+        way this function is ever reached with a terminal status -- `_resolve_or_publish_version`
+        already checked `app_versions` directly first and only reaches `create_version()` when
+        no published `app_versions` row exists -- so a `PUBLISHED` `app_version_uploads` row
+        here means the two tables disagree: a genuine data-integrity gap, never auto-resolved.
+      - `status_changed_at` (falling back to `updated_at`/`created_at`, same convention
+        `create_version()`'s own general stall check uses) is older than
+        `CORE_BUNDLE_SEEDER_STALL_RECOVERY_SECONDS` (default 30s) -- see that env var's own
+        docstring for why this window is so much shorter than the general-purpose one.
+
+    Never raises -- a `False` return always leaves the row completely untouched; the caller
+    decides what to do about it (fail loudly, in every current call site).
+    """
+    rows = await install_dal(
+        (install_dal.app_version_uploads.app_id == app_id)
+        & (install_dal.app_version_uploads.version == version)
+    ).select()
+    if len(rows) != 1:
+        return False
+    row = rows.first()
+    if row is None or row.status not in _RECOVERABLE_UPLOAD_STATUSES:
+        return False
+
+    status_ts = row.status_changed_at or row.updated_at or row.created_at
+    if status_ts.tzinfo is None:
+        status_ts = status_ts.replace(tzinfo=UTC)
+    now = datetime.now(UTC)
+    age_seconds = (now - status_ts).total_seconds()
+    if age_seconds < _core_seeder_stall_recovery_seconds():
+        return False
+
+    await install_dal(install_dal.app_version_uploads.id == row.id).update(
+        status=STATUS_REJECTED,
+        reject_reason=(
+            f"stalled: core-bundle-seeder self-heal, orphaned {row.status} row "
+            f"(age={int(age_seconds)}s) left by an earlier crashed/killed seeder run"
+        ),
+        updated_at=now,
+        status_changed_at=now,
+    )
+    # PII-free by construction -- app_id/version/upload_id/status/age only, no user data,
+    # see this repo's own "bundle logs must be PII-free" convention.
+    logger.warning(
+        "core-bundle-seeder: recovered an orphaned stalled upload row",
+        extra={
+            "app_id": app_id,
+            "version": version,
+            "upload_id": row.id,
+            "prior_status": row.status,
+            "age_seconds": int(age_seconds),
+        },
+    )
+    return True
 
 
 @dataclass(slots=True, frozen=True)
@@ -487,7 +614,7 @@ async def _resolve_or_publish_version(
             )
         return int(existing_row.id)
 
-    try:
+    async def _attempt_create_version() -> None:
         await create_version(
             install_dal,
             tenant_id=publish_tenant_id,
@@ -503,21 +630,44 @@ async def _resolve_or_publish_version(
             # toggle (that gate exists for vendor/tenant-uploaded bundles).
             allow_prebuilt=True,
         )
+
+    try:
+        await _attempt_create_version()
     except ApiError as exc:
         if exc.code != "CONFLICT":
             raise
         # A previous run created the app_version_uploads row but crashed before
-        # process_prebuilt_component() published it -- resuming from an arbitrary
-        # mid-FSM state is out of scope (see module docstring's idempotency note);
-        # fail loudly with a clear, actionable message rather than silently
-        # retrying a transition the state machine may now refuse.
-        raise ApiError(
-            f"{entry.app_id}@{entry.version} already has an app_version_uploads row that never "
-            "reached PUBLISHED -- a previous seeder run likely crashed mid-publish; inspect and "
-            "clear that row manually before re-running",
-            exc.status_code,
-            "stalled_core_bundle_upload",
-        ) from exc
+        # process_prebuilt_component() published it. Resuming from an arbitrary mid-FSM
+        # state is still out of scope (see module docstring's idempotency note) -- but
+        # unlike a vendor upload, THIS namespace is guaranteed single-writer (the HARD
+        # GUARD in seed_one() ensures only this seeder ever touches waddles.core.* rows,
+        # and this process is single-shot/non-concurrent -- see
+        # `_recover_stalled_core_upload()`'s own docstring), so a genuinely orphaned row
+        # left by an earlier crashed run is self-healed here instead of requiring a
+        # human to clear it manually.
+        if not await _recover_stalled_core_upload(
+            install_dal, app_id=entry.app_id, version=entry.version
+        ):
+            raise ApiError(
+                f"{entry.app_id}@{entry.version} already has an app_version_uploads row that "
+                "never reached PUBLISHED and is not (yet) eligible for seeder self-heal -- "
+                "either it is ambiguous (a PUBLISHED upload row with no matching app_versions "
+                "row, a genuine data-integrity gap) or it was touched too recently to safely "
+                "assume the owning process is dead; inspect and clear that row manually before "
+                "re-running",
+                exc.status_code,
+                "stalled_core_bundle_upload",
+            ) from exc
+        try:
+            await _attempt_create_version()
+        except ApiError as retry_exc:
+            raise ApiError(
+                f"{entry.app_id}@{entry.version}: seeder self-heal reset the orphaned upload "
+                f"row but the re-upload still failed ({retry_exc.code}): {retry_exc.message} -- "
+                "this needs manual investigation",
+                retry_exc.status_code,
+                "stalled_core_bundle_upload",
+            ) from retry_exc
 
     published = await process_prebuilt_component(
         install_dal,

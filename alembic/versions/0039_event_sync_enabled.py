@@ -33,9 +33,14 @@ engine (`hub_api/services/event_discord_sync_service.py`):
    community pairing row, not a shared toggle.
 
 2. `calendar_event_discord_syncs` -- new table, per-`(event_id,
-   pairing_id)` sync state. `calendar_events` (legacy, NOT owned by this
-   migration -- see `hub_api/services/schema.py::bind_calendar_sync_
-   tables()`'s own docstring) has only ONE `discord_event_id`/
+   pairing_id)` sync state. `calendar_events` (legacy -- see `hub_api/
+   services/schema.py::bind_calendar_sync_tables()`'s own docstring; its
+   SCHEMA is not designed by this migration, but this migration DOES
+   defensively `CREATE TABLE IF NOT EXISTS` it below, since no migration
+   anywhere in the alembic or config/postgres chains ever created it and
+   this migration's own FK + PyDAL's `migrate=False` bind both require it
+   to already exist -- gh defect, fresh-replay 0036->head previously died
+   here with `UndefinedTable`) has only ONE `discord_event_id`/
    `sync_status`/`sync_error` column set, which cannot represent "this
    event is live on guild A's Discord but still pending on guild B's" --
    the multi-guild fan-out this engine's `run_event_sync_reconcile_batch`
@@ -94,6 +99,49 @@ def upgrade() -> None:
         "(role-sync) on the same pairing row.'"
     )
 
+    # -- calendar_events (fresh-replay fix, gh defect: db-migrate pre-upgrade
+    # hook dies with UndefinedTable) ----------------------------------------
+    # This table is genuinely legacy (see module docstring) and NOT owned by
+    # this migration in the sense of "we designed its schema" -- but no
+    # migration anywhere in the alembic or config/postgres chains has ever
+    # created it, while `hub_api/services/schema.py::bind_calendar_sync_
+    # tables()` binds it with `migrate=False` (PyDAL trusts it already
+    # exists) and this migration's own FK below requires it to exist at
+    # alembic-apply time, which is BEFORE hub-api's PyDAL bind ever runs.
+    # `IF NOT EXISTS` makes this safe to run even where the table was
+    # already created out-of-band (e.g. an older deployment's PyDAL
+    # auto-migrate): column set matches bind_calendar_sync_tables()'s own
+    # field list exactly so that later binding sees a compatible table.
+    op.execute(
+        """
+        CREATE TABLE IF NOT EXISTS calendar_events (
+            id SERIAL PRIMARY KEY,
+            community_id INTEGER NOT NULL,
+            title VARCHAR(255) NOT NULL,
+            description TEXT,
+            event_date TIMESTAMPTZ NOT NULL,
+            end_date TIMESTAMPTZ,
+            timezone VARCHAR(100),
+            location TEXT,
+            status VARCHAR(20) NOT NULL DEFAULT 'scheduled',
+            discord_event_id VARCHAR(255),
+            sync_status VARCHAR(20) NOT NULL DEFAULT 'pending',
+            sync_error TEXT,
+            last_sync_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    op.execute(
+        "COMMENT ON TABLE calendar_events IS "
+        "'Legacy calendar event table (predates the numbered migration set) -- "
+        "created here idempotently only so this migration''s own FK and PyDAL''s "
+        "migrate=False bind in schema.py::bind_calendar_sync_tables() have something "
+        "to point at; NOT the full column set calendar_interaction_module''s own "
+        "EventInfo documents, see 0039 module docstring.'"
+    )
+
     # -- calendar_event_discord_syncs ---------------------------------------
     op.execute(
         """
@@ -143,4 +191,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("DROP TABLE IF EXISTS calendar_event_discord_syncs")
+    # calendar_events is intentionally left in place on downgrade -- it is a
+    # legacy table this migration only ever creates defensively (IF NOT
+    # EXISTS) to satisfy its own FK; other legacy code (calendar_interaction_
+    # module) may depend on it independently of this migration's feature.
     op.execute("ALTER TABLE guild_tenant_pairings DROP COLUMN IF EXISTS event_sync_enabled")

@@ -81,9 +81,12 @@ pipeline:
     # feature/bundle-artifact-signing -- run `make generate-bundle-signing-key
     # KEY_ID=<label> KUBE_CONTEXT=dal2-beta NAMESPACE=waddlebot` once before the first
     # bundle approval on this env (uses the default secret name -- see values.yaml's
-    # pipeline.hubApi.bundleSigning comment). rustDataPlane stays disabled here (base
-    # default), so no bundleSigningPublicKeys override is needed yet -- add one under
-    # pipeline.rustDataPlane.bundleSigningPublicKeys if/when the executor is enabled here.
+    # pipeline.hubApi.bundleSigning comment); deploymentTier=beta is outside alpha/local
+    # so templates/auto-provisioned-keys-job.yaml's hook cannot generate this Secret
+    # itself, only derive+publish its public key once it exists. rustDataPlane stays
+    # disabled here (base default) -- fix/chart-autogen-bundle-signing-key: no
+    # bundleSigningPublicKeys override is needed when the executor IS enabled here, it
+    # now sources the public key from the auto-derived ConfigMap by default.
   hubWebui:
     replicas: 1
     resources:
@@ -532,10 +535,15 @@ ingress:
           pathType: Prefix
           service: inventory-interaction
           port: 8024
+        # SECURITY: routed through hub-api, NOT calendar-interaction directly
+        # -- hub-api's scope-gated event_calendar_bp + EventCalendarProxyClient
+        # are the only legitimate JWT-validators/setters of the
+        # X-User-Context/X-API-Key headers calendar_interaction_module trusts
+        # (live authz bypass, fixed 2026-10).
         - path: /api/v1/calendar
           pathType: Prefix
-          service: calendar-interaction
-          port: 8030
+          service: hub-api
+          port: 8060
         - path: /api/v1/memories
           pathType: Prefix
           service: memories-interaction
@@ -714,9 +722,12 @@ httproute:
     - path: /api/v1/alias
       service: "waddlebot-interactive-social"
       port: 8010
+    # SECURITY: routed through hub-api, NOT waddlebot-interactive-productivity
+    # directly (live authz bypass, fixed 2026-10) -- see matching comment above.
     - path: /api/v1/calendar
-      service: "waddlebot-interactive-productivity"
-      port: 8030
+      service: "waddlebot-hub-api"
+      port: 8060
+      timeoutSeconds: 3600
     - path: /api/v1/loyalty
       service: "waddlebot-interactive-loyalty"
       port: 8032

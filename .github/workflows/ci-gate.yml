@@ -60,7 +60,7 @@ jobs:
   ci-gate:
     name: ci-gate
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 135
     steps:
       - name: Checkout (scripts/ci only)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -77,7 +77,7 @@ jobs:
           SELF_NAME: ci-gate
           IGNORE_CONTEXT: submit-queue
           POLL_INTERVAL_SECONDS: "30"
-          MAX_POLLS: "180"
+          MAX_POLLS: "240"
           # Raw target ref for this run - normalized to a bare branch name
           # below (pull_request.base_ref has no refs/heads/ prefix,
           # merge_group.base_ref does). See the target-aware gating policy
