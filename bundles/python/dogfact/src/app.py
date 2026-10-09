@@ -84,7 +84,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     if not await feature_enabled(FLAG_KEY, default=False):
         return None
 
-    entry = random.choice(DOGFACTS)  # noqa: S311 - a fun reply, not a security decision
+    entry = random.choice(DOGFACTS)
     log.info("dogfact.transform matched", platform=event.platform, entries=len(DOGFACTS))
     return PlatformEvent(
         platform=event.platform,
@@ -98,7 +98,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
 class DispatchResult:
     """`waddle_transports.TransportResult`-shaped result -- see `pyping`'s own `app.py`."""
 
-    __slots__ = ("transport", "detail", "sub_type", "http_status")
+    __slots__ = ("detail", "http_status", "sub_type", "transport")
 
     def __init__(self, *, transport: str, detail: str) -> None:
         """Record which provider the reply was relayed to, and a short detail string."""

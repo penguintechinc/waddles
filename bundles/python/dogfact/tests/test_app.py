@@ -14,7 +14,6 @@ import sys
 import types
 
 import pytest
-
 from app import DOGFACTS, dispatch, transform
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
