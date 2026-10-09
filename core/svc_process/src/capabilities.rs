@@ -60,8 +60,8 @@ use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
 use bundle_capability_gate::{
-    AppScopedResource, CapabilityGate, Denied, HostInvokeScopeBuilder, PermissionId, ResourceRef,
-    TenantTier,
+    AppScopedResource, CapabilityGate, Denied, HostInvokeScopeBuilder, PermissionFamily,
+    PermissionId, Quota, ReputationTarget, ResourceRef, ScopeKind, TenantTier,
 };
 use bundle_host_db::{
     CapabilitySnapshot as DbCapabilitySnapshot, DbError, DbHost, DbScope, DbValue, PostgresBackend,
@@ -69,9 +69,42 @@ use bundle_host_db::{
 };
 use bundle_host_http::egress::{EgressGuard, EgressRuleRow, EgressRuleSource};
 use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
+use bundle_host_reputation::{ReputationError, ReputationScope, ReputationStore};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
 use crate::license::FeatureGate;
+
+/// The durable per-(community, user) rolling-24h absolute-delta cap the store
+/// enforces -- the catalog's own `per_user_daily_abs_max` for
+/// `reputation.community.write`, so the in-memory gate quota and the durable
+/// store cap can never disagree about the ceiling.
+fn reputation_daily_cap() -> i64 {
+    match PermissionFamily::ReputationCommunityWrite
+        .catalog_entry()
+        .default_quota
+    {
+        Quota::ReputationDelta {
+            per_user_daily_abs_max,
+            ..
+        } => per_user_daily_abs_max,
+        // The catalog entry is statically ReputationDelta-shaped (unit-tested
+        // in the gate crate); any other shape denies every write by capping
+        // at zero rather than guessing a number.
+        _ => 0,
+    }
+}
+
+/// Maps a store [`ReputationError`] onto the `{code, message}` wire error the
+/// executor decodes back into the WIT `reputation.error` variant
+/// (`bundle_executor::host::stage_next_imports`).
+fn reputation_error_to_host(err: ReputationError) -> HostResultError {
+    if let ReputationError::Backend(detail) = &err {
+        // Detail may carry DB internals; log it, never hand it to a guest.
+        tracing::error!(error = %detail, "reputation store backend error");
+        return denied("backend", "reputation store backend error");
+    }
+    denied(err.wire_code(), err.to_string())
+}
 
 /// Maps a gate [`Denied`] onto the `{code, message}` shape every `host-call`
 /// error reply carries (spec SS5.4's stable `reason` vocabulary).
@@ -208,6 +241,19 @@ pub struct DbWiring {
     pub flag: Arc<dyn FeatureGate>,
 }
 
+/// Live wiring for the `reputation` bundle host capability (issue #726):
+/// the durable store plus the opt-in flag. Built once at startup
+/// (`crate::lib::try_build_reputation_wiring`) and cloned (cheap, `Arc`) into
+/// every per-invoke [`StageCapabilities`], like [`DbWiring`]. `None` on the
+/// handler means every `reputation.*` call denies `not_implemented`.
+#[derive(Clone)]
+pub struct ReputationWiring {
+    pub store: Arc<dyn ReputationStore>,
+    /// `crate::license::BUNDLE_REPUTATION_CAPABILITY_FLAG` gate -- OFF denies
+    /// every call `feature_disabled` before the store is touched.
+    pub flag: Arc<dyn FeatureGate>,
+}
+
 /// The real capability implementation this stage wires today, scoped to
 /// exactly one invocation's `(tenant, community, app_id)` -- see the
 /// module doc for why this is constructed per-invoke, never per-connection.
@@ -260,6 +306,10 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// unimplemented-seam capability's fail-closed default in
     /// [`Self::handle`]).
     db: Option<DbWiring>,
+    /// `None` until [`Self::with_reputation`] -- every `reputation.*` call
+    /// denies `not_implemented` in that state (never panics, never a silent
+    /// default balance).
+    reputation: Option<ReputationWiring>,
 }
 
 impl<K: KvBackend> StageCapabilities<K> {
@@ -297,6 +347,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             egress,
             gate,
             db: None,
+            reputation: None,
         }
     }
 
@@ -349,6 +400,128 @@ impl<K: KvBackend> StageCapabilities<K> {
     pub fn with_db(mut self, db: DbWiring) -> Self {
         self.db = Some(db);
         self
+    }
+
+    /// Attaches the `reputation` capability's live wiring -- called once per
+    /// invoke with a clone of the process-wide [`ReputationWiring`].
+    pub fn with_reputation(mut self, reputation: ReputationWiring) -> Self {
+        self.reputation = Some(reputation);
+        self
+    }
+
+    /// `reputation.get` / `reputation.adjust` (`wit/waddle-bundle/stage.wit`
+    /// `interface reputation`), carried as `capability = db`,
+    /// `op = "reputation.*"` (`penguin-bundle-host`'s closed `CapabilityKind`
+    /// has no reputation member yet; see the WIT doc).
+    ///
+    /// Order is load-bearing and fail-loud at every step: (1) argument
+    /// parsing -- `user` must be a UUID, `delta` an in-range i32, `reason` a
+    /// machine code; (2) the community must be a real one (a tenant-wide
+    /// `community_id == 0` activation has no community to score in); (3)
+    /// **the gate authorizes FIRST** with a `ReputationScoped` resource, so
+    /// grant, declared delta bounds, per-call/per-user/per-scope quotas,
+    /// instance policy and the membership pre-filter all run before anything
+    /// else can leak state (an ungranted call reports `not_granted`, never
+    /// `not_implemented`/`feature_disabled`); (4) wiring/flag state; (5) the
+    /// store, which re-verifies membership and the durable daily cap inside
+    /// its own transaction. Scope (tenant/community/app) is always
+    /// `self`'s host-derived scope, never an argument.
+    async fn handle_reputation(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        let is_adjust = match call.op.as_str() {
+            "reputation.get" => false,
+            "reputation.adjust" => true,
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("reputation op {other:?} not supported"),
+                ))
+            }
+        };
+
+        let user = call
+            .args
+            .get("user")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| denied("invalid_args", "user must be a UUID string"))
+            .and_then(|s| {
+                uuid::Uuid::parse_str(s)
+                    .map_err(|_| denied("invalid_args", "user must be a UUID string"))
+            })?;
+        let (delta, reason) = if is_adjust {
+            let delta = call
+                .args
+                .get("delta")
+                .and_then(|v| v.as_i64())
+                .and_then(|v| i32::try_from(v).ok())
+                .ok_or_else(|| denied("invalid_args", "delta must be an i32"))?;
+            let reason = call
+                .args
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| denied("invalid_args", "reason must be a string"))?;
+            bundle_host_reputation::validate_reason(reason).map_err(reputation_error_to_host)?;
+            (Some(delta), Some(reason))
+        } else {
+            (None, None)
+        };
+
+        if self.community_id == 0 || self.community.is_none() {
+            return Err(denied(
+                "invalid_args",
+                "reputation is community-scoped; this activation has no community",
+            ));
+        }
+
+        let permission = if is_adjust {
+            PermissionId::ReputationCommunityWrite
+        } else {
+            PermissionId::ReputationRead
+        };
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                permission,
+                ResourceRef::ReputationScoped(ReputationTarget {
+                    target_user: user,
+                    scope_kind: ScopeKind::Community,
+                    delta,
+                }),
+            )
+            .map_err(denied_from_gate)?;
+
+        let Some(wiring) = &self.reputation else {
+            return Err(denied(
+                "not_implemented",
+                "reputation capability is not wired in this deployment \
+                 (BUNDLE_REPUTATION_PASSWORD unset or connection failed)",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "reputation capability is disabled (waddles.bundle-reputation-capability is OFF)",
+            ));
+        }
+
+        let scope = ReputationScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+            app_id: self.app_id.clone(),
+        };
+        let balance = match (delta, reason) {
+            (Some(delta), Some(reason)) => {
+                wiring
+                    .store
+                    .adjust(&scope, user, delta, reason, reputation_daily_cap())
+                    .await
+            }
+            _ => wiring.store.get(&scope, user).await,
+        }
+        .map_err(reputation_error_to_host)?;
+        Ok(serde_json::json!({ "balance": balance }))
     }
 
     /// `http.send` (`wit/waddle-bundle/stage.wit` `interface http`) --
@@ -950,6 +1123,16 @@ impl<K: KvBackend> CapabilityHandler for StageCapabilities<K> {
                 // `db` is wired to `bundle_host_db::DbHost` (PR #498) --
                 // `handle_db` itself gate-checks FIRST (spec SS5) before
                 // consulting its own feature-flag/wiring state.
+                //
+                // `reputation.*` ops (issue #726) ride the same wire kind
+                // (`CapabilityKind` is closed in penguin-bundle-host) and are
+                // dispatched on the op prefix BEFORE the `storage.tables`
+                // path: they carry their own gate permission
+                // (`reputation.read`/`reputation.community.write`), never
+                // `storage.tables`.
+                CapabilityKind::Db if call.op.starts_with("reputation.") => {
+                    self.handle_reputation(&call).await
+                }
                 CapabilityKind::Db => self.handle_db(&call).await,
                 // `enabled` is wired to a real `penguin_licensing::
                 // LicenseClient` (`crate::license::resolve_flag`) -- see
@@ -2452,3 +2635,7 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "capabilities_reputation_tests.rs"]
+mod reputation_tests;

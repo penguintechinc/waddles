@@ -681,6 +681,74 @@ async fn try_build_db_wiring(
     }
 }
 
+/// Builds the `reputation` bundle host capability's production wiring
+/// (issue #726, `spine::ProcessDeps::reputation_wiring`): connects to the
+/// shared `waddles` Postgres as the least-privilege
+/// `waddles_bundle_reputation` role (`bundle_host_reputation::connect`,
+/// alembic 0043), spawns the membership-snapshot refresh task that feeds the
+/// gate's production `SnapshotMembership` (the SAME `Arc` the gate was built
+/// with -- `grant_gate::build_production_gate`'s `membership` param), and
+/// gates every call on `BUNDLE_REPUTATION_CAPABILITY_FLAG` (default OFF).
+///
+/// Same two deliberately distinct outcomes as [`try_build_db_wiring`]:
+/// `password` unset is an INFO-level "never opted in" `None`; a configured
+/// password whose connection fails is an ERROR-level `None` (a real outage
+/// must never read as "not configured"). Either way every `reputation.*`
+/// call denies `not_implemented` and the membership snapshot stays empty
+/// (deny-everything) -- fail-closed at both the gate and the capability.
+async fn try_build_reputation_wiring(
+    cfg: &bundle_host_reputation::ConnectConfig,
+    password: Option<&config::Secret>,
+    license_client: &Arc<penguin_licensing::LicenseClient>,
+    membership: Arc<bundle_capability_gate::SnapshotMembership>,
+    refresh_interval: std::time::Duration,
+) -> Option<capabilities::ReputationWiring> {
+    let Some(password) = password else {
+        tracing::info!(
+            "BUNDLE_REPUTATION_PASSWORD not set; reputation capability not wired (every \
+             reputation host-call will report not_implemented until it is provisioned)"
+        );
+        return None;
+    };
+    match bundle_host_reputation::connect(cfg, password.expose()).await {
+        Ok(conn) => {
+            tracing::info!(
+                host = %cfg.host,
+                port = cfg.port,
+                name = %cfg.name,
+                user = %cfg.user,
+                "reputation capability: connected to the bundle-reputation Postgres role"
+            );
+            tokio::spawn(bundle_host_reputation::run_membership_refresh(
+                conn.clone(),
+                None,
+                membership,
+                refresh_interval,
+            ));
+            Some(capabilities::ReputationWiring {
+                store: Arc::new(bundle_host_reputation::PostgresReputationStore::new(conn)),
+                flag: Arc::new(license::BundleReputationCapabilityGate::new(Arc::clone(
+                    license_client,
+                ))),
+            })
+        }
+        Err(err) => {
+            tracing::error!(
+                host = %cfg.host,
+                port = cfg.port,
+                name = %cfg.name,
+                user = %cfg.user,
+                error = %err,
+                "reputation capability: BUNDLE_REPUTATION_PASSWORD is configured but the \
+                 waddles_bundle_reputation connection failed -- reputation capability \
+                 unavailable (every reputation host-call will report not_implemented); this is \
+                 a misconfiguration or outage, not an intentional opt-out"
+            );
+            None
+        }
+    }
+}
+
 /// Builds the `http` bundle capability's shared
 /// [`bundle_host_http::egress::EgressGuard`], wired with the cluster CIDR
 /// denylist and instance-wide private-IP egress policy
@@ -893,6 +961,14 @@ fn try_start_process_loop(
     };
     let bundle_db_password = config.bundle_db_password.clone();
     let bundle_db_license_client = Arc::clone(&license_client);
+    let bundle_reputation_cfg = bundle_host_reputation::ConnectConfig {
+        host: cli.bundle_reputation_host.clone(),
+        port: cli.bundle_reputation_port,
+        name: cli.bundle_reputation_name.clone(),
+        user: cli.bundle_reputation_user.clone(),
+    };
+    let bundle_reputation_password = config.bundle_reputation_password.clone();
+    let bundle_reputation_refresh = cli.bundle_reputation_membership_refresh();
 
     tokio::spawn(async move {
         // TODO(M4+): tenant/community scope hardcoded to the tenant-wide
@@ -950,6 +1026,17 @@ fn try_start_process_loop(
             &bundle_db_license_client,
         )
         .await;
+        // One process-wide membership snapshot: the gate reads it, the
+        // reputation wiring's refresh task writes it (empty = fail-closed).
+        let membership = Arc::new(bundle_capability_gate::SnapshotMembership::new());
+        let reputation_wiring = try_build_reputation_wiring(
+            &bundle_reputation_cfg,
+            bundle_reputation_password.as_ref(),
+            &bundle_db_license_client,
+            Arc::clone(&membership),
+            bundle_reputation_refresh,
+        )
+        .await;
         // Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
         // `PgGrantLoader` against the RO-replica reader account when
         // `DB_READER_PASSWORD` is configured (the same account the
@@ -969,6 +1056,7 @@ fn try_start_process_loop(
                         grant_gate::PgGrantLoader::new(db),
                         redis_client,
                         cli.bundle_config_poll_interval(),
+                        membership.clone(),
                     ),
                     Err(err) => {
                         tracing::warn!(error = %err, "grant-gate db-reader connection failed; every non-platform permission denies until the next connection attempt");
@@ -976,6 +1064,7 @@ fn try_start_process_loop(
                             bundle_capability_gate::InMemoryGrantLoader::new(),
                             redis_client,
                             cli.bundle_config_poll_interval(),
+                            membership.clone(),
                         )
                     }
                 }
@@ -984,6 +1073,7 @@ fn try_start_process_loop(
                 bundle_capability_gate::InMemoryGrantLoader::new(),
                 redis_client,
                 cli.bundle_config_poll_interval(),
+                membership.clone(),
             ),
         };
 
@@ -1082,6 +1172,7 @@ fn try_start_process_loop(
                 // unconditionally from here.
                 pii_minter: hub_minter.clone(),
                 db_wiring: db_wiring.clone(),
+                reputation_wiring: reputation_wiring.clone(),
                 // Env-only legacy mode has no `BUNDLE_SCOPE_TENANT_ID`/DB
                 // reader to resolve a real tenant from -- `(0, 0)` fails
                 // closed (denies every non-platform permission) rather than
@@ -1458,6 +1549,17 @@ fn try_start_changelog_consumer(
         user: config.cli.bundle_db_user.clone(),
     };
     let bundle_db_password = config.bundle_db_password.clone();
+    let bundle_reputation_cfg = bundle_host_reputation::ConnectConfig {
+        host: config.cli.bundle_reputation_host.clone(),
+        port: config.cli.bundle_reputation_port,
+        name: config.cli.bundle_reputation_name.clone(),
+        user: config.cli.bundle_reputation_user.clone(),
+    };
+    let bundle_reputation_password = config.bundle_reputation_password.clone();
+    let bundle_reputation_refresh = config.cli.bundle_reputation_membership_refresh();
+    // One process-wide membership snapshot: every per-scope gate reads it,
+    // the reputation wiring's refresh task writes it (empty = fail-closed).
+    let membership = Arc::new(bundle_capability_gate::SnapshotMembership::new());
     let config = config.clone();
 
     // Fail loud, never silent (user requirement): this path is only ever
@@ -1517,6 +1619,7 @@ fn try_start_changelog_consumer(
                 // resolves this once, before either drain-loop path starts
                 // (fail-loud if tokenization is enabled and the connect failed).
                 hub_minter.clone(),
+                Arc::clone(&membership),
             )
             .await
             {
@@ -1530,6 +1633,21 @@ fn try_start_changelog_consumer(
                         Some(client) => {
                             try_build_db_wiring(&bundle_db_cfg, bundle_db_password.as_ref(), client)
                                 .await
+                        }
+                        None => None,
+                    };
+                    // `reputation` host capability (issue #726): same
+                    // license-client dependency as `db` above.
+                    deps.reputation_wiring = match &bundle_db_license_client {
+                        Some(client) => {
+                            try_build_reputation_wiring(
+                                &bundle_reputation_cfg,
+                                bundle_reputation_password.as_ref(),
+                                client,
+                                Arc::clone(&membership),
+                                bundle_reputation_refresh,
+                            )
+                            .await
                         }
                         None => None,
                     };
@@ -1584,6 +1702,7 @@ async fn build_source_supervisor_deps(
     active_digests: Arc<active_digests::ActiveDigests>,
     pii_gate: Arc<dyn license::FeatureGate>,
     pii_minter: Option<Arc<dyn pii_tokenize::IdentityMinter>>,
+    membership: Arc<bundle_capability_gate::SnapshotMembership>,
 ) -> Option<source_supervisor::SupervisorDeps> {
     let Some(keys_raw) = config.envelope_binding_keys.as_ref() else {
         tracing::warn!(
@@ -1616,6 +1735,7 @@ async fn build_source_supervisor_deps(
         grant_gate::PgGrantLoader::new(db),
         redis_client,
         config.cli.bundle_config_poll_interval(),
+        membership,
     );
     let kv_conn = connect_kv(&spine_cfg).await;
 
@@ -1639,6 +1759,7 @@ async fn build_source_supervisor_deps(
         // synchronous/no-I/O" placement as `kv_conn` above -- see
         // `try_start_changelog_consumer`'s own spawned block.
         db_wiring: None,
+        reputation_wiring: None,
     })
 }
 
@@ -1843,6 +1964,7 @@ mod tests {
             envelope_binding_keys: Some(crate::config::Secret::new("k1:aabbcc")),
             db_reader_password: None,
             bundle_db_password: None,
+            bundle_reputation_password: None,
         }
     }
 
@@ -1868,6 +1990,7 @@ mod tests {
             Arc::new(active_digests::ActiveDigests::new()),
             Arc::new(license::test_support::FixedGate(true)),
             None,
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
         )
         .await
         .is_none());
@@ -1905,6 +2028,7 @@ mod tests {
             Arc::new(active_digests::ActiveDigests::new()),
             Arc::new(license::test_support::FixedGate(true)),
             None,
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
         )
         .await;
         // SAFETY: serialized by ENV_LOCK above.
@@ -2573,6 +2697,7 @@ mod tests {
             envelope_binding_keys: None,
             db_reader_password: None,
             bundle_db_password: None,
+            bundle_reputation_password: None,
         };
         let state = crate::http::AppState::new(
             config,

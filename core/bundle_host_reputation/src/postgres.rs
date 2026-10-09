@@ -259,25 +259,42 @@ impl ReputationStore for PostgresReputationStore {
     }
 }
 
-/// Loads every active `(tenant, community, user_uuid)` membership for
-/// `tenant_id` (NULL `user_uuid` rows excluded -- they cannot be a target).
-/// Scoped to one tenant so the in-memory snapshot is bounded by that tenant's
-/// membership, not the platform's.
+/// Hard ceiling on snapshot size: if the active identified-membership row
+/// count reaches this, the load is rejected (previous snapshot kept) rather
+/// than silently truncated -- a truncated snapshot would read real members as
+/// non-members. Raising it, or replacing the snapshot with a per-community
+/// lazy cache, is the follow-up if a deployment ever approaches it.
+pub const MAX_SNAPSHOT_ROWS: i64 = 2_000_000;
+
+/// Loads every active `(tenant, community, user_uuid)` membership (NULL
+/// `user_uuid` rows excluded -- they cannot be a target), optionally scoped to
+/// one `tenant_id` (`None` = every tenant, the multi-tenant changelog-consumer
+/// path). Fails with a `DbErr::Custom` if the result would reach
+/// [`MAX_SNAPSHOT_ROWS`].
 pub async fn load_membership(
     conn: &DatabaseConnection,
-    tenant_id: i32,
+    tenant_id: Option<i32>,
 ) -> Result<Vec<MemberRow>, DbErr> {
     let rows = conn
         .query_all_raw(stmt(
             "SELECT c.tenant_id AS tenant_id, cm.community_id AS community_id, \
                     cm.user_uuid AS user_uuid \
              FROM community_members cm JOIN communities c ON c.id = cm.community_id \
-             WHERE c.tenant_id = $1 AND cm.user_uuid IS NOT NULL \
+             WHERE ($1::int IS NULL OR c.tenant_id = $1) AND cm.user_uuid IS NOT NULL \
                AND COALESCE(cm.is_active, TRUE) AND cm.removed_at IS NULL \
-               AND cm.left_at IS NULL",
-            vec![Value::Int(Some(tenant_id))],
+               AND cm.left_at IS NULL \
+             LIMIT $2",
+            vec![
+                Value::Int(tenant_id),
+                Value::BigInt(Some(MAX_SNAPSHOT_ROWS)),
+            ],
         ))
         .await?;
+    if i64::try_from(rows.len()).unwrap_or(i64::MAX) >= MAX_SNAPSHOT_ROWS {
+        return Err(DbErr::Custom(format!(
+            "membership snapshot would reach the {MAX_SNAPSHOT_ROWS}-row ceiling; refusing a truncated load"
+        )));
+    }
     rows.into_iter()
         .map(|r| {
             Ok(MemberRow {
@@ -289,7 +306,7 @@ pub async fn load_membership(
         .collect()
 }
 
-/// Refreshes `snapshot` from the DB every `interval` until the task is
+/// Refreshes `snapshot` (scoped as in [`load_membership`]) from the DB every `interval` until the task is
 /// dropped/aborted. A failed refresh keeps the previous snapshot and logs at
 /// WARN: the snapshot is only a pre-filter (writes re-check live membership in
 /// their own transaction), so staleness is bounded and never widens write
@@ -297,7 +314,7 @@ pub async fn load_membership(
 /// is populated promptly after startup.
 pub async fn run_membership_refresh(
     conn: DatabaseConnection,
-    tenant_id: i32,
+    tenant_id: Option<i32>,
     snapshot: Arc<SnapshotMembership>,
     interval: Duration,
 ) {
@@ -318,7 +335,7 @@ pub async fn run_membership_refresh(
                 }
             }
             Err(e) => {
-                tracing::warn!(error = %e, tenant_id, "reputation membership refresh failed; keeping previous snapshot");
+                tracing::warn!(error = %e, ?tenant_id, "reputation membership refresh failed; keeping previous snapshot");
             }
         }
         tokio::time::sleep(interval).await;

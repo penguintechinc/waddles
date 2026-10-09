@@ -291,6 +291,28 @@ impl FeatureGate for BundleDbCapabilityGate {
     }
 }
 
+/// Gates the bundle `reputation` host capability (`crate::capabilities::
+/// StageCapabilities::handle_reputation`, issue #726) -- a plain opt-in flag,
+/// same shape as [`BUNDLE_DB_CAPABILITY_FLAG`]: unseen/OFF/license-server-
+/// unreachable means every `reputation.*` call is denied `feature_disabled`.
+pub const BUNDLE_REPUTATION_CAPABILITY_FLAG: &str = "waddles.bundle-reputation-capability";
+
+/// Production [`FeatureGate`] for [`BUNDLE_REPUTATION_CAPABILITY_FLAG`] --
+/// plain read of `LicenseClient::flag_enabled` (fail-closed default).
+pub struct BundleReputationCapabilityGate(Arc<LicenseClient>);
+
+impl BundleReputationCapabilityGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for BundleReputationCapabilityGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { self.0.flag_enabled(BUNDLE_REPUTATION_CAPABILITY_FLAG).await })
+    }
+}
+
 /// Opt-out kill-switch for the inbound PII-tokenization pre-dispatch pass
 /// (`crate::pii_tokenize`, `rules/critical-rules.md` PII Tokenization) --
 /// same opt-out-kill-switch shape as [`DISABLE_DB_BUNDLE_CONFIG_FLAG`]:
@@ -1194,6 +1216,14 @@ mod tests {
     #[test]
     fn rust_data_plane_flag_matches_the_product_flag_key_convention() {
         assert_eq!(RUST_DATA_PLANE_FLAG, "waddles.core.rust-data-plane");
+    }
+
+    #[test]
+    fn bundle_reputation_capability_flag_matches_the_product_flag_key_convention() {
+        assert_eq!(
+            BUNDLE_REPUTATION_CAPABILITY_FLAG,
+            "waddles.bundle-reputation-capability"
+        );
     }
 
     #[test]

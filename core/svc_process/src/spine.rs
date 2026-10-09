@@ -681,6 +681,12 @@ pub struct ProcessDeps<S: SpineOps> {
     /// for the distinct, louder behavior when the password *was* configured
     /// but the connection itself failed.
     pub db_wiring: Option<crate::capabilities::DbWiring>,
+    /// The `reputation` host capability's production wiring (issue #726,
+    /// `crate::lib::try_build_reputation_wiring`), cloned into every
+    /// per-invoke `StageCapabilities` like [`ProcessDeps::db_wiring`]. `None`
+    /// when `BUNDLE_REPUTATION_PASSWORD` is unset or the connection failed
+    /// (every `reputation.*` call then denies `not_implemented`).
+    pub reputation_wiring: Option<crate::capabilities::ReputationWiring>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -957,6 +963,10 @@ async fn handle_delivered<S: SpineOps>(
         };
         let caps = match &deps.db_wiring {
             Some(db) => caps.with_db(db.clone()),
+            None => caps,
+        };
+        let caps = match &deps.reputation_wiring {
+            Some(rep) => caps.with_reputation(rep.clone()),
             None => caps,
         };
         Arc::new(caps)
@@ -1845,6 +1855,7 @@ mod tests {
             // every `db` host-call a fixture invokes sees `not_implemented`,
             // exercised directly by `capabilities`'s own test suite instead.
             db_wiring: None,
+            reputation_wiring: None,
         };
         (deps, metrics)
     }

@@ -434,13 +434,17 @@ async fn membership_loader_returns_only_this_tenants_active_identified_members()
         ),
     )
     .await;
-    let rows = load_membership(&f.rep_conn, TENANT).await.unwrap();
+    let rows = load_membership(&f.rep_conn, Some(TENANT)).await.unwrap();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].user, f.member);
     assert_eq!(
         (rows[0].tenant_id, rows[0].community_id),
         (TENANT, COMMUNITY)
     );
+
+    // `None` = every tenant: includes the other tenant's identified member.
+    let all = load_membership(&f.rep_conn, None).await.unwrap();
+    assert_eq!(all.len(), 2, "{all:?}");
 
     // Feed the gate's production MembershipCheck end to end.
     let snapshot = SnapshotMembership::new();
