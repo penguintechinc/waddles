@@ -163,3 +163,16 @@ class TestTransitivePathDeps:
         deps = mod.transitive_path_deps(crate_dir)
         names = {d.name for d in deps}
         assert names == {"bundle_active_set", "bundle_host_http", "egress_assertion"}
+
+
+def test_header_declared_context_used_when_no_workflow(tmp_path: Path) -> None:
+    """A `# Build (context = core/` header resolves context when no workflow builds it."""
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    svc = tmp_path / "core" / "svc_x"
+    svc.mkdir(parents=True)
+    (svc / "Dockerfile.rust").write_text("# Build (context = core/, the parent)\nFROM scratch\n")
+    ctx, source = mod.resolve_build_context(
+        Path("core/svc_x/Dockerfile.rust"), tmp_path, tmp_path / ".github" / "workflows"
+    )
+    assert ctx == (tmp_path / "core").resolve()
+    assert source == "dockerfile-header:context-declaration"

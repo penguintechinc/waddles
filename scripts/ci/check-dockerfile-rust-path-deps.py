@@ -131,7 +131,32 @@ def resolve_build_context(
                 file_dir = file_val.rsplit("/Dockerfile.rust", 1)[0].strip("./")
                 if file_dir.split("/")[-1] == dockerfile_dir_name and context_val:
                     return repo_root / context_val, f"{workflow.name}:context={context_val}"
+    declared = _declared_context(repo_root / dockerfile_rel, dockerfile_rel, repo_root)
+    if declared is not None:
+        return declared, "dockerfile-header:context-declaration"
     return dockerfile_rel.parent, "fallback=dockerfile-directory"
+
+
+_HEADER_CONTEXT_RE = re.compile(r"^#\s*Build\s*\(context\s*=\s*([A-Za-z0-9_./-]+?)/?[\s,)]")
+
+
+def _declared_context(dockerfile: Path, dockerfile_rel: Path, repo_root: Path) -> Path | None:
+    """Reads a `# Build (context = core/ ...` header comment as a last resort.
+
+    Used only when no workflow builds this Dockerfile (e.g. built by
+    scripts/alpha-deploy.sh, not a build-push-action). The declared context
+    must be an ancestor of the Dockerfile and exist, else it is ignored.
+    """
+    for line in dockerfile.read_text().splitlines()[:40]:
+        m = _HEADER_CONTEXT_RE.match(line)
+        if m:
+            cand = (repo_root / dockerfile_rel.parent.parent / m.group(1)).resolve()
+            if cand.is_dir():
+                return cand
+            cand = (repo_root / m.group(1)).resolve()
+            if cand.is_dir() and dockerfile.resolve().is_relative_to(cand):
+                return cand
+    return None
 
 
 def parse_path_deps(cargo_toml: Path) -> list[Path]:
