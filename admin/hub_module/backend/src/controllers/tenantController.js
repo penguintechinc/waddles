@@ -208,7 +208,7 @@ export async function getTenantCommunities(req, res, next) {
     }
 
     const countResult = await query(
-      'SELECT COUNT(*) AS count FROM communities WHERE tenant_id = $1',
+      'SELECT COUNT(*) AS count FROM communities WHERE tenant_id = $1 AND id > 0',
       [tenant.id]
     );
     const total = parseInt(countResult.rows[0]?.count || 0, 10);
@@ -217,7 +217,7 @@ export async function getTenantCommunities(req, res, next) {
       `SELECT id, name, display_name, member_count, is_active, is_public,
               community_type, created_at
        FROM communities
-       WHERE tenant_id = $1
+       WHERE tenant_id = $1 AND id > 0
        ORDER BY created_at DESC
        LIMIT $2 OFFSET $3`,
       [tenant.id, limit, offset]

@@ -11,6 +11,7 @@
 
 pub mod hub;
 pub mod push_trust;
+pub mod render;
 pub mod router;
 pub mod view_store;
 

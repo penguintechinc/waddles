@@ -11,6 +11,7 @@ resync, zero-source WARN).
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
@@ -240,3 +241,29 @@ async def test_provision_source_stream_groups_with_no_bindings_calls_nothing() -
         fake_client, tenant_slug="acme", community_segment=None, app_id=_APP_ID, bound={}
     )
     fake_client.xgroup_create.assert_not_called()
+
+
+async def test_sync_bindings_skips_unsupported_platform_fail_loud(
+    install_dal: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#685: supported_platforms=[discord] binds discord, skips (and logs) twitch."""
+    await _seed_ingest_source(install_dal, platform="twitch", source_id="tw-a")
+    await _seed_ingest_source(install_dal, platform="discord", source_id="dc-a")
+    manifest = dataclasses.replace(_manifest("discord", "twitch"), supported_platforms=("discord",))
+    with caplog.at_level("WARNING"):
+        bound = await _sync(install_dal, tenant_id=1, community_id=None, manifest=manifest)
+    assert bound == {"discord": ["dc-a"]}
+    assert {r.source_id for r in await _binding_rows(install_dal)} == {"dc-a"}
+    skipped = [r for r in caplog.records if "not in supported_platforms" in r.message]
+    assert len(skipped) == 1
+    assert skipped[0].platform == "twitch"  # type: ignore[attr-defined]
+
+
+async def test_sync_bindings_absent_supported_platforms_binds_all(install_dal: Any) -> None:
+    """#685 back-compat: no supported_platforms field => every consumed platform binds."""
+    await _seed_ingest_source(install_dal, platform="twitch", source_id="tw-a")
+    await _seed_ingest_source(install_dal, platform="discord", source_id="dc-a")
+    manifest = _manifest("discord", "twitch")
+    assert manifest.supported_platforms is None
+    bound = await _sync(install_dal, tenant_id=1, community_id=None, manifest=manifest)
+    assert bound == {"discord": ["dc-a"], "twitch": ["tw-a"]}
