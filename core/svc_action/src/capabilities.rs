@@ -272,14 +272,50 @@ impl RelayOp {
     }
 }
 
-/// Whether `(provider, op)` has a live sender behind it today. Only
-/// `chat.send` does; `chat.delete`/`dm.send` are authorized by the gate but
-/// refused loudly (`unsupported_op`) until the per-platform follow-up PRs
-/// (Discord REST sender, Twitch Helix client) implement them and flip the
-/// matching row here -- never queued into a consumer that cannot act on
-/// them, so the bundle sees the failure instead of a silent black hole.
-fn relay_op_supported(_provider: &str, op: RelayOp) -> bool {
-    matches!(op, RelayOp::ChatSend)
+/// Whether `(provider, op)` has a live sender behind it today. `chat.send`
+/// everywhere; Discord additionally implements `chat.delete`/`dm.send` (bot
+/// token REST sender in `svc_ingest`, queued by `StageCapabilities::
+/// handle_discord_queued_op`). Twitch `chat.delete`/`dm.send` stay
+/// authorized-then-refused (`unsupported_op`) until the Helix client lands --
+/// never queued into a consumer that cannot act on them, so the bundle sees
+/// the failure instead of a silent black hole.
+fn relay_op_supported(provider: &str, op: RelayOp) -> bool {
+    matches!(
+        (provider, op),
+        (_, RelayOp::ChatSend) | ("discord", RelayOp::ChatDelete | RelayOp::DmSend)
+    )
+}
+
+/// Producer-side builder for the versioned outbound queue envelope
+/// (`svc_ingest::outbound_ops::parse_outbound` is the consumer). Only the
+/// fields the op needs are emitted; `channel`/`text` stay top-level for the
+/// legacy-consumer rolling-upgrade guarantee on `chat.send`.
+fn build_outbound_envelope(
+    op: RelayOp,
+    provider: &str,
+    channel: Option<&str>,
+    text: Option<&str>,
+    message_id: Option<&str>,
+    user_id: Option<&str>,
+) -> serde_json::Value {
+    let mut env = serde_json::json!({
+        "v": OUTBOUND_SCHEMA_VERSION,
+        "op": op.as_str(),
+        "platform": provider,
+    });
+    if let Some(obj) = env.as_object_mut() {
+        for (key, value) in [
+            ("channel", channel),
+            ("text", text),
+            ("message_id", message_id),
+            ("user_id", user_id),
+        ] {
+            if let Some(v) = value {
+                obj.insert(key.to_string(), serde_json::Value::String(v.to_string()));
+            }
+        }
+    }
+    env
 }
 
 /// Peeks the `op` a bundle's `message_json` asks for. Absent, unparsable or
@@ -709,6 +745,12 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 format!("relay.send message_json is not valid JSON: {e}"),
             )
         })?;
+        // Discord `chat.delete`/`dm.send` are executed by svc-ingest's
+        // bot-token REST sender via the outbound queue; they do not share
+        // the `text`-required shape below (delete has no text).
+        if provider == "discord" && op != RelayOp::ChatSend {
+            return self.handle_discord_queued_op(scope, op, &message).await;
+        }
         // `text` is common to every provider; `channel` resolution below is
         // NOT -- Discord branches off before ever looking at
         // `message.channel` (see `handle_discord_relay`'s doc for why).
@@ -758,14 +800,9 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         // upgraded consumer (which ignores unknown fields) still delivers it
         // during a rolling upgrade; `v`/`op`/`platform` are what the new
         // consumer dispatches on.
-        let payload = serde_json::json!({
-            "v": OUTBOUND_SCHEMA_VERSION,
-            "op": op.as_str(),
-            "platform": provider,
-            "channel": channel,
-            "text": text,
-        })
-        .to_string();
+        let payload =
+            build_outbound_envelope(op, provider, Some(&channel), Some(&text), None, None)
+                .to_string();
         let outbound_bytes = payload.len() as u64;
         self.relay_queue
             .lpush(&key, payload)
@@ -784,6 +821,112 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 outbound_bytes,
             );
         Ok(serde_json::json!({"queued": true, "provider": provider}))
+    }
+
+    /// Discord `chat.delete` / `dm.send`: validates the arguments, builds
+    /// the versioned envelope and queues it for svc-ingest's bot-token REST
+    /// sender (`svc_ingest::outbound::run_discord`).
+    ///
+    /// **Security (moderation delete + DM surface).** `chat.delete` targets
+    /// ONLY the triggering event's own channel (`scope.origin_channel_id`,
+    /// same cross-tenant reasoning as `Self::handle_discord_relay`) -- the
+    /// bundle names the message, never the channel. Every id must be a
+    /// snowflake (no path injection into the REST URL). `dm.send` text goes
+    /// through the egress detokenizer like every other Discord sink. Both
+    /// ops were already authorized by the capability gate in the caller
+    /// (`chat.delete:discord` / `dm.send:discord`, both dangerous).
+    async fn handle_discord_queued_op(
+        &self,
+        scope: &InvokeScope,
+        op: RelayOp,
+        message: &serde_json::Value,
+    ) -> Result<serde_json::Value, HostResultError> {
+        let str_field = |name: &str| {
+            message
+                .get(name)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        };
+        let payload = match op {
+            RelayOp::ChatDelete => {
+                let channel_id = scope.origin_channel_id.as_deref().ok_or_else(|| {
+                    denied(
+                        "invalid_args",
+                        "discord chat.delete requires an origin channel id on the delivered envelope",
+                    )
+                })?;
+                if !is_discord_snowflake(channel_id) {
+                    return Err(denied(
+                        "invalid_args",
+                        "discord chat.delete origin channel id is not a valid snowflake",
+                    ));
+                }
+                let message_id = str_field("message_id")
+                    .filter(|id| is_discord_snowflake(id))
+                    .ok_or_else(|| {
+                        denied(
+                            "invalid_args",
+                            "discord chat.delete requires a snowflake 'message_id'",
+                        )
+                    })?;
+                build_outbound_envelope(
+                    op,
+                    "discord",
+                    Some(channel_id),
+                    None,
+                    Some(message_id),
+                    None,
+                )
+            }
+            RelayOp::DmSend => {
+                let user_id = str_field("user_id")
+                    .filter(|id| is_discord_snowflake(id))
+                    .ok_or_else(|| {
+                        denied(
+                            "invalid_args",
+                            "discord dm.send requires a snowflake 'user_id'",
+                        )
+                    })?;
+                let text = str_field("text").ok_or_else(|| {
+                    denied("invalid_args", "discord dm.send requires non-empty 'text'")
+                })?;
+                let text = self
+                    .detokenize_text(&scope.tenant, text, egress_detokenizer::Sink::Discord)
+                    .await;
+                build_outbound_envelope(op, "discord", None, Some(&text), None, Some(user_id))
+            }
+            RelayOp::ChatSend => {
+                // Discord chat.send is sent inline by `handle_discord_relay`,
+                // never queued.
+                return Err(denied(
+                    "unsupported_op",
+                    "discord chat.send is not queued".to_string(),
+                ));
+            }
+        }
+        .to_string();
+        let outbound_bytes = payload.len() as u64;
+        self.relay_queue
+            .lpush(&outbound_relay_queue_key("discord"), payload)
+            .await
+            .map_err(|e| denied("relay_unavailable", e))?;
+        tracing::info!(
+            provider = "discord",
+            op = op.as_str(),
+            app_id = %scope.app_id,
+            "discord outbound op queued"
+        );
+        self.usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_relay_call(
+                &scope.tenant,
+                scope.community.as_deref(),
+                "",
+                &scope.app_id,
+                outbound_bytes,
+            );
+        Ok(serde_json::json!({"queued": true, "provider": "discord"}))
     }
 
     /// Discord relay send: a stateless bot REST `POST
@@ -1664,6 +1807,7 @@ mod tests {
                 "chat.send:twitch",
                 "chat.send:discord",
                 "chat.delete:twitch",
+                "chat.delete:discord",
                 "dm.send:twitch",
                 "dm.send:discord",
                 "net.http.fqdn:example.com",
@@ -2272,7 +2416,180 @@ mod tests {
         assert_eq!(RelayOp::parse("chat.nuke"), None);
         assert!(relay_op_supported("twitch", RelayOp::ChatSend));
         assert!(!relay_op_supported("twitch", RelayOp::ChatDelete));
-        assert!(!relay_op_supported("discord", RelayOp::DmSend));
+        assert!(relay_op_supported("discord", RelayOp::ChatSend));
+        assert!(relay_op_supported("discord", RelayOp::ChatDelete));
+        assert!(relay_op_supported("discord", RelayOp::DmSend));
+        assert!(!relay_op_supported("twitch", RelayOp::DmSend));
+    }
+
+    #[test]
+    fn outbound_envelope_builder_emits_only_op_fields() {
+        let del = build_outbound_envelope(
+            RelayOp::ChatDelete,
+            "discord",
+            Some("1"),
+            None,
+            Some("2"),
+            None,
+        );
+        assert_eq!(
+            del,
+            serde_json::json!({"v":1,"op":"chat.delete","platform":"discord","channel":"1","message_id":"2"})
+        );
+        let dm = build_outbound_envelope(
+            RelayOp::DmSend,
+            "discord",
+            None,
+            Some("hi"),
+            None,
+            Some("3"),
+        );
+        assert_eq!(
+            dm,
+            serde_json::json!({"v":1,"op":"dm.send","platform":"discord","text":"hi","user_id":"3"})
+        );
+    }
+
+    /// Discord chat.delete/dm.send are queued for svc-ingest's REST sender;
+    /// the delete channel is the event's origin channel, never the bundle's.
+    #[tokio::test]
+    async fn discord_delete_and_dm_are_queued_with_origin_channel() {
+        let caps = caps(FakeRelayQueue::default());
+        let del = serde_json::json!({"op":"chat.delete","message_id":"222","channel":"999999999999999999"});
+        let out = caps
+            .handle(
+                &discord_scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider":"discord","message_json":del.to_string()}),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["queued"], true);
+        let dm = serde_json::json!({"op":"dm.send","user_id":"333","text":"hello"});
+        caps.handle(
+            &discord_scope(),
+            call(
+                CapabilityKind::Relay,
+                "send",
+                serde_json::json!({"provider":"discord","message_json":dm.to_string()}),
+            ),
+        )
+        .await
+        .unwrap();
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        assert_eq!(pushed.len(), 2);
+        assert_eq!(pushed[0].0, "waddles:transport:irc:discord:outbound");
+        let d: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
+        assert_eq!(d["op"], "chat.delete");
+        assert_eq!(
+            d["channel"], "123456789012345678",
+            "origin channel, not the bundle's"
+        );
+        assert_eq!(d["message_id"], "222");
+        let m: serde_json::Value = serde_json::from_str(&pushed[1].1).unwrap();
+        assert_eq!(m["op"], "dm.send");
+        assert_eq!(m["user_id"], "333");
+        assert_eq!(m["text"], "hello");
+    }
+
+    #[tokio::test]
+    async fn discord_queued_ops_reject_bad_arguments_and_queue_nothing() {
+        let bad_origin = InvokeScope {
+            origin_channel_id: Some("not-a-snowflake".to_string()),
+            ..scope()
+        };
+        let cases = [
+            (discord_scope(), serde_json::json!({"op":"chat.delete"})),
+            (
+                discord_scope(),
+                serde_json::json!({"op":"chat.delete","message_id":"../x"}),
+            ),
+            (
+                scope(),
+                serde_json::json!({"op":"chat.delete","message_id":"2"}),
+            ),
+            (
+                bad_origin,
+                serde_json::json!({"op":"chat.delete","message_id":"2"}),
+            ),
+            (
+                discord_scope(),
+                serde_json::json!({"op":"dm.send","text":"x"}),
+            ),
+            (
+                discord_scope(),
+                serde_json::json!({"op":"dm.send","user_id":"u","text":"x"}),
+            ),
+            (
+                discord_scope(),
+                serde_json::json!({"op":"dm.send","user_id":"3"}),
+            ),
+        ];
+        for (sc, message) in cases {
+            let caps = caps(FakeRelayQueue::default());
+            let err = caps
+                .handle(
+                    &sc,
+                    call(
+                        CapabilityKind::Relay,
+                        "send",
+                        serde_json::json!({"provider":"discord","message_json":message.to_string()}),
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "invalid_args", "{message}");
+            assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+        }
+    }
+
+    /// The dangerous Discord ops are gate-denied (and never queued) without
+    /// their own grant.
+    #[tokio::test]
+    async fn discord_queued_ops_require_their_own_grant() {
+        for message in [
+            serde_json::json!({"op":"chat.delete","message_id":"222"}),
+            serde_json::json!({"op":"dm.send","user_id":"333","text":"hi"}),
+        ] {
+            let caps = caps_denied(FakeRelayQueue::default());
+            let err = caps
+                .handle(
+                    &discord_scope(),
+                    call(
+                        CapabilityKind::Relay,
+                        "send",
+                        serde_json::json!({"provider":"discord","message_json":message.to_string()}),
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_granted", "{message}");
+            assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn discord_queued_op_surfaces_queue_outage() {
+        let caps = caps(FakeRelayQueue {
+            fail: true,
+            ..Default::default()
+        });
+        let dm = serde_json::json!({"op":"dm.send","user_id":"333","text":"hello"});
+        let err = caps
+            .handle(
+                &discord_scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider":"discord","message_json":dm.to_string()}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "relay_unavailable");
     }
 
     #[test]
@@ -2317,10 +2634,6 @@ mod tests {
             ),
             (
                 "twitch",
-                serde_json::json!({"op": "dm.send", "user_id": "u1", "text": "hi"}),
-            ),
-            (
-                "discord",
                 serde_json::json!({"op": "dm.send", "user_id": "u1", "text": "hi"}),
             ),
         ] {

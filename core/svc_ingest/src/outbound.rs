@@ -39,7 +39,9 @@ use penguin_connector_twitch::TwitchError;
 use tokio::sync::oneshot;
 
 use crate::ingest::Backoff;
-use crate::outbound_ops::{parse_outbound, route, DiscordSender, SenderError, TwitchSender};
+use crate::outbound_ops::{
+    dispatch_to, parse_outbound, route, DiscordSender, SenderError, TwitchSender,
+};
 
 /// The queue key this module drains -- byte-identical to
 /// `core/svc_action/src/capabilities.rs::outbound_relay_queue_key("twitch")`,
@@ -196,7 +198,7 @@ async fn drain_loop<Q, S>(
                     match parse_outbound(&raw, "twitch") {
                         Ok(action) => {
                             let twitch = TwitchSender::new(sender);
-                            if let Err(err) = route("twitch", &action, &twitch, &DiscordSender).await {
+                            if let Err(err) = route("twitch", &action, &twitch, &DiscordSender::unconfigured()).await {
                                 match err {
                                     // A new op with no implementation yet is an
                                     // actionable failure, not degraded service.
@@ -243,6 +245,104 @@ pub async fn run(
     let sender = RealIrcOutbound::new(identity);
     let backoff = Backoff::new(Duration::from_secs(30));
     drain_loop(conn, &sender, backoff, shutdown).await;
+    Ok(())
+}
+
+/// The queue key the Discord outbound drain reads -- byte-identical to
+/// `core/svc_action/src/capabilities.rs::outbound_relay_queue_key("discord")`
+/// (duplicated, not imported: separate crates, same rationale as
+/// [`TWITCH_OUTBOUND_QUEUE_KEY`]).
+pub const DISCORD_OUTBOUND_QUEUE_KEY: &str = "waddles:transport:irc:discord:outbound";
+
+/// A Valkey list queue with a caller-chosen key (the Twitch
+/// [`RelaySource`] impl on the bare connection hardcodes its key).
+pub struct ListQueue {
+    conn: redis::aio::MultiplexedConnection,
+    key: &'static str,
+}
+
+impl RelaySource for ListQueue {
+    async fn brpop_one(&mut self) -> Result<Option<String>, String> {
+        let result: Option<(String, String)> =
+            redis::AsyncCommands::brpop(&mut self.conn, self.key, BRPOP_TIMEOUT_SECS)
+                .await
+                .map_err(|e| e.to_string())?;
+        Ok(result.map(|(_key, value)| value))
+    }
+}
+
+/// Discord twin of [`drain_loop`]: `BRPOP`s the Discord outbound queue,
+/// parses each entry and executes it via [`DiscordSender`] (REST). Same
+/// discipline: a malformed or failed entry is logged (PII-free: platform/
+/// op/error only) and dropped, never panics, never stalls the loop;
+/// queue-read errors back off exponentially.
+async fn discord_drain_loop<Q>(
+    mut queue: Q,
+    sender: &DiscordSender<'_>,
+    mut backoff: Backoff,
+    mut shutdown: oneshot::Receiver<()>,
+) where
+    Q: RelaySource,
+{
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return,
+            popped = queue.brpop_one() => match popped {
+                Ok(Some(raw)) => {
+                    backoff.reset();
+                    match parse_outbound(&raw, "discord") {
+                        Ok(action) => {
+                            if let Err(err) = dispatch_to(sender, &action).await {
+                                match err {
+                                    SenderError::Unsupported { .. } => tracing::error!(platform = "discord", op = action.op(), error = %err, "outbound op unsupported, dropping"),
+                                    SenderError::Failed { .. } => tracing::warn!(platform = "discord", op = action.op(), error = %err, "outbound relay send failed"),
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(platform = "discord", error = %err, "malformed outbound relay payload, dropping");
+                        }
+                    }
+                }
+                Ok(None) => backoff.reset(),
+                Err(err) => {
+                    tracing::warn!(platform = "discord", error = %err, "outbound relay queue read error, retrying");
+                    let delay = backoff.delay();
+                    tokio::select! {
+                        _ = &mut shutdown => return,
+                        () = tokio::time::sleep(delay) => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Connects the Valkey list connection and runs [`discord_drain_loop`]
+/// with the bot-token REST client until `shutdown` resolves. Spawned by
+/// `crate::lib::try_start_discord_outbound`.
+///
+/// # Errors
+/// [`redis::RedisError`] if the initial Valkey connect fails.
+pub async fn run_discord(
+    spine_cfg: &penguin_spine::SpineConfig,
+    rest: &crate::discord_rest::DiscordRestClient,
+    shutdown: oneshot::Receiver<()>,
+) -> Result<(), redis::RedisError> {
+    let client = build_redis_client(spine_cfg)?;
+    let conn = client.get_multiplexed_async_connection().await?;
+    let queue = ListQueue {
+        conn,
+        key: DISCORD_OUTBOUND_QUEUE_KEY,
+    };
+    let sender = DiscordSender::new(rest);
+    discord_drain_loop(
+        queue,
+        &sender,
+        Backoff::new(Duration::from_secs(30)),
+        shutdown,
+    )
+    .await;
     Ok(())
 }
 
@@ -576,5 +676,83 @@ mod tests {
             relay_block_timeout_s: 30,
         };
         assert!(build_redis_client(&cfg).is_err());
+    }
+
+    #[test]
+    fn discord_queue_key_matches_svc_action_format() {
+        assert_eq!(
+            DISCORD_OUTBOUND_QUEUE_KEY,
+            "waddles:transport:irc:discord:outbound"
+        );
+    }
+
+    /// The Discord drain executes each op against the REST client; a
+    /// malformed entry, a platform mismatch and a REST failure are dropped
+    /// without stopping the loop.
+    #[tokio::test]
+    async fn discord_drain_executes_ops_and_survives_bad_entries() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/channels/1/messages/2"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/channels/1/messages"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let rest = crate::discord_rest::DiscordRestClient::new(
+            crate::config::Secret::new("tok"),
+            server.uri(),
+        )
+        .unwrap();
+        let sender = DiscordSender::new(&rest);
+        let queue = FakeQueue {
+            payloads: vec![
+                Ok(Some("not json".to_string())),
+                Ok(Some(
+                    "{\"v\":1,\"op\":\"chat.send\",\"platform\":\"twitch\",\"channel\":\"1\",\"text\":\"x\"}".to_string(),
+                )),
+                Ok(Some(
+                    "{\"v\":1,\"op\":\"chat.send\",\"platform\":\"discord\",\"channel\":\"1\",\"text\":\"x\"}".to_string(),
+                )),
+                Ok(None),
+                Ok(Some(
+                    "{\"v\":1,\"op\":\"chat.delete\",\"platform\":\"discord\",\"channel\":\"1\",\"message_id\":\"2\"}".to_string(),
+                )),
+            ],
+            idx: AtomicUsize::new(0),
+        };
+        let (_tx, rx) = oneshot::channel();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            discord_drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx),
+        )
+        .await;
+        // wiremock `.expect(1)` verifies on drop.
+    }
+
+    #[tokio::test]
+    async fn discord_drain_unconfigured_sender_drops_loudly_and_stops_on_shutdown() {
+        let sender = DiscordSender::unconfigured();
+        let queue = FakeQueue {
+            payloads: vec![Ok(Some(
+                "{\"op\":\"chat.delete\",\"channel\":\"1\",\"message_id\":\"2\"}".to_string(),
+            ))],
+            idx: AtomicUsize::new(0),
+        };
+        let (tx, rx) = oneshot::channel();
+        tx.send(()).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            discord_drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx),
+        )
+        .await
+        .unwrap();
     }
 }
