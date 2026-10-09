@@ -69,6 +69,16 @@ CREATE TABLE hub_users (
     -- `SELECT *` as waddles_bundle_reader is still denied (test_0032).
     username TEXT
 );
+-- 0044_connector_pii_reader_role column-grants on this legacy table
+-- (config/postgres/migrations/000_create_base_schema.sql); only the
+-- columns it grants/joins on.
+CREATE TABLE hub_user_identities (
+    id SERIAL PRIMARY KEY,
+    hub_user_id INTEGER NOT NULL REFERENCES hub_users(id) ON DELETE CASCADE,
+    platform VARCHAR(50) NOT NULL,
+    platform_user_id VARCHAR(255) NOT NULL,
+    platform_username VARCHAR(255)
+);
 CREATE TABLE app_catalog (
     app_id VARCHAR(255) PRIMARY KEY
 );
@@ -80,7 +90,8 @@ CREATE TABLE community_members (
     community_id INTEGER REFERENCES communities(id) ON DELETE CASCADE,
     user_id VARCHAR(255),
     platform VARCHAR(50),
-    platform_user_id VARCHAR(255)
+    platform_user_id VARCHAR(255),
+    display_name VARCHAR(255)
 );
 -- 0039_event_sync_enabled is the first Alembic migration to FK into
 -- calendar_events -- a legacy table owned by config/postgres/migrations/
