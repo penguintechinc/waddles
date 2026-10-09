@@ -141,11 +141,13 @@ async fn unknown_route_on_main_router_is_404() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-/// No overlay route is mounted yet in P1 (see `crate::overlay::router`'s
-/// module doc) -- `/overlay/*` 404s like any other unknown path today,
-/// honestly, rather than serving a stub.
+/// P3/P4 mounted the `/live`, `/live/ws`, and `/push` overlay routes (see
+/// `tests/overlay_live.rs`), but the plain full-page surface render route
+/// (`GET /overlay/{community}/{surface}`, no suffix) is still P2's
+/// pending job -- it 404s like any other unknown path today, honestly,
+/// rather than serving a stub.
 #[tokio::test]
-async fn overlay_path_is_404_until_p2_p3_add_the_real_route() {
+async fn overlay_path_is_404_until_p2_adds_the_real_render_route() {
     let app = router(test_state());
     let response = app
         .oneshot(
