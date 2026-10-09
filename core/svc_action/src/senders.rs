@@ -75,10 +75,9 @@ pub enum SenderStatus {
 pub fn sender_status(platform: Platform) -> SenderStatus {
     match platform {
         Platform::Twitch => SenderStatus::Implemented,
-        Platform::Discord => SenderStatus::PendingSeam {
-            reason: "TODO(M3+): discord sender -- pending the http host capability \
-                     (crate::capabilities) and penguin-connector-discord's REST sender",
-        },
+        // Bot-token REST: chat.send inline + chat.delete/dm.send queued to
+        // svc-ingest's Discord REST sender (relay capability).
+        Platform::Discord => SenderStatus::Implemented,
         Platform::Slack => SenderStatus::PendingSeam {
             reason: "TODO(M3+): slack sender -- pending the http host capability \
                      (crate::capabilities) and penguin-connectors' Slack scaffold",
@@ -188,14 +187,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn twitch_is_implemented_every_other_platform_is_a_seam() {
+    fn twitch_and_discord_are_implemented_every_other_platform_is_a_seam() {
         assert_eq!(sender_status(Platform::Twitch), SenderStatus::Implemented);
-        for platform in [
-            Platform::Discord,
-            Platform::Slack,
-            Platform::Youtube,
-            Platform::Kick,
-        ] {
+        assert_eq!(sender_status(Platform::Discord), SenderStatus::Implemented);
+        for platform in [Platform::Slack, Platform::Youtube, Platform::Kick] {
             assert!(matches!(
                 sender_status(platform),
                 SenderStatus::PendingSeam { .. }

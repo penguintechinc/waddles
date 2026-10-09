@@ -27,12 +27,13 @@
 //! **Dispatch.** [`route`] sends a parsed [`OutboundAction`] to the named
 //! platform's [`PlatformSender`]; an unknown platform or an op the platform
 //! has not implemented is [`SenderError::Unsupported`] -- fail loud, never a
-//! silent no-op. The Discord and Twitch `chat.delete`/`dm.send`
-//! implementations below are deliberate stubs returning `Unsupported`; the
-//! follow-up PRs (Discord REST sender, Twitch Helix client) replace them.
+//! silent no-op. The Twitch `chat.delete`/`dm.send` implementations below
+//! are still deliberate stubs returning `Unsupported` (Helix client
+//! follow-up); Discord implements all three over `crate::discord_rest`.
 
 use serde::Deserialize;
 
+use crate::discord_rest::{DiscordRestClient, DiscordRestError};
 use crate::outbound::IrcOutbound;
 
 /// Highest queue-envelope schema version this consumer understands.
@@ -283,38 +284,87 @@ impl<S: IrcOutbound> PlatformSender for TwitchSender<'_, S> {
     }
 }
 
-/// The Discord adapter STUB. Discord `chat.send` is sent directly over REST
-/// by `svc_action` (not via this queue), and the REST sender that would
-/// implement `chat.delete`/`dm.send` here is a follow-up PR -- every op is
-/// `Unsupported` until then.
-pub struct DiscordSender;
+/// The Discord adapter: implements `chat.send`, `chat.delete` and `dm.send`
+/// over the bot-token REST client ([`DiscordRestClient`]). Built with
+/// [`Self::unconfigured`] (no bot token) every op is loudly
+/// [`SenderError::Unsupported`] -- never a silent no-op.
+///
+/// Logs carry only platform/op/channel id; never message content, user ids
+/// or the token (see `crate::discord_rest`'s PII-free logging note).
+pub struct DiscordSender<'a> {
+    rest: Option<&'a DiscordRestClient>,
+}
 
-impl PlatformSender for DiscordSender {
+impl<'a> DiscordSender<'a> {
+    /// Wraps a configured REST client.
+    #[must_use]
+    pub fn new(rest: &'a DiscordRestClient) -> Self {
+        Self { rest: Some(rest) }
+    }
+
+    /// A sender with no bot token configured: every op is `Unsupported`.
+    #[must_use]
+    pub fn unconfigured() -> Self {
+        Self { rest: None }
+    }
+
+    fn client(&self, op: &'static str) -> Result<&'a DiscordRestClient, SenderError> {
+        self.rest.ok_or_else(|| SenderError::Unsupported {
+            platform: "discord".to_string(),
+            op,
+        })
+    }
+}
+
+/// Maps a REST failure to the loud, content-free [`SenderError::Failed`].
+fn discord_failed(op: &'static str, err: &DiscordRestError) -> SenderError {
+    SenderError::Failed {
+        platform: "discord",
+        op,
+        message: err.to_string(),
+    }
+}
+
+impl PlatformSender for DiscordSender<'_> {
     fn platform(&self) -> &'static str {
         "discord"
     }
 
-    async fn send_chat(&self, _channel: &str, _text: &str) -> Result<(), SenderError> {
-        Err(SenderError::Unsupported {
-            platform: "discord".to_string(),
-            op: "chat.send",
-        })
+    async fn send_chat(&self, channel: &str, text: &str) -> Result<(), SenderError> {
+        let rest = self.client("chat.send")?;
+        rest.send_message(channel, text)
+            .await
+            .map_err(|e| discord_failed("chat.send", &e))?;
+        tracing::debug!(
+            platform = "discord",
+            op = "chat.send",
+            channel_id = channel,
+            "sent"
+        );
+        Ok(())
     }
 
-    async fn delete_chat(&self, _channel: &str, _message_id: &str) -> Result<(), SenderError> {
-        // STUB: Discord REST `DELETE /channels/{id}/messages/{id}` (follow-up).
-        Err(SenderError::Unsupported {
-            platform: "discord".to_string(),
-            op: "chat.delete",
-        })
+    async fn delete_chat(&self, channel: &str, message_id: &str) -> Result<(), SenderError> {
+        let rest = self.client("chat.delete")?;
+        rest.delete_message(channel, message_id)
+            .await
+            .map_err(|e| discord_failed("chat.delete", &e))?;
+        tracing::info!(
+            platform = "discord",
+            op = "chat.delete",
+            channel_id = channel,
+            "deleted message"
+        );
+        Ok(())
     }
 
-    async fn send_dm(&self, _user_id: &str, _text: &str) -> Result<(), SenderError> {
-        // STUB: Discord REST create-DM-channel + post (follow-up).
-        Err(SenderError::Unsupported {
-            platform: "discord".to_string(),
-            op: "dm.send",
-        })
+    async fn send_dm(&self, user_id: &str, text: &str) -> Result<(), SenderError> {
+        let rest = self.client("dm.send")?;
+        rest.send_dm(user_id, text)
+            .await
+            .map_err(|e| discord_failed("dm.send", &e))?;
+        tracing::info!(platform = "discord", op = "dm.send", "sent direct message");
+        Ok(())
     }
 }
 
@@ -435,7 +485,7 @@ mod tests {
             channel: "#c".into(),
             text: "hi".into(),
         };
-        route("twitch", &action, &twitch, &DiscordSender)
+        route("twitch", &action, &twitch, &DiscordSender::unconfigured())
             .await
             .unwrap();
         assert_eq!(
@@ -462,7 +512,7 @@ mod tests {
             ("discord", &del, "chat.delete"),
             ("discord", &dm, "dm.send"),
         ] {
-            let err = route(platform, action, &twitch, &DiscordSender)
+            let err = route(platform, action, &twitch, &DiscordSender::unconfigured())
                 .await
                 .unwrap_err();
             match err {
@@ -486,15 +536,134 @@ mod tests {
             channel: "c".into(),
             text: "t".into(),
         };
-        let err = route("myspace", &action, &twitch, &DiscordSender)
+        let err = route("myspace", &action, &twitch, &DiscordSender::unconfigured())
             .await
             .unwrap_err();
         assert!(matches!(err, SenderError::Unsupported { .. }));
     }
 
     #[tokio::test]
-    async fn discord_chat_send_stub_is_unsupported() {
-        let err = DiscordSender.send_chat("c", "t").await.unwrap_err();
+    async fn unconfigured_discord_sender_is_unsupported() {
+        let err = DiscordSender::unconfigured()
+            .send_chat("c", "t")
+            .await
+            .unwrap_err();
         assert!(matches!(err, SenderError::Unsupported { .. }));
+    }
+
+    fn rest(server: &wiremock::MockServer) -> DiscordRestClient {
+        DiscordRestClient::new(crate::config::Secret::new("tok"), server.uri()).unwrap()
+    }
+
+    /// The three Discord ops route through `PlatformSender` to the REST
+    /// client (this is the "no longer Unsupported" proof).
+    #[tokio::test]
+    async fn discord_ops_route_to_rest_client() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/channels/1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"9"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/channels/1/messages/2"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/users/@me/channels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"5"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/channels/5/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"9"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = rest(&server);
+        let irc = RecordingIrc::default();
+        let twitch = TwitchSender::new(&irc);
+        let discord = DiscordSender::new(&client);
+        for action in [
+            OutboundAction::ChatSend {
+                channel: "1".into(),
+                text: "hi".into(),
+            },
+            OutboundAction::ChatDelete {
+                channel: "1".into(),
+                message_id: "2".into(),
+            },
+            OutboundAction::DmSend {
+                user_id: "3".into(),
+                text: "hi".into(),
+            },
+        ] {
+            route("discord", &action, &twitch, &discord).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn discord_cannot_dm_is_loud_failed_without_content() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/users/@me/channels"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let client = rest(&server);
+        let err = DiscordSender::new(&client)
+            .send_dm("3", "secret body")
+            .await
+            .unwrap_err();
+        match err {
+            SenderError::Failed {
+                platform,
+                op,
+                message,
+            } => {
+                assert_eq!((platform, op), ("discord", "dm.send"));
+                assert!(!message.contains("secret body"));
+                assert!(message.contains("cannot be direct-messaged"));
+            }
+            other => panic!("expected Failed, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn discord_rest_failures_map_to_failed_for_each_op() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let client = rest(&server);
+        let d = DiscordSender::new(&client);
+        assert!(matches!(
+            d.send_chat("1", "x").await,
+            Err(SenderError::Failed {
+                op: "chat.send",
+                ..
+            })
+        ));
+        assert!(matches!(
+            d.delete_chat("1", "2").await,
+            Err(SenderError::Failed {
+                op: "chat.delete",
+                ..
+            })
+        ));
+        assert!(matches!(
+            d.send_dm("1", "x").await,
+            Err(SenderError::Failed { op: "dm.send", .. })
+        ));
     }
 }
