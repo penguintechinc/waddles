@@ -262,7 +262,8 @@ async def _handle_bet(arg: str | None, *, ledger: _Ledger, actor: str | None, us
     else:
         try:
             amount = int(arg or "")
-        except ValueError:
+        except ValueError as exc:
+            log.info("gamble.invalid_bet", op="bet", error=type(exc).__name__)
             return _USAGE
     if amount <= 0:
         return "you have no points to bet." if balance <= 0 else "bet must be at least 1 point."
@@ -306,7 +307,8 @@ async def _handle_set_odds(arg: str | None, *, ledger: _Ledger) -> str:
         return _USAGE
     try:
         percent = int(parts[1])
-    except ValueError:
+    except ValueError as exc:
+        log.info("gamble.invalid_odds", op="set_odds", error=type(exc).__name__)
         return f"'{parts[1]}' isn't a whole number"
     if not (MIN_ODDS_PERCENT <= percent <= MAX_ODDS_PERCENT):
         return f"odds must be between {MIN_ODDS_PERCENT} and {MAX_ODDS_PERCENT} percent"
