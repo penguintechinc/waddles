@@ -576,3 +576,30 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  - app_id: waddles.core.example.rip
+    version: "1.0.0"
+    language: python
+    source_dir: python/rip
+    manifest_path: rip.manifest.yaml
+    artifact_path: rip.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.hype
+    version: "1.0.0"
+    language: python
+    source_dir: python/hype
+    manifest_path: hype.manifest.yaml
+    artifact_path: hype.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.cringe
+    version: "1.0.0"
+    language: python
+    source_dir: python/cringe
+    manifest_path: cringe.manifest.yaml
+    artifact_path: cringe.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
