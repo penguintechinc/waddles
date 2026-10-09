@@ -7,6 +7,7 @@
 //! module doc for why that is deliberate, not a stub.
 
 pub mod push_trust;
+pub mod render;
 pub mod router;
 pub mod view_store;
 
