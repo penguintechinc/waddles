@@ -61,7 +61,8 @@ CREATE TABLE tenants (
 );
 CREATE TABLE communities (
     id SERIAL PRIMARY KEY,
-    name TEXT
+    name TEXT,
+    tenant_id INTEGER  -- 0045 trigger reads it (legacy NOT NULL column)
 );
 CREATE TABLE hub_users (
     id SERIAL PRIMARY KEY,
