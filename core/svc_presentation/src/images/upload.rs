@@ -104,7 +104,16 @@ async fn parse_multipart(mut multipart: Multipart) -> Result<ParsedUpload, ApiEr
         .await
         .map_err(|err| ApiError::BadRequest(format!("invalid multipart body: {err}")))?
     {
-        match field.name().unwrap_or_default() {
+        let Some(name) = field.name().map(str::to_owned) else {
+            tracing::debug!(
+                op = "parse_multipart",
+                "multipart field missing a name; rejecting"
+            );
+            return Err(ApiError::BadRequest(
+                "multipart field is missing a name".to_string(),
+            ));
+        };
+        match name.as_str() {
             "file" => {
                 parsed.content_type = field.content_type().map(str::to_string);
                 parsed.bytes = Some(field.bytes().await.map_err(|err| {
