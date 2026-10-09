@@ -211,7 +211,8 @@ async def _handle_guess(guess_text: str, *, community: str, provider: str, chann
 
     try:
         value = int(guess_text.strip())
-    except ValueError:
+    except ValueError as exc:
+        log.info("guess.invalid_guess", community=community, error=type(exc).__name__)
         return _USAGE
     if not RANGE_MIN <= value <= RANGE_MAX:
         return _USAGE
