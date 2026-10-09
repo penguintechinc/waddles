@@ -529,3 +529,57 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  - app_id: waddles.core.example.event
+    version: "1.0.0"
+    language: python
+    source_dir: python/event
+    manifest_path: event.manifest.yaml
+    artifact_path: event.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.echo
+    version: "1.0.0"
+    language: python
+    source_dir: python/echo
+    manifest_path: echo.manifest.yaml
+    artifact_path: echo.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.waddle
+    version: "1.0.0"
+    language: python
+    source_dir: python/waddle
+    manifest_path: waddle.manifest.yaml
+    artifact_path: waddle.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.hello
+    version: "1.0.0"
+    language: python
+    source_dir: python/hello
+    manifest_path: hello.manifest.yaml
+    artifact_path: hello.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.bot
+    version: "1.0.0"
+    language: python
+    source_dir: python/bot
+    manifest_path: bot.manifest.yaml
+    artifact_path: bot.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.time
+    version: "1.0.0"
+    language: python
+    source_dir: python/time
+    manifest_path: time.manifest.yaml
+    artifact_path: time.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null

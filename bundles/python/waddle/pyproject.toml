@@ -1,0 +1,13 @@
+[project]
+name = "waddle-bundle-waddle"
+version = "1.0.0"
+description = "`!waddle` -> a random penguin-themed reply. Stateless: relay only, no kv/db."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
