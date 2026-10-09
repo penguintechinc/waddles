@@ -3,7 +3,7 @@ app_id: waddles.core.example.shoutout
 name: Shoutout Bundle (Python)
 # 1.0.0: initial kv-only v1 -- `!so <user>` (post), `!so set <template>`, and two
 # default-OFF sub-modules (`auto`, `ai`). See src/app.py's own module docstring.
-version: 1.0.0
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -59,11 +59,14 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions:
-  - storage.kv
+  - id: storage.kv
+    justification: "persists the per-community shoutout template and auto-shoutout list"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-shoutout feature flag"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.0"
-  min_version: "1.0.0"
+  tested_with: "1.0.2"
+  min_version: "1.0.2"
   max_version: null

@@ -425,6 +425,15 @@ presentation:
   # Matches pipeline.svcStreaming.publicBaseUrl above -- same media NodePort host, so
   # live_stream.py's browser-facing HLS URLs resolve off-laptop like svc-streaming's own.
   publicStreamingUrl: "http://192.168.10.75:31208"
+  # chore/deploy-svc-presentation-rust-alpha -- deploy the Rust svc-presentation (overlay +
+  # image surface) instead of the Python one. Overlay view/SSE port reachable on-host at
+  # localhost:31032 (same NodePort the Python service held). Image built by
+  # scripts/alpha-deploy.sh as svc-presentation-rust:<SHA8> (global.imageTag).
+  rust:
+    enabled: true
+    nodePort:
+      enabled: true
+      port: 31032
 
 # Issue #287 -- svc-streaming (Rust) image, built locally + pushed to the local registry
 # (no CI image for it yet), same as every other alpha module.
