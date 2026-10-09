@@ -5,7 +5,7 @@ name: Chat Rank/Level Bundle (Python)
 # !rank add|sub <amount> <user>. See src/app.py's own module docstring for the full
 # data-model rationale (kv index + db ledger), the level formula, and the follow-up note on
 # automatic per-message XP accrual (not implemented here).
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -70,11 +70,12 @@ limits:
 # (hub_api/services/bundle_approval_service.py::KV_PERMISSION_ID); used here as a
 # pseudonym -> row_id lookup index alongside the db ledger (see src/app.py).
 permissions:
-  - storage.kv
+  - id: storage.kv
+    justification: "persists per-user rank data keyed by pseudonym row id"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.0"
-  min_version: "1.0.0"
+  tested_with: "1.0.1"
+  min_version: "1.0.1"
   max_version: null

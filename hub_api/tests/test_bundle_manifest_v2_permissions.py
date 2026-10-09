@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
+import yaml
 
 from services.bundle_manifest_v2 import ManifestV2Error, parse_bundle_manifest_v2
 
@@ -404,3 +407,40 @@ def test_reputation_write_valid_parses() -> None:
     )
     decls = manifest.permission_declarations  # type: ignore[attr-defined]
     assert decls[0].risk == "dangerous"
+
+
+def _core_hub_manifests() -> list[pathlib.Path]:
+    root = pathlib.Path(__file__).resolve().parents[2] / "bundles"
+    return sorted(root.glob("*/*/hub-manifest.yaml"))
+
+
+def test_core_hub_manifests_have_no_bare_string_permissions() -> None:
+    """Regression: bare-string `permissions:` parse to zero grants (dead shape)."""
+    paths = _core_hub_manifests()
+    assert len(paths) >= 30, f"only {len(paths)} core hub manifests examined"
+    bare = []
+    for path in paths:
+        raw = yaml.safe_load(path.read_text())
+        if any(isinstance(e, str) for e in raw.get("permissions") or []):
+            bare.append(str(path))
+    assert bare == []
+
+
+def test_core_kv_manifests_parse_to_structured_storage_kv_declaration() -> None:
+    """Every converted core bundle yields >=1 structured declaration => grant rows."""
+    structured = 0
+    for path in _core_hub_manifests():
+        raw = yaml.safe_load(path.read_text())
+        if not raw.get("permissions"):
+            continue
+        manifest = parse_bundle_manifest_v2(
+            raw,
+            known_custom_platforms=frozenset(),
+            allow_wildcard_consumes=True,
+            allow_prebuilt=True,
+        )
+        ids = [d.id for d in manifest.permission_declarations]  # type: ignore[attr-defined]
+        assert ids, f"{path}: zero structured permission declarations"
+        assert manifest.permissions == (), f"{path}: leftover bare strings"  # type: ignore[attr-defined]
+        structured += 1
+    assert structured >= 30

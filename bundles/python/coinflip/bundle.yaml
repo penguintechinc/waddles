@@ -4,7 +4,7 @@ name: Coinflip Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !flip/!coinflip (flip)/!flip heads|tails (call)/!flip list/!flip
 # set cooldown <seconds>. See src/app.py's own module docstring for full scope + the
 # cross-community-leaderboard deferral.
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -49,11 +49,12 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions:
-  - storage.kv
+  - id: storage.kv
+    justification: "persists per-community coin-flip tallies and state"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.0"
-  min_version: "1.0.0"
+  tested_with: "1.0.1"
+  min_version: "1.0.1"
   max_version: null

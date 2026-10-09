@@ -4,7 +4,7 @@ name: Remind Bundle (Python)
 # 1.0.0: initial release -- per-user, per-community reminder store/list/cancel, kv-only
 # (feature/bundle-remind). Due-time DELIVERY is not wired -- see src/app.py's own module
 # docstring "Delivery" section for the honest scope of this release.
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -45,11 +45,12 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions:
-  - storage.kv
+  - id: storage.kv
+    justification: "persists per-community reminders and their counters"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.0"
-  min_version: "1.0.0"
+  tested_with: "1.0.1"
+  min_version: "1.0.1"
   max_version: null

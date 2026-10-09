@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-first"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!first` -> a per-community, per-day \"who typed first\" claim race (!first claim/report, !first list, !first leaderboard, !first reset). Python equivalent of bundles/python/pyping, modeled on its hand-built (not bundle_compiler-routed) structure. First bundle to use waddle_sdk.community_kv/waddle_sdk.command instead of hand-rolled key scoping/parsing."
 requires-python = ">=3.13"
 dependencies = []

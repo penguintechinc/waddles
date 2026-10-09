@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-roulette"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!roulette` -> a flavor-only russian-roulette chat minigame (pull/list/admin cooldown config), kv-only v1, stats only -- never calls a real chat timeout/ban API. Net-new Waddles content. Uses the shared waddle_sdk.command grammar parser (#618)."
 requires-python = ">=3.13"
 dependencies = []

@@ -4,7 +4,7 @@
 schema_version: 2
 app_id: waddles.core.example.dadjoke
 name: Random Dad Joke Bundle (Python)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -34,5 +34,6 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions:
-  - storage.kv
+  - id: storage.kv
+    justification: "persists custom dad jokes and the last-served joke per community"
 routes_to: []

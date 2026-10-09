@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-love"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!love <user>` / `!ship <userA> <userB>` -> a fun compatibility percent meter, community-scoped, kv-only v1 (deterministic per unordered pair per day, caller's own ship history via `!love list`). Net-new original content, not a port of anything."
 requires-python = ">=3.13"
 dependencies = []

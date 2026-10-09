@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-dadjoke"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!dadjoke` -> a random family-friendly dad joke from a curated built-in list, plus a per-community custom joke pool (`!dadjoke add/remove/list`, mod/broadcaster-gated mutations). Same kv-only shape as bundles/python/joke, distinct bank; uses the shared `waddle_sdk.command` grammar parser (see bundles/python/fish)."
 requires-python = ">=3.13"
 dependencies = []

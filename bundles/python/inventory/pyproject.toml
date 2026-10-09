@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-inventory"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!inventory`/`!inv` -> a community-scoped, per-user item collection, DB-backed (structured db ops + a per-user kv directory index). Inspired by the general per-viewer item/collectible shape common to Twitch economy bots (incl. superpenguintv (Psychoboy)'s PenguinTwitchBot) -- original implementation, no code/text reused. Uses the shared waddle_sdk.command grammar parser (#618) plus documented extensions for `!inv <user>` and `!inv give <item> <user>`."
 requires-python = ">=3.13"
 dependencies = []
