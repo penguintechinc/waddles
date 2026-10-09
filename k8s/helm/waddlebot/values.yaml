@@ -2292,11 +2292,16 @@ ingress:
           pathType: Prefix
           service: interactive-media
           port: 8105
-        # Interactive Productivity consolidated routes (calendar, memories, translate)
+        # SECURITY: calendar routed through hub-api (NOT interactive-productivity
+        # directly) -- hub-api's scope-gated event_calendar_bp +
+        # EventCalendarProxyClient are the only legitimate JWT-validators/
+        # setters of the X-User-Context/X-API-Key headers
+        # calendar_interaction_module trusts (live authz bypass, fixed 2026-10).
         - path: /api/v1/calendar
           pathType: Prefix
-          service: interactive-productivity
-          port: 8030
+          service: hub
+          port: 8060
+        # Interactive Productivity consolidated routes (memories, translate)
         - path: /api/v1/memories
           pathType: Prefix
           service: interactive-productivity
