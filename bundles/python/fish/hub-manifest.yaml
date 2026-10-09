@@ -4,7 +4,7 @@
 schema_version: 2
 app_id: waddles.core.example.fish
 name: Fishing Game Bundle (Python)
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -47,4 +47,6 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists per-community fishing state and tallies"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-fish feature flag"
 routes_to: []

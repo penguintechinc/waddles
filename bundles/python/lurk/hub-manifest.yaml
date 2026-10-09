@@ -20,7 +20,7 @@ name: Lurk Toggle Example Bundle (Python)
 # community" dispatch path -- see bundle.yaml/src/app.py.
 # 1.0.6 (this task): dispatch() now functions under the tenant-wide sentinel
 # (`community=None`) instead of only replying with an error -- see bundle.yaml/src/app.py.
-version: 1.0.7
+version: 1.0.8
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -54,4 +54,6 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists per-community lurk state"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-lurk feature flag"
 routes_to: []

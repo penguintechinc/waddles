@@ -5,7 +5,7 @@ name: Song Request Queue Bundle (Python)
 # !music list/remove <id>/next/skip/set max-per-user <n>. See src/app.py's own
 # module docstring for full scope -- a request QUEUE only, no playback/external
 # music-service API call.
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -61,10 +61,12 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists the per-community song-request queue, sequence and limits config"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-music feature flag"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.1"
-  min_version: "1.0.1"
+  tested_with: "1.0.2"
+  min_version: "1.0.2"
   max_version: null

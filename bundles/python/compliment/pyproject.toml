@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-compliment"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!compliment [@user]` -> a random compliment from a curated built-in bank, optionally directed at a named target, plus a per-community custom compliment bank (`!compliment add <text>`, mod/broadcaster-gated). Python equivalent of bundles/python/pyping, modeled on its hand-built (not bundle_compiler-routed) structure; uses the shared `waddle_sdk.command` grammar parser (see bundles/python/joke, bundles/python/shoutout for the bare-positional-target grammar extension)."
 requires-python = ">=3.13"
 dependencies = []

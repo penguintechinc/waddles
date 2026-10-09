@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-fish"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!fish` -> a weighted-random, per-community fishing minigame (cast/list/admin cooldown config), kv-only v1. Inspired by superpenguintv (Psychoboy)'s PenguinTwitchBot fishing feature -- original implementation, no code/text reused. First bundle to use the shared waddle_sdk.command grammar parser (#618)."
 requires-python = ">=3.13"
 dependencies = []

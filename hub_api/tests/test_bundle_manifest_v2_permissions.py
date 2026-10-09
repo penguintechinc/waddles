@@ -455,3 +455,22 @@ def test_flag_gated_python_bundles_declare_flags_read(name: str) -> None:
         raw = yaml.safe_load((root / fname).read_text())
         ids = [e["id"] for e in raw["permissions"]]
         assert "flags.read" in ids, f"{root / fname}: missing flags.read"
+
+
+def test_flag_reading_core_bundles_declare_flags_read() -> None:
+    """Every core bundle calling `feature_enabled` (with permissions) declares flags.read."""
+    examined = 0
+    missing = []
+    for path in _core_hub_manifests():
+        raw = yaml.safe_load(path.read_text())
+        if not raw.get("permissions"):
+            continue
+        src = path.parent / "src"
+        if not any("await feature_enabled(" in f.read_text() for f in src.rglob("*.py")):
+            continue
+        examined += 1
+        ids = {e["id"] for e in raw["permissions"] if isinstance(e, dict)}
+        if "flags.read" not in ids:
+            missing.append(str(path))
+    assert examined >= 30, f"only {examined} flag-reading bundles examined"
+    assert missing == []

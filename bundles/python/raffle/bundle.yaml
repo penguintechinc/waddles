@@ -4,7 +4,7 @@ name: Raffle / Giveaway Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !raffle open/close/draw/list, bare !raffle / !enter.
 # See src/app.py's own module docstring for full scope + the pseudonym-only winner-
 # announcement design note.
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -49,10 +49,12 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists per-community raffle entrants and state"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-raffle feature flag"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.1"
-  min_version: "1.0.1"
+  tested_with: "1.0.2"
+  min_version: "1.0.2"
   max_version: null

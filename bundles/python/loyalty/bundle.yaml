@@ -4,7 +4,7 @@ name: Loyalty Points Bundle (Python)
 # 1.0.0: initial DB-backed v1 -- !points (balance)/!points <user>/!points top/
 # !points add|sub <amount> <user>. See src/app.py's own module docstring for the full
 # data-model rationale (kv index + db ledger) and the leaderboard-display-name limitation.
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -71,10 +71,12 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists per-user loyalty points keyed by pseudonym row id"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-loyalty feature flag"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.1"
-  min_version: "1.0.1"
+  tested_with: "1.0.2"
+  min_version: "1.0.2"
   max_version: null

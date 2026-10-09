@@ -3,7 +3,7 @@ app_id: waddles.core.example.social
 name: Social Interactions Example Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !hug/!highfive/!pat <user> (interact), !social stats. See
 # src/app.py's own module docstring for full scope.
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -58,10 +58,12 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists per-community social-interaction counters"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-social feature flag"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.1"
-  min_version: "1.0.1"
+  tested_with: "1.0.2"
+  min_version: "1.0.2"
   max_version: null

@@ -7,7 +7,7 @@ name: Saved Announcements Bundle (Python)
 # DB-backed core/svc_process/bundles/community_announcements_process.py `!announce publish <id>`
 # script bundle (a different, legacy runner architecture) -- flagged there for the migration
 # owner to resolve, not silently papered over.
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -66,10 +66,12 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists the per-community announcement registry"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-announce feature flag"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.1"
-  min_version: "1.0.1"
+  tested_with: "1.0.2"
+  min_version: "1.0.2"
   max_version: null

@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-command"
-version = "1.0.1"
+version = "1.0.2"
 description = "`!command` -> generic per-community custom TEXT commands and timers (Twitch-style). Python equivalent of bundles/python/count, modeled on its hand-built (not bundle_compiler-routed) structure."
 requires-python = ">=3.13"
 dependencies = []

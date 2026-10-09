@@ -2,7 +2,7 @@ schema_version: 2
 app_id: waddles.core.example.hangman
 name: Hangman Bundle (Python)
 # 1.0.0: initial release -- per-community hangman word-guessing game (feature/bundle-hangman).
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -45,10 +45,12 @@ limits:
 permissions:
   - id: storage.kv
     justification: "persists in-progress per-community hangman game state"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-hangman feature flag"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.1"
-  min_version: "1.0.1"
+  tested_with: "1.0.2"
+  min_version: "1.0.2"
   max_version: null
