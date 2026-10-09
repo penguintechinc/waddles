@@ -705,7 +705,7 @@ async fn try_build_reputation_wiring(
 ) -> Option<capabilities::ReputationWiring> {
     let Some(password) = password else {
         tracing::info!(
-            "BUNDLE_REPUTATION_PASSWORD not set; reputation capability not wired (every \
+            "BUNDLE_REPUTATION_PASSWORD not set; reputation capability unavailable (every \
              reputation host-call will report not_implemented until it is provisioned)"
         );
         return None;

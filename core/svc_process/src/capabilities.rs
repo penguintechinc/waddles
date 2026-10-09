@@ -495,7 +495,7 @@ impl<K: KvBackend> StageCapabilities<K> {
         let Some(wiring) = &self.reputation else {
             return Err(denied(
                 "not_implemented",
-                "reputation capability is not wired in this deployment \
+                "reputation capability is not provisioned in this deployment \
                  (BUNDLE_REPUTATION_PASSWORD unset or connection failed)",
             ));
         };

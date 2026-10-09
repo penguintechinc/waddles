@@ -80,7 +80,7 @@ class DailyCapExceededError(ReputationError):
 
 
 class UnavailableError(ReputationError):
-    """The capability is not wired or its feature flag is off on this host."""
+    """The capability is unprovisioned or its feature flag is off on this host."""
 
 
 class BackendError(ReputationError):
