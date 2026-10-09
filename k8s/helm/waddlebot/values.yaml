@@ -2825,3 +2825,10 @@ autoProvisionedKeys:
     publicKeyConfigMapName: ""  # default: "<fullname>-service-jwt-public" when empty
     keyId: "waddlebot-1"
     externalSecret: false
+  # #684 / PR #718 secret messaging (one-time secrets) -- AES-256-GCM key, 64 lowercase
+  # hex chars, hub-api env ONE_TIME_SECRET_ENCRYPTION_KEY. Generated once, never rotated.
+  # Feature flag waddles.secret-messaging stays OFF by default (PostHog/ENV baseline).
+  oneTimeSecret:
+    secretName: "waddlebot-ots-encryption-key"
+    secretKey: "ONE_TIME_SECRET_ENCRYPTION_KEY"
+    externalSecret: false
