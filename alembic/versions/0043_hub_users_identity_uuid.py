@@ -59,16 +59,12 @@ tolerant no-ops until it lands:
 Downgrade is the exact inverse, in reverse order: revoke both grants,
 drop the view, drop the unique constraint, drop the column.
 
-**Numbering note:** originally authored as `0027_hub_users_identity_uuid`
-against a `0026` head; renumbered to `0034` (`down_revision =
-0033_instance_perm_policies`) once the real chain -- 0026 seeder ->
-0027 lifecycle -> 0028 changelog -> 0029 attribution -> 0030 app schemas
--> 0031 signing -> 0032 grants -> 0033 instance perm policies (#432) --
-was known. May need further renumbering at actual merge time if more
-migrations land on `release/v3.0.X` ahead of this one in the meantime.
+**Numbering note:** originally authored as 0027, then 0034 (both stale/colliding);
+owns 0043, chained directly off 0042_instance_perm_policies. This migration is the
+SOLE owner of the hub_users.uuid column add.
 
-Revision ID: 0034_hub_users_identity_uuid
-Revises: 0033_instance_perm_policies
+Revision ID: 0043_hub_users_identity_uuid
+Revises: 0042_instance_perm_policies
 Create Date: 2026-09-28
 """
 
@@ -76,8 +72,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0034_hub_users_identity_uuid"
-down_revision = "0033_instance_perm_policies"
+revision = "0043_hub_users_identity_uuid"
+down_revision = "0042_instance_perm_policies"
 branch_labels = None
 depends_on = None
 
