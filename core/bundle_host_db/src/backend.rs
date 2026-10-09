@@ -20,6 +20,12 @@
 //! control). Every value (row-id, column value, tenant/community) is bound
 //! as a SeaORM [`Value`], never interpolated into SQL text.
 //!
+//! **Typed columns** (`uuid` incl. `user_ref`, `timestamptz`, `jsonb`, and
+//! NULL in any type): writes bind by the *declared* column type and emit an
+//! explicit `$n::uuid`/`$n::timestamptz`/`$n::jsonb` cast, and reads project
+//! `timestamptz`/`jsonb` as text in SQL -- see `crate::typed` for why a
+//! plain `text` bind fails against real Postgres.
+//!
 //! **Known simplifications in this landing (see PR description "remaining
 //! work"):** `tenant_id`/`community_id` platform columns are bound as
 //! `text` here; this must be reconciled against whatever concrete type
@@ -45,6 +51,7 @@ use crate::limits::{
 };
 use crate::schema::{ColumnType, TableSchema, PLATFORM_COLUMNS};
 use crate::scope::{quote_ident, validate_identifier, DbScope};
+use crate::typed;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -149,7 +156,10 @@ fn reject_write_on_cross_community_table(schema: &TableSchema) -> Result<(), DbE
     Ok(())
 }
 
-fn db_value_to_sea_value(v: &DbValue) -> Value {
+/// Plain (column-type-agnostic) conversion of a [`DbValue`] to the SeaORM
+/// value bound for it -- [`typed::bind_value`] layers the declared-column
+/// typing (native `uuid`, typed NULLs) on top of this for every write.
+pub(crate) fn db_value_to_sea_value(v: &DbValue) -> Value {
     match v {
         DbValue::Null => Value::String(None),
         DbValue::Bool(b) => Value::Bool(Some(*b)),
@@ -210,7 +220,10 @@ fn validate_column_value(schema: &TableSchema, name: &str, value: &DbValue) -> R
         }
         (ColumnType::Int8, DbValue::Int(_)) => {}
         (ColumnType::Bool, DbValue::Bool(_)) => {}
-        (ColumnType::Timestamptz, DbValue::Text(_)) => {}
+        (ColumnType::Timestamptz, DbValue::Text(s)) => {
+            typed::validate_timestamptz(s)
+                .map_err(|reason| DbError::InvalidValue(format!("{name:?} {reason}")))?;
+        }
         (ColumnType::Text, DbValue::Text(s)) => {
             if s.len() > MAX_TEXT_BYTES {
                 return Err(DbError::QuotaExceeded(format!(
@@ -247,6 +260,55 @@ fn validate_column_values(
         validate_column_value(schema, name, value)?;
     }
     Ok(())
+}
+
+/// One guest-supplied column of an `insert`/`update`, resolved against the
+/// schema into exactly what the statement needs: the quoted identifier, the
+/// explicit type cast for its placeholder, and the typed bind value.
+struct WriteColumn {
+    quoted: String,
+    cast: &'static str,
+    value: Value,
+}
+
+impl WriteColumn {
+    /// The placeholder for bind position `n` (1-based): `$n` plus the
+    /// declared column's explicit cast, if it is a typed column.
+    fn placeholder(&self, n: usize) -> String {
+        format!("${n}{}", self.cast)
+    }
+}
+
+/// Resolves every (already [`validate_column_values`]-checked) guest column
+/// against `schema` -- the declared type decides the bind type and cast
+/// (see [`crate::typed`]), never the guest value. Run **before** a
+/// transaction is opened so a failure here costs no round trip.
+fn plan_writes(
+    schema: &TableSchema,
+    column_values: &[(String, DbValue)],
+) -> Result<Vec<WriteColumn>, DbError> {
+    column_values
+        .iter()
+        .map(|(name, value)| {
+            let col = schema.column(name).ok_or_else(|| {
+                DbError::InvalidColumn(format!("{name:?} is not declared for this app"))
+            })?;
+            Ok(WriteColumn {
+                quoted: quote_ident(name),
+                cast: typed::param_cast(col),
+                value: typed::bind_value(col, value)?,
+            })
+        })
+        .collect()
+}
+
+/// The `SELECT` list `get`/`query` share: the platform `row_id`/`version`
+/// followed by each declared column in its read form
+/// ([`typed::select_expr`]).
+fn select_list(schema: &TableSchema) -> String {
+    let mut exprs = vec![quote_ident("row_id"), quote_ident("version")];
+    exprs.extend(schema.columns.iter().map(typed::select_expr));
+    exprs.join(", ")
 }
 
 /// Sets the two independent tenant-scope mechanisms for the current
@@ -435,7 +497,17 @@ fn order_by_sql(schema: &TableSchema, order_by: &Option<OrderBy>) -> Result<Stri
         Some(OrderBy::Column { name, descending }) => {
             validate_order_column(schema, name)?;
             let dir = if *descending { "DESC" } else { "ASC" };
-            Ok(format!("{} {dir}", quote_ident(name)))
+            // Table-qualified on purpose: `get`/`query` project
+            // `timestamptz`/`jsonb` columns under their own name (as text,
+            // see `typed::select_expr`), and Postgres resolves a bare
+            // `ORDER BY name` to that *output* column -- sorting the text
+            // projection instead of the stored value. A qualified reference
+            // always means the real column.
+            Ok(format!(
+                "{}.{} {dir}",
+                quote_ident(&schema.table),
+                quote_ident(name)
+            ))
         }
     }
 }
@@ -479,6 +551,7 @@ impl PostgresBackend {
     ) -> Result<Row, DbError> {
         reject_write_on_cross_community_table(schema)?;
         validate_column_values(schema, &column_values)?;
+        let writes = plan_writes(schema, &column_values)?;
 
         let txn = self
             .conn
@@ -519,19 +592,22 @@ impl PostgresBackend {
             )));
         }
 
-        let mut col_names: Vec<String> = column_values.iter().map(|(n, _)| n.clone()).collect();
-        col_names.push("tenant_id".to_string());
-        col_names.push("community_id".to_string());
-        let quoted_cols: Vec<String> = col_names.iter().map(|c| quote_ident(c)).collect();
+        let mut quoted_cols: Vec<String> = writes.iter().map(|w| w.quoted.clone()).collect();
+        quoted_cols.push(quote_ident("tenant_id"));
+        quoted_cols.push(quote_ident("community_id"));
 
-        let mut bind_values: Vec<Value> = column_values
+        // Declared columns first (typed bind + explicit cast per column),
+        // then the two platform scope columns, bound as text.
+        let mut placeholders: Vec<String> = writes
             .iter()
-            .map(|(_, v)| db_value_to_sea_value(v))
+            .enumerate()
+            .map(|(i, w)| w.placeholder(i + 1))
             .collect();
+        let mut bind_values: Vec<Value> = writes.into_iter().map(|w| w.value).collect();
         bind_values.push(Value::String(Some(scope.tenant.clone())));
         bind_values.push(Value::String(scope.community.clone()));
-
-        let placeholders: Vec<String> = (1..=bind_values.len()).map(|i| format!("${i}")).collect();
+        placeholders.push(format!("${}", bind_values.len() - 1));
+        placeholders.push(format!("${}", bind_values.len()));
 
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({}) RETURNING row_id, version",
@@ -547,7 +623,7 @@ impl PostgresBackend {
                 bind_values,
             ))
             .await
-            .map_err(|e| DbError::Backend(e.to_string()))?
+            .map_err(typed::map_write_error)?
             .ok_or_else(|| DbError::Backend("INSERT ... RETURNING produced no row".to_string()))?;
 
         let row_id: Uuid = result_row
@@ -584,11 +660,6 @@ impl PostgresBackend {
             .map_err(|e| DbError::Backend(e.to_string()))?;
         set_local_scope(&txn, scope).await?;
 
-        let declared: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
-        let mut select_cols = vec!["row_id".to_string(), "version".to_string()];
-        select_cols.extend(declared.iter().cloned());
-        let quoted_select: Vec<String> = select_cols.iter().map(|c| quote_ident(c)).collect();
-
         let (pred_sql, mut pred_values) = scope_predicate(schema, scope, 2);
         pred_values.insert(0, Value::Uuid(Some(row_uuid)));
         if schema.cross_community_read {
@@ -601,7 +672,7 @@ impl PostgresBackend {
 
         let sql = format!(
             "SELECT {} FROM {} WHERE row_id = $1 AND {}",
-            quoted_select.join(", "),
+            select_list(schema),
             schema.qualified_name(),
             pred_sql
         );
@@ -624,7 +695,7 @@ impl PostgresBackend {
             .try_get("", "version")
             .map_err(|e| DbError::Backend(e.to_string()))?;
 
-        let mut columns = Vec::with_capacity(declared.len());
+        let mut columns = Vec::with_capacity(schema.columns.len());
         for col in &schema.columns {
             let value = extract_value(&result_row, col)?;
             columns.push((col.name.clone(), value));
@@ -660,6 +731,7 @@ impl PostgresBackend {
             .map_err(|_| DbError::InvalidValue("row_id is not a valid UUID".to_string()))?;
         let expected_version_i64 = i64::try_from(expected_version)
             .map_err(|_| DbError::InvalidValue("expected_version out of range".to_string()))?;
+        let writes = plan_writes(schema, &column_values)?;
 
         let txn = self
             .conn
@@ -668,15 +740,12 @@ impl PostgresBackend {
             .map_err(|e| DbError::Backend(e.to_string()))?;
         set_local_scope(&txn, scope).await?;
 
-        let set_clauses: Vec<String> = column_values
+        let set_clauses: Vec<String> = writes
             .iter()
             .enumerate()
-            .map(|(i, (name, _))| format!("{} = ${}", quote_ident(name), i + 1))
+            .map(|(i, w)| format!("{} = {}", w.quoted, w.placeholder(i + 1)))
             .collect();
-        let mut bind_values: Vec<Value> = column_values
-            .iter()
-            .map(|(_, v)| db_value_to_sea_value(v))
-            .collect();
+        let mut bind_values: Vec<Value> = writes.into_iter().map(|w| w.value).collect();
 
         let row_id_param = bind_values.len() + 1;
         let version_param = row_id_param + 1;
@@ -701,7 +770,7 @@ impl PostgresBackend {
                 bind_values,
             ))
             .await
-            .map_err(|e| DbError::Backend(e.to_string()))?;
+            .map_err(typed::map_write_error)?;
 
         let Some(updated_row) = updated else {
             // 0 rows affected: distinguish not-found from a version
@@ -841,11 +910,6 @@ impl PostgresBackend {
             .map_err(|e| DbError::Backend(e.to_string()))?;
         set_local_scope(&txn, scope).await?;
 
-        let declared: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
-        let mut select_cols = vec!["row_id".to_string(), "version".to_string()];
-        select_cols.extend(declared.iter().cloned());
-        let quoted_select: Vec<String> = select_cols.iter().map(|c| quote_ident(c)).collect();
-
         let (pred_sql, pred_values) = scope_predicate(schema, scope, 1);
         if schema.cross_community_read {
             tracing::info!(
@@ -862,7 +926,7 @@ impl PostgresBackend {
 
         let sql = format!(
             "SELECT {} FROM {} WHERE {} ORDER BY {order_sql} LIMIT ${limit_param} OFFSET ${offset_param}",
-            quoted_select.join(", "),
+            select_list(schema),
             schema.qualified_name(),
             pred_sql,
         );
@@ -888,7 +952,7 @@ impl PostgresBackend {
             let version: i64 = result_row
                 .try_get("", "version")
                 .map_err(|e| DbError::Backend(e.to_string()))?;
-            let mut columns = Vec::with_capacity(declared.len());
+            let mut columns = Vec::with_capacity(schema.columns.len());
             for col in &schema.columns {
                 columns.push((col.name.clone(), extract_value(result_row, col)?));
             }
@@ -902,6 +966,10 @@ impl PostgresBackend {
     }
 }
 
+/// Decodes one declared column of a `get`/`query` result row. Reads the
+/// form [`typed::select_expr`] projected: `timestamptz` (RFC 3339 UTC) and
+/// `jsonb` (JSON text) arrive as plain text, `uuid` decodes natively -- so
+/// the decode type here must stay in lockstep with that projection.
 fn extract_value(
     row: &sea_orm::QueryResult,
     col: &crate::schema::ColumnDef,
@@ -917,7 +985,7 @@ fn extract_value(
             })
         }};
     }
-    match col.sql_type {
+    match typed::effective_type(col) {
         ColumnType::Bool => try_nullable!(bool, DbValue::Bool),
         ColumnType::Int4 => try_nullable!(i32, |v: i32| DbValue::Int(v as i64)),
         ColumnType::Int8 => try_nullable!(i64, DbValue::Int),
@@ -1184,7 +1252,7 @@ mod tests {
                 })
             )
             .unwrap(),
-            "\"score\" ASC"
+            "\"fishing_core\".\"score\" ASC"
         );
         assert_eq!(
             order_by_sql(
@@ -1195,7 +1263,7 @@ mod tests {
                 })
             )
             .unwrap(),
-            "\"score\" DESC"
+            "\"fishing_core\".\"score\" DESC"
         );
     }
 
@@ -2484,14 +2552,14 @@ mod tests {
                     name: "score".to_string(),
                     descending: true,
                 }),
-                "ORDER BY \"score\" DESC LIMIT",
+                "ORDER BY \"fishing_core\".\"score\" DESC LIMIT",
             ),
             (
                 Some(OrderBy::Column {
                     name: "created_at".to_string(),
                     descending: false,
                 }),
-                "ORDER BY \"created_at\" ASC LIMIT",
+                "ORDER BY \"fishing_core\".\"created_at\" ASC LIMIT",
             ),
         ];
         for (order_by, expected) in cases {
@@ -2708,7 +2776,20 @@ mod tests {
         );
         assert!(ok(ColumnType::Int8, DbValue::Int(i64::MIN)).is_ok());
         assert!(ok(ColumnType::Bool, DbValue::Bool(false)).is_ok());
-        assert!(ok(ColumnType::Timestamptz, DbValue::Text("2026-01-01".into())).is_ok());
+        assert!(ok(
+            ColumnType::Timestamptz,
+            DbValue::Text("2026-01-01T00:00:00Z".into())
+        )
+        .is_ok());
+        assert_eq!(
+            code(ColumnType::Timestamptz, DbValue::Text("2026-01-01".into())),
+            "invalid_value",
+            "a bare date has no UTC offset"
+        );
+        assert_eq!(
+            code(ColumnType::Timestamptz, DbValue::Text("now".into())),
+            "invalid_value"
+        );
         assert!(ok(ColumnType::Text, DbValue::Text("a".repeat(MAX_TEXT_BYTES))).is_ok());
         assert!(ok(ColumnType::Text, DbValue::Null).is_ok());
 
@@ -2756,6 +2837,329 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code(), "invalid_column");
+    }
+
+    // Typed-column statements (regression: bundle-DB typed columns failed
+    // against real Postgres because every value was bound as `text`). The
+    // mock cannot reject a wrong cast, so these pin the exact SQL/bind shape;
+    // `tests/postgres_integration.rs` proves it against a real server.
+
+    const OTHER_UUID: &str = "9a1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d";
+
+    fn other_uuid() -> Uuid {
+        Uuid::parse_str(OTHER_UUID).expect("OTHER_UUID is a valid UUID")
+    }
+
+    #[tokio::test]
+    async fn insert_casts_only_the_typed_columns_and_binds_a_uuid_natively() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(3))
+                .append_query_results([count_row(0), insert_returning_row()]),
+        );
+        let scope = scoped();
+
+        h.backend
+            .insert(
+                &wide_schema(),
+                &scope,
+                vec![
+                    ("flag".to_string(), DbValue::Bool(true)),
+                    ("small".to_string(), DbValue::Int(5)),
+                    ("big".to_string(), DbValue::Int(9)),
+                    ("note".to_string(), DbValue::Text("n".to_string())),
+                    (
+                        "seen_at".to_string(),
+                        DbValue::Text("2026-01-02T03:04:05Z".to_string()),
+                    ),
+                    ("doc".to_string(), DbValue::Text("{\"a\":1}".to_string())),
+                    (
+                        "other_id".to_string(),
+                        DbValue::Text(OTHER_UUID.to_uppercase()),
+                    ),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let stmts = h.statements();
+        assert_eq!(
+            stmts[5].sql,
+            "INSERT INTO \"app_community\".\"wide_tbl\" \
+             (\"flag\", \"small\", \"big\", \"note\", \"seen_at\", \"doc\", \"other_id\", \
+             \"tenant_id\", \"community_id\") \
+             VALUES ($1, $2, $3, $4, $5::timestamptz, $6::jsonb, $7::uuid, $8, $9) \
+             RETURNING row_id, version"
+        );
+        assert_eq!(
+            bound(&stmts[5]),
+            vec![
+                Value::Bool(Some(true)),
+                big(5),
+                big(9),
+                text("n"),
+                text("2026-01-02T03:04:05Z"),
+                text("{\"a\":1}"),
+                Value::Uuid(Some(other_uuid())),
+                text("acme"),
+                text("main"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_casts_a_user_ref_column_to_uuid() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(3))
+                .append_query_results([count_row(0), insert_returning_row()]),
+        );
+
+        h.backend
+            .insert(
+                &schema_with_user_ref(),
+                &scoped(),
+                vec![
+                    (
+                        "user_ref".to_string(),
+                        DbValue::Text(OTHER_UUID.to_string()),
+                    ),
+                    ("score".to_string(), DbValue::Int(1)),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let stmts = h.statements();
+        assert_eq!(
+            stmts[5].sql,
+            "INSERT INTO \"app_core\".\"fishing_core\" \
+             (\"user_ref\", \"score\", \"tenant_id\", \"community_id\") \
+             VALUES ($1::uuid, $2, $3, $4) RETURNING row_id, version"
+        );
+        assert_eq!(bound(&stmts[5])[0], Value::Uuid(Some(other_uuid())));
+    }
+
+    #[tokio::test]
+    async fn insert_types_a_null_by_its_column_so_it_can_assign_into_a_non_text_column() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(3))
+                .append_query_results([count_row(0), insert_returning_row()]),
+        );
+        let nulls = ["flag", "small", "big", "note", "seen_at", "doc", "other_id"]
+            .iter()
+            .map(|c| (c.to_string(), DbValue::Null))
+            .collect();
+
+        h.backend
+            .insert(&wide_schema(), &scoped(), nulls)
+            .await
+            .unwrap();
+
+        let stmts = h.statements();
+        assert!(stmts[5]
+            .sql
+            .contains("VALUES ($1, $2, $3, $4, $5::timestamptz, $6::jsonb, $7::uuid, $8, $9)"));
+        assert_eq!(
+            bound(&stmts[5]),
+            vec![
+                Value::Bool(None),
+                Value::BigInt(None),
+                Value::BigInt(None),
+                Value::String(None),
+                Value::String(None),
+                Value::String(None),
+                Value::Uuid(None),
+                text("acme"),
+                text("main"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn update_casts_typed_set_clauses_and_leaves_plain_ones_alone() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([vec![mock_row(vec![("version", big(4))])]]),
+        );
+
+        h.backend
+            .update(
+                &wide_schema(),
+                &scoped(),
+                ROW_ID,
+                3,
+                vec![
+                    (
+                        "seen_at".to_string(),
+                        DbValue::Text("2026-01-02T03:04:05+02:00".to_string()),
+                    ),
+                    ("doc".to_string(), DbValue::Text("[1]".to_string())),
+                    ("other_id".to_string(), DbValue::Null),
+                    ("note".to_string(), DbValue::Text("n".to_string())),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let stmts = h.statements();
+        assert_eq!(
+            stmts[3].sql,
+            "UPDATE \"app_community\".\"wide_tbl\" SET \"seen_at\" = $1::timestamptz, \
+             \"doc\" = $2::jsonb, \"other_id\" = $3::uuid, \"note\" = $4, \
+             version = version + 1, updated_at = now() \
+             WHERE row_id = $5 AND version = $6 AND tenant_id = $7 AND community_id = $8 \
+             RETURNING version"
+        );
+        assert_eq!(
+            bound(&stmts[3]),
+            vec![
+                text("2026-01-02T03:04:05+02:00"),
+                text("[1]"),
+                Value::Uuid(None),
+                text("n"),
+                uuid_cell(),
+                big(3),
+                text("acme"),
+                text("main"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_typed_value_is_rejected_before_any_io() {
+        let bad: [(&str, DbValue); 4] = [
+            ("other_id", DbValue::Text("nope".to_string())),
+            ("seen_at", DbValue::Text("2026-01-02".to_string())),
+            ("doc", DbValue::Text("{not json".to_string())),
+            ("seen_at", DbValue::Int(1)),
+        ];
+        for (column, value) in bad {
+            let h = Harness::new(mock_db());
+            let err = h
+                .backend
+                .insert(
+                    &wide_schema(),
+                    &scoped(),
+                    vec![(column.to_string(), value.clone())],
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), "invalid_value", "insert {column}={value:?}");
+            assert!(h.statements().is_empty(), "{column} reached the database");
+
+            let h = Harness::new(mock_db());
+            let err = h
+                .backend
+                .update(
+                    &wide_schema(),
+                    &scoped(),
+                    ROW_ID,
+                    1,
+                    vec![(column.to_string(), value.clone())],
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), "invalid_value", "update {column}={value:?}");
+            assert!(h.statements().is_empty(), "{column} reached the database");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_and_query_project_timestamptz_and_jsonb_as_text_in_sql() {
+        let schema = wide_schema();
+        let select = "SELECT \"row_id\", \"version\", \"flag\", \"small\", \"big\", \"note\", \
+             CASE WHEN isfinite(\"seen_at\") \
+             THEN to_char(\"seen_at\" AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') \
+             ELSE \"seen_at\"::text END AS \"seen_at\", \
+             \"doc\"::text AS \"doc\", \"other_id\" \
+             FROM \"app_community\".\"wide_tbl\"";
+        let all_null = || {
+            wide_row(vec![
+                ("flag", Value::Bool(None)),
+                ("small", Value::Int(None)),
+                ("big", Value::BigInt(None)),
+                ("note", Value::String(None)),
+                ("seen_at", Value::String(None)),
+                ("doc", Value::String(None)),
+                ("other_id", Value::Uuid(None)),
+            ])
+        };
+
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([vec![all_null()]]),
+        );
+        h.backend.get(&schema, &scoped(), ROW_ID).await.unwrap();
+        let stmts = h.statements();
+        assert_eq!(
+            stmts[3].sql,
+            format!("{select} WHERE row_id = $1 AND tenant_id = $2 AND community_id = $3")
+        );
+
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([vec![all_null()]]),
+        );
+        h.backend
+            .query(&schema, &scoped(), 10, 0, None)
+            .await
+            .unwrap();
+        let stmts = h.statements();
+        assert_eq!(
+            stmts[3].sql,
+            format!(
+                "{select} WHERE tenant_id = $1 AND community_id = $2 \
+                 ORDER BY row_id ASC LIMIT $3 OFFSET $4"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn query_orders_a_projected_column_by_its_stored_value_not_the_text_alias() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([no_rows()]),
+        );
+        h.backend
+            .query(
+                &wide_schema(),
+                &scoped(),
+                10,
+                0,
+                Some(OrderBy::Column {
+                    name: "seen_at".to_string(),
+                    descending: true,
+                }),
+            )
+            .await
+            .unwrap();
+        let sql = &h.statements()[3].sql;
+        assert!(
+            sql.contains("ORDER BY \"wide_tbl\".\"seen_at\" DESC LIMIT"),
+            "a bare `ORDER BY \"seen_at\"` would sort the text projection: {sql}"
+        );
+    }
+
+    #[test]
+    fn a_user_ref_column_reads_as_a_uuid_even_if_its_cached_type_says_otherwise() {
+        let schema = TableSchema::validated(
+            AppSchema::Core,
+            "t",
+            vec![ColumnDef {
+                name: "owner".to_string(),
+                sql_type: ColumnType::Text,
+                nullable: true,
+                is_user_ref: true,
+            }],
+        )
+        .expect("schema is valid");
+        assert_eq!(select_list(&schema), "\"row_id\", \"version\", \"owner\"");
     }
 
     #[tokio::test]
