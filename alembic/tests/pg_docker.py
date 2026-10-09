@@ -68,7 +68,9 @@ CREATE TABLE hub_users (
     id SERIAL PRIMARY KEY,
     -- a PII column outside 0043's column-scoped reader grant (uuid, id), so
     -- `SELECT *` as waddles_bundle_reader is still denied (test_0032).
-    username TEXT
+    username TEXT,
+    -- identity_resolution_service.resolve_display_names reads it (hub profile name)
+    display_name TEXT
 );
 -- 0044_connector_pii_reader_role column-grants on this legacy table
 -- (config/postgres/migrations/000_create_base_schema.sql); only the

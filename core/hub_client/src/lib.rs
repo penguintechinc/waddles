@@ -16,6 +16,7 @@
 //!   in-flight requests against a channel that keeps refusing them;
 //! - retries **only** if the RPC is idempotent
 //!   ([`ResolveDisplayNames`](HubClient::resolve_display_names),
+//!   [`ResolveHandle`](HubClient::resolve_handle),
 //!   [`GetStreamDek`](HubClient::get_stream_dek)) and the failure is
 //!   transient (`UNAVAILABLE`/`DEADLINE_EXCEEDED`).
 //!   [`MintEphemeralPseudonyms`](HubClient::mint_ephemeral_pseudonyms)
@@ -42,6 +43,7 @@ use pb::key_service_client::KeyServiceClient;
 use pb::{
     EphemeralPseudonym, GetStreamDekRequest, GetStreamDekResponse, MintEphemeralPseudonymRequest,
     MintEphemeralPseudonymsRequest, ResolveDisplayNamesRequest, ResolveDisplayNamesResponse,
+    ResolveHandleRequest, ResolveHandleResponse,
 };
 use service_auth::{MachineJwtClient, ServiceAuthError};
 use tonic::transport::{Channel, Endpoint};
@@ -144,6 +146,18 @@ fn is_retryable(status: &Status) -> bool {
     matches!(
         status.code(),
         tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+    )
+}
+
+/// Whether a failed RPC is the caller's own input being rejected (no such handle,
+/// ambiguous handle, malformed request) rather than a sign hub-api is unhealthy.
+/// `ResolveHandle` hits these on ordinary typos (`!secret @nobody`), so counting them
+/// as circuit failures would let a few bad lookups -- or one hostile chatter -- open
+/// the breaker and fail every other RPC (egress detokenization, pseudonym mint) fast.
+fn is_caller_error(status: &Status) -> bool {
+    matches!(
+        status.code(),
+        tonic::Code::NotFound | tonic::Code::FailedPrecondition | tonic::Code::InvalidArgument
     )
 }
 
@@ -283,6 +297,42 @@ impl HubClient {
         .await
     }
 
+    /// Resolves ONE raw chat reference (`@bob`, `bob`, or a Discord `<@id>`
+    /// mention) to its stable UUID inside hub-api's PII boundary -- the raw
+    /// handle is sent to hub-api and never comes back, only the UUID does.
+    /// Idempotent (a read, or a get-or-create of the same stable pseudonym)
+    /// so it is retried like `resolve_display_names`. A handle with no match
+    /// surfaces as `HubClientError::Grpc` with `Code::NotFound`, an
+    /// ambiguous one as `Code::FailedPrecondition` -- never a default UUID.
+    pub async fn resolve_handle(
+        &self,
+        tenant_id: String,
+        platform: String,
+        target: String,
+    ) -> Result<ResolveHandleResponse, HubClientError> {
+        self.call_with_retry(|| {
+            let tenant_id = tenant_id.clone();
+            let platform = platform.clone();
+            let target = target.clone();
+            async move {
+                let request = self
+                    .authed_request(ResolveHandleRequest {
+                        tenant_id,
+                        platform,
+                        target,
+                    })
+                    .await?;
+                let mut client = self.identity.clone();
+                client
+                    .resolve_handle(request)
+                    .await
+                    .map(|r| r.into_inner())
+                    .map_err(HubClientError::from)
+            }
+        })
+        .await
+    }
+
     /// Returns a sealed stream DEK. Idempotent -- retried the same as
     /// `resolve_display_names`.
     pub async fn get_stream_dek(
@@ -340,6 +390,11 @@ impl HubClient {
                     debug!(attempt, code = ?status.code(), "hub_client.retrying");
                     tokio::time::sleep(backoff).await;
                 }
+                Err(HubClientError::Grpc(status)) if is_caller_error(&status) => {
+                    // The server answered and rejected the input: proof of health.
+                    self.circuit.record_success();
+                    return Err(HubClientError::Grpc(status));
+                }
                 Err(HubClientError::Grpc(status)) => {
                     self.circuit.record_failure();
                     return Err(HubClientError::Grpc(status));
@@ -380,6 +435,72 @@ mod tests {
             breaker.allow(),
             "one failure after a reset never opens a threshold-2 breaker"
         );
+    }
+
+    #[test]
+    fn caller_errors_are_exactly_not_found_failed_precondition_invalid_argument() {
+        assert!(is_caller_error(&Status::not_found("no such handle")));
+        assert!(is_caller_error(&Status::failed_precondition("ambiguous")));
+        assert!(is_caller_error(&Status::invalid_argument("bad")));
+        assert!(!is_caller_error(&Status::internal("boom")));
+        assert!(!is_caller_error(&Status::unavailable("down")));
+        assert!(!is_caller_error(&Status::unauthenticated("no")));
+        assert!(!is_caller_error(&Status::permission_denied("no")));
+    }
+
+    /// A `HubClient` over a lazy channel that never dials -- `call_with_retry` is driven
+    /// with synthetic results, so no network or JWT bootstrap is involved.
+    fn offline_client() -> HubClient {
+        let channel = Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        HubClient {
+            identity: IdentityServiceClient::new(channel.clone()),
+            key: KeyServiceClient::new(channel),
+            token_client: Arc::new(MachineJwtClient::new(
+                "http://127.0.0.1:1/token",
+                "/nonexistent/sa-token",
+                "identity:handle:resolve",
+            )),
+            circuit: Arc::new(CircuitBreaker::new(5, Duration::from_secs(30))),
+            deadline: DEFAULT_RPC_DEADLINE,
+            max_retries: 2,
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_not_found_lookups_never_open_the_circuit() {
+        let client = offline_client();
+        for _ in 0..20 {
+            let result: Result<(), HubClientError> = client
+                .call_with_retry(|| async {
+                    Err(HubClientError::Grpc(Status::not_found("no such handle")))
+                })
+                .await;
+            assert!(matches!(
+                result,
+                Err(HubClientError::Grpc(ref s)) if s.code() == tonic::Code::NotFound
+            ));
+        }
+        assert!(
+            client.circuit.allow(),
+            "caller errors are not health failures: the breaker must stay closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn server_errors_still_open_the_circuit() {
+        let client = offline_client();
+        for _ in 0..5 {
+            let result: Result<(), HubClientError> = client
+                .call_with_retry(|| async { Err(HubClientError::Grpc(Status::internal("boom"))) })
+                .await;
+            assert!(result.is_err());
+        }
+        assert!(
+            !client.circuit.allow(),
+            "five consecutive INTERNAL failures must open the breaker"
+        );
+        let blocked: Result<(), HubClientError> = client.call_with_retry(|| async { Ok(()) }).await;
+        assert!(matches!(blocked, Err(HubClientError::CircuitOpen)));
     }
 
     #[test]
