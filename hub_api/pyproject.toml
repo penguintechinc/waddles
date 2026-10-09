@@ -243,6 +243,8 @@ convention = "google"
 # every other v1 blueprint's DTOs already use; S101 is the same
 # tenant_middleware postcondition assert as workstream_usage.py above.
 "blueprints/v1/ingest_sources.py" = ["N815", "S101"]
+# One-time secrets (feature #684) -- same camelCase wire DTOs + tenant_middleware postcondition assert.
+"blueprints/v1/one_time_secrets.py" = ["N815", "S101"]
 # Same camelCase-DTO-wire-contract rationale as bundle_versions.py/
 # bundle_approvals.py above -- no tenant_middleware assert here (this
 # endpoint is deliberately cross-tenant), so only N815 is needed.
