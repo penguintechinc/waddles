@@ -1,0 +1,24 @@
+[project]
+name = "waddle-bundle-chat"
+version = "1.0.0"
+description = "`!chat-history [list]` / `!channels [list]` -- read-only chat history queries, community-scoped. Python equivalent of bundles/python/count, modeled on its hand-built (not bundle_compiler-routed) structure."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3", "mypy==1.14.1", "ruff==0.11.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+
+# `waddle-sdk` ships no `py.typed` marker (a pre-existing SDK packaging gap, not fixable from
+# this bundle without touching `sdk/waddle-sdk/` -- out of this bundle's scope). Silencing
+# `import-untyped` here only, so `--strict` still catches real type errors in this bundle's
+# own code.
+[[tool.mypy.overrides]]
+module = "waddle_sdk.*"
+ignore_missing_imports = true

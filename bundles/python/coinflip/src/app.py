@@ -459,7 +459,7 @@ async def _handle_set_cooldown(
     try:
         seconds = int(parts[1])
     except ValueError as exc:
-        log.debug("coinflip.invalid_cooldown", raw=parts[1], error=str(exc))
+        log.debug("coinflip.invalid_cooldown", error_type=type(exc).__name__)
         return f"'{parts[1]}' isn't a whole number of seconds"
     if not (MIN_COOLDOWN_SECONDS <= seconds <= MAX_COOLDOWN_SECONDS):
         return (

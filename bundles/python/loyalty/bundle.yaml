@@ -1,0 +1,79 @@
+schema_version: 2
+app_id: waddles.core.example.loyalty
+name: Loyalty Points Bundle (Python)
+# 1.0.0: initial DB-backed v1 -- !points (balance)/!points <user>/!points top/
+# !points add|sub <amount> <user>. See src/app.py's own module docstring for the full
+# data-model rationale (kv index + db ledger) and the leaderboard-display-name limitation.
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+# Attribution: inspired by superpenguintv (Psychoboy)'s PenguinTwitchBot points/currency
+# system, NOT a literal port -- no original source or text reused (contrast
+# bundles/csharp/superpenguin-roll, an actual line-for-line port, which does carry the
+# full verbatim MIT notice). See src/app.py's module docstring for detail.
+author: "superpenguintv (Psychoboy)"
+license: Apache-2.0
+source_url: https://github.com/penguintechinc/waddles/tree/main/bundles/python/loyalty
+notice: |
+  Points/currency ledger concept inspired by superpenguintv (Psychoboy)'s
+  PenguinTwitchBot loyalty-points feature (https://github.com/Psychoboy/PenguinTwitchBot).
+  This is an original Waddles implementation: the command grammar, data model (structured
+  db ledger + kv lookup index), optimistic-concurrency update loop, and leaderboard
+  rendering are written fresh for this bundle. No original PenguinTwitchBot source code
+  or text is reused.
+language: python
+artifact: component
+execution_model: wasi-component
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!points"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!points"]
+    produces: []
+    config: {}
+    spec:
+      required_config: []
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+    config: {}
+    spec:
+      required_config: []
+egress: []
+# One app-owned table -- this is what grants the `db` capability
+# (hub_api/services/bundle_approval_service.py::_derive_capabilities: `data.tables`
+# non-empty => `db`). Columns (informal today -- the richer `data.table.columns[]`
+# declarative schema in hub_api/services/bundle_data_schema.py is "not wired into
+# onboarding yet" per that module's own docstring, so hub-api's provisioning-time table
+# creation for this bundle is a separate, pre-existing platform gap, not something this
+# PR fixes):
+#   actor_hash text(64) not null  -- SHA-256 hex pseudonym of the balance-holder, never
+#                                    a raw username/user_ref (see src/app.py::_pseudonym)
+#   balance    int8 not null default 0
+data:
+  tables:
+    - loyalty_balances
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+# `storage.kv` -- required for the data plane to grant `kv` at all
+# (hub_api/services/bundle_approval_service.py::KV_PERMISSION_ID); used here as a
+# pseudonym -> row_id lookup index alongside the db ledger (see src/app.py).
+permissions:
+  - storage.kv
+config_schema: {}
+compatible_with: []
+incompatible_with: []
+platform_compatibility:
+  tested_with: "1.0.0"
+  min_version: "1.0.0"
+  max_version: null

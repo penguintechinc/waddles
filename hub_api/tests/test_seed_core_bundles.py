@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -671,7 +671,12 @@ async def test_seed_one_refuses_when_catalog_version_does_not_match_manifest(
 async def test_resolve_or_publish_version_reports_a_stalled_upload_clearly(
     install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A prior crashed run left an app_version_uploads row that never reached PUBLISHED."""
+    """Preserved fail-loud path: an INSPECTING row touched moments ago is NOT self-healed.
+
+    `_recover_stalled_core_upload()`'s own grace window (`CORE_BUNDLE_SEEDER_STALL_RECOVERY_
+    SECONDS`, default 30s) refuses to touch a row this fresh -- it cannot yet safely assume
+    the owning process is dead -- so this remains a hard, operator-actionable failure.
+    """
     _patch_validator_and_storage(monkeypatch)
     entry = _write_bundle(tmp_path)
     now = datetime.now(UTC)
@@ -689,6 +694,109 @@ async def test_resolve_or_publish_version_reports_a_stalled_upload_clearly(
     with pytest.raises(ApiError) as excinfo:
         await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
     assert excinfo.value.code == "stalled_core_bundle_upload"
+
+
+# regression: the actual alpha incident this fixes -- a prior seeder Job crashed mid-INSPECTING
+# (e.g. after a SeaweedFS blip) and Kubernetes restarted the Job per its own backoffLimit well
+# inside bundle_version_service's own 15m general-purpose stall-timeout window, so create_version()
+# alone never got a chance to self-heal it; the seeder must recover its OWN orphaned row instead
+# of crashing the whole Helm hook (gh "stalled_core_bundle_upload", alpha stuck at 33/40 bundles).
+async def test_seed_one_self_heals_an_orphaned_stalled_inspecting_row(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_validator_and_storage(monkeypatch)
+    entry = _write_bundle(tmp_path)
+    stale = datetime.now(UTC) - timedelta(minutes=5)
+    orphaned_id = await install_dal.app_version_uploads.async_insert(
+        app_id=entry.app_id,
+        version=entry.version,
+        tenant_id=1,
+        artifact_kind="prebuilt",
+        language="rust",
+        status="INSPECTING",
+        created_at=stale,
+        updated_at=stale,
+        status_changed_at=stale,
+    )
+
+    results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+
+    assert [r.outcome for r in results] == ["made_available", "activated"]
+
+    upload_row = (
+        await install_dal(install_dal.app_version_uploads.app_id == entry.app_id).select()
+    ).first()
+    assert upload_row.status == STATUS_PUBLISHED
+    # The orphaned row was reused in place (create_version()'s own REJECTED-row-reuse path),
+    # never left behind as a second row alongside a fresh one.
+    assert upload_row.id == orphaned_id
+
+    all_rows = await install_dal(
+        (install_dal.app_version_uploads.app_id == entry.app_id)
+        & (install_dal.app_version_uploads.version == entry.version)
+    ).select()
+    assert len(all_rows) == 1
+
+
+async def test_seed_one_self_heal_is_idempotent_on_a_second_rerun(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second seeder run after a successful self-heal is a clean no_op, not a repeat conflict."""
+    _patch_validator_and_storage(monkeypatch)
+    entry = _write_bundle(tmp_path)
+    stale = datetime.now(UTC) - timedelta(minutes=5)
+    await install_dal.app_version_uploads.async_insert(
+        app_id=entry.app_id,
+        version=entry.version,
+        tenant_id=1,
+        artifact_kind="prebuilt",
+        language="rust",
+        status="INSPECTING",
+        created_at=stale,
+        updated_at=stale,
+        status_changed_at=stale,
+    )
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+
+    results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+
+    assert [r.outcome for r in results] == ["no_op"]
+
+
+async def test_resolve_or_publish_version_still_fails_loud_for_an_ambiguous_published_row(
+    install_dal: Any, tmp_path: Path
+) -> None:
+    """Preserved fail-loud path: a PUBLISHED upload row with no matching app_versions row.
+
+    `_resolve_or_publish_version()` already checked `app_versions` directly first and only
+    reaches `create_version()` when no published version exists there -- so an
+    `app_version_uploads` row claiming PUBLISHED at this point means the two tables disagree.
+    That is a genuine data-integrity gap, never a crash artifact, and `_recover_stalled_core_
+    upload()` must never auto-resolve it no matter how old the row is.
+    """
+    entry = _write_bundle(tmp_path)
+    long_ago = datetime.now(UTC) - timedelta(hours=1)
+    await install_dal.app_version_uploads.async_insert(
+        app_id=entry.app_id,
+        version=entry.version,
+        tenant_id=1,
+        artifact_kind="prebuilt",
+        language="rust",
+        status=STATUS_PUBLISHED,
+        created_at=long_ago,
+        updated_at=long_ago,
+        status_changed_at=long_ago,
+    )
+
+    with pytest.raises(ApiError) as excinfo:
+        await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert excinfo.value.code == "stalled_core_bundle_upload"
+
+    # Untouched -- still PUBLISHED, never reset/deleted by the self-heal path.
+    upload_row = (
+        await install_dal(install_dal.app_version_uploads.app_id == entry.app_id).select()
+    ).first()
+    assert upload_row.status == STATUS_PUBLISHED
 
 
 # ---------------------------------------------------------------------------

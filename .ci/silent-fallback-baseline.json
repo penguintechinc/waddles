@@ -3635,6 +3635,22 @@
       "line_hash": "e06d4a6bfe41646f",
       "justification": "Sanctioned graceful degradation (critical-rules.md Feature Flags & License Tiers): _license_tier() fails CLOSED to \"free\" (never \"enterprise\") when the WIT flags import is unavailable or stale-world -- same defensive shape as waddle_sdk.flask_core.feature_flags.tier(). Never overridable by env var/flag per license-tier rules. See function docstring.",
       "status": "sanctioned-by-design"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_presentation/src/telemetry.rs",
+      "line": 73,
+      "line_hash": "a996203a023a8fdd",
+      "justification": "Identical already-baselined pattern as core/svc_streaming/src/telemetry.rs:65 (gh-605) -- svc-presentation-rust's telemetry module is explicitly modeled on svc-streaming's (P1 scaffold task instructions). `OTEL_SERVICE_NAME` unset simply means \"use the service's own default name\", not an error; no subscriber is installed yet at this point in init() for a tracing:: call to log to.",
+      "status": "sanctioned-by-design"
+    },
+    {
+      "rule_id": "rust-silent-unwrap-or-default",
+      "path": "core/svc_presentation/src/telemetry.rs",
+      "line": 123,
+      "line_hash": "376f928376a5c74c",
+      "justification": "Identical already-baselined pattern as core/svc_streaming/src/telemetry.rs:111 (gh-605) -- same rationale as the entry above: RUST_LOG/EnvFilter unset simply means \"default to info\", not an error, and no tracing subscriber exists yet to log to at this point in init().",
+      "status": "sanctioned-by-design"
     }
   ]
 }

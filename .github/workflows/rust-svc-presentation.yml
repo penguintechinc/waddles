@@ -1,0 +1,34 @@
+name: Rust svc-presentation (lint + test)
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/svc_presentation/**'
+      - 'core/overlay_schema/**'
+      - 'core/overlay_auth/**'
+      - 'core/service_auth/**'
+      - '.github/workflows/rust-svc-presentation.yml'
+      - '.github/workflows/rust-crate-ci.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/svc_presentation/**'
+      - 'core/overlay_schema/**'
+      - 'core/overlay_auth/**'
+      - 'core/service_auth/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    name: fmt + clippy + deny + coverage
+    uses: ./.github/workflows/rust-crate-ci.yml
+    with:
+      crate_name: svc-presentation
+      working_directory: core/svc_presentation
+      # Thin binary entrypoint, untestable without subprocessing -- same
+      # convention as rust-svc-process.yml/rust-egress-proxy.yml.
+      coverage_ignore_regex: 'main\.rs'

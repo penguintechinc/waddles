@@ -1,0 +1,26 @@
+[package]
+name = "overlay-schema"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "The unified overlay surface enum, push wire format, and SSE/websocket envelope (issues #456/#457 contract C3) -- single source of truth svc-presentation-rust, svc-streaming-rust, and the webui all target. A path dependency within this repo, not a penguin-libs crate: it depends on no cross-repo schema, only this repo's own overlay wire protocol (mirrors core/svc_presentation/services/render.py's existing payload fields for a faithful Python->Rust port). See src/lib.rs module doc."
+
+[lib]
+name = "overlay_schema"
+path = "src/lib.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- rules/critical-rules.md
+# Dependency Pinning. Cargo.lock is committed here and in every crate that
+# later depends on this one (svc-presentation-rust, svc-streaming-rust).
+# Same exact pins every other crate in this repo already uses for these
+# two crates (see e.g. core/svc_streaming/Cargo.toml) -- a path dependency
+# on this crate introduces no second pin of either.
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+
+[dev-dependencies]
+# Round-trip / fixture tests assert exact JSON shape against hand-written
+# literals -- no additional dev-dependency needed beyond serde_json above.

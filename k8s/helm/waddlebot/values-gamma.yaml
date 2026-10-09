@@ -19,8 +19,11 @@ pipeline:
     bundleSigning:
       secretName: ""
   rustDataPlane:
-    # OVERRIDE REQUIRED once the executor is enabled on gamma -- paste the `key_id:
-    # public_key` pair `generate-bundle-signing-key.sh` prints, e.g.:
+    # fix/chart-autogen-bundle-signing-key -- no longer required once the executor is
+    # enabled on gamma: it sources BUNDLE_SIGNING_PUBLIC_KEYS from the
+    # auto-provisioned ConfigMap by default (templates/auto-provisioned-keys-job.yaml
+    # derives+publishes it from whatever Secret pipeline.hubApi.bundleSigning above
+    # points at). Only set this explicitly to pin a specific key, e.g.:
     #   bundleSigningPublicKeys:
     #     2026-09-key1: "<base64 32-byte Ed25519 public key>"
     bundleSigningPublicKeys: {}

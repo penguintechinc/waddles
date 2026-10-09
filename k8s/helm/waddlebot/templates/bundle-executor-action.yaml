@@ -14,12 +14,11 @@
 # file). Gated on the top-level pipeline.rustDataPlane.enabled flag (default false) plus
 # this module's own .enabled sub-flag.
 {{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.bundleExecutorAction.enabled }}
-{{- $bseaTier := .Values.global.deploymentTier }}
-{{- if not .Values.pipeline.rustDataPlane.bundleSigningPublicKeys }}
-{{- if not (or (eq $bseaTier "alpha") (eq $bseaTier "local")) }}
-{{- fail (printf "pipeline.rustDataPlane.bundleSigningPublicKeys is empty and global.deploymentTier=%q is outside alpha/local: run make generate-bundle-signing-key and set values; see README rollout order" $bseaTier) }}
-{{- end }}
-{{- end }}
+{{- /* fix/chart-autogen-bundle-signing-key -- see templates/bundle-executor.yaml's
+header comment for the full rationale (identical here): BUNDLE_SIGNING_PUBLIC_KEYS
+now sources from the auto-provisioned ConfigMap by default instead of a render-time
+`fail` guard requiring a hand-pasted values override. */}}
+{{- $bseaCmName := .Values.autoProvisionedKeys.bundleSigning.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" (include "waddlebot.fullname" .)) }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -97,8 +96,18 @@ spec:
           value: {{ .Values.pipeline.rustDataPlane.bundleExecutorAction.sandboxGvisor | quote }}
         # feature/bundle-artifact-signing -- shared platform key set, see values.yaml's
         # pipeline.rustDataPlane.bundleSigningPublicKeys comment (not secret; public keys).
+        # fix/chart-autogen-bundle-signing-key -- see templates/bundle-executor.yaml's
+        # matching env block comment for the full rationale.
+        {{- if .Values.pipeline.rustDataPlane.bundleSigningPublicKeys }}
         - name: BUNDLE_SIGNING_PUBLIC_KEYS
           value: {{ .Values.pipeline.rustDataPlane.bundleSigningPublicKeys | toJson | quote }}
+        {{- else }}
+        - name: BUNDLE_SIGNING_PUBLIC_KEYS
+          valueFrom:
+            configMapKeyRef:
+              name: {{ $bseaCmName }}
+              key: BUNDLE_SIGNING_PUBLIC_KEYS
+        {{- end }}
         - name: BUNDLE_BUCKET_ENDPOINT
           value: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
         - name: BUNDLE_BUCKET_NAME

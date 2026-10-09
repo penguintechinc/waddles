@@ -150,6 +150,12 @@ pub enum CapabilityKind {
     Context,
     Clock,
     Log,
+    /// `streaming.lifecycle.subscribe` -- read-only subscription to
+    /// svc-streaming-rust's stream-lifecycle hooks (`wit/waddle-bundle/
+    /// stage.wit`'s `streaming-lifecycle` export, issue #456). No
+    /// enforcement mechanics live in this crate yet; host wiring is a
+    /// separate implementation task.
+    Streaming,
     /// `interaction.pii.receive` -- raw PII delivery in form/modal/
     /// interaction inputs. No enforcement mechanics live in this crate;
     /// the host's default-filter behavior when this is NOT granted is a
@@ -235,6 +241,11 @@ pub enum PermissionFamily {
     /// catalog entry). Subject to the instance-policy layer like any other
     /// family (spec SS1.3).
     InteractionPiiReceive,
+    /// `streaming.lifecycle.subscribe` -- gates linking a component's
+    /// `streaming-lifecycle` WIT export (issue #456). Catalog/permission
+    /// definition only; host-side enforcement (actually registering the
+    /// export per grant) is a later task.
+    StreamingLifecycleSubscribe,
 }
 
 /// One row of the catalog table (spec SS1).
@@ -272,6 +283,7 @@ impl PermissionFamily {
         Self::PlatformClock,
         Self::PlatformLog,
         Self::InteractionPiiReceive,
+        Self::StreamingLifecycleSubscribe,
     ];
 
     /// The static catalog id prefix -- for a parameterized family
@@ -300,6 +312,7 @@ impl PermissionFamily {
             Self::PlatformClock => "platform.clock",
             Self::PlatformLog => "platform.log",
             Self::InteractionPiiReceive => "interaction.pii.receive",
+            Self::StreamingLifecycleSubscribe => "streaming.lifecycle.subscribe",
         }
     }
 
@@ -542,6 +555,15 @@ impl PermissionFamily {
                 notes: "DEFAULT NO; without this grant the host filters PII out of \
                         form/modal/interaction inputs (best-effort)",
             },
+            Self::StreamingLifecycleSubscribe => CatalogEntry {
+                family: *self,
+                risk: Risk::Normal,
+                capability_kind: CapabilityKind::Streaming,
+                default_quota: Quota::Descriptive(
+                    "no call-rate quota -- host-pushed callbacks only, not a bundle-initiated call",
+                ),
+                notes: "Gates linking the streaming-lifecycle WIT export (wit-stage-v1-1 C1, issue #456)",
+            },
         }
     }
 }
@@ -583,6 +605,7 @@ pub enum PermissionId {
     PlatformClock,
     PlatformLog,
     InteractionPiiReceive,
+    StreamingLifecycleSubscribe,
 }
 
 /// Platforms compiled into this build's relay/moderation providers (spec
@@ -639,6 +662,7 @@ impl PermissionId {
             Self::PlatformClock => PermissionFamily::PlatformClock,
             Self::PlatformLog => PermissionFamily::PlatformLog,
             Self::InteractionPiiReceive => PermissionFamily::InteractionPiiReceive,
+            Self::StreamingLifecycleSubscribe => PermissionFamily::StreamingLifecycleSubscribe,
         }
     }
 
@@ -789,6 +813,7 @@ impl PermissionId {
             "platform.clock" => Ok(Self::PlatformClock),
             "platform.log" => Ok(Self::PlatformLog),
             "interaction.pii.receive" => Ok(Self::InteractionPiiReceive),
+            "streaming.lifecycle.subscribe" => Ok(Self::StreamingLifecycleSubscribe),
             other => Err(ParsePermissionIdError::UnknownPermission(other.to_string())),
         }
     }
@@ -833,6 +858,22 @@ mod tests {
         assert_eq!(
             id.family().catalog_entry().capability_kind,
             CapabilityKind::Interaction
+        );
+    }
+
+    #[test]
+    fn streaming_lifecycle_subscribe_is_normal_risk_and_round_trips() {
+        let id = PermissionId::parse("streaming.lifecycle.subscribe").unwrap();
+        assert_eq!(id.canonical_id(), "streaming.lifecycle.subscribe");
+        assert_eq!(id.family(), PermissionFamily::StreamingLifecycleSubscribe);
+        assert_eq!(id.risk(), Risk::Normal);
+        assert_eq!(
+            id.family().catalog_entry().capability_kind,
+            CapabilityKind::Streaming
+        );
+        assert_eq!(
+            PermissionFamily::StreamingLifecycleSubscribe.expected_app_scoped_resource(),
+            crate::resource::AppScopedResource::None
         );
     }
 

@@ -1,0 +1,47 @@
+# hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
+# waddles.core.example.quote -- see bundles/python/pyping/hub-manifest.yaml's own header for why
+# this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
+#
+# 1.0.0: strangler extraction of core/svc_process/bundles/social_quote_process.py's `!quote`
+# command -- see this bundle's src/app.py module docstring (feature/bundle-quote).
+# BUILD-ONLY / INERT: ships flag-OFF (`waddles.command-quote`) and is not wired into the
+# strangler cut-over yet -- bot_process._FEATURE_MODULES still owns live `quote` traffic.
+# Ported off the retired `waddle_sdk.db` DAL-style facade onto the structured
+# insert/get/query/update/delete API -- see src/app.py's module docstring.
+schema_version: 2
+app_id: waddles.core.example.quote
+name: Quote Book Bundle (Python)
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+language: python
+artifact: prebuilt
+execution_model: native
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!quote"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!quote"]
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+egress: []
+# See bundle.yaml's own comment -- same table, same informal column shape.
+data:
+  tables:
+    - quote_entries
+limits:
+  timeout_ms: 3000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - storage.kv
+routes_to: []

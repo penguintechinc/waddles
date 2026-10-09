@@ -3,18 +3,26 @@
 //! [`crate::api::engine::SharedEngine`] is wired into the router. Ported
 //! from the Python alpha's `blueprints/streaming.py`
 //! `start_forwarding`/`stop_forwarding`/`get_status`; the real ffmpeg
-//! subprocess + transcode-token admission
-//! (`services/ffmpeg_engine.py`/`services/token_ledger_client.py`) is not
-//! reimplemented here -- that is `crate::pipeline::supervisor`'s job (S3),
-//! not this chunk's.
+//! subprocess (`services/ffmpeg_engine.py`) is not reimplemented here --
+//! that is `crate::pipeline::supervisor`'s job (S3). TRANSCODE-token
+//! admission (`services/token_ledger_client.py`) **is** reimplemented here
+//! (slice S2 of the Rust rewrite, `crate::billing::token_ledger`) since
+//! [`start`] is this crate's direct analog of Python's
+//! `start_forwarding`: the only handler holding both the caller's bearer
+//! JWT and a `streaming_configs.transcode_enabled` row at the same time.
 
-use axum::extract::Path;
+use axum::extract::{Path, State};
+use axum::http::header::AUTHORIZATION;
+use axum::http::HeaderMap;
 use axum::Extension;
+use chrono::Utc;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 
+use crate::billing::token_ledger::TokenLedgerClient;
 use crate::db::entities::{streaming_config, streaming_target};
 use crate::error::ApiError;
 use crate::http::auth::AuthenticatedClaims;
+use crate::http::AppState;
 use crate::pipeline::{
     AudioCodec, InputSpec, ObjectStoreRef, OutputSpec, PipelineError, PipelineSpec,
     TranscodeProfile, VideoCodec,
@@ -87,12 +95,15 @@ mod tests {
 /// not a per-protocol stream key/token) and every enabled target becomes
 /// an [`OutputSpec::RtmpPush`] (the only protocol `streaming_targets`
 /// models today -- `platform` distinguishes destinations like
-/// twitch/youtube/facebook/custom, not RTMP vs SRT).
+/// twitch/youtube/facebook/custom, not RTMP vs SRT). `video` is resolved
+/// by the caller ([`resolve_transcode_video`]) before this is called --
+/// building the spec itself never touches the token ledger.
 async fn build_pipeline_spec(
     db: &DatabaseConnection,
     tenant: &str,
     community_id: i32,
     config: &streaming_config::Model,
+    video: VideoCodec,
 ) -> Result<PipelineSpec, ApiError> {
     let targets = streaming_target::Entity::find()
         .filter(streaming_target::Column::ConfigId.eq(config.id))
@@ -122,16 +133,6 @@ async fn build_pipeline_spec(
         });
     }
 
-    let video = if config.transcode_enabled {
-        VideoCodec::H264 {
-            preset: "veryfast".into(),
-            crf: None,
-            bitrate_kbps: Some(config.transcode_bitrate_kbps.max(0) as u32),
-        }
-    } else {
-        VideoCodec::Copy
-    };
-
     Ok(PipelineSpec {
         id: pipeline_id_for_config(config.id),
         tenant: tenant.to_string(),
@@ -148,6 +149,97 @@ async fn build_pipeline_spec(
         }],
         outputs,
     })
+}
+
+/// Extracts the raw `Bearer` token from the request's `Authorization`
+/// header for pass-through to hub-api's token ledger -- [`AuthenticatedClaims`]
+/// already validated this same header and decoded it into
+/// `crate::http::auth::Claims`, but does not retain the raw token string,
+/// so [`start`] re-reads the header directly rather than widening that
+/// extractor's public shape. Returns
+/// `None` if the header is missing/malformed, which should not happen
+/// (axum's extractor ordering means [`AuthenticatedClaims`] already
+/// rejected the request if so) -- treated as "no admission possible",
+/// falling back to passthrough rather than panicking.
+fn raw_bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+}
+
+/// TRANSCODE admission (BLOCK-WITH-FALLBACK, ported from the Python
+/// alpha's `services/streaming_service.py::start_forwarding`): if
+/// `config.transcode_enabled` is false, no ledger call is made and this
+/// always resolves to [`VideoCodec::Copy`] (matching Python's "the debit
+/// is only attempted `if config_row.transcode_enabled`"). Otherwise
+/// attempts a real token debit; an affordable debit returns the
+/// transcoded ([`VideoCodec::H264`]) profile, while an unaffordable one
+/// (`insufficient_balance`) OR an unreachable ledger
+/// (`ledger_unavailable`) falls back to passthrough -- `start()` still
+/// succeeds and the stream still starts, just without transcoding. Never
+/// returns an `Err`: a billing/entitlement check must never take down a
+/// live-stream start.
+async fn resolve_transcode_video(
+    token_ledger: &TokenLedgerClient,
+    hub_api_url: &str,
+    bearer_token: Option<&str>,
+    transcode_token_cost: i64,
+    transcode_product_key: &str,
+    community_id: i32,
+    config: &streaming_config::Model,
+) -> VideoCodec {
+    if !config.transcode_enabled {
+        return VideoCodec::Copy;
+    }
+
+    let Some(bearer_token) = bearer_token else {
+        // Should not happen (see `raw_bearer_token`'s doc comment) -- a
+        // missing bearer at this point means admission cannot be
+        // attempted at all, so fail closed on the ledger call the same
+        // way an unreachable ledger would: fall back to passthrough
+        // rather than guessing an entitlement this handler can't verify.
+        tracing::error!(
+            community_id,
+            config_id = config.id,
+            "lifecycle: transcode admission requested but no bearer token present on the request, falling back to passthrough"
+        );
+        return VideoCodec::Copy;
+    };
+
+    let reference = format!("stream:{}:{}", config.id, Utc::now().to_rfc3339());
+    let result = token_ledger
+        .debit_transcoding_tokens(
+            hub_api_url,
+            bearer_token,
+            community_id,
+            transcode_token_cost,
+            transcode_product_key,
+            &reference,
+        )
+        .await;
+
+    if result.ok {
+        tracing::info!(
+            community_id,
+            config_id = config.id,
+            balance_after = result.balance_after,
+            "lifecycle: transcode admission granted"
+        );
+        VideoCodec::H264 {
+            preset: "veryfast".into(),
+            crf: None,
+            bitrate_kbps: Some(config.transcode_bitrate_kbps.max(0) as u32),
+        }
+    } else {
+        tracing::warn!(
+            community_id,
+            config_id = config.id,
+            blocked_reason = result.blocked_reason.as_deref(),
+            "lifecycle: transcode admission denied or unreachable, falling back to passthrough"
+        );
+        VideoCodec::Copy
+    }
 }
 
 /// `POST .../configs/{config_id}/start`.
@@ -168,12 +260,24 @@ async fn build_pipeline_spec(
 pub async fn start(
     Path((community_id, config_id)): Path<(i32, i32)>,
     AuthenticatedClaims(claims): AuthenticatedClaims,
+    State(state): State<AppState>,
+    headers: HeaderMap,
     DbConn(db): DbConn,
     Extension(engine): Extension<SharedEngine>,
 ) -> Result<ApiSuccess<PipelineStatusDto>, ApiError> {
     assert_tenant_owns_community(&db, &claims.tenant, community_id).await?;
     let config = fetch_config(&db, community_id, config_id).await?;
-    let spec = build_pipeline_spec(&db, &claims.tenant, community_id, &config).await?;
+    let video = resolve_transcode_video(
+        &state.token_ledger,
+        &state.config.cli.hub_api_url,
+        raw_bearer_token(&headers),
+        state.config.cli.transcode_token_cost,
+        &state.config.cli.transcode_product_key,
+        community_id,
+        &config,
+    )
+    .await;
+    let spec = build_pipeline_spec(&db, &claims.tenant, community_id, &config, video).await?;
     let handle = engine.start(spec).await.map_err(map_pipeline_error)?;
     let status = engine.status(handle.id).await.map_err(map_pipeline_error)?;
     Ok(ApiSuccess::ok(status.into()))
