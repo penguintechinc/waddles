@@ -382,3 +382,171 @@ async fn token_from_env_reads_value() {
     std::env::set_var("TWITCH_HELIX_TEST_TOKEN_PRESENT", "abc");
     assert!(AccessToken::from_env("TWITCH_HELIX_TEST_TOKEN_PRESENT").is_ok());
 }
+
+/// Display + Debug + every `source()` link of an error, joined for leak scanning.
+fn full_error_text(err: &HelixError) -> String {
+    let mut out = format!("{err} | {err:?}");
+    let mut cur: Option<&dyn std::error::Error> = std::error::Error::source(err);
+    while let Some(e) = cur {
+        out.push_str(&format!(" | {e} | {e:?}"));
+        cur = e.source();
+    }
+    out
+}
+
+// regression: PR #722 review -- Transport errors leaked the full request URL
+// (incl. query-string user/channel ids) into Display/Debug.
+#[tokio::test]
+async fn transport_error_never_leaks_url_or_ids() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let uri = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let c = HelixClient::with_base_url("cid", AccessToken::new("tok").unwrap(), uri).unwrap();
+
+    let errs = [
+        c.send_whisper("from-user-9911", "to-user-4422", "hi")
+            .await
+            .unwrap_err(),
+        c.delete_chat_message("chan-7733", "mod-5544", "msg-6655")
+            .await
+            .unwrap_err(),
+        c.send_chat_message("chan-7733", "send-8866", "hi", None)
+            .await
+            .unwrap_err(),
+    ];
+    assert_eq!(errs.len(), 3);
+    for err in &errs {
+        assert!(matches!(err, HelixError::Transport(_)), "{err:?}");
+        assert!(err.is_retryable());
+        let text = full_error_text(err);
+        for needle in [
+            "from_user_id",
+            "to_user_id",
+            "broadcaster_id",
+            "moderator_id",
+            "message_id",
+            // Full ids, not bare digits: the ephemeral port could contain digits.
+            "from-user-9911",
+            "to-user-4422",
+            "chan-7733",
+            "mod-5544",
+            "msg-6655",
+            "send-8866",
+            "/whispers",
+            "/moderation/chat",
+            "/chat/messages",
+            "http://",
+            "https://",
+        ] {
+            assert!(!text.contains(needle), "{needle:?} leaked in {text:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn malformed_error_never_leaks_url() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .mount(&s)
+        .await;
+    let err = client(&s)
+        .send_chat_message("chan-7733", "send-8866", "hi", None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, HelixError::Malformed(_)), "{err:?}");
+    let text = full_error_text(&err);
+    for needle in ["chan-7733", "send-8866", "/chat/messages", "http://"] {
+        assert!(!text.contains(needle), "{needle:?} leaked in {text:?}");
+    }
+}
+
+// regression: PR #722 review -- a trailing-newline token became a retryable
+// Transport (builder) error and was retried forever.
+#[tokio::test]
+async fn token_with_trailing_newline_is_trimmed_and_sent_clean() {
+    let s = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/moderation/chat"))
+        .and(header("Authorization", "Bearer tok"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let c = HelixClient::with_base_url("cid", AccessToken::new("tok\n").unwrap(), s.uri()).unwrap();
+    c.delete_chat_message("b", "m", "x").await.unwrap();
+}
+
+#[test]
+fn bad_tokens_fail_loud_and_non_retryable() {
+    let cases = [
+        "",
+        " ",
+        "\n",
+        "\r\n",
+        "sekrit\ntok",
+        "sekrit tok",
+        "s\u{e9}krit",
+    ];
+    for bad in cases {
+        let err = AccessToken::new(bad).unwrap_err();
+        assert!(matches!(err, HelixError::InvalidArgument(_)), "{bad:?}");
+        assert!(!err.is_retryable(), "{bad:?}");
+        assert!(!err.to_string().contains("sekrit"), "token echoed: {err}");
+    }
+}
+
+#[tokio::test]
+async fn token_from_env_is_trimmed_and_blank_fails_loud() {
+    std::env::set_var("TWITCH_HELIX_TEST_TOKEN_NEWLINE", "envtok\n");
+    std::env::set_var("TWITCH_HELIX_TEST_TOKEN_BLANK", "\n");
+    let s = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(header("Authorization", "Bearer envtok"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let token = AccessToken::from_env("TWITCH_HELIX_TEST_TOKEN_NEWLINE").unwrap();
+    HelixClient::with_base_url("cid", token, s.uri())
+        .unwrap()
+        .delete_chat_message("b", "m", "x")
+        .await
+        .unwrap();
+
+    let err = AccessToken::from_env("TWITCH_HELIX_TEST_TOKEN_BLANK").unwrap_err();
+    assert!(matches!(err, HelixError::InvalidArgument(_)));
+    assert!(!err.is_retryable());
+}
+
+#[tokio::test]
+async fn client_id_is_trimmed_and_unsendable_ids_rejected() {
+    let s = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(header("Client-Id", "cid"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let t = || AccessToken::new("tok").unwrap();
+    HelixClient::with_base_url("cid\n", t(), s.uri())
+        .unwrap()
+        .delete_chat_message("b", "m", "x")
+        .await
+        .unwrap();
+    for bad in ["c\nid", "c id", "\n"] {
+        let err = HelixClient::with_base_url(bad, t(), s.uri()).unwrap_err();
+        assert!(matches!(err, HelixError::InvalidArgument(_)), "{bad:?}");
+        assert!(!err.is_retryable());
+    }
+}
+
+#[tokio::test]
+async fn unparsable_base_url_is_non_retryable() {
+    let c =
+        HelixClient::with_base_url("cid", AccessToken::new("tok").unwrap(), "not a url").unwrap();
+    let err = c.delete_chat_message("b", "m", "x").await.unwrap_err();
+    assert!(matches!(err, HelixError::InvalidArgument(_)), "{err:?}");
+    assert!(!err.is_retryable());
+}

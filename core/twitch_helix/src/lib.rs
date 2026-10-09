@@ -31,7 +31,15 @@
 //!
 //! # Logging
 //! Only endpoint names and status codes are logged -- never tokens, message
-//! text, or user/channel identifiers.
+//! text, or user/channel identifiers. Returned errors are URL-free too:
+//! [`HelixError::Transport`] has its request URL (and query-string ids)
+//! stripped, so a caller may log any [`HelixError`] safely.
+//!
+//! # Misconfiguration
+//! Tokens and client ids are trimmed and validated on load. Anything that still
+//! cannot be sent (builder errors) is [`HelixError::InvalidArgument`], which is
+//! never [`HelixError::is_retryable`] -- a permanent config fault fails loud
+//! instead of being retried forever.
 
 mod error;
 
@@ -60,16 +68,16 @@ pub const MAX_WHISPER_CHARS: usize = 10_000;
 pub struct AccessToken(String);
 
 impl AccessToken {
-    /// Wrap a raw token; rejects empty/whitespace-only values (fail loud).
+    /// Wrap a raw token, trimming surrounding whitespace (a trailing `\n` from a
+    /// secret file/env is the usual culprit). Fails loud on an empty value or one
+    /// that still has whitespace/control/non-ASCII characters inside, since such
+    /// a token can never form a valid `Authorization` header.
     pub fn new(raw: impl Into<String>) -> Result<Self, HelixError> {
         let raw = raw.into();
-        if raw.trim().is_empty() {
-            return Err(HelixError::InvalidArgument("access token is empty".into()));
-        }
-        Ok(Self(raw))
+        Ok(Self(clean_header_value("access token", &raw)?))
     }
 
-    /// Read a token from the named environment variable.
+    /// Read a token from the named environment variable (trimmed, see [`AccessToken::new`]).
     pub fn from_env(var: &str) -> Result<Self, HelixError> {
         let raw = std::env::var(var)
             .map_err(|_| HelixError::InvalidArgument(format!("env var {var} not set")))?;
@@ -167,15 +175,12 @@ impl HelixClient {
         token: AccessToken,
         api_base: impl Into<String>,
     ) -> Result<Self, HelixError> {
-        let client_id = client_id.into();
-        if client_id.trim().is_empty() {
-            return Err(HelixError::InvalidArgument("client id is empty".into()));
-        }
+        let client_id = clean_header_value("client id", &client_id.into())?;
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .use_rustls_tls()
             .build()
-            .map_err(HelixError::Transport)?;
+            .map_err(HelixError::from_reqwest)?;
         Ok(Self {
             http,
             api_base: api_base.into().trim_end_matches('/').to_owned(),
@@ -258,7 +263,7 @@ impl HelixClient {
         let parsed: SendChatResponse = response
             .json()
             .await
-            .map_err(|e| HelixError::Malformed(e.to_string()))?;
+            .map_err(|e| HelixError::Malformed(e.without_url().to_string()))?;
         let sent = parsed
             .data
             .into_iter()
@@ -322,7 +327,7 @@ impl HelixClient {
     {
         let mut waited = false;
         loop {
-            let response = build().send().await.map_err(HelixError::Transport)?;
+            let response = build().send().await.map_err(HelixError::from_reqwest)?;
             self.record_rate_limit(&response);
             let status = response.status();
             tracing::debug!(endpoint, status = status.as_u16(), "twitch helix response");
@@ -353,6 +358,23 @@ impl HelixClient {
             *guard = Some(snapshot);
         }
     }
+}
+
+/// Trim a credential-like value (token, client id) and reject anything that
+/// cannot be a valid HTTP header value, so a bad secret fails loud at load time
+/// instead of surfacing later as a request-builder error. The value is never
+/// echoed into the error.
+fn clean_header_value(name: &str, raw: &str) -> Result<String, HelixError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(HelixError::InvalidArgument(format!("{name} is empty")));
+    }
+    if !trimmed.chars().all(|c| c.is_ascii_graphic()) {
+        return Err(HelixError::InvalidArgument(format!(
+            "{name} contains whitespace, control, or non-ASCII characters"
+        )));
+    }
+    Ok(trimmed.to_owned())
 }
 
 /// Reject empty required string arguments before any network I/O.
@@ -441,6 +463,46 @@ mod tests {
             AccessToken::new("  "),
             Err(HelixError::InvalidArgument(_))
         ));
+    }
+
+    #[test]
+    fn token_is_trimmed_on_load() {
+        assert_eq!(AccessToken::new("tok\n").unwrap().0, "tok");
+        assert_eq!(AccessToken::new("  tok \r\n").unwrap().0, "tok");
+    }
+
+    #[test]
+    fn token_with_unusable_characters_fails_loud_non_retryable() {
+        for bad in [
+            "",
+            "  ",
+            "\n",
+            "sekrit\ntok",
+            "sekrit tok",
+            "s\u{e9}krit",
+            "sekrit\0",
+        ] {
+            let err = AccessToken::new(bad).unwrap_err();
+            assert!(matches!(err, HelixError::InvalidArgument(_)), "{bad:?}");
+            assert!(!err.is_retryable(), "{bad:?}");
+            assert!(!err.to_string().contains("sekrit"), "token echoed: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unsendable_header_value_is_non_retryable_not_transport() {
+        // Bypass `AccessToken::new` (which now rejects this) to prove the second
+        // line of defence: a builder error must not become a retryable Transport.
+        let client = HelixClient::with_base_url(
+            "cid",
+            AccessToken("sekrit-tok\n".into()),
+            "http://127.0.0.1:1",
+        )
+        .unwrap();
+        let err = client.delete_chat_message("b", "m", "x").await.unwrap_err();
+        assert!(matches!(err, HelixError::InvalidArgument(_)), "{err:?}");
+        assert!(!err.is_retryable());
+        assert!(!err.to_string().contains("sekrit"), "token echoed: {err}");
     }
 
     #[test]
