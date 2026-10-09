@@ -130,7 +130,8 @@ jobs:
           for entry in "${IMAGES[@]}"; do
             IFS=":" read -r name tag dockerfile context <<< "${entry}"
             echo "::group::build ${name}:${tag}"
-            docker build -f "${dockerfile}" -t "${name}:${tag}" "${context}"
+            # --build-context proto=proto: svc_process/svc_action Dockerfile.rust COPY --from=proto (repo-root proto/ is outside their core/ context), same as build-svc-*.yml
+            docker build --build-context proto=proto -f "${dockerfile}" -t "${name}:${tag}" "${context}"
             kind load docker-image "${name}:${tag}" --name waddlebot-e2e
             built=$((built + 1))
             echo "::endgroup::"
@@ -426,7 +427,8 @@ jobs:
           built=0
           for entry in "${IMAGES[@]}"; do
             IFS=":" read -r name tag dockerfile context <<< "${entry}"
-            docker build -f "${dockerfile}" -t "${name}:${tag}" "${context}"
+            # --build-context proto=proto: svc_process/svc_action Dockerfile.rust COPY --from=proto (repo-root proto/ is outside their core/ context), same as build-svc-*.yml
+            docker build --build-context proto=proto -f "${dockerfile}" -t "${name}:${tag}" "${context}"
             kind load docker-image "${name}:${tag}" --name waddlebot-upgrade
             built=$((built + 1))
           done
