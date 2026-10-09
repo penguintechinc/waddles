@@ -279,7 +279,18 @@ jobs:
           );
           CREATE TABLE communities (
               id SERIAL PRIMARY KEY,
-              name TEXT
+              name TEXT,
+              tenant_id INTEGER
+          );
+          -- 0043_bundle_reputation_store ALTERs community_members (legacy
+          -- config/postgres/migrations/000 table) -- minimal bootstrap of just the
+          -- columns the migration/grants/tests touch.
+          CREATE TABLE community_members (
+              id SERIAL PRIMARY KEY,
+              community_id INTEGER REFERENCES communities(id) ON DELETE CASCADE,
+              is_active BOOLEAN DEFAULT true,
+              left_at TIMESTAMP,
+              removed_at TIMESTAMP
           );
           CREATE TABLE hub_users (
               id SERIAL PRIMARY KEY
