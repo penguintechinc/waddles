@@ -177,7 +177,7 @@ mod tests {
         url::form_urlencoded::parse(format!("k={encoded}").as_bytes())
             .next()
             .map(|(_, v)| v.into_owned())
-            .unwrap_or_default()
+            .expect("the `k=` pair always yields one decoded value")
     }
 
     #[test]
@@ -217,7 +217,7 @@ mod tests {
             "a '#' in the password must not open a fragment"
         );
         assert_eq!(
-            percent_decode(parsed.password().unwrap_or_default()),
+            percent_decode(parsed.password().expect("the URL carries a password")),
             password
         );
     }

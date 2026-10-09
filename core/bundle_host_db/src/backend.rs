@@ -1385,8 +1385,7 @@ mod tests {
     fn bound(stmt: &Statement) -> Vec<Value> {
         stmt.values
             .as_ref()
-            .map(|values| values.0.clone())
-            .unwrap_or_default()
+            .map_or_else(Vec::new, |values| values.0.clone())
     }
 
     /// Asserts the transaction opened with both scope mechanisms: the
