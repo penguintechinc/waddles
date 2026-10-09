@@ -122,3 +122,28 @@ cp target/wasm32-wasip1/release/connector_fixture.wasm ../connector_fixture.wasm
 Built and verified with `cargo-component 0.21.1` / `wasm-tools 1.259.0`
 against `wit-bindgen-rt 0.44.0` (same toolchain as `hostile_fixture.wasm`
 above).
+
+## `reputation_fixture.wasm`
+
+A real, compiled `waddle:bundle` **`world stage-next`** component
+(`reputation-fixture-src/`, issue #726), used by
+`tests/stage_next_reputation.rs` to prove a bundle can CALL the new
+`reputation` host import through the executor's production `Linker` and
+that the call reaches the stage as `capability = db`, `op =
+"reputation.get" | "reputation.adjust"`. `process-stage.transform` branches
+on `event.event-type` (`rep-get` / `rep-adjust`) and echoes the call's
+outcome (`ok:<balance>` or a stable error tag) into `payload-json`. The
+fixture's `wit/stage.wit` is a verbatim copy of the normative
+`wit/waddle-bundle/stage.wit`; refresh it whenever that file changes.
+
+### Regenerating
+
+```bash
+cd reputation-fixture-src
+cargo component build --release
+cp "${CARGO_TARGET_DIR:-target}/wasm32-wasip1/release/reputation_fixture.wasm" ../reputation_fixture.wasm
+rm -f src/bindings.rs   # generated, not committed
+```
+
+Built with `cargo-component 0.21.1` / `wasm-tools 1.259.0` against
+`wit-bindgen-rt 0.44.0` (same toolchain as `hostile_fixture.wasm`).

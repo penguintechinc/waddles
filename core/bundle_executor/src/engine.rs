@@ -36,6 +36,56 @@ wasmtime::component::bindgen!({
     additional_derives: [serde::Serialize, serde::Deserialize],
 });
 
+/// `world stage-next`'s generated bindings (issue #726: the foundation that
+/// lets a bundle CALL a host import added after the frozen `stage` 1.0.0
+/// contract). Every interface `stage-next` shares byte-for-byte with `stage`
+/// is remapped (`with`) onto the `stage` bindings generated above, so the
+/// one `Host` impl per shared interface on [`ExecState`] serves both worlds
+/// and only the genuinely new imports (`overlay`, `reputation`) get their
+/// own generated `Host` traits + `add_to_linker`.
+pub mod stage_next_world {
+    wasmtime::component::bindgen!({
+        path: "../../wit/waddle-bundle",
+        world: "stage-next",
+        imports: { default: async },
+        exports: { default: async },
+        additional_derives: [serde::Serialize, serde::Deserialize],
+        with: {
+            "waddle:bundle/types@1.0.0": super::waddle::bundle::types,
+            "waddle:bundle/context@1.0.0": super::waddle::bundle::context,
+            "waddle:bundle/http@1.0.0": super::waddle::bundle::http,
+            "waddle:bundle/kv@1.0.0": super::waddle::bundle::kv,
+            "waddle:bundle/db@1.0.0": super::waddle::bundle::db,
+            "waddle:bundle/relay@1.0.0": super::waddle::bundle::relay,
+            "waddle:bundle/flags@1.0.0": super::waddle::bundle::flags,
+            "waddle:bundle/log@1.0.0": super::waddle::bundle::log,
+            "waddle:bundle/clock@1.0.0": super::waddle::bundle::clock,
+            "waddle:bundle/process-stage@1.0.0": super::exports::waddle::bundle::process_stage,
+            "waddle:bundle/action-stage@1.0.0": super::exports::waddle::bundle::action_stage,
+        },
+    });
+}
+
+/// Marker for the `stage-next`-only interfaces' `add_to_linker` (see
+/// [`stage_next_world`]).
+struct HasStageNextState;
+impl HasData for HasStageNextState {
+    type Data<'a> = &'a mut ExecState;
+}
+
+/// Links the `stage-next`-only host imports (`overlay`, `reputation`) onto
+/// `linker`. A `stage` 1.0.0 component never declares these imports, so
+/// registering them is inert for it; a `stage-next` component that imports
+/// them instantiates and reaches the real `Host` impls in
+/// `crate::host::stage_next_imports`. Every call still passes through the
+/// stage-side capability gate -- linking is reachability, never authority.
+fn link_stage_next_imports(linker: &mut Linker<ExecState>) -> Result<(), ExecutorError> {
+    use stage_next_world::waddle::bundle::{overlay, reputation};
+    overlay::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
+    reputation::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
+    Ok(())
+}
+
 /// `waddle:connector@1.0.0`'s generated bindings, isolated in their own
 /// module so this second `bindgen!` invocation's `waddle::{bundle,
 /// connector}` module tree never collides with the `stage` world's own
@@ -149,6 +199,7 @@ pub fn build_linker(engine: &Engine) -> Result<Linker<ExecState>, ExecutorError>
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
 
     Stage::add_to_linker::<_, HasExecState>(&mut linker, |s| s)?;
+    link_stage_next_imports(&mut linker)?;
 
     Ok(linker)
 }
@@ -182,6 +233,10 @@ pub fn build_linker_for(
     match manifest.world {
         WitWorld::Stage => {
             Stage::add_to_linker::<_, HasExecState>(&mut linker, |s| s)?;
+        }
+        WitWorld::StageNext => {
+            Stage::add_to_linker::<_, HasExecState>(&mut linker, |s| s)?;
+            link_stage_next_imports(&mut linker)?;
         }
         WitWorld::Connector => {
             use connector_world::waddle::bundle::{clock, flags, http, log};
@@ -318,6 +373,14 @@ mod tests {
     fn build_linker_for_stage_world_succeeds() -> Result<(), ExecutorError> {
         let engine = build_engine(&test_config())?;
         let m = manifest("sha256:aa", WitWorld::Stage, &[]);
+        let _linker = build_linker_for(&engine, &m)?;
+        Ok(())
+    }
+
+    #[test]
+    fn build_linker_for_stage_next_world_succeeds() -> Result<(), ExecutorError> {
+        let engine = build_engine(&test_config())?;
+        let m = manifest("sha256:ee", WitWorld::StageNext, &[]);
         let _linker = build_linker_for(&engine, &m)?;
         Ok(())
     }
