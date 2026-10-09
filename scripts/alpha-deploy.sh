@@ -254,7 +254,9 @@ service_dockerfile() {
         svc-action) echo "core/svc_action/Dockerfile.rust" ;;
         waddlebot-egress-proxy) echo "core/egress_proxy/Dockerfile.rust" ;;
         reputation-module) echo "core/reputation_module/Dockerfile" ;;
-        svc-presentation) echo "core/svc_presentation/Dockerfile" ;;
+        # chore/deploy-svc-presentation-rust-alpha -- Rust svc-presentation (values-alpha.yaml
+        # presentation.rust.enabled); Dockerfile.rust builds from the "core" context.
+        svc-presentation) echo "core/svc_presentation/Dockerfile.rust" ;;
         svc-streaming) echo "core/svc_streaming/Dockerfile.rust" ;;
         # fix/alpha-deploy-executor-and-failfast -- core/bundle_executor/Dockerfile.rust
         # now exists; this crate backs BOTH the bundle-executor and bundle-executor-action
@@ -269,9 +271,9 @@ service_context() {
     case "$1" in
         # bundle-executor's Dockerfile COPYs core/bundle_executor AND wit/ from the repo
         # root (see its own header comment) -- same "." context as hub-api et al.
-        hub-api|hub-webui|waddlebot-migrations|core-bundle-seeder|reputation-module|svc-presentation|bundle-executor) echo "." ;;
+        hub-api|hub-webui|waddlebot-migrations|core-bundle-seeder|reputation-module|bundle-executor) echo "." ;;
         svc-ingest) echo "core/svc_ingest" ;;
-        svc-process|svc-action|waddlebot-egress-proxy) echo "core" ;;
+        svc-process|svc-action|waddlebot-egress-proxy|svc-presentation) echo "core" ;;
         svc-streaming) echo "core/svc_streaming" ;;
         *) err "unknown service: $1"; exit 1 ;;
     esac
@@ -285,6 +287,7 @@ service_image_repo() {
         svc-ingest) echo "svc-ingest-rust" ;;
         svc-process) echo "svc-process-rust" ;;
         svc-action) echo "svc-action-rust" ;;
+        svc-presentation) echo "svc-presentation-rust" ;;
         *) echo "$1" ;;
     esac
 }
@@ -298,7 +301,7 @@ service_image_repo() {
 # stale-mutable-`:alpha`-tag bug this fix addresses.
 service_image_tag() {
     case "$1" in
-        reputation-module|svc-presentation|svc-streaming) echo "alpha" ;;
+        reputation-module|svc-streaming) echo "alpha" ;;
         *) echo "${SHA8}" ;;
     esac
 }
