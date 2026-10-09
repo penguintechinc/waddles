@@ -60,13 +60,14 @@ use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
 use bundle_capability_gate::{
-    AppScopedResource, CapabilityGate, Denied, HostInvokeScopeBuilder, PermissionFamily,
-    PermissionId, Quota, ReputationTarget, ResourceRef, ScopeKind, TenantTier,
+    AppScopedResource, CapabilityGate, Denied, EconomyTarget, HostInvokeScopeBuilder,
+    PermissionFamily, PermissionId, Quota, ReputationTarget, ResourceRef, ScopeKind, TenantTier,
 };
 use bundle_host_db::{
     CapabilitySnapshot as DbCapabilitySnapshot, DbError, DbHost, DbScope, DbValue, PostgresBackend,
     SchemaCache,
 };
+use bundle_host_economy::{EconomyError, EconomyScope, EconomyStore};
 use bundle_host_http::egress::{EgressGuard, EgressRuleRow, EgressRuleSource};
 use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use bundle_host_reputation::{ReputationError, ReputationScope, ReputationStore};
@@ -104,6 +105,50 @@ fn reputation_error_to_host(err: ReputationError) -> HostResultError {
         return denied("backend", "reputation store backend error");
     }
     denied(err.wire_code(), err.to_string())
+}
+
+/// Maps a store [`EconomyError`] onto the `{code, message}` wire error the
+/// executor decodes back into the WIT `economy.error` variant
+/// (`bundle_executor::host::stage_next_economy`). `insufficient_funds` /
+/// `over_cap` carry their number as the bare-decimal message.
+fn economy_error_to_host(err: EconomyError) -> HostResultError {
+    if let EconomyError::Backend(detail) = &err {
+        // Detail may carry DB internals; log it, never hand it to a guest.
+        tracing::error!(error = %detail, "economy store backend error");
+        return denied("backend", "economy store backend error");
+    }
+    denied(err.wire_code(), err.wire_message())
+}
+
+/// Reads a required positive-or-zero integer argument as an `i64` -- the
+/// WIT `u64` amounts arrive as JSON numbers; anything non-integer, negative or
+/// above `i64::MAX` (the `BIGINT` balance ceiling) is `invalid_args`.
+fn economy_amount_arg(
+    args: &serde_json::Value,
+    key: &str,
+    min: i64,
+) -> Result<i64, HostResultError> {
+    args.get(key)
+        .and_then(|v| v.as_u64())
+        .and_then(|v| i64::try_from(v).ok())
+        .filter(|v| *v >= min)
+        .ok_or_else(|| {
+            denied(
+                "invalid_args",
+                format!("{key} must be an integer >= {min} and <= {}", i64::MAX),
+            )
+        })
+}
+
+/// Reads a required UUID-string argument.
+fn economy_user_arg(args: &serde_json::Value, key: &str) -> Result<uuid::Uuid, HostResultError> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| denied("invalid_args", format!("{key} must be a UUID string")))
+        .and_then(|s| {
+            uuid::Uuid::parse_str(s)
+                .map_err(|_| denied("invalid_args", format!("{key} must be a UUID string")))
+        })
 }
 
 /// Maps a gate [`Denied`] onto the `{code, message}` shape every `host-call`
@@ -254,6 +299,19 @@ pub struct ReputationWiring {
     pub flag: Arc<dyn FeatureGate>,
 }
 
+/// Live wiring for the `economy` bundle host capability (issue #714): the
+/// durable store plus the opt-in flag. Built once at startup
+/// (`crate::lib::try_build_economy_wiring`) and cloned (cheap, `Arc`) into
+/// every per-invoke [`StageCapabilities`], like [`ReputationWiring`]. `None`
+/// on the handler means every `economy.*` call denies `not_implemented`.
+#[derive(Clone)]
+pub struct EconomyWiring {
+    pub store: Arc<dyn EconomyStore>,
+    /// `crate::license::BUNDLE_ECONOMY_CAPABILITY_FLAG` gate -- OFF denies
+    /// every call `feature_disabled` before the store is touched.
+    pub flag: Arc<dyn FeatureGate>,
+}
+
 /// The real capability implementation this stage wires today, scoped to
 /// exactly one invocation's `(tenant, community, app_id)` -- see the
 /// module doc for why this is constructed per-invoke, never per-connection.
@@ -310,6 +368,10 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// denies `not_implemented` in that state (never panics, never a silent
     /// default balance).
     reputation: Option<ReputationWiring>,
+    /// `None` until [`Self::with_economy`] -- every `economy.*` call denies
+    /// `not_implemented` in that state (never panics, never a silent default
+    /// balance).
+    economy: Option<EconomyWiring>,
 }
 
 impl<K: KvBackend> StageCapabilities<K> {
@@ -348,6 +410,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             gate,
             db: None,
             reputation: None,
+            economy: None,
         }
     }
 
@@ -407,6 +470,192 @@ impl<K: KvBackend> StageCapabilities<K> {
     pub fn with_reputation(mut self, reputation: ReputationWiring) -> Self {
         self.reputation = Some(reputation);
         self
+    }
+
+    /// Attaches the `economy` capability's live wiring -- called once per
+    /// invoke with a clone of the process-wide [`EconomyWiring`].
+    pub fn with_economy(mut self, economy: EconomyWiring) -> Self {
+        self.economy = Some(economy);
+        self
+    }
+
+    /// `economy.balance` / `economy.wager` / `economy.transfer` /
+    /// `economy.max_bet` / `economy.leaderboard` (`wit/waddle-bundle/stage.wit`
+    /// `interface economy`), carried as `capability = db`, `op = "economy.*"`
+    /// (`penguin-bundle-host`'s closed `CapabilityKind` has no economy member
+    /// yet; see the WIT doc).
+    ///
+    /// Same fail-loud order as [`Self::handle_reputation`]: (1) argument
+    /// parsing -- users must be UUIDs, amounts positive in-range integers (a
+    /// transfer to oneself is malformed); (2) the community must be a real one;
+    /// (3) **the gate authorizes FIRST** with an `EconomyScoped` resource, so
+    /// grant, declared `max_bet`/`max_amount`, the economy's own amount quotas,
+    /// instance policy and the membership pre-filter (every named user) all run
+    /// before anything else can leak state; (4) wiring/flag state; (5) the
+    /// store, which re-verifies membership and enforces the cap -- computed
+    /// HERE from the grant's declared bound clamped to the catalog ceiling, never
+    /// from guest input -- inside its own atomic write. Scope (tenant/community/
+    /// app) is always `self`'s host-derived scope, never an argument.
+    async fn handle_economy(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        #[derive(Clone, Copy)]
+        enum Op {
+            Balance,
+            MaxBet,
+            Wager(i64, i64),
+            Transfer(i64),
+            Leaderboard(u32),
+        }
+
+        let args = &call.args;
+        let (op, target_user, counterparty) = match call.op.as_str() {
+            "economy.balance" => (Op::Balance, Some(economy_user_arg(args, "user")?), None),
+            "economy.max_bet" => (Op::MaxBet, Some(economy_user_arg(args, "user")?), None),
+            "economy.wager" => {
+                let user = economy_user_arg(args, "user")?;
+                let stake = economy_amount_arg(args, "stake", 1)?;
+                let payout = economy_amount_arg(args, "payout", 0)?;
+                (Op::Wager(stake, payout), Some(user), None)
+            }
+            "economy.transfer" => {
+                let from = economy_user_arg(args, "from")?;
+                let to = economy_user_arg(args, "to")?;
+                if from == to {
+                    return Err(denied("invalid_args", "cannot transfer to oneself"));
+                }
+                let amount = economy_amount_arg(args, "amount", 1)?;
+                (Op::Transfer(amount), Some(from), Some(to))
+            }
+            "economy.leaderboard" => {
+                let limit = args
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                    .filter(|v| (1..=bundle_host_economy::MAX_LEADERBOARD_LIMIT).contains(v))
+                    .ok_or_else(|| {
+                        denied(
+                            "invalid_args",
+                            format!(
+                                "limit must be 1..={}",
+                                bundle_host_economy::MAX_LEADERBOARD_LIMIT
+                            ),
+                        )
+                    })?;
+                (Op::Leaderboard(limit), None, None)
+            }
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("economy op {other:?} not supported"),
+                ))
+            }
+        };
+
+        if self.community_id == 0 || self.community.is_none() {
+            return Err(denied(
+                "invalid_args",
+                "economy is community-scoped; this activation has no community",
+            ));
+        }
+
+        // `max_bet` describes the WAGER capability's own limit, so it is
+        // authorized under `economy.wager` (carrying no amount: it is rate
+        // limited, not metered); balance/leaderboard are `economy.read`.
+        let (permission, amount) = match op {
+            Op::Balance | Op::Leaderboard(_) => (PermissionId::EconomyRead, None),
+            Op::MaxBet => (PermissionId::EconomyWager, None),
+            Op::Wager(stake, _) => (PermissionId::EconomyWager, Some(stake)),
+            Op::Transfer(amount) => (PermissionId::EconomyTransfer, Some(amount)),
+        };
+        let family = permission.family();
+        let authorized = self
+            .gate
+            .authorize(
+                &self.gate_scope(),
+                permission,
+                ResourceRef::EconomyScoped(EconomyTarget {
+                    target_user,
+                    counterparty,
+                    amount,
+                }),
+            )
+            .map_err(denied_from_gate)?;
+
+        let Some(wiring) = &self.economy else {
+            return Err(denied(
+                "not_implemented",
+                "economy capability is not provisioned in this deployment \
+                 (BUNDLE_ECONOMY_PASSWORD unset or connection failed)",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "economy capability is disabled (waddles.bundle-economy-capability is OFF)",
+            ));
+        }
+
+        let scope = EconomyScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+            app_id: self.app_id.clone(),
+        };
+        let user = target_user.unwrap_or_default();
+        let result = match op {
+            Op::Balance => wiring
+                .store
+                .balance(&scope, user)
+                .await
+                .map(|balance| serde_json::json!({ "balance": balance })),
+            Op::MaxBet => {
+                // The cap is the grant's declared `max_bet` clamped to the
+                // catalog ceiling: the exact number the gate enforces on a
+                // wager's stake.
+                let cap = family
+                    .economy_amount_bound(&authorized.params)
+                    .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+                wiring
+                    .store
+                    .max_bet(&scope, user, cap)
+                    .await
+                    .map(|max_bet| serde_json::json!({ "max_bet": max_bet }))
+            }
+            Op::Wager(stake, payout) => {
+                let cap = family
+                    .economy_amount_bound(&authorized.params)
+                    .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+                wiring
+                    .store
+                    .wager(&scope, user, stake, payout, cap)
+                    .await
+                    .map(|balance| serde_json::json!({ "balance": balance }))
+            }
+            Op::Transfer(amount) => {
+                let cap = family
+                    .economy_amount_bound(&authorized.params)
+                    .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+                let to = counterparty.unwrap_or_default();
+                wiring
+                    .store
+                    .transfer(&scope, user, to, amount, cap)
+                    .await
+                    .map(|()| serde_json::json!({}))
+            }
+            Op::Leaderboard(limit) => wiring.store.leaderboard(&scope, limit).await.map(|rows| {
+                serde_json::json!({
+                    "entries": rows
+                        .into_iter()
+                        .map(|r| serde_json::json!({
+                            "user": r.user.to_string(),
+                            "balance": r.balance,
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            }),
+        };
+        result.map_err(economy_error_to_host)
     }
 
     /// `reputation.get` / `reputation.adjust` (`wit/waddle-bundle/stage.wit`
@@ -1132,6 +1381,12 @@ impl<K: KvBackend> CapabilityHandler for StageCapabilities<K> {
                 // `storage.tables`.
                 CapabilityKind::Db if call.op.starts_with("reputation.") => {
                     self.handle_reputation(&call).await
+                }
+                // `economy.*` ops (issue #714) likewise: own gate permissions
+                // (`economy.read`/`economy.wager`/`economy.transfer`), own
+                // handler, never the `storage.tables` path.
+                CapabilityKind::Db if call.op.starts_with("economy.") => {
+                    self.handle_economy(&call).await
                 }
                 CapabilityKind::Db => self.handle_db(&call).await,
                 // `enabled` is wired to a real `penguin_licensing::
@@ -2639,3 +2894,7 @@ mod tests {
 #[cfg(test)]
 #[path = "capabilities_reputation_tests.rs"]
 mod reputation_tests;
+
+#[cfg(test)]
+#[path = "capabilities_economy_tests.rs"]
+mod economy_tests;

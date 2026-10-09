@@ -713,6 +713,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-host-economy"
+version = "0.1.0"
+dependencies = [
+ "bundle-capability-gate",
+ "opentelemetry",
+ "sea-orm",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "bundle-host-http"
 version = "0.1.0"
 dependencies = [
@@ -4325,6 +4338,7 @@ dependencies = [
  "bundle-active-set",
  "bundle-capability-gate",
  "bundle-host-db",
+ "bundle-host-economy",
  "bundle-host-http",
  "bundle-host-kv",
  "bundle-host-reputation",

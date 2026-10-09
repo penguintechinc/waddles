@@ -687,6 +687,12 @@ pub struct ProcessDeps<S: SpineOps> {
     /// when `BUNDLE_REPUTATION_PASSWORD` is unset or the connection failed
     /// (every `reputation.*` call then denies `not_implemented`).
     pub reputation_wiring: Option<crate::capabilities::ReputationWiring>,
+    /// The `economy` host capability's production wiring (issue #714,
+    /// `crate::lib::try_build_economy_wiring`), cloned into every per-invoke
+    /// `StageCapabilities` like [`ProcessDeps::reputation_wiring`]. `None`
+    /// when `BUNDLE_ECONOMY_PASSWORD` is unset or the connection failed
+    /// (every `economy.*` call then denies `not_implemented`).
+    pub economy_wiring: Option<crate::capabilities::EconomyWiring>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -967,6 +973,10 @@ async fn handle_delivered<S: SpineOps>(
         };
         let caps = match &deps.reputation_wiring {
             Some(rep) => caps.with_reputation(rep.clone()),
+            None => caps,
+        };
+        let caps = match &deps.economy_wiring {
+            Some(eco) => caps.with_economy(eco.clone()),
             None => caps,
         };
         Arc::new(caps)
@@ -1856,6 +1866,7 @@ mod tests {
             // exercised directly by `capabilities`'s own test suite instead.
             db_wiring: None,
             reputation_wiring: None,
+            economy_wiring: None,
         };
         (deps, metrics)
     }

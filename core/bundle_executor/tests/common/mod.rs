@@ -1,4 +1,4 @@
-//! Shared harness for the `stage-next` `reputation` integration tests
+//! Shared harness for the `stage-next` `reputation` and `economy` integration tests
 //! (`stage_next_reputation.rs` -- Rust fixture; `stage_next_python_reputation_e2e.rs`
 //! -- freshly built Python bundle). The executor side is entirely real
 //! (`Executor`, wasmtime, the production `Linker`, the frame codec); only the
@@ -195,11 +195,14 @@ pub async fn run_many(
                     .expect("host-call or result frame");
                 match frame.message {
                     Message::Result(body) => break body,
-                    Message::HostCall(call) if call.op.starts_with("reputation.") => {
+                    Message::HostCall(call)
+                        if call.op.starts_with("reputation.")
+                            || call.op.starts_with("economy.") =>
+                    {
                         assert_eq!(
                             call.capability,
                             CapabilityKind::Db,
-                            "reputation rides the db wire kind"
+                            "reputation/economy ride the db wire kind"
                         );
                         let body = match &scenario.answer {
                             StageAnswer::Ok(v) => HostResultBody {

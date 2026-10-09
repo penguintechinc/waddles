@@ -280,6 +280,36 @@ pub struct CliConfig {
         default_value_t = 30
     )]
     pub bundle_reputation_membership_refresh_s: u64,
+
+    /// Production wiring for the bundle `economy` host capability (issue
+    /// #714, `bundle_host_economy::connect`) -- the least-privilege
+    /// `waddles_economy_runtime` role (`alembic/versions/
+    /// 0044_bundle_economy_store.py`): DML on `economy_balances` + append-only
+    /// `economy_ledger` + column-scoped membership SELECT, nothing else.
+    /// Distinct from `BUNDLE_DB_*`, `BUNDLE_REPUTATION_*` and `DB_READER_*`.
+    #[arg(long, env = "BUNDLE_ECONOMY_HOST", default_value = "localhost")]
+    pub bundle_economy_host: String,
+    #[arg(long, env = "BUNDLE_ECONOMY_PORT", default_value_t = 5432)]
+    pub bundle_economy_port: u16,
+    #[arg(long, env = "BUNDLE_ECONOMY_NAME", default_value = "waddlebot")]
+    pub bundle_economy_name: String,
+    #[arg(
+        long,
+        env = "BUNDLE_ECONOMY_USER",
+        default_value = "waddles_economy_runtime"
+    )]
+    pub bundle_economy_user: String,
+    /// Refresh cadence, in whole seconds, of the membership snapshot the
+    /// economy wiring feeds (`bundle_capability_gate::SnapshotMembership`; a
+    /// read pre-filter only -- writes re-check live membership inside the
+    /// write itself). Clamped to a 5s floor by
+    /// [`CliConfig::bundle_economy_membership_refresh`].
+    #[arg(
+        long,
+        env = "BUNDLE_ECONOMY_MEMBERSHIP_REFRESH_S",
+        default_value_t = 30
+    )]
+    pub bundle_economy_membership_refresh_s: u64,
     /// Poll interval, in whole seconds, for the change-log consumer's
     /// incremental tick (`bundle_active_set::read_safe_seq`/`read_changes`)
     /// -- the full active-set re-read only runs for scopes the change-log
@@ -485,6 +515,12 @@ impl CliConfig {
         std::time::Duration::from_secs(self.bundle_reputation_membership_refresh_s.max(5))
     }
 
+    /// [`Self::bundle_economy_membership_refresh_s`] clamped to a 5s floor so
+    /// a misconfigured `0` can never hot-loop the membership query.
+    pub fn bundle_economy_membership_refresh(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.bundle_economy_membership_refresh_s.max(5))
+    }
+
     /// [`Self::bundle_config_full_reconcile_minutes`] clamped to a 1-minute
     /// floor -- a misconfigured `0`/negative value must never hot-loop the
     /// full active-set re-read against the reader database.
@@ -548,6 +584,13 @@ pub struct Config {
     /// unprovisioned deployment must start; the capability then denies
     /// `not_implemented`. An empty value is treated as unset.
     pub bundle_reputation_password: Option<Secret>,
+    /// `BUNDLE_ECONOMY_PASSWORD` for the `economy` host capability's
+    /// `waddles_economy_runtime` connection
+    /// (`crate::lib::try_build_economy_wiring`). `Option`, same rationale as
+    /// `bundle_reputation_password`: the capability's flag defaults OFF, so an
+    /// unprovisioned deployment must start; the capability then denies
+    /// `not_implemented`. An empty value is treated as unset.
+    pub bundle_economy_password: Option<Secret>,
 }
 
 impl fmt::Debug for Config {
@@ -572,6 +615,13 @@ impl fmt::Debug for Config {
                 "bundle_reputation_password",
                 &self
                     .bundle_reputation_password
+                    .as_ref()
+                    .map(|_| Secret::new("")),
+            )
+            .field(
+                "bundle_economy_password",
+                &self
+                    .bundle_economy_password
                     .as_ref()
                     .map(|_| Secret::new("")),
             )
@@ -623,6 +673,10 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .map(Secret::new);
+        let bundle_economy_password = std::env::var("BUNDLE_ECONOMY_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(Secret::new);
         Ok(Self {
             cli,
             db_password,
@@ -632,6 +686,7 @@ impl Config {
             db_reader_password,
             bundle_db_password,
             bundle_reputation_password,
+            bundle_economy_password,
         })
     }
 }
@@ -658,6 +713,7 @@ mod tests {
             "DB_READER_PASSWORD",
             "BUNDLE_DB_PASSWORD",
             "BUNDLE_REPUTATION_PASSWORD",
+            "BUNDLE_ECONOMY_PASSWORD",
         ] {
             // SAFETY: serialized by ENV_LOCK, no concurrent readers/writers
             // of these specific variables within the test process.

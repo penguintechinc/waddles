@@ -466,3 +466,87 @@ fn economy_ids_parse_and_belong_to_exactly_the_economy_scope_class() {
     assert!(PermissionId::parse("economy.mint").is_err());
     assert!(PermissionId::parse("economy").is_err());
 }
+
+#[test]
+fn an_amountless_wager_call_is_rate_limited_and_consumes_no_amount_aggregate() {
+    // `economy.wager` with no amount is `max-bet`: it must not eat into the
+    // per-user daily stake budget, but it is still rate limited.
+    let user = Uuid::new_v4();
+    let g = gate(&[("economy.wager", serde_json::json!({}))], &[user]);
+    let mut limited = false;
+    for _ in 0..40 {
+        if g.authorize(&scope(), PermissionId::EconomyWager, read(Some(user)))
+            == Err(Denied::RateLimited)
+        {
+            limited = true;
+            break;
+        }
+    }
+    assert!(
+        limited,
+        "amountless wager-permission calls are rate limited"
+    );
+    // The full 10 x 1_000 per-user daily stake budget is still intact.
+    for _ in 0..10 {
+        g.authorize(&scope(), PermissionId::EconomyWager, wager(user, 1_000))
+            .expect("amountless calls consumed none of the stake budget");
+    }
+}
+
+#[test]
+fn economy_amount_bound_is_clamped_and_only_defined_for_money_families() {
+    let none = serde_json::json!({});
+    assert_eq!(
+        PermissionFamily::EconomyWager.economy_amount_bound(&none),
+        Some(1_000)
+    );
+    assert_eq!(
+        PermissionFamily::EconomyWager.economy_amount_bound(&serde_json::json!({"max_bet": 25})),
+        Some(25)
+    );
+    assert_eq!(
+        PermissionFamily::EconomyTransfer
+            .economy_amount_bound(&serde_json::json!({"max_amount": 9_999_999})),
+        Some(1_000)
+    );
+    // Each family reads only its own param.
+    assert_eq!(
+        PermissionFamily::EconomyTransfer.economy_amount_bound(&serde_json::json!({"max_bet": 3})),
+        Some(1_000)
+    );
+    for family in [
+        PermissionFamily::EconomyRead,
+        PermissionFamily::ReputationRead,
+        PermissionFamily::StorageKv,
+    ] {
+        assert_eq!(family.economy_amount_bound(&none), None, "{family:?}");
+    }
+}
+
+/// Regression (found by `svc_process/tests/economy_pg_e2e.rs`): the quota
+/// ledger fixes a window's shape at first use per `(scope, permission id)`, so
+/// a metered wager followed by an amount-less `max-bet` under the SAME
+/// permission must not read the stake-sum window as a call counter.
+#[test]
+fn a_metered_wager_then_amountless_calls_do_not_poison_each_others_windows() {
+    let user = Uuid::new_v4();
+    let g = gate(&[("economy.wager", serde_json::json!({}))], &[user]);
+    g.authorize(&scope(), PermissionId::EconomyWager, wager(user, 1_000))
+        .unwrap();
+    // 1_000 staked already; an amount-less call must still be allowed (the
+    // read rate limit is 20 calls/s, not "20 units of stake").
+    for _ in 0..10 {
+        g.authorize(&scope(), PermissionId::EconomyWager, read(Some(user)))
+            .expect("amount-less call after a metered one");
+    }
+    // ...and the metered budget is unchanged by those reads.
+    for _ in 0..9 {
+        g.authorize(&scope(), PermissionId::EconomyWager, wager(user, 1_000))
+            .unwrap();
+    }
+    assert_eq!(
+        g.authorize(&scope(), PermissionId::EconomyWager, wager(user, 1))
+            .unwrap_err(),
+        Denied::QuotaExceeded
+    );
+}

@@ -177,6 +177,7 @@ mod tests {
             db_reader_password: None,
             bundle_db_password: None,
             bundle_reputation_password: None,
+            bundle_economy_password: None,
         };
         AppState::new(
             config,
@@ -213,6 +214,7 @@ mod tests {
             db_reader_password: None,
             bundle_db_password: None,
             bundle_reputation_password: None,
+            bundle_economy_password: None,
         };
         let state = AppState::new(
             config,
@@ -266,6 +268,7 @@ mod tests {
             db_reader_password: None,
             bundle_db_password: None,
             bundle_reputation_password: None,
+            bundle_economy_password: None,
         };
         let state = AppState::new(
             config,

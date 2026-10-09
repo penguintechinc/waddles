@@ -269,8 +269,8 @@ impl CapabilityGate {
 impl CapabilityGate {
     /// The `economy.*` quota step of [`Self::authorize`] (issue #714).
     ///
-    /// A call with no metered amount (a read) takes the family's plain
-    /// rate limit. A money-moving call is checked, in order: the amount is
+    /// A call with no metered amount (a read, or `economy.wager`'s `max-bet`)
+    /// takes a plain rate limit and consumes none of the amount aggregates. A money-moving call is checked, in order: the amount is
     /// positive; it is within the catalog per-call ceiling AND the
     /// community-declared bound (`params.max_bet` for a wager,
     /// `params.max_amount` for a transfer -- clamped to the ceiling, never
@@ -289,12 +289,28 @@ impl CapabilityGate {
     ) -> Result<(), Denied> {
         let family = permission.family();
         let Some(amount) = target.amount else {
-            return match self.quota.check_and_consume(
-                key,
-                canonical_id,
-                &permission.default_quota(),
-                1,
-            ) {
+            // An amount-less call (a read, or `max-bet`, which describes the
+            // wager capability's limit without moving money) is rate limited,
+            // never metered against the daily amount aggregates: a family whose
+            // default quota is amount-shaped falls back to the read rate limit.
+            let rate_limit = match permission.default_quota() {
+                Quota::EconomyAmount { .. } => Quota::CallsPerWindow {
+                    max_calls: 20,
+                    window: Duration::from_secs(1),
+                },
+                other => other,
+            };
+            // Distinct ledger key: the quota ledger keys its windows by
+            // `(scope, permission id)` and fixes a window's shape at first use,
+            // so reusing the permission id here would let a metered wager and
+            // an amount-less `max-bet` poison each other's window (found by the
+            // real-path e2e: a `max-bet` after a wager read the stake-sum window
+            // as a call counter and was spuriously `rate_limited`).
+            let calls_key = format!("{canonical_id}#calls");
+            return match self
+                .quota
+                .check_and_consume(key, &calls_key, &rate_limit, 1)
+            {
                 Ok(()) => Ok(()),
                 Err(QuotaDenial::RateLimited) => {
                     Err(self.deny(scope, permission, Denied::RateLimited))

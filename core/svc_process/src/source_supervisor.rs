@@ -181,6 +181,9 @@ pub struct SupervisorDeps {
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::reputation_wiring`'s doc.
     pub reputation_wiring: Option<crate::capabilities::ReputationWiring>,
+    /// Cloned into every spawned binding consumer's own `ProcessDeps` --
+    /// see `crate::spine::ProcessDeps::economy_wiring`'s doc.
+    pub economy_wiring: Option<crate::capabilities::EconomyWiring>,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -331,6 +334,7 @@ async fn run_binding_consumer(
             pii_minter: deps.pii_minter.clone(),
             db_wiring: deps.db_wiring.clone(),
             reputation_wiring: deps.reputation_wiring.clone(),
+            economy_wiring: deps.economy_wiring.clone(),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();

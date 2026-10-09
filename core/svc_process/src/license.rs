@@ -313,6 +313,29 @@ impl FeatureGate for BundleReputationCapabilityGate {
     }
 }
 
+/// Gates the bundle `economy` host capability (`crate::capabilities::
+/// StageCapabilities::handle_economy`, issue #714) -- a plain opt-in flag,
+/// same shape as [`BUNDLE_REPUTATION_CAPABILITY_FLAG`]: unseen/OFF/license-
+/// server-unreachable means every `economy.*` call is denied
+/// `feature_disabled`.
+pub const BUNDLE_ECONOMY_CAPABILITY_FLAG: &str = "waddles.bundle-economy-capability";
+
+/// Production [`FeatureGate`] for [`BUNDLE_ECONOMY_CAPABILITY_FLAG`] -- plain
+/// read of `LicenseClient::flag_enabled` (fail-closed default).
+pub struct BundleEconomyCapabilityGate(Arc<LicenseClient>);
+
+impl BundleEconomyCapabilityGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for BundleEconomyCapabilityGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { self.0.flag_enabled(BUNDLE_ECONOMY_CAPABILITY_FLAG).await })
+    }
+}
+
 /// Opt-out kill-switch for the inbound PII-tokenization pre-dispatch pass
 /// (`crate::pii_tokenize`, `rules/critical-rules.md` PII Tokenization) --
 /// same opt-out-kill-switch shape as [`DISABLE_DB_BUNDLE_CONFIG_FLAG`]:
@@ -1223,6 +1246,14 @@ mod tests {
         assert_eq!(
             BUNDLE_REPUTATION_CAPABILITY_FLAG,
             "waddles.bundle-reputation-capability"
+        );
+    }
+
+    #[test]
+    fn bundle_economy_capability_flag_matches_the_product_flag_key_convention() {
+        assert_eq!(
+            BUNDLE_ECONOMY_CAPABILITY_FLAG,
+            "waddles.bundle-economy-capability"
         );
     }
 

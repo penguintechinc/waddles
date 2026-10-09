@@ -749,6 +749,75 @@ async fn try_build_reputation_wiring(
     }
 }
 
+/// Builds the `economy` bundle host capability's production wiring (issue
+/// #714, `spine::ProcessDeps::economy_wiring`): connects to the shared
+/// `waddles` Postgres as the least-privilege `waddles_economy_runtime` role
+/// (`bundle_host_economy::connect`, alembic 0044), spawns the
+/// membership-snapshot refresh task that feeds the gate's production
+/// `SnapshotMembership` (the SAME `Arc` the gate was built with --
+/// `grant_gate::build_production_gate`'s `membership` param), and gates every
+/// call on `BUNDLE_ECONOMY_CAPABILITY_FLAG` (default OFF).
+///
+/// Same two deliberately distinct outcomes as [`try_build_reputation_wiring`]:
+/// `password` unset is an INFO-level "never opted in" `None`; a configured
+/// password whose connection fails is an ERROR-level `None` (a real outage
+/// must never read as "not configured"). Either way every `economy.*` call
+/// denies `not_implemented` and, with no refresher feeding it, the membership
+/// snapshot stays empty (deny-everything) -- fail-closed at both the gate and
+/// the capability.
+async fn try_build_economy_wiring(
+    cfg: &bundle_host_economy::ConnectConfig,
+    password: Option<&config::Secret>,
+    license_client: &Arc<penguin_licensing::LicenseClient>,
+    membership: Arc<bundle_capability_gate::SnapshotMembership>,
+    refresh_interval: std::time::Duration,
+) -> Option<capabilities::EconomyWiring> {
+    let Some(password) = password else {
+        tracing::info!(
+            "BUNDLE_ECONOMY_PASSWORD not set; economy capability unavailable (every economy \
+             host-call will report not_implemented until it is provisioned)"
+        );
+        return None;
+    };
+    match bundle_host_economy::connect(cfg, password.expose()).await {
+        Ok(conn) => {
+            tracing::info!(
+                host = %cfg.host,
+                port = cfg.port,
+                name = %cfg.name,
+                user = %cfg.user,
+                "economy capability: connected to the bundle-economy Postgres role"
+            );
+            tokio::spawn(bundle_host_economy::run_membership_refresh(
+                conn.clone(),
+                None,
+                membership,
+                refresh_interval,
+            ));
+            Some(capabilities::EconomyWiring {
+                store: Arc::new(bundle_host_economy::PostgresEconomyStore::new(conn)),
+                flag: Arc::new(license::BundleEconomyCapabilityGate::new(Arc::clone(
+                    license_client,
+                ))),
+            })
+        }
+        Err(err) => {
+            tracing::error!(
+                host = %cfg.host,
+                port = cfg.port,
+                name = %cfg.name,
+                user = %cfg.user,
+                error = %err,
+                "economy capability: BUNDLE_ECONOMY_PASSWORD is configured but the \
+                 waddles_economy_runtime connection failed -- economy capability unavailable \
+                 (every economy host-call will report not_implemented); this is a \
+                 misconfiguration or outage, not an intentional opt-out"
+            );
+            None
+        }
+    }
+}
+
 /// Builds the `http` bundle capability's shared
 /// [`bundle_host_http::egress::EgressGuard`], wired with the cluster CIDR
 /// denylist and instance-wide private-IP egress policy
@@ -969,6 +1038,14 @@ fn try_start_process_loop(
     };
     let bundle_reputation_password = config.bundle_reputation_password.clone();
     let bundle_reputation_refresh = cli.bundle_reputation_membership_refresh();
+    let bundle_economy_cfg = bundle_host_economy::ConnectConfig {
+        host: cli.bundle_economy_host.clone(),
+        port: cli.bundle_economy_port,
+        name: cli.bundle_economy_name.clone(),
+        user: cli.bundle_economy_user.clone(),
+    };
+    let bundle_economy_password = config.bundle_economy_password.clone();
+    let bundle_economy_refresh = cli.bundle_economy_membership_refresh();
 
     tokio::spawn(async move {
         // TODO(M4+): tenant/community scope hardcoded to the tenant-wide
@@ -1035,6 +1112,14 @@ fn try_start_process_loop(
             &bundle_db_license_client,
             Arc::clone(&membership),
             bundle_reputation_refresh,
+        )
+        .await;
+        let economy_wiring = try_build_economy_wiring(
+            &bundle_economy_cfg,
+            bundle_economy_password.as_ref(),
+            &bundle_db_license_client,
+            Arc::clone(&membership),
+            bundle_economy_refresh,
         )
         .await;
         // Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
@@ -1173,6 +1258,7 @@ fn try_start_process_loop(
                 pii_minter: hub_minter.clone(),
                 db_wiring: db_wiring.clone(),
                 reputation_wiring: reputation_wiring.clone(),
+                economy_wiring: economy_wiring.clone(),
                 // Env-only legacy mode has no `BUNDLE_SCOPE_TENANT_ID`/DB
                 // reader to resolve a real tenant from -- `(0, 0)` fails
                 // closed (denies every non-platform permission) rather than
@@ -1557,6 +1643,14 @@ fn try_start_changelog_consumer(
     };
     let bundle_reputation_password = config.bundle_reputation_password.clone();
     let bundle_reputation_refresh = config.cli.bundle_reputation_membership_refresh();
+    let bundle_economy_cfg = bundle_host_economy::ConnectConfig {
+        host: config.cli.bundle_economy_host.clone(),
+        port: config.cli.bundle_economy_port,
+        name: config.cli.bundle_economy_name.clone(),
+        user: config.cli.bundle_economy_user.clone(),
+    };
+    let bundle_economy_password = config.bundle_economy_password.clone();
+    let bundle_economy_refresh = config.cli.bundle_economy_membership_refresh();
     // One process-wide membership snapshot: every per-scope gate reads it,
     // the reputation wiring's refresh task writes it (empty = fail-closed).
     let membership = Arc::new(bundle_capability_gate::SnapshotMembership::new());
@@ -1646,6 +1740,21 @@ fn try_start_changelog_consumer(
                                 client,
                                 Arc::clone(&membership),
                                 bundle_reputation_refresh,
+                            )
+                            .await
+                        }
+                        None => None,
+                    };
+                    // `economy` host capability (issue #714): same
+                    // license-client dependency as `reputation` above.
+                    deps.economy_wiring = match &bundle_db_license_client {
+                        Some(client) => {
+                            try_build_economy_wiring(
+                                &bundle_economy_cfg,
+                                bundle_economy_password.as_ref(),
+                                client,
+                                Arc::clone(&membership),
+                                bundle_economy_refresh,
                             )
                             .await
                         }
@@ -1760,6 +1869,7 @@ async fn build_source_supervisor_deps(
         // `try_start_changelog_consumer`'s own spawned block.
         db_wiring: None,
         reputation_wiring: None,
+        economy_wiring: None,
     })
 }
 
@@ -1965,6 +2075,7 @@ mod tests {
             db_reader_password: None,
             bundle_db_password: None,
             bundle_reputation_password: None,
+            bundle_economy_password: None,
         }
     }
 
@@ -2698,6 +2809,7 @@ mod tests {
             db_reader_password: None,
             bundle_db_password: None,
             bundle_reputation_password: None,
+            bundle_economy_password: None,
         };
         let state = crate::http::AppState::new(
             config,

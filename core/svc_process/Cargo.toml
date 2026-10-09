@@ -174,6 +174,11 @@ bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
 # `handle_reputation`, `src/lib.rs`'s `try_build_reputation_wiring`) -- same
 # same-repo path-dependency rationale as `bundle-host-db` above.
 bundle-host-reputation = { path = "../bundle_host_reputation", version = "=0.1.0" }
+# The `economy` bundle host capability's durable store + production
+# membership-snapshot loader (issue #714, `src/capabilities.rs`'s
+# `handle_economy`, `src/lib.rs`'s `try_build_economy_wiring`) -- same
+# same-repo path-dependency rationale as `bundle-host-reputation` above.
+bundle-host-economy = { path = "../bundle_host_economy", version = "=0.1.0" }
 # `kv` host capability (`src/lib.rs`'s `connect_kv`, `src/capabilities.rs`):
 # a direct Valkey connection, same crate/feature pins `core/svc_action`
 # uses for its own direct `relay`/usage connection, and the same version
