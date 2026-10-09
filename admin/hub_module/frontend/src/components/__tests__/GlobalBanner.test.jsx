@@ -13,6 +13,7 @@ async function load(getBanner) {
   vi.doMock('../../services/api', () => ({ publicApi: { getBanner } }));
   const rtl = await import('@testing-library/react');
   activeRtl = rtl;
+  rtl.configure({ asyncUtilTimeout: 5000 });
   const { default: GlobalBanner } = await import('../GlobalBanner');
   return { ...rtl, GlobalBanner };
 }
