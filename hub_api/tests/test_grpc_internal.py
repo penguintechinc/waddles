@@ -128,14 +128,14 @@ async def test_wrong_scope_rejected(issuer: ServiceJwtIssuer, server_address: st
 
 
 @pytest.mark.asyncio
-async def test_valid_token_reaches_unimplemented_stub(
+async def test_valid_token_reaches_servicer_unavailable_without_dal(
     issuer: ServiceJwtIssuer, server_address: str
 ) -> None:
-    """A correctly-scoped, valid token clears auth and reaches the stub -> UNIMPLEMENTED."""
+    """Valid token reaches the servicer; no DAL bound -> UNAVAILABLE, never a default."""
     token = issuer.issue(SPIFFE_ID, SCOPE)
     with pytest.raises(grpc.aio.AioRpcError) as exc_info:
         await _mint_call(server_address, token=token)
-    assert exc_info.value.code() == grpc.StatusCode.UNIMPLEMENTED
+    assert exc_info.value.code() == grpc.StatusCode.UNAVAILABLE
 
 
 @pytest.mark.asyncio
