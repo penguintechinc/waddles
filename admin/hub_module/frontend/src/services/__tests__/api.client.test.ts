@@ -125,13 +125,12 @@ describe.each(CLIENTS)('%s session handling', (_label, client) => {
     expect(log).toEqual(['GET /api/v1/user/profile', 'POST /api/v1/auth/refresh', 'GET /api/v1/user/profile']);
   });
 
-  // KNOWN DEFECT: the interceptor also wraps the /auth/refresh call itself, so a
-  // 401 from the refresh endpoint (expired refresh cookie) re-enters it and
-  // refreshes again without bound. `it.fails` goes red once that is fixed --
-  // then turn this into a plain `it`.
-  it.fails('does not recurse when the refresh endpoint itself returns 401', async () => {
+  // Regression: the interceptor used to wrap the /auth/refresh call itself, so a
+  // 401 from the refresh endpoint (expired refresh cookie) re-entered it and
+  // refreshed again without bound. It must refresh once, then log out.
+  it('does not recurse when the refresh endpoint itself returns 401', async () => {
     let refreshCalls = 0;
-    script(client, (call) => {
+    const { log } = script(client, (call) => {
       if (call === 'POST /api/v1/auth/refresh') {
         refreshCalls += 1;
         if (refreshCalls > 5) return 'network-error';
@@ -139,9 +138,11 @@ describe.each(CLIENTS)('%s session handling', (_label, client) => {
       return { status: 401 };
     });
 
-    await client.get('/api/v1/user/profile').catch(() => undefined);
+    await expect(client.get('/api/v1/user/profile')).rejects.toMatchObject({ response: { status: 401 } });
 
-    expect(refreshCalls).toBeLessThanOrEqual(1);
+    expect(refreshCalls).toBe(1);
+    expect(log).toEqual(['GET /api/v1/user/profile', 'POST /api/v1/auth/refresh']);
+    expect(window.location.href).toBe('/login');
   });
 
   it.each([403, 404, 500])('rejects HTTP %i without attempting a refresh', async (status) => {

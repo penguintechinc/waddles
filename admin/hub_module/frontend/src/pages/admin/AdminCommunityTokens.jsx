@@ -63,9 +63,9 @@ export default function AdminCommunityTokens() {
         tokenApi.listCATs(communityId),
         tokenApi.getCATScopes(communityId),
       ]);
-      setTokens(listRes.tokens || []);
-      setQuota(listRes.quota ?? null);
-      setScopes(scopesRes.scopes || []);
+      setTokens(listRes.data?.tokens || []);
+      setQuota(listRes.data?.quota ?? null);
+      setScopes(scopesRes.data?.scopes || []);
     } catch (err) {
       setError(err.message || 'Failed to load community tokens.');
     } finally {
@@ -107,7 +107,7 @@ export default function AdminCommunityTokens() {
         name: createName.trim(),
         scopes: selectedScopes,
       });
-      setNewTokenValue(res.token);
+      setNewTokenValue(res.data.token);
       setShowCreateModal(false);
       setCopied(false);
       setShowSuccessModal(true);
@@ -235,7 +235,7 @@ export default function AdminCommunityTokens() {
                   <td className="px-5 py-4">
                     <ScopeBadgeList scopes={token.scopes} />
                   </td>
-                  <td className="px-5 py-4 text-navy-400">{token.created_by || '—'}</td>
+                  <td className="px-5 py-4 text-navy-400">{token.created_by_name || '—'}</td>
                   <td className="px-5 py-4 text-navy-400">
                     {token.last_used_at
                       ? new Date(token.last_used_at).toLocaleDateString()
@@ -295,14 +295,14 @@ export default function AdminCommunityTokens() {
                     <p className="text-xs text-gold-400 uppercase tracking-wide mb-2">{category}</p>
                     <div className="space-y-1.5">
                       {categoryScopes.map((scope) => (
-                        <label key={scope.key} className="flex items-start gap-2.5 cursor-pointer">
+                        <label key={scope.scope_key} className="flex items-start gap-2.5 cursor-pointer">
                           <input
                             type="checkbox"
-                            checked={selectedScopes.includes(scope.key)}
-                            onChange={() => toggleScope(scope.key)}
+                            checked={selectedScopes.includes(scope.scope_key)}
+                            onChange={() => toggleScope(scope.scope_key)}
                             className="mt-0.5 accent-gold-400"
                           />
-                          <span className="text-sm text-sky-100">{scope.key}</span>
+                          <span className="text-sm text-sky-100">{scope.scope_key}</span>
                           {scope.description && (
                             <span className="text-xs text-navy-400 ml-1">{scope.description}</span>
                           )}

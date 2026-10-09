@@ -3,9 +3,10 @@
  * create modal (validation, grouped scopes, one-time token reveal, copy),
  * revoke, and error states.
  *
- * `tokenApi` is mocked with the UNWRAPPED payloads this page reads
- * (`res.tokens`, `res.token`); see AdminCommunityTokens.wire.test.jsx for the
- * contract against the real HTTP-backed client.
+ * `tokenApi` is mocked with axios-shaped responses (`{ data: { tokens, quota } }`,
+ * `{ data: { scopes } }`, `{ data: { token } }`); see
+ * AdminCommunityTokens.wire.test.jsx for the contract against the real
+ * HTTP-backed client.
  */
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -23,18 +24,18 @@ const TOKENS = [
     id: 't1',
     name: 'Event bot',
     scopes: ['a:read', 'b:read', 'c:read', 'd:read', 'e:read'],
-    created_by: 'alice',
+    created_by_name: 'alice',
     last_used_at: '2026-03-01T12:00:00Z',
     created_at: '2026-01-02T12:00:00Z',
   },
-  { id: 't2', name: 'Welcomer', scopes: [], created_by: null, last_used_at: null, created_at: null },
+  { id: 't2', name: 'Welcomer', scopes: [], created_by_name: null, last_used_at: null, created_at: null },
   { id: 't3', name: 'Single', scopes: ['x:write'] },
 ];
 
 const SCOPES = [
-  { key: 'events:read', description: 'Read events', category: 'Events' },
-  { key: 'events:write', description: 'Write events', category: 'Events' },
-  { key: 'misc:ping' },
+  { scope_key: 'events:read', description: 'Read events', category: 'Events' },
+  { scope_key: 'events:write', description: 'Write events', category: 'Events' },
+  { scope_key: 'misc:ping' },
 ];
 
 function mount() {
@@ -59,9 +60,9 @@ const modal = () =>
 
 beforeEach(() => {
   vi.clearAllMocks();
-  tokenApi.listCATs.mockResolvedValue({ tokens: TOKENS, quota: 10 });
-  tokenApi.getCATScopes.mockResolvedValue({ scopes: SCOPES });
-  tokenApi.createCAT.mockResolvedValue({ token: 'cat_secret_value' });
+  tokenApi.listCATs.mockResolvedValue({ data: { tokens: TOKENS, quota: 10 } });
+  tokenApi.getCATScopes.mockResolvedValue({ data: { scopes: SCOPES } });
+  tokenApi.createCAT.mockResolvedValue({ data: { token: 'cat_secret_value' } });
   tokenApi.revokeCAT.mockResolvedValue({});
   vi.spyOn(window, 'confirm').mockReturnValue(true);
 });
@@ -109,7 +110,7 @@ describe('AdminCommunityTokens listing', () => {
   });
 
   it('blocks creation and flags the quota in red once it is reached', async () => {
-    tokenApi.listCATs.mockResolvedValue({ tokens: TOKENS, quota: 3 });
+    tokenApi.listCATs.mockResolvedValue({ data: { tokens: TOKENS, quota: 3 } });
     mount();
     await screen.findByText('Event bot');
     expect(screen.getByText('3')).toHaveClass('text-red-400');
@@ -119,14 +120,21 @@ describe('AdminCommunityTokens listing', () => {
   });
 
   it('omits the quota line when the API gives none', async () => {
-    tokenApi.listCATs.mockResolvedValue({ tokens: TOKENS });
+    tokenApi.listCATs.mockResolvedValue({ data: { tokens: TOKENS } });
     mount();
     await screen.findByText('Event bot');
     expect(screen.queryByText(/tokens used/)).not.toBeInTheDocument();
   });
 
   it('shows the empty state when there are no tokens', async () => {
+    tokenApi.listCATs.mockResolvedValue({ data: {} });
+    mount();
+    expect(await screen.findByText('No community tokens yet')).toBeInTheDocument();
+  });
+
+  it('treats a response with no body as an empty list with no scopes', async () => {
     tokenApi.listCATs.mockResolvedValue({});
+    tokenApi.getCATScopes.mockResolvedValue({});
     mount();
     expect(await screen.findByText('No community tokens yet')).toBeInTheDocument();
   });
@@ -257,7 +265,7 @@ describe('AdminCommunityTokens create', () => {
     fireEvent.click(modal().getByRole('checkbox', { name: /misc:ping/ }));
     fireEvent.click(modal().getByRole('button', { name: 'Create Token' }));
     expect(await screen.findByRole('button', { name: 'Creating…' })).toBeDisabled();
-    release({ token: 'tok' });
+    release({ data: { token: 'tok' } });
     await screen.findByText('tok');
   });
 
