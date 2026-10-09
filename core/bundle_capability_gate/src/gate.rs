@@ -24,11 +24,12 @@ use crate::permission::{PermissionId, Quota};
 use crate::quota::{QuotaDenial, QuotaLedger};
 use crate::resource::{
     resolve_kv_key_prefix, resolve_object_prefix, resolve_overlay, resolve_table,
-    AppScopedResource, AuthorizedCall, ResolvedResource, ResourceRef,
+    AppScopedResource, AuthorizedCall, EconomyTarget, ResolvedResource, ResourceRef, ScopeKind,
 };
 use crate::scope::{GrantScopeKey, InvokeScope};
 
 const REPUTATION_AGGREGATE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+const ECONOMY_AGGREGATE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The gate's held state: a hot-path grant snapshot, a hot-path membership
 /// check, and a quota ledger -- all sync/zero-I/O per spec SS5.5's
@@ -131,7 +132,42 @@ impl CapabilityGate {
                 }
                 ResolvedResource::ReputationTarget(target.clone())
             }
+            ResourceRef::EconomyScoped(target) => {
+                if !family.is_economy_scoped() {
+                    return Err(self.deny(scope, &permission, Denied::ResourceScopeMismatch));
+                }
+                // Every user the call names must be a live community member
+                // (a wager's player, a transfer's sender AND recipient).
+                for user in [target.target_user, target.counterparty]
+                    .into_iter()
+                    .flatten()
+                {
+                    if !self.membership.is_member(scope, user, ScopeKind::Community) {
+                        return Err(self.deny(scope, &permission, Denied::UserNotInScope));
+                    }
+                }
+                ResolvedResource::EconomyTarget(*target)
+            }
         };
+
+        // `economy.*` (issue #714) has its own quota family, so it settles
+        // here and never falls into the reputation-delta/generic arms below.
+        if let ResourceRef::EconomyScoped(target) = &resource {
+            self.check_economy_quota(
+                scope,
+                &permission,
+                &canonical_id,
+                &key,
+                target,
+                &granted.params,
+            )?;
+            audit::record_authorized(scope, &permission);
+            return Ok(AuthorizedCall {
+                permission,
+                resource: resolved,
+                params: granted.params.clone(),
+            });
+        }
 
         // Quota/rate enforcement (spec SS1, SS7.2 steps 2-3, SS7.3). A
         // `reputation.*.write` `adjust()` call (a target with `delta:
@@ -140,7 +176,7 @@ impl CapabilityGate {
         // `Descriptive`, a plain rate limit for `CallsPerWindow`).
         let delta = match &resource {
             ResourceRef::ReputationScoped(target) => target.delta,
-            ResourceRef::AppScoped(_) => None,
+            ResourceRef::AppScoped(_) | ResourceRef::EconomyScoped(_) => None,
         };
 
         if let Some(delta) = delta {
@@ -170,7 +206,7 @@ impl CapabilityGate {
 
             let target_user = match &resource {
                 ResourceRef::ReputationScoped(t) => t.target_user,
-                ResourceRef::AppScoped(_) => {
+                ResourceRef::AppScoped(_) | ResourceRef::EconomyScoped(_) => {
                     unreachable!("delta is only Some for ReputationScoped")
                 }
             };
@@ -227,6 +263,101 @@ impl CapabilityGate {
             resource: resolved,
             params: granted.params.clone(),
         })
+    }
+}
+
+impl CapabilityGate {
+    /// The `economy.*` quota step of [`Self::authorize`] (issue #714).
+    ///
+    /// A call with no metered amount (a read) takes the family's plain
+    /// rate limit. A money-moving call is checked, in order: the amount is
+    /// positive; it is within the catalog per-call ceiling AND the
+    /// community-declared bound (`params.max_bet` for a wager,
+    /// `params.max_amount` for a transfer -- clamped to the ceiling, never
+    /// above it); the per-user daily aggregate (keyed on the acting
+    /// `target_user`, the sender for a transfer); the per-community daily
+    /// aggregate. Any breach of the first two is `amount_out_of_bounds`, of
+    /// the aggregates `quota_exceeded`. Nothing is consumed by a denied call.
+    fn check_economy_quota(
+        &self,
+        scope: &InvokeScope,
+        permission: &PermissionId,
+        canonical_id: &str,
+        key: &crate::scope::GrantScopeKey,
+        target: &EconomyTarget,
+        params: &serde_json::Value,
+    ) -> Result<(), Denied> {
+        let family = permission.family();
+        let Some(amount) = target.amount else {
+            return match self.quota.check_and_consume(
+                key,
+                canonical_id,
+                &permission.default_quota(),
+                1,
+            ) {
+                Ok(()) => Ok(()),
+                Err(QuotaDenial::RateLimited) => {
+                    Err(self.deny(scope, permission, Denied::RateLimited))
+                }
+                Err(QuotaDenial::QuotaExceeded) => {
+                    Err(self.deny(scope, permission, Denied::QuotaExceeded))
+                }
+            };
+        };
+        let Quota::EconomyAmount {
+            per_call_abs_max,
+            per_user_daily_abs_max,
+            per_scope_daily_abs_max,
+        } = family.catalog_entry().default_quota
+        else {
+            // Defensive: a money-moving call against a family whose catalog
+            // quota is not EconomyAmount-shaped is a wiring bug -- deny.
+            return Err(self.deny(scope, permission, Denied::AmountOutOfBounds));
+        };
+
+        let Some(bound) = family.economy_amount_bound(params) else {
+            return Err(self.deny(scope, permission, Denied::AmountOutOfBounds));
+        };
+        if amount < 1 || amount > bound {
+            return Err(self.deny(scope, permission, Denied::AmountOutOfBounds));
+        }
+
+        // A money-moving call must name the acting user: without one there
+        // is no per-user aggregate to charge, so fail closed.
+        let Some(acting_user) = target.target_user else {
+            return Err(self.deny(scope, permission, Denied::ResourceScopeMismatch));
+        };
+        if self
+            .quota
+            .check_and_consume_per_user(
+                key,
+                canonical_id,
+                acting_user,
+                per_user_daily_abs_max,
+                ECONOMY_AGGREGATE_WINDOW,
+                amount,
+            )
+            .is_err()
+        {
+            return Err(self.deny(scope, permission, Denied::QuotaExceeded));
+        }
+        if self
+            .quota
+            .check_and_consume(
+                key,
+                canonical_id,
+                &Quota::EconomyAmount {
+                    per_call_abs_max,
+                    per_user_daily_abs_max,
+                    per_scope_daily_abs_max,
+                },
+                amount,
+            )
+            .is_err()
+        {
+            return Err(self.deny(scope, permission, Denied::QuotaExceeded));
+        }
+        Ok(())
     }
 }
 
@@ -933,3 +1064,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "gate_economy_tests.rs"]
+mod economy_tests;

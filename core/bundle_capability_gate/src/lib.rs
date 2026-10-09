@@ -62,7 +62,8 @@ pub use permission::{
 };
 pub use quota::{InMemoryQuotaLedger, QuotaDenial, QuotaLedger};
 pub use resource::{
-    AppScopedResource, AuthorizedCall, ReputationTarget, ResolvedResource, ResourceRef, ScopeKind,
+    AppScopedResource, AuthorizedCall, EconomyTarget, ReputationTarget, ResolvedResource,
+    ResourceRef, ScopeKind,
 };
 pub use scope::{
     GrantScopeKey, HostInvokeScopeBuilder, InvokeScope, InvokeScopeBuildError, TenantTier,

@@ -46,6 +46,10 @@ pub enum Denied {
     /// `delta_min`/`delta_max` bound or the catalog's per-call ceiling (spec
     /// SS1/SS7.2 step 2). Triggered by this crate.
     DeltaOutOfBounds,
+    /// An `economy.wager`/`economy.transfer` metered `amount` exceeded the
+    /// catalog's per-call ceiling or the community-declared
+    /// `max_bet`/`max_amount` bound (issue #714). Triggered by this crate.
+    AmountOutOfBounds,
     /// A `chat.send`/`moderation` platform, or a `users.profile.read`
     /// platform with no non-identifying attribute to offer (spec SS10.2), is
     /// not supported. Reserved -- not triggered by this crate's `authorize()`
@@ -75,6 +79,7 @@ impl Denied {
             Self::RateLimited => "rate_limited",
             Self::UserNotInScope => "user_not_in_scope",
             Self::DeltaOutOfBounds => "delta_out_of_bounds",
+            Self::AmountOutOfBounds => "amount_out_of_bounds",
             Self::UnsupportedPlatform => "unsupported_platform",
             Self::ContainsPii => "contains_pii",
             Self::InstanceDenied => "instance_denied",
@@ -105,6 +110,10 @@ mod tests {
         assert_eq!(Denied::RateLimited.reason_str(), "rate_limited");
         assert_eq!(Denied::UserNotInScope.reason_str(), "user_not_in_scope");
         assert_eq!(Denied::DeltaOutOfBounds.reason_str(), "delta_out_of_bounds");
+        assert_eq!(
+            Denied::AmountOutOfBounds.reason_str(),
+            "amount_out_of_bounds"
+        );
         assert_eq!(
             Denied::UnsupportedPlatform.reason_str(),
             "unsupported_platform"
