@@ -311,19 +311,43 @@ spec:
           limits:
             memory: {{ .Values.infrastructure.seaweedfs.resources.limits.memory }}
             cpu: {{ .Values.infrastructure.seaweedfs.resources.limits.cpu }}
+        # fix/seaweedfs-mem-httpprobe -- a tcpSocket probe only proves the
+        # listener is accepting connections; under bundle-seed load the pod
+        # OOMKilled at the old 512Mi alpha limit and on restart the S3 HTTP
+        # handler wedged (TCP accept succeeds, HTTP requests hang / the
+        # seeder's .wasm uploads see ConnectionClosedError) while tcpSocket
+        # stayed green the whole time. An httpGet probe can't replace it
+        # directly: kubelet only treats HTTP 200-399 as Success, and an
+        # unsigned/anonymous GET against the S3 gateway's IAM-protected
+        # identities (s3-identities.json above) correctly returns 403 --
+        # i.e. the one HTTP status that proves the handler IS serving is
+        # the one status kubelet always calls a Failure. So this execs curl
+        # itself and accepts 200 OR 403 as "handler responding"; a wedged
+        # handler (connection accepted but no response within --max-time)
+        # yields an empty/"000" code, which correctly fails the probe.
         livenessProbe:
-          tcpSocket:
-            port: s3
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - |
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:{{ .Values.infrastructure.seaweedfs.s3Port }}/")
+              [ "$code" = "200" ] || [ "$code" = "403" ]
           initialDelaySeconds: 30
           periodSeconds: 30
-          timeoutSeconds: 20
+          timeoutSeconds: 10
           failureThreshold: 3
         readinessProbe:
-          tcpSocket:
-            port: s3
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - |
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:{{ .Values.infrastructure.seaweedfs.s3Port }}/")
+              [ "$code" = "200" ] || [ "$code" = "403" ]
           initialDelaySeconds: 10
-          periodSeconds: 30
-          timeoutSeconds: 20
+          periodSeconds: 15
+          timeoutSeconds: 10
           failureThreshold: 3
       volumes:
       - name: seaweedfs-data
