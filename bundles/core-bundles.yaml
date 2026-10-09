@@ -774,3 +774,57 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  - app_id: waddles.core.example.death
+    version: "1.0.0"
+    language: python
+    source_dir: python/death
+    manifest_path: death.manifest.yaml
+    artifact_path: death.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.roast
+    version: "1.0.0"
+    language: python
+    source_dir: python/roast
+    manifest_path: roast.manifest.yaml
+    artifact_path: roast.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.ship
+    version: "1.0.0"
+    language: python
+    source_dir: python/ship
+    manifest_path: ship.manifest.yaml
+    artifact_path: ship.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.iq
+    version: "1.0.0"
+    language: python
+    source_dir: python/iq
+    manifest_path: iq.manifest.yaml
+    artifact_path: iq.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.mood
+    version: "1.0.0"
+    language: python
+    source_dir: python/mood
+    manifest_path: mood.manifest.yaml
+    artifact_path: mood.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.winner
+    version: "1.0.0"
+    language: python
+    source_dir: python/winner
+    manifest_path: winner.manifest.yaml
+    artifact_path: winner.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
