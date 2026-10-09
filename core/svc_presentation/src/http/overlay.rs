@@ -93,6 +93,13 @@ pub async fn push(
     Json(body): Json<OverlayPush>,
 ) -> Result<Json<PushResponseBody>, ApiError> {
     let surface = parse_surface(&params.surface).ok_or_else(|| unknown_surface(&params.surface))?;
+    // Never echo or trust the unvalidated path segment: it must match the
+    // community the verified credential was issued for.
+    if params.community != credential.community_id.to_string() {
+        return Err(ApiError::Forbidden(
+            "path community does not match credential".to_string(),
+        ));
+    }
     state.hub.publish(credential.community_id, surface, body);
     tracing::debug!(
         community_id = credential.community_id,
@@ -250,6 +257,8 @@ async fn run_ws_connection(
     }
 
     let mut heartbeat = tokio::time::interval(heartbeat_interval);
+    // A stalled send must not trigger a burst of catch-up pings.
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     heartbeat.tick().await; // the first tick fires immediately; consume it
 
     loop {
@@ -286,7 +295,10 @@ async fn run_ws_connection(
             incoming = socket.recv() => {
                 match incoming {
                     None => break,
-                    Some(Err(_)) => break,
+                    Some(Err(err)) => {
+                        tracing::warn!(error = %err, "overlay websocket transport error, closing");
+                        break;
+                    }
                     Some(Ok(Message::Close(_))) => break,
                     // Pongs and any stray client->server frames need no
                     // response of their own -- axum already auto-replies
@@ -387,6 +399,26 @@ mod tests {
             Some(RecvOutcome::Push(push)) => assert_eq!(push.title.as_deref(), Some("hello")),
             _ => panic!("expected the published frame"),
         }
+    }
+
+    #[tokio::test]
+    async fn push_handler_rejects_community_mismatch_with_403() {
+        let state = test_state();
+        let err = push(
+            State(state),
+            Extension(fake_push_credential(42)),
+            Path(OverlayRouteParams {
+                community: "43".to_string(),
+                surface: "media".to_string(),
+            }),
+            Json(OverlayPush::default()),
+        )
+        .await
+        .expect_err("mismatched community must be rejected");
+        assert_eq!(
+            err.into_response().status(),
+            axum::http::StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]

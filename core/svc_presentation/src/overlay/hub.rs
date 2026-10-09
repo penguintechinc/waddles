@@ -15,7 +15,7 @@
 //! [`PresentationHub::publish`]/[`PresentationHub::subscribe`].
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
 use overlay_schema::{OverlayPush, Surface};
@@ -106,11 +106,12 @@ pub fn register_hub_metrics(registry: &prometheus::Registry) -> HubMetrics {
 }
 
 type ChannelKey = (i64, Surface);
+type ChannelMap = HashMap<ChannelKey, broadcast::Sender<Arc<OverlayPush>>>;
 
 /// The in-process push fan-out: one broadcast channel per (community,
 /// surface), created lazily on first publish or subscribe.
 pub struct PresentationHub {
-    channels: Mutex<HashMap<ChannelKey, broadcast::Sender<Arc<OverlayPush>>>>,
+    channels: Arc<Mutex<ChannelMap>>,
     capacity: usize,
     metrics: HubMetrics,
 }
@@ -126,25 +127,10 @@ impl PresentationHub {
     /// handful of sends instead of 64 real ones.
     pub fn with_capacity(capacity: usize, metrics: HubMetrics) -> Self {
         Self {
-            channels: Mutex::new(HashMap::new()),
+            channels: Arc::new(Mutex::new(HashMap::new())),
             capacity,
             metrics,
         }
-    }
-
-    /// Returns the channel for `(community_id, surface)`, creating it (with
-    /// zero current subscribers) on first use. The lock is held only for
-    /// the hashmap lookup/insert -- never across an `.await` point.
-    fn sender_for(
-        &self,
-        community_id: i64,
-        surface: Surface,
-    ) -> broadcast::Sender<Arc<OverlayPush>> {
-        let mut channels = self.channels.lock().expect("hub channel map lock poisoned");
-        channels
-            .entry((community_id, surface))
-            .or_insert_with(|| broadcast::channel(self.capacity).0)
-            .clone()
     }
 
     /// Fans `push` out to every current subscriber of `community_id`/
@@ -155,8 +141,16 @@ impl PresentationHub {
     /// not a failure this caller needs to react to or retry).
     pub fn publish(&self, community_id: i64, surface: Surface, push: OverlayPush) {
         let start = Instant::now();
-        let sender = self.sender_for(community_id, surface);
-        let _ = sender.send(Arc::new(push));
+        // Publish never creates a channel: with no entry there are no
+        // subscribers, and creating one here would leak an entry per
+        // unique (community, surface) a pusher names.
+        let sender = {
+            let channels = self.channels.lock().expect("hub channel map lock poisoned");
+            channels.get(&(community_id, surface)).cloned()
+        };
+        if let Some(sender) = sender {
+            let _ = sender.send(Arc::new(push));
+        }
         self.metrics
             .fanout_latency_seconds
             .with_label_values(&[surface.as_str()])
@@ -170,8 +164,17 @@ impl PresentationHub {
     /// subscriber there was never handed anything published before it
     /// connected either).
     pub fn subscribe(&self, community_id: i64, surface: Surface) -> HubSubscription {
-        let sender = self.sender_for(community_id, surface);
-        let receiver = sender.subscribe();
+        // Subscribe while holding the map lock so a concurrent
+        // `HubSubscription::drop` GC can never remove the channel between
+        // our lookup and our `subscribe()`.
+        let key = (community_id, surface);
+        let receiver = {
+            let mut channels = self.channels.lock().expect("hub channel map lock poisoned");
+            channels
+                .entry(key)
+                .or_insert_with(|| broadcast::channel(self.capacity).0)
+                .subscribe()
+        };
         self.metrics
             .subscribers
             .with_label_values(&[surface.as_str()])
@@ -181,7 +184,17 @@ impl PresentationHub {
             metrics: self.metrics.clone(),
             surface,
             connected_at: Instant::now(),
+            key,
+            channels: Arc::downgrade(&self.channels),
         }
+    }
+
+    /// Number of live channel entries (test/diagnostic visibility into GC).
+    pub fn channel_count(&self) -> usize {
+        self.channels
+            .lock()
+            .expect("hub channel map lock poisoned")
+            .len()
     }
 }
 
@@ -195,6 +208,10 @@ pub struct HubSubscription {
     metrics: HubMetrics,
     surface: Surface,
     connected_at: Instant,
+    key: ChannelKey,
+    /// Weak so a live subscriber never keeps the hub's senders alive:
+    /// dropping the hub still closes every channel.
+    channels: Weak<Mutex<ChannelMap>>,
 }
 
 /// One outcome of [`HubSubscription::recv`].
@@ -230,6 +247,21 @@ impl HubSubscription {
 
 impl Drop for HubSubscription {
     fn drop(&mut self) {
+        // GC: this receiver is still counted while `drop` runs, so a count
+        // of <= 1 means we are the last one -- remove the channel so
+        // subscribe-then-disconnect can't grow the map without bound. The
+        // check runs under the map lock, which `subscribe` also holds while
+        // adding receivers, so it cannot race a new subscriber.
+        if let Some(map) = self.channels.upgrade() {
+            if let Ok(mut channels) = map.lock() {
+                if channels
+                    .get(&self.key)
+                    .is_some_and(|tx| tx.receiver_count() <= 1)
+                {
+                    channels.remove(&self.key);
+                }
+            }
+        }
         self.metrics
             .subscribers
             .with_label_values(&[self.surface.as_str()])
@@ -254,6 +286,27 @@ mod tests {
             title: Some(title.to_string()),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn channel_is_reclaimed_when_last_subscriber_drops() {
+        let hub = PresentationHub::new(test_metrics());
+        let a = hub.subscribe(1, Surface::Media);
+        let b = hub.subscribe(1, Surface::Media);
+        assert_eq!(hub.channel_count(), 1);
+        drop(a);
+        assert_eq!(hub.channel_count(), 1, "one receiver remains");
+        drop(b);
+        assert_eq!(hub.channel_count(), 0, "last receiver gone -> reclaimed");
+        for id in 0..100 {
+            drop(hub.subscribe(id, Surface::Media));
+            hub.publish(id + 1000, Surface::Media, push_with_title("x"));
+        }
+        assert_eq!(hub.channel_count(), 0, "no leak across churn or publish");
+        // A fresh subscriber after GC still works.
+        let mut sub = hub.subscribe(1, Surface::Media);
+        hub.publish(1, Surface::Media, push_with_title("again"));
+        assert!(matches!(sub.recv().await, Some(RecvOutcome::Push(_))));
     }
 
     #[tokio::test]
