@@ -144,7 +144,7 @@ export default function AdminAnnouncements() {
       await adminApi.broadcastAnnouncement(
         communityId,
         broadcastAnnouncement.id,
-        { platforms }
+        platforms
       );
       setShowBroadcastModal(false);
       setBroadcastAnnouncement(null);

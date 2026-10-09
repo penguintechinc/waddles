@@ -54,14 +54,18 @@ function AdminShoutouts() {
     }
   }, [activeTab, communityId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  async function fetchHistory() {
+  // `filters` lets a caller (Clear) pass the values it is about to set: reading
+  // the `historyFilter*` state here would use this render's stale closure.
+  async function fetchHistory(
+    filters = { from: historyFilterFrom, to: historyFilterTo, type: historyFilterType },
+  ) {
     setHistoryLoading(true);
     setHistoryError(null);
     try {
       const params = {};
-      if (historyFilterFrom) params.from = historyFilterFrom;
-      if (historyFilterTo) params.to = historyFilterTo;
-      if (historyFilterType) params.type = historyFilterType;
+      if (filters.from) params.from = filters.from;
+      if (filters.to) params.to = filters.to;
+      if (filters.type) params.type = filters.type;
       const res = await adminApi.getShoutoutHistory(communityId, params);
       setHistory(res.data?.history || res.data?.shoutouts || []);
     } catch (err) {
@@ -609,7 +613,7 @@ function AdminShoutouts() {
                   <option value="manual">Manual</option>
                 </select>
               </div>
-              <button onClick={fetchHistory} className="btn btn-secondary text-sm">
+              <button onClick={() => fetchHistory()} className="btn btn-secondary text-sm">
                 Apply Filters
               </button>
               <button
@@ -617,7 +621,7 @@ function AdminShoutouts() {
                   setHistoryFilterFrom('');
                   setHistoryFilterTo('');
                   setHistoryFilterType('');
-                  setTimeout(fetchHistory, 0);
+                  fetchHistory({ from: '', to: '', type: '' });
                 }}
                 className="text-navy-400 hover:text-sky-300 text-sm transition-colors"
               >

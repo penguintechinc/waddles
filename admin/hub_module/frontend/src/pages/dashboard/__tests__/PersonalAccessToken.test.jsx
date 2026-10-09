@@ -3,9 +3,10 @@
  * create flow (name validation, optional scope ceiling, one-time reveal,
  * copy), revoke, and error handling.
  *
- * `tokenApi` is mocked with the UNWRAPPED payloads the page reads (`res.token`,
- * `res.scopes`); see PersonalAccessToken.wire.test.jsx for the contract against
- * the real HTTP-backed client.
+ * `tokenApi` is mocked with axios-shaped responses (`{ data: { pat } }`,
+ * `{ data: { scopes } }`, `{ data: { token } }`); see
+ * PersonalAccessToken.wire.test.jsx for the contract against the real
+ * HTTP-backed client.
  */
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -18,9 +19,9 @@ vi.mock('../../../services/api', () => ({
 }));
 
 const SCOPES = [
-  { key: 'profile:read', description: 'Read profile', category: 'Profile' },
-  { key: 'profile:write', category: 'Profile' },
-  { key: 'misc:ping' },
+  { scope_key: 'profile:read', description: 'Read profile', category: 'Profile' },
+  { scope_key: 'profile:write', category: 'Profile' },
+  { scope_key: 'misc:ping' },
 ];
 
 const TOKEN = {
@@ -31,13 +32,13 @@ const TOKEN = {
 };
 
 async function loadedEmpty() {
-  tokenApi.getPAT.mockResolvedValue({ token: null });
+  tokenApi.getPAT.mockResolvedValue({ data: { pat: null } });
   render(<PersonalAccessToken />);
   await screen.findByText('No active token');
 }
 
 async function loadedWithToken(token = TOKEN) {
-  tokenApi.getPAT.mockResolvedValue({ token });
+  tokenApi.getPAT.mockResolvedValue({ data: { pat: token } });
   render(<PersonalAccessToken />);
   await screen.findByText(token.name);
 }
@@ -51,8 +52,8 @@ async function openCreate() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  tokenApi.getPATScopes.mockResolvedValue({ scopes: SCOPES });
-  tokenApi.createPAT.mockResolvedValue({ token: 'pat_secret' });
+  tokenApi.getPATScopes.mockResolvedValue({ data: { scopes: SCOPES } });
+  tokenApi.createPAT.mockResolvedValue({ data: { token: 'pat_secret' } });
   tokenApi.revokePAT.mockResolvedValue({});
   vi.spyOn(window, 'confirm').mockReturnValue(true);
 });
@@ -64,7 +65,7 @@ afterEach(() => {
 
 describe('PersonalAccessToken display', () => {
   it('shows Loading… then the empty state when there is no token', async () => {
-    tokenApi.getPAT.mockResolvedValue({ token: null });
+    tokenApi.getPAT.mockResolvedValue({ data: { pat: null } });
     render(<PersonalAccessToken />);
     expect(screen.getByText('Loading…')).toBeInTheDocument();
     expect(await screen.findByText('No active token')).toBeInTheDocument();
@@ -147,7 +148,7 @@ describe('PersonalAccessToken create', () => {
     fireEvent.change(screen.getByPlaceholderText('e.g. My deploy script'), { target: { value: 'ci' } });
     fireEvent.click(form().getByRole('button', { name: 'Create Token' }));
     await screen.findByText('pat_secret');
-    tokenApi.getPAT.mockResolvedValue({ token: { ...TOKEN, name: 'ci' } });
+    tokenApi.getPAT.mockResolvedValue({ data: { pat: { ...TOKEN, name: 'ci' } } });
 
     fireEvent.click(screen.getByRole('button', { name: 'Done' }));
 
@@ -220,7 +221,7 @@ describe('PersonalAccessToken create', () => {
     fireEvent.change(screen.getByPlaceholderText('e.g. My deploy script'), { target: { value: 'ci' } });
     fireEvent.click(form().getByRole('button', { name: 'Create Token' }));
     expect(await screen.findByRole('button', { name: 'Creating…' })).toBeDisabled();
-    release({ token: 'tok' });
+    release({ data: { token: 'tok' } });
     await screen.findByText('tok');
   });
 });
