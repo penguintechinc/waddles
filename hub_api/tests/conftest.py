@@ -1601,6 +1601,8 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("id", Integer, primary_key=True, autoincrement=True),
         Column("tenant_id", Integer, nullable=False),
         Column("name", String(255)),
+        Column("is_active", Boolean),
+        Column("is_public", Boolean),
     )
     # app_source_bindings (migration 0025) -- AUTO-BIND record of which
     # ingest_sources an approved app consumes (services/app_source_
