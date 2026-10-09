@@ -119,7 +119,7 @@ bundles:
   # fresh publish+activate. Mirrors bundles/csharp/csping/hub-manifest.yaml's own 1.0.0/1.0.1
   # retirement (fix/csping-version-bump, #575).
   - app_id: waddles.core.example.eightball
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/eightball
     manifest_path: eightball.manifest.yaml
@@ -128,7 +128,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.roll
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/roll
     manifest_path: roll.manifest.yaml
@@ -405,7 +405,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.poll
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/poll
     manifest_path: poll.manifest.yaml
@@ -467,7 +467,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.choose
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/choose
     manifest_path: choose.manifest.yaml
@@ -485,7 +485,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.wave
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/wave
     manifest_path: wave.manifest.yaml
@@ -494,7 +494,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.slap
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/slap
     manifest_path: slap.manifest.yaml
