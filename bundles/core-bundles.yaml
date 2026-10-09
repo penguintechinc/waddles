@@ -792,3 +792,46 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  # Utility pack (2026-10-09, feature/bundles-utility-pack): alias / lastseen / dailycounter /
+  # weather. All gate behind `waddles.command-<name>` flags (default OFF) inside `transform()`;
+  # this entry only installs the bundles. Original logic (no PenguinTwitchBot port), so
+  # waddles.core.example.* rather than waddles.integrations.superpenguin.*. `weather` declares
+  # `net.http.fqdn:api.weatherapi.com` (GET) and reads its key via secret-ref WEATHER_API_KEY
+  # (operator-provisioned, never in the repo). `lastseen` supports self + Discord @mention +
+  # literal UUID only -- free-text name lookup needs #429.
+  - app_id: waddles.core.example.alias
+    version: "1.0.0"
+    language: python
+    source_dir: python/alias
+    manifest_path: alias.manifest.yaml
+    artifact_path: alias.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.lastseen
+    version: "1.0.0"
+    language: python
+    source_dir: python/lastseen
+    manifest_path: lastseen.manifest.yaml
+    artifact_path: lastseen.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.dailycounter
+    version: "1.0.0"
+    language: python
+    source_dir: python/dailycounter
+    manifest_path: dailycounter.manifest.yaml
+    artifact_path: dailycounter.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.weather
+    version: "1.0.0"
+    language: python
+    source_dir: python/weather
+    manifest_path: weather.manifest.yaml
+    artifact_path: weather.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null

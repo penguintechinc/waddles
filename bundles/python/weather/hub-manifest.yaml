@@ -1,0 +1,44 @@
+# hub-api install-pipeline manifest (schema_version 2) for waddles.core.example.weather.
+# 1.0.0: new utility-pack bundle -- see src/app.py's module docstring.
+schema_version: 2
+app_id: waddles.core.example.weather
+name: Weather Bundle (Python)
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+language: python
+artifact: prebuilt
+execution_model: native
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!weather"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!weather"]
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+egress:
+  - host: api.weatherapi.com
+    methods: ["GET"]
+data:
+  tables: []
+limits:
+  timeout_ms: 5000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-weather feature flag"
+  - id: net.http.fqdn:api.weatherapi.com
+    justification: "fetches current conditions from the WeatherAPI.com HTTPS API; GET only"
+    params:
+      methods: ["GET"]
+routes_to: []
