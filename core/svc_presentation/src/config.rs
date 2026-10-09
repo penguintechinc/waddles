@@ -167,6 +167,13 @@ pub struct CliConfig {
     /// doesn't need to re-fetch a render just to get a fresh link.
     #[arg(long, env = "IMAGE_SIGNED_URL_TTL_SECONDS", default_value_t = 300)]
     pub image_signed_url_ttl_seconds: u64,
+
+    /// Local-development mode: relaxes the fail-fast requirement for
+    /// `IMAGE_BUCKET_ACCESS_KEY_ID`/`IMAGE_BUCKET_SECRET_ACCESS_KEY`.
+    /// Off by default -- every deployed (non-dev) process must have a
+    /// bucket credential pair or refuse to start.
+    #[arg(long, env = "SVC_PRESENTATION_DEV_MODE", default_value_t = false)]
+    pub dev_mode: bool,
 }
 
 impl CliConfig {
@@ -244,12 +251,22 @@ impl Config {
         cli.validate()?;
         let db_password = Secret::new(env_required("DB_PASSWORD")?);
         let cache_password = std::env::var("CACHE_PASSWORD").ok().map(Secret::new);
-        let image_bucket_access_key_id = std::env::var("IMAGE_BUCKET_ACCESS_KEY_ID")
-            .ok()
-            .map(Secret::new);
-        let image_bucket_secret_access_key = std::env::var("IMAGE_BUCKET_SECRET_ACCESS_KEY")
-            .ok()
-            .map(Secret::new);
+        let non_blank = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .map(Secret::new)
+        };
+        let image_bucket_access_key_id = non_blank("IMAGE_BUCKET_ACCESS_KEY_ID");
+        let image_bucket_secret_access_key = non_blank("IMAGE_BUCKET_SECRET_ACCESS_KEY");
+        if !cli.dev_mode {
+            if image_bucket_access_key_id.is_none() {
+                return Err(ConfigError::MissingEnv("IMAGE_BUCKET_ACCESS_KEY_ID"));
+            }
+            if image_bucket_secret_access_key.is_none() {
+                return Err(ConfigError::MissingEnv("IMAGE_BUCKET_SECRET_ACCESS_KEY"));
+            }
+        }
         Ok(Self {
             cli,
             db_password,
@@ -274,7 +291,12 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn clear_secret_env() {
-        for var in ["DB_PASSWORD", "CACHE_PASSWORD"] {
+        for var in [
+            "DB_PASSWORD",
+            "CACHE_PASSWORD",
+            "IMAGE_BUCKET_ACCESS_KEY_ID",
+            "IMAGE_BUCKET_SECRET_ACCESS_KEY",
+        ] {
             // SAFETY: serialized by ENV_LOCK, no concurrent readers/writers
             // of these specific variables within the test process.
             unsafe { std::env::remove_var(var) };
@@ -320,10 +342,38 @@ mod tests {
         unsafe {
             std::env::set_var("DB_PASSWORD", "test-db-pass");
         }
-        let cli = CliConfig::parse_from(["svc-presentation"]);
+        let cli = CliConfig::parse_from(["svc-presentation", "--dev-mode"]);
         let cfg = Config::from_cli(cli).expect("secret is set");
         assert_eq!(cfg.db_password.expose(), "test-db-pass");
         assert!(cfg.cache_password.is_none());
+        clear_secret_env();
+    }
+
+    #[test]
+    fn non_dev_startup_fails_fast_on_blank_bucket_credentials() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_secret_env();
+        // SAFETY: serialized by ENV_LOCK above.
+        unsafe {
+            std::env::set_var("DB_PASSWORD", "db");
+            std::env::set_var("IMAGE_BUCKET_ACCESS_KEY_ID", "   ");
+            std::env::set_var("IMAGE_BUCKET_SECRET_ACCESS_KEY", "sk");
+        }
+        let err = Config::from_cli(CliConfig::parse_from(["svc-presentation"])).unwrap_err();
+        assert_eq!(err, ConfigError::MissingEnv("IMAGE_BUCKET_ACCESS_KEY_ID"));
+        unsafe {
+            std::env::set_var("IMAGE_BUCKET_ACCESS_KEY_ID", "ak");
+            std::env::set_var("IMAGE_BUCKET_SECRET_ACCESS_KEY", "");
+        }
+        let err = Config::from_cli(CliConfig::parse_from(["svc-presentation"])).unwrap_err();
+        assert_eq!(
+            err,
+            ConfigError::MissingEnv("IMAGE_BUCKET_SECRET_ACCESS_KEY")
+        );
+        unsafe {
+            std::env::set_var("IMAGE_BUCKET_SECRET_ACCESS_KEY", "sk");
+        }
+        Config::from_cli(CliConfig::parse_from(["svc-presentation"])).expect("both creds set");
         clear_secret_env();
     }
 
@@ -343,7 +393,7 @@ mod tests {
         unsafe {
             std::env::set_var("DB_PASSWORD", "super-secret-db-pass");
         }
-        let cli = CliConfig::parse_from(["svc-presentation"]);
+        let cli = CliConfig::parse_from(["svc-presentation", "--dev-mode"]);
         let cfg = Config::from_cli(cli).expect("secret is set");
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("super-secret-db-pass"));

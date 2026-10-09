@@ -46,6 +46,7 @@ async fn run_with_shutdown_binds_connects_serves_and_stops_cleanly() {
 
     let cli = CliConfig::try_parse_from([
         "svc-presentation",
+        "--dev-mode",
         "--http-port",
         &http_port.to_string(),
         "--metrics-port",

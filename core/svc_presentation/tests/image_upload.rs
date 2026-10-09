@@ -190,6 +190,41 @@ fn upload_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Minimal PNG signature plus filler -- passes the magic-byte sniff.
+const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nIHDR-filler-bytes";
+
+#[tokio::test]
+async fn spoofed_content_type_with_html_payload_is_rejected_with_400() {
+    let image_store: Arc<dyn ImageStore> = Arc::new(FakeImageStore::default());
+    let asset_store = Arc::new(FakeAssetStore::default());
+    let state = test_state_with(Some(image_store), asset_store.clone(), true);
+    let app = upload_router(state);
+    let boundary = "testboundary";
+    let body = multipart_body(
+        boundary,
+        "evil.png",
+        "image/png",
+        b"<html><script>alert(1)</script></html>",
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/overlay/42/image/push")
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .extension(push_credential(42))
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(asset_store.inserted.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn happy_path_upload_stores_the_object_and_the_metadata_row() {
     let image_store: Arc<dyn ImageStore> = Arc::new(FakeImageStore::default());
@@ -198,12 +233,7 @@ async fn happy_path_upload_stores_the_object_and_the_metadata_row() {
     let app = upload_router(state);
 
     let boundary = "testboundary";
-    let body = multipart_body(
-        boundary,
-        "test.png",
-        "image/png",
-        b"not-a-real-png-but-bytes",
-    );
+    let body = multipart_body(boundary, "test.png", "image/png", PNG_BYTES);
 
     let response = app
         .oneshot(
@@ -287,12 +317,7 @@ async fn oversized_upload_is_rejected_with_400() {
     let app = upload_router(state);
 
     let boundary = "testboundary";
-    let body = multipart_body(
-        boundary,
-        "test.png",
-        "image/png",
-        b"way too many bytes for the cap",
-    );
+    let body = multipart_body(boundary, "test.png", "image/png", PNG_BYTES);
 
     let response = app
         .oneshot(
@@ -321,7 +346,7 @@ async fn flag_disabled_rejects_with_403_before_touching_any_store() {
     let app = upload_router(state);
 
     let boundary = "testboundary";
-    let body = multipart_body(boundary, "test.png", "image/png", b"bytes");
+    let body = multipart_body(boundary, "test.png", "image/png", PNG_BYTES);
 
     let response = app
         .oneshot(
@@ -350,7 +375,7 @@ async fn missing_image_store_surfaces_a_clear_500_not_a_panic() {
     let app = upload_router(state);
 
     let boundary = "testboundary";
-    let body = multipart_body(boundary, "test.png", "image/png", b"bytes");
+    let body = multipart_body(boundary, "test.png", "image/png", PNG_BYTES);
 
     let response = app
         .oneshot(
@@ -386,7 +411,7 @@ async fn display_param_fields_are_parsed_and_stored_and_unknown_fields_are_ignor
         boundary,
         "test.png",
         "image/png",
-        b"bytes",
+        PNG_BYTES,
         &[
             ("position_x", "10"),
             ("position_y", "20"),
@@ -433,7 +458,7 @@ async fn image_store_put_failure_surfaces_a_clear_500() {
     let app = upload_router(state);
 
     let boundary = "testboundary";
-    let body = multipart_body(boundary, "test.png", "image/png", b"bytes");
+    let body = multipart_body(boundary, "test.png", "image/png", PNG_BYTES);
 
     let response = app
         .oneshot(

@@ -38,6 +38,24 @@ const ALLOWED_CONTENT_TYPES: &[(&str, &str)] = &[
     ("image/webp", "webp"),
 ];
 
+/// Returns the allowed image content type whose magic bytes `data` starts
+/// with, or `None`. The declared `Content-Type` is client-controlled, so
+/// only the sniffed type is trusted (stored-XSS guard: a spoofed header over
+/// an HTML payload must never reach the bucket).
+fn sniff_content_type(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
 fn extension_for(content_type: &str) -> Option<&'static str> {
     ALLOWED_CONTENT_TYPES
         .iter()
@@ -167,6 +185,17 @@ pub async fn upload_image(
         )));
     }
 
+    if sniff_content_type(&bytes) != Some(content_type.as_str()) {
+        state
+            .image_metrics
+            .uploads_total
+            .with_label_values(&["rejected_magic_bytes"])
+            .inc();
+        return Err(ApiError::BadRequest(
+            "file content does not match the declared image content type".to_string(),
+        ));
+    }
+
     let sha256 = {
         let mut hasher = Sha256::new();
         hasher.update(&bytes);
@@ -174,7 +203,9 @@ pub async fn upload_image(
     };
 
     let asset_id = Uuid::new_v4();
-    let community_id = credential.community_id;
+    // Typed `i64` (verified credential) + `Uuid` + allowlisted extension:
+    // no client-controlled string reaches the key.
+    let community_id: i64 = credential.community_id;
     let object_key = format!(
         "{}/{community_id}/{asset_id}.{ext}",
         state.config.cli.image_bucket_prefix
@@ -254,6 +285,27 @@ mod tests {
         assert_eq!(extension_for("image/jpeg"), Some("jpg"));
         assert_eq!(extension_for("image/gif"), Some("gif"));
         assert_eq!(extension_for("image/webp"), Some("webp"));
+    }
+
+    #[test]
+    fn sniff_recognizes_each_allowed_format_and_rejects_html() {
+        assert_eq!(
+            sniff_content_type(b"\x89PNG\r\n\x1a\nxx"),
+            Some("image/png")
+        );
+        assert_eq!(
+            sniff_content_type(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some("image/jpeg")
+        );
+        assert_eq!(sniff_content_type(b"GIF89a.."), Some("image/gif"));
+        assert_eq!(sniff_content_type(b"GIF87a.."), Some("image/gif"));
+        assert_eq!(
+            sniff_content_type(b"RIFF\0\0\0\0WEBPVP8 "),
+            Some("image/webp")
+        );
+        assert_eq!(sniff_content_type(b"RIFF\0\0\0\0WAVEfmt "), None);
+        assert_eq!(sniff_content_type(b"<html><script>x</script>"), None);
+        assert_eq!(sniff_content_type(b""), None);
     }
 
     #[test]
