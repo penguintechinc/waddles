@@ -1,4 +1,4 @@
-.PHONY: dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: openapi-hubapi dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
@@ -26,6 +26,10 @@ docker-push:
 
 lint:
 	@bash scripts/lint.sh
+
+openapi-hubapi:
+	@python3 scripts/export-hubapi-openapi.py
+	@spectral lint openapi/v1.yaml --fail-severity=error
 
 check-docs:
 	@bash scripts/check-doc-refs.sh
