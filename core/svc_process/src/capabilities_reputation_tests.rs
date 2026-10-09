@@ -19,7 +19,12 @@ const COMMUNITY_ID: i32 = 3;
 const APP_ID: &str = "waddles.core.test-reputation";
 const VERSION: i64 = 1;
 
-type RecordedCall = (String, ReputationScope, Uuid, Option<(i32, String, i64)>);
+type RecordedCall = (
+    String,
+    ReputationScope,
+    Uuid,
+    Option<(i32, String, ReputationCaps)>,
+);
 
 /// Records every store call; answers with a canned result.
 #[derive(Default)]
@@ -60,14 +65,14 @@ impl ReputationStore for RecordingStore {
         user: Uuid,
         delta: i32,
         reason: &'a str,
-        daily_cap: i64,
+        caps: ReputationCaps,
     ) -> bundle_host_reputation::BoxFuture<'a, Result<i64, ReputationError>> {
         Box::pin(async move {
             self.calls.lock().unwrap().push((
                 "adjust".into(),
                 scope.clone(),
                 user,
-                Some((delta, reason.to_string(), daily_cap)),
+                Some((delta, reason.to_string(), caps)),
             ));
             self.take()
         })
@@ -231,9 +236,13 @@ async fn adjust_reaches_the_store_with_host_derived_scope_and_the_catalog_cap() 
     assert_eq!(*user, f.member);
     assert_eq!(
         adjust.as_ref().unwrap(),
-        &(5, "game.win".to_string(), reputation_daily_cap())
+        &(5, "game.win".to_string(), reputation_caps())
     );
-    assert!(reputation_daily_cap() > 0, "catalog cap must be non-zero");
+    assert!(
+        reputation_caps().per_user_daily_abs_max > 0
+            && reputation_caps().per_scope_daily_abs_max > 0,
+        "catalog caps must be non-zero"
+    );
 }
 
 #[tokio::test]
@@ -375,6 +384,12 @@ async fn malformed_arguments_are_invalid_args() {
             "reputation.adjust",
             serde_json::json!({"user": m, "delta": 99999999999_i64, "reason": "r"}),
         ),
+        // regression: pr-741 review -- a zero delta is rejected loudly, before
+        // the gate's quotas and the store's transaction.
+        (
+            "reputation.adjust",
+            serde_json::json!({"user": m, "delta": 0, "reason": "r"}),
+        ),
     ] {
         assert_eq!(
             code_of(&f, op, args.clone()).await,
@@ -417,6 +432,10 @@ async fn store_errors_map_to_their_wire_codes_and_backend_detail_never_leaks() {
             ReputationError::DailyCapExceeded { cap: 1 },
             "daily_cap_exceeded",
         ),
+        (
+            ReputationError::ScopeQuotaExceeded { cap: 1 },
+            "quota_exceeded",
+        ),
         (ReputationError::Invalid("x".into()), "invalid_args"),
     ] {
         f.store.answer(Err(err));
@@ -456,9 +475,10 @@ async fn reputation_ops_do_not_ride_the_storage_tables_permission() {
 }
 
 #[test]
-fn daily_cap_matches_the_catalog_per_user_ceiling() {
+fn daily_caps_match_the_catalog_per_user_and_per_scope_ceilings() {
     let Quota::ReputationDelta {
         per_user_daily_abs_max,
+        per_scope_daily_abs_max,
         ..
     } = PermissionFamily::ReputationCommunityWrite
         .catalog_entry()
@@ -466,5 +486,11 @@ fn daily_cap_matches_the_catalog_per_user_ceiling() {
     else {
         panic!("reputation.community.write must carry a ReputationDelta quota");
     };
-    assert_eq!(reputation_daily_cap(), per_user_daily_abs_max);
+    assert_eq!(
+        reputation_caps(),
+        ReputationCaps {
+            per_user_daily_abs_max,
+            per_scope_daily_abs_max
+        }
+    );
 }
