@@ -4,7 +4,7 @@
 schema_version: 2
 app_id: waddles.core.example.wave
 name: Wave Example Bundle (Python)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -33,5 +33,7 @@ limits:
   timeout_ms: 2000
   memory_mb: 64
   egress_rps: 10
-permissions: []
+permissions:
+  - id: flags.read
+    justification: "reads the waddles.command-wave PostHog feature flag via feature_enabled to gate the command"
 routes_to: []

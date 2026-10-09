@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-joke"
-version = "1.0.0"
+version = "1.0.2"
 description = "`!joke` -> a random family-friendly joke from a curated built-in list, plus a per-community custom joke pool (`!joke add/remove/list`, mod/broadcaster-gated mutations). Python equivalent of bundles/python/pyping, modeled on its hand-built (not bundle_compiler-routed) structure; uses the shared `waddle_sdk.command` grammar parser (see bundles/python/fish)."
 requires-python = ">=3.13"
 dependencies = []

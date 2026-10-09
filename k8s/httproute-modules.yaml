@@ -26,13 +26,23 @@ spec:
       backendRefs:
         - name: waddlebot-interactive-social
           port: 8010
+    # SECURITY: routed through hub-api, NOT waddlebot-interactive-productivity
+    # directly. hub-api's scope-gated `event_calendar_bp`
+    # (hub_api/blueprints/v1/event.py) + `EventCalendarProxyClient`
+    # (hub_api/services/event_calendar_proxy.py) are the only legitimate
+    # JWT-validators and setters of the `X-User-Context` /`X-API-Key`
+    # headers that calendar_interaction_module trusts. A direct route here
+    # bypassed JWT auth entirely (live authz bypass, fixed 2026-10).
     - matches:
         - path:
             type: PathPrefix
             value: /api/v1/calendar
+      timeouts:
+        request: 3600s
+        backendRequest: 3600s
       backendRefs:
-        - name: waddlebot-interactive-productivity
-          port: 8030
+        - name: waddlebot-hub-api
+          port: 8060
     - matches:
         - path:
             type: PathPrefix

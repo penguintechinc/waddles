@@ -49,6 +49,7 @@ COPY hub_api/routers ./routers
 COPY hub_api/openapi ./openapi
 COPY hub_api/services ./services
 COPY hub_api/grpc_internal ./grpc_internal
+COPY hub_api/cli ./cli
 # bootstrap.py's ScriptDirectory call only ever statically parses this
 # directory's revision/down_revision graph -- it never executes alembic/
 # env.py (see bootstrap.py's module docstring for why that matters in this

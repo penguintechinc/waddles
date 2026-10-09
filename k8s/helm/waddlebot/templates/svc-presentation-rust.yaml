@@ -1,0 +1,169 @@
+# chore/deploy-svc-presentation-rust-alpha -- Rust svc-presentation (core/svc_presentation,
+# Dockerfile.rust: overlay surfaces + image upload/render) Deployment + Service. Renders
+# INSTEAD of templates/svc-presentation.yaml (Python) when presentation.rust.enabled is
+# true -- the two are mutually exclusive and share the same Deployment/Service names, so
+# enabling this is an in-place swap (Service + NodePort unchanged). Full Python decommission
+# is a later step.
+#
+# Config surface (core/svc_presentation/src/config.rs):
+#   - DB_* : non-secret from the shared ConfigMap (envFrom); DB_PASSWORD from <release>-secrets.
+#   - PUSH_JWKS_URL/PUSH_AUDIENCE/PUSH_TRUSTED_ISSUER : overlay_auth PUSH guard verifies
+#     hub-api-issued machine JWTs against hub-api's service JWKS (no static shared secret,
+#     and no bundle-signing key is involved).
+#   - IMAGE_BUCKET_* : fail-fast at startup if the access key pair is blank (#696). Creds are
+#     REUSED from the existing <release>-secrets Secret (hub-api's SeaweedFS identity, which
+#     already has Read/Write/List/Tagging on the assets bucket) -- no new secret/identity.
+#   - OTEL_* : destination env-configurable, never hardcoded (presentation.rust.otlpEndpoint).
+{{- if and .Values.pipeline.svcPresentation.enabled .Values.presentation.rust.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-presentation
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-presentation
+spec:
+  replicas: {{ .Values.pipeline.svcPresentation.replicas }}
+  selector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-presentation
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: svc-presentation
+    spec:
+      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
+      containers:
+      - name: svc-presentation
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" (.Values.presentation.rust.imageRepository | default "svc-presentation-rust") "imageTag" .Values.global.imageTag) }}"
+        # Always -- per-commit tag pushed to the local registry; same node-image-cache
+        # rationale as templates/svc-action-rust.yaml.
+        imagePullPolicy: Always
+        # Pinned to the Rust image's own `appuser` (uid 10001, Dockerfile.rust), not the
+        # chart-wide uid 1000 -- same pattern as svc-action-rust/svc-streaming.
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: {{ .Values.pipeline.svcPresentation.port }}
+          protocol: TCP
+        - name: metrics
+          containerPort: 9090
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: {{ include "waddlebot.fullname" . }}-config
+        env:
+        - name: MODULE_PORT
+          value: {{ .Values.pipeline.svcPresentation.port | quote }}
+        - name: METRICS_PORT
+          value: "9090"
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: DB_PASSWORD
+        - name: PUSH_JWKS_URL
+          value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}/internal/service-jwks.json"
+        - name: PUSH_AUDIENCE
+          value: {{ .Values.serviceJwt.audience | quote }}
+        - name: PUSH_TRUSTED_ISSUER
+          value: "hub-api"
+        - name: IMAGE_BUCKET_ENDPOINT
+          value: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.s3Port }}"
+        - name: IMAGE_BUCKET_NAME
+          value: {{ .Values.presentation.rust.imageBucket.bucketName | default .Values.infrastructure.seaweedfs.bucketName | quote }}
+        - name: IMAGE_BUCKET_REGION
+          value: {{ .Values.presentation.rust.imageBucket.region | quote }}
+        - name: IMAGE_BUCKET_PREFIX
+          value: {{ .Values.presentation.rust.imageBucket.prefix | quote }}
+        # Existing credentials only (no new Secret/identity) -- see header.
+        - name: IMAGE_BUCKET_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: HUB_API_S3_ACCESS_KEY_ID
+        - name: IMAGE_BUCKET_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: HUB_API_S3_SECRET_ACCESS_KEY
+        - name: OTEL_SERVICE_NAME
+          value: "svc-presentation"
+        - name: OTEL_RESOURCE_ATTRIBUTES
+          value: "deployment.environment={{ .Values.global.deploymentTier | default "alpha" }}"
+        {{- if .Values.presentation.rust.otlpEndpoint }}
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: {{ .Values.presentation.rust.otlpEndpoint | quote }}
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: {{ .Values.presentation.rust.otlpProtocol | quote }}
+        {{- end }}
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        resources:
+          {{- toYaml .Values.pipeline.svcPresentation.resources | nindent 10 }}
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-presentation
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-presentation
+spec:
+  {{- if .Values.presentation.rust.nodePort.enabled }}
+  # Alpha-only on-host access to the overlay view/SSE port (localhost:<nodePort>).
+  type: NodePort
+  {{- else }}
+  type: ClusterIP
+  {{- end }}
+  ports:
+  - port: {{ .Values.pipeline.svcPresentation.port }}
+    targetPort: http
+    protocol: TCP
+    name: http
+    {{- if .Values.presentation.rust.nodePort.enabled }}
+    nodePort: {{ .Values.presentation.rust.nodePort.port }}
+    {{- end }}
+  - port: 9090
+    targetPort: metrics
+    protocol: TCP
+    name: metrics
+  selector:
+    {{- include "waddlebot.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-presentation
+{{- end }}
