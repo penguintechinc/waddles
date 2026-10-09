@@ -542,6 +542,34 @@ async fn client_id_is_trimmed_and_unsendable_ids_rejected() {
     }
 }
 
+// A 4xx whose body is cut off mid-stream still classifies by status and says
+// plainly that the explanation was unreadable (no silent empty default).
+#[tokio::test]
+async fn unreadable_error_body_is_reported_not_hidden() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let uri = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 2048];
+        let _ = sock.read(&mut buf).unwrap();
+        // Promise 100 body bytes, send 5, then hang up.
+        sock.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 100\r\n\r\nshort")
+            .unwrap();
+    });
+    let c = HelixClient::with_base_url("cid", AccessToken::new("tok").unwrap(), uri).unwrap();
+    let err = c.delete_chat_message("b", "m", "x").await.unwrap_err();
+    server.join().unwrap();
+    match &err {
+        HelixError::Client { status, message } => {
+            assert_eq!(*status, 400);
+            assert_eq!(message, "<response body unreadable>");
+        }
+        other => panic!("expected Client error, got {other:?}"),
+    }
+    assert!(!err.is_retryable());
+}
+
 #[tokio::test]
 async fn unparsable_base_url_is_non_retryable() {
     let c =

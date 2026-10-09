@@ -58,6 +58,8 @@ pub const DEFAULT_API_BASE: &str = "https://api.twitch.tv/helix";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Upper bound for the opt-in rate-limit sleep.
 const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(30);
+/// Placeholder error message when a 4xx response body could not be read.
+const UNREADABLE_BODY: &str = "<response body unreadable>";
 /// Helix chat message length ceiling (characters).
 pub const MAX_CHAT_MESSAGE_CHARS: usize = 500;
 /// Helix whisper length ceiling (characters, for prior-correspondent recipients).
@@ -433,7 +435,19 @@ async fn classify(response: Response) -> Result<Response, HelixError> {
             status: status.as_u16(),
         });
     }
-    let text = response.text().await.unwrap_or_default();
+    let text = match response.text().await {
+        Ok(text) => text,
+        Err(e) => {
+            // The status code still classifies the failure; surface (not hide)
+            // that Twitch's explanation could not be read.
+            tracing::warn!(
+                status = status.as_u16(),
+                error = %e.without_url(),
+                "twitch error response body unreadable; reporting status only"
+            );
+            UNREADABLE_BODY.to_owned()
+        }
+    };
     let message = serde_json::from_str::<ErrorBody>(&text)
         .map(|b| b.message)
         .unwrap_or(text);
