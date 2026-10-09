@@ -529,3 +529,122 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  # Facts pack: three stateless, self-contained random-content bundles (no kv, no external
+  # API calls), each gated behind its own `waddles.command-<name>` flag (default OFF).
+  - app_id: waddles.core.example.catfact
+    version: "1.0.0"
+    language: python
+    source_dir: python/catfact
+    manifest_path: catfact.manifest.yaml
+    artifact_path: catfact.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.dogfact
+    version: "1.0.0"
+    language: python
+    source_dir: python/dogfact
+    manifest_path: dogfact.manifest.yaml
+    artifact_path: dogfact.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.advice
+    version: "1.0.0"
+    language: python
+    source_dir: python/advice
+    manifest_path: advice.manifest.yaml
+    artifact_path: advice.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.scramble
+    version: "1.0.0"
+    language: python
+    source_dir: python/scramble
+    manifest_path: scramble.manifest.yaml
+    artifact_path: scramble.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.guess
+    version: "1.0.0"
+    language: python
+    source_dir: python/guess
+    manifest_path: guess.manifest.yaml
+    artifact_path: guess.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.rip
+    version: "1.0.0"
+    language: python
+    source_dir: python/rip
+    manifest_path: rip.manifest.yaml
+    artifact_path: rip.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.hype
+    version: "1.0.0"
+    language: python
+    source_dir: python/hype
+    manifest_path: hype.manifest.yaml
+    artifact_path: hype.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.cringe
+    version: "1.0.0"
+    language: python
+    source_dir: python/cringe
+    manifest_path: cringe.manifest.yaml
+    artifact_path: cringe.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.gamble
+    version: "1.0.0"
+    language: python
+    source_dir: python/gamble
+    manifest_path: gamble.manifest.yaml
+    artifact_path: gamble.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.heist
+    version: "1.0.0"
+    language: python
+    source_dir: python/heist
+    manifest_path: heist.manifest.yaml
+    artifact_path: heist.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.dice
+    version: "1.0.0"
+    language: python
+    source_dir: python/dice
+    manifest_path: dice.manifest.yaml
+    artifact_path: dice.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.vote
+    version: "1.0.0"
+    language: python
+    source_dir: python/vote
+    manifest_path: vote.manifest.yaml
+    artifact_path: vote.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.fortune
+    version: "1.0.0"
+    language: python
+    source_dir: python/fortune
+    manifest_path: fortune.manifest.yaml
+    artifact_path: fortune.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
