@@ -194,6 +194,17 @@ def _core_seeder_stall_recovery_seconds() -> int:
     try:
         return int(raw) if raw else _DEFAULT_CORE_SEEDER_STALL_RECOVERY_SECONDS
     except ValueError:
+        # A malformed env var is an operator misconfiguration, not an expected empty/unset
+        # value (that path never reaches `int(raw)` -- see the `if raw` guard above) -- logged
+        # so a bad deploy-time override is visible instead of silently reverting to the
+        # default with no trace (critical-rules.md Fail-Loud Code Paths).
+        logger.warning(
+            "core-bundle-seeder: invalid %s=%r, falling back to default %ds",
+            CORE_SEEDER_STALL_RECOVERY_SECONDS_ENV,
+            raw,
+            _DEFAULT_CORE_SEEDER_STALL_RECOVERY_SECONDS,
+            extra={"env_var": CORE_SEEDER_STALL_RECOVERY_SECONDS_ENV, "raw_value": raw},
+        )
         return _DEFAULT_CORE_SEEDER_STALL_RECOVERY_SECONDS
 
 
