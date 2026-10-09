@@ -2414,6 +2414,11 @@ config:
   kickPusherCluster: ""
   # YouTube Live poll receiver — comma-separated list of channel IDs to monitor
   youtubeLiveChannels: ""
+  # RSI Spectrum one-way ingest (gh #101) — comma-separated forum channel ids / lobby ids
+  spectrumForumChannels: ""
+  spectrumLobbies: ""
+  # ENV baseline for flag waddles.spectrum-integration (default OFF; PostHog overrides when connected)
+  spectrumIntegrationEnabled: false
 
 # Dependencies Configuration
 dependencies:

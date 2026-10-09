@@ -273,3 +273,44 @@ class Config:
     # NOT yet mounted by app.py (out of this PR's scope, see that
     # module's own docstring for where it should be mounted).
     KICK_WEBHOOK_SECRET = os.getenv("KICK_WEBHOOK_SECRET", "")
+
+    # RSI Spectrum one-way ingest (receivers/spectrum_poll.py, gh #101).
+    # Gated by the `waddles.spectrum-integration` flag: ENV baseline
+    # `FLAG_WADDLES_SPECTRUM_INTEGRATION` (default OFF), overridden by PostHog
+    # when connected -- see `spectrum_flag_baseline()`. Comma-separated source
+    # ids, one lease-guarded poller each (no DB-backed list yet -- same MVP
+    # posture as TWITCH_CHANNELS/YOUTUBE_LIVE_CHANNELS).
+    SPECTRUM_FORUM_CHANNELS = [
+        c.strip() for c in os.getenv("SPECTRUM_FORUM_CHANNELS", "").split(",") if c.strip()
+    ]
+    SPECTRUM_LOBBIES = [
+        c.strip() for c in os.getenv("SPECTRUM_LOBBIES", "").split(",") if c.strip()
+    ]
+
+    # Env var *name* (never a value) holding the RSI session token, resolved at
+    # connect time via `waddle_transports.signing.resolve_secret`.
+    SPECTRUM_RSI_TOKEN_REF = "SPECTRUM_RSI_TOKEN"  # noqa: S105 - an env var name, not a secret
+    SPECTRUM_API_BASE = os.getenv("SPECTRUM_API_BASE", "")
+    SPECTRUM_POLL_INTERVAL_S = float(os.getenv("SPECTRUM_POLL_INTERVAL_S", "15.0"))
+    SPECTRUM_MAX_CONSECUTIVE_ERRORS = int(os.getenv("SPECTRUM_MAX_CONSECUTIVE_ERRORS", "8"))
+    SPECTRUM_EMIT_BACKLOG = os.getenv("SPECTRUM_EMIT_BACKLOG", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+    @classmethod
+    def spectrum_flag_baseline(cls) -> bool:
+        """ENV baseline for `waddles.spectrum-integration` (default OFF; PostHog overrides)."""
+        return os.getenv("FLAG_WADDLES_SPECTRUM_INTEGRATION", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    @classmethod
+    def spectrum_token_configured(cls) -> bool:
+        """Presence-only check (no network I/O) for the RSI session token env var."""
+        return bool(os.getenv(cls.SPECTRUM_RSI_TOKEN_REF))
