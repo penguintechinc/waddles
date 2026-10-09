@@ -1,0 +1,40 @@
+# hub-api install-pipeline manifest (schema_version 2) for waddles.core.example.dailycounter.
+# 1.0.0: new utility-pack bundle -- see src/app.py's module docstring.
+schema_version: 2
+app_id: waddles.core.example.dailycounter
+name: Daily Counter Bundle (Python)
+version: 1.0.0
+feature: waddles.core.example
+module: core
+provider: builtin
+language: python
+artifact: prebuilt
+execution_model: native
+is_default: false
+stages:
+  process:
+    entry: "waddle:bundle/process-stage#transform"
+    consumes:
+      - platform: twitch
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!dailycounter"]
+      - platform: discord
+        event_types: ["chat.message"]
+        filters:
+          command_prefix: ["!dailycounter"]
+  action:
+    entry: "waddle:bundle/action-stage#dispatch"
+egress: []
+data:
+  tables: []
+limits:
+  timeout_ms: 2000
+  memory_mb: 64
+  egress_rps: 10
+permissions:
+  - id: storage.kv
+    justification: "persists per-community named daily counters keyed by name and UTC day (30-day TTL)"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-dailycounter feature flag"
+routes_to: []
