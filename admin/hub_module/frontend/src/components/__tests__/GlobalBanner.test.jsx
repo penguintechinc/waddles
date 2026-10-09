@@ -53,6 +53,19 @@ describe('GlobalBanner', () => {
     expect(container.firstChild).toHaveTextContent('Maintenance at 5pm, see status page or docs now');
   });
 
+  it('renders links at the very start and end of the text with nothing around them', async () => {
+    const getBanner = vi.fn().mockResolvedValue({
+      data: { ...BANNER, text: '[first](https://a.example)[last](https://b.example)' },
+    });
+    const { render, screen, GlobalBanner } = await load(getBanner);
+
+    const { container } = render(<GlobalBanner />);
+
+    expect(await screen.findByRole('link', { name: 'first' })).toHaveAttribute('href', 'https://a.example');
+    expect(screen.getByRole('link', { name: 'last' })).toHaveAttribute('href', 'https://b.example');
+    expect(container.firstChild).toHaveTextContent('firstlast');
+  });
+
   it('does not turn non-http markdown links into anchors', async () => {
     const getBanner = vi.fn().mockResolvedValue({
       data: { ...BANNER, text: 'click [here](javascript:alert(1)) please' },

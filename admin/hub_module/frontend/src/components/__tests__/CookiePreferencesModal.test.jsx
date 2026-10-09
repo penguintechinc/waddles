@@ -72,6 +72,14 @@ describe('CookiePreferencesModal rendering', () => {
     expect(screen.getAllByText('Enabled')).toHaveLength(1);
   });
 
+  it('treats missing consent flags as off, while essential stays locked on', () => {
+    mount({ consent: {} });
+    expect(toggle('Essential Cookies')).toBeChecked();
+    for (const name of ['Functional Cookies', 'Analytics Cookies', 'Marketing Cookies']) {
+      expect(toggle(name)).not.toBeChecked();
+    }
+  });
+
   it('initialises the toggles from stored consent', () => {
     mount({
       consent: { essential_cookies: true, functional_cookies: true, analytics_cookies: false, marketing_cookies: true },
