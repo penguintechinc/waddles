@@ -349,3 +349,40 @@ def test_invalid_category_rejected() -> None:
 def test_alternatives_category_parses_through() -> None:
     manifest = _parse({"category": "alternatives"})
     assert manifest.category == "alternatives"  # type: ignore[attr-defined]
+
+
+def test_supported_platforms_absent_means_all_platforms() -> None:
+    manifest = _parse({})
+    assert manifest.supported_platforms is None  # type: ignore[attr-defined]
+    assert manifest.supports_platform("twitch")  # type: ignore[attr-defined]
+    assert manifest.supports_platform("discord")  # type: ignore[attr-defined]
+
+
+def test_supported_platforms_gates_platform() -> None:
+    manifest = _parse(
+        {
+            "supported_platforms": ["discord", "slack"],
+            "stages": {
+                "process": {
+                    "entry": "x:y",
+                    "consumes": [{"platform": "discord", "event_types": ["chat.message"]}],
+                }
+            },
+        }
+    )
+    assert manifest.supported_platforms == ("discord", "slack")  # type: ignore[attr-defined]
+    assert manifest.supports_platform("discord")  # type: ignore[attr-defined]
+    assert not manifest.supports_platform("twitch")  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("bad", [[], "discord", ["myspace"], [1]])
+def test_supported_platforms_invalid_rejected(bad: object) -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"supported_platforms": bad})
+    assert exc.value.reason == "invalid_supported_platforms"
+
+
+def test_consumes_platform_outside_supported_platforms_rejected() -> None:
+    with pytest.raises(ManifestV2Error) as exc:
+        _parse({"supported_platforms": ["discord"]})  # base manifest consumes twitch
+    assert exc.value.reason == "consumes_platform_unsupported"
