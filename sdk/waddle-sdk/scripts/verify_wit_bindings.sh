@@ -141,6 +141,26 @@ check "wit_world/exports/__init__.py" "class ActionStage(Protocol):" "exports.Ac
 check "wit_world/exports/__init__.py" "def transform(self, event: types.PlatformEvent) -> Optional[types.PlatformEvent]:" "exports.transform signature"
 check "wit_world/exports/__init__.py" "def dispatch(self, envelope: types.StageEnvelope, config: str) -> types.TransportResult:" "exports.dispatch signature"
 
+# ---- world stage-next: waddle_sdk/reputation.py (issue #726) ----
+# `reputation` exists ONLY in `world stage-next`, so it is generated and
+# checked from a second, separate bindings run. Every assertion below was
+# confirmed against a real `componentize-py==0.25.1 -w stage-next bindings`
+# run, not guessed.
+NEXT_OUT_DIR="$(mktemp -d)"
+trap 'rm -rf "${OUT_DIR}" "${NEXT_OUT_DIR}"' EXIT
+echo "Generating stage-next bindings from ${WIT_DIR}/stage.wit into ${NEXT_OUT_DIR} ..."
+componentize-py -d "${WIT_DIR}" -w stage-next bindings "${NEXT_OUT_DIR}"
+OUT_DIR="${NEXT_OUT_DIR}"
+
+check "wit_world/imports/reputation.py" "class Error_Denied:" "reputation.Error_Denied"
+check "wit_world/imports/reputation.py" "class Error_NotAMember:" "reputation.Error_NotAMember"
+check "wit_world/imports/reputation.py" "class Error_DailyCapExceeded:" "reputation.Error_DailyCapExceeded"
+check "wit_world/imports/reputation.py" "class Error_Invalid:" "reputation.Error_Invalid"
+check "wit_world/imports/reputation.py" "class Error_Unavailable:" "reputation.Error_Unavailable"
+check "wit_world/imports/reputation.py" "class Error_Backend:" "reputation.Error_Backend"
+check "wit_world/imports/reputation.py" "def get(user: str) -> int:" "reputation.get signature"
+check "wit_world/imports/reputation.py" "def adjust(user: str, delta: int, reason: str) -> int:" "reputation.adjust signature"
+
 echo ""
 echo "Checked ${CHECKS} binding-shape assertions against componentize-py's real generated output."
 if [ "${FAILURES}" -gt 0 ]; then

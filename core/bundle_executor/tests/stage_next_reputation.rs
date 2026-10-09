@@ -4,9 +4,7 @@
 //! crosses the real wire bridge to the stage as `capability = db`,
 //! `op = "reputation.*"` with the exact args shape `core/svc_process`
 //! decodes. Only the stage half of the connection is simulated (it answers
-//! with a canned host-result or a gate-style denial); every executor-side
-//! piece -- component instantiation against the stage-next imports, the
-//! `reputation::Host` impl, the frame codec -- is the real code.
+//! with a canned host-result or a gate-style denial) -- see `common`.
 //!
 //! The same fixture is also loaded against a linker built for
 //! `WitWorld::Stage` to prove the isolation direction: a `stage` linker
@@ -15,227 +13,26 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::sync::Arc;
+mod common;
 
-use bundle_executor::config::CliConfig;
 use bundle_executor::engine::{build_engine, build_linker_for};
-use bundle_executor::heartbeat::Heartbeat;
-use bundle_executor::invoke::{ComponentSource, Executor};
 use bundle_executor::manifest::{VerifiedManifest, WitWorld};
-use bundle_executor::wire::run_connection;
-use penguin_bundle_host::wire::{
-    read_frame, write_frame, CapabilityKind, ExportKind, Frame, HelloBody, HelloLimits,
-    HelloOkBody, HostResultBody, HostResultError, InvokeBody, LoadBody, LoadLimits, Message,
-    SandboxInfo, ShutdownBody,
-};
-use sha2::{Digest, Sha256};
+use common::{run_one, test_config, StageAnswer, TARGET_USER};
 
 const FIXTURE_WASM: &[u8] = include_bytes!("fixtures/reputation_fixture.wasm");
 const APP_ID: &str = "waddles.test.reputation-fixture";
-const TARGET_USER: &str = "11111111-2222-4333-8444-555555555555";
 
-struct FixtureSource;
-
-impl ComponentSource for FixtureSource {
-    async fn fetch(
-        &self,
-        _component_key: &str,
-        _sidecar_key: &str,
-    ) -> Result<(Vec<u8>, Vec<u8>), bundle_executor::error::ExecutorError> {
-        Ok((FIXTURE_WASM.to_vec(), b"{}".to_vec()))
-    }
-}
-
-fn fixture_digest() -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(FIXTURE_WASM);
-    format!("sha256:{:x}", hasher.finalize())
-}
-
-fn test_config() -> CliConfig {
-    use clap::Parser;
-    CliConfig::try_parse_from([
-        "bundle-executor",
-        "--stage-host-api-addr",
-        "svc-process:8301",
-    ])
-    .expect("static test args always parse")
-}
-
-/// What the simulated stage answers to the one `reputation.*` host-call.
-enum StageAnswer {
-    Ok(serde_json::Value),
-    Err(&'static str, &'static str),
-}
-
-/// Runs load + one `transform` invoke of `event_type`/`payload_json` against
-/// the fixture, answering the single expected host-call with `answer`.
-/// Returns `(observed host-call op, observed host-call args, guest result)`.
-async fn run_one(
+async fn run(
     event_type: &'static str,
     payload_json: String,
     answer: StageAnswer,
 ) -> (String, serde_json::Value, String) {
-    let (executor_io, stage_io) = tokio::io::duplex(256 * 1024);
-    let executor = Arc::new(Executor::new(&test_config(), FixtureSource).expect("executor builds"));
-    let digest = fixture_digest();
-
-    let stage = tokio::spawn(async move {
-        let mut io = stage_io;
-        let hello = read_frame(&mut io).await.expect("hello");
-        write_frame(
-            &mut io,
-            &Frame::new(
-                hello.id,
-                Message::HelloOk(HelloOkBody {
-                    stage: "svc-process".to_string(),
-                    protocol_version: 1,
-                    limits: HelloLimits {
-                        call_timeout_ms: 2000,
-                        memory_mb: 64,
-                        max_concurrent_calls: 32,
-                    },
-                }),
-            ),
-        )
-        .await
-        .expect("write hello-ok");
-
-        write_frame(
-            &mut io,
-            &Frame::new(
-                1,
-                Message::Load(LoadBody {
-                    tenant_id: 1,
-                    community_id: 7,
-                    app_id: APP_ID.to_string(),
-                    version: "1".to_string(),
-                    digest: digest.clone(),
-                    component_key: "k".to_string(),
-                    sidecar_key: "s".to_string(),
-                    capabilities: vec![],
-                    limits: LoadLimits {
-                        timeout_ms: 2000,
-                        memory_mb: 64,
-                    },
-                }),
-            ),
-        )
-        .await
-        .expect("write load");
-        let loaded = read_frame(&mut io).await.expect("loaded reply");
-        assert!(
-            matches!(loaded.message, Message::Loaded(_)),
-            "stage-next component must load, got {:?}",
-            loaded.message
-        );
-
-        write_frame(
-            &mut io,
-            &Frame::new(
-                2,
-                Message::Invoke(InvokeBody {
-                    app_id: APP_ID.to_string(),
-                    digest,
-                    export: ExportKind::Transform,
-                    payload: serde_json::json!({
-                        "platform": "test",
-                        "event_type": event_type,
-                        "actor": null,
-                        "payload_json": payload_json,
-                        "occurred_at": "2026-10-09T00:00:00.000Z",
-                    }),
-                    deadline_ms: 5000,
-                    trace: None,
-                }),
-            ),
-        )
-        .await
-        .expect("write invoke");
-
-        let call_frame = read_frame(&mut io).await.expect("host-call frame");
-        let Message::HostCall(call) = call_frame.message else {
-            panic!("expected host-call, got {:?}", call_frame.message);
-        };
-        assert_eq!(
-            call.capability,
-            CapabilityKind::Db,
-            "reputation rides the db wire kind"
-        );
-        let body = match answer {
-            StageAnswer::Ok(v) => HostResultBody {
-                result: Some(v),
-                error: None,
-            },
-            StageAnswer::Err(code, message) => HostResultBody {
-                result: None,
-                error: Some(HostResultError {
-                    code: code.to_string(),
-                    message: message.to_string(),
-                }),
-            },
-        };
-        write_frame(
-            &mut io,
-            &Frame::new(call_frame.id, Message::HostResult(body)),
-        )
-        .await
-        .expect("write host-result");
-
-        let result = read_frame(&mut io).await.expect("transform result");
-        let Message::Result(result_body) = result.message else {
-            panic!("expected result, got {:?}", result.message);
-        };
-
-        write_frame(
-            &mut io,
-            &Frame::new(3, Message::Shutdown(ShutdownBody { grace_ms: 100 })),
-        )
-        .await
-        .expect("write shutdown");
-        (call.op, call.args, result_body.payload)
-    });
-
-    let executor_task = tokio::spawn(async move {
-        run_connection(
-            executor_io,
-            HelloBody {
-                protocol_version: 1,
-                executor_version: "0.1.0".to_string(),
-                wasmtime_version: bundle_executor::engine::WASMTIME_VERSION.to_string(),
-                wasmtime_abi: bundle_executor::engine::WASMTIME_VERSION.to_string(),
-                collector: "drc".to_string(),
-                sandbox: SandboxInfo {
-                    runtime: "runc".to_string(),
-                    verified: false,
-                },
-            },
-            Arc::clone(&executor),
-            "test-peer",
-            Heartbeat::disabled(),
-        )
-        .await
-    });
-
-    let (op, args, payload) = stage.await.expect("stage task");
-    executor_task
-        .await
-        .expect("executor task")
-        .expect("connection ran to a clean shutdown");
-    let payload_json = payload["payload_json"]
-        .as_str()
-        .expect("payload_json is a string");
-    let parsed: serde_json::Value = serde_json::from_str(payload_json).expect("guest result json");
-    (
-        op,
-        args,
-        parsed["result"].as_str().expect("result tag").to_string(),
-    )
+    run_one(FIXTURE_WASM, APP_ID, 64, event_type, payload_json, answer).await
 }
 
 #[tokio::test]
 async fn get_crosses_the_bridge_and_returns_the_balance() {
-    let (op, args, result) = run_one(
+    let (op, args, result) = run(
         "rep-get",
         format!(r#"{{"user":"{TARGET_USER}"}}"#),
         StageAnswer::Ok(serde_json::json!({ "balance": 42 })),
@@ -248,7 +45,7 @@ async fn get_crosses_the_bridge_and_returns_the_balance() {
 
 #[tokio::test]
 async fn adjust_crosses_the_bridge_with_user_delta_reason_and_returns_new_balance() {
-    let (op, args, result) = run_one(
+    let (op, args, result) = run(
         "rep-adjust",
         format!(r#"{{"user":"{TARGET_USER}","delta":-5,"reason":"game.loss"}}"#),
         StageAnswer::Ok(serde_json::json!({ "balance": 37 })),
@@ -266,7 +63,7 @@ async fn adjust_crosses_the_bridge_with_user_delta_reason_and_returns_new_balanc
 /// typed `denied(<code>)`, never a swallowed default balance.
 #[tokio::test]
 async fn gate_denial_surfaces_as_a_typed_denied_error() {
-    let (_, _, result) = run_one(
+    let (_, _, result) = run(
         "rep-adjust",
         format!(r#"{{"user":"{TARGET_USER}","delta":999,"reason":"x"}}"#),
         StageAnswer::Err("delta_out_of_bounds", "delta outside declared bounds"),
@@ -274,7 +71,7 @@ async fn gate_denial_surfaces_as_a_typed_denied_error() {
     .await;
     assert_eq!(result, "denied:delta_out_of_bounds");
 
-    let (_, _, result) = run_one(
+    let (_, _, result) = run(
         "rep-get",
         format!(r#"{{"user":"{TARGET_USER}"}}"#),
         StageAnswer::Err("not_granted", "reputation.read not granted"),
@@ -292,7 +89,7 @@ async fn membership_and_cap_and_unavailable_errors_map_to_their_variants() {
         ("not_implemented", "wiring", "unavailable:wiring"),
     ];
     for (code, message, expected) in cases {
-        let (_, _, result) = run_one(
+        let (_, _, result) = run(
             "rep-adjust",
             format!(r#"{{"user":"{TARGET_USER}","delta":1,"reason":"r"}}"#),
             StageAnswer::Err(code, message),

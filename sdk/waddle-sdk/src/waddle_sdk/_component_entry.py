@@ -120,7 +120,17 @@ except ImportError:
 # neither case may break module load. Absence after this point is exactly
 # what each wrapper's existing ``getattr(..., None)``/``hasattr`` call-site
 # guard already handles.
-for _wit_capability in ("context", "http", "kv", "db", "relay", "flags", "log", "clock"):
+for _wit_capability in (
+    "context",
+    "http",
+    "kv",
+    "db",
+    "relay",
+    "flags",
+    "log",
+    "clock",
+    "reputation",  # stage-next only (issue #726); absent from a stage-1.0.0 world, hence the guard
+):
     try:
         importlib.import_module(f"wit_world.imports.{_wit_capability}")
     except (ImportError, AttributeError):
@@ -291,3 +301,44 @@ class ActionStage:
         See :func:`_dispatch_impl`.
         """
         return _dispatch_impl(envelope, config)
+
+
+def _unsupported_lifecycle(stage: str) -> Any:
+    """Raise the generated ``Err(types.UnsupportedStage(stage=...))`` for a lifecycle hook."""
+    import wit_world
+    from componentize_py_types import Err
+
+    raise Err(wit_world.imports.types.UnsupportedStage(stage=stage))
+
+
+class StreamingLifecycle:
+    """componentize-py's app-class name for the ``streaming-lifecycle`` export (``stage-next``).
+
+    ``world stage-next`` (``wit/waddle-bundle/stage.wit``) additionally exports
+    ``streaming-lifecycle``; componentize-py ``-w stage-next`` therefore
+    requires this class on the entry module just as it requires
+    ``ProcessStage``/``ActionStage`` (``getattr(app_module,
+    "StreamingLifecycle")``). A bundle that reacts to stream events is a
+    follow-up (issue #716); until then every hook returns the WIT
+    ``unsupported-stage`` failure arm -- "not interested", exactly what the
+    interface documents -- so a ``stage-next`` Python bundle built only to
+    CALL a new host import (e.g. ``reputation``) componentizes and runs
+    unchanged. Unused (and harmless) when the component is built against
+    ``world stage``.
+    """
+
+    def on_start(self, info: Any) -> Any:
+        """Implement ``streaming-lifecycle.on-start`` (unsupported by default)."""
+        return _unsupported_lifecycle("on-start")
+
+    def on_stop(self, info: Any) -> Any:
+        """Implement ``streaming-lifecycle.on-stop`` (unsupported by default)."""
+        return _unsupported_lifecycle("on-stop")
+
+    def on_segment(self, segment: Any) -> Any:
+        """Implement ``streaming-lifecycle.on-segment`` (unsupported by default)."""
+        return _unsupported_lifecycle("on-segment")
+
+    def on_recording_ready(self, recording: Any) -> Any:
+        """Implement ``streaming-lifecycle.on-recording-ready`` (unsupported by default)."""
+        return _unsupported_lifecycle("on-recording-ready")

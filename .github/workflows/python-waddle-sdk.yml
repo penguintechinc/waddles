@@ -8,6 +8,7 @@ on:
       - 'core/svc_process/bundles/social_alias_process.py'
       - 'core/svc_process/services/command_alias_store.py'
       - 'wit/waddle-bundle/**'
+      - 'core/bundle_host_reputation/src/lib.rs'
       - '.github/workflows/python-waddle-sdk.yml'
   pull_request:
     branches: [main, 'release/**']
@@ -16,6 +17,7 @@ on:
       - 'core/svc_process/bundles/social_alias_process.py'
       - 'core/svc_process/services/command_alias_store.py'
       - 'wit/waddle-bundle/**'
+      - 'core/bundle_host_reputation/src/lib.rs'
   workflow_dispatch:
 
 permissions:

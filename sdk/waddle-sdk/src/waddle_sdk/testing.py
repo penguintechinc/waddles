@@ -43,7 +43,13 @@ from typing import Any
 
 from waddle_sdk.kv import InvalidKvKeyError, validate_key
 
-__all__ = ["FakeKvHost", "InvalidKvKeyError", "install_fake_kv_host"]
+__all__ = [
+    "FakeKvHost",
+    "FakeReputationHost",
+    "InvalidKvKeyError",
+    "install_fake_kv_host",
+    "install_fake_reputation_host",
+]
 
 
 @dataclass(slots=True)
@@ -99,5 +105,96 @@ def install_fake_kv_host(monkeypatch: Any) -> FakeKvHost:
     )
     fake_wit_world = types.ModuleType("wit_world")
     fake_wit_world.imports = types.SimpleNamespace(kv=kv_mod)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
+    return host
+
+
+@dataclass(frozen=True)
+class _FakeWitError(Exception):
+    """Stand-in for componentize-py's generated ``Err`` wrapper (``.value`` = the error variant)."""
+
+    value: Any
+
+
+def _variant(name: str, with_payload: bool) -> type:
+    """Build a class named exactly like a generated ``reputation.Error_*`` variant case."""
+    if with_payload:
+
+        @dataclass
+        class _Case:
+            value: str
+
+    else:
+
+        @dataclass
+        class _Case:  # type: ignore[no-redef]
+            pass
+
+    _Case.__name__ = name
+    _Case.__qualname__ = name
+    return _Case
+
+
+_Error_Denied = _variant("Error_Denied", True)
+_Error_NotAMember = _variant("Error_NotAMember", False)
+_Error_DailyCapExceeded = _variant("Error_DailyCapExceeded", False)
+_Error_Invalid = _variant("Error_Invalid", True)
+_Error_Unavailable = _variant("Error_Unavailable", True)
+_Error_Backend = _variant("Error_Backend", True)
+
+
+@dataclass(slots=True)
+class FakeReputationHost:
+    """In-memory stand-in for `wit_world.imports.reputation`, enforcing the real host's rules.
+
+    Mirrors what the real stage does (gate + store): the target must be in
+    `members`; `granted` False denies every call `not_granted`; one adjust may
+    not exceed `per_call_abs_max`; the rolling total per user may not exceed
+    `daily_abs_cap` (the catalog's `reputation.community.write` ceilings are 5
+    and 5 -- the defaults here). Every failure raises the same-named
+    `Error_*` variant the generated binding would, wrapped in an `Err`-shaped
+    exception, so a bundle's error handling is exercised for real.
+    """
+
+    members: set[str] = field(default_factory=set)
+    balances: dict[str, int] = field(default_factory=dict)
+    ledger: list[tuple[str, int, str]] = field(default_factory=list)
+    granted: bool = True
+    per_call_abs_max: int = 5
+    daily_abs_cap: int = 5
+    _used: dict[str, int] = field(default_factory=dict)
+
+    def _check(self, user: str) -> None:
+        if not self.granted:
+            raise _FakeWitError(_Error_Denied("not_granted"))
+        if user not in self.members:
+            raise _FakeWitError(_Error_NotAMember())
+
+    def get(self, user: str) -> int:
+        """Return `user`'s balance (0 for a member with no adjustments)."""
+        self._check(user)
+        return self.balances.get(user, 0)
+
+    def adjust(self, user: str, delta: int, reason: str) -> int:
+        """Apply `delta` and return the new balance, enforcing bounds and the daily cap."""
+        self._check(user)
+        if abs(delta) > self.per_call_abs_max:
+            raise _FakeWitError(_Error_Denied("delta_out_of_bounds"))
+        if self._used.get(user, 0) + abs(delta) > self.daily_abs_cap:
+            raise _FakeWitError(_Error_DailyCapExceeded())
+        self._used[user] = self._used.get(user, 0) + abs(delta)
+        self.balances[user] = self.balances.get(user, 0) + delta
+        self.ledger.append((user, delta, reason))
+        return self.balances[user]
+
+
+def install_fake_reputation_host(
+    monkeypatch: Any, members: set[str] | None = None
+) -> FakeReputationHost:
+    """Install a fresh `FakeReputationHost` as `wit_world.imports.reputation` and return it."""
+    host = FakeReputationHost(members=set(members or ()))
+    rep_mod = types.SimpleNamespace(get=host.get, adjust=host.adjust)
+    fake_wit_world = types.ModuleType("wit_world")
+    fake_wit_world.imports = types.SimpleNamespace(reputation=rep_mod)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
     return host
