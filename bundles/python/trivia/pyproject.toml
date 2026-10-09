@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-trivia"
-version = "1.0.0"
+version = "1.0.2"
 description = "`!trivia` -> a per-community trivia Q&A game (!trivia start, !trivia answer <text>, !trivia score). Uses waddle_sdk.community_kv/waddle_sdk.command, modeled on bundles/python/first's own structure."
 requires-python = ">=3.13"
 dependencies = []

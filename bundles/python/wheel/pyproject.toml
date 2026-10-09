@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-wheel"
-version = "1.0.0"
+version = "1.0.2"
 description = "`!wheel` -> a community-scoped, kv-backed spin-the-wheel random picker (!wheel add/remove/list/reset, bare/spin to spin). Modeled on bundles/python/count's hand-built (not bundle_compiler-routed) structure."
 requires-python = ">=3.13"
 dependencies = []

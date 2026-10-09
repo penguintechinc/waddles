@@ -5,7 +5,7 @@ name: Inventory Bundle (Python)
 # !inv give <item> <user>/!inv add|remove <item> <user>. See src/app.py's own module docstring
 # for the full data-model rationale (per-user kv directory + db item ledger) and the two
 # documented grammar extensions.
-version: 1.0.0
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -71,11 +71,14 @@ limits:
 # (hub_api/services/bundle_approval_service.py::KV_PERMISSION_ID); used here as a per-user
 # item -> row_id directory index alongside the db ledger (see src/app.py).
 permissions:
-  - storage.kv
+  - id: storage.kv
+    justification: "persists per-user inventory entries keyed by pseudonym"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-inventory feature flag"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.0"
-  min_version: "1.0.0"
+  tested_with: "1.0.2"
+  min_version: "1.0.2"
   max_version: null

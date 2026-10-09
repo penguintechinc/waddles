@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
+import yaml
 
 from services.bundle_manifest_v2 import ManifestV2Error, parse_bundle_manifest_v2
 
@@ -404,3 +407,70 @@ def test_reputation_write_valid_parses() -> None:
     )
     decls = manifest.permission_declarations  # type: ignore[attr-defined]
     assert decls[0].risk == "dangerous"
+
+
+def _core_hub_manifests() -> list[pathlib.Path]:
+    root = pathlib.Path(__file__).resolve().parents[2] / "bundles"
+    return sorted(root.glob("*/*/hub-manifest.yaml"))
+
+
+def test_core_hub_manifests_have_no_bare_string_permissions() -> None:
+    """Regression: bare-string `permissions:` parse to zero grants (dead shape)."""
+    paths = _core_hub_manifests()
+    assert len(paths) >= 30, f"only {len(paths)} core hub manifests examined"
+    bare = []
+    for path in paths:
+        raw = yaml.safe_load(path.read_text())
+        if any(isinstance(e, str) for e in raw.get("permissions") or []):
+            bare.append(str(path))
+    assert bare == []
+
+
+def test_core_kv_manifests_parse_to_structured_storage_kv_declaration() -> None:
+    """Every converted core bundle yields >=1 structured declaration => grant rows."""
+    structured = 0
+    for path in _core_hub_manifests():
+        raw = yaml.safe_load(path.read_text())
+        if not raw.get("permissions"):
+            continue
+        manifest = parse_bundle_manifest_v2(
+            raw,
+            known_custom_platforms=frozenset(),
+            allow_wildcard_consumes=True,
+            allow_prebuilt=True,
+        )
+        ids = [d.id for d in manifest.permission_declarations]  # type: ignore[attr-defined]
+        assert ids, f"{path}: zero structured permission declarations"
+        assert manifest.permissions == (), f"{path}: leftover bare strings"  # type: ignore[attr-defined]
+        structured += 1
+    assert structured >= 30
+
+
+@pytest.mark.parametrize("name", ["chat", "choose", "eightball", "poll", "roll", "slap", "wave"])
+def test_flag_gated_python_bundles_declare_flags_read(name: str) -> None:
+    """Bundles calling `feature_enabled` must declare `flags.read` (host gate fails closed)."""
+    root = pathlib.Path(__file__).resolve().parents[2] / "bundles" / "python" / name
+    assert "feature_enabled(" in (root / "src" / "app.py").read_text()
+    for fname in ("bundle.yaml", "hub-manifest.yaml"):
+        raw = yaml.safe_load((root / fname).read_text())
+        ids = [e["id"] for e in raw["permissions"]]
+        assert "flags.read" in ids, f"{root / fname}: missing flags.read"
+
+
+def test_flag_reading_core_bundles_declare_flags_read() -> None:
+    """Every core bundle calling `feature_enabled` (with permissions) declares flags.read."""
+    examined = 0
+    missing = []
+    for path in _core_hub_manifests():
+        raw = yaml.safe_load(path.read_text())
+        if not raw.get("permissions"):
+            continue
+        src = path.parent / "src"
+        if not any("await feature_enabled(" in f.read_text() for f in src.rglob("*.py")):
+            continue
+        examined += 1
+        ids = {e["id"] for e in raw["permissions"] if isinstance(e, dict)}
+        if "flags.read" not in ids:
+            missing.append(str(path))
+    assert examined >= 30, f"only {examined} flag-reading bundles examined"
+    assert missing == []

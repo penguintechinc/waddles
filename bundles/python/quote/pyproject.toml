@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-quote"
-version = "1.0.0"
+version = "1.0.2"
 description = "`!quote` -> a per-community quote book (structured db ops + a kv seq->row_id index, see src/app.py's module docstring). `!quote add/list/remove/random/<id>`. Ported from core/svc_process/bundles/social_quote_process.py (strangler extraction), modeled on bundles/python/rank's structured-db + community_kv-index template."
 requires-python = ">=3.13"
 dependencies = []
