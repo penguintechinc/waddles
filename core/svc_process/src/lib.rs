@@ -685,7 +685,7 @@ async fn try_build_db_wiring(
 /// (issue #726, `spine::ProcessDeps::reputation_wiring`): connects to the
 /// shared `waddles` Postgres as the least-privilege
 /// `waddles_bundle_reputation` role (`bundle_host_reputation::connect`,
-/// alembic 0043), spawns the membership-snapshot refresh task that feeds the
+/// alembic 0046), spawns the membership-snapshot refresh task that feeds the
 /// gate's production `SnapshotMembership` (the SAME `Arc` the gate was built
 /// with -- `grant_gate::build_production_gate`'s `membership` param), and
 /// gates every call on `BUNDLE_REPUTATION_CAPABILITY_FLAG` (default OFF).

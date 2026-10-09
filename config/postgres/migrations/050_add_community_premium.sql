@@ -9,6 +9,10 @@ COMMENT ON COLUMN communities.is_premium IS 'Super admin granted premium status 
 COMMENT ON COLUMN communities.seat_limit IS 'Optional max member count; NULL = unlimited';
 
 -- Global announcement banner settings
+-- hub_settings (000_create_base_schema) has no `description` column; add it first so the
+-- seed INSERT below works on a fresh-DB replay (no-op where it already exists).
+ALTER TABLE hub_settings ADD COLUMN IF NOT EXISTS description TEXT;
+
 INSERT INTO hub_settings (setting_key, setting_value, description) VALUES
   ('banner_enabled',    'false',   'Show global announcement banner across all pages'),
   ('banner_text',       '',        'Banner message text (supports emoji and [text](url) links)'),

@@ -1,6 +1,6 @@
 //! Postgres-backed [`ReputationStore`], the membership-snapshot loader and
 //! the connection factory (all under the least-privilege
-//! `waddles_bundle_reputation` role, alembic 0043).
+//! `waddles_bundle_reputation` role, alembic 0046).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,7 +13,8 @@ use sea_orm::{
 use uuid::Uuid;
 
 use crate::{
-    metrics, validate_reason, BoxFuture, ReputationError, ReputationScope, ReputationStore,
+    metrics, validate_delta, validate_reason, BoxFuture, ReputationCaps, ReputationError,
+    ReputationScope, ReputationStore,
 };
 
 /// Per-transaction statement timeout, so a stuck row lock can never hold a
@@ -22,9 +23,12 @@ const STATEMENT_TIMEOUT_MS: u32 = 5_000;
 
 /// Active-membership predicate shared by every query: the target must be an
 /// active (not left, not removed) member of exactly this tenant's community.
+/// `community_members.is_active` is nullable, and a NULL is NOT an active
+/// member (`IS TRUE`, fail-closed -- the same reading every other authz path
+/// takes); never `COALESCE(.., TRUE)`.
 /// Bind order is always `$1 = tenant_id`, `$2 = community_id`, `$3 = user`.
 const MEMBER_PREDICATE: &str = "cm.community_id = $2 AND c.tenant_id = $1 AND cm.user_uuid = $3 \
-     AND COALESCE(cm.is_active, TRUE) AND cm.removed_at IS NULL AND cm.left_at IS NULL";
+     AND cm.is_active IS TRUE AND cm.removed_at IS NULL AND cm.left_at IS NULL";
 
 /// Non-secret connection settings (the password is passed separately to
 /// [`connect`] -- Token & Secret Hygiene).
@@ -111,12 +115,13 @@ impl PostgresReputationStore {
         user: Uuid,
         delta: i32,
         reason: &str,
-        daily_cap: i64,
+        caps: ReputationCaps,
     ) -> Result<i64, ReputationError> {
         validate_reason(reason)?;
-        if daily_cap < 0 {
+        validate_delta(delta)?;
+        if caps.per_user_daily_abs_max < 0 || caps.per_scope_daily_abs_max < 0 {
             return Err(ReputationError::Invalid(
-                "daily_cap must be >= 0".to_string(),
+                "daily caps must be >= 0".to_string(),
             ));
         }
         let abs_delta = i64::from(delta).abs();
@@ -143,9 +148,25 @@ impl PostgresReputationStore {
             return Err(ReputationError::NotAMember);
         }
 
-        // 2. Ensure the score row exists, then take its row lock. Every
+        // 2. Per-scope advisory lock (transaction-scoped, released at
+        // commit/rollback). Adjusts for DIFFERENT users in this
+        // (tenant, community, app) share no score row, so this is what
+        // serializes them for the per-scope window SUM in step 4. Always taken
+        // BEFORE any score-row lock so the lock order is uniform (no cycles).
+        // A hash collision only over-serializes two unrelated scopes.
+        txn.execute_raw(stmt(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            vec![Value::String(Some(format!(
+                "waddles.bundle_reputation.scope:{}:{}:{}",
+                scope.tenant_id, scope.community_id, scope.app_id
+            )))],
+        ))
+        .await
+        .map_err(backend_err)?;
+
+        // 3. Ensure the score row exists, then take its row lock. Every
         // concurrent adjust for this (community, user) serializes here, which
-        // is what makes the window-sum cap check below race-free.
+        // is what makes the per-user window-sum cap check below race-free.
         txn.execute_raw(stmt(
             "INSERT INTO bundle_reputation_scores (tenant_id, community_id, user_uuid) \
              VALUES ($1, $2, $3) ON CONFLICT (community_id, user_uuid) DO NOTHING",
@@ -168,7 +189,7 @@ impl PostgresReputationStore {
             })?;
         let _: i64 = locked.try_get("", "balance").map_err(backend_err)?;
 
-        // 3. Rolling-24h cap over APPLIED adjustments (ledger rows).
+        // 4. Rolling-24h per-user cap over APPLIED adjustments (ledger rows).
         let used_row = txn
             .query_one_raw(stmt(
                 "SELECT COALESCE(SUM(ABS(delta)), 0)::BIGINT AS used \
@@ -181,11 +202,40 @@ impl PostgresReputationStore {
             .map_err(backend_err)?
             .ok_or_else(|| backend_err("window SUM returned no row"))?;
         let used: i64 = used_row.try_get("", "used").map_err(backend_err)?;
-        if used.saturating_add(abs_delta) > daily_cap {
-            return Err(ReputationError::DailyCapExceeded { cap: daily_cap });
+        if used.saturating_add(abs_delta) > caps.per_user_daily_abs_max {
+            return Err(ReputationError::DailyCapExceeded {
+                cap: caps.per_user_daily_abs_max,
+            });
         }
 
-        // 4. Apply + audit, same transaction.
+        // 5. Rolling-24h per-scope cap: the SUM of every applied |delta| by
+        // this app across the whole (tenant, community), under the advisory
+        // lock from step 2. Durable (derived from the ledger), so a restart or
+        // a second replica cannot reset or multiply it. Served by 0041's
+        // `idx_bundle_reputation_adjustments_app_day (app_id, occurred_at)`.
+        let scope_used_row = txn
+            .query_one_raw(stmt(
+                "SELECT COALESCE(SUM(ABS(delta)), 0)::BIGINT AS used \
+                 FROM bundle_reputation_adjustments \
+                 WHERE tenant_id = $1 AND community_id = $2 AND app_id = $3 \
+                   AND scope = 'community' AND occurred_at > NOW() - INTERVAL '24 hours'",
+                vec![
+                    Value::Int(Some(scope.tenant_id)),
+                    Value::Int(Some(scope.community_id)),
+                    Value::String(Some(scope.app_id.clone())),
+                ],
+            ))
+            .await
+            .map_err(backend_err)?
+            .ok_or_else(|| backend_err("scope window SUM returned no row"))?;
+        let scope_used: i64 = scope_used_row.try_get("", "used").map_err(backend_err)?;
+        if scope_used.saturating_add(abs_delta) > caps.per_scope_daily_abs_max {
+            return Err(ReputationError::ScopeQuotaExceeded {
+                cap: caps.per_scope_daily_abs_max,
+            });
+        }
+
+        // 6. Apply + audit, same transaction.
         let updated = txn
             .query_one_raw(stmt(
                 "UPDATE bundle_reputation_scores \
@@ -246,13 +296,11 @@ impl ReputationStore for PostgresReputationStore {
         user: Uuid,
         delta: i32,
         reason: &'a str,
-        daily_cap: i64,
+        caps: ReputationCaps,
     ) -> BoxFuture<'a, Result<i64, ReputationError>> {
         Box::pin(async move {
             let start = Instant::now();
-            let result = self
-                .adjust_impl(scope, user, delta, reason, daily_cap)
-                .await;
+            let result = self.adjust_impl(scope, user, delta, reason, caps).await;
             metrics::record_call("adjust", outcome_of(&result), start.elapsed().as_secs_f64());
             result
         })
@@ -281,7 +329,7 @@ pub async fn load_membership(
                     cm.user_uuid AS user_uuid \
              FROM community_members cm JOIN communities c ON c.id = cm.community_id \
              WHERE ($1::int IS NULL OR c.tenant_id = $1) AND cm.user_uuid IS NOT NULL \
-               AND COALESCE(cm.is_active, TRUE) AND cm.removed_at IS NULL \
+               AND cm.is_active IS TRUE AND cm.removed_at IS NULL \
                AND cm.left_at IS NULL \
              LIMIT $2",
             vec![

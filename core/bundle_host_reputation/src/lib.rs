@@ -12,15 +12,28 @@
 //!          + MembershipCheck (SnapshotMembership, fast pre-filter)
 //!     2. flag gate / wiring check (fail-loud `not_implemented` / `feature_disabled`)
 //!     3. ReputationStore::adjust   <-- THIS CRATE: the authoritative, durable part
-//!          one transaction: live membership re-check -> row lock -> rolling-24h
-//!          cap -> balance update -> audit-ledger insert
+//!          one transaction: live membership re-check -> per-scope advisory
+//!          lock -> score-row lock -> rolling-24h per-user cap -> rolling-24h
+//!          per-scope cap -> balance update -> audit-ledger insert
 //! ```
 //!
 //! The gate's quota ledger is in-memory (per process, resets on restart, not
-//! shared across replicas); the store's cap is the durable one, derived from
-//! the audit ledger under the score row's lock, so concurrent adjusts for the
-//! same user serialize and the cap can never be exceeded by a race, a restart
-//! or a second replica.
+//! shared across replicas); the store's caps are the durable ones, both
+//! derived from the audit ledger inside the write transaction:
+//!
+//! * **per-user** (`per_user_daily_abs_max`): the SUM of the user's applied
+//!   `|delta|` over the rolling 24h, read under the score row's lock;
+//! * **per-scope** (`per_scope_daily_abs_max`, the Dangerous-grant blast-radius
+//!   cap): the SUM of every applied `|delta|` by this app in this
+//!   (tenant, community) over the rolling 24h, read under a transaction-scoped
+//!   advisory lock keyed on that scope (adjusts for DIFFERENT users share no
+//!   row, so the score-row lock alone cannot serialize them).
+//!
+//! Concurrent adjusts therefore serialize on the lock that guards the cap they
+//! are checked against, and neither cap can be exceeded by a race, a restart
+//! or a second replica. A zero `delta` is rejected up front
+//! ([`validate_delta`]): it would otherwise consume no quota yet still append
+//! a ledger row and bump `adjustment_count`, an unbounded-growth vector.
 //!
 //! # Scope derivation
 //!
@@ -28,7 +41,7 @@
 //! `tenant_id`, `community_id` and `app_id` come from the host-built
 //! [`ReputationScope`] -- never from guest input. The user must be an ACTIVE
 //! member of that community of that tenant (`community_members.user_uuid`,
-//! alembic 0043) at the moment of the call, re-verified inside the same
+//! alembic 0046) at the moment of the call, re-verified inside the same
 //! transaction as the write.
 //!
 //! # Audit
@@ -75,7 +88,13 @@ pub enum ReputationError {
     /// total past `cap`.
     #[error("rolling-24h per-user reputation cap ({cap}) would be exceeded")]
     DailyCapExceeded { cap: i64 },
-    /// Malformed argument (bad `reason`, ...).
+    /// Applying `delta` would push this app's rolling-24h absolute-delta total
+    /// for the whole (tenant, community) past `cap`. Surfaces under the same
+    /// stable `quota_exceeded` code the gate's in-memory per-scope check uses,
+    /// so a bundle sees one code however the aggregate cap tripped.
+    #[error("rolling-24h per-scope reputation cap ({cap}) would be exceeded")]
+    ScopeQuotaExceeded { cap: i64 },
+    /// Malformed argument (bad `reason`, zero `delta`, ...).
     #[error("invalid argument: {0}")]
     Invalid(String),
     /// Database/connection/timeout failure.
@@ -89,6 +108,7 @@ impl ReputationError {
         match self {
             Self::NotAMember => "not_a_member",
             Self::DailyCapExceeded { .. } => "daily_cap_exceeded",
+            Self::ScopeQuotaExceeded { .. } => "quota_exceeded",
             Self::Invalid(_) => "invalid_args",
             Self::Backend(_) => "backend",
         }
@@ -114,6 +134,33 @@ pub fn validate_reason(reason: &str) -> Result<(), ReputationError> {
     Ok(())
 }
 
+/// Rejects a zero `delta`: it passes the gate's bounds and quotas (a 0-amount
+/// consumption) yet would open a transaction, append a ledger row and bump
+/// `adjustment_count` on every call with no rate limit. Shared by the stage
+/// handler and the store so neither relies on the other.
+pub fn validate_delta(delta: i32) -> Result<(), ReputationError> {
+    if delta == 0 {
+        return Err(ReputationError::Invalid(
+            "delta must be non-zero".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// The two durable rolling-24h absolute-delta ceilings one `adjust` is checked
+/// against (the catalog's `reputation.community.write` `Quota::ReputationDelta`
+/// `per_user_daily_abs_max` / `per_scope_daily_abs_max`, passed in by the
+/// stage). A struct rather than two bare `i64`s so the two can never be
+/// transposed at a call site.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ReputationCaps {
+    /// Max rolling-24h sum of absolute applied deltas for one target user.
+    pub per_user_daily_abs_max: i64,
+    /// Max rolling-24h sum of absolute applied deltas by one app across the
+    /// whole (tenant, community).
+    pub per_scope_daily_abs_max: i64,
+}
+
 /// The durable, community-scoped reputation store.
 pub trait ReputationStore: Send + Sync {
     /// Current score of `user` in `scope`'s community (0 for an active member
@@ -125,16 +172,17 @@ pub trait ReputationStore: Send + Sync {
         user: uuid::Uuid,
     ) -> BoxFuture<'a, Result<i64, ReputationError>>;
 
-    /// Atomically applies `delta` and returns the NEW score. `daily_cap` is
-    /// the maximum rolling-24h sum of absolute applied deltas for this user
-    /// (the catalog's `per_user_daily_abs_max`, passed in by the stage).
+    /// Atomically applies a non-zero `delta` and returns the NEW score.
+    /// `caps` are the durable per-user and per-scope rolling-24h ceilings
+    /// (see [`ReputationCaps`]); both are enforced inside the write
+    /// transaction. [`ReputationError::Invalid`] for a zero `delta`.
     fn adjust<'a>(
         &'a self,
         scope: &'a ReputationScope,
         user: uuid::Uuid,
         delta: i32,
         reason: &'a str,
-        daily_cap: i64,
+        caps: ReputationCaps,
     ) -> BoxFuture<'a, Result<i64, ReputationError>>;
 }
 
@@ -170,11 +218,26 @@ mod tests {
     }
 
     #[test]
+    fn zero_delta_is_rejected_nonzero_accepted() {
+        assert!(matches!(
+            validate_delta(0),
+            Err(ReputationError::Invalid(_))
+        ));
+        for ok in [1, -1, i32::MAX, i32::MIN] {
+            assert!(validate_delta(ok).is_ok(), "{ok}");
+        }
+    }
+
+    #[test]
     fn wire_codes_are_stable() {
         assert_eq!(ReputationError::NotAMember.wire_code(), "not_a_member");
         assert_eq!(
             ReputationError::DailyCapExceeded { cap: 1 }.wire_code(),
             "daily_cap_exceeded"
+        );
+        assert_eq!(
+            ReputationError::ScopeQuotaExceeded { cap: 1 }.wire_code(),
+            "quota_exceeded"
         );
         assert_eq!(
             ReputationError::Invalid(String::new()).wire_code(),

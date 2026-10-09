@@ -24,11 +24,12 @@ stable code: `not_granted`, `delta_out_of_bounds`, `quota_exceeded`,
 bundle --reputation.adjust--> executor (stage-next linker)
    --host-call{capability=db, op="reputation.adjust"}--> svc_process
    handle_reputation:
-     1. args (UUID user, i32 delta, [a-z0-9._:-] reason)
+     1. args (UUID user, non-zero i32 delta, [a-z0-9._:-] reason)
      2. CapabilityGate.authorize(ReputationScoped{target, delta})   grant, bounds, quotas, membership snapshot
      3. flag waddles.bundle-reputation-capability / wiring present   fail-loud not_implemented | feature_disabled
-     4. ReputationStore.adjust                                       one txn: live membership re-check,
-                                                                     row lock, rolling-24h cap, balance, ledger row
+     4. ReputationStore.adjust                                       one txn: live membership re-check (NULL is_active = non-member),
+                                                                     per-scope advisory lock, row lock, rolling-24h per-user AND
+                                                                     per-scope caps (both durable), balance, ledger row
 ```
 
 `penguin-bundle-host`'s `CapabilityKind` is a closed enum with no `reputation`
@@ -60,11 +61,11 @@ penguin-libs grows one.
 
 | Item | Value |
 |---|---|
-| Schema | alembic `0043_bundle_reputation_store` (DDL in `scripts/db/bundle_reputation_store.sql`) |
+| Schema | alembic `0046_bundle_reputation_store` (DDL in `scripts/db/bundle_reputation_store.sql`) |
 | Role | `waddles_bundle_reputation`: DML on `bundle_reputation_scores`, SELECT/INSERT on `bundle_reputation_adjustments`, column SELECT on `community_members`/`communities`. Created NOLOGIN unless `DB_REPUTATION_PASSWORD` is set when migrating |
 | svc_process env | `BUNDLE_REPUTATION_{HOST,PORT,NAME,USER}`, `BUNDLE_REPUTATION_PASSWORD`, `BUNDLE_REPUTATION_MEMBERSHIP_REFRESH_S` |
 | Flag | `waddles.bundle-reputation-capability` (default OFF) |
-| Caps | catalog: 5 per call, 5 per user per rolling 24h, 50 per community per day (`reputation.community.write`) |
+| Caps | catalog: 5 per call, 5 per user per rolling 24h, 50 per app per community per rolling 24h (`reputation.community.write`). Both daily caps are enforced DURABLY in the store txn from the audit ledger (a restart or second replica cannot reset or multiply them); the gate's in-memory copy is only a fast pre-filter. A zero delta is `invalid_args` |
 | Identity | targets are `community_members.user_uuid`, NULL until hub-api's IdentityService assigns it (#429). NULL means nobody is addressable: the capability is fail-closed until then |
 
 ## `economy` (#714): the shared community currency

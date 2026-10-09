@@ -46,8 +46,13 @@ const SHIPPED_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_st
 struct World {
     _container: ContainerAsync<GenericImage>,
     su: DatabaseConnection,
+    /// Reputation-role connection settings, to build a restarted/second stack.
+    cfg: ConnectConfig,
     caps: StageCapabilities,
+    /// `members[0]`.
     member: Uuid,
+    /// Every active identified member of community 10 (`member` first).
+    members: Vec<Uuid>,
 }
 
 async fn exec(c: &DatabaseConnection, sql: &str) {
@@ -76,6 +81,11 @@ fn grant(id: &str, params: serde_json::Value) -> (String, GrantedPermission) {
 }
 
 async fn world() -> World {
+    world_with_members(0).await
+}
+
+/// `1 + extra_members` active members, all loaded into the gate's snapshot.
+async fn world_with_members(extra_members: usize) -> World {
     let container = GenericImage::new("postgres", "17.6-bookworm")
         .with_exposed_port(ContainerPort::Tcp(5432))
         .with_wait_for(WaitFor::log(
@@ -131,24 +141,42 @@ async fn world() -> World {
     )
     .await;
     exec(&su, SHIPPED_DDL).await;
-    let member = Uuid::new_v4();
-    exec(
-        &su,
-        &format!("INSERT INTO community_members (community_id, user_uuid) VALUES (10, '{member}')"),
-    )
-    .await;
+    let mut members = Vec::new();
+    for _ in 0..=extra_members {
+        let m = Uuid::new_v4();
+        exec(
+            &su,
+            &format!("INSERT INTO community_members (community_id, user_uuid) VALUES (10, '{m}')"),
+        )
+        .await;
+        members.push(m);
+    }
+    let member = members[0];
 
-    let rep_conn = connect(
-        &ConnectConfig {
-            host,
-            port,
-            name: "waddles_test".to_string(),
-            user: "waddles_bundle_reputation".to_string(),
-        },
-        REP_PW,
-    )
-    .await
-    .unwrap();
+    let cfg = ConnectConfig {
+        host,
+        port,
+        name: "waddles_test".to_string(),
+        user: "waddles_bundle_reputation".to_string(),
+    };
+    let caps = build_caps(&cfg).await;
+    World {
+        _container: container,
+        su,
+        cfg,
+        caps,
+        member,
+        members,
+    }
+}
+
+/// A complete stage-side stack over the database `cfg` points at, sharing
+/// NOTHING in memory with any other: a NEW connection pool, a NEW store, a NEW
+/// membership snapshot (loaded by the real loader), a NEW gate and a NEW
+/// in-memory quota ledger. Calling it again against the same database is
+/// exactly a process restart or a second `svc_process` replica.
+async fn build_caps(cfg: &ConnectConfig) -> StageCapabilities {
+    let rep_conn = connect(cfg, REP_PW).await.unwrap();
 
     // Production membership path: snapshot populated by the real loader.
     let membership = Arc::new(SnapshotMembership::new());
@@ -201,7 +229,7 @@ async fn world() -> World {
         .unwrap(),
         boxed(StaticFlag(true)),
     ));
-    let caps = StageCapabilities::new(
+    StageCapabilities::new(
         "acme".to_string(),
         Some("main".to_string()),
         APP_ID.to_string(),
@@ -214,13 +242,7 @@ async fn world() -> World {
     .with_reputation(ReputationWiring {
         store: Arc::new(PostgresReputationStore::new(rep_conn)) as Arc<dyn ReputationStore>,
         flag: Arc::new(StaticGate(true)),
-    });
-    World {
-        _container: container,
-        su,
-        caps,
-        member,
-    }
+    })
 }
 
 fn call(op: &str, args: serde_json::Value) -> HostCallBody {
@@ -361,4 +383,110 @@ async fn the_daily_cap_is_enforced_across_calls() {
         .await,
         3
     );
+}
+
+/// regression: pr-741 review -- a zero delta passed the gate's bounds and
+/// quotas (a 0-amount consumption) and reached the store, which appended a
+/// ledger row per call. It is now an `invalid_args` rejection before the gate,
+/// so it neither writes nor consumes any quota.
+#[tokio::test]
+async fn a_zero_delta_is_invalid_args_writes_nothing_and_consumes_no_quota() {
+    let w = world().await;
+    let m = w.member.to_string();
+    for _ in 0..50 {
+        let err = w
+            .caps
+            .handle(call(
+                "reputation.adjust",
+                serde_json::json!({"user": m, "delta": 0, "reason": "noop"}),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_args");
+    }
+    assert_eq!(
+        scalar(&w.su, "SELECT COUNT(*) FROM bundle_reputation_adjustments").await,
+        0
+    );
+    assert_eq!(
+        scalar(&w.su, "SELECT COUNT(*) FROM bundle_reputation_scores").await,
+        0
+    );
+    // The full per-user budget (5/day) is still intact after 50 zero calls.
+    let out = w
+        .caps
+        .handle(call(
+            "reputation.adjust",
+            serde_json::json!({"user": m, "delta": 5, "reason": "real"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(out, serde_json::json!({"balance": 5}));
+}
+
+/// regression: pr-741 review -- the per-scope daily cap (catalog: 50 for
+/// `reputation.community.write`, the Dangerous-grant blast-radius bound) used
+/// to live only in the gate's in-memory ledger, so a restart or another replica
+/// reset it. Spend the whole budget through one stack, then build a FRESH stack
+/// (new gate + empty in-memory ledger + new pool, i.e. a restart / second
+/// replica): it must still refuse, and only the durable store can be why.
+#[tokio::test]
+async fn the_per_scope_cap_survives_a_gate_restart_and_a_second_replica() {
+    let w = world_with_members(10).await;
+    assert_eq!(w.members.len(), 11);
+
+    // 10 distinct users x 5 (the per-call and per-user ceiling) = 50, the
+    // whole per-scope budget. Distinct users so only the SCOPE cap can bind.
+    for m in &w.members[..10] {
+        let out = w
+            .caps
+            .handle(call(
+                "reputation.adjust",
+                serde_json::json!({"user": m.to_string(), "delta": 5, "reason": "burn"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(out, serde_json::json!({"balance": 5}));
+    }
+    let sum_sql = "SELECT COALESCE(SUM(ABS(delta)), 0)::BIGINT FROM bundle_reputation_adjustments";
+    assert_eq!(scalar(&w.su, sum_sql).await, 50);
+
+    // An 11th user with a pristine per-user budget: the original stack's
+    // in-memory scope ledger refuses (control) ...
+    let fresh_user = w.members[10].to_string();
+    let adjust_one = serde_json::json!({"user": fresh_user, "delta": 1, "reason": "over"});
+    let err = w
+        .caps
+        .handle(call("reputation.adjust", adjust_one.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "quota_exceeded");
+
+    // ... and so do a restarted stack and a second replica, whose gates hold NO
+    // in-memory state at all -- the refusal can only come from the store.
+    for label in ["restarted", "second replica"] {
+        let stack = build_caps(&w.cfg).await;
+        let err = stack
+            .handle(call("reputation.adjust", adjust_one.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "quota_exceeded", "{label}");
+    }
+    // Nothing was written by any refused call.
+    assert_eq!(scalar(&w.su, sum_sql).await, 50);
+    assert_eq!(
+        scalar(&w.su, "SELECT COUNT(*) FROM bundle_reputation_adjustments").await,
+        10
+    );
+
+    // Reads are unaffected by the write budget.
+    let stack = build_caps(&w.cfg).await;
+    let out = stack
+        .handle(call(
+            "reputation.get",
+            serde_json::json!({"user": fresh_user}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(out, serde_json::json!({"balance": 0}));
 }

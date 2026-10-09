@@ -70,28 +70,36 @@ use bundle_host_db::{
 use bundle_host_economy::{EconomyError, EconomyScope, EconomyStore};
 use bundle_host_http::egress::{EgressGuard, EgressRuleRow, EgressRuleSource};
 use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
-use bundle_host_reputation::{ReputationError, ReputationScope, ReputationStore};
+use bundle_host_reputation::{ReputationCaps, ReputationError, ReputationScope, ReputationStore};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
 use crate::license::FeatureGate;
 
-/// The durable per-(community, user) rolling-24h absolute-delta cap the store
-/// enforces -- the catalog's own `per_user_daily_abs_max` for
-/// `reputation.community.write`, so the in-memory gate quota and the durable
-/// store cap can never disagree about the ceiling.
-fn reputation_daily_cap() -> i64 {
+/// The durable rolling-24h absolute-delta caps the store enforces for
+/// `reputation.community.write` -- the catalog's own `per_user_daily_abs_max`
+/// (per community, user) and `per_scope_daily_abs_max` (per app across the
+/// community), so the in-memory gate quota and the durable store caps can
+/// never disagree about the ceilings.
+fn reputation_caps() -> ReputationCaps {
     match PermissionFamily::ReputationCommunityWrite
         .catalog_entry()
         .default_quota
     {
         Quota::ReputationDelta {
             per_user_daily_abs_max,
+            per_scope_daily_abs_max,
             ..
-        } => per_user_daily_abs_max,
+        } => ReputationCaps {
+            per_user_daily_abs_max,
+            per_scope_daily_abs_max,
+        },
         // The catalog entry is statically ReputationDelta-shaped (unit-tested
         // in the gate crate); any other shape denies every write by capping
-        // at zero rather than guessing a number.
-        _ => 0,
+        // both at zero rather than guessing a number.
+        _ => ReputationCaps {
+            per_user_daily_abs_max: 0,
+            per_scope_daily_abs_max: 0,
+        },
     }
 }
 
@@ -664,16 +672,17 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// has no reputation member yet; see the WIT doc).
     ///
     /// Order is load-bearing and fail-loud at every step: (1) argument
-    /// parsing -- `user` must be a UUID, `delta` an in-range i32, `reason` a
-    /// machine code; (2) the community must be a real one (a tenant-wide
+    /// parsing -- `user` must be a UUID, `delta` a non-zero in-range i32 (a
+    /// zero delta consumes no quota yet would append a ledger row per call),
+    /// `reason` a machine code; (2) the community must be a real one (a tenant-wide
     /// `community_id == 0` activation has no community to score in); (3)
     /// **the gate authorizes FIRST** with a `ReputationScoped` resource, so
     /// grant, declared delta bounds, per-call/per-user/per-scope quotas,
     /// instance policy and the membership pre-filter all run before anything
     /// else can leak state (an ungranted call reports `not_granted`, never
     /// `not_implemented`/`feature_disabled`); (4) wiring/flag state; (5) the
-    /// store, which re-verifies membership and the durable daily cap inside
-    /// its own transaction. Scope (tenant/community/app) is always
+    /// store, which re-verifies membership and the durable per-user and
+    /// per-scope daily caps inside its own transaction. Scope (tenant/community/app) is always
     /// `self`'s host-derived scope, never an argument.
     async fn handle_reputation(
         &self,
@@ -706,6 +715,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                 .and_then(|v| v.as_i64())
                 .and_then(|v| i32::try_from(v).ok())
                 .ok_or_else(|| denied("invalid_args", "delta must be an i32"))?;
+            bundle_host_reputation::validate_delta(delta).map_err(reputation_error_to_host)?;
             let reason = call
                 .args
                 .get("reason")
@@ -764,7 +774,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             (Some(delta), Some(reason)) => {
                 wiring
                     .store
-                    .adjust(&scope, user, delta, reason, reputation_daily_cap())
+                    .adjust(&scope, user, delta, reason, reputation_caps())
                     .await
             }
             _ => wiring.store.get(&scope, user).await,
