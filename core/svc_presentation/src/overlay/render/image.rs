@@ -4,8 +4,8 @@
 //! [`overlay_schema::Surface::ALL`] variant today, without pretending a
 //! real renderer exists yet.
 //!
-//! Per `rules/general.md` Red Flags ("Partial features with 'TODO'
-//! placeholders") and `rules/critical-rules.md` Fail-Loud Code Paths, this
+//! Per `rules/general.md` Red Flags (no partial-feature placeholders)
+//! and `rules/critical-rules.md` Fail-Loud Code Paths, this
 //! is NOT a silent default/blank frame -- every call returns
 //! [`RenderError::NotYetImplemented`] loudly, the same shape
 //! `crate::error::ApiError::Unimplemented` already uses at the HTTP
