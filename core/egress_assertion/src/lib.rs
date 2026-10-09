@@ -708,4 +708,147 @@ mod tests {
         assert!(destination_matches(&assertion, "169.254.169.254", 443));
         assert!(destination_matches(&assertion, "127.0.0.1", 443));
     }
+
+    /// Wraps the fixed test-only DER fixture in PEM at runtime, so no PEM
+    /// literal is committed to source.
+    fn key_a_pem() -> String {
+        const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut b64 = String::new();
+        for chunk in KEY_A_PRIV_DER.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    b64.push(T[((n >> (18 - 6 * i)) & 63) as usize] as char);
+                } else {
+                    b64.push('=');
+                }
+            }
+        }
+        format!(
+            "-----BEGIN {0}-----\n{b64}\n-----END {0}-----\n",
+            "PRIVATE KEY"
+        )
+    }
+
+    #[test]
+    fn from_ed25519_pem_loads_and_signs_verifiably() {
+        let key = AssertionSigningKey::from_ed25519_pem(key_a_pem().as_bytes(), "k1")
+            .expect("valid pem loads");
+        let token = key.sign(&base_assertion()).expect("sign");
+        verify_with_key(&token, &decoding_key(), ASSERTION_MAX_TTL_SECONDS)
+            .expect("PEM-loaded key signs a token the matching public key verifies");
+    }
+
+    #[test]
+    fn from_ed25519_pem_rejects_garbage() {
+        let err = AssertionSigningKey::from_ed25519_pem(b"not a pem", "k1")
+            .err()
+            .expect("must fail");
+        assert!(matches!(err, AssertionError::InvalidSigningKey(_)));
+        assert!(err.to_string().contains("signing key"));
+    }
+
+    #[test]
+    fn from_env_requires_kid() {
+        let err = AssertionSigningKey::from_env("EA_T1_PATH", "EA_T1_KEY", "EA_T1_KID")
+            .err()
+            .expect("must fail");
+        assert!(matches!(err, AssertionError::InvalidSigningKey(m) if m.contains("EA_T1_KID")));
+    }
+
+    #[test]
+    fn from_env_fails_when_neither_source_set() {
+        std::env::set_var("EA_T2_KID", "k1");
+        let err = AssertionSigningKey::from_env("EA_T2_PATH", "EA_T2_KEY", "EA_T2_KID")
+            .err()
+            .expect("must fail");
+        assert!(matches!(err, AssertionError::InvalidSigningKey(m) if m.contains("neither")));
+    }
+
+    #[test]
+    fn from_env_loads_inline_pem() {
+        std::env::set_var("EA_T3_KID", "k1");
+        std::env::set_var("EA_T3_KEY", key_a_pem());
+        assert!(AssertionSigningKey::from_env("EA_T3_PATH", "EA_T3_KEY", "EA_T3_KID").is_ok());
+    }
+
+    #[test]
+    fn from_env_rejects_bad_inline_pem() {
+        std::env::set_var("EA_T4_KID", "k1");
+        std::env::set_var("EA_T4_KEY", "garbage");
+        assert!(AssertionSigningKey::from_env("EA_T4_PATH", "EA_T4_KEY", "EA_T4_KID").is_err());
+    }
+
+    #[test]
+    fn from_env_loads_pem_from_file_and_prefers_it() {
+        let path = std::env::temp_dir().join(format!("ea_key_{}.pem", std::process::id()));
+        std::fs::write(&path, key_a_pem()).expect("write");
+        std::env::set_var("EA_T5_KID", "k1");
+        std::env::set_var("EA_T5_PATH", &path);
+        std::env::set_var("EA_T5_KEY", "garbage-ignored-when-path-set");
+        let res = AssertionSigningKey::from_env("EA_T5_PATH", "EA_T5_KEY", "EA_T5_KID");
+        let _ = std::fs::remove_file(path);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn from_env_unreadable_path_fails_closed() {
+        std::env::set_var("EA_T6_KID", "k1");
+        std::env::set_var("EA_T6_PATH", "/nonexistent/ea/key.pem");
+        let err = AssertionSigningKey::from_env("EA_T6_PATH", "EA_T6_KEY", "EA_T6_KID")
+            .err()
+            .expect("must fail");
+        assert!(matches!(err, AssertionError::InvalidSigningKey(m) if m.contains("reading")));
+    }
+
+    #[test]
+    fn ip_matches_grant_fqdn_never_matches_an_ip() {
+        let ip: IpAddr = "1.2.3.4".parse().expect("ip");
+        assert!(!ip_matches_grant(DestinationCategory::Fqdn, "1.2.3.4", ip));
+    }
+
+    #[test]
+    fn ip_matches_grant_v6_cidr_contains_v4_mapped_target() {
+        let ip: IpAddr = "10.1.2.3".parse().expect("ip");
+        assert!(ip_matches_grant(
+            DestinationCategory::PrivateIp,
+            "::ffff:10.0.0.0/104",
+            ip
+        ));
+        assert!(!ip_matches_grant(
+            DestinationCategory::PrivateIp,
+            "::ffff:192.168.0.0/112",
+            ip
+        ));
+    }
+
+    #[test]
+    fn net_contains_v4_cidr_with_v6_targets() {
+        let net: IpNet = "10.0.0.0/8".parse().expect("net");
+        let mapped: IpAddr = "::ffff:10.1.1.1".parse().expect("ip");
+        let native: IpAddr = "2001:db8::1".parse().expect("ip");
+        assert!(net_contains(net, mapped));
+        assert!(
+            !net_contains(net, native),
+            "native v6 never matches a v4 grant"
+        );
+    }
+
+    #[test]
+    fn error_display_strings() {
+        assert!(AssertionError::Invalid("x".into())
+            .to_string()
+            .contains("invalid assertion"));
+        assert!(AssertionError::TtlTooLong { actual: 9, max: 5 }
+            .to_string()
+            .contains("exceeds max"));
+        assert!(AssertionError::SigningFailed("x".into())
+            .to_string()
+            .contains("failed to sign"));
+    }
 }

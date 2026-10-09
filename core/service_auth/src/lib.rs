@@ -496,4 +496,309 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, ServiceAuthError::InvalidToken(_)));
     }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Minimal HTTP server returning canned `(status, body)` responses in
+    /// order (last one repeats); returns its base URL and a hit counter.
+    async fn mock_server(responses: Vec<(u16, String)>) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_task = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let n = hits_task.fetch_add(1, Ordering::SeqCst);
+                let (status, body) = responses[n.min(responses.len() - 1)].clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let _ = sock.read(&mut buf).await;
+                    let resp = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    fn b64url(data: &[u8]) -> String {
+        const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in data.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            for i in 0..=chunk.len() {
+                out.push(T[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            }
+        }
+        out
+    }
+
+    fn jwks_body(kid: &str) -> String {
+        serde_json::json!({"keys":[{"kid": kid, "kty":"OKP", "crv":"Ed25519", "x": b64url(KEY_A_PUB_RAW)}]})
+            .to_string()
+    }
+
+    fn temp_sa_token(name: &str, contents: &str) -> String {
+        let path =
+            std::env::temp_dir().join(format!("service_auth_test_{}_{name}", std::process::id()));
+        std::fs::write(&path, contents).expect("write sa token");
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn error_display_strings() {
+        assert!(ServiceAuthError::UnknownKeyId(Some("k".into()))
+            .to_string()
+            .contains("unknown key id"));
+        assert!(ServiceAuthError::InvalidToken("x".into())
+            .to_string()
+            .contains("invalid service token"));
+        assert!(ServiceAuthError::BootstrapRejected("x".into())
+            .to_string()
+            .contains("bootstrap rejected"));
+        let io: ServiceAuthError = std::io::Error::other("boom").into();
+        assert!(io.to_string().contains("io error"));
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_malformed_token() {
+        let bundle = StaticTrustBundle(Mutex::new(HashMap::new()));
+        let err = verify("not-a-jwt", &bundle, "a", &["hub-api"], "s")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::InvalidToken(m) if m.contains("malformed header")));
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_token_without_kid() {
+        let (enc, dec) = ed25519_keypair();
+        let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
+        let header = Header::new(Algorithm::EdDSA);
+        let token = jsonwebtoken::encode(&header, &base_claims(now_secs()), &enc).expect("encode");
+        let err = verify(
+            &token,
+            &bundle,
+            "waddlebot-internal",
+            &["hub-api"],
+            "identity:ephemeral:mint",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::UnknownKeyId(None)));
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_untrusted_issuer() {
+        let (enc, dec) = ed25519_keypair();
+        let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
+        let mut claims = base_claims(now_secs());
+        claims.iss = "evil-issuer".into();
+        let token = make_token(&enc, "k1", &claims);
+        let err = verify(
+            &token,
+            &bundle,
+            "waddlebot-internal",
+            &["hub-api"],
+            "identity:ephemeral:mint",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::InvalidToken(_)));
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_wrong_algorithm_hs256() {
+        let (_enc, dec) = ed25519_keypair();
+        let bundle = StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)])));
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some("k1".into());
+        let token = jsonwebtoken::encode(
+            &header,
+            &base_claims(now_secs()),
+            &EncodingKey::from_secret(b"shared"),
+        )
+        .expect("encode");
+        let err = verify(
+            &token,
+            &bundle,
+            "waddlebot-internal",
+            &["hub-api"],
+            "identity:ephemeral:mint",
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::InvalidToken(_)));
+    }
+
+    #[tokio::test]
+    async fn jwks_bundle_fetches_and_caches_key() {
+        let (url, hits) = mock_server(vec![(200, jwks_body("k1"))]).await;
+        let bundle = JwksTrustBundle::new(url);
+        let (enc, _) = ed25519_keypair();
+        let token = make_token(&enc, "k1", &base_claims(now_secs()));
+        for _ in 0..2 {
+            verify(
+                &token,
+                &bundle,
+                "waddlebot-internal",
+                &["hub-api"],
+                "identity:ephemeral:mint",
+            )
+            .await
+            .expect("verifies via JWKS");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "second lookup is cached");
+    }
+
+    #[tokio::test]
+    async fn jwks_bundle_unknown_kid_after_refresh_is_none() {
+        let (url, hits) = mock_server(vec![(200, jwks_body("k1"))]).await;
+        let bundle = JwksTrustBundle::new(url);
+        assert!(bundle.public_key("other").await.is_none());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn jwks_bundle_unreachable_endpoint_fails_closed() {
+        let bundle = JwksTrustBundle::new("http://127.0.0.1:1/jwks");
+        assert!(bundle.public_key("k1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn jwks_bundle_malformed_json_fails_closed() {
+        let (url, _) = mock_server(vec![(200, "not json".into())]).await;
+        let bundle = JwksTrustBundle::new(url);
+        assert!(bundle.public_key("k1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn jwks_bundle_bad_entry_fails_closed() {
+        let body = serde_json::json!({"keys":[{"kid":"k1","x":"!!!not-base64!!!"}]}).to_string();
+        let (url, _) = mock_server(vec![(200, body)]).await;
+        let bundle = JwksTrustBundle::new(url);
+        assert!(bundle.public_key("k1").await.is_none());
+        let err = bundle.refresh().await.unwrap_err();
+        assert!(
+            matches!(err, ServiceAuthError::InvalidToken(m) if m.contains("bad JWKS entry k1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn jwks_bundle_refresh_replaces_cache_on_rotation() {
+        let (url, hits) = mock_server(vec![(200, jwks_body("old")), (200, jwks_body("new"))]).await;
+        let bundle = JwksTrustBundle::new(url);
+        assert!(bundle.public_key("old").await.is_some());
+        assert!(bundle.public_key("new").await.is_some());
+        assert!(
+            bundle.public_key("old").await.is_none(),
+            "refresh replaces the cache wholesale"
+        );
+        assert!(hits.load(Ordering::SeqCst) >= 3);
+    }
+
+    #[tokio::test]
+    async fn machine_client_mints_and_caches_token() {
+        let body = serde_json::json!({"token":"tok-1","expires_in":900}).to_string();
+        let (url, hits) = mock_server(vec![(200, body)]).await;
+        let sa = temp_sa_token("mint", "sa-token\n");
+        let client = MachineJwtClient::new(url, sa.clone(), "identity:ephemeral:mint");
+        assert_eq!(&*client.get_token().await.expect("mint"), "tok-1");
+        assert_eq!(&*client.get_token().await.expect("cached"), "tok-1");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn machine_client_refreshes_near_expiry() {
+        let first =
+            serde_json::json!({"token":"tok-1","expires_in":CLOCK_SKEW_SECONDS}).to_string();
+        let second = serde_json::json!({"token":"tok-2","expires_in":900}).to_string();
+        let (url, hits) = mock_server(vec![(200, first), (200, second)]).await;
+        let sa = temp_sa_token("refresh", "sa");
+        let client = MachineJwtClient::new(url, sa.clone(), "s");
+        assert_eq!(&*client.get_token().await.expect("first"), "tok-1");
+        assert_eq!(&*client.get_token().await.expect("second"), "tok-2");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn machine_client_clamps_ttl_to_platform_max() {
+        let body =
+            serde_json::json!({"token":"t","expires_in": 10 * MAX_TOKEN_TTL_SECONDS}).to_string();
+        let (url, _) = mock_server(vec![(200, body)]).await;
+        let sa = temp_sa_token("clamp", "sa");
+        let client = MachineJwtClient::new(url, sa.clone(), "s");
+        let before = now_secs();
+        client.get_token().await.expect("mint");
+        let exp = client
+            .cached
+            .read()
+            .await
+            .as_ref()
+            .expect("cached")
+            .expires_at;
+        assert!(exp <= before + MAX_TOKEN_TTL_SECONDS + 5);
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn machine_client_bootstrap_rejected_on_non_success() {
+        let (url, _) = mock_server(vec![(403, "{}".into())]).await;
+        let sa = temp_sa_token("reject", "sa");
+        let client = MachineJwtClient::new(url, sa.clone(), "s");
+        let err = client.get_token().await.unwrap_err();
+        assert!(matches!(err, ServiceAuthError::BootstrapRejected(m) if m.contains("403")));
+        assert!(
+            client.cached.read().await.is_none(),
+            "nothing cached on rejection"
+        );
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn machine_client_missing_sa_token_is_io_error() {
+        let client = MachineJwtClient::new("http://127.0.0.1:1/t", "/nonexistent/sa/token", "s");
+        assert!(matches!(
+            client.get_token().await.unwrap_err(),
+            ServiceAuthError::Io(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn machine_client_malformed_body_is_http_error() {
+        let (url, _) = mock_server(vec![(200, "garbage".into())]).await;
+        let sa = temp_sa_token("badbody", "sa");
+        let client = MachineJwtClient::new(url, sa.clone(), "s");
+        assert!(matches!(
+            client.get_token().await.unwrap_err(),
+            ServiceAuthError::Http(_)
+        ));
+        let _ = std::fs::remove_file(sa);
+    }
+
+    #[tokio::test]
+    async fn machine_client_unreachable_endpoint_is_http_error() {
+        let sa = temp_sa_token("unreach", "sa");
+        let client = MachineJwtClient::new("http://127.0.0.1:1/t", sa.clone(), "s");
+        assert!(matches!(
+            client.get_token().await.unwrap_err(),
+            ServiceAuthError::Http(_)
+        ));
+        let _ = std::fs::remove_file(sa);
+    }
 }
