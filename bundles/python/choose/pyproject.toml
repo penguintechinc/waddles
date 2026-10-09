@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-choose"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!choose a | b | c` (or space-separated) -> a random pick from the caller's own options. Relay only, no kv/db state. Python equivalent of bundles/python/pyping, modeled on its hand-built (not bundle_compiler-routed) structure, same shape as bundles/python/eightball."
 requires-python = ">=3.13"
 dependencies = []

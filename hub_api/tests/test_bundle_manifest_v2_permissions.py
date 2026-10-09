@@ -444,3 +444,14 @@ def test_core_kv_manifests_parse_to_structured_storage_kv_declaration() -> None:
         assert manifest.permissions == (), f"{path}: leftover bare strings"  # type: ignore[attr-defined]
         structured += 1
     assert structured >= 30
+
+
+@pytest.mark.parametrize("name", ["chat", "choose", "eightball", "poll", "roll", "slap", "wave"])
+def test_flag_gated_python_bundles_declare_flags_read(name: str) -> None:
+    """Bundles calling `feature_enabled` must declare `flags.read` (host gate fails closed)."""
+    root = pathlib.Path(__file__).resolve().parents[2] / "bundles" / "python" / name
+    assert "feature_enabled(" in (root / "src" / "app.py").read_text()
+    for fname in ("bundle.yaml", "hub-manifest.yaml"):
+        raw = yaml.safe_load((root / fname).read_text())
+        ids = [e["id"] for e in raw["permissions"]]
+        assert "flags.read" in ids, f"{root / fname}: missing flags.read"
