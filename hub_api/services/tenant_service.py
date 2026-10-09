@@ -141,7 +141,8 @@ async def get_tenant_communities(
     limit = min(100, max(1, limit))
     offset = (page - 1) * limit
 
-    query = dal.communities.tenant_id == tenant_id
+    # `id > 0` excludes the tenant-wide sentinel community (id 0, seed_core_bundles.py).
+    query = (dal.communities.tenant_id == tenant_id) & (dal.communities.id > 0)
     total = await async_dal.count_async(query)
     rows = await async_dal.select_async(
         dal(query),

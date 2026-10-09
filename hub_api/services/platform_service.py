@@ -177,7 +177,8 @@ async def list_communities(
     limit = min(100, max(1, limit))
     offset = (page - 1) * limit
 
-    query = dal.communities.is_active == is_active
+    # `id > 0` excludes the tenant-wide sentinel community (id 0), incl. the is_active=False path.
+    query = (dal.communities.is_active == is_active) & (dal.communities.id > 0)
     if search:
         query &= dal.communities.name.like(
             f"%{search}%", case_sensitive=False
