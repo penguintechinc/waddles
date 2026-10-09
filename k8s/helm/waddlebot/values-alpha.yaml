@@ -82,9 +82,17 @@ infrastructure:
       type: ClusterIP
     persistence:
       size: 2Gi
+    # fix/seaweedfs-mem-httpprobe -- the former 512Mi limit OOMKilled under
+    # bundle-seed load (observed twice on alpha); on restart the S3 HTTP
+    # handler on s3Port wedged (TCP accepts, HTTP hangs) while the old
+    # tcpSocket-only probes stayed green, stalling the seeder's .wasm
+    # uploads. Raised to match values.yaml's base tier (proven-good via a
+    # live patch + restart: fast HTTP 403 confirmed, no more OOMKill under
+    # the same seed load) rather than carrying a separate, lower alpha tier
+    # for this one service.
     resources:
-      requests: { cpu: "50m", memory: "128Mi" }
-      limits: { cpu: "300m", memory: "512Mi" }
+      requests: { cpu: "200m", memory: "256Mi" }
+      limits: { cpu: "1000m", memory: "1Gi" }
     # feature/seaweedfs-object-storage -- alpha is exempt from the beta/gamma/production
     # fail guard (templates/infrastructure/seaweedfs.yaml) and may reference this
     # well-known secret name; the Secret itself is never committed -- provision it once
