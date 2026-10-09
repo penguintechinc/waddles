@@ -34,10 +34,11 @@ env:
   KIND_NODE_IMAGE: "kindest/node@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a" # v1.34.0
   CHART_DIR: "k8s/helm/waddlebot"
   NAMESPACE: "waddlebot"
-  # --wait also waits on post-install/post-upgrade hooks. core-bundle-seeder does
-  # real per-bundle work (~39 core bundles, 13+ min per k8s/helm/waddlebot/values.yaml
-  # pipeline.coreBundleSeeder.activeDeadlineSeconds) -- 5m could never cover it.
-  HELM_TIMEOUT: "35m"
+  # Helm always waits on hook Jobs for up to --timeout. core-bundle-seeder does real
+  # per-bundle work (~39 core bundles, 13+ min per k8s/helm/waddlebot/values.yaml
+  # pipeline.coreBundleSeeder.activeDeadlineSeconds) -- a 5m default could never cover
+  # it. Mirrors scripts/alpha-deploy.sh's own HELM_ARGS (--timeout 60m).
+  HELM_TIMEOUT: "60m"
   # Pinned to the v1.16.5 tag commit (GPG-signature-verified against cilium/cilium),
   # checksum-verified below -- kind ships kindnet, not Cilium, so every
   # CiliumNetworkPolicy the chart renders (security.md Kubernetes Network
@@ -171,11 +172,28 @@ jobs:
         id: install
         run: |
           set -euo pipefail
+          # NO --wait/--atomic on the helm call below, exactly like scripts/alpha-deploy.sh
+          # (load-bearing -- see its HELM_ARGS comment + scripts/check_alpha_deploy_no_wait.py):
+          # db-migrate is a post-install hook and hub-api only becomes Ready after it ran, so
+          # --wait (Helm blocks on Deployment readiness BEFORE post-install hooks) deadlocks a
+          # fresh install. Helm still awaits hook Jobs via --timeout; Deployment readiness is
+          # verified explicitly AFTER the hook phase by wait_rollouts.
+          wait_rollouts() {
+            local names count
+            names=$(kubectl get deployments -n "${NAMESPACE}" -o name)
+            count=$(echo "${names}" | grep -c . || true)
+            echo "deployments to wait on: ${count}"
+            [ "${count}" -gt 0 ] || { echo "::error::zero deployments found - denominator check failed"; exit 1; }
+            for d in ${names}; do
+              kubectl rollout status "${d}" -n "${NAMESPACE}" --timeout=15m
+            done
+          }
           helm install waddlebot "${CHART_DIR}" \
             --namespace "${NAMESPACE}" \
             -f "${CHART_DIR}/values-alpha.yaml" \
             -f "${CHART_DIR}/values-ci.yaml" \
-            --wait --timeout "${HELM_TIMEOUT}"
+            --timeout "${HELM_TIMEOUT}"
+          wait_rollouts
           status=$(helm status waddlebot -n "${NAMESPACE}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["status"])')
           echo "release status: ${status}"
           [ "${status}" = "deployed" ] || { echo "::error::release not deployed after install"; exit 1; }
@@ -241,11 +259,28 @@ jobs:
       - name: helm upgrade (same chart, no-op)
         run: |
           set -euo pipefail
+          # NO --wait/--atomic on the helm call below, exactly like scripts/alpha-deploy.sh
+          # (load-bearing -- see its HELM_ARGS comment + scripts/check_alpha_deploy_no_wait.py):
+          # db-migrate is a post-install hook and hub-api only becomes Ready after it ran, so
+          # --wait (Helm blocks on Deployment readiness BEFORE post-install hooks) deadlocks a
+          # fresh install. Helm still awaits hook Jobs via --timeout; Deployment readiness is
+          # verified explicitly AFTER the hook phase by wait_rollouts.
+          wait_rollouts() {
+            local names count
+            names=$(kubectl get deployments -n "${NAMESPACE}" -o name)
+            count=$(echo "${names}" | grep -c . || true)
+            echo "deployments to wait on: ${count}"
+            [ "${count}" -gt 0 ] || { echo "::error::zero deployments found - denominator check failed"; exit 1; }
+            for d in ${names}; do
+              kubectl rollout status "${d}" -n "${NAMESPACE}" --timeout=15m
+            done
+          }
           helm upgrade waddlebot "${CHART_DIR}" \
             --namespace "${NAMESPACE}" \
             -f "${CHART_DIR}/values-alpha.yaml" \
             -f "${CHART_DIR}/values-ci.yaml" \
-            --wait --timeout "${HELM_TIMEOUT}"
+            --timeout "${HELM_TIMEOUT}"
+          wait_rollouts
           status=$(helm status waddlebot -n "${NAMESPACE}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["status"])')
           [ "${status}" = "deployed" ] || { echo "::error::release not deployed after same-chart upgrade"; exit 1; }
 
@@ -305,7 +340,7 @@ jobs:
           set -euo pipefail
           # core-bundle-seeder (and auto-provision-keys) use hook-delete-policy
           # hook-succeeded, so their Jobs are GONE after a clean run -- helm's
-          # --wait already failed the install/upgrade if either failed. Prove they
+          # helm already failed the install/upgrade if either failed. Prove they
           # actually did their work by reading the resulting DB state instead of
           # a Job flag that can never exist.
           migrate_job=$(kubectl get jobs -n "${NAMESPACE}" -l app.kubernetes.io/component=db-migrate -o jsonpath='{.items[0].status.succeeded}')
@@ -438,6 +473,22 @@ jobs:
       - name: helm install base ref chart
         run: |
           set -euo pipefail
+          # NO --wait/--atomic on the helm call below, exactly like scripts/alpha-deploy.sh
+          # (load-bearing -- see its HELM_ARGS comment + scripts/check_alpha_deploy_no_wait.py):
+          # db-migrate is a post-install hook and hub-api only becomes Ready after it ran, so
+          # --wait (Helm blocks on Deployment readiness BEFORE post-install hooks) deadlocks a
+          # fresh install. Helm still awaits hook Jobs via --timeout; Deployment readiness is
+          # verified explicitly AFTER the hook phase by wait_rollouts.
+          wait_rollouts() {
+            local names count
+            names=$(kubectl get deployments -n "${NAMESPACE}" -o name)
+            count=$(echo "${names}" | grep -c . || true)
+            echo "deployments to wait on: ${count}"
+            [ "${count}" -gt 0 ] || { echo "::error::zero deployments found - denominator check failed"; exit 1; }
+            for d in ${names}; do
+              kubectl rollout status "${d}" -n "${NAMESPACE}" --timeout=15m
+            done
+          }
           kubectl create namespace "${NAMESPACE}"
           kubectl create secret generic waddlebot-platform-credentials \
             --namespace "${NAMESPACE}" \
@@ -448,17 +499,35 @@ jobs:
             --namespace "${NAMESPACE}" \
             -f "/tmp/base-chart/${CHART_DIR}/values-alpha.yaml" \
             -f "${CHART_DIR}/values-ci.yaml" \
-            --wait --timeout "${HELM_TIMEOUT}"
+            --timeout "${HELM_TIMEOUT}"
+          wait_rollouts
 
       - name: helm upgrade to PR chart
         run: |
           set -euo pipefail
+          # NO --wait/--atomic on the helm call below, exactly like scripts/alpha-deploy.sh
+          # (load-bearing -- see its HELM_ARGS comment + scripts/check_alpha_deploy_no_wait.py):
+          # db-migrate is a post-install hook and hub-api only becomes Ready after it ran, so
+          # --wait (Helm blocks on Deployment readiness BEFORE post-install hooks) deadlocks a
+          # fresh install. Helm still awaits hook Jobs via --timeout; Deployment readiness is
+          # verified explicitly AFTER the hook phase by wait_rollouts.
+          wait_rollouts() {
+            local names count
+            names=$(kubectl get deployments -n "${NAMESPACE}" -o name)
+            count=$(echo "${names}" | grep -c . || true)
+            echo "deployments to wait on: ${count}"
+            [ "${count}" -gt 0 ] || { echo "::error::zero deployments found - denominator check failed"; exit 1; }
+            for d in ${names}; do
+              kubectl rollout status "${d}" -n "${NAMESPACE}" --timeout=15m
+            done
+          }
           helm dependency build "${CHART_DIR}"
           helm upgrade waddlebot "${CHART_DIR}" \
             --namespace "${NAMESPACE}" \
             -f "${CHART_DIR}/values-alpha.yaml" \
             -f "${CHART_DIR}/values-ci.yaml" \
-            --wait --timeout "${HELM_TIMEOUT}"
+            --timeout "${HELM_TIMEOUT}"
+          wait_rollouts
           status=$(helm status waddlebot -n "${NAMESPACE}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["status"])')
           echo "release status after upgrade-path: ${status}"
           [ "${status}" = "deployed" ] || { echo "::error::release not deployed after base->PR upgrade"; exit 1; }
