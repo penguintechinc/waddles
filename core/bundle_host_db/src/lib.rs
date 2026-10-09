@@ -491,4 +491,313 @@ mod tests {
         let cache2 = Arc::clone(&cache);
         assert!(cache2.get("a").is_some());
     }
+
+    const ROW_ID: &str = "00000000-0000-0000-0000-000000000000";
+
+    fn stored_row() -> Row {
+        Row {
+            row_id: ROW_ID.to_string(),
+            version: 1,
+            columns: vec![],
+        }
+    }
+
+    /// A backend that answers every op with one fixed outcome, counting the
+    /// calls it receives and remembering the scope it was handed -- proves
+    /// what `DbHost` does before, around, and after the backend.
+    struct ScriptedBackend {
+        outcome: Result<(), DbError>,
+        calls: std::sync::atomic::AtomicUsize,
+        seen_scope: std::sync::Mutex<Option<DbScope>>,
+    }
+
+    impl ScriptedBackend {
+        fn new(outcome: Result<(), DbError>) -> Self {
+            Self {
+                outcome,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                seen_scope: std::sync::Mutex::new(None),
+            }
+        }
+
+        fn record(&self, scope: &DbScope) {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *self
+                .seen_scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(scope.clone());
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl DbBackend for ScriptedBackend {
+        fn insert<'a>(
+            &'a self,
+            _schema: &'a TableSchema,
+            scope: &'a DbScope,
+            _column_values: Vec<(String, DbValue)>,
+        ) -> BoxFuture<'a, Result<Row, DbError>> {
+            self.record(scope);
+            let out = self.outcome.clone().map(|()| stored_row());
+            Box::pin(async move { out })
+        }
+
+        fn get<'a>(
+            &'a self,
+            _schema: &'a TableSchema,
+            scope: &'a DbScope,
+            _row_id: &'a str,
+        ) -> BoxFuture<'a, Result<Row, DbError>> {
+            self.record(scope);
+            let out = self.outcome.clone().map(|()| stored_row());
+            Box::pin(async move { out })
+        }
+
+        fn update<'a>(
+            &'a self,
+            _schema: &'a TableSchema,
+            scope: &'a DbScope,
+            _row_id: &'a str,
+            _expected_version: u64,
+            _column_values: Vec<(String, DbValue)>,
+        ) -> BoxFuture<'a, Result<Row, DbError>> {
+            self.record(scope);
+            let out = self.outcome.clone().map(|()| stored_row());
+            Box::pin(async move { out })
+        }
+
+        fn delete<'a>(
+            &'a self,
+            _schema: &'a TableSchema,
+            scope: &'a DbScope,
+            _row_id: &'a str,
+            _expected_version: u64,
+        ) -> BoxFuture<'a, Result<(), DbError>> {
+            self.record(scope);
+            let out = self.outcome.clone();
+            Box::pin(async move { out })
+        }
+
+        fn query<'a>(
+            &'a self,
+            _schema: &'a TableSchema,
+            scope: &'a DbScope,
+            _limit: u32,
+            _offset: u32,
+            _order_by: Option<OrderBy>,
+        ) -> BoxFuture<'a, Result<Vec<Row>, DbError>> {
+            self.record(scope);
+            let out = self.outcome.clone().map(|()| vec![stored_row()]);
+            Box::pin(async move { out })
+        }
+    }
+
+    /// A backend whose every call never completes.
+    struct HangingBackend;
+
+    impl DbBackend for HangingBackend {
+        fn insert<'a>(
+            &'a self,
+            _schema: &'a TableSchema,
+            _scope: &'a DbScope,
+            _column_values: Vec<(String, DbValue)>,
+        ) -> BoxFuture<'a, Result<Row, DbError>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn get<'a>(
+            &'a self,
+            _schema: &'a TableSchema,
+            _scope: &'a DbScope,
+            _row_id: &'a str,
+        ) -> BoxFuture<'a, Result<Row, DbError>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn update<'a>(
+            &'a self,
+            _schema: &'a TableSchema,
+            _scope: &'a DbScope,
+            _row_id: &'a str,
+            _expected_version: u64,
+            _column_values: Vec<(String, DbValue)>,
+        ) -> BoxFuture<'a, Result<Row, DbError>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn delete<'a>(
+            &'a self,
+            _schema: &'a TableSchema,
+            _scope: &'a DbScope,
+            _row_id: &'a str,
+            _expected_version: u64,
+        ) -> BoxFuture<'a, Result<(), DbError>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn query<'a>(
+            &'a self,
+            _schema: &'a TableSchema,
+            _scope: &'a DbScope,
+            _limit: u32,
+            _offset: u32,
+            _order_by: Option<OrderBy>,
+        ) -> BoxFuture<'a, Result<Vec<Row>, DbError>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    const APP: &str = "waddles.bot.a";
+
+    /// Runs all five ops through `host` under `scope` and returns each
+    /// outcome reduced to its error (or `None` on success).
+    async fn run_every_op<B: DbBackend>(
+        host: &DbHost<B>,
+        scope: &DbScope,
+        schemas: &SchemaCache,
+        snapshot: &CapabilitySnapshot,
+    ) -> Vec<(&'static str, Option<DbError>)> {
+        vec![
+            (
+                "insert",
+                host.insert(scope, schemas, snapshot, vec![]).await.err(),
+            ),
+            (
+                "get",
+                host.get(scope, schemas, snapshot, ROW_ID).await.err(),
+            ),
+            (
+                "query",
+                host.query(scope, schemas, snapshot, 10, 0, None)
+                    .await
+                    .err(),
+            ),
+            (
+                "update",
+                host.update(scope, schemas, snapshot, ROW_ID, 1, vec![])
+                    .await
+                    .err(),
+            ),
+            (
+                "delete",
+                host.delete(scope, schemas, snapshot, ROW_ID, 1).await.err(),
+            ),
+        ]
+    }
+
+    fn provisioned() -> (SchemaCache, CapabilitySnapshot) {
+        let schemas = SchemaCache::new();
+        schemas.update(APP, sample_schema());
+        (schemas, granted_snapshot(APP))
+    }
+
+    #[tokio::test]
+    async fn every_op_succeeds_when_granted_and_provisioned() {
+        let host = DbHost::new(ScriptedBackend::new(Ok(())));
+        let (schemas, snapshot) = provisioned();
+        let scope = DbScope::new("acme", Some("main".to_string()), APP);
+
+        for (op, err) in run_every_op(&host, &scope, &schemas, &snapshot).await {
+            assert_eq!(err, None, "{op}");
+        }
+        assert_eq!(host.backend.call_count(), 5);
+
+        let rows = host
+            .query(&scope, &schemas, &snapshot, 10, 0, None)
+            .await
+            .unwrap();
+        assert_eq!(rows, vec![stored_row()]);
+        let row = host.get(&scope, &schemas, &snapshot, ROW_ID).await.unwrap();
+        assert_eq!(row, stored_row());
+    }
+
+    #[tokio::test]
+    async fn every_backend_error_reaches_the_caller_unchanged_for_every_op() {
+        let errors = [
+            DbError::Backend("db down".to_string()),
+            DbError::Timeout,
+            DbError::QuotaExceeded("rows".to_string()),
+            DbError::Conflict,
+            DbError::NotFound,
+            DbError::InvalidValue("v".to_string()),
+        ];
+        let (schemas, snapshot) = provisioned();
+        let scope = DbScope::new("acme", None, APP);
+
+        for expected in errors {
+            let host = DbHost::new(ScriptedBackend::new(Err(expected.clone())));
+            for (op, err) in run_every_op(&host, &scope, &schemas, &snapshot).await {
+                assert_eq!(err, Some(expected.clone()), "{op}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ungranted_app_never_reaches_the_backend_on_any_op() {
+        let host = DbHost::new(ScriptedBackend::new(Ok(())));
+        let schemas = SchemaCache::new();
+        schemas.update(APP, sample_schema());
+        let snapshot = CapabilitySnapshot::new(); // storage.tables never declared
+        let scope = DbScope::new("acme", None, APP);
+
+        for (op, err) in run_every_op(&host, &scope, &schemas, &snapshot).await {
+            assert_eq!(
+                err,
+                Some(DbError::InvalidColumn("not_granted".to_string())),
+                "{op}"
+            );
+        }
+        assert_eq!(
+            host.backend.call_count(),
+            0,
+            "denied calls must not reach the backend"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_granted_app_without_a_provisioned_table_never_reaches_the_backend() {
+        let host = DbHost::new(ScriptedBackend::new(Ok(())));
+        let schemas = SchemaCache::new(); // no table for this app
+        let snapshot = granted_snapshot(APP);
+        let scope = DbScope::new("acme", None, APP);
+
+        for (op, err) in run_every_op(&host, &scope, &schemas, &snapshot).await {
+            assert_eq!(err, Some(DbError::NoTable), "{op}");
+        }
+        assert_eq!(host.backend.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_backend_is_handed_exactly_the_invocation_scope() {
+        let (schemas, snapshot) = provisioned();
+        for scope in [
+            DbScope::new("acme", Some("main".to_string()), APP),
+            DbScope::new("other-tenant", None, APP),
+        ] {
+            let host = DbHost::new(ScriptedBackend::new(Ok(())));
+            host.get(&scope, &schemas, &snapshot, ROW_ID).await.unwrap();
+            let seen = host
+                .backend
+                .seen_scope
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            assert_eq!(seen, Some(scope));
+        }
+    }
+
+    /// Virtual time: the 5s per-call deadline fires instantly.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_backend_call_times_out_on_every_op() {
+        let host = DbHost::new(HangingBackend);
+        let (schemas, snapshot) = provisioned();
+        let scope = DbScope::new("acme", None, APP);
+
+        for (op, err) in run_every_op(&host, &scope, &schemas, &snapshot).await {
+            assert_eq!(err, Some(DbError::Timeout), "{op}");
+        }
+    }
 }
