@@ -188,14 +188,14 @@ def main() -> int:
                 status = "OK" if ok else "FAIL"
                 print(f"{status}  [{phase_label}] {d['kind']}/{name} (weight {weight}) serviceAccountName={sa}: {reason}")
                 if not ok:
-                    failures.append(f"[{phase_label}] {d['kind']}/{name} serviceAccountName={sa}: {reason}")
+                    failures.append(f"[{phase_label}] {d['kind']}/{name} serviceAccountName dependency")
 
             for ref in refs:
                 ok, reason = resolver(ref, ("ConfigMap", "Secret"), weight)
                 status = "OK" if ok else "FAIL"
                 print(f"{status}  [{phase_label}] {d['kind']}/{name} (weight {weight}) mounts {ref}: {reason}")
                 if not ok:
-                    failures.append(f"[{phase_label}] {d['kind']}/{name} mounts {ref}: {reason}")
+                    failures.append(f"[{phase_label}] {d['kind']}/{name} configmap/secret mount dependency")
 
     print(f"\nhooks examined: {examined}")
     if examined == 0:
@@ -204,6 +204,8 @@ def main() -> int:
 
     if failures:
         print(f"\nFAIL: {len(failures)} hook dependency ordering violation(s):", file=sys.stderr)
+        # Dependency names (which may be Secret resource names) are deliberately
+        # not echoed here -- the per-dependency FAIL lines above carry them.
         for f in failures:
             print(f"  - {f}", file=sys.stderr)
         return 1
