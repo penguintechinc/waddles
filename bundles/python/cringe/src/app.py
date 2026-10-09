@@ -105,7 +105,8 @@ async def _handle(args: list[str], event: PlatformEvent) -> str:
         if len(args) > 1:
             try:
                 amount = int(args[1])
-            except ValueError:
+            except ValueError as exc:
+                log.info("cringe.invalid_amount", op=op, error=type(exc).__name__)
                 return "Usage: !cringe add [N] (N is a whole number)"
         if not 1 <= amount <= MAX_INCREMENT:
             return f"N must be between 1 and {MAX_INCREMENT}"
