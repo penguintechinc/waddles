@@ -1,0 +1,84 @@
+# Odoo / external-WaddleDB connector (hub_api/services/odoo_sync_service.py, Bar Citizen #15).
+# CronJob reusing the hub-api image with an overridden command. Disabled by default
+# (`pipeline.odooSync.enabled: false`) -- deploy-time kill switch; the per-tenant PostHog flag
+# waddles.bar_citizen.odoo_sync (default OFF) / WADDLES_ODOO_SYNC_ENABLED env baseline is the runtime gate.
+{{- if .Values.pipeline.odooSync.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-odoo-sync
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: odoo-sync
+spec:
+  schedule: {{ .Values.pipeline.odooSync.schedule | quote }}
+  # Never run two reconcile passes over the same pairing set concurrently -- each pass is
+  # already idempotent (desired-vs-current diff), but overlapping passes would double the
+  # Twitch/Discord API call volume for no benefit.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.pipeline.odooSync.backoffLimit }}
+      activeDeadlineSeconds: {{ .Values.pipeline.odooSync.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: odoo-sync
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+          {{- include "waddlebot.imagePullSecrets" . | nindent 10 }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          # Waits on hub-api's own /ready (same signal core-bundle-seeder-job.yaml/
+          # migrations-job.yaml wait on) -- this worker reads/writes the same hub-api-owned
+          # control-plane tables (guild_tenant_pairings, community_role_sync_bindings,
+          # community_members, ...), so it never races hub-api's own startup schema
+          # bootstrap on a fresh install.
+          initContainers:
+          {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 10 }}
+          containers:
+          - name: odoo-sync
+            image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.global.imageTag) }}"
+            imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+            # Overrides hub-api's own `ENTRYPOINT`/`CMD` (hypercorn) -- same services/ tree,
+            # a different standalone entrypoint (odoo_sync_service.py's own `main()`).
+            command: ["python3", "-m", "services.odoo_sync_service"]
+            securityContext:
+              {{- toYaml .Values.securityContext | nindent 14 }}
+            envFrom:
+            - configMapRef:
+                name: {{ include "waddlebot.fullname" . }}-config
+            - secretRef:
+                name: {{ include "waddlebot.fullname" . }}-secrets
+            # feature/alpha-localized-posthog -- POSTHOG_API_KEY/POSTHOG_KEY auto-provisioned
+            # once posthog.enabled=true (alpha); this worker's own `_flag_enabled()` resolves
+            # FEATURE_BAR_CITIZEN_ROLE_SYNC through the same entitlement client hub-api uses.
+            # `optional: true`: safe before the bootstrap Job has run, or when disabled.
+            - secretRef:
+                name: {{ .Values.posthog.bootstrap.secretName | default "posthog-bootstrap-secret" }}
+                optional: true
+            env:
+            # Odoo creds ONLY from the operator-managed Secret (never rendered by this chart).
+            - name: WADDLES_ODOO_SYNC_ENABLED
+              value: {{ .Values.pipeline.odooSync.envBaseline | default false | quote }}
+            {{- range $k := list "ODOO_URL" "ODOO_DB" "ODOO_LOGIN" "ODOO_API_KEY" "ODOO_SYNC_REF_KEY" }}
+            - name: {{ $k }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.pipeline.odooSync.secretName | quote }}
+                  key: {{ $k }}
+            {{- end }}
+            resources:
+              {{- toYaml .Values.pipeline.odooSync.resources | nindent 14 }}
+            volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          volumes:
+          - name: tmp
+            emptyDir: {}
+{{- end }}
