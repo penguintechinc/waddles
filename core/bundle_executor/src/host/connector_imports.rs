@@ -13,15 +13,26 @@
 //! not the same Rust type despite matching field-for-field).
 //!
 //! `identity` is connector-only (never present in `stage`/`stage-v1_1`,
-//! spec S3.3). Its real implementation -- a direct, RO-replica Postgres
-//! read through the `waddles_connector_pii_reader` role, with the caching/
-//! rate-limiting/audit trail spec S3.4 specifies -- is out of this task's
-//! scope (phase 1 task A is the WIT world + per-component `Linker` gate,
-//! not the identity backend). `identity::Host::lookup` below is a
-//! deliberate, honest stub: it always returns `Error::Backend`, never
-//! panics, and is reachable ONLY when `VerifiedManifest::may_link_identity`
-//! already passed (`crate::engine::build_linker_for`) -- linking, not this
-//! stub's behavior, is what this task tests.
+//! spec S3.3). `identity::Host::lookup` below delegates over the same
+//! host-API wire bridge (`crate::host::imports::call`) every other import
+//! in this module uses, reusing `CapabilityKind::Db` (spec S3.3's
+//! RO-replica-backed lookup is fundamentally a database read) -- there is
+//! no `Identity` variant in `penguin-bundle-host`'s `CapabilityKind` enum
+//! (external `penguin-libs` dependency), and adding one is a `penguin-libs`
+//! change out of this repo's scope. The actual RO-replica query --
+//! tenant-scoped, cached (TTL + erasure/rename invalidation), rate-limited
+//! per connector digest, audited counts-only against
+//! `waddles_connector_pii_reader` (migration
+//! `0037_connector_pii_reader_role`) -- is implemented by whichever
+//! process's capability handler answers `CapabilityKind::Db`/`"identity.lookup"`
+//! (today a `not_implemented` seam for every `Db` call, e.g.
+//! `core/svc_process/src/capabilities.rs`); wiring that handler in
+//! `svc_ingest`/`svc_action` is the next phase-1 task, not this one. This
+//! function's own job -- and what it's tested for -- is delegating
+//! faithfully and mapping every wire outcome to the exact WIT
+//! `identity::Error` variant spec S1 defines, reachable ONLY when
+//! `VerifiedManifest::may_link_identity` already passed
+//! (`crate::engine::build_linker_for`).
 
 use tracing::{debug, warn};
 
@@ -192,21 +203,152 @@ impl flags::Host for ExecState {
 }
 
 impl identity::Host for ExecState {
-    /// Deliberate stub -- see this module's doc comment. Reachable only
-    /// when `crate::manifest::VerifiedManifest::may_link_identity` already
-    /// passed at `Linker`-build time (spec S3.2.1 gate 2); the RO-replica
-    /// read, cache, rate limit, and audit trail (spec S3.3/S3.4) are a
-    /// later task in this design's phased rollout, not this one.
+    /// See this module's doc comment: delegates over the standard
+    /// `CapabilityKind::Db`/`"identity.lookup"` wire round trip. Reachable
+    /// only when `crate::manifest::VerifiedManifest::may_link_identity`
+    /// already passed at `Linker`-build time (spec S3.2.1 gate 2) -- a
+    /// `stage`/`stage-v1_1` component has no path to this function at all
+    /// (the `identity` interface isn't in that world's Linker), and a
+    /// `connector`-world component without `connector.pii.read` never gets
+    /// it linked either, so every call reaching here already passed both
+    /// gates.
     async fn lookup(
         &mut self,
-        _key: identity::IdentityKey,
+        key: identity::IdentityKey,
     ) -> Result<identity::IdentityRecord, identity::Error> {
-        warn!(
-            app_id = %self.app_id,
-            "identity.lookup called but the RO-replica backend is not yet wired (spec S3.3/S3.4, deferred to a later phase-1 task)"
-        );
-        Err(identity::Error::Backend(
-            "identity.lookup backend not yet implemented".to_string(),
-        ))
+        let args = match &key {
+            identity::IdentityKey::Uuid(uuid) => {
+                serde_json::json!({ "kind": "uuid", "uuid": uuid })
+            }
+            identity::IdentityKey::PlatformIdentity((platform, platform_user_id)) => {
+                serde_json::json!({
+                    "kind": "platform-identity",
+                    "platform": platform,
+                    "platform_user_id": platform_user_id,
+                })
+            }
+        };
+        match call(self, CapabilityKind::Db, "identity.lookup", args).await {
+            Ok(value) => serde_json::from_value::<IdentityRecordWire>(value)
+                .map(Into::into)
+                .map_err(|e| identity::Error::Backend(format!("malformed host-result: {e}"))),
+            Err(e) => {
+                warn!(app_id = %self.app_id, error = %e, "identity.lookup host-call failed");
+                Err(connector_identity_error_from(e))
+            }
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct IdentityRecordWire {
+    uuid: String,
+    linked: bool,
+    #[serde(default)]
+    handle: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+impl From<IdentityRecordWire> for identity::IdentityRecord {
+    fn from(w: IdentityRecordWire) -> Self {
+        identity::IdentityRecord {
+            uuid: w.uuid,
+            linked: w.linked,
+            handle: w.handle,
+            display_name: w.display_name,
+        }
+    }
+}
+
+/// Maps a wire-level [`ExecutorError`] to the exact WIT `identity::Error`
+/// variant spec S1 defines -- `not-found` (erased or never existed) and
+/// `rate-limited` (per-connector-digest token bucket exhausted, spec S3.4)
+/// are distinct, meaningful outcomes a connector bundle must branch on, not
+/// collapsed into a generic `backend` error.
+fn connector_identity_error_from(err: ExecutorError) -> identity::Error {
+    match &err {
+        ExecutorError::HostCallDenied { code, message, .. } => match code.as_str() {
+            "denied" => identity::Error::Denied(message.clone()),
+            "not_found" => identity::Error::NotFound,
+            "rate_limited" => identity::Error::RateLimited(message.parse().unwrap_or(0)),
+            _ => identity::Error::Backend(message.clone()),
+        },
+        other => identity::Error::Backend(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn denied_code_maps_to_denied_variant() {
+        let err = ExecutorError::HostCallDenied {
+            code: "denied".to_string(),
+            message: "no grant".to_string(),
+            capability: "db",
+            op: "identity.lookup",
+        };
+        assert!(matches!(
+            connector_identity_error_from(err),
+            identity::Error::Denied(m) if m == "no grant"
+        ));
+    }
+
+    #[test]
+    fn not_found_code_maps_to_not_found_variant() {
+        let err = ExecutorError::HostCallDenied {
+            code: "not_found".to_string(),
+            message: "erased".to_string(),
+            capability: "db",
+            op: "identity.lookup",
+        };
+        assert!(matches!(
+            connector_identity_error_from(err),
+            identity::Error::NotFound
+        ));
+    }
+
+    #[test]
+    fn rate_limited_code_maps_to_rate_limited_variant_with_parsed_retry_after() {
+        let err = ExecutorError::HostCallDenied {
+            code: "rate_limited".to_string(),
+            message: "5".to_string(),
+            capability: "db",
+            op: "identity.lookup",
+        };
+        assert!(matches!(
+            connector_identity_error_from(err),
+            identity::Error::RateLimited(5)
+        ));
+    }
+
+    #[test]
+    fn rate_limited_with_unparseable_message_defaults_to_zero_retry_after() {
+        let err = ExecutorError::HostCallDenied {
+            code: "rate_limited".to_string(),
+            message: "not-a-number".to_string(),
+            capability: "db",
+            op: "identity.lookup",
+        };
+        assert!(matches!(
+            connector_identity_error_from(err),
+            identity::Error::RateLimited(0)
+        ));
+    }
+
+    #[test]
+    fn unknown_code_maps_to_backend_variant() {
+        let err = ExecutorError::HostCallDenied {
+            code: "something_else".to_string(),
+            message: "oops".to_string(),
+            capability: "db",
+            op: "identity.lookup",
+        };
+        assert!(matches!(
+            connector_identity_error_from(err),
+            identity::Error::Backend(m) if m == "oops"
+        ));
     }
 }
