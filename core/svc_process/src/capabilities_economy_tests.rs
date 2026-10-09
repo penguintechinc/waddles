@@ -12,7 +12,7 @@ use bundle_capability_gate::{
     GrantScopeKey, GrantSet, GrantedPermission, InMemoryGrantSnapshot,
     InMemoryInstancePolicySnapshot, InMemoryMembership, InMemoryQuotaLedger,
 };
-use bundle_host_economy::LeaderboardEntry;
+use bundle_host_economy::{EconomyCaps, LeaderboardEntry};
 use bundle_host_http::egress::{ReqwestTransport, StaticFlag};
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -81,9 +81,21 @@ impl EconomyStore for RecordingStore {
         stake: i64,
         payout: i64,
         max_bet: i64,
+        caps: EconomyCaps,
     ) -> bundle_host_economy::BoxFuture<'a, Result<i64, EconomyError>> {
         Box::pin(async move {
-            self.record("wager", scope, vec![user], vec![stake, payout, max_bet]);
+            self.record(
+                "wager",
+                scope,
+                vec![user],
+                vec![
+                    stake,
+                    payout,
+                    max_bet,
+                    caps.per_user_daily_max,
+                    caps.per_scope_daily_max,
+                ],
+            );
             self.take_i64()
         })
     }
@@ -94,9 +106,20 @@ impl EconomyStore for RecordingStore {
         to: Uuid,
         amount: i64,
         max_amount: i64,
+        caps: EconomyCaps,
     ) -> bundle_host_economy::BoxFuture<'a, Result<(), EconomyError>> {
         Box::pin(async move {
-            self.record("transfer", scope, vec![from, to], vec![amount, max_amount]);
+            self.record(
+                "transfer",
+                scope,
+                vec![from, to],
+                vec![
+                    amount,
+                    max_amount,
+                    caps.per_user_daily_max,
+                    caps.per_scope_daily_max,
+                ],
+            );
             self.next_unit.lock().unwrap().take().unwrap_or(Ok(()))
         })
     }
@@ -273,8 +296,9 @@ async fn wager_reaches_the_store_with_host_derived_scope_and_the_declared_cap() 
     assert_eq!(op, "wager");
     assert_eq!(scope, &expected_scope());
     assert_eq!(users, &vec![f.alice]);
-    // stake, payout, and the cap = the GRANT's declared 50, not the guest's.
-    assert_eq!(nums, &vec![10, 25, 50]);
+    // stake, payout, the per-call cap = the GRANT's declared 50 (not the
+    // guest's), then the catalog's durable per-user / per-scope daily caps.
+    assert_eq!(nums, &vec![10, 25, 50, 10_000, 250_000]);
 }
 
 #[tokio::test]
@@ -296,7 +320,9 @@ async fn transfer_reaches_the_store_with_both_users_and_the_declared_cap() {
     assert_eq!(op, "transfer");
     assert_eq!(scope, &expected_scope());
     assert_eq!(users, &vec![f.alice, f.bob]);
-    assert_eq!(nums, &vec![30, 200]);
+    // amount, the grant's declared max_amount, then the transfer family's own
+    // durable per-sender / per-scope daily caps.
+    assert_eq!(nums, &vec![30, 200, 5_000, 100_000]);
 }
 
 #[tokio::test]
@@ -712,6 +738,34 @@ async fn economy_ops_do_not_ride_the_storage_tables_or_reputation_permission() {
 }
 
 #[test]
+fn durable_caps_match_the_catalog_per_family_and_fail_closed_otherwise() {
+    assert_eq!(
+        economy_caps(PermissionFamily::EconomyWager),
+        EconomyCaps {
+            per_user_daily_max: 10_000,
+            per_scope_daily_max: 250_000
+        }
+    );
+    assert_eq!(
+        economy_caps(PermissionFamily::EconomyTransfer),
+        EconomyCaps {
+            per_user_daily_max: 5_000,
+            per_scope_daily_max: 100_000
+        }
+    );
+    // A non-EconomyAmount family refuses everything rather than guessing.
+    for family in [PermissionFamily::EconomyRead, PermissionFamily::StorageKv] {
+        assert_eq!(
+            economy_caps(family),
+            EconomyCaps {
+                per_user_daily_max: 0,
+                per_scope_daily_max: 0
+            }
+        );
+    }
+}
+
+#[test]
 fn the_economy_amount_quota_is_not_reputations() {
     let Quota::EconomyAmount {
         per_call_abs_max, ..
@@ -734,6 +788,11 @@ fn the_economy_amount_quota_is_not_reputations() {
 #[test]
 fn economy_wire_error_helpers_cover_every_variant() {
     for (err, code) in [
+        (EconomyError::UserQuotaExceeded { cap: 1 }, "quota_exceeded"),
+        (
+            EconomyError::ScopeQuotaExceeded { cap: 1 },
+            "quota_exceeded",
+        ),
         (EconomyError::NotAMember, "not_a_member"),
         (
             EconomyError::InsufficientFunds { balance: 1 },

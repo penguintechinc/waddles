@@ -67,7 +67,7 @@ use bundle_host_db::{
     CapabilitySnapshot as DbCapabilitySnapshot, DbError, DbHost, DbScope, DbValue, PostgresBackend,
     SchemaCache,
 };
-use bundle_host_economy::{EconomyError, EconomyScope, EconomyStore};
+use bundle_host_economy::{EconomyCaps, EconomyError, EconomyScope, EconomyStore};
 use bundle_host_http::egress::{EgressGuard, EgressRuleRow, EgressRuleSource};
 use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use bundle_host_reputation::{ReputationCaps, ReputationError, ReputationScope, ReputationStore};
@@ -113,6 +113,29 @@ fn reputation_error_to_host(err: ReputationError) -> HostResultError {
         return denied("backend", "reputation store backend error");
     }
     denied(err.wire_code(), err.to_string())
+}
+
+/// The durable rolling-24h aggregate caps the store enforces for a
+/// money-moving economy permission -- the catalog's own
+/// `per_user_daily_abs_max` / `per_scope_daily_abs_max`, so the gate's
+/// in-memory quota and the store's durable caps can never disagree about the
+/// ceilings. Any non-`EconomyAmount` shape (a wiring bug, unit-tested away in
+/// the gate crate) caps both at zero, refusing every call rather than guessing.
+fn economy_caps(family: PermissionFamily) -> EconomyCaps {
+    match family.catalog_entry().default_quota {
+        Quota::EconomyAmount {
+            per_user_daily_abs_max,
+            per_scope_daily_abs_max,
+            ..
+        } => EconomyCaps {
+            per_user_daily_max: per_user_daily_abs_max,
+            per_scope_daily_max: per_scope_daily_abs_max,
+        },
+        _ => EconomyCaps {
+            per_user_daily_max: 0,
+            per_scope_daily_max: 0,
+        },
+    }
 }
 
 /// Maps a store [`EconomyError`] onto the `{code, message}` wire error the
@@ -500,9 +523,10 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// grant, declared `max_bet`/`max_amount`, the economy's own amount quotas,
     /// instance policy and the membership pre-filter (every named user) all run
     /// before anything else can leak state; (4) wiring/flag state; (5) the
-    /// store, which re-verifies membership and enforces the cap -- computed
-    /// HERE from the grant's declared bound clamped to the catalog ceiling, never
-    /// from guest input -- inside its own atomic write. Scope (tenant/community/
+    /// store, which re-verifies membership and enforces the per-call cap --
+    /// computed HERE from the grant's declared bound clamped to the catalog
+    /// ceiling, never from guest input -- and the durable per-user/per-scope
+    /// rolling-24h caps ([`economy_caps`]) inside its own atomic write. Scope (tenant/community/
     /// app) is always `self`'s host-derived scope, never an argument.
     async fn handle_economy(
         &self,
@@ -636,7 +660,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                     .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
                 wiring
                     .store
-                    .wager(&scope, user, stake, payout, cap)
+                    .wager(&scope, user, stake, payout, cap, economy_caps(family))
                     .await
                     .map(|balance| serde_json::json!({ "balance": balance }))
             }
@@ -647,7 +671,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                 let to = counterparty.unwrap_or_default();
                 wiring
                     .store
-                    .transfer(&scope, user, to, amount, cap)
+                    .transfer(&scope, user, to, amount, cap, economy_caps(family))
                     .await
                     .map(|()| serde_json::json!({}))
             }

@@ -41,6 +41,16 @@
 //! not exceed `stake * `[`MAX_PAYOUT_MULTIPLE`] -- the bundle decides the game
 //! outcome, so the host bounds how much a single call can mint.
 //!
+//! Both rolling-24h daily aggregates ([`EconomyCaps`]: per user, per
+//! (tenant, community, app)) are ALSO enforced durably here, derived from the
+//! append-only ledger inside the write transaction under a transaction-scoped
+//! advisory lock keyed on `(tenant, community, app, wager|transfer)`: the
+//! gate's in-memory copy resets on restart and multiplies across replicas, the
+//! ledger does not. The lock is always the FIRST lock a transaction takes (one
+//! per transaction), so the lock order is uniform and cannot cycle with the
+//! row locks. Only APPLIED movements count (a refused call writes no ledger
+//! row and so consumes no budget).
+//!
 //! # Scope derivation
 //!
 //! The bundle supplies only target user UUID(s) and amounts. `tenant_id`,
@@ -72,6 +82,21 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// A single wager's payout may be at most this many times its stake.
 pub const MAX_PAYOUT_MULTIPLE: i64 = 100;
+
+/// The two durable rolling-24h aggregate ceilings one money-moving call is
+/// checked against (the catalog's `Quota::EconomyAmount`
+/// `per_user_daily_abs_max` / `per_scope_daily_abs_max` for the permission
+/// being exercised, passed in by the stage). A struct rather than two bare
+/// `i64`s so they can never be transposed at a call site.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct EconomyCaps {
+    /// Max rolling-24h sum of stakes (wager) / amounts sent (transfer) for one
+    /// acting user within one app and community.
+    pub per_user_daily_max: i64,
+    /// Max rolling-24h sum of stakes (wager) / amounts sent (transfer) by one
+    /// app across the whole (tenant, community).
+    pub per_scope_daily_max: i64,
+}
 
 /// Largest accepted leaderboard page.
 pub const MAX_LEADERBOARD_LIMIT: u32 = 100;
@@ -107,6 +132,15 @@ pub enum EconomyError {
     /// The stake/amount (or a payout) exceeds the enforced cap `cap`.
     #[error("amount exceeds the enforced cap ({cap})")]
     OverCap { cap: i64 },
+    /// The acting user's rolling-24h total for this app/community would pass
+    /// `cap`. Surfaces under the same stable `quota_exceeded` code the gate's
+    /// in-memory per-user check uses.
+    #[error("rolling-24h per-user economy cap ({cap}) would be exceeded")]
+    UserQuotaExceeded { cap: i64 },
+    /// This app's rolling-24h total across the whole (tenant, community) would
+    /// pass `cap`. Same `quota_exceeded` code as the gate's per-scope check.
+    #[error("rolling-24h per-scope economy cap ({cap}) would be exceeded")]
+    ScopeQuotaExceeded { cap: i64 },
     /// Malformed argument (non-positive amount, self-transfer, bad limit, ...).
     #[error("invalid argument: {0}")]
     Invalid(String),
@@ -122,6 +156,7 @@ impl EconomyError {
             Self::NotAMember => "not_a_member",
             Self::InsufficientFunds { .. } => "insufficient_funds",
             Self::OverCap { .. } => "over_cap",
+            Self::UserQuotaExceeded { .. } | Self::ScopeQuotaExceeded { .. } => "quota_exceeded",
             Self::Invalid(_) => "invalid_args",
             Self::Backend(_) => "backend",
         }
@@ -158,9 +193,10 @@ pub trait EconomyStore: Send + Sync {
     ) -> BoxFuture<'a, Result<i64, EconomyError>>;
 
     /// Atomically debits `stake` and credits `payout` (net `payout - stake`)
-    /// and returns the NEW balance. `max_bet` is the host-computed stake cap.
-    /// Requires `1 <= stake <= max_bet`, `0 <= payout <=
-    /// stake * `[`MAX_PAYOUT_MULTIPLE`], and `balance >= stake`.
+    /// and returns the NEW balance. `max_bet` is the host-computed stake cap;
+    /// `caps` the durable daily aggregates. Requires `1 <= stake <= max_bet`,
+    /// `0 <= payout <= stake * `[`MAX_PAYOUT_MULTIPLE`], `balance >= stake`,
+    /// and the stake to fit both rolling-24h caps.
     fn wager<'a>(
         &'a self,
         scope: &'a EconomyScope,
@@ -168,10 +204,12 @@ pub trait EconomyStore: Send + Sync {
         stake: i64,
         payout: i64,
         max_bet: i64,
+        caps: EconomyCaps,
     ) -> BoxFuture<'a, Result<i64, EconomyError>>;
 
     /// Atomically moves `amount` from `from` to `to` (both must be active
-    /// members, `from != to`). `max_amount` is the host-computed cap.
+    /// members, `from != to`). `max_amount` is the host-computed per-call cap;
+    /// `caps` the durable daily aggregates, charged against the SENDER.
     fn transfer<'a>(
         &'a self,
         scope: &'a EconomyScope,
@@ -179,6 +217,7 @@ pub trait EconomyStore: Send + Sync {
         to: uuid::Uuid,
         amount: i64,
         max_amount: i64,
+        caps: EconomyCaps,
     ) -> BoxFuture<'a, Result<(), EconomyError>>;
 
     /// The community's top `limit` (`1..=`[`MAX_LEADERBOARD_LIMIT`]) active
@@ -301,6 +340,15 @@ mod tests {
             "insufficient_funds"
         );
         assert_eq!(EconomyError::OverCap { cap: 9 }.wire_code(), "over_cap");
+        // Both durable aggregate breaches share the gate's own stable code.
+        assert_eq!(
+            EconomyError::UserQuotaExceeded { cap: 1 }.wire_code(),
+            "quota_exceeded"
+        );
+        assert_eq!(
+            EconomyError::ScopeQuotaExceeded { cap: 1 }.wire_code(),
+            "quota_exceeded"
+        );
         assert_eq!(
             EconomyError::Invalid(String::new()).wire_code(),
             "invalid_args"

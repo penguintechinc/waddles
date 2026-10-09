@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0044_bundle_economy_store (issue #714).
+"""Real-Postgres tests for 0047_bundle_economy_store (issue #714).
 
 Runs the actual Alembic chain to `head` in an ephemeral container (see
 `pg_docker.py`) and asserts the schema, the non-negative balance backstop, the
@@ -23,12 +23,14 @@ requires_docker = pytest.mark.skipif(
     not DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
 )
 
-_MIGRATION_PATH = Path(__file__).resolve().parents[1] / "versions" / "0044_bundle_economy_store.py"
+_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[1] / "versions" / "0047_bundle_economy_store.py"
+)
 _ROLE = "waddles_economy_runtime"
 
 
 def _load_migration():  # type: ignore[no-untyped-def]
-    spec = importlib.util.spec_from_file_location("migration_0044", _MIGRATION_PATH)
+    spec = importlib.util.spec_from_file_location("migration_0047", _MIGRATION_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -36,10 +38,10 @@ def _load_migration():  # type: ignore[no-untyped-def]
 
 
 class TestMigrationMetadata:
-    def test_chains_off_0043_reputation_store(self) -> None:
+    def test_chains_off_0046_reputation_store(self) -> None:
         migration = _load_migration()
-        assert migration.revision == "0044_bundle_economy_store"
-        assert migration.down_revision == "0043_bundle_reputation_store"
+        assert migration.revision == "0047_bundle_economy_store"
+        assert migration.down_revision == "0046_bundle_reputation_store"
 
     def test_revision_id_fits_alembic_version_num_varchar32(self) -> None:
         assert len(_load_migration().revision) <= 32
@@ -57,7 +59,7 @@ class TestMigrationMetadata:
 def pg_db() -> Iterator[PgTestDatabase]:
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0044-economy") as db:
+    with migrated_postgres("0047-economy") as db:
         yield db
 
 
@@ -107,7 +109,11 @@ class TestSchema:
                 "WHERE i.indrelid = 'economy_balances'::regclass AND i.indisprimary "
                 "ORDER BY array_position(i.indkey::int[], a.attnum)"
             )
-            assert [r[0] for r in cur.fetchall()] == ["tenant_id", "community_id", "user_uuid"]
+            assert [r[0] for r in cur.fetchall()] == [
+                "tenant_id",
+                "community_id",
+                "user_uuid",
+            ]
 
     def test_ledger_table_has_the_expected_columns(self, pg_db: PgTestDatabase) -> None:
         with _cursor(pg_db) as cur:
@@ -130,7 +136,9 @@ class TestSchema:
                 "occurred_at",
             }
 
-    def test_balance_check_rejects_a_negative_balance(self, pg_db: PgTestDatabase) -> None:
+    def test_balance_check_rejects_a_negative_balance(
+        self, pg_db: PgTestDatabase
+    ) -> None:
         with _cursor(pg_db) as cur:
             cur.execute("INSERT INTO tenants (slug) VALUES ('econ-t') RETURNING id")
             tid = cur.fetchone()[0]
@@ -168,7 +176,9 @@ class TestSchema:
                     (tid, cid),
                 )
 
-    def test_user_uuid_column_exists_and_is_shared_with_0043(self, pg_db: PgTestDatabase) -> None:
+    def test_user_uuid_column_exists_and_is_shared_with_reputation_and_identity(
+        self, pg_db: PgTestDatabase
+    ) -> None:
         with _cursor(pg_db) as cur:
             cur.execute(
                 "SELECT data_type, is_nullable FROM information_schema.columns "
@@ -179,10 +189,14 @@ class TestSchema:
     def test_public_has_no_access_to_either_table(self, pg_db: PgTestDatabase) -> None:
         with _cursor(pg_db) as cur:
             for table in ("economy_balances", "economy_ledger"):
-                cur.execute("SELECT has_table_privilege('public', %s, 'SELECT')", (table,))
+                cur.execute(
+                    "SELECT has_table_privilege('public', %s, 'SELECT')", (table,)
+                )
                 assert cur.fetchone() == (False,), table
 
-    def test_ddl_is_idempotent_a_second_application_succeeds(self, pg_db: PgTestDatabase) -> None:
+    def test_ddl_is_idempotent_a_second_application_succeeds(
+        self, pg_db: PgTestDatabase
+    ) -> None:
         sql = _load_migration()._SQL_PATH.read_text(encoding="utf-8")
         with _cursor(pg_db) as cur:
             cur.execute(sql)
@@ -190,7 +204,9 @@ class TestSchema:
 
 @requires_docker
 class TestRolePrivilegeBoundary:
-    def test_role_exists_nologin_without_a_staged_password(self, pg_db: PgTestDatabase) -> None:
+    def test_role_exists_nologin_without_a_staged_password(
+        self, pg_db: PgTestDatabase
+    ) -> None:
         with _cursor(pg_db) as cur:
             cur.execute(
                 "SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole, rolreplication "
@@ -204,8 +220,10 @@ class TestRolePrivilegeBoundary:
     ) -> None:
         checks = {
             ("economy_balances", "SELECT"): True,
-            ("economy_balances", "INSERT"): True,
-            ("economy_balances", "UPDATE"): True,
+            # INSERT/UPDATE are COLUMN-scoped only (see the column test below):
+            # no whole-table privilege, so a row can never be minted or re-keyed.
+            ("economy_balances", "INSERT"): False,
+            ("economy_balances", "UPDATE"): False,
             ("economy_balances", "DELETE"): False,
             ("economy_ledger", "SELECT"): True,
             ("economy_ledger", "INSERT"): True,
@@ -226,17 +244,63 @@ class TestRolePrivilegeBoundary:
         }
         with _cursor(pg_db) as cur:
             for (table, priv), expected in checks.items():
-                cur.execute("SELECT has_table_privilege(%s, %s, %s)", (_ROLE, table, priv))
+                cur.execute(
+                    "SELECT has_table_privilege(%s, %s, %s)", (_ROLE, table, priv)
+                )
                 assert cur.fetchone() == (expected,), f"{table} {priv}"
+
+    def test_balances_writes_are_column_scoped_so_insert_cannot_mint(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        checks = {
+            # INSERT may name the identity columns only: balance takes its default 0.
+            ("tenant_id", "INSERT"): True,
+            ("community_id", "INSERT"): True,
+            ("user_uuid", "INSERT"): True,
+            ("balance", "INSERT"): False,
+            # UPDATE may move balance/updated_at only: no re-keying a row.
+            ("balance", "UPDATE"): True,
+            ("updated_at", "UPDATE"): True,
+            ("tenant_id", "UPDATE"): False,
+            ("community_id", "UPDATE"): False,
+            ("user_uuid", "UPDATE"): False,
+        }
+        with _cursor(pg_db) as cur:
+            for (column, priv), expected in checks.items():
+                cur.execute(
+                    "SELECT has_column_privilege(%s, 'economy_balances', %s, %s)",
+                    (_ROLE, column, priv),
+                )
+                assert cur.fetchone() == (expected,), f"{column} {priv}"
+
+    def test_scope_window_index_exists_for_the_durable_daily_aggregate(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        with _cursor(pg_db) as cur:
+            cur.execute(
+                "SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_economy_ledger_scope_window'"
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert "(tenant_id, community_id, app_id, kind, occurred_at)" in row[0]
 
     def test_member_table_select_is_column_scoped(self, pg_db: PgTestDatabase) -> None:
         with _cursor(pg_db) as cur:
-            for column in ("community_id", "user_uuid", "is_active", "removed_at", "left_at"):
+            for column in (
+                "community_id",
+                "user_uuid",
+                "is_active",
+                "removed_at",
+                "left_at",
+            ):
                 cur.execute(
                     "SELECT has_column_privilege(%s, 'community_members', %s, 'SELECT')",
                     (_ROLE, column),
                 )
                 assert cur.fetchone() == (True,), column
             # Whole-table SELECT (every column) must NOT be granted.
-            cur.execute("SELECT has_table_privilege(%s, 'community_members', 'SELECT')", (_ROLE,))
+            cur.execute(
+                "SELECT has_table_privilege(%s, 'community_members', 'SELECT')",
+                (_ROLE,),
+            )
             assert cur.fetchone() == (False,)

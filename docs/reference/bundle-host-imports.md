@@ -92,10 +92,14 @@ independent of reputation's 5-point `ReputationDelta` caps:
 
 The community-declared `max_bet`/`max_amount` is clamped to the per-call
 ceiling by one shared function (`PermissionFamily::economy_amount_bound`)
-used by both the gate and the stage's durable store call. Per-user and
-per-community daily aggregates are in-memory per process (like reputation's
-gate quota: reset on restart, not shared across replicas); the durable guards
-are the store's max-bet / payout-multiple caps and the non-negative CHECK.
+used by both the gate and the stage's durable store call. The gate's per-user
+and per-community daily aggregates are an in-memory fast pre-filter (reset on
+restart, not shared across replicas); the SAME two aggregates are enforced
+DURABLY in the store transaction from the append-only ledger (stakes for a
+wager, amounts sent for a transfer, per app and community), under a
+transaction-scoped advisory lock per `(tenant, community, app, wager|transfer)`,
+so a restart or a second replica can neither reset nor multiply them. Both
+paths answer the same `quota_exceeded` code. Only APPLIED movements count.
 
 ### Atomicity and server-side caps
 
@@ -104,6 +108,8 @@ are the store's max-bet / payout-multiple caps and the non-negative CHECK.
 | No overdraw, ever | `wager` is ONE statement: `UPDATE economy_balances SET balance = balance - stake + payout WHERE ... AND balance >= stake` (+ membership predicate + ledger insert as data-modifying CTEs). No read-modify-write; `CHECK (balance >= 0)` is the DB backstop |
 | Can't stake what you don't hold | the guard is `balance >= stake`, not `balance + payout >= stake` |
 | Max bet | stage computes `min(declared max_bet, ceiling)`; the store refuses `stake > max_bet` with `over-cap(max_bet)` before touching the DB |
+| Daily aggregates | durable, ledger-derived, advisory-locked (above); the lock is the first and only advisory lock a transaction takes, so lock order is uniform |
+| Membership | `community_members.is_active IS TRUE` -- a NULL `is_active` is NOT a member (fail-closed), in the gate snapshot loader, the live re-check, balance reads and the leaderboard |
 | Payout bound | `payout <= stake * 100` (`over-cap(stake*100)`); the bundle decides the outcome, the host bounds the mint |
 | Transfers | one txn: both members verified live, both rows locked in uuid order (no opposite-direction deadlock), then one statement debits, credits and writes both ledger rows |
 | Ledger | `economy_ledger` is append-only for the runtime role; one row per movement, written in the same statement |
@@ -112,10 +118,10 @@ are the store's max-bet / payout-multiple caps and the non-negative CHECK.
 
 | Item | Value |
 |---|---|
-| Schema | alembic `0044_bundle_economy_store` (DDL in `scripts/db/bundle_economy_store.sql`) |
-| Role | `waddles_economy_runtime`: SELECT/INSERT/UPDATE on `economy_balances` (no DELETE), SELECT/INSERT on `economy_ledger`, column SELECT on `community_members`/`communities`. Created NOLOGIN unless `DB_ECONOMY_PASSWORD` is set when migrating |
+| Schema | alembic `0047_bundle_economy_store` (DDL in `scripts/db/bundle_economy_store.sql`) |
+| Role | `waddles_economy_runtime`: SELECT on `economy_balances` with COLUMN-scoped INSERT (`tenant_id, community_id, user_uuid` only: a new row can only start at 0, INSERT cannot mint) and COLUMN-scoped UPDATE (`balance, updated_at` only: no re-keying), no DELETE; SELECT/INSERT on `economy_ledger` (append-only); column SELECT on `community_members`/`communities`. Created NOLOGIN unless `DB_ECONOMY_PASSWORD` is set when migrating |
 | svc_process env | `BUNDLE_ECONOMY_{HOST,PORT,NAME,USER}`, `BUNDLE_ECONOMY_PASSWORD`, `BUNDLE_ECONOMY_MEMBERSHIP_REFRESH_S`. Unset password or failed connect: every call is `not_implemented`, membership snapshot stays empty |
 | Flag | `waddles.bundle-economy-capability` (default OFF; OFF is `feature_disabled` after the gate) |
-| Identity | targets are `community_members.user_uuid`, NULL until hub-api's IdentityService assigns it (#429). NULL matches nobody: the capability is fail-closed until then |
+| Identity | targets are `community_members.user_uuid`, minted inside hub-api's PII boundary (#429, alembic `0045_identity_resolution` once on the branch; NULL until then and for unresolvable rows). NULL matches nobody: the capability is fail-closed for those rows |
 | Funding | this capability only MOVES balance. Initial funding / earn flows are a separate privileged hub-side writer; an unfunded member reads 0 |
 | Wire | like reputation: `capability = db`, ops `economy.balance|wager|transfer|max_bet|leaderboard`; numeric refusals (`insufficient_funds`, `over_cap`) carry the bare decimal as the wire message |

@@ -1,6 +1,6 @@
 //! Postgres-backed [`EconomyStore`], the membership-snapshot loader and the
 //! connection factory (all under the least-privilege `waddles_economy_runtime`
-//! role, alembic 0044).
+//! role, alembic 0047).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,7 +13,7 @@ use sea_orm::{
 use uuid::Uuid;
 
 use crate::{
-    metrics, validate_transfer, validate_wager, BoxFuture, EconomyError, EconomyScope,
+    metrics, validate_transfer, validate_wager, BoxFuture, EconomyCaps, EconomyError, EconomyScope,
     EconomyStore, LeaderboardEntry, MAX_LEADERBOARD_LIMIT,
 };
 
@@ -23,9 +23,12 @@ const STATEMENT_TIMEOUT_MS: u32 = 5_000;
 
 /// Active-membership predicate shared by every query: the user must be an
 /// active (not left, not removed) member of exactly this tenant's community.
+/// `community_members.is_active` is nullable, and a NULL is NOT an active
+/// member (`IS TRUE`, fail-closed -- the same reading every other authz path
+/// takes); never `COALESCE(.., TRUE)`.
 /// Bind order is always `$1 = tenant_id`, `$2 = community_id`, `$3 = user`.
 const MEMBER_PREDICATE: &str = "cm.community_id = $2 AND c.tenant_id = $1 AND cm.user_uuid = $3 \
-     AND COALESCE(cm.is_active, TRUE) AND cm.removed_at IS NULL AND cm.left_at IS NULL";
+     AND cm.is_active IS TRUE AND cm.removed_at IS NULL AND cm.left_at IS NULL";
 
 /// Non-secret connection settings (the password is passed separately to
 /// [`connect`] -- Token & Secret Hygiene).
@@ -71,11 +74,104 @@ fn scope_values(scope: &EconomyScope, user: Uuid) -> Vec<Value> {
     ]
 }
 
+/// Rejects a negative aggregate ceiling (a zero one is legal: it refuses every
+/// call, the fail-closed fallback the stage uses for an unrecognized catalog).
+fn validate_caps(caps: EconomyCaps) -> Result<(), EconomyError> {
+    if caps.per_user_daily_max < 0 || caps.per_scope_daily_max < 0 {
+        return Err(EconomyError::Invalid("daily caps must be >= 0".to_string()));
+    }
+    Ok(())
+}
+
 fn outcome_of<T>(r: &Result<T, EconomyError>) -> &'static str {
     match r {
         Ok(_) => "ok",
         Err(e) => e.wire_code(),
     }
+}
+
+/// Takes the transaction-scoped advisory lock serializing every money-moving
+/// call of `kind` (`wager` | `transfer`) for one `(tenant, community, app)`.
+/// Always the FIRST lock a transaction takes (one per transaction), so the lock
+/// order is uniform and cannot cycle with the row locks that follow. A hash
+/// collision only over-serializes two unrelated scopes.
+async fn lock_scope<C: ConnectionTrait>(
+    conn: &C,
+    scope: &EconomyScope,
+    kind: &str,
+) -> Result<(), EconomyError> {
+    conn.execute_raw(stmt(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        vec![Value::String(Some(format!(
+            "waddles.bundle_economy.scope:{}:{}:{}:{kind}",
+            scope.tenant_id, scope.community_id, scope.app_id
+        )))],
+    ))
+    .await
+    .map_err(backend_err)?;
+    Ok(())
+}
+
+/// Enforces both durable rolling-24h aggregates for `amount` about to be
+/// applied by `user`, derived from the append-only ledger of APPLIED movements
+/// (a refused call wrote no row and so consumed no budget). MUST run under
+/// [`lock_scope`] for the same `kind`, which is what makes the SUMs race-free.
+/// `ledger_kind`/`amount_expr` are internal constants (`wager`/`stake`,
+/// `transfer_out`/`-delta`), never caller input.
+async fn enforce_daily_caps<C: ConnectionTrait>(
+    conn: &C,
+    scope: &EconomyScope,
+    user: Uuid,
+    ledger_kind: &'static str,
+    amount_expr: &'static str,
+    amount: i64,
+    caps: EconomyCaps,
+) -> Result<(), EconomyError> {
+    let base = |per_user: bool| {
+        format!(
+            "SELECT COALESCE(SUM({amount_expr}), 0)::BIGINT AS used FROM economy_ledger \
+             WHERE tenant_id = $1 AND community_id = $2 AND app_id = $3 \
+               AND kind = '{ledger_kind}' AND occurred_at > NOW() - INTERVAL '24 hours'{}",
+            if per_user { " AND user_uuid = $4" } else { "" }
+        )
+    };
+    let scope_values = |per_user: bool| {
+        let mut v = vec![
+            Value::Int(Some(scope.tenant_id)),
+            Value::Int(Some(scope.community_id)),
+            Value::String(Some(scope.app_id.clone())),
+        ];
+        if per_user {
+            v.push(Value::Uuid(Some(user)));
+        }
+        v
+    };
+
+    let user_used: i64 = conn
+        .query_one_raw(stmt(&base(true), scope_values(true)))
+        .await
+        .map_err(backend_err)?
+        .ok_or_else(|| backend_err("per-user window SUM returned no row"))?
+        .try_get("", "used")
+        .map_err(backend_err)?;
+    if user_used.saturating_add(amount) > caps.per_user_daily_max {
+        return Err(EconomyError::UserQuotaExceeded {
+            cap: caps.per_user_daily_max,
+        });
+    }
+    let scope_used: i64 = conn
+        .query_one_raw(stmt(&base(false), scope_values(false)))
+        .await
+        .map_err(backend_err)?
+        .ok_or_else(|| backend_err("per-scope window SUM returned no row"))?
+        .try_get("", "used")
+        .map_err(backend_err)?;
+    if scope_used.saturating_add(amount) > caps.per_scope_daily_max {
+        return Err(EconomyError::ScopeQuotaExceeded {
+            cap: caps.per_scope_daily_max,
+        });
+    }
+    Ok(())
 }
 
 /// The production [`EconomyStore`].
@@ -157,8 +253,10 @@ impl PostgresEconomyStore {
         stake: i64,
         payout: i64,
         max_bet: i64,
+        caps: EconomyCaps,
     ) -> Result<i64, EconomyError> {
         validate_wager(stake, payout, max_bet)?;
+        validate_caps(caps)?;
 
         // The whole wager is ONE statement: the guarded UPDATE is the
         // atomic debit+credit (`balance >= stake` re-evaluated against the
@@ -196,6 +294,12 @@ impl PostgresEconomyStore {
         ))
         .await
         .map_err(backend_err)?;
+
+        // Durable daily aggregates first (under the per-scope advisory lock,
+        // always this transaction's first lock), then the one atomic statement.
+        lock_scope(&txn, scope, "wager").await?;
+        enforce_daily_caps(&txn, scope, user, "wager", "stake", stake, caps).await?;
+
         let Some(row) = txn
             .query_one_raw(stmt(&sql, values))
             .await
@@ -217,8 +321,10 @@ impl PostgresEconomyStore {
         to: Uuid,
         amount: i64,
         max_amount: i64,
+        caps: EconomyCaps,
     ) -> Result<(), EconomyError> {
         validate_transfer(from, to, amount, max_amount)?;
+        validate_caps(caps)?;
 
         let txn = self.conn.begin().await.map_err(backend_err)?;
         txn.execute_raw(stmt(
@@ -227,6 +333,11 @@ impl PostgresEconomyStore {
         ))
         .await
         .map_err(backend_err)?;
+
+        // 0. Per-scope advisory lock (this transaction's first lock) and the
+        // durable daily aggregates, charged against the SENDER.
+        lock_scope(&txn, scope, "transfer").await?;
+        enforce_daily_caps(&txn, scope, from, "transfer_out", "-delta", amount, caps).await?;
 
         // 1. Live membership of BOTH sides, inside the write transaction.
         let member_sql = format!(
@@ -248,8 +359,8 @@ impl PostgresEconomyStore {
         // lock both rows in deterministic (uuid) order so two opposite
         // transfers can never deadlock.
         txn.execute_raw(stmt(
-            "INSERT INTO economy_balances (tenant_id, community_id, user_uuid, balance) \
-             VALUES ($1, $2, $3, 0) ON CONFLICT (tenant_id, community_id, user_uuid) DO NOTHING",
+            "INSERT INTO economy_balances (tenant_id, community_id, user_uuid) \
+             VALUES ($1, $2, $3) ON CONFLICT (tenant_id, community_id, user_uuid) DO NOTHING",
             scope_values(scope, to),
         ))
         .await
@@ -342,7 +453,7 @@ impl PostgresEconomyStore {
                    ON cm.community_id = b.community_id AND cm.user_uuid = b.user_uuid \
                  JOIN communities c ON c.id = cm.community_id AND c.tenant_id = b.tenant_id \
                  WHERE b.tenant_id = $1 AND b.community_id = $2 \
-                   AND COALESCE(cm.is_active, TRUE) AND cm.removed_at IS NULL \
+                   AND cm.is_active IS TRUE AND cm.removed_at IS NULL \
                    AND cm.left_at IS NULL \
                  ORDER BY b.balance DESC, b.user_uuid ASC \
                  LIMIT $3",
@@ -408,10 +519,13 @@ impl EconomyStore for PostgresEconomyStore {
         stake: i64,
         payout: i64,
         max_bet: i64,
+        caps: EconomyCaps,
     ) -> BoxFuture<'a, Result<i64, EconomyError>> {
         Box::pin(async move {
             let start = Instant::now();
-            let result = self.wager_impl(scope, user, stake, payout, max_bet).await;
+            let result = self
+                .wager_impl(scope, user, stake, payout, max_bet, caps)
+                .await;
             metrics::record_call("wager", outcome_of(&result), start.elapsed().as_secs_f64());
             result
         })
@@ -424,11 +538,12 @@ impl EconomyStore for PostgresEconomyStore {
         to: Uuid,
         amount: i64,
         max_amount: i64,
+        caps: EconomyCaps,
     ) -> BoxFuture<'a, Result<(), EconomyError>> {
         Box::pin(async move {
             let start = Instant::now();
             let result = self
-                .transfer_impl(scope, from, to, amount, max_amount)
+                .transfer_impl(scope, from, to, amount, max_amount, caps)
                 .await;
             metrics::record_call(
                 "transfer",
@@ -477,7 +592,7 @@ pub async fn load_membership(
                     cm.user_uuid AS user_uuid \
              FROM community_members cm JOIN communities c ON c.id = cm.community_id \
              WHERE ($1::int IS NULL OR c.tenant_id = $1) AND cm.user_uuid IS NOT NULL \
-               AND COALESCE(cm.is_active, TRUE) AND cm.removed_at IS NULL \
+               AND cm.is_active IS TRUE AND cm.removed_at IS NULL \
                AND cm.left_at IS NULL \
              LIMIT $2",
             vec![

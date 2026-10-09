@@ -752,7 +752,7 @@ async fn try_build_reputation_wiring(
 /// Builds the `economy` bundle host capability's production wiring (issue
 /// #714, `spine::ProcessDeps::economy_wiring`): connects to the shared
 /// `waddles` Postgres as the least-privilege `waddles_economy_runtime` role
-/// (`bundle_host_economy::connect`, alembic 0044), spawns the
+/// (`bundle_host_economy::connect`, alembic 0047), spawns the
 /// membership-snapshot refresh task that feeds the gate's production
 /// `SnapshotMembership` (the SAME `Arc` the gate was built with --
 /// `grant_gate::build_production_gate`'s `membership` param), and gates every

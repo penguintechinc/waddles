@@ -458,3 +458,64 @@ async fn concurrent_wagers_through_the_whole_stack_never_overdraw() {
         10
     );
 }
+
+/// The daily aggregates are DURABLE: the world's gate has a fresh, empty
+/// in-memory quota ledger (as after a restart or on a second replica), yet the
+/// store still refuses once the ledger says the budget is spent. The ledger is
+/// seeded with already-applied wagers by the privileged writer.
+#[tokio::test]
+async fn the_durable_daily_caps_refuse_even_with_an_empty_in_memory_gate_ledger() {
+    let w = world().await;
+    let a = w.alice.to_string();
+    // alice already staked 9_990 of her 10_000 per-user daily budget.
+    exec(
+        &w.su,
+        &format!(
+            "INSERT INTO economy_ledger (tenant_id, community_id, app_id, user_uuid, kind, \
+                                         delta, stake, payout, balance_after) \
+             VALUES (1, 10, '{APP_ID}', '{}', 'wager', -9990, 9990, 0, 500)",
+            w.alice
+        ),
+    )
+    .await;
+    let err = w
+        .caps
+        .handle(call(
+            "economy.wager",
+            serde_json::json!({"user": a, "stake": 20, "payout": 0}),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "quota_exceeded", "per-user: {}", err.message);
+    // Exactly the remaining budget is allowed.
+    w.caps
+        .handle(call(
+            "economy.wager",
+            serde_json::json!({"user": a, "stake": 10, "payout": 0}),
+        ))
+        .await
+        .unwrap();
+
+    // Per-scope: other members' applied wagers fill the community's 250_000.
+    exec(
+        &w.su,
+        &format!(
+            "INSERT INTO economy_ledger (tenant_id, community_id, app_id, user_uuid, kind, \
+                                         delta, stake, payout, balance_after) \
+             VALUES (1, 10, '{APP_ID}', gen_random_uuid(), 'wager', -240000, 240000, 0, 1)"
+        ),
+    )
+    .await;
+    // scope total is now 9_990 + 10 + 240_000 = 250_000: nothing more fits.
+    let err = w
+        .caps
+        .handle(call(
+            "economy.wager",
+            serde_json::json!({"user": w.bob.to_string(), "stake": 1, "payout": 0}),
+        ))
+        .await
+        .unwrap_err();
+    // bob is unfunded; the quota refusal (checked first, under the scope lock)
+    // is what the bundle sees.
+    assert_eq!(err.code, "quota_exceeded", "per-scope: {}", err.message);
+}

@@ -1,5 +1,5 @@
 -- Bundle economy store DDL (issue #714) -- the single source of truth read by
--- BOTH `alembic/versions/0044_bundle_economy_store.py` (production schema) and
+-- BOTH `alembic/versions/0047_bundle_economy_store.py` (production schema) and
 -- `core/bundle_host_economy/tests/postgres_integration.rs` (`include_str!`), so
 -- the Rust store's SQL is always tested against the exact DDL that ships.
 -- Idempotent (IF NOT EXISTS / guarded DO blocks); lives under `scripts/db/`
@@ -11,12 +11,13 @@
 -- `waddles_economy_runtime` role.
 
 -- 1. Stable user identity on community membership. Idempotent re-statement of
--- alembic 0043's column so this file stands alone: `user_uuid` is the PII-free
--- token a bundle names as the target of an economy call; it is minted INSIDE
--- the hub-api PII boundary (IdentityService, #429) and is NULL until then.
--- NULL rows can never match a UUID lookup, so the economy capability is
--- fail-closed (every target reads as a non-member) until the identity layer
--- populates it.
+-- the column + unique index that alembic 0045_identity_resolution owns (and
+-- 0046 also restates), so this file stands alone for the Rust integration
+-- tests: `user_uuid` is the PII-free token a bundle names as the target of an
+-- economy call; it is minted INSIDE the hub-api PII boundary (IdentityService,
+-- #429) and is NULL for any member with no resolved identity. NULL rows can
+-- never match a UUID lookup, so the economy capability is fail-closed (such a
+-- target reads as a non-member).
 ALTER TABLE community_members ADD COLUMN IF NOT EXISTS user_uuid UUID;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_community_members_community_user_uuid
@@ -69,18 +70,28 @@ CREATE TABLE IF NOT EXISTS economy_ledger (
 CREATE INDEX IF NOT EXISTS idx_economy_ledger_user_time
     ON economy_ledger (tenant_id, community_id, user_uuid, occurred_at);
 
+-- Serves the durable rolling-24h per-scope aggregate (SUM by app, kind, window).
+CREATE INDEX IF NOT EXISTS idx_economy_ledger_scope_window
+    ON economy_ledger (tenant_id, community_id, app_id, kind, occurred_at);
+
 REVOKE ALL ON economy_ledger FROM PUBLIC;
 
 -- 4. Least-privilege role grants (role itself is provisioned by the
 -- migration / test harness; skipped if absent so this file never depends on
--- ordering). DML on the two economy tables (balances: no DELETE; ledger:
--- append-only -- no UPDATE/DELETE), column-scoped SELECT on the membership
--- tables -- no DDL, no other table.
+-- ordering). Balances: SELECT, column-scoped INSERT (identity columns ONLY, so
+-- a new row can only ever start at the column default 0 -- INSERT can never
+-- mint) and column-scoped UPDATE (balance, updated_at only; no re-keying a
+-- row), no DELETE. Ledger: append-only -- no UPDATE/DELETE. Column-scoped
+-- SELECT on the membership tables. No DDL, no other table.
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'waddles_economy_runtime') THEN
         GRANT USAGE ON SCHEMA public TO waddles_economy_runtime;
-        GRANT SELECT, INSERT, UPDATE ON economy_balances TO waddles_economy_runtime;
+        REVOKE ALL ON economy_balances FROM waddles_economy_runtime;
+        GRANT SELECT ON economy_balances TO waddles_economy_runtime;
+        GRANT INSERT (tenant_id, community_id, user_uuid)
+            ON economy_balances TO waddles_economy_runtime;
+        GRANT UPDATE (balance, updated_at) ON economy_balances TO waddles_economy_runtime;
         GRANT SELECT, INSERT ON economy_ledger TO waddles_economy_runtime;
         GRANT USAGE ON SEQUENCE economy_ledger_id_seq TO waddles_economy_runtime;
         GRANT SELECT (community_id, user_uuid, is_active, left_at, removed_at)

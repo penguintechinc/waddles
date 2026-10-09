@@ -284,7 +284,7 @@ pub struct CliConfig {
     /// Production wiring for the bundle `economy` host capability (issue
     /// #714, `bundle_host_economy::connect`) -- the least-privilege
     /// `waddles_economy_runtime` role (`alembic/versions/
-    /// 0044_bundle_economy_store.py`): DML on `economy_balances` + append-only
+    /// 0047_bundle_economy_store.py`): DML on `economy_balances` + append-only
     /// `economy_ledger` + column-scoped membership SELECT, nothing else.
     /// Distinct from `BUNDLE_DB_*`, `BUNDLE_REPUTATION_*` and `DB_READER_*`.
     #[arg(long, env = "BUNDLE_ECONOMY_HOST", default_value = "localhost")]

@@ -17,10 +17,11 @@ community-scoped currency store with atomic debit/credit:
   otherwise created NOLOGIN (inert -- it cannot authenticate, and the
   capability stays unwired/fail-closed in that deployment), so a missing
   secret never breaks the migration chain.
-- Re-states 0043's nullable `community_members.user_uuid` identity column
-  idempotently (IF NOT EXISTS) so the DDL file stands alone. It is NULL until
-  hub-api's IdentityService (#429) mints it; NULL rows never match, so the
-  capability is fail-closed until populated.
+- Re-states the nullable `community_members.user_uuid` identity column
+  idempotently (IF NOT EXISTS; 0045_identity_resolution and 0046 already add
+  it, in either order) so the DDL file stands alone. hub-api's IdentityService
+  (#429, 0045) populates it; NULL rows never match, so the capability is
+  fail-closed for any member without a resolved identity.
 
 The DDL itself lives in `scripts/db/bundle_economy_store.sql` (copied into the
 migrations image, and `include_str!`'d by the Rust crate's integration test) so
@@ -31,8 +32,8 @@ Chain note: this repo's live schema chain is the Alembic one;
 brand-new database, so a new SQL-only file there would never reach an
 existing deployment.
 
-Revision ID: 0044_bundle_economy_store
-Revises: 0043_bundle_reputation_store
+Revision ID: 0047_bundle_economy_store
+Revises: 0046_bundle_reputation_store
 Create Date: 2026-10-09
 """
 
@@ -44,19 +45,21 @@ from pathlib import Path
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0044_bundle_economy_store"
-down_revision = "0043_bundle_reputation_store"
+revision = "0047_bundle_economy_store"
+down_revision = "0046_bundle_reputation_store"
 branch_labels = None
 depends_on = None
 
 _ROLE = "waddles_economy_runtime"
 _PASSWORD_ENV = "DB_ECONOMY_PASSWORD"  # noqa: S105 -- env var NAME, not a secret
 _PASSWORD_GUC = f"waddles.{_ROLE}_pw"
-_SQL_PATH = Path(__file__).resolve().parents[2] / "scripts" / "db" / "bundle_economy_store.sql"
+_SQL_PATH = (
+    Path(__file__).resolve().parents[2] / "scripts" / "db" / "bundle_economy_store.sql"
+)
 
 #: Created/refreshed BEFORE the DDL file's grants block so its guarded GRANTs
 #: find the role. The password reaches SQL only through a session GUC bound by
-#: a parameterized query (same pattern as 0030/0032/0043) -- never interpolated.
+#: a parameterized query (same pattern as 0030/0032/0046) -- never interpolated.
 _ROLE_SQL = f"""
 DO $$
 DECLARE
@@ -92,7 +95,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the economy tables and role; leave 0043's shared `user_uuid` column alone."""
+    """Drop the economy tables and role; leave 0045's shared `user_uuid` column alone."""
     op.execute("DROP TABLE IF EXISTS economy_ledger")
     op.execute("DROP TABLE IF EXISTS economy_balances")
     op.execute(
