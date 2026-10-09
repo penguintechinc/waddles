@@ -621,3 +621,30 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  - app_id: waddles.core.example.dice
+    version: "1.0.0"
+    language: python
+    source_dir: python/dice
+    manifest_path: dice.manifest.yaml
+    artifact_path: dice.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.vote
+    version: "1.0.0"
+    language: python
+    source_dir: python/vote
+    manifest_path: vote.manifest.yaml
+    artifact_path: vote.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.fortune
+    version: "1.0.0"
+    language: python
+    source_dir: python/fortune
+    manifest_path: fortune.manifest.yaml
+    artifact_path: fortune.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
