@@ -529,3 +529,39 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  - app_id: waddles.core.example.bookmark
+    version: "1.0.0"
+    language: python
+    source_dir: python/bookmark
+    manifest_path: bookmark.manifest.yaml
+    artifact_path: bookmark.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.lfg
+    version: "1.0.0"
+    language: python
+    source_dir: python/lfg
+    manifest_path: lfg.manifest.yaml
+    artifact_path: lfg.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.ticket
+    version: "1.0.0"
+    language: python
+    source_dir: python/ticket
+    manifest_path: ticket.manifest.yaml
+    artifact_path: ticket.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.label
+    version: "1.0.0"
+    language: python
+    source_dir: python/label
+    manifest_path: label.manifest.yaml
+    artifact_path: label.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
