@@ -225,6 +225,80 @@ pub fn outbound_relay_queue_key(provider: &str) -> String {
 /// [`StageCapabilities::handle_discord_relay`]. Action-stage bundles only.
 const RELAY_PROVIDERS: &[&str] = &["twitch", "discord"];
 
+/// Version stamped on every outbound action envelope this host queues
+/// (`"v"`). The consumer (`svc_ingest::outbound_ops`) treats a missing `v`
+/// as the legacy text-only shape and rejects any version above the one it
+/// knows -- bump only with a consumer that understands it.
+const OUTBOUND_SCHEMA_VERSION: u32 = 1;
+
+/// The verb of an outbound platform action (provider-framework Step 0,
+/// issue #719). Mirrors `svc_ingest::outbound_ops::OutboundAction`; the
+/// wire string is the same `op` field the queue envelope carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RelayOp {
+    ChatSend,
+    ChatDelete,
+    DmSend,
+}
+
+impl RelayOp {
+    /// Parses the wire `op` string; `None` for an unknown verb (the caller
+    /// fails loud rather than defaulting to `chat.send`).
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "chat.send" => Some(Self::ChatSend),
+            "chat.delete" => Some(Self::ChatDelete),
+            "dm.send" => Some(Self::DmSend),
+            _ => None,
+        }
+    }
+
+    /// The wire/permission-family spelling of this op.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ChatSend => "chat.send",
+            Self::ChatDelete => "chat.delete",
+            Self::DmSend => "dm.send",
+        }
+    }
+
+    /// The catalog permission id this op requires for `provider`.
+    fn permission(self, provider: &str) -> PermissionId {
+        match self {
+            Self::ChatSend => PermissionId::ChatSend(provider.to_string()),
+            Self::ChatDelete => PermissionId::ChatDelete(provider.to_string()),
+            Self::DmSend => PermissionId::DmSend(provider.to_string()),
+        }
+    }
+}
+
+/// Whether `(provider, op)` has a live sender behind it today. Only
+/// `chat.send` does; `chat.delete`/`dm.send` are authorized by the gate but
+/// refused loudly (`unsupported_op`) until the per-platform follow-up PRs
+/// (Discord REST sender, Twitch Helix client) implement them and flip the
+/// matching row here -- never queued into a consumer that cannot act on
+/// them, so the bundle sees the failure instead of a silent black hole.
+fn relay_op_supported(_provider: &str, op: RelayOp) -> bool {
+    matches!(op, RelayOp::ChatSend)
+}
+
+/// Peeks the `op` a bundle's `message_json` asks for. Absent, unparsable or
+/// non-string `op` is the legacy `chat.send` shape -- the later field-level
+/// validation in `handle_relay` still produces the same `invalid_args`
+/// errors it always did for malformed input. `Err` carries an unknown op
+/// string.
+fn peek_relay_op(args: &serde_json::Value) -> Result<RelayOp, String> {
+    let op = args
+        .get("message_json")
+        .and_then(|v| v.as_str())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|m| m.get("op").and_then(|o| o.as_str()).map(str::to_string));
+    match op {
+        None => Ok(RelayOp::ChatSend),
+        Some(raw) => RelayOp::parse(&raw).ok_or(raw),
+    }
+}
+
 /// Strips CR/LF and every other control character before an outbound relay
 /// write -- a byte-exact port of `waddle_transports.transports.irc.
 /// sanitize_irc_component`'s CRLF-injection defense, applied here (not just
@@ -575,16 +649,39 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 format!("relay provider {provider:?} is not in the compiled-in allowlist"),
             ));
         }
-        // Gate call FIRST (spec SS5), now that `provider` is known well
-        // enough to name the specific `chat.send:<platform>` permission id
-        // this call maps to.
+        // The op defaults to `chat.send` (legacy shape); an unknown op is
+        // refused loudly, never defaulted.
+        let op = peek_relay_op(args).map_err(|raw| {
+            denied(
+                "unknown_op",
+                format!("relay op {raw:?} is not one of chat.send/chat.delete/dm.send"),
+            )
+        })?;
+        // Gate call FIRST (spec SS5), now that `provider` and `op` are known
+        // well enough to name the specific `<op>:<platform>` permission id
+        // this call maps to (`chat.send:`/`chat.delete:`/`dm.send:`).
         self.gate
             .authorize(
                 &scope.gate_scope(),
-                PermissionId::ChatSend(provider.to_string()),
+                op.permission(provider),
                 ResourceRef::AppScoped(AppScopedResource::None),
             )
             .map_err(denied_from_gate)?;
+        if !relay_op_supported(provider, op) {
+            tracing::error!(
+                provider,
+                op = op.as_str(),
+                app_id = %scope.app_id,
+                "relay op authorized but no sender implements it yet"
+            );
+            return Err(denied(
+                "unsupported_op",
+                format!(
+                    "relay op {:?} is not implemented for provider {provider:?}",
+                    op.as_str()
+                ),
+            ));
+        }
         // WIT `relay.push(provider: string, message-json: string)`
         // (`wit/waddle-bundle/stage.wit`) carries the message as an
         // opaque, provider-shaped JSON *string* -- `channel`/`text` are
@@ -657,7 +754,18 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         }
 
         let key = outbound_relay_queue_key(provider);
-        let payload = serde_json::json!({"channel": channel, "text": text}).to_string();
+        // Versioned envelope. `channel`/`text` stay top-level so a not-yet-
+        // upgraded consumer (which ignores unknown fields) still delivers it
+        // during a rolling upgrade; `v`/`op`/`platform` are what the new
+        // consumer dispatches on.
+        let payload = serde_json::json!({
+            "v": OUTBOUND_SCHEMA_VERSION,
+            "op": op.as_str(),
+            "platform": provider,
+            "channel": channel,
+            "text": text,
+        })
+        .to_string();
         let outbound_bytes = payload.len() as u64;
         self.relay_queue
             .lpush(&key, payload)
@@ -1555,6 +1663,9 @@ mod tests {
                 "storage.kv",
                 "chat.send:twitch",
                 "chat.send:discord",
+                "chat.delete:twitch",
+                "dm.send:twitch",
+                "dm.send:discord",
                 "net.http.fqdn:example.com",
                 "storage.tables",
                 "flags.read",
@@ -2146,6 +2257,109 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
         assert_eq!(parsed["channel"], "#somechannel");
         assert_eq!(parsed["text"], "hi");
+        // Versioned op envelope (provider-framework Step 0) alongside the
+        // legacy top-level fields.
+        assert_eq!(parsed["v"], 1);
+        assert_eq!(parsed["op"], "chat.send");
+        assert_eq!(parsed["platform"], "twitch");
+    }
+
+    #[test]
+    fn relay_op_parse_round_trips_and_rejects_unknown() {
+        for op in [RelayOp::ChatSend, RelayOp::ChatDelete, RelayOp::DmSend] {
+            assert_eq!(RelayOp::parse(op.as_str()), Some(op));
+        }
+        assert_eq!(RelayOp::parse("chat.nuke"), None);
+        assert!(relay_op_supported("twitch", RelayOp::ChatSend));
+        assert!(!relay_op_supported("twitch", RelayOp::ChatDelete));
+        assert!(!relay_op_supported("discord", RelayOp::DmSend));
+    }
+
+    #[test]
+    fn peek_relay_op_defaults_to_chat_send_and_flags_unknown() {
+        let legacy = serde_json::json!({"message_json": r#"{"channel":"c","text":"hi"}"#});
+        assert_eq!(peek_relay_op(&legacy), Ok(RelayOp::ChatSend));
+        assert_eq!(
+            peek_relay_op(&serde_json::json!({"provider": "twitch"})),
+            Ok(RelayOp::ChatSend)
+        );
+        let del = serde_json::json!({"message_json": r#"{"op":"chat.delete"}"#});
+        assert_eq!(peek_relay_op(&del), Ok(RelayOp::ChatDelete));
+        let bad = serde_json::json!({"message_json": r#"{"op":"bogus"}"#});
+        assert_eq!(peek_relay_op(&bad), Err("bogus".to_string()));
+    }
+
+    #[tokio::test]
+    async fn relay_unknown_op_fails_loud_and_queues_nothing() {
+        let caps = caps(FakeRelayQueue::default());
+        let message_json = serde_json::json!({"op": "bogus", "channel": "#c", "text": "hi"});
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "message_json": message_json.to_string()}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "unknown_op");
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn relay_new_ops_fail_loud_unsupported_and_queue_nothing() {
+        for (provider, message) in [
+            (
+                "twitch",
+                serde_json::json!({"op": "chat.delete", "channel": "#c", "message_id": "m1"}),
+            ),
+            (
+                "twitch",
+                serde_json::json!({"op": "dm.send", "user_id": "u1", "text": "hi"}),
+            ),
+            (
+                "discord",
+                serde_json::json!({"op": "dm.send", "user_id": "u1", "text": "hi"}),
+            ),
+        ] {
+            let caps = caps(FakeRelayQueue::default());
+            let err = caps
+                .handle(
+                    &scope(),
+                    call(
+                        CapabilityKind::Relay,
+                        "send",
+                        serde_json::json!({"provider": provider, "message_json": message.to_string()}),
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "unsupported_op", "{provider} {message}");
+            assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_new_ops_require_their_own_grant_not_chat_send() {
+        // `caps_denied` has an empty grant snapshot; a `chat.send` grant must
+        // never stand in for `chat.delete:`/`dm.send:`.
+        let caps = caps_denied(FakeRelayQueue::default());
+        let message = serde_json::json!({"op": "dm.send", "user_id": "u1", "text": "hi"});
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "message_json": message.to_string()}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
     }
 
     /// Minimal [`egress_detokenizer::DisplayNameResolver`] test fixture:

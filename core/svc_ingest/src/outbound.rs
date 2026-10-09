@@ -39,6 +39,7 @@ use penguin_connector_twitch::TwitchError;
 use tokio::sync::oneshot;
 
 use crate::ingest::Backoff;
+use crate::outbound_ops::{parse_outbound, route, DiscordSender, SenderError, TwitchSender};
 
 /// The queue key this module drains -- byte-identical to
 /// `core/svc_action/src/capabilities.rs::outbound_relay_queue_key("twitch")`,
@@ -51,14 +52,6 @@ pub const TWITCH_OUTBOUND_QUEUE_KEY: &str = "waddles:transport:irc:twitch:outbou
 /// periodically to check `shutdown` even with an empty queue, rather than
 /// blocking on the Valkey connection indefinitely.
 const BRPOP_TIMEOUT_SECS: f64 = 5.0;
-
-/// One relay send request, the exact JSON shape
-/// `StageCapabilities::handle_relay` (`svc_action`) `LPUSH`es.
-#[derive(Debug, serde::Deserialize, PartialEq, Eq)]
-struct RelayMessage {
-    channel: String,
-    text: String,
-}
 
 /// Builds a `redis::Client` for `cfg`'s transport, mirroring
 /// `penguin_spine`'s own (private, unexported) `build_redis_client` --
@@ -200,10 +193,16 @@ async fn drain_loop<Q, S>(
             popped = queue.brpop_one() => match popped {
                 Ok(Some(raw)) => {
                     backoff.reset();
-                    match serde_json::from_str::<RelayMessage>(&raw) {
-                        Ok(msg) => {
-                            if let Err(err) = sender.send(&msg.channel, &msg.text).await {
-                                tracing::warn!(platform = "twitch", channel = %msg.channel, error = %err, "outbound relay send failed");
+                    match parse_outbound(&raw, "twitch") {
+                        Ok(action) => {
+                            let twitch = TwitchSender::new(sender);
+                            if let Err(err) = route("twitch", &action, &twitch, &DiscordSender).await {
+                                match err {
+                                    // A new op with no implementation yet is an
+                                    // actionable failure, not degraded service.
+                                    SenderError::Unsupported { .. } => tracing::error!(platform = "twitch", op = action.op(), error = %err, "outbound op unsupported, dropping"),
+                                    SenderError::Failed { .. } => tracing::warn!(platform = "twitch", op = action.op(), error = %err, "outbound relay send failed"),
+                                }
                             }
                         }
                         Err(err) => {
@@ -303,17 +302,55 @@ mod tests {
         }
     }
 
-    #[test]
-    fn relay_message_deserializes_the_svc_action_push_shape() {
-        let msg: RelayMessage =
-            serde_json::from_str("{\"channel\":\"#somechannel\",\"text\":\"hi\"}").unwrap();
-        assert_eq!(
-            msg,
-            RelayMessage {
-                channel: "#somechannel".to_string(),
-                text: "hi".to_string()
-            }
-        );
+    /// Backward compat: a legacy text-only entry (queued by a pre-upgrade
+    /// svc_action) and the new versioned envelope both still send chat.
+    #[tokio::test]
+    async fn legacy_and_versioned_chat_send_payloads_both_send() {
+        for raw in [
+            "{\"channel\":\"#c\",\"text\":\"hi\"}",
+            "{\"v\":1,\"op\":\"chat.send\",\"platform\":\"twitch\",\"channel\":\"#c\",\"text\":\"hi\"}",
+        ] {
+            let queue = FakeQueue {
+                payloads: vec![Ok(Some(raw.to_string()))],
+                idx: AtomicUsize::new(0),
+            };
+            let sender = RecordingSender::default();
+            let (_tx, rx) = oneshot::channel();
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx),
+            )
+            .await;
+            assert_eq!(
+                sender.calls.lock().unwrap().as_slice(),
+                &[("#c".to_string(), "hi".to_string())],
+                "{raw}"
+            );
+        }
+    }
+
+    /// New ops are routed to the adapter (Unsupported until implemented) and
+    /// never reach the IRC chat sender; an unknown op is dropped loudly.
+    #[tokio::test]
+    async fn new_and_unknown_ops_never_send_chat() {
+        for raw in [
+            "{\"v\":1,\"op\":\"chat.delete\",\"channel\":\"#c\",\"message_id\":\"m\"}",
+            "{\"v\":1,\"op\":\"dm.send\",\"user_id\":\"u\",\"text\":\"hi\"}",
+            "{\"v\":1,\"op\":\"bogus\",\"channel\":\"#c\",\"text\":\"hi\"}",
+        ] {
+            let queue = FakeQueue {
+                payloads: vec![Ok(Some(raw.to_string()))],
+                idx: AtomicUsize::new(0),
+            };
+            let sender = RecordingSender::default();
+            let (_tx, rx) = oneshot::channel();
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                drain_loop(queue, &sender, Backoff::new(Duration::from_secs(30)), rx),
+            )
+            .await;
+            assert!(sender.calls.lock().unwrap().is_empty(), "{raw}");
+        }
     }
 
     #[test]

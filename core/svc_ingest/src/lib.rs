@@ -70,6 +70,7 @@ pub mod ingest;
 pub mod license;
 pub mod normalize;
 pub mod outbound;
+pub mod outbound_ops;
 pub mod publish;
 pub mod telemetry;
 
