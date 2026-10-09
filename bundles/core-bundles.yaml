@@ -529,3 +529,32 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  # Facts pack: three stateless, self-contained random-content bundles (no kv, no external
+  # API calls), each gated behind its own `waddles.command-<name>` flag (default OFF).
+  - app_id: waddles.core.example.catfact
+    version: "1.0.0"
+    language: python
+    source_dir: python/catfact
+    manifest_path: catfact.manifest.yaml
+    artifact_path: catfact.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.dogfact
+    version: "1.0.0"
+    language: python
+    source_dir: python/dogfact
+    manifest_path: dogfact.manifest.yaml
+    artifact_path: dogfact.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.advice
+    version: "1.0.0"
+    language: python
+    source_dir: python/advice
+    manifest_path: advice.manifest.yaml
+    artifact_path: advice.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
