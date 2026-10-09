@@ -209,6 +209,7 @@ def _actor_uuid(actor: str | None) -> str | None:
     try:
         return str(uuid.UUID(actor))
     except ValueError:
+        log.debug("event.actor_not_uuid", error="ValueError")
         return None
 
 

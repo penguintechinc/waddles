@@ -133,7 +133,7 @@ def _resolve_target(raw: str, platform: str) -> str | None:
     try:
         return str(uuid.UUID(token))
     except ValueError:
-        pass
+        log.debug("label.target_not_uuid", platform=platform, error="ValueError")
     mention = _DISCORD_MENTION_RE.match(token)
     if mention:
         return str(uuid.uuid5(_ACTOR_NAMESPACE, f"discord:{mention.group(1)}"))

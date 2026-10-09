@@ -343,6 +343,7 @@ async def _join(arg: str | None, *, ledger: _Ledger, actor: str | None, username
     try:
         amount = int(arg or "")
     except ValueError:
+        log.debug("heist.join_amount_invalid", op="join", error="ValueError")
         return _USAGE
     if amount <= 0:
         return "stake must be at least 1 point."
@@ -417,6 +418,7 @@ async def _handle_set_window(arg: str | None, *, ledger: _Ledger) -> str:
     try:
         seconds = int(parts[1])
     except ValueError:
+        log.debug("heist.window_seconds_invalid", op="window", error="ValueError")
         return f"'{parts[1]}' isn't a whole number of seconds"
     if not (MIN_WINDOW_SECONDS <= seconds <= MAX_WINDOW_SECONDS):
         return f"window must be between {MIN_WINDOW_SECONDS} and {MAX_WINDOW_SECONDS} seconds"

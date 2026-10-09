@@ -106,6 +106,7 @@ async def _handle(args: list[str], event: PlatformEvent) -> str:
             try:
                 amount = int(args[1])
             except ValueError:
+                log.debug("rip.add_amount_invalid", op=op, error="ValueError")
                 return "Usage: !rip add [N] (N is a whole number)"
         if not 1 <= amount <= MAX_INCREMENT:
             return f"N must be between 1 and {MAX_INCREMENT}"
