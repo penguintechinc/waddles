@@ -174,6 +174,9 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         homepage_url=raw.get("homepage_url"),
         notice=raw.get("notice"),
         category=raw.get("category"),
+        supported_platforms=(
+            tuple(raw["supported_platforms"]) if raw.get("supported_platforms") else None
+        ),
     )
 
 
