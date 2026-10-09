@@ -135,6 +135,26 @@ COMMENT ON INDEX idx_simple_cooldowns_expired IS
 -- =============================================================================
 -- 3. GAME CONFIGURATION EXTENSIONS
 -- =============================================================================
+-- Fresh-DB replay: loyalty_config is created by alembic 0015_loyalty_core_tables.py,
+-- which runs AFTER this baseline file, so on an empty DB the ALTER below silently
+-- did nothing and the COMMENTs failed the whole file. Create it first with the
+-- identical DDL (IF NOT EXISTS -> no-op on DBs that already have it; 0015 is then a
+-- no-op too) so the simple-games columns land on fresh databases as well.
+CREATE TABLE IF NOT EXISTS loyalty_config (
+    id SERIAL PRIMARY KEY,
+    community_id INTEGER NOT NULL UNIQUE
+        REFERENCES communities(id) ON DELETE CASCADE,
+    currency_name VARCHAR(50) NOT NULL DEFAULT 'Points',
+    currency_symbol VARCHAR(16) NOT NULL DEFAULT '🪙',
+    earn_chat_points INTEGER NOT NULL DEFAULT 1,
+    earn_chat_cooldown_s INTEGER NOT NULL DEFAULT 60,
+    earn_watch_points_per_min INTEGER NOT NULL DEFAULT 1,
+    earn_watch_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    max_balance BIGINT,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Add simple games columns to loyalty_config if not already present
 ALTER TABLE IF EXISTS loyalty_config
     ADD COLUMN IF NOT EXISTS simple_games_enabled BOOLEAN DEFAULT TRUE,

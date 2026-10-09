@@ -1,6 +1,6 @@
 //! Postgres-backed [`ReputationStore`], the membership-snapshot loader and
 //! the connection factory (all under the least-privilege
-//! `waddles_bundle_reputation` role, alembic 0043).
+//! `waddles_bundle_reputation` role, alembic 0046).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

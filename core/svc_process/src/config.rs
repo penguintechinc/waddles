@@ -252,7 +252,7 @@ pub struct CliConfig {
     /// Production wiring for the bundle `reputation` host capability
     /// (issue #726, `bundle_host_reputation::connect`) -- the least-privilege
     /// `waddles_bundle_reputation` role (`alembic/versions/
-    /// 0043_bundle_reputation_store.py`): DML on the two reputation tables +
+    /// 0046_bundle_reputation_store.py`): DML on the two reputation tables +
     /// column-scoped membership SELECT, nothing else. Distinct from both
     /// `BUNDLE_DB_*` (app_core/app_community DML) and `DB_READER_*`
     /// (read-only loader).

@@ -2,7 +2,7 @@
 //! (row lock, rolling-24h cap, ledger atomicity, live membership predicate)
 //! and the `waddles_bundle_reputation` role's privilege boundary can only be
 //! proven by a real server. The schema under test is the EXACT shipped DDL --
-//! `scripts/db/bundle_reputation_store.sql`, which alembic 0043 also executes
+//! `scripts/db/bundle_reputation_store.sql`, which alembic 0046 also executes
 //! -- applied on top of hand-written minimal prerequisites (`tenants`,
 //! `communities`, `community_members`, `app_catalog` and a copy of 0041's
 //! `bundle_reputation_adjustments`; the full legacy baseline needs the whole
@@ -158,7 +158,7 @@ async fn fixture() -> Fixture {
     )
     .await;
     // The role must exist BEFORE the shipped DDL so its grants block fires
-    // (same ordering alembic 0043 guarantees).
+    // (same ordering alembic 0046 guarantees).
     exec(
         &su,
         &format!(

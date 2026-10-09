@@ -61,7 +61,7 @@ penguin-libs grows one.
 
 | Item | Value |
 |---|---|
-| Schema | alembic `0043_bundle_reputation_store` (DDL in `scripts/db/bundle_reputation_store.sql`) |
+| Schema | alembic `0046_bundle_reputation_store` (DDL in `scripts/db/bundle_reputation_store.sql`) |
 | Role | `waddles_bundle_reputation`: DML on `bundle_reputation_scores`, SELECT/INSERT on `bundle_reputation_adjustments`, column SELECT on `community_members`/`communities`. Created NOLOGIN unless `DB_REPUTATION_PASSWORD` is set when migrating |
 | svc_process env | `BUNDLE_REPUTATION_{HOST,PORT,NAME,USER}`, `BUNDLE_REPUTATION_PASSWORD`, `BUNDLE_REPUTATION_MEMBERSHIP_REFRESH_S` |
 | Flag | `waddles.bundle-reputation-capability` (default OFF) |

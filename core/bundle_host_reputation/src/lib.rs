@@ -41,7 +41,7 @@
 //! `tenant_id`, `community_id` and `app_id` come from the host-built
 //! [`ReputationScope`] -- never from guest input. The user must be an ACTIVE
 //! member of that community of that tenant (`community_members.user_uuid`,
-//! alembic 0043) at the moment of the call, re-verified inside the same
+//! alembic 0046) at the moment of the call, re-verified inside the same
 //! transaction as the write.
 //!
 //! # Audit

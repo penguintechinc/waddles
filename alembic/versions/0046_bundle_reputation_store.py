@@ -28,12 +28,19 @@ the migrations image, and `include_str!`'d by the Rust crate's integration
 test) so the shipped schema and the tested schema cannot drift.
 
 Chain note: this repo's live schema chain is the Alembic one (head was
-`0042_instance_perm_policies`); `config/postgres/migrations/*.sql` is only
-replayed by the 0001 baseline on a brand-new database, so a new SQL-only file
-there would never reach an existing deployment.
+`0045_identity_resolution` when this was renumbered from 0043 -> 0046 to chain
+after the identity migrations 0043-0045); `config/postgres/migrations/*.sql` is
+only replayed by the 0001 baseline on a brand-new database, so a new SQL-only
+file there would never reach an existing deployment.
 
-Revision ID: 0043_bundle_reputation_store
-Revises: 0042_instance_perm_policies
+`community_members.user_uuid` and its `(community_id, user_uuid)` unique index
+are now first created by 0045_identity_resolution; the DDL file's `IF NOT
+EXISTS` forms make them a no-op here (and keep the file runnable standalone for
+the Rust integration tests). 0045 therefore OWNS them: this migration's
+downgrade must not drop them.
+
+Revision ID: 0046_bundle_reputation_store
+Revises: 0045_identity_resolution
 Create Date: 2026-10-09
 """
 
@@ -45,8 +52,8 @@ from pathlib import Path
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0043_bundle_reputation_store"
-down_revision = "0042_instance_perm_policies"
+revision = "0046_bundle_reputation_store"
+down_revision = "0045_identity_resolution"
 branch_labels = None
 depends_on = None
 
@@ -94,8 +101,9 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("DROP INDEX IF EXISTS idx_bundle_reputation_adjustments_user_window")
     op.execute("DROP TABLE IF EXISTS bundle_reputation_scores")
-    op.execute("DROP INDEX IF EXISTS uq_community_members_community_user_uuid")
-    op.execute("ALTER TABLE community_members DROP COLUMN IF EXISTS user_uuid")
+    # `community_members.user_uuid` + its unique index are owned by 0045
+    # (see module docstring) -- left in place so downgrading to 0045 keeps the
+    # identity layer intact.
     op.execute(
         f"""
 DO $$ BEGIN
