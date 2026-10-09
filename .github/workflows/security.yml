@@ -16,6 +16,10 @@ permissions:
   security-events: write
   actions: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Fast checks (~2-3 min): Trivy fs + Dependency Review.
   # Python (pip-audit, bandit) and Node audits run as their own jobs below.

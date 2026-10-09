@@ -4,7 +4,7 @@
 schema_version: 2
 app_id: waddles.core.example.wheel
 name: Spin-the-Wheel Picker Bundle (Python)
-version: 1.0.0
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -34,5 +34,8 @@ limits:
   memory_mb: 64
   egress_rps: 10
 permissions:
-  - storage.kv
+  - id: storage.kv
+    justification: "persists the per-community wheel options list"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-wheel feature flag"
 routes_to: []

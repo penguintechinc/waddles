@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-chat"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!chat-history [list]` / `!channels [list]` -- read-only chat history queries, community-scoped. Python equivalent of bundles/python/count, modeled on its hand-built (not bundle_compiler-routed) structure."
 requires-python = ">=3.13"
 dependencies = []

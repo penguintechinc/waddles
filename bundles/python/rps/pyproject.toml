@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-rps"
-version = "1.0.0"
+version = "1.0.2"
 description = "`!rps <rock|paper|scissors>` -> play one round against the bot, community-scoped, kv-only v1 (r/p/s shorthand, per-caller cooldown, W/L/T record via `!rps list`, admin cooldown config via `!rps set cooldown <seconds>`). Net-new original content, not a port of anything."
 requires-python = ">=3.13"
 dependencies = []
