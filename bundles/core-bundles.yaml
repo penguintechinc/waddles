@@ -558,3 +558,21 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  - app_id: waddles.core.example.scramble
+    version: "1.0.0"
+    language: python
+    source_dir: python/scramble
+    manifest_path: scramble.manifest.yaml
+    artifact_path: scramble.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.guess
+    version: "1.0.0"
+    language: python
+    source_dir: python/guess
+    manifest_path: guess.manifest.yaml
+    artifact_path: guess.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
