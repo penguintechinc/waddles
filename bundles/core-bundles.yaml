@@ -603,3 +603,21 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  - app_id: waddles.core.example.gamble
+    version: "1.0.0"
+    language: python
+    source_dir: python/gamble
+    manifest_path: gamble.manifest.yaml
+    artifact_path: gamble.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.heist
+    version: "1.0.0"
+    language: python
+    source_dir: python/heist
+    manifest_path: heist.manifest.yaml
+    artifact_path: heist.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
