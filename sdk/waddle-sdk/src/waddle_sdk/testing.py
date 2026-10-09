@@ -44,9 +44,11 @@ from typing import Any
 from waddle_sdk.kv import InvalidKvKeyError, validate_key
 
 __all__ = [
+    "FakeEconomyHost",
     "FakeKvHost",
     "FakeReputationHost",
     "InvalidKvKeyError",
+    "install_fake_economy_host",
     "install_fake_kv_host",
     "install_fake_reputation_host",
 ]
@@ -196,5 +198,117 @@ def install_fake_reputation_host(
     rep_mod = types.SimpleNamespace(get=host.get, adjust=host.adjust)
     fake_wit_world = types.ModuleType("wit_world")
     fake_wit_world.imports = types.SimpleNamespace(reputation=rep_mod)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
+    return host
+
+
+_Error_InsufficientFunds = _variant("Error_InsufficientFunds", True)
+_Error_OverCap = _variant("Error_OverCap", True)
+
+
+@dataclass(frozen=True)
+class _FakeEntry:
+    """Stand-in for the generated ``economy.Entry`` record."""
+
+    user: str
+    balance: int
+
+
+@dataclass(slots=True)
+class FakeEconomyHost:
+    """In-memory stand-in for `wit_world.imports.economy`, enforcing the real host's rules.
+
+    Mirrors what the real stage does (gate + store): every named user must be
+    in `members`; `granted` False denies every call `not_granted`; a wager's
+    stake must be `1..=max_bet` (else `Error_OverCap(max_bet)`), held by the
+    user (else `Error_InsufficientFunds(balance)`), and its payout at most
+    `stake * 100` (else `Error_OverCap(stake * 100)`); a transfer needs two
+    distinct members and a held, in-cap amount. Money moves atomically (the
+    check and the write are one step, so the balance can never go negative)
+    and every movement appends a `ledger` row. Every refusal raises the
+    same-named `Error_*` variant the generated binding would, wrapped in an
+    `Err`-shaped exception, so a bundle's error handling is exercised for real.
+    """
+
+    members: set[str] = field(default_factory=set)
+    balances: dict[str, int] = field(default_factory=dict)
+    ledger: list[tuple[str, str, int]] = field(default_factory=list)
+    granted: bool = True
+    max_bet_cap: int = 1_000
+    max_amount_cap: int = 1_000
+    payout_multiple: int = 100
+
+    def _check(self, *users: str) -> None:
+        if not self.granted:
+            raise _FakeWitError(_Error_Denied("not_granted"))
+        for user in users:
+            if user not in self.members:
+                raise _FakeWitError(_Error_NotAMember())
+
+    def balance(self, user: str) -> int:
+        """Return `user`'s balance (0 for a member who holds nothing)."""
+        self._check(user)
+        return self.balances.get(user, 0)
+
+    def max_bet(self, user: str) -> int:
+        """Return `min(max_bet_cap, balance)`."""
+        self._check(user)
+        return min(self.max_bet_cap, self.balances.get(user, 0))
+
+    def wager(self, user: str, stake: int, payout: int) -> int:
+        """Atomically debit `stake`, credit `payout`; enforce cap, funds and payout multiple."""
+        self._check(user)
+        if stake < 1:
+            raise _FakeWitError(_Error_Invalid("stake must be >= 1"))
+        if stake > self.max_bet_cap:
+            raise _FakeWitError(_Error_OverCap(self.max_bet_cap))
+        if payout > stake * self.payout_multiple:
+            raise _FakeWitError(_Error_OverCap(stake * self.payout_multiple))
+        held = self.balances.get(user, 0)
+        if held < stake:
+            raise _FakeWitError(_Error_InsufficientFunds(held))
+        self.balances[user] = held - stake + payout
+        self.ledger.append(("wager", user, payout - stake))
+        return self.balances[user]
+
+    def transfer(self, from_user: str, to_user: str, amount: int) -> None:
+        """Atomically move `amount` between two distinct members."""
+        self._check(from_user, to_user)
+        if from_user == to_user or amount < 1:
+            raise _FakeWitError(_Error_Invalid("bad transfer"))
+        if amount > self.max_amount_cap:
+            raise _FakeWitError(_Error_OverCap(self.max_amount_cap))
+        held = self.balances.get(from_user, 0)
+        if held < amount:
+            raise _FakeWitError(_Error_InsufficientFunds(held))
+        self.balances[from_user] = held - amount
+        self.balances[to_user] = self.balances.get(to_user, 0) + amount
+        self.ledger.append(("transfer_out", from_user, -amount))
+        self.ledger.append(("transfer_in", to_user, amount))
+
+    def leaderboard(self, limit: int) -> list[_FakeEntry]:
+        """Return the top `limit` members by balance, highest first (ties by user id)."""
+        self._check()
+        if not 1 <= limit <= 100:
+            raise _FakeWitError(_Error_Invalid("limit must be 1..=100"))
+        ranked = sorted(
+            ((u, b) for u, b in self.balances.items() if u in self.members),
+            key=lambda ub: (-ub[1], ub[0]),
+        )
+        return [_FakeEntry(user=u, balance=b) for u, b in ranked[:limit]]
+
+
+def install_fake_economy_host(monkeypatch: Any, members: set[str] | None = None) -> FakeEconomyHost:
+    """Install a fresh `FakeEconomyHost` as `wit_world.imports.economy` and return it."""
+    host = FakeEconomyHost(members=set(members or ()))
+    eco_mod = types.SimpleNamespace(
+        balance=host.balance,
+        wager=host.wager,
+        transfer=host.transfer,
+        max_bet=host.max_bet,
+        leaderboard=host.leaderboard,
+    )
+    fake_wit_world = types.ModuleType("wit_world")
+    fake_wit_world.imports = types.SimpleNamespace(economy=eco_mod)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
     return host

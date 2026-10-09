@@ -8,6 +8,7 @@ on:
       - 'core/bundle_host_kv/**'
       - 'core/bundle_capability_gate/**'
       - 'core/bundle_host_reputation/**'
+      - 'core/bundle_host_economy/**'
       - 'core/hub_client/**'
       - '.github/workflows/rust-svc-process.yml'
       - '.github/workflows/rust-crate-ci.yml'
@@ -18,6 +19,7 @@ on:
       - 'core/bundle_host_kv/**'
       - 'core/bundle_capability_gate/**'
       - 'core/bundle_host_reputation/**'
+      - 'core/bundle_host_economy/**'
       - 'core/hub_client/**'
   workflow_dispatch:
 

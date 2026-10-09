@@ -9,6 +9,9 @@ on:
       - 'core/svc_process/services/command_alias_store.py'
       - 'wit/waddle-bundle/**'
       - 'core/bundle_host_reputation/src/lib.rs'
+      - 'core/bundle_host_economy/src/lib.rs'
+      - 'core/bundle_executor/src/host/stage_next_economy.rs'
+      - 'core/svc_process/src/capabilities.rs'
       - '.github/workflows/python-waddle-sdk.yml'
   pull_request:
     branches: [main, 'release/**']
@@ -18,6 +21,9 @@ on:
       - 'core/svc_process/services/command_alias_store.py'
       - 'wit/waddle-bundle/**'
       - 'core/bundle_host_reputation/src/lib.rs'
+      - 'core/bundle_host_economy/src/lib.rs'
+      - 'core/bundle_executor/src/host/stage_next_economy.rs'
+      - 'core/svc_process/src/capabilities.rs'
   workflow_dispatch:
 
 permissions:

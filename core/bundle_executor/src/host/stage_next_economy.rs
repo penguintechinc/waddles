@@ -166,6 +166,8 @@ impl economy::Host for ExecState {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
 
     fn denied(code: &str, message: &str) -> ExecutorError {
