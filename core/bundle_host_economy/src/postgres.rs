@@ -184,10 +184,10 @@ impl PostgresEconomyStore {
         Self { conn }
     }
 
-    /// Explains why a guarded UPDATE matched no row: not an active member
-    /// (`NotAMember`) or a balance below `needed` (`InsufficientFunds`). Read
-    /// AFTER the failed write; it never gates money movement, only names the
-    /// refusal.
+    /// Explains why a guarded UPDATE matched no row: `user` is not an active
+    /// member (`NotAMember`) or holds less than the amount being debited
+    /// (`InsufficientFunds`, carrying what they do hold). Read AFTER the failed
+    /// write; it never gates money movement, only names the refusal.
     async fn diagnose_refusal<C: ConnectionTrait>(
         conn: &C,
         scope: &EconomyScope,

@@ -13,7 +13,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use bundle_capability_gate::{
     HostInvokeScopeBuilder, MembershipCheck, ScopeKind, SnapshotMembership, TenantTier,
@@ -41,6 +42,19 @@ const TENANT: i32 = 1;
 const COMMUNITY: i32 = 10;
 const OTHER_TENANT: i32 = 2;
 const OTHER_COMMUNITY: i32 = 20;
+
+/// Every test owns its own Postgres container (full isolation), but starting
+/// 25 of them at once starves a small CI runner past the default 60s startup
+/// timeout. A small permit pool throttles only the START (the permit is dropped
+/// as soon as the container is ready); the tests themselves still run in
+/// parallel.
+const MAX_CONCURRENT_CONTAINER_STARTS: usize = 3;
+const CONTAINER_STARTUP_TIMEOUT: Duration = Duration::from_secs(240);
+
+fn start_gate() -> &'static tokio::sync::Semaphore {
+    static GATE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_CONTAINER_STARTS))
+}
 
 struct Fixture {
     _container: ContainerAsync<GenericImage>,
@@ -77,6 +91,10 @@ async fn scalar_i64(conn: &DatabaseConnection, sql: &str) -> i64 {
 }
 
 async fn fixture() -> Fixture {
+    let permit = start_gate()
+        .acquire()
+        .await
+        .expect("the start gate is never closed");
     let container = GenericImage::new(POSTGRES_IMAGE, POSTGRES_TAG)
         .with_exposed_port(ContainerPort::Tcp(5432))
         .with_wait_for(WaitFor::log(
@@ -88,9 +106,11 @@ async fn fixture() -> Fixture {
         ))
         .with_env_var("POSTGRES_PASSWORD", SUPERUSER_PASSWORD)
         .with_env_var("POSTGRES_DB", "waddles_test")
+        .with_startup_timeout(CONTAINER_STARTUP_TIMEOUT)
         .start()
         .await
         .expect("postgres test container starts");
+    drop(permit);
     let host = container.get_host().await.unwrap().to_string();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let su_url = format!("postgres://postgres:{SUPERUSER_PASSWORD}@{host}:{port}/waddles_test");
