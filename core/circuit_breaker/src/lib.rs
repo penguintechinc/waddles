@@ -100,6 +100,20 @@ impl CircuitBreaker {
         }
     }
 
+    /// Locks the per-source state map. A poisoned mutex means a prior holder
+    /// panicked mid-update; the map is plain counters/timestamps with no
+    /// cross-entry invariant, so we recover the guard but log loudly (once
+    /// per acquisition) rather than silently swallowing the poison.
+    fn lock_sources(&self) -> std::sync::MutexGuard<'_, HashMap<String, SourceEntry>> {
+        match self.sources.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                error!("circuit breaker state mutex poisoned; recovering state map");
+                poisoned.into_inner()
+            }
+        }
+    }
+
     #[cfg(test)]
     fn new_for_test() -> Self {
         Self::new(Arc::new(()))
@@ -112,7 +126,7 @@ impl CircuitBreaker {
     /// never affected by this call (each source's state lives under its own
     /// map key, task instruction 2's isolation requirement).
     pub fn allow(&self, source: &str) -> bool {
-        let mut sources = self.sources.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sources = self.lock_sources();
         match sources.get_mut(source) {
             None => true,
             Some(entry) => match entry.state {
@@ -133,7 +147,7 @@ impl CircuitBreaker {
     /// history -- a source that is working again should not carry stale
     /// failure count toward a future trip.
     pub fn record_success(&self, source: &str) {
-        let mut sources = self.sources.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sources = self.lock_sources();
         if let Some(entry) = sources.get_mut(source) {
             entry.failures.clear();
         }
@@ -145,7 +159,7 @@ impl CircuitBreaker {
     /// failure). Failures outside [`FAILURE_WINDOW`] are pruned before
     /// counting, per task instruction 4 "N failures in a window".
     pub fn record_failure(&self, source: &str) -> bool {
-        let mut sources = self.sources.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sources = self.lock_sources();
         let entry = sources
             .entry(source.to_string())
             .or_insert_with(SourceEntry::new);
