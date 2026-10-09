@@ -502,3 +502,30 @@ bundles:
     activation_targets:
       - tenant_slug: global
         community_id: null
+  - app_id: waddles.core.example.hug
+    version: "1.0.0"
+    language: python
+    source_dir: python/hug
+    manifest_path: hug.manifest.yaml
+    artifact_path: hug.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.boop
+    version: "1.0.0"
+    language: python
+    source_dir: python/boop
+    manifest_path: boop.manifest.yaml
+    artifact_path: boop.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.highfive
+    version: "1.0.0"
+    language: python
+    source_dir: python/highfive
+    manifest_path: highfive.manifest.yaml
+    artifact_path: highfive.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
