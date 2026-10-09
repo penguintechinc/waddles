@@ -2,6 +2,7 @@
 """Client and server classes corresponding to protobuf-defined services."""
 
 import grpc
+
 from waddles.hub.internal.v1 import (
     identity_pb2 as waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2,
 )
@@ -52,6 +53,12 @@ class IdentityServiceStub:
             response_deserializer=waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolveDisplayNamesResponse.FromString,
             _registered_method=True,
         )
+        self.ResolveHandle = channel.unary_unary(
+            "/waddles.hub.internal.v1.IdentityService/ResolveHandle",
+            request_serializer=waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolveHandleRequest.SerializeToString,
+            response_deserializer=waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolveHandleResponse.FromString,
+            _registered_method=True,
+        )
 
 
 class IdentityServiceServicer:
@@ -79,6 +86,21 @@ class IdentityServiceServicer:
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
+    def ResolveHandle(self, request, context):
+        """Resolves ONE raw user reference as a chat user typed it -- a platform
+        handle ("@bob", "bob") or a Discord mention ("<@123>", "<@!123>") -- to
+        the stable UUID of that identity, entirely inside the hub-api PII
+        boundary: the raw handle is matched here and never stored, echoed or
+        logged; only the UUID comes back. NOT_FOUND = no such identity in the
+        tenant (or tenant unknown), FAILED_PRECONDITION = the handle matches
+        more than one identity (never guessed), INVALID_ARGUMENT = malformed
+        or non-user reference (role/channel mention, @everyone). Required
+        scope: "identity:handle:resolve".
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
 
 def add_IdentityServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -91,6 +113,11 @@ def add_IdentityServiceServicer_to_server(servicer, server):
             servicer.ResolveDisplayNames,
             request_deserializer=waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolveDisplayNamesRequest.FromString,
             response_serializer=waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolveDisplayNamesResponse.SerializeToString,
+        ),
+        "ResolveHandle": grpc.unary_unary_rpc_method_handler(
+            servicer.ResolveHandle,
+            request_deserializer=waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolveHandleRequest.FromString,
+            response_serializer=waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolveHandleResponse.SerializeToString,
         ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -159,6 +186,36 @@ class IdentityService:
             "/waddles.hub.internal.v1.IdentityService/ResolveDisplayNames",
             waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolveDisplayNamesRequest.SerializeToString,
             waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolveDisplayNamesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def ResolveHandle(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/waddles.hub.internal.v1.IdentityService/ResolveHandle",
+            waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolveHandleRequest.SerializeToString,
+            waddles_dot_hub_dot_internal_dot_v1_dot_identity__pb2.ResolveHandleResponse.FromString,
             options,
             channel_credentials,
             insecure,
