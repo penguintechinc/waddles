@@ -446,7 +446,10 @@ def test_core_kv_manifests_parse_to_structured_storage_kv_declaration() -> None:
     assert structured >= 30
 
 
-@pytest.mark.parametrize("name", ["chat", "choose", "eightball", "poll", "roll", "slap", "wave"])
+@pytest.mark.parametrize(
+    "name",
+    ["chat", "choose", "eightball", "poll", "roll", "slap", "wave", "hug", "boop", "highfive"],
+)
 def test_flag_gated_python_bundles_declare_flags_read(name: str) -> None:
     """Bundles calling `feature_enabled` must declare `flags.read` (host gate fails closed)."""
     root = pathlib.Path(__file__).resolve().parents[2] / "bundles" / "python" / name
