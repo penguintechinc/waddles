@@ -816,6 +816,23 @@ pipeline:
       limits:
         cpu: "500m"
         memory: "512Mi"
+  # Odoo / external-WaddleDB connector (hub_api/services/odoo_sync_service.py) -- deploy-time
+  # kill switch, defaulted OFF. Odoo creds come ONLY from an operator-created Secret holding
+  # ODOO_URL/ODOO_DB/ODOO_LOGIN/ODOO_API_KEY/ODOO_SYNC_REF_KEY -- never rendered here.
+  odooSync:
+    enabled: false
+    envBaseline: false
+    secretName: "waddlebot-odoo-credentials"
+    schedule: "*/30 * * * *"
+    backoffLimit: 2
+    activeDeadlineSeconds: 600
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
   # Bar Citizen role-sync reconcile worker (Unit F, hub_api/services/role_sync_service.py) --
   # deploy-time kill switch, defaulted OFF (critical-rules.md Feature Flags: every feature
   # flagged OFF until validated) -- see templates/role-sync-cronjob.yaml's own header comment.
