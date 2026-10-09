@@ -22,7 +22,7 @@
 # Base image pinned to the same digest already used by every other pipeline-stage skeleton
 # in this file (pipeline.pythonBaseImage) — no Dockerfile/CI image exists for svc-presentation
 # yet; core/svc_presentation/Dockerfile in this PR is scaffold-only, not wired into CI.
-{{- if .Values.pipeline.svcPresentation.enabled }}
+{{- if and .Values.pipeline.svcPresentation.enabled (not .Values.presentation.rust.enabled) }}
 ---
 apiVersion: apps/v1
 kind: Deployment

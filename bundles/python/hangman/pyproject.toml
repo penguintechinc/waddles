@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-hangman"
-version = "1.0.0"
+version = "1.0.2"
 description = "`!hangman` -> a per-community hangman word-guessing game (!hangman start, !hangman guess <letter>, !hangman reveal). Uses waddle_sdk.community_kv/waddle_sdk.command, modeled on bundles/python/first's own structure."
 requires-python = ">=3.13"
 dependencies = []
