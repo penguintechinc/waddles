@@ -316,7 +316,7 @@ jobs:
           fi
           psql_q() {
             kubectl exec -n "${NAMESPACE}" deploy/postgres -- \
-              sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "$1"' _ "$1"
+              sh -c "psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -tAc \"$1\""
           }
           alembic_rows=$(psql_q "select count(*) from alembic_version")
           bundle_versions=$(psql_q "select count(*) from app_versions")

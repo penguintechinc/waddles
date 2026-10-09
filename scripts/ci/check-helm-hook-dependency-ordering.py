@@ -124,14 +124,15 @@ def main() -> int:
             dep = index.get((kind, name))
             if dep is None:
                 continue
+            dep_name = (dep.get("metadata") or {}).get("name")
             dep_hooks = hook_types(dep)
             if not (dep_hooks & PRE_HOOKS):
-                return False, f"{kind}/{name} exists but is a regular (non-hook) resource"
+                return False, f"{kind}/{dep_name} exists but is a regular (non-hook) resource"
             dep_weight = hook_weight(dep)
             if dep_weight < max_weight:
-                return True, f"{kind}/{name} is a pre-* hook at weight {dep_weight} < {max_weight}"
-            return False, f"{kind}/{name} is a pre-* hook at weight {dep_weight}, not < {max_weight}"
-        return False, f"no {'/'.join(kinds)} named {name} found in rendered output"
+                return True, f"{kind}/{dep_name} is a pre-* hook at weight {dep_weight} < {max_weight}"
+            return False, f"{kind}/{dep_name} is a pre-* hook at weight {dep_weight}, not < {max_weight}"
+        return False, f"no {'/'.join(kinds)} with the requested name found in rendered output"
 
     def resolves_post(name: str, kinds: tuple[str, ...], max_weight: int) -> tuple[bool, str]:
         """Dependency check for a post-install/post-upgrade hook context.
@@ -146,17 +147,19 @@ def main() -> int:
             dep = index.get((kind, name))
             if dep is None:
                 continue
+            dep_name = (dep.get("metadata") or {}).get("name")
             dep_hooks = hook_types(dep)
             if not dep_hooks:
-                return True, f"{kind}/{name} is a regular resource, already created before any post-* hook fires"
+                return True, f"{kind}/{dep_name} is a regular resource, already created before any post-* hook fires"
             if dep_hooks & PRE_HOOKS:
-                return True, f"{kind}/{name} is a pre-* hook, always runs before the post-* phase"
+                return True, f"{kind}/{dep_name} is a pre-* hook, always runs before the post-* phase"
             dep_weight = hook_weight(dep)
             if dep_weight < max_weight:
-                return True, f"{kind}/{name} is a post-* hook at weight {dep_weight} < {max_weight}"
-            return False, f"{kind}/{name} is a post-* hook at weight {dep_weight}, not < {max_weight}"
-        return False, f"no {'/'.join(kinds)} named {name} found in rendered output"
+                return True, f"{kind}/{dep_name} is a post-* hook at weight {dep_weight} < {max_weight}"
+            return False, f"{kind}/{dep_name} is a post-* hook at weight {dep_weight}, not < {max_weight}"
+        return False, f"no {'/'.join(kinds)} with the requested name found in rendered output"
 
+    known_names = {n for (_, n) in index}
     examined = 0
     failures: list[str] = []
 
@@ -190,10 +193,14 @@ def main() -> int:
                 if not ok:
                     failures.append(f"[{phase_label}] {d['kind']}/{name} serviceAccountName dependency")
 
-            for ref in refs:
+            for i, ref in enumerate(refs):
                 ok, reason = resolver(ref, ("ConfigMap", "Secret"), weight)
+                # Show the matched resource's own name (taken from the rendered doc's
+                # metadata.name, never echoed from the Secret/ConfigMap reference field)
+                # -- an unresolved reference is reported by position instead.
+                shown = next((n for n in known_names if n == ref), f"<unresolved dependency #{i}>")
                 status = "OK" if ok else "FAIL"
-                print(f"{status}  [{phase_label}] {d['kind']}/{name} (weight {weight}) mounts {ref}: {reason}")
+                print(f"{status}  [{phase_label}] {d['kind']}/{name} (weight {weight}) mounts {shown}: {reason}")
                 if not ok:
                     failures.append(f"[{phase_label}] {d['kind']}/{name} configmap/secret mount dependency")
 
