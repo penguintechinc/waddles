@@ -29,6 +29,22 @@ Security hardening (identity review) adds:
 - :func:`collect_uuid_unavailability` / :func:`run_uuid_availability_monitor` -- the
   metric for community members whose ``user_uuid`` could not be derived, so a
   trigger-side fail-closed NULL is observable rather than only a ``RAISE WARNING``.
+
+Wrong-recipient hardening (review of the handle -> UUID path, #748) adds:
+
+- A handle only ever matches a VERIFIED, platform-unique login: the OAuth-verified
+  ``hub_user_identities.platform_username`` of a linked user, or -- only on platforms whose
+  chat handle IS the unique login (:data:`LOGIN_HANDLE_PLATFORMS`, i.e. Twitch) -- the handle a
+  pseudonym was minted with. A Discord display name / server nickname is mutable, non-unique
+  and self-chosen, so it is never matched: ``!secret @alice`` cannot be steered to whoever
+  nicknamed themselves "alice" (:class:`HandleUnverifiedError`; use a real ``<@id>`` mention).
+- Every match requires CURRENT community membership in the tenant (not left, not removed, in an
+  active community) and an active hub user; a left / erased identity is never returned.
+- A mention (``<@id>``) resolves only for such a current member and never mints for anyone else.
+- Handles are compared NFKC + casefold (never bare ``lower()``), and display names are stripped
+  of every format / zero-width / filler character so a name cannot render blank.
+- Failures log type + SQLSTATE + traceback frames, and span exception events carry the same --
+  never the driver message, which embeds bound parameters (handles).
 """
 
 from __future__ import annotations
@@ -37,15 +53,18 @@ import asyncio
 import logging
 import re
 import time
+import traceback
 import unicodedata
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from pathlib import PurePath
 from typing import Any, Literal
 
 from flask_core.service_jwt import SYSTEM_TENANT
 from opentelemetry import metrics, trace
 from opentelemetry.metrics import CallbackOptions, Observation
+from opentelemetry.trace import Status, StatusCode
 
 logger = logging.getLogger(__name__)
 _tracer = trace.get_tracer("hub_api.identity")
@@ -76,6 +95,10 @@ _tenant_authz = _meter.create_counter(
 _erasures = _meter.create_counter(
     "hub_api.identity.pseudonym_erasures", description="GDPR pseudonym erasures by mode"
 )
+_target_refusals = _meter.create_counter(
+    "hub_api.identity.target_refusals",
+    description="Handle/mention lookups refused for safety, by reason (no PII)",
+)
 
 #: Why a community member's ``user_uuid`` is NULL ("unavailable"), as written by the
 #: membership trigger (alembic 0047). Kept in step with the table's CHECK constraint.
@@ -102,13 +125,25 @@ MAX_TARGET_LEN = 255
 MAX_DISPLAY_NAME_LEN = 64
 _PLATFORM_RE = re.compile(r"^[a-z0-9_-]{1,50}$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
-_DISCORD_MENTION_RE = re.compile(r"^<@!?(\d{1,32})>$")
+#: ASCII digits only: ``\d`` would also accept other scripts' digits (which NFKC then folds).
+_DISCORD_MENTION_RE = re.compile(r"^<@!?([0-9]{1,32})>$")
 _NON_USER_AT_REFS = frozenset({"@everyone", "@here"})
-#: Bidi marks/overrides/isolates: invisible characters a display name could use to
-#: spoof or reorder the message it is substituted into (dropped outright).
-_UNSAFE_NAME_CHARS = frozenset(
-    "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
-)
+
+#: Platforms whose chat-visible handle IS the platform-unique login (Twitch enforces
+#: ``display_name`` == ``login`` modulo capitalisation), so the handle a pseudonym was minted
+#: with is a stable identifier there. Everywhere else (Discord: global display name / server
+#: nickname -- mutable, non-unique, self-chosen) only a verified ``platform_username`` matches.
+#: A fail-closed allow-list: an unknown platform gets the strict behaviour.
+LOGIN_HANDLE_PLATFORMS = frozenset({"twitch"})
+
+#: Characters that render as nothing (or nearly) yet are not whitespace, beyond the whole
+#: Unicode "Cf" format category: combining grapheme joiner, Hangul / Khmer / Mongolian
+#: fillers, braille blank, halfwidth Hangul filler. Dropped from display names and refused
+#: in lookup targets so a name can neither render blank nor hide inside a handle.
+_INVISIBLE_FILLERS = frozenset("\u034f\u115f\u1160\u17b4\u17b5\u180e\u2800\u3164\uffa0")
+#: General categories dropped outright from names: format (zero-width / bidi / tag characters,
+#: soft hyphen, BOM), surrogates and private use.
+_DROPPED_NAME_CATEGORIES = frozenset({"Cf", "Cs", "Co"})
 
 
 class IdentityResolutionError(Exception):
@@ -125,6 +160,24 @@ class TenantNotFoundError(IdentityResolutionError):
 
 class HandleNotFoundError(IdentityResolutionError):
     """No identity in the tenant matches the handle (maps to NOT_FOUND)."""
+
+
+class HandleUnverifiedError(HandleNotFoundError):
+    """No VERIFIED login matches, and this platform's display names are not accepted.
+
+    Raised for every handle miss on a platform outside :data:`LOGIN_HANDLE_PLATFORMS`
+    (Discord) -- a nickname is never matched, so the outcome is uniform whether or not
+    anyone wears that nickname (no oracle). Maps to NOT_FOUND; the caller should ask the
+    user for a real mention instead.
+    """
+
+
+class TargetNotMemberError(HandleNotFoundError):
+    """The referenced identity is not a CURRENT member of the tenant (left, removed, or never).
+
+    Maps to the same NOT_FOUND / ``handle not found`` as an unknown handle, so a non-member is
+    indistinguishable from a nonexistent user (no membership oracle).
+    """
 
 
 class AmbiguousHandleError(IdentityResolutionError):
@@ -151,6 +204,56 @@ class ResolvedIdentity:
 
     platform_user_id: str
     uuid: uuid.UUID
+
+
+def _failure_summary(exc: BaseException) -> str:
+    """Render a failure for logs and span events: type, SQLSTATE and traceback frames.
+
+    Deliberately omits ``str(exc)``: psycopg2 error text embeds the client-interpolated query
+    and DETAIL rows, i.e. the handle / platform id being looked up. The exception type, the
+    machine-readable SQLSTATE and the frames (file:line:function, never argument values) are
+    enough to diagnose a failure without putting PII into any telemetry sink.
+    """
+    sqlstate = getattr(exc, "pgcode", None) or "-"
+    frames = " <- ".join(
+        f"{PurePath(f.filename).name}:{f.lineno}:{f.name}"
+        for f in reversed(traceback.extract_tb(exc.__traceback__))
+    )
+    return f"{type(exc).__module__}.{type(exc).__qualname__} sqlstate={sqlstate} at {frames or '-'}"
+
+
+def _mark_span_error(span: trace.Span, exc: BaseException) -> None:
+    """Flag ``span`` failed with a PII-free exception event (type + SQLSTATE, no message).
+
+    Spans are opened with ``record_exception=False``: the SDK's automatic exception event
+    carries ``str(exc)`` and a chained stack trace, both of which can contain bound handles.
+    """
+    span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+    span.add_event(
+        "exception",
+        {
+            "exception.type": type(exc).__qualname__,
+            "exception.sqlstate": str(getattr(exc, "pgcode", None) or "-"),
+        },
+    )
+
+
+def _has_invisible(text: str) -> bool:
+    """True if ``text`` holds any format / zero-width / filler character (see module consts)."""
+    return any(
+        ch in _INVISIBLE_FILLERS or unicodedata.category(ch) in _DROPPED_NAME_CATEGORIES
+        for ch in text
+    )
+
+
+def _fold_handle(text: str) -> str:
+    """Canonical comparison form of a handle: NFKC, then casefold (never a bare ``lower()``).
+
+    NFKC folds compatibility variants (fullwidth ``ａｌｉｃｅ``, ligatures) onto their plain
+    form and casefold covers the case mappings ``lower()`` misses, so two spellings of one
+    login cannot be told apart by a lookalike -- and two different logins cannot collide.
+    """
+    return unicodedata.normalize("NFKC", text).casefold()
 
 
 def _validate_tenant_ref(tenant_id: str) -> None:
@@ -200,7 +303,9 @@ async def resolve_identities(
     for item in items:
         _validate(item)
     started = time.monotonic()
-    with _tracer.start_as_current_span("identity.resolve") as span:
+    with _tracer.start_as_current_span(
+        "identity.resolve", record_exception=False, set_status_on_exception=False
+    ) as span:
         span.set_attribute("identity.batch_size", len(items))
         _batch_size.record(len(items))
         try:
@@ -225,6 +330,7 @@ async def resolve_identities(
                     raise IdentityResolutionError("resolution returned no uuid")
                 seen[key] = ResolvedIdentity(item.platform_user_id, uuid.UUID(str(rows[0][0])))
         except IdentityResolutionError as exc:
+            _mark_span_error(span, exc)
             _resolve_counter.add(len(items), {"outcome": type(exc).__name__})
             logger.warning(
                 "identity resolution rejected",
@@ -232,9 +338,11 @@ async def resolve_identities(
             )
             raise
         except Exception as exc:
+            _mark_span_error(span, exc)
             _resolve_counter.add(len(items), {"outcome": "error"})
             logger.error(
-                "identity resolution failed",
+                "identity resolution failed: %s",
+                _failure_summary(exc),
                 extra={"action": "identity_resolve", "result": type(exc).__name__},
             )
             raise IdentityResolutionError("resolution failed") from exc
@@ -290,39 +398,96 @@ class DisplayNameResult:
     unresolved: tuple[str, ...]
 
 
-#: Candidate UUIDs for a handle inside one tenant (at most 2 are needed: 0 = not found,
-#: 1 = resolved, 2 = ambiguous). Two PII-bearing sources, both hub-api-owned:
-#: the pseudonym store's mint-time handle (re-pointed at the hub user once the platform
-#: account is linked -- the same precedence ``resolve_identity_uuid()`` applies, so a
-#: stale pseudonym can never collide with its own linked identity) and the linked
-#: ``hub_user_identities.platform_username``, restricted to identities that are members
-#: of one of the tenant's communities. Matching is case-insensitive and exact.
-_HANDLE_CANDIDATES_SQL = """
-SELECT DISTINCT cand.uuid::text FROM (
-    SELECT COALESCE(hu.uuid, ep.pseudonym) AS uuid
-      FROM ephemeral_pseudonyms ep
-      LEFT JOIN hub_user_identities hui
-        ON hui.platform = ep.platform AND hui.platform_user_id = ep.platform_user_id
-      LEFT JOIN hub_users hu ON hu.id = hui.hub_user_id
-     WHERE ep.tenant_id = %s AND ep.platform = %s AND lower(ep.handle) = lower(%s)
-    UNION
-    SELECT hu.uuid
-      FROM hub_user_identities hui
-      JOIN hub_users hu ON hu.id = hui.hub_user_id
-     WHERE hui.platform = %s AND lower(hui.platform_username) = lower(%s)
-       AND EXISTS (
-            SELECT 1 FROM community_members cm JOIN communities c ON c.id = cm.community_id
-             WHERE c.tenant_id = %s
-               AND ((cm.platform = hui.platform AND cm.platform_user_id = hui.platform_user_id)
-                    OR cm.user_id = hu.id::text))
-) cand
-LIMIT 2
+#: A CURRENT member of a tenant community (aliases ``cm`` = community_members, ``c`` =
+#: communities): not left, not removed, in a community that is active and not deleted. The
+#: single definition every handle / mention lookup applies, so a left or removed identity is
+#: never returned. ``IS NOT FALSE`` keeps rows whose flag was never set (legacy NULL).
+_CURRENT_MEMBER_SQL = (
+    "cm.is_active IS NOT FALSE AND cm.left_at IS NULL AND cm.removed_at IS NULL "
+    "AND c.is_active IS NOT FALSE AND c.deleted_at IS NULL"
+)
+
+
+def _with_current_member(template: str) -> str:
+    """Splice :data:`_CURRENT_MEMBER_SQL` into a query template at its ``{CURRENT_MEMBER}`` mark.
+
+    The predicate is a module constant (never request input), substituted once at import so
+    the three lookups below can never drift apart on what "current member" means.
+    """
+    return template.replace("{CURRENT_MEMBER}", _CURRENT_MEMBER_SQL)
+
+
+#: Handle -> candidate UUIDs via a VERIFIED login: the OAuth-verified, platform-unique
+#: ``hub_user_identities.platform_username`` of an active hub user who is a CURRENT member of
+#: the tenant (by their platform account, or by their hub membership). Case/compatibility-
+#: insensitive exact match (NFKC + lower in SQL, re-checked with NFKC + casefold in Python);
+#: returns the stored username so the Python side can confirm the fold agrees. Params:
+#: ``[platform, handle, tenant_id]``. Runs on every platform.
+_LINKED_LOGIN_CANDIDATES_SQL = _with_current_member(
+    """
+SELECT DISTINCT hu.uuid::text, hui.platform_username
+  FROM hub_user_identities hui
+  JOIN hub_users hu ON hu.id = hui.hub_user_id
+ WHERE hui.platform = %s
+   AND hu.is_active IS NOT FALSE
+   AND lower(normalize(hui.platform_username, NFKC)) = lower(normalize(%s, NFKC))
+   AND EXISTS (
+        SELECT 1 FROM community_members cm JOIN communities c ON c.id = cm.community_id
+         WHERE c.tenant_id = %s AND {CURRENT_MEMBER}
+           AND ((cm.platform = hui.platform AND cm.platform_user_id = hui.platform_user_id)
+                OR cm.user_id = hu.id::text))
+ LIMIT 25
 """
+)
+
+#: Handle -> candidate UUIDs via the handle a pseudonym was minted with -- ONLY used on
+#: :data:`LOGIN_HANDLE_PLATFORMS`, where that handle is the platform-unique login. The
+#: pseudonym is re-pointed at the hub user once the platform account is linked (the
+#: precedence ``resolve_identity_uuid()`` applies, so a stale pseudonym cannot collide with
+#: its own linked identity), and the account must be a CURRENT member of the tenant. A
+#: wiped (erased) handle is NULL and never matches. Params: ``[tenant_id, platform, handle]``.
+_PSEUDONYM_LOGIN_CANDIDATES_SQL = _with_current_member(
+    """
+SELECT DISTINCT COALESCE(hu.uuid, ep.pseudonym)::text, ep.handle
+  FROM ephemeral_pseudonyms ep
+  LEFT JOIN hub_user_identities hui
+    ON hui.platform = ep.platform AND hui.platform_user_id = ep.platform_user_id
+  LEFT JOIN hub_users hu ON hu.id = hui.hub_user_id
+ WHERE ep.tenant_id = %s AND ep.platform = %s AND ep.handle IS NOT NULL
+   AND (hu.id IS NULL OR hu.is_active IS NOT FALSE)
+   AND lower(normalize(ep.handle, NFKC)) = lower(normalize(%s, NFKC))
+   AND EXISTS (
+        SELECT 1 FROM community_members cm JOIN communities c ON c.id = cm.community_id
+         WHERE c.tenant_id = ep.tenant_id AND cm.platform = ep.platform
+           AND cm.platform_user_id = ep.platform_user_id AND {CURRENT_MEMBER})
+ LIMIT 25
+"""
+)
+
+#: Is the platform account (mention target) a CURRENT member of the tenant -- directly, or
+#: through the active hub user it is linked to? A linked hub user that is deactivated never
+#: counts. Params: ``[tenant_id, platform, puid, platform, puid, platform, puid]``.
+_MENTION_MEMBER_SQL = _with_current_member(
+    """
+SELECT 1
+  FROM community_members cm JOIN communities c ON c.id = cm.community_id
+ WHERE c.tenant_id = %s AND {CURRENT_MEMBER}
+   AND ((cm.platform = %s AND cm.platform_user_id = %s)
+        OR cm.user_id IN (SELECT hui.hub_user_id::text FROM hub_user_identities hui
+                           WHERE hui.platform = %s AND hui.platform_user_id = %s))
+   AND NOT EXISTS (
+        SELECT 1 FROM hub_user_identities hui JOIN hub_users hu ON hu.id = hui.hub_user_id
+         WHERE hui.platform = %s AND hui.platform_user_id = %s AND hu.is_active IS FALSE)
+ LIMIT 1
+"""
+)
 
 #: Hub-user display names, only for users that are members of the tenant (a UUID from
 #: another tenant resolves to nothing -- no cross-tenant existence oracle). Preference:
-#: the hub profile name, then the tenant's most recent member display name, then the
-#: first linked platform username. Never username/email.
+#: the hub profile name, then the tenant's most recent member display name. There is
+#: deliberately NO further fallback to a linked ``platform_username``: it is any-platform
+#: and tenant-agnostic, so it could surface (say) a Twitch login in a Discord message, or a
+#: login the tenant never saw. Never username/email.
 _HUB_NAMES_SQL = """
 SELECT hu.uuid::text,
        COALESCE(
@@ -332,12 +497,7 @@ SELECT hu.uuid::text,
              WHERE c.tenant_id = %s
                AND (cm.user_uuid = hu.uuid OR cm.user_id = hu.id::text)
                AND NULLIF(btrim(cm.display_name), '') IS NOT NULL
-             ORDER BY cm.id DESC LIMIT 1),
-           (SELECT NULLIF(btrim(hui.platform_username), '')
-              FROM hub_user_identities hui
-             WHERE hui.hub_user_id = hu.id
-               AND NULLIF(btrim(hui.platform_username), '') IS NOT NULL
-             ORDER BY hui.id LIMIT 1)
+             ORDER BY cm.id DESC LIMIT 1)
        )
   FROM hub_users hu
  WHERE hu.uuid = ANY(%s::uuid[])
@@ -358,15 +518,24 @@ def parse_target(platform: str, raw: str) -> ParsedTarget:
 
     Accepts ``@bob`` / ``bob`` and, on Discord, ``<@123>`` / ``<@!123>``. Anything
     that is not a plain user reference (role/channel/emoji mentions, ``@everyone``,
-    ``@here``, control characters, oversize input) raises
-    :class:`IdentityValidationError` -- it is never coerced into a lookup.
+    ``@here``, control or zero-width / format characters, oversize input) raises
+    :class:`IdentityValidationError` -- it is never coerced into a lookup. The target is
+    NFKC-normalised first, so a fullwidth ``＠everyone`` or ``<＠１２３>`` is judged by what
+    it renders as, not by its code points.
     """
     if not _PLATFORM_RE.match(platform):
         raise IdentityValidationError("platform invalid")
-    target = raw.strip() if isinstance(raw, str) else ""
-    if not target or len(target) > MAX_TARGET_LEN or _CONTROL_RE.search(target):
+    if not isinstance(raw, str) or len(raw) > MAX_TARGET_LEN:
         raise IdentityValidationError("target invalid")
-    if target.lower() in _NON_USER_AT_REFS:
+    target = unicodedata.normalize("NFKC", raw.strip())
+    if (
+        not target
+        or len(target) > MAX_TARGET_LEN
+        or _CONTROL_RE.search(target)
+        or _has_invisible(target)
+    ):
+        raise IdentityValidationError("target invalid")
+    if _fold_handle(target) in _NON_USER_AT_REFS:
         raise IdentityValidationError("target is not a user reference")
     if target.startswith("<") and target.endswith(">"):
         mention = _DISCORD_MENTION_RE.match(target) if platform == "discord" else None
@@ -387,12 +556,15 @@ async def _observed[T](op: str, size: int, work: Callable[[], Awaitable[T]]) -> 
     error chained -- the caller never sees a default value.
     """
     started = time.monotonic()
-    with _tracer.start_as_current_span(f"identity.{op}") as span:
+    with _tracer.start_as_current_span(
+        f"identity.{op}", record_exception=False, set_status_on_exception=False
+    ) as span:
         span.set_attribute("identity.batch_size", size)
         _batch_size.record(size, {"op": op})
         try:
             result = await work()
         except IdentityResolutionError as exc:
+            _mark_span_error(span, exc)
             outcome = type(exc).__name__
             _op_counter.add(1, {"op": op, "outcome": outcome})
             logger.warning(
@@ -401,9 +573,11 @@ async def _observed[T](op: str, size: int, work: Callable[[], Awaitable[T]]) -> 
             )
             raise
         except Exception as exc:
+            _mark_span_error(span, exc)
             _op_counter.add(1, {"op": op, "outcome": "error"})
             logger.error(
-                "identity operation failed",
+                "identity operation failed: %s",
+                _failure_summary(exc),
                 extra={"action": f"identity_{op}", "result": type(exc).__name__},
             )
             raise IdentityResolutionError("resolution failed") from exc
@@ -412,18 +586,100 @@ async def _observed[T](op: str, size: int, work: Callable[[], Awaitable[T]]) -> 
         return result
 
 
+async def _resolve_mention(
+    async_dal: Any, tenant_pk: int, platform: str, platform_user_id: str
+) -> ResolvedTarget:
+    """Resolve a mention's platform user id -- members only, and never minting for others."""
+    member = await async_dal.executesql_async(
+        _MENTION_MEMBER_SQL,
+        [
+            tenant_pk,
+            platform,
+            platform_user_id,
+            platform,
+            platform_user_id,
+            platform,
+            platform_user_id,
+        ],
+    )
+    if not member:
+        _target_refusals.add(1, {"reason": "not_member", "kind": "mention"})
+        raise TargetNotMemberError("handle not found")
+    rows = await async_dal.executesql_async(
+        "SELECT resolve_identity_uuid(%s, %s, %s, NULL, NULL)",
+        [tenant_pk, platform, platform_user_id],
+    )
+    if not rows or rows[0][0] is None:
+        raise IdentityResolutionError("resolution returned no uuid")
+    return ResolvedTarget(uuid.UUID(str(rows[0][0])), "mention")
+
+
+async def _login_candidates(
+    async_dal: Any, sql: str, params: list[Any], folded_target: str
+) -> set[str]:
+    """Run a candidate query and keep rows whose stored login folds equal to the target.
+
+    The SQL pre-filter (NFKC + lower) and this check (NFKC + casefold) must agree, so the
+    result can only be narrower than either alone -- never a looser match.
+    """
+    rows = await async_dal.executesql_async(sql, params)
+    return {str(r[0]) for r in rows or [] if _fold_handle(str(r[1] or "")) == folded_target}
+
+
+async def _resolve_handle(
+    async_dal: Any, tenant_pk: int, platform: str, handle: str
+) -> ResolvedTarget:
+    """Resolve a free-text handle to exactly one verified, current-member identity."""
+    folded = _fold_handle(handle)
+    candidates = await _login_candidates(
+        async_dal, _LINKED_LOGIN_CANDIDATES_SQL, [platform, handle, tenant_pk], folded
+    )
+    if platform in LOGIN_HANDLE_PLATFORMS:
+        candidates |= await _login_candidates(
+            async_dal, _PSEUDONYM_LOGIN_CANDIDATES_SQL, [tenant_pk, platform, handle], folded
+        )
+    logger.debug(
+        "handle candidates collected",
+        extra={
+            "action": "identity_resolve_target",
+            "kind": "handle",
+            "candidates": len(candidates),
+            "pseudonym_logins": platform in LOGIN_HANDLE_PLATFORMS,
+        },
+    )
+    if len(candidates) > 1:
+        _target_refusals.add(1, {"reason": "ambiguous", "kind": "handle"})
+        raise AmbiguousHandleError("handle ambiguous")
+    if not candidates:
+        if platform not in LOGIN_HANDLE_PLATFORMS:
+            _target_refusals.add(1, {"reason": "unverified_platform", "kind": "handle"})
+            raise HandleUnverifiedError(
+                "handle not verifiable on this platform; use an @mention of the user"
+            )
+        _target_refusals.add(1, {"reason": "not_found", "kind": "handle"})
+        raise HandleNotFoundError("handle not found")
+    return ResolvedTarget(uuid.UUID(next(iter(candidates))), "handle")
+
+
 async def resolve_target(
     async_dal: Any, tenant_id: str, platform: str, target: str
 ) -> ResolvedTarget:
     """Resolve a raw chat reference to a UUID entirely inside the PII boundary.
 
-    A Discord mention carries the stable platform user id, so it resolves through
-    ``resolve_identity_uuid()`` (linked hub user, else get-or-create pseudonym). A
-    handle is matched case-insensitively within the tenant against hub-api-owned PII
-    columns: exactly one distinct identity resolves, none raises
-    :class:`HandleNotFoundError`, several raise :class:`AmbiguousHandleError` -- a
-    secret or lookup must never land on a guessed identity. The handle is never
-    persisted, echoed or logged.
+    The result is where a secret / lookup lands, so it is resolved conservatively and every
+    refusal is loud (a raised :class:`IdentityResolutionError`), never a guess:
+
+    - A Discord mention carries the stable platform user id. It resolves (through
+      ``resolve_identity_uuid()``: linked hub user, else the stable pseudonym) only for a
+      CURRENT member of the tenant; anyone else raises :class:`TargetNotMemberError` and
+      nothing is minted, so lookups cannot be used to mint rows or correlate non-members.
+    - A handle matches only a verified, platform-unique login of a current member (see
+      :data:`LOGIN_HANDLE_PLATFORMS`); never a Discord display name / nickname. A miss on a
+      platform that does not accept display names raises :class:`HandleUnverifiedError`,
+      none elsewhere :class:`HandleNotFoundError`, several distinct identities
+      :class:`AmbiguousHandleError`.
+
+    The handle is never persisted, echoed or logged.
     """
     _validate_tenant_ref(tenant_id)
     parsed = parse_target(platform, target)
@@ -431,23 +687,8 @@ async def resolve_target(
     async def work() -> ResolvedTarget:
         tenant_pk = await _tenant_pk(async_dal, tenant_id)
         if parsed.kind == "mention":
-            rows = await async_dal.executesql_async(
-                "SELECT resolve_identity_uuid(%s, %s, %s, NULL, NULL)",
-                [tenant_pk, platform, parsed.value],
-            )
-            if not rows or rows[0][0] is None:
-                raise IdentityResolutionError("resolution returned no uuid")
-            return ResolvedTarget(uuid.UUID(str(rows[0][0])), "mention")
-        rows = await async_dal.executesql_async(
-            _HANDLE_CANDIDATES_SQL,
-            [tenant_pk, platform, parsed.value, platform, parsed.value, tenant_pk],
-        )
-        candidates = sorted({str(r[0]) for r in rows or []})
-        if not candidates:
-            raise HandleNotFoundError("handle not found")
-        if len(candidates) > 1:
-            raise AmbiguousHandleError("handle ambiguous")
-        return ResolvedTarget(uuid.UUID(candidates[0]), "handle")
+            return await _resolve_mention(async_dal, tenant_pk, platform, parsed.value)
+        return await _resolve_handle(async_dal, tenant_pk, platform, parsed.value)
 
     resolved = await _observed("resolve_target", 1, work)
     logger.debug(
@@ -460,18 +701,25 @@ async def resolve_target(
 def _clean_display_name(raw: Any) -> str:
     """Make a stored name safe to substitute into outbound text; ``""`` if nothing remains.
 
-    Drops bidi/format spoofing characters, turns other control characters and line
-    separators into spaces, collapses whitespace and caps the length. Per-sink escaping
-    (Discord markdown, IRC, HTML) stays the egress layer's job.
+    Drops every format character (bidi controls, zero-width space / joiners, word joiner,
+    BOM, tag characters, soft hyphen), private-use / surrogate code points and the blank-
+    rendering fillers; turns other control characters and line separators into spaces,
+    collapses whitespace and caps the length. A name left with no visible character (only
+    combining marks, or nothing) is ``""`` -- never a blank-looking name -- so it reports
+    unresolved instead of impersonating silence. Per-sink escaping (Discord markdown, IRC,
+    HTML) stays the egress layer's job.
     """
     if not isinstance(raw, str):
         return ""
     chars = [
         " " if unicodedata.category(ch) in ("Cc", "Zl", "Zp") else ch
         for ch in raw
-        if ch not in _UNSAFE_NAME_CHARS
+        if ch not in _INVISIBLE_FILLERS and unicodedata.category(ch) not in _DROPPED_NAME_CATEGORIES
     ]
-    return " ".join("".join(chars).split())[:MAX_DISPLAY_NAME_LEN].strip()
+    cleaned = " ".join("".join(chars).split())[:MAX_DISPLAY_NAME_LEN].strip()
+    if not any(unicodedata.category(ch)[0] not in "MZC" for ch in cleaned):
+        return ""
+    return cleaned
 
 
 async def resolve_display_names(

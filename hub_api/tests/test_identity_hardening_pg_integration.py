@@ -310,8 +310,12 @@ async def test_hub_link_resolves_only_inside_a_tenant_the_user_belongs_to(
     outsider = await resolve_identity(adal, "globex", "discord", "111")
     assert outsider != uuid.UUID(hub_uuid)  # cannot correlate the person across tenants
     assert await resolve_identity(adal, "globex", "discord", "111") == outsider  # stable
-    mention = await resolve_target(adal, "globex", "discord", "<@111>")
-    assert mention.uuid == outsider  # the mention path is tenant-filtered too
+    # the mention path is tenant-gated too: a non-member of globex is refused outright (no
+    # hub uuid, no pseudonym handed out, and nothing minted by the lookup itself)
+    minted_before = await _one(adal, "SELECT count(*) FROM ephemeral_pseudonyms")
+    with pytest.raises(svc.TargetNotMemberError):
+        await resolve_target(adal, "globex", "discord", "<@111>")
+    assert await _one(adal, "SELECT count(*) FROM ephemeral_pseudonyms") == minted_before
     # the SQL function itself (not just the service) refuses the explicit-id shortcut too
     with pytest.raises(Exception, match="not a member of the tenant"):
         await adal.executesql_async(
@@ -507,6 +511,8 @@ async def test_erasure_removes_the_handle_but_keeps_the_pseudonym(adal: AsyncDAL
         adal, [IdentityRequest("globex", "twitch", "tw-1", SECRET_HANDLE)]
     )
     pseudonym = str(ra[0].uuid)
+    # a handle lookup needs current membership: tw-1 is a member of acme (not of globex)
+    await _member_row(adal, await _community(adal, ta), platform="twitch", puid="tw-1")
     assert (await resolve_target(adal, "acme", "twitch", f"@{SECRET_HANDLE}")).uuid == ra[0].uuid
     # scoped to one tenant: the other tenant's row is untouched
     assert await erase_pseudonym_handles(adal, "twitch", "tw-1", tenant_id="acme") == 1
@@ -605,6 +611,8 @@ async def test_tenant_bound_token_is_confined_to_its_tenant(
 ) -> None:
     ta = await _tenant(adal, "acme")
     await _tenant(adal, "globex")
+    # the mention lookup below needs a CURRENT member (it never mints for strangers)
+    await _member_row(adal, await _community(adal, ta), platform="discord", puid="1")
     issuer = make_issuer(tenant="acme" if claim_by == "slug" else str(ta))
     caplog.set_level(logging.DEBUG)
     async with serving(adal, issuer) as addr, grpc.aio.insecure_channel(addr) as ch:

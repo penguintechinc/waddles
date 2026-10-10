@@ -46,6 +46,7 @@ from services.identity_resolution_service import (  # noqa: E402
     IdentityResolutionError,
     IdentityValidationError,
     ParsedTarget,
+    TargetNotMemberError,
     TenantNotFoundError,
     _clean_display_name,
     parse_target,
@@ -262,18 +263,22 @@ async def test_handle_resolves_linked_hub_user_via_platform_username(adal: Async
 async def test_linked_identity_supersedes_its_own_stale_pseudonym(
     adal: AsyncDAL, platform_username: str | None
 ) -> None:
-    """A pseudonym minted before the account was linked must not collide with the link."""
+    """A pseudonym minted before the account was linked must not collide with the link.
+
+    Twitch: its chat handle is the platform-unique login, so the minted handle is matchable
+    (a Discord display name never is -- see test_identity_wrong_recipient_pg_integration).
+    """
     t = await _tenant(adal, "acme")
     c = await _community(adal, t)
-    pseudonym = await _member(adal, c, platform="discord", puid="d-9", display="Carol")
+    pseudonym = await _member(adal, c, platform="twitch", puid="tw-9", display="Carol")
     assert pseudonym is not None
     hub_id, hub_uuid = await _hub_user(adal)
-    await _identity(adal, hub_id, "discord", "d-9", platform_username)
-    got = await resolve_target(adal, "acme", "discord", "carol")
+    await _identity(adal, hub_id, "twitch", "tw-9", platform_username)
+    got = await resolve_target(adal, "acme", "twitch", "carol")
     assert got.uuid == uuid.UUID(hub_uuid)  # one candidate, the linked uuid -- not ambiguous
     assert got.uuid != uuid.UUID(pseudonym)
     # ...and it is the same uuid resolve_identity() hands out for that platform id
-    assert await resolve_identity(adal, "acme", "discord", "d-9") == got.uuid
+    assert await resolve_identity(adal, "acme", "twitch", "tw-9") == got.uuid
 
 
 @pg_only
@@ -361,17 +366,18 @@ async def test_mention_resolves_known_linked_and_unknown_ids(adal: AsyncDAL) -> 
     for raw in ("<@555>", "<@!555>"):
         got = await resolve_target(adal, "acme", "discord", raw)
         assert (got.uuid, got.kind) == (uuid.UUID(known), "mention")
-    # an id never seen before is get-or-create (stable), exactly like the mint path
-    first = await resolve_target(adal, "acme", "discord", "<@999>")
-    again = await resolve_target(adal, "acme", "discord", "<@999>")
-    assert first.uuid == again.uuid != uuid.UUID(known)
-    # linked ids resolve to the hub uuid
+    # an id that is not a current member is refused and NEVER minted (a mention is a lookup,
+    # not a way to create pseudonym rows or correlation tokens for strangers)
+    before = await _pseudonym_count(adal)
+    for _ in range(2):
+        with pytest.raises(TargetNotMemberError):
+            await resolve_target(adal, "acme", "discord", "<@999>")
+    assert await _pseudonym_count(adal) == before
+    # linked ids resolve to the hub uuid -- but only for a member of the tenant
     hub_id, hub_uuid = await _hub_user(adal)
     await _identity(adal, hub_id, "discord", "777", None)
-    # ...but only inside a tenant the hub user belongs to: before membership the account is
-    # just another pseudonym there (the global hub uuid is never handed to a non-member tenant)
-    outsider = await resolve_target(adal, "acme", "discord", "<@777>")
-    assert outsider.uuid != uuid.UUID(hub_uuid)
+    with pytest.raises(TargetNotMemberError):  # linked elsewhere, not a member here
+        await resolve_target(adal, "acme", "discord", "<@777>")
     await _member(adal, c, platform="discord", puid="777")
     assert (await resolve_target(adal, "acme", "discord", "<@777>")).uuid == uuid.UUID(hub_uuid)
 
@@ -392,17 +398,26 @@ async def test_target_validation_and_unknown_tenant_fail_loud(adal: AsyncDAL) ->
 
 
 @pg_only
-@pytest.mark.parametrize("raw", ["@bob", "<@1>"])
-async def test_target_db_failure_is_wrapped_not_defaulted(adal: AsyncDAL, raw: str) -> None:
+@pytest.mark.parametrize(
+    ("platform", "raw", "table"),
+    [
+        ("twitch", "@bob", "ephemeral_pseudonyms"),  # pseudonym-login path
+        ("discord", "@bob", "hub_user_identities"),  # verified-login path
+        ("discord", "<@1>", "community_members"),  # mention membership gate
+    ],
+)
+async def test_target_db_failure_is_wrapped_not_defaulted(
+    adal: AsyncDAL, platform: str, raw: str, table: str
+) -> None:
     await _tenant(adal, "acme")
-    await adal.executesql_async("ALTER TABLE ephemeral_pseudonyms RENAME TO ep_tmp")
+    await adal.executesql_async(f"ALTER TABLE {table} RENAME TO tbl_tmp")  # noqa: S608
     try:
         with pytest.raises(IdentityResolutionError) as exc_info:
-            await resolve_target(adal, "acme", "discord", raw)
+            await resolve_target(adal, "acme", platform, raw)
         assert not isinstance(exc_info.value, HandleNotFoundError | AmbiguousHandleError)
         assert exc_info.value.__cause__ is not None  # driver error chained, not swallowed
     finally:
-        await adal.executesql_async("ALTER TABLE ep_tmp RENAME TO ephemeral_pseudonyms")
+        await adal.executesql_async(f"ALTER TABLE tbl_tmp RENAME TO {table}")  # noqa: S608
 
 
 # ------------------------------------------------------------------ UUID -> display names
@@ -418,7 +433,9 @@ async def test_display_names_hub_user_pseudonym_and_fallbacks(adal: AsyncDAL) ->
     # blank profile name -> tenant member display name
     h2, u2 = await _hub_user(adal, display_name="   ", username="h2@example.com")
     await _member(adal, c, user_id=str(h2), display="Member Name 2")
-    # no names anywhere but a linked platform username -> that
+    # no names anywhere but a linked platform username -> NOT that: the username fallback was
+    # any-platform and tenant-agnostic (a Twitch login could surface in a Discord message), so
+    # the user reports unresolved instead
     h3, u3 = await _hub_user(adal, display_name=None, username="h3@example.com")
     await _identity(adal, h3, "twitch", "tw-3", "linked_login")
     await _member(adal, c, user_id=str(h3))
@@ -427,13 +444,12 @@ async def test_display_names_hub_user_pseudonym_and_fallbacks(adal: AsyncDAL) ->
     assert p4 is not None
 
     got = await resolve_display_names(adal, "acme", [u1, u2, u3, p4])
-    assert got.unresolved == ()
+    assert got.unresolved == (u3,)
     by_uuid = {n.uuid: n for n in got.names}
     assert (by_uuid[u1].display_name, by_uuid[u1].is_hub_user) == ("Profile Name", True)
     assert (by_uuid[u2].display_name, by_uuid[u2].is_hub_user) == ("Member Name 2", True)
-    assert (by_uuid[u3].display_name, by_uuid[u3].is_hub_user) == ("linked_login", True)
     assert (by_uuid[p4].display_name, by_uuid[p4].is_hub_user) == ("Chatter Four", False)
-    assert [n.uuid for n in got.names] == [u1, u2, u3, p4]  # request order kept
+    assert [n.uuid for n in got.names] == [u1, u2, p4]  # request order kept
 
 
 @pg_only
@@ -573,8 +589,12 @@ async def test_reader_role_cannot_read_raw_handles_or_run_the_lookups(
     ):
         assert "permission denied" in _reader_denied(pg_db, sql)
     # ...cannot run the handle->uuid join or either display-name query as an oracle
-    handle_params: list[Any] = [t, "discord", "x", "discord", "x", t]
-    assert "permission denied" in _reader_denied(pg_db, _svc._HANDLE_CANDIDATES_SQL, handle_params)
+    for sql, params in (
+        (_svc._LINKED_LOGIN_CANDIDATES_SQL, ["discord", "x", t]),
+        (_svc._PSEUDONYM_LOGIN_CANDIDATES_SQL, [t, "twitch", "x"]),
+        (_svc._MENTION_MEMBER_SQL, [t, "discord", "1", "discord", "1", "discord", "1"]),
+    ):
+        assert "permission denied" in _reader_denied(pg_db, sql, params)
     assert "permission denied" in _reader_denied(
         pg_db, _svc._HUB_NAMES_SQL, [t, [str(uuid.uuid4())], t]
     )
@@ -618,11 +638,16 @@ async def test_logs_carry_no_handles_or_names(
     await _member(adal, c, platform="twitch", puid="pii-id-3", display="dupesecret")
     hub_id, hub_uuid = await _hub_user(adal, display_name=NAME_SECRET)
     await _member(adal, c, user_id=str(hub_id))
+    await _member(adal, c, platform="discord", puid="424242")
     assert minted is not None
     caplog.set_level(logging.DEBUG)
 
     await resolve_target(adal, "acme", "twitch", f"@{HANDLE_SECRET}")  # ok
     await resolve_target(adal, "acme", "discord", "<@424242>")  # ok (mention)
+    with pytest.raises(TargetNotMemberError):
+        await resolve_target(adal, "acme", "discord", "<@535353>")  # non-member mention
+    with pytest.raises(HandleNotFoundError):  # discord nickname: refused, never matched
+        await resolve_target(adal, "acme", "discord", "@NicknameSecret")
     with pytest.raises(HandleNotFoundError):
         await resolve_target(adal, "acme", "twitch", "@GhostSecretHandle")
     with pytest.raises(AmbiguousHandleError):
@@ -650,7 +675,9 @@ async def test_logs_carry_no_handles_or_names(
         "SecretRole",
         "LeakyTenantHandle",
         "DbFailureSecret",
+        "NicknameSecret",
         "424242",
+        "535353",
         "pii-id-1",
     ):
         assert secret not in text, f"{secret!r} leaked into logs"

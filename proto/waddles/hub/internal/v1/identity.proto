@@ -32,11 +32,20 @@ service IdentityService {
   // handle ("@bob", "bob") or a Discord mention ("<@123>", "<@!123>") -- to
   // the stable UUID of that identity, entirely inside the hub-api PII
   // boundary: the raw handle is matched here and never stored, echoed or
-  // logged; only the UUID comes back. NOT_FOUND = no such identity in the
-  // tenant (or tenant unknown), FAILED_PRECONDITION = the handle matches
-  // more than one identity (never guessed), INVALID_ARGUMENT = malformed
-  // or non-user reference (role/channel mention, @everyone). Required
-  // scope: "identity:handle:resolve".
+  // logged; only the UUID comes back. The result is where a secret lands, so
+  // matching is conservative: a handle matches only a VERIFIED, platform-unique
+  // login (the OAuth-verified platform username of a linked user, or -- on
+  // Twitch, where the chat handle is the login -- the handle a pseudonym was
+  // minted with), NEVER a mutable display name / server nickname (Discord);
+  // and every match, handle or mention, requires CURRENT community membership
+  // in the tenant (a left/removed/erased identity is never returned, and a
+  // mention never mints a pseudonym for a non-member). NOT_FOUND = no such
+  // verified, current-member identity in the tenant (or tenant unknown, or a
+  // display-name-only reference on a platform that does not accept them --
+  // ask the user for a real mention), FAILED_PRECONDITION = the handle
+  // matches more than one identity (never guessed), INVALID_ARGUMENT =
+  // malformed or non-user reference (role/channel mention, @everyone, zero-
+  // width/format characters). Required scope: "identity:handle:resolve".
   rpc ResolveHandle(ResolveHandleRequest) returns (ResolveHandleResponse);
 }
 
