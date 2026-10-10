@@ -349,9 +349,10 @@ mod tests {
             "RTMPS://ingest.example.com/app/sk_abc",
             "rtmp://ingest.example.com/app/sk_abc",
         ] {
-            let target =
-                ResolvedRelayTarget::from_raw(RelayTargetKind::Rtmp, Secret::new(raw.to_string()))
-                    .unwrap_or_else(|err| panic!("{raw} should be accepted: {err}"));
+            let result =
+                ResolvedRelayTarget::from_raw(RelayTargetKind::Rtmp, Secret::new(raw.to_string()));
+            assert!(result.is_ok(), "{raw} should be accepted");
+            let target = result.expect("asserted ok above");
             assert_eq!(target.kind, RelayTargetKind::Rtmp);
             // Whatever the scheme, the stream key never reaches the redacted form.
             assert!(!target.url_redacted.contains("sk_abc"));

@@ -58,7 +58,13 @@ boundary — a pure-copy WHIP→WHEP leg needs **no ffmpeg process** (RTP forwar
 | Opus | `-c:a libopus -b:a <kbps>k -ar 48000 -ac 2` |
 | Ladder (source/720p30/480p30) | one `split=2[v720][v480]` feeding two `scale` chains; copy rung maps `0:v` directly (§1, §7 case 7) |
 
-Hardware accel (VAAPI/NVENC) is **out of scope** for this spec — CPU-only encode paths only.
+Hardware accel (VAAPI/NVENC): **superseded 2026-10-10** — the recipes above are the CPU encoders and
+remain the guaranteed fallback; hardware encoders (`h264/hevc/av1_nvenc`, `*_vaapi`) are now selected
+per codec at startup only when a trial encode proves them usable. See
+`core/svc_streaming/README.md` "Encoders: GPU-preferred, CPU-fallback" and `src/pipeline/encoder.rs`.
+Codec selection (H.264/H.265/AV1 from `streaming_configs`/`streaming_targets`) and the container
+compatibility matrix live in `src/pipeline/codec.rs`; H.265/AV1 are rejected loudly for RTMP/FLV
+(and AV1 for MPEG-TS/SRT) on the bundled ffmpeg 5.1.
 AV1 carriage: **HLS/CMAF (fMP4) — yes**, spec-supported. **RTMP/FLV — only via Enhanced RTMP**
 (Veovera E-RTMP, ffmpeg flv-muxer + destination-platform support both emerging as of the pinned
 ffmpeg version — verify before enabling, treat non-MVP). **WebRTC via `webrtc-rs` — AV1 RTP
@@ -69,7 +75,7 @@ already; the gap is server-side Rust) — deferred (open question §9.5).
 
 | Output | argv fragment | Note |
 |---|---|---|
-| RTMP push | `-f flv rtmp://host/app/key` | H264+AAC only until Enhanced RTMP lands |
+| RTMP push | `-f flv rtmp://host/app/key` (`rtmps://` accepted) | H264+AAC only until Enhanced RTMP lands — HEVC/AV1/Opus are rejected at validation, not dropped by `tee` |
 | SRT push | `-f mpegts "srt://host:port?streamid=…&latency=200"` | |
 | HLS std | `-f hls -hls_time 4 -hls_list_size 6 -hls_flags delete_segments+independent_segments -hls_segment_type fmp4` | |
 | LL-HLS | `-f hls -hls_playlist_type event -hls_time 4 -hls_part_time 0.5 -hls_flags independent_segments+program_date_time -hls_segment_type fmp4 -lhls 1` | ffmpeg's native LL-HLS is partial (no blocking playlist reload / preload hints per current spec) — degraded LL-HLS accepted for MVP (§9.2) |

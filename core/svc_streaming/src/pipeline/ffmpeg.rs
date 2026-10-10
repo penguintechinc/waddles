@@ -265,19 +265,44 @@ pub fn build_argv(spec: &PipelineSpec, paths: &Paths) -> Result<Vec<String>, Pip
         }
     }
 
+    // A group made only of external pushes must not be able to end the
+    // ffmpeg process while the pipeline still serves local outputs (HLS,
+    // recording, WHEP, Discord): with `onfail=ignore` a dead destination is
+    // dropped from its tee, but a tee whose slaves have *all* failed aborts
+    // the whole process ("All tee outputs failed", verified on ffmpeg 5.1).
+    // Such a group is therefore always muxed through `tee`, plus a `null`
+    // guard slave that can never fail. A pipeline that is pushes only gets
+    // no guard: when every destination is dead there is nothing left to
+    // serve, and the process exiting (supervisor restart/Failed) is the
+    // honest signal rather than a silently idle pipeline.
+    let has_local_outputs = spec
+        .outputs
+        .iter()
+        .any(|o| !matches!(o, OutputSpec::RtmpPush { .. } | OutputSpec::SrtPush { .. }));
+
     for (_, members) in &groups {
         let profile = members[0].profile;
-        let in_tee = members.len() > 1;
+        let grouped = members.len() > 1;
         for m in members {
-            validate_output_codecs(m, in_tee)?;
+            validate_output_codecs(m, grouped)?;
         }
         push_map_and_codec(&mut argv, profile, use_filter_complex, &labels, paths);
-        if !in_tee {
+        let isolate_pushes = has_local_outputs
+            && members.iter().all(|m| {
+                matches!(
+                    m.output,
+                    OutputSpec::RtmpPush { .. } | OutputSpec::SrtPush { .. }
+                )
+            });
+        if !grouped && !isolate_pushes {
             argv.extend(solo_muxer_args(members[0].output, spec.id, paths)?);
         } else {
-            let mut slaves = Vec::with_capacity(members.len());
+            let mut slaves = Vec::with_capacity(members.len() + 1);
             for m in members {
                 slaves.push(tee_slave(m.output, spec.id, paths)?);
+            }
+            if isolate_pushes {
+                slaves.push(TEE_GUARD_SLAVE.to_string());
             }
             argv.push("-f".into());
             argv.push("tee".into());
@@ -403,6 +428,8 @@ pub fn encode_summary(spec: &PipelineSpec, paths: &Paths) -> Vec<EncodeInfo> {
     let mut seen: Vec<&str> = Vec::new();
     let mut out = Vec::new();
     for output in &spec.outputs {
+        // DiscordVoice (audio-only PCM) has no profile; an unresolvable
+        // profile is reported by `build_argv`, not here.
         let Ok(name) = output_profile_name(output, spec) else {
             continue;
         };
@@ -423,6 +450,11 @@ pub fn encode_summary(spec: &PipelineSpec, paths: &Paths) -> Vec<EncodeInfo> {
     }
     out
 }
+
+/// A tee slave that discards everything and can never fail. Appended to a
+/// push-only tee group so the group always has a live slave -- see the
+/// comment in [`build_argv`].
+const TEE_GUARD_SLAVE: &str = "[f=null]-";
 
 struct Resolved<'a> {
     output: &'a OutputSpec,
@@ -461,9 +493,9 @@ fn output_profile_name(output: &OutputSpec, spec: &PipelineSpec) -> Result<Strin
         OutputSpec::Hls { profile, .. }
         | OutputSpec::Whep { profile }
         | OutputSpec::Record { profile, .. } => Ok(profile.clone()),
-        OutputSpec::DiscordVoice { .. } => {
-            unreachable!("DiscordVoice never resolves a profile -- filtered out before this call")
-        }
+        OutputSpec::DiscordVoice { .. } => Err(PipelineError::InvalidSpec(
+            "a DiscordVoice output is audio-only and has no transcode profile".into(),
+        )),
     }
 }
 
@@ -1439,7 +1471,10 @@ mod tests {
                     "[0:v]split=2[v720][v480];[v720]scale=1280:720[v720s];[v480]scale=854:480[v480s]",
                 ],
                 &["-map", "0:v", "-map", "0:a", "-c:v", "copy", "-c:a", "copy"],
-                &["-f", "flv", "rtmp://push/key1"],
+                // The lone push stays isolated behind a tee with a null guard
+                // slave so a dead destination cannot take the HLS outputs
+                // down with it.
+                &["-f", "tee", "[f=flv:onfail=ignore]rtmp://push/key1|[f=null]-"],
                 &["-map", "[v720s]", "-map", "0:a", "-c:v", "libx264"],
                 &["-b:v", "2500k"],
                 &["-f", "hls"],
@@ -1448,8 +1483,9 @@ mod tests {
                 &["-f", "hls"],
             ],
         );
-        // No -f tee anywhere -- each output has a distinct profile.
-        assert!(!argv.iter().any(|a| a == "tee"));
+        // Each output has a distinct profile, so no tee group has two
+        // members; the only tee is the lone push's guarded isolation tee.
+        assert_eq!(argv.iter().filter(|a| *a == "tee").count(), 1);
     }
 
     // Case 8: RTMP in -> Discord voice.
@@ -1715,5 +1751,889 @@ mod tests {
             secret_ref_key(&SecretRef::Env { var: "X".into() }),
             secret_ref_key(&SecretRef::File { path: "X".into() })
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Codec selection, GPU/CPU encoders, ladder, fan-out polish
+    // ------------------------------------------------------------------
+
+    fn profile(name: &str, video: VideoCodec, audio: AudioCodec) -> TranscodeProfile {
+        TranscodeProfile {
+            name: name.into(),
+            video,
+            audio,
+            resolution: None,
+            fps: None,
+        }
+    }
+
+    fn h264_video() -> VideoCodec {
+        VideoCodec::H264 {
+            preset: "veryfast".into(),
+            crf: None,
+            bitrate_kbps: Some(2500),
+        }
+    }
+
+    fn h265_video() -> VideoCodec {
+        VideoCodec::H265 {
+            preset: "veryfast".into(),
+            crf: None,
+            bitrate_kbps: Some(2500),
+        }
+    }
+
+    fn av1_video() -> VideoCodec {
+        VideoCodec::Av1Svt {
+            preset: "10".into(),
+            crf: None,
+            bitrate_kbps: Some(2500),
+        }
+    }
+
+    fn hls_out(profile: &str) -> OutputSpec {
+        OutputSpec::Hls {
+            variant: HlsVariant::Std,
+            profile: profile.into(),
+        }
+    }
+
+    fn rtmp_out(profile: Option<&str>) -> OutputSpec {
+        OutputSpec::RtmpPush {
+            url_secret_ref: rtmp_url_ref(),
+            profile: profile.map(str::to_string),
+        }
+    }
+
+    fn srt_ref() -> SecretRef {
+        SecretRef::Env {
+            var: "SRT_URL".into(),
+        }
+    }
+
+    fn srt_out(profile: Option<&str>) -> OutputSpec {
+        OutputSpec::SrtPush {
+            url_secret_ref: srt_ref(),
+            profile: profile.map(str::to_string),
+        }
+    }
+
+    fn rtmp_input() -> Vec<InputSpec> {
+        vec![InputSpec::Rtmp {
+            stream_key: "sk1".into(),
+        }]
+    }
+
+    fn push_paths() -> Paths {
+        paths_with_secrets(&[
+            (rtmp_url_ref(), "rtmp://push/key1"),
+            (srt_ref(), "srt://push:9000?streamid=abc"),
+        ])
+    }
+
+    fn invalid_spec_message(err: PipelineError) -> String {
+        match err {
+            PipelineError::InvalidSpec(msg) => msg,
+            other => panic!("expected InvalidSpec, got {other:?}"),
+        }
+    }
+
+    // --- H.265 / AV1 are reachable where the container supports them ---
+
+    #[test]
+    fn hevc_to_hls_uses_libx265_and_the_hvc1_tag_players_need() {
+        let s = spec(
+            rtmp_input(),
+            vec![profile("default", h265_video(), AudioCodec::Copy)],
+            vec![hls_out("default")],
+        );
+        let argv = build_argv(&s, &push_paths()).expect("builds");
+        assert_fragments_in_order(
+            &argv,
+            &[
+                &["-c:v", "libx265", "-preset", "veryfast"],
+                &["-tag:v", "hvc1"],
+                &["-c:a", "copy"],
+                &["-f", "hls"],
+                &["-hls_segment_type", "fmp4"],
+            ],
+        );
+    }
+
+    #[test]
+    fn av1_to_hls_uses_svt_av1_with_a_numeric_preset() {
+        let s = spec(
+            rtmp_input(),
+            vec![profile(
+                "default",
+                av1_video(),
+                AudioCodec::Aac { bitrate_kbps: 128 },
+            )],
+            vec![hls_out("default")],
+        );
+        let argv = build_argv(&s, &push_paths()).expect("builds");
+        assert_fragments_in_order(
+            &argv,
+            &[
+                &["-c:v", "libsvtav1", "-preset", "10"],
+                &["-c:a", "aac"],
+                &["-f", "hls"],
+            ],
+        );
+    }
+
+    #[test]
+    fn hevc_over_srt_alongside_hls_shares_one_encode_through_tee() {
+        let s = spec(
+            rtmp_input(),
+            vec![profile("default", h265_video(), AudioCodec::Copy)],
+            vec![hls_out("default"), srt_out(Some("default"))],
+        );
+        let argv = build_argv(&s, &push_paths()).expect("builds");
+        assert_eq!(
+            argv.iter().filter(|a| *a == "libx265").count(),
+            1,
+            "one shared encode, not one per output: {argv:?}"
+        );
+        let tee = argv.last().unwrap();
+        assert!(tee.contains("[f=hls:"), "{tee}");
+        assert!(
+            tee.contains("[f=mpegts:onfail=ignore]srt://push:9000?streamid=abc"),
+            "{tee}"
+        );
+    }
+
+    // --- incompatible codec/container pairs fail loudly -----------------
+
+    #[test]
+    fn rtmp_push_of_hevc_or_av1_is_rejected_with_the_flv_message() {
+        for video in [h265_video(), av1_video()] {
+            let s = spec(
+                rtmp_input(),
+                vec![profile("default", video, AudioCodec::Copy)],
+                vec![rtmp_out(None)],
+            );
+            let msg = invalid_spec_message(build_argv(&s, &push_paths()).unwrap_err());
+            assert!(
+                msg.contains(
+                    "FLV/RTMP cannot carry HEVC/AV1 (needs enhanced-RTMP); use HLS/SRT or H.264"
+                ),
+                "message was: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_original_silent_tee_drop_is_now_a_loud_error() {
+        // HLS + an RTMP push sharing one H.265 profile used to build a tee
+        // whose FLV slave ffmpeg skipped at header time (exit 0, no push).
+        let s = spec(
+            rtmp_input(),
+            vec![profile("default", h265_video(), AudioCodec::Copy)],
+            vec![hls_out("default"), rtmp_out(Some("default"))],
+        );
+        let msg = invalid_spec_message(build_argv(&s, &push_paths()).unwrap_err());
+        assert!(msg.contains("FLV/RTMP cannot carry HEVC/AV1"), "{msg}");
+        assert!(msg.contains("\"default\""), "names the profile: {msg}");
+    }
+
+    #[test]
+    fn srt_push_of_av1_is_rejected_because_ffmpeg_5_muxes_it_as_private_data() {
+        let s = spec(
+            rtmp_input(),
+            vec![profile("default", av1_video(), AudioCodec::Copy)],
+            vec![srt_out(None)],
+        );
+        let msg = invalid_spec_message(build_argv(&s, &push_paths()).unwrap_err());
+        assert!(msg.contains("MPEG-TS/SRT cannot carry AV1"), "{msg}");
+    }
+
+    #[test]
+    fn rtmp_push_of_opus_audio_is_rejected_but_hls_and_srt_carry_it() {
+        let opus = AudioCodec::Opus { bitrate_kbps: 128 };
+        let rtmp = spec(
+            rtmp_input(),
+            vec![profile("default", h264_video(), opus.clone())],
+            vec![rtmp_out(None)],
+        );
+        let msg = invalid_spec_message(build_argv(&rtmp, &push_paths()).unwrap_err());
+        assert!(msg.contains("cannot carry Opus"), "{msg}");
+
+        for out in [hls_out("default"), srt_out(None)] {
+            let ok = spec(
+                rtmp_input(),
+                vec![profile("default", h264_video(), opus.clone())],
+                vec![out],
+            );
+            assert!(build_argv(&ok, &push_paths()).is_ok());
+        }
+    }
+
+    #[test]
+    fn passthrough_profiles_are_never_rejected_by_the_codec_check() {
+        let s = spec(
+            rtmp_input(),
+            vec![copy_profile("copy")],
+            vec![rtmp_out(None), srt_out(None), hls_out("copy")],
+        );
+        assert!(build_argv(&s, &push_paths()).is_ok());
+    }
+
+    #[test]
+    fn recording_validates_as_mpegts_alone_and_as_mp4_inside_a_tee() {
+        let record = |profile: &str| OutputSpec::Record {
+            profile: profile.into(),
+            target: ObjectStoreRef {
+                store: "s3".into(),
+                prefix: "t/c".into(),
+            },
+        };
+        // Solo: `-f segment` writes `.ts`, which cannot hold AV1 on ffmpeg 5.1.
+        let solo = spec(
+            rtmp_input(),
+            vec![profile("default", av1_video(), AudioCodec::Copy)],
+            vec![record("default")],
+        );
+        assert!(build_argv(&solo, &push_paths()).is_err());
+
+        // In a tee group it is a single MP4, which carries everything.
+        let grouped = spec(
+            rtmp_input(),
+            vec![profile("default", av1_video(), AudioCodec::Copy)],
+            vec![hls_out("default"), record("default")],
+        );
+        assert!(build_argv(&grouped, &push_paths()).is_ok());
+    }
+
+    // --- GPU-preferred, CPU-fallback ------------------------------------
+
+    fn hls_h264_spec() -> PipelineSpec {
+        spec(
+            rtmp_input(),
+            vec![profile("default", h264_video(), AudioCodec::Copy)],
+            vec![hls_out("default")],
+        )
+    }
+
+    #[test]
+    fn default_paths_encode_on_the_cpu() {
+        let argv = build_argv(&hls_h264_spec(), &push_paths()).expect("builds");
+        assert!(argv.windows(2).any(|w| w == ["-c:v", "libx264"]));
+        assert!(!argv
+            .iter()
+            .any(|a| a.contains("nvenc") || a.contains("vaapi")));
+    }
+
+    #[test]
+    fn nvenc_backend_swaps_in_the_hardware_encoder_with_a_valid_preset() {
+        let paths = Paths {
+            encoders: EncoderSelection::software().with(VideoFamily::H264, EncoderBackend::Nvenc),
+            ..push_paths()
+        };
+        let argv = build_argv(&hls_h264_spec(), &paths).expect("builds");
+        assert_fragments_in_order(
+            &argv,
+            &[
+                &["-c:v", "h264_nvenc", "-preset", "p2", "-tune", "ll"],
+                &["-b:v", "2500k"],
+                &["-f", "hls"],
+            ],
+        );
+        assert!(!argv.iter().any(|a| a == "libx264" || a == "veryfast"));
+    }
+
+    #[test]
+    fn each_codec_family_picks_its_own_backend() {
+        let paths = Paths {
+            encoders: EncoderSelection::software().with(VideoFamily::H265, EncoderBackend::Nvenc),
+            ..push_paths()
+        };
+        // H.265 goes to the GPU...
+        let s = spec(
+            rtmp_input(),
+            vec![profile("default", h265_video(), AudioCodec::Copy)],
+            vec![hls_out("default")],
+        );
+        let argv = build_argv(&s, &paths).expect("builds");
+        assert!(argv.windows(2).any(|w| w == ["-c:v", "hevc_nvenc"]));
+        assert!(argv.windows(2).any(|w| w == ["-tag:v", "hvc1"]));
+        // ...while H.264 on the same host stays on the CPU.
+        let argv = build_argv(&hls_h264_spec(), &paths).expect("builds");
+        assert!(argv.windows(2).any(|w| w == ["-c:v", "libx264"]));
+    }
+
+    #[test]
+    fn av1_stays_on_the_cpu_when_no_gpu_av1_encoder_was_selected() {
+        let paths = Paths {
+            encoders: EncoderSelection::software()
+                .with(VideoFamily::H264, EncoderBackend::Nvenc)
+                .with(VideoFamily::H265, EncoderBackend::Nvenc),
+            ..push_paths()
+        };
+        let s = spec(
+            rtmp_input(),
+            vec![profile("default", av1_video(), AudioCodec::Copy)],
+            vec![hls_out("default")],
+        );
+        let argv = build_argv(&s, &paths).expect("builds");
+        assert!(argv.windows(2).any(|w| w == ["-c:v", "libsvtav1"]));
+    }
+
+    #[test]
+    fn vaapi_registers_the_device_globally_and_uploads_frames_per_output() {
+        let paths = Paths {
+            encoders: EncoderSelection::software()
+                .with(VideoFamily::H264, EncoderBackend::Vaapi)
+                .with_vaapi_device("/dev/dri/renderD128"),
+            ..push_paths()
+        };
+        let mut s = hls_h264_spec();
+        s.profiles[0].resolution = Some((1280, 720));
+        let argv = build_argv(&s, &paths).expect("builds");
+        // Global device registration comes before the input.
+        assert_eq!(
+            &argv[..4],
+            [
+                "-init_hw_device",
+                "vaapi=va:/dev/dri/renderD128",
+                "-filter_hw_device",
+                "va"
+            ]
+        );
+        assert_fragments_in_order(
+            &argv,
+            &[
+                &["-f", "flv", "-i", "pipe:0"],
+                &["-c:v", "h264_vaapi"],
+                &["-vf", "scale=1280:720,format=nv12,hwupload"],
+            ],
+        );
+    }
+
+    #[test]
+    fn vaapi_without_a_render_node_is_an_invalid_spec_not_a_broken_command() {
+        let paths = Paths {
+            encoders: EncoderSelection::software().with(VideoFamily::H264, EncoderBackend::Vaapi),
+            ..push_paths()
+        };
+        let msg = invalid_spec_message(build_argv(&hls_h264_spec(), &paths).unwrap_err());
+        assert!(msg.contains("no render node"), "{msg}");
+    }
+
+    #[test]
+    fn a_passthrough_pipeline_never_asks_for_a_gpu() {
+        let paths = Paths {
+            encoders: EncoderSelection::software().with(VideoFamily::H264, EncoderBackend::Vaapi),
+            ..push_paths()
+        };
+        let s = spec(
+            rtmp_input(),
+            vec![copy_profile("copy")],
+            vec![hls_out("copy")],
+        );
+        let argv = build_argv(&s, &paths).expect("builds");
+        assert!(!argv.iter().any(|a| a == "-init_hw_device"));
+    }
+
+    #[test]
+    fn encode_summary_reports_each_distinct_encode_and_its_backend() {
+        let paths = Paths {
+            encoders: EncoderSelection::software().with(VideoFamily::H265, EncoderBackend::Nvenc),
+            ..push_paths()
+        };
+        let s = spec(
+            rtmp_input(),
+            vec![
+                profile("default", h265_video(), AudioCodec::Copy),
+                profile("h264-copy", h264_video(), AudioCodec::Copy),
+                copy_profile("record"),
+            ],
+            vec![
+                hls_out("default"),
+                srt_out(Some("default")),
+                rtmp_out(Some("h264-copy")),
+                OutputSpec::Record {
+                    profile: "record".into(),
+                    target: ObjectStoreRef {
+                        store: "s3".into(),
+                        prefix: "t".into(),
+                    },
+                },
+            ],
+        );
+        assert_eq!(
+            encode_summary(&s, &paths),
+            vec![
+                EncodeInfo {
+                    profile: "default".into(),
+                    family: VideoFamily::H265,
+                    backend: EncoderBackend::Nvenc,
+                },
+                EncodeInfo {
+                    profile: "h264-copy".into(),
+                    family: VideoFamily::H264,
+                    backend: EncoderBackend::Software,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn encode_summary_skips_outputs_it_cannot_resolve() {
+        let s = spec(
+            rtmp_input(),
+            vec![copy_profile("copy")],
+            vec![hls_out("missing"), rtmp_out(Some("also-missing"))],
+        );
+        assert!(encode_summary(&s, &push_paths()).is_empty());
+    }
+
+    // --- ladder ----------------------------------------------------------
+
+    #[test]
+    fn codec_ladder_without_resolutions_splits_the_decode_with_null_filters() {
+        // HLS + SRT on H.265 (shared encode), RTMP on its own H.264 rung.
+        let s = spec(
+            rtmp_input(),
+            vec![
+                profile("default", h265_video(), AudioCodec::Copy),
+                profile("h264-copy", h264_video(), AudioCodec::Copy),
+            ],
+            vec![
+                hls_out("default"),
+                rtmp_out(Some("h264-copy")),
+                srt_out(Some("default")),
+            ],
+        );
+        let argv = build_argv(&s, &push_paths()).expect("builds");
+        assert_fragments_in_order(
+            &argv,
+            &[
+                &["-f", "flv", "-i", "pipe:0"],
+                &[
+                    "-filter_complex",
+                    "[0:v]split=2[v_default][v_h264_copy];[v_default]null[v_defaults];[v_h264_copy]null[v_h264_copys]",
+                ],
+                // First group: the H.265 rung feeding HLS + SRT through tee.
+                &["-map", "[v_defaults]", "-map", "0:a", "-c:v", "libx265"],
+                &["-f", "tee"],
+                // Second group: the H.264 rung feeding the RTMP push alone,
+                // isolated behind a guarded tee.
+                &["-map", "[v_h264_copys]", "-map", "0:a", "-c:v", "libx264"],
+                &["-f", "tee", "[f=flv:onfail=ignore]rtmp://push/key1|[f=null]-"],
+            ],
+        );
+        assert_eq!(argv.iter().filter(|a| *a == "libx265").count(), 1);
+        assert_eq!(argv.iter().filter(|a| *a == "libx264").count(), 1);
+    }
+
+    #[test]
+    fn ladder_rungs_at_the_same_height_get_distinct_labels() {
+        let mut a = profile("hevc", h265_video(), AudioCodec::Copy);
+        a.resolution = Some((1280, 720));
+        let mut b = profile("avc", h264_video(), AudioCodec::Copy);
+        b.resolution = Some((1280, 720));
+        let s = spec(
+            rtmp_input(),
+            vec![a, b],
+            vec![hls_out("hevc"), rtmp_out(Some("avc"))],
+        );
+        let argv = build_argv(&s, &push_paths()).expect("builds");
+        assert_fragments_in_order(
+            &argv,
+            &[&[
+                "-filter_complex",
+                "[0:v]split=2[v720][v720_1];[v720]scale=1280:720[v720s];[v720_1]scale=1280:720[v720_1s]",
+            ]],
+        );
+        assert!(argv.windows(2).any(|w| w == ["-map", "[v720s]"]));
+        assert!(argv.windows(2).any(|w| w == ["-map", "[v720_1s]"]));
+    }
+
+    #[test]
+    fn vaapi_ladder_rungs_upload_inside_the_filter_graph() {
+        let paths = Paths {
+            encoders: EncoderSelection::software()
+                .with(VideoFamily::H264, EncoderBackend::Vaapi)
+                .with_vaapi_device("/dev/dri/renderD128"),
+            ..push_paths()
+        };
+        let s = spec(
+            rtmp_input(),
+            vec![
+                profile("default", h265_video(), AudioCodec::Copy),
+                profile("h264-copy", h264_video(), AudioCodec::Copy),
+            ],
+            vec![hls_out("default"), rtmp_out(Some("h264-copy"))],
+        );
+        let argv = build_argv(&s, &paths).expect("builds");
+        assert_fragments_in_order(
+            &argv,
+            &[&[
+                "-filter_complex",
+                "[0:v]split=2[v_default][v_h264_copy];[v_default]null[v_defaults];[v_h264_copy]format=nv12,hwupload[v_h264_copys]",
+            ]],
+        );
+        // The H.265 rung stays on the CPU; only H.264 went to VA-API.
+        assert!(argv.windows(2).any(|w| w == ["-c:v", "libx265"]));
+        assert!(argv.windows(2).any(|w| w == ["-c:v", "h264_vaapi"]));
+        // The filter graph already uploads, so no per-output `-vf`.
+        assert!(!argv.iter().any(|a| a == "-vf"));
+    }
+
+    // --- push profile binding -------------------------------------------
+
+    #[test]
+    fn a_push_output_binds_to_its_named_profile() {
+        let s = spec(
+            rtmp_input(),
+            vec![
+                profile("first", h265_video(), AudioCodec::Copy),
+                profile("second", h264_video(), AudioCodec::Copy),
+            ],
+            vec![hls_out("first"), rtmp_out(Some("second"))],
+        );
+        let argv = build_argv(&s, &push_paths()).expect("builds");
+        // The RTMP push is on the H.264 rung, not profiles[0] (H.265).
+        let flv_pos = argv
+            .iter()
+            .position(|a| a.starts_with("[f=flv"))
+            .expect("the RTMP push slave");
+        let x264_pos = argv.iter().position(|a| a == "libx264").expect("x264");
+        let x265_pos = argv.iter().position(|a| a == "libx265").expect("x265");
+        assert!(x265_pos < x264_pos && x264_pos < flv_pos, "{argv:?}");
+    }
+
+    #[test]
+    fn a_push_output_naming_an_unknown_profile_is_an_invalid_spec() {
+        let s = spec(
+            rtmp_input(),
+            vec![copy_profile("copy")],
+            vec![rtmp_out(Some("nope"))],
+        );
+        let msg = invalid_spec_message(build_argv(&s, &push_paths()).unwrap_err());
+        assert!(msg.contains("unknown profile"), "{msg}");
+    }
+
+    #[test]
+    fn an_unbound_push_with_no_profiles_at_all_is_an_invalid_spec() {
+        let s = spec(rtmp_input(), vec![], vec![rtmp_out(None)]);
+        let msg = invalid_spec_message(build_argv(&s, &push_paths()).unwrap_err());
+        assert!(msg.contains("no transcode profiles"), "{msg}");
+    }
+
+    // --- tee slaves ------------------------------------------------------
+
+    fn tee_arg(s: &PipelineSpec, paths: &Paths) -> String {
+        let argv = build_argv(s, paths).expect("builds");
+        let pos = argv.iter().position(|a| a == "tee").expect("a tee output");
+        argv[pos + 1].clone()
+    }
+
+    #[test]
+    fn hls_in_a_tee_group_carries_the_full_hls_option_set() {
+        let s = spec(
+            rtmp_input(),
+            vec![profile("default", h264_video(), AudioCodec::Copy)],
+            vec![hls_out("default"), rtmp_out(Some("default"))],
+        );
+        let paths = push_paths();
+        let tee = tee_arg(&s, &paths);
+
+        let target = HlsOutputTarget::new(&paths.stream_data_dir, s.id, "default", HlsVariant::Std);
+        let mut expected = String::from("[f=hls");
+        for (name, value) in target.muxer_options() {
+            expected.push_str(&format!(":{name}={value}"));
+        }
+        expected.push_str(&format!("]{}", target.media_playlist_path().display()));
+        assert!(
+            tee.starts_with(&expected),
+            "tee HLS slave must equal the standalone option set\nexpected prefix: {expected}\nactual:          {tee}"
+        );
+        // The regression the minimal `f=hls` slave caused: no master playlist
+        // and ffmpeg's default segment names the file server never serves.
+        assert!(tee.contains("master_pl_name=master.m3u8"));
+        assert!(tee.contains("hls_segment_filename="));
+        assert!(tee.contains("hls_fmp4_init_filename=init.mp4"));
+        assert!(tee.contains("hls_segment_type=fmp4"));
+    }
+
+    #[test]
+    fn tee_failure_policy_isolates_pushes_but_not_the_hls_surface() {
+        let s = spec(
+            rtmp_input(),
+            vec![profile("default", h264_video(), AudioCodec::Copy)],
+            vec![
+                hls_out("default"),
+                rtmp_out(Some("default")),
+                srt_out(Some("default")),
+            ],
+        );
+        let tee = tee_arg(&s, &push_paths());
+        let slaves: Vec<&str> = tee.split('|').collect();
+        assert_eq!(slaves.len(), 3);
+        // A dead external destination must not take the others down...
+        assert!(
+            slaves[1].starts_with("[f=flv:onfail=ignore]"),
+            "{}",
+            slaves[1]
+        );
+        assert!(
+            slaves[2].starts_with("[f=mpegts:onfail=ignore]"),
+            "{}",
+            slaves[2]
+        );
+        // ...but the HLS slave aborts the process on a write failure so the
+        // supervisor restarts it instead of serving a frozen playlist.
+        assert!(slaves[0].starts_with("[f=hls:"), "{}", slaves[0]);
+        assert!(!slaves[0].contains("onfail"), "{}", slaves[0]);
+    }
+
+    #[test]
+    fn tee_target_with_a_pipe_character_is_rejected_without_echoing_it() {
+        let secret = SecretRef::Env { var: "EVIL".into() };
+        let s = spec(
+            rtmp_input(),
+            vec![profile("default", h264_video(), AudioCodec::Copy)],
+            vec![
+                hls_out("default"),
+                OutputSpec::RtmpPush {
+                    url_secret_ref: secret.clone(),
+                    profile: None,
+                },
+            ],
+        );
+        for bad in [
+            "rtmp://h/a/key|[f=flv]rtmp://attacker/steal",
+            "rtmp://h/a/ke'y",
+            "rtmp://h/a/ke\\y",
+            "rtmp://h/a/ke\ny",
+        ] {
+            let paths = paths_with_secrets(&[(secret.clone(), bad)]);
+            let msg = invalid_spec_message(build_argv(&s, &paths).unwrap_err());
+            assert!(msg.contains("tee muxer cannot carry"), "{msg}");
+            assert!(
+                !msg.contains("attacker") && !msg.contains("key"),
+                "leaked: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn tee_option_values_cannot_contain_option_separators() {
+        let s = spec(
+            rtmp_input(),
+            vec![profile("default", h264_video(), AudioCodec::Copy)],
+            vec![hls_out("default"), rtmp_out(Some("default"))],
+        );
+        for dir in ["/data/a:b", "/data/[x]", "/data/it's"] {
+            let paths = Paths {
+                stream_data_dir: PathBuf::from(dir),
+                ..push_paths()
+            };
+            assert!(build_argv(&s, &paths).is_err(), "{dir} must be refused");
+        }
+    }
+
+    #[test]
+    fn rtmps_urls_reach_the_flv_muxer_solo_and_in_a_tee() {
+        let url = "rtmps://live-api-s.facebook.com:443/rtmp/FB-key";
+        let paths = paths_with_secrets(&[(rtmp_url_ref(), url)]);
+
+        let solo = spec(
+            rtmp_input(),
+            vec![copy_profile("copy")],
+            vec![rtmp_out(None)],
+        );
+        let argv = build_argv(&solo, &paths).expect("builds");
+        assert_fragments_in_order(&argv, &[&["-f", "flv", url]]);
+
+        let grouped = spec(
+            rtmp_input(),
+            vec![copy_profile("copy")],
+            vec![rtmp_out(None), hls_out("copy")],
+        );
+        let tee = tee_arg(&grouped, &paths);
+        assert!(
+            tee.contains(&format!("[f=flv:onfail=ignore]{url}")),
+            "{tee}"
+        );
+    }
+
+    // --- destination cap --------------------------------------------------
+
+    fn spec_with_pushes(count: usize) -> PipelineSpec {
+        let mut outputs = vec![hls_out("copy")];
+        for i in 0..count {
+            outputs.push(if i % 2 == 0 {
+                rtmp_out(Some("copy"))
+            } else {
+                srt_out(Some("copy"))
+            });
+        }
+        spec(rtmp_input(), vec![copy_profile("copy")], outputs)
+    }
+
+    #[test]
+    fn the_free_tier_cap_applies_to_the_argv_itself() {
+        let paths = Paths {
+            relay_policy: Some(RelayPolicy::FREE),
+            ..push_paths()
+        };
+        assert!(build_argv(&spec_with_pushes(3), &paths).is_ok());
+        let msg = invalid_spec_message(build_argv(&spec_with_pushes(4), &paths).unwrap_err());
+        assert_eq!(msg, "relay limit: max 3 destinations on this tier");
+    }
+
+    #[test]
+    fn the_cap_counts_rtmp_and_srt_pushes_but_not_hls_or_record() {
+        let paths = Paths {
+            relay_policy: Some(RelayPolicy::FREE),
+            ..push_paths()
+        };
+        let mut s = spec_with_pushes(3);
+        s.outputs.push(OutputSpec::Record {
+            profile: "copy".into(),
+            target: ObjectStoreRef {
+                store: "s3".into(),
+                prefix: "t".into(),
+            },
+        });
+        s.outputs.push(hls_out("copy"));
+        assert!(build_argv(&s, &paths).is_ok());
+    }
+
+    #[test]
+    fn a_higher_tier_policy_raises_the_cap_and_no_policy_means_unbounded() {
+        let pro = Paths {
+            relay_policy: Some(RelayPolicy::PROFESSIONAL),
+            ..push_paths()
+        };
+        assert!(build_argv(&spec_with_pushes(10), &pro).is_ok());
+        assert!(build_argv(&spec_with_pushes(11), &pro).is_err());
+        assert!(build_argv(&spec_with_pushes(11), &push_paths()).is_ok());
+    }
+
+    #[test]
+    fn a_lone_push_beside_other_outputs_is_still_isolated_behind_a_tee() {
+        // HLS on an H.265 rung + an RTMP push on its own H.264 rung: the
+        // push is alone in its group, but a dead destination must not abort
+        // the process (it would take HLS with it).
+        let s = spec(
+            rtmp_input(),
+            vec![
+                profile("default", h265_video(), AudioCodec::Copy),
+                profile("h264-copy", h264_video(), AudioCodec::Copy),
+            ],
+            vec![hls_out("default"), rtmp_out(Some("h264-copy"))],
+        );
+        let argv = build_argv(&s, &push_paths()).expect("builds");
+        assert_eq!(
+            &argv[argv.len() - 3..],
+            [
+                "-f",
+                "tee",
+                "[f=flv:onfail=ignore]rtmp://push/key1|[f=null]-"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_push_only_tee_group_beside_hls_gets_a_null_guard_so_it_can_never_fully_fail() {
+        // HLS on H.265; RTMP + a second RTMP both on the H.264 rung.
+        let s = spec(
+            rtmp_input(),
+            vec![
+                profile("default", h265_video(), AudioCodec::Copy),
+                profile("h264-copy", h264_video(), AudioCodec::Copy),
+            ],
+            vec![
+                hls_out("default"),
+                rtmp_out(Some("h264-copy")),
+                srt_out(Some("h264-copy")),
+            ],
+        );
+        let argv = build_argv(&s, &push_paths()).expect("builds");
+        let tee = argv.last().unwrap();
+        assert_eq!(
+            tee,
+            "[f=flv:onfail=ignore]rtmp://push/key1|[f=mpegts:onfail=ignore]srt://push:9000?streamid=abc|[f=null]-"
+        );
+    }
+
+    #[test]
+    fn a_shared_tee_with_a_local_slave_needs_no_guard() {
+        let s = spec(
+            rtmp_input(),
+            vec![copy_profile("copy")],
+            vec![hls_out("copy"), rtmp_out(Some("copy"))],
+        );
+        assert!(!tee_arg(&s, &push_paths()).contains("f=null"));
+    }
+
+    #[test]
+    fn a_pushes_only_pipeline_gets_no_guard_so_total_failure_is_not_silent() {
+        let s = spec(
+            rtmp_input(),
+            vec![copy_profile("copy")],
+            vec![rtmp_out(None), srt_out(None)],
+        );
+        let tee = tee_arg(&s, &push_paths());
+        assert!(!tee.contains("f=null"), "{tee}");
+    }
+
+    #[test]
+    fn a_pipeline_whose_only_output_is_a_push_stays_a_plain_muxer() {
+        let s = spec(
+            rtmp_input(),
+            vec![copy_profile("copy")],
+            vec![rtmp_out(None)],
+        );
+        let argv = build_argv(&s, &push_paths()).expect("builds");
+        assert!(!argv.iter().any(|a| a == "tee"));
+        assert_eq!(&argv[argv.len() - 3..], ["-f", "flv", "rtmp://push/key1"]);
+    }
+
+    #[test]
+    fn a_lone_srt_push_is_isolated_the_same_way() {
+        let s = spec(
+            rtmp_input(),
+            vec![copy_profile("copy")],
+            vec![hls_out("copy"), srt_out(Some("copy"))],
+        );
+        // Same profile -> shared tee group, not a separate muxer.
+        let tee = tee_arg(&s, &push_paths());
+        assert!(tee.contains("[f=mpegts:onfail=ignore]srt://push:9000?streamid=abc"));
+    }
+
+    #[test]
+    fn encode_summary_ignores_the_audio_only_discord_voice_output() {
+        let s = spec(
+            rtmp_input(),
+            vec![profile("default", h264_video(), AudioCodec::Copy)],
+            vec![
+                hls_out("default"),
+                OutputSpec::DiscordVoice {
+                    guild_id: "g".into(),
+                    channel_id: "c".into(),
+                },
+            ],
+        );
+        let summary = encode_summary(&s, &push_paths());
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary[0].family, VideoFamily::H264);
+        // ...and building the argv for the same spec still works.
+        assert!(build_argv(&s, &push_paths()).is_ok());
+    }
+
+    #[test]
+    fn resolving_a_profile_for_discord_voice_is_an_error_not_a_panic() {
+        let s = spec(rtmp_input(), vec![copy_profile("copy")], vec![]);
+        let voice = OutputSpec::DiscordVoice {
+            guild_id: "g".into(),
+            channel_id: "c".into(),
+        };
+        let msg = invalid_spec_message(output_profile_name(&voice, &s).unwrap_err());
+        assert!(msg.contains("audio-only"), "{msg}");
     }
 }

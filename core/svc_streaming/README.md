@@ -14,8 +14,8 @@ competitor product name. Use "streaming proxy" / "forward to targets".
 ```
 Input                Profile (transcode)              Output
 -----                ----------------------           ------
-Rtmp{stream_key}  \                               / RtmpPush{url_secret_ref}
-Srt{stream_id}     \  video: Copy|H264|H265|Av1Svt /  SrtPush{url_secret_ref}
+Rtmp{stream_key}  \                               / RtmpPush{url_secret_ref, profile?}
+Srt{stream_id}     \  video: Copy|H264|H265|Av1Svt /  SrtPush{url_secret_ref, profile?}
 Whip{token}        --  audio: Copy|Aac|Opus       --  Hls{Ll|Std, profile}
 Pull{url}          /   resolution, fps             \  Whep{profile}
                                                      \  Record{profile, ObjectStoreRef}
@@ -23,7 +23,112 @@ Pull{url}          /   resolution, fps             \  Whep{profile}
 ```
 
 One `PipelineSpec` = N inputs -> N named `TranscodeProfile`s -> N outputs.
-Full model: `src/pipeline/model.rs`.
+Full model: `src/pipeline/model.rs`. A push output's optional `profile` names
+the profile it encodes with (`None` = `profiles[0]`, the legacy binding).
+
+## Codec Selection (H.264 / H.265 / AV1)
+
+The output codec is chosen in the database and the API, not hard-coded:
+
+| Where | Column / field | Values | Default |
+|---|---|---|---|
+| `streaming_configs` | `video_codec` | `h264` `h265` `av1` | `h264` |
+| `streaming_configs` | `audio_codec` | `copy` `aac` `opus` | `copy` |
+| `streaming_targets` | `protocol` | `rtmp` (also `rtmps://` URLs) `srt` | `rtmp` |
+| `streaming_targets` | `video_codec`, `audio_codec` | as above, or `NULL` = inherit | `NULL` |
+
+(Alembic `0056_streaming_codec_columns`; API: `POST/PUT .../configs`,
+`POST .../targets`.) The config's codec is the **default encode**: HLS and
+every target without an override use it. An RTMP target with no video
+override uses H.264 (the only codec FLV carries); an SRT target inherits the
+config's. Any non-default codec needs `transcode_enabled` (re-encoding is the
+token-gated transcode feature).
+
+What each container can carry with the bundled ffmpeg (Debian 5.1.x):
+
+| Output | H.264 | H.265 | AV1 | AAC | Opus |
+|---|---|---|---|---|---|
+| RTMP push (FLV) | yes | **no** | **no** | yes | **no** |
+| SRT push (MPEG-TS) | yes | yes | **no** | yes | yes |
+| HLS (fMP4) | yes | yes (`hvc1`) | yes | yes | yes |
+
+Anything marked **no** is rejected **loudly**: `400` from the API write
+handlers (e.g. *"FLV/RTMP cannot carry HEVC/AV1 (needs enhanced-RTMP); use
+HLS/SRT or H.264"*), `400` from `/start`, an error log + dropped session on
+ingest, and `InvalidSpec` from `build_argv`. `ffmpeg -f tee` cannot be
+relied on to refuse it: a slave whose header write fails is skipped with the
+process still exiting 0, even with the default `onfail=abort` (verified on the
+runtime image). Enhanced-RTMP (H.265/AV1 over RTMP) and AV1-in-MPEG-TS need
+an ffmpeg 6.1+ build; when that image lands, flip the matching arms in
+`pipeline/codec.rs::check_video` -- nothing else changes.
+
+Targets that need a *different* codec than the default (an RTMP push beside
+H.265 HLS) become extra profiles, encoded off one shared decode
+(`-filter_complex split`, `null` filters when no resolution is set):
+
+```
+H.265 config, RTMP + SRT targets:
+  decode -> split -> [default: libx265] -> tee: HLS (fMP4/hvc1) | SRT (MPEG-TS) | -f null guard
+                  \-> [h264-copy: libx264] -> tee: RTMP (FLV) | -f null guard
+```
+
+## Encoders: GPU-preferred, CPU-fallback
+
+At startup (`pipeline::encoder::detect_encoders`) the service picks, **per
+codec family**, a hardware encoder only if (1) a device node exists
+(`/dev/nvidiactl`/`/dev/nvidia0`, or `/dev/dri/renderD*`), (2) the encoder is
+compiled into `FFMPEG_PATH`, and (3) a one-second **trial encode succeeds**.
+Anything else -- no GPU, driver missing from the image, encoder not built in,
+trial timeout -- falls back to `libx264`/`libx265`/`libsvtav1` with a log line
+saying why. The CPU path needs nothing and works everywhere.
+
+| Env | Default | Meaning |
+|---|---|---|
+| `STREAM_ENCODER` | `auto` | `auto` = GPU when proven usable else CPU; `cpu` = never use a GPU; `nvenc`/`vaapi` = prefer only that backend (still falls back to CPU) |
+| `STREAM_VAAPI_DEVICE` | auto (`/dev/dri/renderD*`) | VA-API render node |
+
+Selection is exposed as the `encoder_backend{codec,backend,encoder}` gauge and
+`encodes_started_total{codec,backend}` counter (OTel), and as `pipeline
+encode` log lines per started pipeline. Notes:
+
+- The runtime image's ffmpeg 5.1 has `h264/hevc_nvenc` and `h264/hevc_vaapi`
+  but **no** `av1_nvenc`/`av1_vaapi`, so AV1 is CPU-only there; it is
+  detected, not assumed (a newer ffmpeg picks AV1 hardware up automatically).
+- A GPU needs more than this code: the container needs the device
+  (`/dev/dri/renderD128` + `supplementalGroups`, or the NVIDIA device
+  plugin) **and** a user-space driver (Mesa `va-driver` / NVIDIA runtime) in
+  the image. The base image ships neither, which is why the trial encode
+  exists -- on `penguin-frame` (AMD Phoenix1, `renderD128` present) VA-API
+  fails with *"Failed to initialise VAAPI connection"* and the service
+  correctly stays on the CPU.
+- NVENC on consumer cards caps concurrent sessions; a session that fails to
+  open at runtime is a pipeline failure the supervisor restarts, not a
+  per-start CPU re-fallback.
+
+## Fan-out (one ingest -> HLS + N pushes)
+
+One ingest feeds HLS plus up to the tier cap of RTMP/SRT pushes through
+`-f tee`, sharing one encode per distinct codec choice.
+
+- **Destination cap** -- `RelayPolicy` (Free tier: 3 destinations) is enforced
+  in the ffmpeg argv itself (`build_argv` -> `InvalidSpec: relay limit: max 3
+  destinations on this tier`), not only in `RelaySink`. HLS and recording do
+  not count. License-tier resolution is not wired, so Free is the cap for
+  everyone for now.
+- **`rtmps://`** is accepted for RTMP targets (same FLV muxer, TLS ingest).
+- **Full HLS options in the tee** -- an HLS slave carries the complete
+  `HlsOutputTarget` option set (fMP4 init/segment names, `master.m3u8`),
+  generated from the same list as the standalone output so they cannot drift.
+- **Failure isolation** -- pushes are `onfail=ignore`: a dead destination is
+  dropped without stopping HLS or its siblings. A push-only group beside
+  local outputs gets a `[f=null]-` guard slave, because a tee whose slaves
+  have *all* failed aborts the whole process. HLS has no `onfail` (abort):
+  a write failure restarts ffmpeg via the supervisor instead of serving a
+  frozen playlist. A dropped destination stays dropped until the pipeline
+  restarts (ffmpeg's tee does not retry).
+- Tee slave values containing `\ ' |` or control characters (and `: [ ]`
+  inside options) are refused -- a `|` in a secret URL would otherwise inject
+  an extra slave.
 
 ## Ports
 
@@ -48,6 +153,8 @@ Full model: `src/pipeline/model.rs`.
 | `WEBRTC_UDP_RANGE` | `40000-40100` | `"<start>-<end>"`, validated at startup |
 | `STREAM_DATA_DIR` | `/var/lib/svc-streaming` | Local recordings/segments root |
 | `FFMPEG_PATH` | `/usr/bin/ffmpeg` | |
+| `STREAM_ENCODER` | `auto` | `auto`/`cpu`/`nvenc`/`vaapi` -- see Encoders |
+| `STREAM_VAAPI_DEVICE` | auto-discovered | VA-API render node |
 | `PUBLIC_BASE_URL` | `http://localhost:8208` | |
 | `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER` | `localhost`/`5432`/`waddlebot`/`svc_streaming` | Per-service DB account |
 | `DB_PASSWORD` | *(required, env-only)* | Never a CLI flag |
@@ -87,6 +194,9 @@ together into one running service -- see Runtime Wiring below.
 | `src/http/` | Router (community JWT + internal ServiceKey + HLS + WHIP/WHEP mounts), `/health`, `/readyz`, two-document OpenAPI split | Implemented |
 | `src/api/` | Control-plane `/api/v1/*` routes | Implemented |
 | `src/pipeline/` | `PipelineSpec`/model types, `ffmpeg` argv builder, `FfmpegSupervisor` lifecycle | Implemented |
+| `src/pipeline/codec.rs` | Codec vocabulary (`h264/h265/av1`, `copy/aac/opus`, `rtmp/srt`) + container compatibility matrix | Implemented |
+| `src/pipeline/encoder.rs` | GPU-preferred / CPU-fallback encoder probe (`detect_encoders`) + NVENC/VA-API argv | Implemented |
+| `src/spec_builder.rs` | `streaming_configs` + `streaming_targets` -> profiles + push outputs; shared by the API validators, `/start` and the orchestrator | Implemented |
 | `src/ingest/rtmp.rs` | RTMP push ingest (`rml_rtmp`) | Implemented |
 | `src/ingest/srt.rs` | SRT ingest (`srt-tokio`) | Implemented |
 | `src/ingest/whip.rs`, `src/egress/whep.rs` | WHIP/WHEP WebRTC ingest+egress (`webrtc`) | Implemented (transcode-bridge teardown-on-disconnect not wired, see Runtime Wiring) |
@@ -114,7 +224,8 @@ WHIP POST ┘   (streaming_configs lookup   (spawn ffmpeg /   └ RecordSink -> 
 `run_with_shutdown` builds one `mpsc::channel<IngestSession>`; RTMP/SRT
 listeners and the WHIP router all push onto it, `Orchestrator::run` is its
 sole reader. HLS is always an output; `streaming_targets` rows become
-`RtmpPush`; `record_enabled` adds `Record` on its own always-`Copy` profile
+`RtmpPush`/`SrtPush` (by `protocol`) via `spec_builder::plan_push_outputs`;
+`record_enabled` adds `Record` on its own always-`Copy` profile
 (never shares a name with the transcoded default -- avoids a filter_complex
 ladder bug, see `RECORD_PROFILE`'s doc comment).
 

@@ -1021,6 +1021,175 @@ mod tests {
         assert!(err.to_string().contains("forward_url"));
     }
 
+    // --- codec selection (H.265 / AV1), protocol, loud rejection ---
+
+    fn codec_config(transcode: bool, video: &str, audio: &str) -> streaming_config::Model {
+        streaming_config::Model {
+            transcode_enabled: transcode,
+            video_codec: video.into(),
+            audio_codec: audio.into(),
+            ..sample_config(1, 42, false, transcode)
+        }
+    }
+
+    async fn insert_target(
+        db: &DatabaseConnection,
+        var: &str,
+        protocol: &str,
+        video: Option<&str>,
+    ) {
+        let secret = serde_json::to_string(&SecretRef::Env { var: var.into() })
+            .unwrap()
+            .replace('\'', "''");
+        let video = video.map_or("NULL".to_string(), |v| format!("'{v}'"));
+        db.execute_unprepared(&format!(
+            "INSERT INTO streaming_targets (config_id, platform, forward_url, enabled, protocol, video_codec) \
+             VALUES (1, 'custom', '{secret}', 1, '{protocol}', {video});"
+        ))
+        .await
+        .expect("insert target");
+    }
+
+    fn rtmp_input() -> InputSpec {
+        InputSpec::Rtmp {
+            stream_key: "sk_enabled".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_spec_wires_an_srt_target_from_the_db_as_an_srt_push() {
+        let db = seed_db().await;
+        insert_target(&db, "SRT_URL", "srt", None).await;
+        let spec = build_pipeline_spec_for_ingest(
+            &db,
+            &codec_config(false, "h264", "copy"),
+            "tenant-1",
+            rtmp_input(),
+        )
+        .await
+        .expect("builds");
+        assert!(matches!(
+            spec.outputs[1],
+            OutputSpec::SrtPush {
+                profile: Some(ref p),
+                ..
+            } if p == DEFAULT_PROFILE
+        ));
+    }
+
+    #[tokio::test]
+    async fn build_spec_h265_config_keeps_hls_and_srt_on_h265_and_rtmp_on_an_h264_rung() {
+        let db = seed_db().await;
+        insert_target(&db, "RTMP_URL", "rtmp", None).await;
+        insert_target(&db, "SRT_URL", "srt", None).await;
+        let config = codec_config(true, "h265", "aac");
+        let spec = build_pipeline_spec_for_ingest(&db, &config, "tenant-1", rtmp_input())
+            .await
+            .expect("builds");
+
+        assert_eq!(spec.profiles.len(), 2);
+        assert!(matches!(spec.profiles[0].video, VideoCodec::H265 { .. }));
+        assert!(matches!(spec.profiles[1].video, VideoCodec::H264 { .. }));
+
+        // The spec turns into an argv the muxers can actually carry.
+        let mut resolved = HashMap::new();
+        resolved.insert(
+            crate::pipeline::secret_ref_key(&SecretRef::Env {
+                var: "RTMP_URL".into(),
+            }),
+            "rtmps://live.example/app/key".to_string(),
+        );
+        resolved.insert(
+            crate::pipeline::secret_ref_key(&SecretRef::Env {
+                var: "SRT_URL".into(),
+            }),
+            "srt://srt.example:9000?streamid=k".to_string(),
+        );
+        let paths = crate::pipeline::Paths {
+            stream_data_dir: std::path::PathBuf::from("/data"),
+            resolved_secrets: resolved,
+            ..Default::default()
+        };
+        let argv = crate::pipeline::build_argv(&spec, &paths).expect("argv builds");
+        assert!(argv.iter().any(|a| a == "libx265"));
+        assert!(argv.iter().any(|a| a == "libx264"));
+        assert!(argv
+            .iter()
+            .any(|a| a.contains("[f=mpegts:onfail=ignore]srt://srt.example:9000")));
+        assert!(argv
+            .iter()
+            .any(|a| a.starts_with("[f=flv:onfail=ignore]rtmps://live.example/app/key|[f=null]-")));
+    }
+
+    #[tokio::test]
+    async fn build_spec_rejects_an_rtmp_target_requesting_hevc_with_the_flv_message() {
+        let db = seed_db().await;
+        insert_target(&db, "RTMP_URL", "rtmp", Some("h265")).await;
+        let err = build_pipeline_spec_for_ingest(
+            &db,
+            &codec_config(true, "h264", "copy"),
+            "tenant-1",
+            rtmp_input(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "FLV/RTMP cannot carry HEVC/AV1 (needs enhanced-RTMP); use HLS/SRT or H.264"
+            ),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_spec_rejects_an_srt_target_inheriting_av1() {
+        let db = seed_db().await;
+        insert_target(&db, "SRT_URL", "srt", None).await;
+        let err = build_pipeline_spec_for_ingest(
+            &db,
+            &codec_config(true, "av1", "copy"),
+            "tenant-1",
+            rtmp_input(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("MPEG-TS/SRT cannot carry AV1"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_spec_rejects_a_codec_without_transcoding() {
+        let db = seed_db().await;
+        let err = build_pipeline_spec_for_ingest(
+            &db,
+            &codec_config(false, "h265", "copy"),
+            "tenant-1",
+            rtmp_input(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("transcode_enabled"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn build_spec_av1_hls_with_no_targets_is_a_single_av1_profile() {
+        let db = seed_db().await;
+        let spec = build_pipeline_spec_for_ingest(
+            &db,
+            &codec_config(true, "av1", "opus"),
+            "tenant-1",
+            rtmp_input(),
+        )
+        .await
+        .expect("builds");
+        assert_eq!(spec.profiles.len(), 1);
+        assert!(matches!(spec.profiles[0].video, VideoCodec::Av1Svt { .. }));
+        assert!(matches!(spec.profiles[0].audio, AudioCodec::Opus { .. }));
+        assert_eq!(spec.outputs.len(), 1);
+    }
+
     // --- Orchestrator sink lifecycle (no DB/ffmpeg process involved) ---
 
     fn test_orchestrator(stream_data_dir: std::path::PathBuf) -> Orchestrator {

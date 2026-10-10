@@ -1118,6 +1118,197 @@ mod tests {
         unsafe { std::env::remove_var("SVC_STREAMING_SUPERVISOR_TEST_SHARED_SECRET") };
     }
 
+    fn pushes_spec(count: usize) -> PipelineSpec {
+        let mut spec = copy_spec(Uuid::new_v4());
+        for _ in 0..count {
+            spec.outputs.push(ModelOutputSpec::RtmpPush {
+                url_secret_ref: crate::store::SecretRef::Env {
+                    var: "SVC_STREAMING_SUPERVISOR_TEST_CAP_SECRET".into(),
+                },
+                profile: None,
+            });
+        }
+        spec
+    }
+
+    #[tokio::test]
+    async fn start_enforces_the_default_free_tier_destination_cap_in_the_argv_path() {
+        // SAFETY: unique env var name, not touched by other tests.
+        unsafe {
+            std::env::set_var(
+                "SVC_STREAMING_SUPERVISOR_TEST_CAP_SECRET",
+                "rtmp://push/cap",
+            );
+        }
+        let sup = FfmpegSupervisor::new(
+            PathBuf::from("/nonexistent/ffmpeg-binary-for-cap-test"),
+            PathBuf::from("/tmp"),
+            40000,
+            Arc::new(DefaultSecretResolver),
+            SupervisorConfig::default(),
+        );
+        let ok = pushes_spec(3);
+        let ok_id = ok.id;
+        sup.start(ok)
+            .await
+            .expect("three destinations fit the Free tier");
+        sup.stop(ok_id).await.expect("stop succeeds");
+
+        let err = sup.start(pushes_spec(4)).await.unwrap_err();
+        match err {
+            PipelineError::InvalidSpec(msg) => {
+                assert_eq!(msg, "relay limit: max 3 destinations on this tier")
+            }
+            other => panic!("expected InvalidSpec, got {other:?}"),
+        }
+        unsafe { std::env::remove_var("SVC_STREAMING_SUPERVISOR_TEST_CAP_SECRET") };
+    }
+
+    #[tokio::test]
+    async fn with_relay_policy_raises_the_cap() {
+        // SAFETY: unique env var name, not touched by other tests.
+        unsafe {
+            std::env::set_var(
+                "SVC_STREAMING_SUPERVISOR_TEST_CAP_SECRET",
+                "rtmp://push/cap",
+            );
+        }
+        let sup = FfmpegSupervisor::new(
+            PathBuf::from("/nonexistent/ffmpeg-binary-for-cap-test"),
+            PathBuf::from("/tmp"),
+            40000,
+            Arc::new(DefaultSecretResolver),
+            SupervisorConfig::default(),
+        )
+        .with_relay_policy(RelayPolicy::PROFESSIONAL);
+        let spec = pushes_spec(4);
+        let id = spec.id;
+        sup.start(spec)
+            .await
+            .expect("the Professional tier allows ten");
+        sup.stop(id).await.expect("stop succeeds");
+        unsafe { std::env::remove_var("SVC_STREAMING_SUPERVISOR_TEST_CAP_SECRET") };
+    }
+
+    #[tokio::test]
+    async fn build_paths_carries_the_encoder_selection_and_cap_into_the_argv_inputs() {
+        use crate::pipeline::codec::VideoFamily;
+        use crate::pipeline::encoder::EncoderBackend;
+        let sup = FfmpegSupervisor::new(
+            PathBuf::from("/nonexistent/ffmpeg"),
+            PathBuf::from("/tmp"),
+            40000,
+            Arc::new(DefaultSecretResolver),
+            SupervisorConfig::default(),
+        );
+        let paths = sup
+            .build_paths(&copy_spec(Uuid::new_v4()))
+            .await
+            .expect("paths");
+        assert!(
+            paths.encoders.is_software_only(),
+            "CPU unless told otherwise"
+        );
+        assert_eq!(paths.relay_policy, Some(RelayPolicy::FREE));
+
+        let sup = sup
+            .with_encoders(
+                EncoderSelection::software().with(VideoFamily::H265, EncoderBackend::Nvenc),
+            )
+            .with_relay_policy(RelayPolicy::PROFESSIONAL);
+        let paths = sup
+            .build_paths(&copy_spec(Uuid::new_v4()))
+            .await
+            .expect("paths");
+        assert_eq!(
+            paths.encoders.backend_for(VideoFamily::H265),
+            EncoderBackend::Nvenc
+        );
+        assert_eq!(paths.relay_policy, Some(RelayPolicy::PROFESSIONAL));
+    }
+
+    #[tokio::test]
+    async fn start_accepts_an_h265_hls_pipeline_and_reports_its_encode() {
+        let sup = FfmpegSupervisor::new(
+            PathBuf::from("/nonexistent/ffmpeg-binary-for-encode-test"),
+            PathBuf::from("/tmp"),
+            40000,
+            Arc::new(DefaultSecretResolver),
+            SupervisorConfig::default(),
+        );
+        let id = Uuid::new_v4();
+        let spec = PipelineSpec {
+            id,
+            tenant: "tenant-1".into(),
+            community_id: "community-1".into(),
+            inputs: vec![InputSpec::Rtmp {
+                stream_key: "sk1".into(),
+            }],
+            profiles: vec![TranscodeProfile {
+                name: "default".into(),
+                video: crate::pipeline::codec::VideoFamily::H265.to_video_codec(Some(2500)),
+                audio: AudioCodec::Copy,
+                resolution: None,
+                fps: None,
+            }],
+            outputs: vec![ModelOutputSpec::Hls {
+                variant: crate::pipeline::model::HlsVariant::Std,
+                profile: "default".into(),
+            }],
+        };
+        sup.start(spec)
+            .await
+            .expect("an H.265 HLS pipeline is accepted");
+        sup.stop(id).await.expect("stop succeeds");
+    }
+
+    #[tokio::test]
+    async fn start_refuses_hevc_aimed_at_an_rtmp_push() {
+        // SAFETY: unique env var name, not touched by other tests.
+        unsafe {
+            std::env::set_var(
+                "SVC_STREAMING_SUPERVISOR_TEST_FLV_SECRET",
+                "rtmp://push/flv",
+            );
+        }
+        let sup = FfmpegSupervisor::new(
+            PathBuf::from("/nonexistent/ffmpeg-binary-for-flv-test"),
+            PathBuf::from("/tmp"),
+            40000,
+            Arc::new(DefaultSecretResolver),
+            SupervisorConfig::default(),
+        );
+        let spec = PipelineSpec {
+            id: Uuid::new_v4(),
+            tenant: "tenant-1".into(),
+            community_id: "community-1".into(),
+            inputs: vec![InputSpec::Rtmp {
+                stream_key: "sk1".into(),
+            }],
+            profiles: vec![TranscodeProfile {
+                name: "default".into(),
+                video: crate::pipeline::codec::VideoFamily::H265.to_video_codec(None),
+                audio: AudioCodec::Copy,
+                resolution: None,
+                fps: None,
+            }],
+            outputs: vec![ModelOutputSpec::RtmpPush {
+                url_secret_ref: crate::store::SecretRef::Env {
+                    var: "SVC_STREAMING_SUPERVISOR_TEST_FLV_SECRET".into(),
+                },
+                profile: None,
+            }],
+        };
+        let err = sup.start(spec).await.unwrap_err();
+        match err {
+            PipelineError::InvalidSpec(msg) => {
+                assert!(msg.contains("FLV/RTMP cannot carry HEVC/AV1"), "{msg}")
+            }
+            other => panic!("expected InvalidSpec, got {other:?}"),
+        }
+        unsafe { std::env::remove_var("SVC_STREAMING_SUPERVISOR_TEST_FLV_SECRET") };
+    }
+
     #[tokio::test]
     async fn stub_supervisor_reports_unimplemented_for_every_method() {
         let stub = StubSupervisor;
