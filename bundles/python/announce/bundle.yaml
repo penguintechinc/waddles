@@ -7,7 +7,8 @@ name: Saved Announcements Bundle (Python)
 # DB-backed core/svc_process/builtin_handlers/community_announcements_process.py `!announce publish <id>`
 # built-in stage handler (a different, legacy runner architecture) -- flagged there for the migration
 # owner to resolve, not silently papered over.
-version: 1.0.2
+# 1.0.3: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -72,6 +73,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.2"
-  min_version: "1.0.2"
+  tested_with: "1.0.3"
+  min_version: "1.0.3"
   max_version: null

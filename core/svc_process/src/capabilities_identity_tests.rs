@@ -509,10 +509,13 @@ async fn an_unknown_identity_op_is_refused() {
 async fn resolutions_are_rate_limited_by_the_gate() {
     let f = fixture();
     for n in 0..20 {
-        f.caps
+        if let Err(e) = f
+            .caps
             .handle(id_call("identity.resolve_actor", serde_json::json!({})))
             .await
-            .unwrap_or_else(|e| panic!("call {n} within the window must succeed: {e:?}"));
+        {
+            panic!("call {n} within the window must succeed: {e:?}");
+        }
     }
     assert_eq!(
         code_of(&f, "identity.resolve_actor", serde_json::json!({})).await,

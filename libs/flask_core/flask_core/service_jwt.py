@@ -77,6 +77,11 @@ CLOCK_SKEW_SECONDS = 30
 
 ISSUER = os.getenv("SERVICE_JWT_ISSUER", "hub-api")
 
+#: Reserved operator-plane tenant (security.md Reserved Tenants): internal service
+#: accounts such as svc-process/svc-action live here and may act on behalf of any
+#: tenant. Every other `tenant` claim value confines the token to that one tenant.
+SYSTEM_TENANT = "system"
+
 
 class ServiceJwtError(Exception):
     """Base class for every machine-JWT failure raised by this module."""
@@ -180,6 +185,11 @@ class ServiceIdentity:
     k8s_namespace: str
     k8s_service_account: str
     allowed_scopes: frozenset[str]
+    #: Tenant this identity's tokens are bound to, stamped into the `tenant` claim by
+    #: the issuer (never taken from the caller -- security.md "Client cannot set
+    #: tenant"). `SYSTEM_TENANT` = operator plane (all tenants); empty = no tenant
+    #: claim, which tenant-aware consumers (the internal gRPC server) reject.
+    tenant: str = ""
 
     def matches_service_account(self, namespace: str, service_account: str) -> bool:
         """Return True if a validated TokenReview identity is this service."""
@@ -249,6 +259,10 @@ class ServiceJwtIssuer:
             "exp": now + ttl_seconds,
             "jti": str(uuid.uuid4()),
         }
+        if identity.tenant:
+            # Tenant binding comes from the allow-listed identity only -- the caller
+            # supplies a scope, never a tenant (security.md Tenant Isolation).
+            payload["tenant"] = identity.tenant
         # PyJWT's EdDSA signer accepts a `cryptography` private-key object
         # directly -- extracting raw bytes here was dead code that only
         # ever created (and immediately discarded) an extra copy of the
@@ -372,8 +386,17 @@ def load_identities_from_env(*, env: str = "alpha") -> list[ServiceIdentity]:
                 k8s_namespace=entry["k8s_namespace"],
                 k8s_service_account=entry["k8s_service_account"],
                 allowed_scopes=frozenset(entry.get("allowed_scopes", [])),
+                tenant=str(entry.get("tenant") or ""),
             )
         )
+        if not identities[-1].tenant:
+            # Not fatal (non-tenant-aware scopes such as egress:connect still work), but
+            # the internal gRPC server rejects tokens without a tenant claim, so say so
+            # loudly at startup rather than at the first denied RPC.
+            logger.warning(
+                "service identity has no tenant binding; tenant-aware RPCs will reject its tokens",
+                extra={"action": "service_jwt_identity_untenanted", "service_id": service_id},
+            )
     return identities
 
 

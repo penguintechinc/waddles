@@ -22,11 +22,11 @@ one balance) is a separate, open design item (#714).
 | `!points <user>` | documented grammar extension (see `src/app.py`) | That user's balance. `0` if they have never received points. |
 | `!points top` | `top` sub-module | Leaderboard: top 10 balances, highest first. |
 | `!points add <amount> <user>` | `add` verb | Broadcaster/moderator only. Adds `<amount>` points to `<user>`. |
-| `!points sub <amount> <user>` | `sub` verb | Broadcaster/moderator only. Removes `<amount>` points from `<user>`, clamped at `0` (never negative). |
+| `!points sub <amount> <user>` | `sub` verb | Broadcaster/moderator only. Removes `<amount>` points from `<user>`, clamped at `0` (never negative); the reply reports the amount actually removed. |
 
 Any other grammar-legal verb (`enable`/`disable`/`remove`/`reset`) or a malformed `!points ...`
 replies with usage text -- never silently dropped. `<amount>` must be a positive integer
-(`0`, negatives, decimals and words are usage errors).
+(`0`, negatives, decimals, words, `+5`, `1_000`, non-ASCII digits and anything over `1000000000` are usage errors).
 
 ## Examples
 
@@ -78,10 +78,19 @@ supplies the fields.
 | Missing `channel_id`, missing community (no tenant-wide fallback), unknown command, malformed forwarded payload | `ValueError`; missing community also logs ERROR `loyalty.missing_community`. |
 | `relay.push` fails | Propagates; no success line is logged. |
 
-**Known limitation:** first-time grants insert the `db` row and *then* write the `kv` index. If the
-index write fails the bundle fails loud, but the row already exists un-indexed -- a retry inserts a
-second row for the same user (the leaderboard would show both). Same insert-then-index shape
-`inventory` documents; no cleanup of the orphan exists yet.
+## Integrity guarantees (1.0.3)
+
+| Risk | Guard |
+|---|---|
+| Two simultaneous first-time `add`s for one user created two rows and one grant's points vanished (leaderboard showed the user twice) | Row creation is gated by an atomic claim (`loyalty.claim.<pseudonym>`, `kv.increment` -- only the first caller sees `1`; 30 s TTL so a crashed creator cannot wedge a user). The loser re-checks the index and otherwise replies "points for that user are being set up right now, try again in a few seconds." -- never a duplicate row, never a silent drop. |
+| Row inserted but its index write failed -> unreachable orphan row holding points | The orphan is deleted and the claim released before the error is raised; a failed cleanup is logged at ERROR (`loyalty.orphan_cleanup_failed`). |
+| Negative balances | `sub` clamps at `0`; the first-ever `sub` against a user with no row writes nothing ("alice has 0 points; nothing to remove.") instead of creating a junk zero row. A stored negative / over-cap balance is treated as corruption and fails loud (`balance_invalid`) instead of being rendered or "repaired". |
+| Unbounded / overflowing amounts | One `add`/`sub` is `1..1000000000` (ASCII digits only -- `+5`, `1_000` and non-ASCII digits are usage errors); balances saturate at `10^15` (exact in JSON, far inside int8). The reply says what was actually applied: `Removed 5 of 999 points from alice (balance can't go below 0). New balance: 0.` |
+| A mod-granted balance invisible to its owner (`Alice` vs `alice` hashed differently) | The caller's own `!points` identity is normalized exactly like a typed `<user>` (strip `@`, lower-case). |
+| Non-moderator passing the mod gate with a string badge (`"false"` is truthy) | Badges are read with an identity check; only a real boolean `True` opens the gate. |
+
+Double-apply is not possible on the update path: every retry re-reads the row and recomputes from
+the fresh balance (`expected_version` gated).
 
 ## Logging / PII
 
@@ -169,7 +178,7 @@ mypy --strict src
 ruff check .
 ```
 
-Current result: 130 tests, `src/app.py` at 100% statement+branch coverage.
+Current result: 194 tests, `src/app.py` at 100% statement+branch coverage.
 
 ## Activation
 

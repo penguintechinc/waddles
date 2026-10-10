@@ -108,6 +108,7 @@ Full detail, per-container table, typed stage contract, and current build status
 - **[Quick Start](QUICKSTART.md)** — step-by-step deployment
 - **[Architecture](ARCHITECTURE.md)** — 8-container pipeline, App Bundle model, build status
 - **[App Bundle SDK](plans/2026-08-31-app-bundle-sdk-design.md)** — bundle authoring spec
+- **[Enterprise SSO](SSO.md)** — SAML 2.0 / OIDC (Enterprise) and Google (Professional) sign-in: deployment, setup, security model
 - **[Contributing](CONTRIBUTING.md)** — how to contribute
 
 ## Community & Support

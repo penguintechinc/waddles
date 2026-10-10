@@ -93,7 +93,7 @@ def required_level(tier: str) -> int:
     """
     return TIER_LEVELS.get(normalize_tier(tier), UNKNOWN_REQUIRED_LEVEL)
 
-#: ``flag -> min_tier`` for every non-free Feature contract (22 as of the
+#: ``flag -> min_tier`` for every non-free Feature contract (23 as of the
 #: eight-module catalog). Keep alphabetical by flag within each tier so a
 #: drift-test failure diff is easy to read.
 _FEATURE_MIN_TIERS: dict[str, str] = {
@@ -116,6 +116,7 @@ _FEATURE_MIN_TIERS: dict[str, str] = {
     # -- enterprise --------------------------------------------------------
     "waddles.analytics.advanced": TIER_ENTERPRISE,
     "waddles.auth.sso_saml": TIER_ENTERPRISE,
+    "waddles.compliance.audit_export": TIER_ENTERPRISE,
     "waddles.compliance.audit_logs": TIER_ENTERPRISE,
     "waddles.compliance.external_kms": TIER_ENTERPRISE,
     "waddles.integrations.waddleai": TIER_ENTERPRISE,

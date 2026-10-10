@@ -50,7 +50,7 @@
 //! community is `NotAMember`, so the call is also not a cross-community oracle.
 //!
 //! The read path is the existing PII-free data-plane view
-//! `community_member_identities` (alembic 0043/0045/0051) under the read-only
+//! `community_member_identities` (alembic 0043/0045/0052) under the read-only
 //! `waddles_bundle_reader` role the stage already holds for the grant tables --
 //! no new role, password or privilege.
 
@@ -337,20 +337,28 @@ impl InvocationIdentity {
     /// (`<@123>`, `@bob`) -- still limited to references THIS message carried,
     /// so it is no more of a lookup oracle than the tokenized path.
     pub fn for_untokenized_event(event: &PlatformEvent) -> Self {
-        let bindings = event
+        let bindings: Vec<MentionBinding> = match event
             .payload
             .get("text")
             .and_then(serde_json::Value::as_str)
-            .map(|text| {
-                crate::pii_tokenize::scan_mentions(text)
-                    .into_iter()
-                    .map(|m| MentionBinding {
-                        key: m.matched_text,
-                        reference: m.reference,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        {
+            Some(text) => crate::pii_tokenize::scan_mentions(text)
+                .into_iter()
+                .map(|m| MentionBinding {
+                    key: m.matched_text,
+                    reference: m.reference,
+                })
+                .collect(),
+            // A non-text event (no `text` string) names no one: an empty
+            // mention table is the correct state, not a swallowed error.
+            None => {
+                tracing::debug!(
+                    platform = %event.platform,
+                    "identity: untokenized event carries no text; no mentions to bind"
+                );
+                Vec::new()
+            }
+        };
         Self::from_event(event, bindings)
     }
 
@@ -660,7 +668,7 @@ const CONFIRM_SQL: &str = "SELECT is_active_member AS is_active \
 
 /// Production [`MemberDirectory`]: reads the PII-free
 /// `community_member_identities` view over the read-only
-/// `waddles_bundle_reader` connection (alembic 0051). Every query binds
+/// `waddles_bundle_reader` connection (alembic 0052). Every query binds
 /// `(tenant_id, community_id)` from the host-derived [`IdentityScope`].
 pub struct PgMemberDirectory {
     db: DatabaseConnection,

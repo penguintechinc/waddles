@@ -1,0 +1,128 @@
+# CI overlay for .github/workflows/helm-chart-e2e.yml -- layered ON TOP of
+# values-alpha.yaml (`helm install -f values-alpha.yaml -f values-ci.yaml`).
+#
+# Goal: exercise the parts of the chart that only fail on a REAL cluster
+# (hook ordering, image entrypoints, live-object strategic-merge, secret
+# lifecycle across upgrades) while keeping the kind cluster's image-build
+# bill small. Everything disabled here is disabled because it is either
+# (a) legacy Python that duplicates a Rust path already exercised, or
+# (b) genuinely external (real Discord/Twitch network access, PostHog,
+# SPIRE) and out of scope for an ephemeral, network-isolated kind run.
+#
+# MUST stay in sync with the workflow's image build/kind-load list: every
+# component left `enabled: true` below that isn't already covered by
+# values-alpha.yaml's local-registry image references needs a matching
+# `kind load docker-image` in the workflow.
+
+global:
+  imageRegistry: ""          # images are `kind load`-ed by exact local tag, no registry prefix
+  imageTag: "ci"
+  imagePullPolicy: Never      # forces use of the kind-loaded image; a cache-miss must fail loudly, never fall back to a network pull
+
+# The workflow pre-creates the namespace via `kubectl create namespace` (before
+# `helm install`) so it can seed waddlebot-platform-credentials ahead of time --
+# exactly how a real operator provisions a Secret before first install (gh-478).
+# values.yaml's namespaceCreate:true default would then have the chart's own
+# templates/namespace.yaml try to adopt that already-existing, non-Helm-owned
+# Namespace and fail install with "cannot be imported into the current release".
+namespaceCreate: false
+
+# Dummy, obviously-fake platform credentials -- CI never talks to real Discord/Twitch.
+# waddlebot-platform-credentials is created out-of-band by the workflow (kubectl create
+# secret) BEFORE `helm install`, exactly like a real operator would before first install,
+# so the chart's lookup-then-generate-or-require hook path is exercised for real.
+oauth:
+  discord:
+    botToken: "ci-dummy-discord-bot-token-never-real"
+  twitch:
+    oauthToken: "oauth:ci-dummy-twitch-irc-token-never-real"
+    nick: "waddlebot_ci"
+    channels: "#waddlebot_ci_channel"
+
+# svc-ingest-rust's Discord gateway / Twitch IRC connection with the dummy token above
+# will fail to authenticate -- that is expected and must degrade (log + retry/backoff),
+# never crashloop the Job/Deployment hard enough to fail `helm install --wait`. Tracked
+# gap: rustDataPlane has no dedicated "offline/no external connectors" flag yet; until
+# one exists, the workflow relies on svc-ingest-rust's existing reconnect backoff and
+# asserts only Pod Ready (readiness does not depend on gateway auth succeeding), not
+# gateway auth success itself.
+pipeline:
+  rustDataPlane:
+    enabled: true
+    svcIngestRust:
+      replicas: 1
+    svcProcessRust:
+      replicas: 1
+    svcActionRust:
+      replicas: 1
+    # No Dockerfile exists for bundle-executor yet (values.yaml's own KNOWN GAPS
+    # comment) and it isn't in the workflow's kind-load image list -- disabling
+    # both here isn't a scope-cut, it's the only image reference that can't be
+    # satisfied at all right now.
+    bundleExecutor:
+      enabled: false
+    bundleExecutorAction:
+      enabled: false
+  migrationsJob:
+    enabled: true
+  coreBundleSeeder:
+    enabled: true
+  svcIngest:
+    enabled: false   # legacy Python connector superseded by svcIngestRust above
+  svcProcess:
+    enabled: false
+  svcAction:
+    enabled: false
+  # Not in the workflow's 6-image kind-load list -- correct keys are
+  # pipeline.svcPresentation/svcStreaming/hubWebui, NOT the top-level
+  # "presentation:"/"streaming:" this file previously set (those paths don't
+  # match any `{{- if }}` in the chart, so they silently disabled nothing and
+  # both services sat in ImagePullBackOff for their alpha localhost:32000
+  # image references every run).
+  svcPresentation:
+    enabled: false
+  svcStreaming:
+    enabled: false
+  hubWebui:
+    enabled: false   # webui image isn't built by this workflow either
+
+modules:
+  # Pre-existing, PR-480-independent drift: modules.hub is the legacy admin-panel
+  # Deployment (values.yaml modules.hub.port: 8060, PORT=8060 env), but its image
+  # field ("waddlebot-hub-api") now resolves to the NEW hub_api Dockerfile/app,
+  # which hardcodes port 8204 and ignores $PORT entirely -- so modules.hub's
+  # readiness/liveness probes (port 8060) can never succeed against that image,
+  # crash-looping regardless of this PR's changes. templates/hub-api.yaml's own
+  # header comment ("Coexists with those 2 legacy Deployments; cutover is a later
+  # task") confirms this is a known, unreconciled migration-in-progress gap, not
+  # something introduced here -- disabling for this workflow's scope rather than
+  # guessing at the intended cutover.
+  hub:
+    enabled: false
+  router:
+    enabled: false     # not required for install/upgrade correctness; cuts one image build
+
+reputation:
+  enabled: false   # own image (docker.io/waddlebot/reputation-module), not in the kind-load list
+egressProxy:
+  enabled: false   # values.yaml's own "SKELETON: no Dockerfile/CI image yet" -- allowlistSigning.secretName has no auto-provisioning wired up yet either (not in autoProvisionedKeys), so the pod can never reach Ready regardless of image availability
+posthog:
+  enabled: false
+spire:
+  enabled: false
+
+infrastructure:
+  seaweedfs:
+    enabled: true       # exercises the #479 immutable bucket-init Job fix (now aws-cli/SeaweedFS, gh-508)
+  ollama:
+    enabled: false
+  qdrant:
+    enabled: false
+
+autoProvisionedKeys:
+  enabled: true          # exercises the #477 openssl-in-hook-image fix
+
+ingress:
+  enabled: false          # no external LB/ingress controller on kind
+httproute:
+  enabled: false

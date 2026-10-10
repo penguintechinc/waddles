@@ -10,7 +10,10 @@ webui:
 global:
   imageRegistry: "ghcr.io/penguintechinc/waddlebot"
   imageTag: "latest"
-  imagePullPolicy: Always
+  # IfNotPresent: scripts/deploy-beta.sh always passes a unique per-deploy tag
+  # (--set-string global.imageTag=beta-<epoch>), so Always buys nothing. Override with
+  # --set global.imagePullPolicy=Always only when deploying a mutable tag (e.g. `latest`).
+  imagePullPolicy: IfNotPresent
   imagePullSecrets:
     - name: ghcr-pull-secret
   corsOrigin: "https://hub.waddlebot.io,https://waddlebot.io,https://waddles.penguintech.cloud,https://waddlebot.penguintech.cloud,http://localhost:3000,http://localhost:5173"

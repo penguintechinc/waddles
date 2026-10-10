@@ -141,9 +141,20 @@ The following table lists the main configurable parameters of the WaddleBot char
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `global.imageRegistry` | Global Docker image registry | `docker.io/waddlebot` |
-| `global.imagePullPolicy` | Global image pull policy | `IfNotPresent` |
+| `global.imagePullPolicy` | Image pull policy for **every** workload container, including `hub-api`, `svc-{action,ingest,process}-rust`, `svc-presentation` and both `bundle-executor` Deployments (no template hardcodes a policy) | `IfNotPresent` |
 | `global.imagePullSecrets` | Global image pull secrets | `[]` |
 | `global.storageClass` | Global storage class for PVCs | `standard` |
+
+#### Image pull policy
+
+Every deploy carries a unique per-deploy `global.imageTag` (alpha SHA8, beta `beta-<epoch>`,
+gamma `gamma-<epoch>`, production digest), so `IfNotPresent` is correct in every environment
+(`values-alpha.yaml`, `-beta`, `-gamma`, `-production` all declare it). `Always` is **not** safe
+as a blanket default: for locally-loaded images (kind e2e, alpha local builds) the node already
+has the image, `Always` forces a registry pull that fails, and the pod never becomes Ready.
+Set `--set global.imagePullPolicy=Always` per deployment only when deploying a mutable tag
+(e.g. `latest`); `values-local.yaml` keeps `Always` for that reason.
+`tests/test_image_pull_policy_render.py` pins this behavior.
 
 ### Namespace
 
@@ -532,6 +543,23 @@ runs will in fact mint two *different* random secret values each time, since bot
 independently take the "generate" branch -- that's expected, not a bug). Real
 keep/idempotency is exercised by `lookup` against the live cluster during an actual
 `helm install`/`helm upgrade`, i.e. it is proven at deploy time, not template time.
+
+### Enterprise SSO key (`sso.*`, `templates/sso.yaml`)
+
+hub-api's enterprise SSO (SAML 2.0 / OIDC / Google; see `docs/SSO.md`) needs one more symmetric
+key, `SSO_ENCRYPTION_KEY` (64 lowercase hex chars) in Secret `waddlebot-sso-encryption-key`. It follows the
+same keep/generate mechanism as `tenantKek`/`oneTimeSecret` above -- `lookup` + `randBytes`, generated
+in `alpha`/`local` only, `helm.sh/resource-policy: keep`, never rotated by the chart -- with one
+deliberate difference: **a miss in beta/gamma/production does NOT fail the release.** SSO is
+entitlement-gated, so a deployment that never enables it must still install. hub-api consumes the key
+through an `optional: true` `secretKeyRef` (one `include "waddlebot.sso.hubApiEnv"` in
+`templates/hub-api.yaml`; the env block lives in `templates/_sso.tpl`), and SSO fails loudly at request
+time (HTTP 503 `SSO_UNAVAILABLE`) until the Secret exists. Enable SSO outside alpha/local by
+pre-creating the Secret, or by pointing an ExternalSecret at it and setting
+`sso.encryptionKey.externalSecret=true`. Other values: `sso.allowedPrivateHosts` (operator allowlist for
+on-prem IdPs behind the SSRF guard), `sso.stateTtlSeconds`, `sso.clockSkewSeconds`, and
+`sso.google.existingSecret` (optional shared Google OAuth client -- never inline the values).
+Tests: `tests/test_sso_render.py`.
 
 ## SPIRE (optional, disabled pending #437)
 

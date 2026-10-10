@@ -6,7 +6,8 @@ name: Dynamic Counter Bundle (Python)
 # (!count add/remove/list, !<name> read/add/sub/set) -- feature/count-dynamic-counters.
 # 1.0.4 (fix/bump-count-lurk-1.0.4): version-only bump to republish the colon-free `kv` key
 # fix (gh-631, #638) -- app_versions is immutable per (app_id, version).
-version: 1.0.6
+# 1.0.7: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
+version: 1.0.7
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -55,6 +56,6 @@ config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.6"
-  min_version: "1.0.6"
+  tested_with: "1.0.7"
+  min_version: "1.0.7"
   max_version: null

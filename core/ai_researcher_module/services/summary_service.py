@@ -103,12 +103,18 @@ class SummaryService:
             # Build context for AI
             context = self._build_stream_context(messages, stream_start, stream_end)
 
-            # Generate summary with AI
-            prompt = self._build_stream_summary_prompt(context)
-            ai_response = await self.ai_provider.generate(prompt)
+            # Generate summary with AI -- JSON prompt only for a JSON-capable
+            # model, plain labeled text otherwise (the free/default path)
+            json_mode = self._supports_json()
+            prompt = self._build_stream_summary_prompt(context, json_mode)
+            ai_response = await self.ai_provider.generate(
+                prompt, want_json=json_mode
+            )
 
-            # Parse AI response
-            summary_data = self._parse_stream_summary(ai_response)
+            # Parse AI response in the mode the provider actually used
+            summary_data = self._parse_stream_summary(
+                ai_response.content, ai_response.json_mode
+            )
 
             # Calculate viewer engagement metrics
             viewer_stats = self._calculate_viewer_stats(messages)
@@ -232,12 +238,17 @@ class SummaryService:
                 sentiment_trend
             )
 
-            # Generate summary with AI
-            prompt = self._build_weekly_summary_prompt(context)
-            ai_response = await self.ai_provider.generate(prompt)
+            # Generate summary with AI (JSON only for a JSON-capable model)
+            json_mode = self._supports_json()
+            prompt = self._build_weekly_summary_prompt(context, json_mode)
+            ai_response = await self.ai_provider.generate(
+                prompt, want_json=json_mode
+            )
 
-            # Parse AI response
-            summary_data = self._parse_weekly_summary(ai_response)
+            # Parse AI response in the mode the provider actually used
+            summary_data = self._parse_weekly_summary(
+                ai_response.content, ai_response.json_mode
+            )
             summary_data['top_chatters'] = top_chatters[:10]  # Top 10
             summary_data['popular_topics'] = popular_topics[:10]  # Top 10
             summary_data['sentiment_trend'] = sentiment_trend
@@ -500,12 +511,15 @@ class SummaryService:
             'stream_summaries': stream_summaries
         }
 
-    def _build_stream_summary_prompt(self, context: dict) -> str:
-        """Build AI prompt for stream summary."""
-        return f"""
-Analyze this stream session and provide a summary in JSON format.
+    def _supports_json(self) -> bool:
+        """True only if the configured model is declared JSON-capable (env)."""
+        return bool(getattr(self.ai_provider, 'supports_json', False))
 
-Stream Details:
+    def _build_stream_summary_prompt(
+        self, context: dict, json_mode: bool = False
+    ) -> str:
+        """Build AI prompt for stream summary (JSON or plain-text labeled lines)."""
+        details = f"""Stream Details:
 - Duration: {context['duration_minutes']} minutes
 - Total Messages: {context['message_count']}
 
@@ -514,7 +528,18 @@ Your task:
 2. Note 2-3 notable moments or highlights
 3. Assess overall sentiment (positive/neutral/negative)
 4. Write a 2-3 sentence summary
+"""
+        # default=str: DB rows carry datetimes, which json.dumps rejects outright
+        sample = (
+            f"Messages sample: "
+            f"{json.dumps(context['messages'][:100], default=str)}"
+        )
 
+        if json_mode:
+            return f"""
+Analyze this stream session and provide a summary in JSON format.
+
+{details}
 Return JSON with this structure:
 {{
     "title": "Stream Summary - [date]",
@@ -524,15 +549,28 @@ Return JSON with this structure:
     "sentiment": "positive|neutral|negative"
 }}
 
-Messages sample: {json.dumps(context['messages'][:100])}
+{sample}
 """
 
-    def _build_weekly_summary_prompt(self, context: dict) -> str:
-        """Build AI prompt for weekly summary."""
         return f"""
-Generate a weekly community summary in JSON format.
+Analyze this stream session and write a summary as plain text.
 
-Week Overview:
+{details}
+Reply with exactly these labeled lines and nothing else:
+TITLE: <one line, e.g. Stream Summary - [date]>
+SUMMARY: <2-3 sentences>
+KEY TOPICS: <comma-separated list>
+NOTABLE MOMENTS: <semicolon-separated list>
+SENTIMENT: <positive, neutral or negative>
+
+{sample}
+"""
+
+    def _build_weekly_summary_prompt(
+        self, context: dict, json_mode: bool = False
+    ) -> str:
+        """Build AI prompt for weekly summary (JSON or plain-text labeled lines)."""
+        overview = f"""Week Overview:
 - Streams: {context['stream_count']}
 - Total Messages: {context['total_messages']}
 - Top Chatters: {json.dumps(context['top_chatters'][:5])}
@@ -543,7 +581,12 @@ Your task:
 1. Summarize the week's activity in 3-4 sentences
 2. Highlight community engagement patterns
 3. Note any trending topics or themes
+"""
+        if json_mode:
+            return f"""
+Generate a weekly community summary in JSON format.
 
+{overview}
 Return JSON with this structure:
 {{
     "title": "Weekly Summary - Week of [date]",
@@ -551,32 +594,118 @@ Return JSON with this structure:
 }}
 """
 
-    def _parse_stream_summary(self, ai_response: str) -> dict:
-        """Parse AI response into stream summary dict."""
-        try:
-            # Try to parse as JSON
-            data = json.loads(ai_response)
-            return data
-        except json.JSONDecodeError:
-            # Fallback: extract manually
-            return {
-                'title': 'Stream Summary',
-                'summary': ai_response,
+        return f"""
+Write a weekly community summary as plain text.
+
+{overview}
+Reply with exactly these labeled lines and nothing else:
+TITLE: <one line, e.g. Weekly Summary - Week of [date]>
+SUMMARY: <3-4 sentences>
+"""
+
+    # Labels the plain-text prompts ask for -> result keys / value kind.
+    _STREAM_TEXT_FIELDS = {
+        'TITLE': ('title', 'str'),
+        'SUMMARY': ('summary', 'str'),
+        'KEY TOPICS': ('key_topics', 'list,'),
+        'NOTABLE MOMENTS': ('notable_moments', 'list;'),
+        'SENTIMENT': ('sentiment', 'str'),
+    }
+    _WEEKLY_TEXT_FIELDS = {
+        'TITLE': ('title', 'str'),
+        'SUMMARY': ('summary', 'str'),
+    }
+
+    @staticmethod
+    def _parse_labeled_text(text: str, fields: dict) -> dict:
+        """Parse `LABEL: value` lines (case-insensitive) into a dict; unknown lines ignored.
+
+        A value may continue on following lines until the next known label.
+        Returns only the fields that were actually present.
+        """
+        found: Dict[str, str] = {}
+        current: Optional[str] = None
+        for raw_line in text.splitlines():
+            line = raw_line.strip().lstrip('*#-').strip()
+            label, sep, rest = line.partition(':')
+            normalized = label.strip().strip('*').strip().upper()
+            if sep and normalized in fields:
+                current = normalized
+                found[current] = rest.strip().strip('*').strip()
+            elif current is not None and line:
+                found[current] = f"{found[current]} {line}".strip()
+
+        result: dict = {}
+        for label, value in found.items():
+            key, kind = fields[label]
+            if kind == 'str':
+                result[key] = value
+            else:
+                sep_char = kind[-1]
+                result[key] = [
+                    item.strip() for item in value.split(sep_char) if item.strip()
+                ]
+        return result
+
+    def _parse_stream_summary(self, ai_response: str, json_mode: bool = False) -> dict:
+        """Parse AI response text into a stream summary dict."""
+        return self._parse_summary(
+            ai_response, json_mode,
+            fields=self._STREAM_TEXT_FIELDS,
+            default_title='Stream Summary',
+            defaults={
                 'key_topics': [],
                 'notable_moments': [],
                 'sentiment': 'neutral'
             }
+        )
 
-    def _parse_weekly_summary(self, ai_response: str) -> dict:
-        """Parse AI response into weekly summary dict."""
-        try:
-            data = json.loads(ai_response)
-            return data
-        except json.JSONDecodeError:
-            return {
-                'title': 'Weekly Summary',
-                'summary': ai_response
-            }
+    def _parse_weekly_summary(self, ai_response: str, json_mode: bool = False) -> dict:
+        """Parse AI response text into a weekly summary dict."""
+        return self._parse_summary(
+            ai_response, json_mode,
+            fields=self._WEEKLY_TEXT_FIELDS,
+            default_title='Weekly Summary',
+            defaults={}
+        )
+
+    def _parse_summary(
+        self,
+        ai_response: str,
+        json_mode: bool,
+        fields: dict,
+        default_title: str,
+        defaults: dict
+    ) -> dict:
+        """Parse a summary in the mode the provider actually ran in.
+
+        JSON mode: the provider already validated the JSON. Text mode: read the
+        labeled lines. Either way `title` and `summary` are always present; if
+        the model ignored the requested shape the whole reply becomes the
+        summary and a warning is logged (degraded, never silent).
+        """
+        data: dict = {}
+        if json_mode:
+            try:
+                parsed = json.loads(ai_response)
+                data = parsed if isinstance(parsed, dict) else {}
+            except json.JSONDecodeError:
+                data = {}
+        else:
+            data = self._parse_labeled_text(ai_response, fields)
+
+        if not isinstance(data.get('summary'), str) or not data['summary'].strip():
+            logger.warning(
+                f"Summary reply did not follow the requested "
+                f"{'JSON' if json_mode else 'labeled-text'} shape; "
+                f"using the whole reply as the summary ({len(ai_response)} chars)"
+            )
+            data['summary'] = ai_response.strip()
+        if not isinstance(data.get('title'), str) or not data['title'].strip():
+            data['title'] = default_title
+        for key, value in defaults.items():
+            data.setdefault(key, value)
+        return data
 
     def _calculate_viewer_stats(self, messages: List[dict]) -> dict:
         """Calculate viewer engagement statistics."""

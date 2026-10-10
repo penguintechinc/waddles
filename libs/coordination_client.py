@@ -73,7 +73,7 @@ class CoordinationClient:
             logger.info(f"CoordinationClient started with {len(self.claimed_entities)} entities")
             
         except Exception as e:
-            logger.error(f"Error starting coordination client: {str(e)}")
+            logger.error("Error starting coordination client: %s", type(e).__name__)
             raise
     
     async def stop(self):
@@ -97,7 +97,7 @@ class CoordinationClient:
             logger.info("CoordinationClient stopped")
             
         except Exception as e:
-            logger.error(f"Error stopping coordination client: {str(e)}")
+            logger.error("Error stopping coordination client: %s", type(e).__name__)
     
     async def claim_entities(self) -> List[Dict]:
         """Claim available entities from coordination system"""
@@ -128,7 +128,7 @@ class CoordinationClient:
                     return []
                     
         except Exception as e:
-            logger.error(f"Error claiming entities: {str(e)}")
+            logger.error("Error claiming entities: %s", type(e).__name__)
             return []
     
     async def release_entities(self, entity_ids: List[str] = None) -> bool:
@@ -168,7 +168,7 @@ class CoordinationClient:
                     return False
                     
         except Exception as e:
-            logger.error(f"Error releasing entities: {str(e)}")
+            logger.error("Error releasing entities: %s", type(e).__name__)
             return False
     
     async def update_entity_status(self, entity_status: EntityStatus) -> bool:
@@ -197,7 +197,7 @@ class CoordinationClient:
                     return False
                     
         except Exception as e:
-            logger.error(f"Error updating entity status: {str(e)}")
+            logger.error("Error updating entity status: %s", type(e).__name__)
             return False
     
     async def report_error(self, entity_id: str, error_message: str) -> bool:
@@ -223,7 +223,7 @@ class CoordinationClient:
                     return False
                     
         except Exception as e:
-            logger.error(f"Error reporting entity error: {str(e)}")
+            logger.error("Error reporting entity error: %s", type(e).__name__)
             return False
     
     async def checkin(self) -> bool:
@@ -248,7 +248,7 @@ class CoordinationClient:
                     return False
                     
         except Exception as e:
-            logger.error(f"Error sending checkin: {str(e)}")
+            logger.error("Error sending checkin: %s", type(e).__name__)
             return False
 
     async def heartbeat(self, extend_claims: bool = True) -> Dict:
@@ -283,7 +283,7 @@ class CoordinationClient:
                     return {"error": f"HTTP {response.status}"}
                     
         except Exception as e:
-            logger.error(f"Error sending heartbeat: {str(e)}")
+            logger.error("Error sending heartbeat: %s", type(e).__name__)
             return {"error": str(e)}
     
     async def checkin_loop(self):
@@ -305,7 +305,7 @@ class CoordinationClient:
                 logger.info("Checkin loop cancelled")
                 break
             except Exception as e:
-                logger.error(f"Error in checkin loop: {str(e)}")
+                logger.error("Error in checkin loop: %s", type(e).__name__)
                 # Continue the loop even if checkin fails
                 continue
     
@@ -343,7 +343,7 @@ class CoordinationClient:
                 logger.info(f"Released {len(offline_entities)} offline entities")
                 
         except Exception as e:
-            logger.error(f"Error checking offline entities: {str(e)}")
+            logger.error("Error checking offline entities: %s", type(e).__name__)
     
     async def check_entity_live_status(self, entity_id: str) -> bool:
         """Check if an entity is currently live (platform-specific implementation needed)"""
@@ -379,7 +379,7 @@ class CoordinationClient:
             return False
             
         except Exception as e:
-            logger.error(f"Error reclaiming entities: {str(e)}")
+            logger.error("Error reclaiming entities: %s", type(e).__name__)
             return False
 
 # Example usage functions for collector modules

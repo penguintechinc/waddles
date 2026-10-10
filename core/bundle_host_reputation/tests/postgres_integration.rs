@@ -2,7 +2,7 @@
 //! (row lock, rolling-24h cap, ledger atomicity, live membership predicate)
 //! and the `waddles_bundle_reputation` role's privilege boundary can only be
 //! proven by a real server. The schema under test is the EXACT shipped DDL --
-//! `scripts/db/bundle_reputation_store.sql`, which alembic 0049 also executes
+//! `scripts/db/bundle_reputation_store.sql`, which alembic 0050 also executes
 //! -- applied on top of hand-written minimal prerequisites (`tenants`,
 //! `communities`, `community_members`, `app_catalog` and a copy of 0041's
 //! `bundle_reputation_adjustments`; the full legacy baseline needs the whole
@@ -27,7 +27,7 @@ use testcontainers::core::logs::LogSource;
 use testcontainers::core::wait::LogWaitStrategy;
 use testcontainers::core::{ContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage, ImageExt};
+use testcontainers::{ContainerAsync, ContainerRequest, GenericImage, ImageExt};
 use uuid::Uuid;
 
 const POSTGRES_IMAGE: &str = "postgres";
@@ -104,8 +104,23 @@ async fn scalar_i64(conn: &DatabaseConnection, sql: &str) -> i64 {
         .unwrap()
 }
 
-async fn fixture() -> Fixture {
-    let container = GenericImage::new(POSTGRES_IMAGE, POSTGRES_TAG)
+/// Attempts the pull-owning (first) container start gets before the fixture
+/// gives up -- a registry stream can be cut mid-pull on a cold CI runner.
+const PULL_ATTEMPTS: u32 = 3;
+
+/// Process-wide guard for the image pull; `true` once the image is local.
+///
+/// Every test owns its own container, so on a cold runner all 13 tests would
+/// otherwise pull `postgres:17.6-bookworm` at the same instant -- concurrent
+/// identical pulls intermittently die with `PullImage ... bytes remaining on
+/// stream` (seen in CI on #773). The first test to take the lock owns the
+/// pull; the rest queue behind it, then start in parallel off the cached image.
+static IMAGE_PULL: tokio::sync::Mutex<bool> = tokio::sync::Mutex::const_new(false);
+
+/// One Postgres container request with the exact readiness wait the suite
+/// relies on; rebuilt per attempt because `start()` consumes it.
+fn postgres_request() -> ContainerRequest<GenericImage> {
+    GenericImage::new(POSTGRES_IMAGE, POSTGRES_TAG)
         .with_exposed_port(ContainerPort::Tcp(5432))
         .with_wait_for(WaitFor::log(
             LogWaitStrategy::new(
@@ -116,9 +131,37 @@ async fn fixture() -> Fixture {
         ))
         .with_env_var("POSTGRES_PASSWORD", SUPERUSER_PASSWORD)
         .with_env_var("POSTGRES_DB", "waddles_test")
-        .start()
-        .await
-        .expect("postgres test container starts");
+}
+
+/// Starts a Postgres container, serializing the first start (the one that
+/// pulls the image if it is not cached) so concurrent tests never race the
+/// same pull. Panics with the last error once the pull-owning start has
+/// exhausted its attempts, or immediately for any later start.
+async fn start_postgres() -> ContainerAsync<GenericImage> {
+    let mut pulled = IMAGE_PULL.lock().await;
+    if *pulled {
+        drop(pulled);
+        return postgres_request()
+            .start()
+            .await
+            .expect("postgres test container starts");
+    }
+    let mut last_err = None;
+    for _ in 0..PULL_ATTEMPTS {
+        match postgres_request().start().await {
+            Ok(container) => {
+                *pulled = true;
+                drop(pulled);
+                return container;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    panic!("postgres test container starts after {PULL_ATTEMPTS} attempts: {last_err:?}");
+}
+
+async fn fixture() -> Fixture {
+    let container = start_postgres().await;
     let host = container.get_host().await.unwrap().to_string();
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let su_url = format!("postgres://postgres:{SUPERUSER_PASSWORD}@{host}:{port}/waddles_test");
@@ -158,7 +201,7 @@ async fn fixture() -> Fixture {
     )
     .await;
     // The role must exist BEFORE the shipped DDL so its grants block fires
-    // (same ordering alembic 0049 guarantees).
+    // (same ordering alembic 0050 guarantees).
     exec(
         &su,
         &format!(

@@ -131,7 +131,11 @@ class TestAutoProvisionJobPublishesJsonMapForBundleSigningOnly:
     def test_service_jwt_call_unchanged_no_json_key(self) -> None:
         result = _helm_template(_ALPHA_VALUES)
         assert result.returncode == 0
-        assert "SERVICE_JWT_PRIVATE_KEY SERVICE_JWT_ACTIVE_KID SERVICE_JWT_PUBLIC_KEY" in result.stdout
+        # kid-suffixed PEM private key name + empty json-key slot + "pem" format
+        # (fix/hub-api-grpc-service-jwt-issuer); still no JSON-map key.
+        assert (
+            'SERVICE_JWT_ACTIVE_KID SERVICE_JWT_PUBLIC_KEY "" pem' in result.stdout
+        )
         assert "SERVICE_JWT_PUBLIC_KEYS" not in result.stdout
 
 

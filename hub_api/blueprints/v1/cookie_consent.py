@@ -41,6 +41,7 @@ harmless to bind twice, guarded idempotent).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -55,6 +56,8 @@ from services.current_user import get_current_user_id, get_optional_current_user
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.schema import bind_privacy_tables
+
+logger = logging.getLogger(__name__)
 
 cookie_consent_bp = Blueprint("v1_cookie_consent", __name__, url_prefix="/api/v1/cookie")
 
@@ -159,10 +162,28 @@ class ConsentMessageResponse:
 
 
 @dataclass(slots=True, frozen=True)
+class SaveConsentPreferencesDTO:
+    """Preferences as submitted to `POST /api/v1/cookie`.
+
+    `doNotSell` is tri-state: `None` means the caller did not say, so a
+    stored CCPA opt-out is kept; `True`/`False` is an explicit choice
+    (`False` is a deliberate opt-back-in). Defaulting it to `False` would
+    make an omitted field indistinguishable from an opt-back-in and
+    silently revert the opt-out.
+    """
+
+    necessary: bool = True
+    functional: bool = False
+    analytics: bool = False
+    marketing: bool = False
+    doNotSell: bool | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class SaveConsentRequest:
     """Request DTO for `POST /api/v1/cookie`."""
 
-    preferences: ConsentPreferencesDTO = field(default_factory=ConsentPreferencesDTO)
+    preferences: SaveConsentPreferencesDTO = field(default_factory=SaveConsentPreferencesDTO)
     consentMethod: str = "banner"
 
 
@@ -170,8 +191,11 @@ class SaveConsentRequest:
 class UpdatePreferencesRequest:
     """Request DTO for `PATCH /api/v1/cookie/preferences`.
 
-    No `doNotSell` field -- see `services/cookie_consent_service.py`'s
-    `update_preferences()` docstring for why.
+    `doNotSell` is accepted for wire compatibility but never written from
+    the body: this endpoint merges the four cookie categories over the
+    stored preferences (`services/cookie_consent_service.py`'s
+    `update_preferences()`), so the stored opt-out is preserved, and only a
+    `Sec-GPC` signal can force it on.
     """
 
     preferences: ConsentPreferencesDTO = field(default_factory=ConsentPreferencesDTO)
@@ -261,13 +285,16 @@ async def save_consent(data: SaveConsentRequest) -> tuple[Any, int]:
     """Save or update consent preferences."""
     async_dal, dal = _dal()
     user_id = get_optional_current_user_id(request)
-    requested = {
+    requested: dict[str, Any] = {
         "necessary": True,
         "functional": bool(data.preferences.functional),
         "analytics": bool(data.preferences.analytics),
         "marketing": bool(data.preferences.marketing),
-        "doNotSell": bool(data.preferences.doNotSell),
     }
+    # Only an explicit `doNotSell` is written -- an omitted one must keep
+    # the stored opt-out (see `SaveConsentPreferencesDTO`).
+    if data.preferences.doNotSell is not None:
+        requested["doNotSell"] = data.preferences.doNotSell
     preferences, gpc_applied = svc.apply_gpc(request, requested)
     consent_id = request.cookies.get(svc.CONSENT_COOKIE_NAME)
     version = _cfg_version()
@@ -421,26 +448,38 @@ async def get_policy_history() -> CookiePolicyHistoryResponse:
 @tenant_middleware  # type: ignore[untyped-decorator]
 @validate_request(UpdatePreferencesRequest)
 async def update_preferences(data: UpdatePreferencesRequest) -> tuple[Any, int]:
-    """Update specific consent categories for the authenticated user."""
+    """Update specific consent categories for the authenticated user.
+
+    The four categories are merged over the stored preferences (a stored
+    `doNotSell` opt-out is preserved); a `Sec-GPC: 1` header additionally
+    forces `doNotSell` on and `marketing` off, same as `POST /api/v1/cookie`.
+    """
     async_dal, dal = _dal()
     try:
         user_id = get_current_user_id(request)
-        preferences = {
+        requested: dict[str, Any] = {
             "necessary": True,
             "functional": bool(data.preferences.functional),
             "analytics": bool(data.preferences.analytics),
             "marketing": bool(data.preferences.marketing),
         }
+        preferences, gpc_applied = svc.apply_gpc(request, requested)
         record = await svc.update_preferences(
             async_dal, dal, user_id=user_id, preferences=preferences
         )
     except ApiError as exc:
+        # PII-free: only the static status/code, never exc.message or the subject id.
+        logger.debug(
+            "cookie_consent.update_preferences rejected: status=%s code=%s",
+            exc.status_code,
+            exc.code,
+        )
         return _err(exc)
     return jsonify_dto(
         ConsentMessageResponse(
             success=True,
             message="Preferences updated successfully",
-            data=_consent_data_dto(record),
+            data=_consent_data_dto(record, gpc_applied=gpc_applied),
         )
     )
 

@@ -1,0 +1,54 @@
+# Enterprise SSO encryption/binding key Secret (hub_api/services/sso_crypto.py).
+#
+# Same KEEP / GENERATE policy and the same pure-Helm mechanism as
+# auto-provisioned-secrets.yaml's symmetric keys (`lookup` decides keep-vs-generate,
+# `randBytes`/`sha256sum` supply the entropy -- 64 lowercase hex chars), with ONE
+# deliberate difference: a miss outside alpha/local does NOT fail the release.
+# SSO is entitlement-gated (waddles.auth.sso_saml / waddles.auth.sso_google, default
+# OFF), so a beta/gamma/production install that never uses it must still succeed.
+# hub-api reads this key through an `optional: true` secretKeyRef (templates/_sso.tpl);
+# if SSO is later used without the key, it fails LOUDLY at request time (503
+# SSO_UNAVAILABLE + log code `sso_key_missing`) -- there is no fallback key and no
+# plaintext mode. To enable SSO outside alpha/local, pre-create the Secret (or point an
+# ExternalSecret/SealedSecret at it and set sso.encryptionKey.externalSecret=true).
+#
+# `lookup` returns empty under `helm template`/`--dry-run`, so every template run takes
+# the "not found" branch; keep-on-second-run is proven only by a real install/upgrade
+# (see auto-provisioned-secrets.yaml's header for the full caveat).
+{{- if .Values.sso.enabled }}
+{{- $tier := .Values.global.deploymentTier }}
+{{- $canGenerate := or (eq $tier "alpha") (eq $tier "local") }}
+{{- $cfg := .Values.sso.encryptionKey }}
+{{- $existing := lookup "v1" "Secret" .Values.namespace $cfg.secretName }}
+{{- /* An EMPTY stored value counts as MISSING, not KEEP -- see _helpers.tpl
+waddlebot.secretKeyNonEmpty (fix/no-empty-kept-secrets). */}}
+{{- if (include "waddlebot.secretKeyNonEmpty" (dict "existing" $existing "key" $cfg.secretKey)) }}
+# Kept as-is -- {{ $cfg.secretName }} already exists and holds a non-empty {{ $cfg.secretKey }}.
+# Never rotated by this chart: rotating would orphan every stored SSO client secret.
+{{- else if $cfg.externalSecret }}
+# Skipped -- sso.encryptionKey.externalSecret=true: an ExternalSecret/SealedSecret controller
+# owns {{ $cfg.secretName }}.
+{{- else if not $canGenerate }}
+# NOT generated -- global.deploymentTier={{ $tier }} is outside alpha/local. SSO stays
+# unavailable (fails loudly at request time) until {{ $cfg.secretName }} exists with a
+# 64-hex-char {{ $cfg.secretKey }}. The chart deliberately does not fail here: SSO is
+# entitlement-gated.
+{{- else }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $cfg.secretName }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: auto-provisioned-key
+  annotations:
+    # Survives `helm uninstall`; the `lookup` branch above wins on every later upgrade.
+    helm.sh/resource-policy: keep
+type: Opaque
+data:
+  # 64 lowercase hex chars -- sha256sum(randBytes 32) is the same extract-style KDF
+  # step auto-provisioned-secrets.yaml uses for TENANT_KEK_HEX / ONE_TIME_SECRET_ENCRYPTION_KEY.
+  {{ $cfg.secretKey }}: {{ sha256sum (randBytes 32) | b64enc }}
+{{- end }}
+{{- end }}

@@ -17,6 +17,21 @@ from flask_core.secrets import require_secret_key
 load_dotenv()
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    """Parse a boolean env var strictly: a typo'd value fails loud, never a silent default."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in ('1', 'true', 'yes', 'on'):
+        return True
+    if value in ('0', 'false', 'no', 'off'):
+        return False
+    raise ValueError(
+        f"{name}={raw!r} is not a boolean (use true/false/1/0/yes/no/on/off)"
+    )
+
+
 class Config:
     """Configuration class for AI Researcher module"""
 
@@ -70,6 +85,15 @@ class Config:
     OLLAMA_TEMPERATURE = float(os.getenv('OLLAMA_TEMPERATURE', '0.7'))
     OLLAMA_MAX_TOKENS = int(os.getenv('OLLAMA_MAX_TOKENS', '2000'))
     OLLAMA_TIMEOUT = int(os.getenv('OLLAMA_TIMEOUT', '60'))
+
+    # Model capabilities -- describe whatever OLLAMA_MODEL is configured to.
+    # OLLAMA_SUPPORTS_JSON=false (default) is the TEXT-ONLY path: no structured
+    # output params are sent and prompts/parsers are plain text. Set true only
+    # for a model that handles JSON. There is deliberately no tier->model map.
+    OLLAMA_SUPPORTS_JSON = _env_flag('OLLAMA_SUPPORTS_JSON', False)
+    # Send think=false so reasoning models answer directly instead of burning
+    # the token budget on hidden reasoning (which leaves an empty completion).
+    OLLAMA_DISABLE_THINKING = _env_flag('OLLAMA_DISABLE_THINKING', True)
 
     # SSL/TLS Configuration for Ollama
     OLLAMA_CERT_PATH = os.getenv('OLLAMA_CERT_PATH', '')
@@ -383,7 +407,9 @@ class Config:
                 'max_tokens': cls.OLLAMA_MAX_TOKENS,
                 'timeout': cls.OLLAMA_TIMEOUT,
                 'cert_path': cls.OLLAMA_CERT_PATH,
-                'verify_ssl': cls.OLLAMA_VERIFY_SSL
+                'verify_ssl': cls.OLLAMA_VERIFY_SSL,
+                'supports_json': cls.OLLAMA_SUPPORTS_JSON,
+                'disable_thinking': cls.OLLAMA_DISABLE_THINKING
             }
         elif cls.AI_PROVIDER == 'waddleai':
             return {

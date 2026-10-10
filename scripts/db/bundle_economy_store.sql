@@ -1,5 +1,5 @@
 -- Bundle economy store DDL (issue #714) -- the single source of truth read by
--- BOTH `alembic/versions/0050_bundle_economy_store.py` (production schema) and
+-- BOTH `alembic/versions/0051_bundle_economy_store.py` (production schema) and
 -- `core/bundle_host_economy/tests/postgres_integration.rs` (`include_str!`), so
 -- the Rust store's SQL is always tested against the exact DDL that ships.
 -- Idempotent (IF NOT EXISTS / guarded DO blocks); lives under `scripts/db/`

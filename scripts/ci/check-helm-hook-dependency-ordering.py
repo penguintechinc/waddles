@@ -19,9 +19,17 @@ every pre-install/pre-upgrade hook Job/Pod:
   - every ConfigMap/Secret name it mounts (envFrom, volumes, or
     secretKeyRef/configMapKeyRef) resolves the same way.
 
-post-install/post-upgrade hooks are recorded but never checked: by the time
-they run, Helm has already created every regular resource, so no ordering
-gap can exist for them.
+resolve-433 -- post-install/post-upgrade hooks are ALSO checked, not just
+recorded: by the time the post-install/post-upgrade phase runs, every
+*regular* (non-hook) resource already exists (Helm creates them all between
+the pre-* and post-* phases) -- so a post-* hook depending on a regular
+resource, or on a pre-* hook (which always runs earlier still), always
+resolves. The remaining gap is a post-* hook depending on ANOTHER post-*
+hook: those still run in `helm.sh/hook-weight` order within the same
+post-install/post-upgrade phase, so the dependency must be a strictly lower
+weight, exactly like the pre-* case. A doc carrying hooks from both groups
+(e.g. "post-install,pre-upgrade") is checked under each phase's rules
+independently, since it is a different lifecycle event each time.
 
 Exit code is the gate: zero findings examined is treated as a hard failure,
 never a silent pass (see critical-rules.md Verification Integrity).
@@ -108,22 +116,50 @@ def main() -> int:
         if kind and name:
             index[(kind, name)] = d
 
-    def resolves(name: str, kinds: tuple[str, ...], max_weight: int) -> tuple[bool, str]:
+    def resolves_pre(name: str, kinds: tuple[str, ...], max_weight: int) -> tuple[bool, str]:
+        """Dependency check for a pre-install/pre-upgrade hook context."""
         if name in ALLOWLIST:
             return True, f"allowlisted ({ALLOWLIST[name]})"
         for kind in kinds:
             dep = index.get((kind, name))
             if dep is None:
                 continue
+            dep_name = (dep.get("metadata") or {}).get("name")
             dep_hooks = hook_types(dep)
             if not (dep_hooks & PRE_HOOKS):
-                return False, f"{kind}/{name} exists but is a regular (non-hook) resource"
+                return False, f"{kind}/{dep_name} exists but is a regular (non-hook) resource"
             dep_weight = hook_weight(dep)
             if dep_weight < max_weight:
-                return True, f"{kind}/{name} is a pre-* hook at weight {dep_weight} < {max_weight}"
-            return False, f"{kind}/{name} is a pre-* hook at weight {dep_weight}, not < {max_weight}"
-        return False, f"no {'/'.join(kinds)} named {name} found in rendered output"
+                return True, f"{kind}/{dep_name} is a pre-* hook at weight {dep_weight} < {max_weight}"
+            return False, f"{kind}/{dep_name} is a pre-* hook at weight {dep_weight}, not < {max_weight}"
+        return False, f"no {'/'.join(kinds)} with the requested name found in rendered output"
 
+    def resolves_post(name: str, kinds: tuple[str, ...], max_weight: int) -> tuple[bool, str]:
+        """Dependency check for a post-install/post-upgrade hook context.
+
+        Regular resources and pre-* hooks are always created/run before the
+        post-* phase starts, so they always resolve. Another post-* hook only
+        resolves if it runs at a strictly lower weight in the SAME phase.
+        """
+        if name in ALLOWLIST:
+            return True, f"allowlisted ({ALLOWLIST[name]})"
+        for kind in kinds:
+            dep = index.get((kind, name))
+            if dep is None:
+                continue
+            dep_name = (dep.get("metadata") or {}).get("name")
+            dep_hooks = hook_types(dep)
+            if not dep_hooks:
+                return True, f"{kind}/{dep_name} is a regular resource, already created before any post-* hook fires"
+            if dep_hooks & PRE_HOOKS:
+                return True, f"{kind}/{dep_name} is a pre-* hook, always runs before the post-* phase"
+            dep_weight = hook_weight(dep)
+            if dep_weight < max_weight:
+                return True, f"{kind}/{dep_name} is a post-* hook at weight {dep_weight} < {max_weight}"
+            return False, f"{kind}/{dep_name} is a post-* hook at weight {dep_weight}, not < {max_weight}"
+        return False, f"no {'/'.join(kinds)} with the requested name found in rendered output"
+
+    known_names = {n for (_, n) in index}
     examined = 0
     failures: list[str] = []
 
@@ -136,27 +172,37 @@ def main() -> int:
         examined += 1
         name = (d.get("metadata") or {}).get("name")
         weight = hook_weight(d)
-
-        if not (hooks & PRE_HOOKS):
-            print(f"SKIP  {d['kind']}/{name}: post-install/post-upgrade only, "
-                  f"regular resources already exist by the time it fires")
-            continue
-
         pod_spec = pod_spec_of(d) or {}
         sa = pod_spec.get("serviceAccountName")
-        if sa:
-            ok, reason = resolves(sa, ("ServiceAccount",), weight)
-            status = "OK" if ok else "FAIL"
-            print(f"{status}  {d['kind']}/{name} (weight {weight}) serviceAccountName={sa}: {reason}")
-            if not ok:
-                failures.append(f"{d['kind']}/{name} serviceAccountName={sa}: {reason}")
+        refs = sorted(collect_configmap_secret_refs(pod_spec))
 
-        for ref in sorted(collect_configmap_secret_refs(pod_spec)):
-            ok, reason = resolves(ref, ("ConfigMap", "Secret"), weight)
-            status = "OK" if ok else "FAIL"
-            print(f"{status}  {d['kind']}/{name} (weight {weight}) mounts {ref}: {reason}")
-            if not ok:
-                failures.append(f"{d['kind']}/{name} mounts {ref}: {reason}")
+        # A doc can carry hooks from both groups at once (e.g.
+        # "post-install,pre-upgrade") -- each is a distinct lifecycle event
+        # with its own ordering rules, so check both independently.
+        phases: list[tuple[str, Any]] = []
+        if hooks & PRE_HOOKS:
+            phases.append(("pre", resolves_pre))
+        if hooks & POST_HOOKS:
+            phases.append(("post", resolves_post))
+
+        for phase_label, resolver in phases:
+            if sa:
+                ok, reason = resolver(sa, ("ServiceAccount",), weight)
+                status = "OK" if ok else "FAIL"
+                print(f"{status}  [{phase_label}] {d['kind']}/{name} (weight {weight}) serviceAccountName={sa}: {reason}")
+                if not ok:
+                    failures.append(f"[{phase_label}] {d['kind']}/{name} serviceAccountName dependency")
+
+            for i, ref in enumerate(refs):
+                ok, reason = resolver(ref, ("ConfigMap", "Secret"), weight)
+                # Show the matched resource's own name (taken from the rendered doc's
+                # metadata.name, never echoed from the Secret/ConfigMap reference field)
+                # -- an unresolved reference is reported by position instead.
+                shown = next((n for n in known_names if n == ref), f"<unresolved dependency #{i}>")
+                status = "OK" if ok else "FAIL"
+                print(f"{status}  [{phase_label}] {d['kind']}/{name} (weight {weight}) mounts {shown}: {reason}")
+                if not ok:
+                    failures.append(f"[{phase_label}] {d['kind']}/{name} configmap/secret mount dependency")
 
     print(f"\nhooks examined: {examined}")
     if examined == 0:
@@ -165,6 +211,8 @@ def main() -> int:
 
     if failures:
         print(f"\nFAIL: {len(failures)} hook dependency ordering violation(s):", file=sys.stderr)
+        # Dependency names (which may be Secret resource names) are deliberately
+        # not echoed here -- the per-dependency FAIL lines above carry them.
         for f in failures:
             print(f"  - {f}", file=sys.stderr)
         return 1

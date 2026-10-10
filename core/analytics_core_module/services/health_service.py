@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import DEFAULT_TENANT_SLUG
+from .log_safety import log_failure
 
 
 class HealthService:
@@ -119,7 +120,7 @@ class HealthService:
             }
 
         except Exception as e:
-            self.logger.error(f"Failed to calculate health score: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to calculate health score", e, community_id=community_id)
             raise
 
     async def _calculate_activity_consistency(self, community_id: int) -> float:
@@ -156,7 +157,7 @@ class HealthService:
             return consistency_score
 
         except Exception as e:
-            self.logger.error(f"Failed to calculate activity consistency: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to calculate activity consistency", e, community_id=community_id)
             return 0.0
 
     async def _calculate_engagement_rate(self, community_id: int) -> float:
@@ -187,7 +188,7 @@ class HealthService:
             return min(100.0, engagement_rate)
 
         except Exception as e:
-            self.logger.error(f"Failed to calculate engagement rate: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to calculate engagement rate", e, community_id=community_id)
             return 0.0
 
     async def _calculate_retention(self, community_id: int) -> float:
@@ -242,7 +243,7 @@ class HealthService:
             return min(100.0, retention_score)
 
         except Exception as e:
-            self.logger.error(f"Failed to calculate retention: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to calculate retention", e, community_id=community_id)
             return 0.0
 
     async def _calculate_message_distribution(self, community_id: int) -> float:
@@ -277,7 +278,7 @@ class HealthService:
             return distribution_score
 
         except Exception as e:
-            self.logger.error(f"Failed to calculate message distribution: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to calculate message distribution", e, community_id=community_id)
             return 0.0
 
     async def _store_health_snapshot(
@@ -347,7 +348,7 @@ class HealthService:
             self.dal.commit()
 
         except Exception as e:
-            self.logger.error(f"Failed to store health snapshot: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to store health snapshot", e, community_id=community_id)
 
     def _score_to_grade(self, score: float) -> str:
         """Convert 0-100 score to A-F grade."""
@@ -409,5 +410,5 @@ class HealthService:
                 return {'is_premium': result[0][0]}
             return {'is_premium': False}
         except Exception as e:
-            self.logger.error(f"Failed to get config: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to get config", e, community_id=community_id)
             return {'is_premium': False}

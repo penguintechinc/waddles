@@ -22,9 +22,7 @@ from typing import Any
 import grpc
 import psycopg2
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from flask_core.database import AsyncDAL
-from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey
 
 import grpc_internal  # noqa: F401  # puts grpc_internal/pb on sys.path (waddles.* stubs)
 
@@ -39,8 +37,7 @@ from pg_docker import (  # noqa: E402  # type: ignore[import-not-found]
 )
 from waddles.hub.internal.v1 import identity_pb2, identity_pb2_grpc  # noqa: E402
 
-from grpc_internal.interceptors import AuthInterceptor, DeadlineInterceptor  # noqa: E402
-from grpc_internal.servicers import REQUIRED_SCOPES, IdentityServicer  # noqa: E402
+from grpc_internal.servicers import REQUIRED_SCOPES  # noqa: E402
 from services import identity_resolution_service as _svc  # noqa: E402
 from services.identity_resolution_service import (  # noqa: E402
     MAX_DISPLAY_NAME_LEN,
@@ -58,6 +55,7 @@ from services.identity_resolution_service import (  # noqa: E402
     resolve_identity,
     resolve_target,
 )
+from tests._identity_grpc import AuthedIdentityStub, make_issuer, serving  # noqa: E402
 
 _READER_ROLE = "waddles_bundle_reader"
 _READER_DEFAULT_PW = "pg-docker-harness-default-reader-pw"
@@ -218,6 +216,14 @@ async def _member(
         "display_name) VALUES (%s, %s, %s, %s, %s) RETURNING user_uuid::text",
         [community_id, user_id, platform, puid, display],
     )
+    if value is not None and display:
+        # The membership trigger never copies display names into the PII table (alembic
+        # 0048); a pseudonym's handle arrives from the platform-asserted mint that
+        # svc-process performs with the sender's name. Emulate that mint here.
+        await adal.executesql_async(
+            "UPDATE ephemeral_pseudonyms SET handle = %s WHERE pseudonym = %s::uuid",
+            [display, value],
+        )
     return None if value is None else str(value)
 
 
@@ -398,6 +404,11 @@ async def test_mention_resolves_known_linked_and_unknown_ids(adal: AsyncDAL) -> 
     # linked ids resolve to the hub uuid
     hub_id, hub_uuid = await _hub_user(adal)
     await _identity(adal, hub_id, "discord", "777", None)
+    # ...but only inside a tenant the hub user belongs to: before membership the account is
+    # just another pseudonym there (the global hub uuid is never handed to a non-member tenant)
+    outsider = await resolve_target(adal, "acme", "discord", "<@777>")
+    assert outsider.uuid != uuid.UUID(hub_uuid)
+    await _member(adal, c, platform="discord", puid="777")
     assert (await resolve_target(adal, "acme", "discord", "<@777>")).uuid == uuid.UUID(hub_uuid)
 
 
@@ -620,14 +631,17 @@ async def test_reader_role_cannot_read_raw_handles_or_run_the_lookups(
     finally:
         conn.rollback()
         conn.close()
-    # 0051 appended the two non-PII columns the bundle `identity` capability needs
-    # (`tenant_id`, `is_active_member`); still no handle/name/username/email column.
+    # 0048 added the status/reason columns and the bundle-identity migration appended
+    # the two non-PII columns the bundle `identity` capability needs (`tenant_id`,
+    # `is_active_member`); still no handle/name/username/email column.
     assert columns == {
         "community_id",
         "platform",
         "platform_user_id",
         "hub_user_uuid",
         "user_uuid",
+        "user_uuid_status",
+        "user_uuid_unavailable_reason",
         "tenant_id",
         "is_active_member",
     }
@@ -689,15 +703,9 @@ async def test_logs_carry_no_handles_or_names(
 
 @pytest.fixture
 async def grpc_addr(adal: AsyncDAL) -> AsyncIterator[str]:
-    """In-process grpc.aio server wired with the real IdentityServicer + real DAL."""
-    server = grpc.aio.server()
-    identity_pb2_grpc.add_IdentityServiceServicer_to_server(IdentityServicer(adal), server)
-    port = server.add_insecure_port("127.0.0.1:0")
-    await server.start()
-    try:
-        yield f"127.0.0.1:{port}"
-    finally:
-        await server.stop(grace=None)
+    """In-process server: real IdentityServicer + real DAL behind the REAL interceptor chain."""
+    async with serving(adal) as addr:
+        yield addr
 
 
 def _handle_req(target: str, tenant: str = "acme", platform: str = "twitch") -> Any:
@@ -713,7 +721,7 @@ async def test_grpc_resolve_handle_real_path(adal: AsyncDAL, grpc_addr: str) -> 
     await _member(adal, c, platform="twitch", puid="tw-3", display="twin")
     dm = await _member(adal, c, platform="discord", puid="808", display="Disc")
     async with grpc.aio.insecure_channel(grpc_addr) as ch:
-        stub = identity_pb2_grpc.IdentityServiceStub(ch)
+        stub = AuthedIdentityStub(ch)
         ok = await stub.ResolveHandle(_handle_req(f"@{HANDLE_SECRET}"), timeout=5)
         assert ok.uuid == minted and ok.match_kind == identity_pb2.MATCH_KIND_HANDLE
         assert HANDLE_SECRET.encode() not in ok.SerializeToString()  # handle never echoed
@@ -754,7 +762,7 @@ async def test_grpc_resolve_display_names_real_path(adal: AsyncDAL, grpc_addr: s
     assert pseudonym is not None
     missing = str(uuid.uuid4())
     async with grpc.aio.insecure_channel(grpc_addr) as ch:
-        stub = identity_pb2_grpc.IdentityServiceStub(ch)
+        stub = AuthedIdentityStub(ch)
         resp = await stub.ResolveDisplayNames(
             identity_pb2.ResolveDisplayNamesRequest(
                 tenant_id="acme", uuids=[hub_uuid, pseudonym, missing]
@@ -793,26 +801,19 @@ async def test_grpc_resolve_display_names_real_path(adal: AsyncDAL, grpc_addr: s
 
 
 async def test_grpc_new_rpcs_without_dal_are_unavailable_not_default() -> None:
-    server = grpc.aio.server()
-    identity_pb2_grpc.add_IdentityServiceServicer_to_server(IdentityServicer(), server)
-    port = server.add_insecure_port("127.0.0.1:0")
-    await server.start()
-    try:
-        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as ch:
-            stub = identity_pb2_grpc.IdentityServiceStub(ch)
-            with pytest.raises(grpc.aio.AioRpcError) as handle:
-                await stub.ResolveHandle(_handle_req("@bob"), timeout=5)
-            assert handle.value.code() == grpc.StatusCode.UNAVAILABLE
-            with pytest.raises(grpc.aio.AioRpcError) as names:
-                await stub.ResolveDisplayNames(
-                    identity_pb2.ResolveDisplayNamesRequest(
-                        tenant_id="acme", uuids=[str(uuid.uuid4())]
-                    ),
-                    timeout=5,
-                )
-            assert names.value.code() == grpc.StatusCode.UNAVAILABLE
-    finally:
-        await server.stop(grace=None)
+    async with serving(None) as addr, grpc.aio.insecure_channel(addr) as ch:
+        stub = AuthedIdentityStub(ch)
+        with pytest.raises(grpc.aio.AioRpcError) as handle:
+            await stub.ResolveHandle(_handle_req("@bob"), timeout=5)
+        assert handle.value.code() == grpc.StatusCode.UNAVAILABLE
+        with pytest.raises(grpc.aio.AioRpcError) as names:
+            await stub.ResolveDisplayNames(
+                identity_pb2.ResolveDisplayNamesRequest(
+                    tenant_id="acme", uuids=[str(uuid.uuid4())]
+                ),
+                timeout=5,
+            )
+        assert names.value.code() == grpc.StatusCode.UNAVAILABLE
 
 
 _SPIFFE = "spiffe://penguintech.io/alpha/svc-process"
@@ -827,56 +828,27 @@ def test_resolve_handle_has_its_own_registered_scope() -> None:
     }
 
 
-@pytest.fixture
-def scoped_issuer() -> ServiceJwtIssuer:
-    """Issuer whose one identity may hold the mint scope AND the handle scope."""
-    key = Ed25519PrivateKey.generate()
-    identity = ServiceIdentity(
-        service_id=_SPIFFE,
-        k8s_namespace="waddlebot",
-        k8s_service_account="svc-process",
-        allowed_scopes=frozenset({"identity:ephemeral:mint", _HANDLE_SCOPE}),
-    )
-    signing = SigningKey(kid="k", private_key=key, public_key=key.public_key())
-    return ServiceJwtIssuer(
-        keys={"k": signing}, active_kid="k", identities={identity.service_id: identity}
-    )
-
-
 @pg_only
-async def test_resolve_handle_requires_its_own_scope_end_to_end(
-    adal: AsyncDAL, scoped_issuer: ServiceJwtIssuer
-) -> None:
+async def test_resolve_handle_requires_its_own_scope_end_to_end(adal: AsyncDAL) -> None:
     """The full interceptor chain: a mint-scoped token cannot resolve handles."""
     t = await _tenant(adal, "acme")
     c = await _community(adal, t)
     minted = await _member(adal, c, platform="twitch", puid="tw-1", display="Scoped")
-    server = grpc.aio.server(
-        interceptors=[
-            DeadlineInterceptor(),
-            AuthInterceptor(verifier=scoped_issuer.as_verifier(), required_scopes=REQUIRED_SCOPES),
-        ]
-    )
-    identity_pb2_grpc.add_IdentityServiceServicer_to_server(IdentityServicer(adal), server)
-    port = server.add_insecure_port("127.0.0.1:0")
-    await server.start()
-    try:
-        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as ch:
-            stub = identity_pb2_grpc.IdentityServiceStub(ch)
-            wrong = scoped_issuer.issue(_SPIFFE, "identity:ephemeral:mint")
-            with pytest.raises(grpc.aio.AioRpcError) as denied:
-                await stub.ResolveHandle(
-                    _handle_req("@scoped"),
-                    metadata=(("authorization", f"Bearer {wrong}"),),
-                    timeout=2,
-                )
-            assert denied.value.code() == grpc.StatusCode.UNAUTHENTICATED
-            right = scoped_issuer.issue(_SPIFFE, _HANDLE_SCOPE)
-            ok = await stub.ResolveHandle(
+    issuer = make_issuer()  # system tenant, may hold every identity scope
+    async with serving(adal, issuer) as addr, grpc.aio.insecure_channel(addr) as ch:
+        stub = identity_pb2_grpc.IdentityServiceStub(ch)
+        wrong = issuer.issue(_SPIFFE, "identity:ephemeral:mint")
+        with pytest.raises(grpc.aio.AioRpcError) as denied:
+            await stub.ResolveHandle(
                 _handle_req("@scoped"),
-                metadata=(("authorization", f"Bearer {right}"),),
+                metadata=(("authorization", f"Bearer {wrong}"),),
                 timeout=2,
             )
-            assert ok.uuid == minted
-    finally:
-        await server.stop(grace=None)
+        assert denied.value.code() == grpc.StatusCode.UNAUTHENTICATED
+        right = issuer.issue(_SPIFFE, _HANDLE_SCOPE)
+        ok = await stub.ResolveHandle(
+            _handle_req("@scoped"),
+            metadata=(("authorization", f"Bearer {right}"),),
+            timeout=2,
+        )
+        assert ok.uuid == minted

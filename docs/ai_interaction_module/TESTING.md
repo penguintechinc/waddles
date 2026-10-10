@@ -1,5 +1,12 @@
 # AI Interaction Module - Testing Guide
 
+## Real-Ollama integration tests (env-gated)
+
+`tests/test_ai_interaction_ollama_realpath.py` drives `OllamaProvider`, `WaddleAIProvider` (against
+Ollama's OpenAI-compatible `/v1`) and `AIService` against a live Ollama - no mocked transport, one
+query at a time. Set `WADDLE_TEST_OLLAMA_URL` to run them (unset = skipped). Offline tests always run.
+Full instructions: `docs/testing/ollama-realpath.md`.
+
 ## Test Environment Setup
 
 ```bash

@@ -21,6 +21,21 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    """Parse a boolean env var strictly: a typo'd value fails loud, never a silent default."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in ('1', 'true', 'yes', 'on'):
+        return True
+    if value in ('0', 'false', 'no', 'off'):
+        return False
+    raise ValueError(
+        f"{name}={raw!r} is not a boolean (use true/false/1/0/yes/no/on/off)"
+    )
+
+
 class Config:
     """Configuration class for AI interaction module"""
 
@@ -62,6 +77,11 @@ class Config:
     OLLAMA_TEMPERATURE = float(os.getenv('OLLAMA_TEMPERATURE', '0.7'))
     OLLAMA_MAX_TOKENS = int(os.getenv('OLLAMA_MAX_TOKENS', '500'))
     OLLAMA_TIMEOUT = int(os.getenv('OLLAMA_TIMEOUT', '30'))
+    # Send think=false so reasoning models answer directly instead of spending
+    # the token budget on hidden reasoning (which leaves an empty reply).
+    # This module only ever asks for plain-text chat replies -- it never sends
+    # structured-output (JSON) params, so it works with text-only models.
+    OLLAMA_DISABLE_THINKING = _env_flag('OLLAMA_DISABLE_THINKING', True)
 
     # SSL/TLS Configuration for Ollama
     OLLAMA_CERT_PATH = os.getenv(  # noqa: E501
@@ -259,7 +279,8 @@ class Config:
                 'max_tokens': cls.OLLAMA_MAX_TOKENS,
                 'timeout': cls.OLLAMA_TIMEOUT,
                 'cert_path': cls.OLLAMA_CERT_PATH,
-                'verify_ssl': cls.OLLAMA_VERIFY_SSL
+                'verify_ssl': cls.OLLAMA_VERIFY_SSL,
+                'disable_thinking': cls.OLLAMA_DISABLE_THINKING
             }
         elif cls.AI_PROVIDER == 'waddleai':
             return {

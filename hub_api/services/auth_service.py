@@ -36,6 +36,7 @@ import httpx
 from flask_core.auth import SCOPE_BUNDLES, create_jwt_token, verify_jwt_token
 
 from config import HubAPIConfig
+from services.audit_http import record_session_issued
 from services.errors import bad_request, conflict, forbidden, not_found, unauthorized
 
 logger = logging.getLogger(__name__)
@@ -126,6 +127,7 @@ async def create_session_token(
     tenant_id: int | None = None,
     tenant_slug: str | None = None,
     requires_oauth_link: bool = False,
+    auth_method: str = "unspecified",
 ) -> str:
     """Mint a JWT (`flask_core.auth.create_jwt_token`) and record `hub_sessions`.
 
@@ -135,6 +137,12 @@ async def create_session_token(
     no "no subject" JWT). `tenant` is always set -- `DEFAULT_TENANT_SLUG`
     ("global") when the caller has no tenant context, per security.md
     Tenant Isolation ("there is no untenanted token").
+
+    Every login path funnels through here, so this is also the one place session issuance
+    (password / OAuth-SSO / passkey / refresh) is written to the tamper-evident audit log;
+    `auth_method` names the path (an identifier, never user input). The audit write happens
+    BEFORE the `hub_sessions` row is persisted and raises `AuditWriteError` on failure, so a
+    session the audit log cannot account for is never issued (entitled tenants only).
     """
     roles: list[str] = []
     scopes: set[str] = set(SCOPE_BUNDLES["global"]["viewer"])  # every session gets *:read
@@ -195,6 +203,14 @@ async def create_session_token(
             scope=" ".join(sorted(scopes)),
             expiration_hours=24,
         ),
+    )
+
+    await record_session_issued(
+        user_id=user.id if user is not None else None,
+        tenant_id=tenant_id,
+        tenant_slug=resolved_tenant,
+        auth_method=auth_method,
+        pending_link=requires_oauth_link,
     )
 
     now = datetime.now(UTC)
@@ -324,7 +340,7 @@ async def register(
         return True, None
 
     user = SessionUser(id=user_id, email=email_lower, username=username or email_lower)
-    token = await create_session_token(async_dal, dal, cfg, user=user)
+    token = await create_session_token(async_dal, dal, cfg, user=user, auth_method="register")
     return False, LoginResult(
         token=token,
         user_id=user.id,
@@ -361,7 +377,9 @@ async def verify_email(async_dal: Any, dal: Any, cfg: HubAPIConfig, *, token: st
     )
 
     user = SessionUser(id=row.id, email=row.email, username=row.username)
-    session_token = await create_session_token(async_dal, dal, cfg, user=user)
+    session_token = await create_session_token(
+        async_dal, dal, cfg, user=user, auth_method="email_verification"
+    )
     return LoginResult(
         token=session_token,
         user_id=user.id,
@@ -448,7 +466,13 @@ async def login(
         is_analytics_consumer=bool(row.is_analytics_consumer),
     )
     token = await create_session_token(
-        async_dal, dal, cfg, user=user, tenant_id=tenant_id, tenant_slug=tenant_slug
+        async_dal,
+        dal,
+        cfg,
+        user=user,
+        tenant_id=tenant_id,
+        tenant_slug=tenant_slug,
+        auth_method="password",
     )
     return LoginResult(
         token=token,
@@ -494,7 +518,7 @@ async def admin_login(
         is_vendor=bool(row.is_vendor),
         is_analytics_consumer=bool(row.is_analytics_consumer),
     )
-    token = await create_session_token(async_dal, dal, cfg, user=user)
+    token = await create_session_token(async_dal, dal, cfg, user=user, auth_method="admin_password")
     return LoginResult(
         token=token,
         user_id=user.id,
@@ -547,6 +571,7 @@ async def temp_password_login(
         user=None,
         username_override=identifier,
         requires_oauth_link=bool(row.force_oauth_link),
+        auth_method="temp_password",
     )
     return TempLoginResult(token=token, requires_oauth_link=bool(row.force_oauth_link))
 
@@ -582,7 +607,7 @@ async def refresh_token(async_dal: Any, dal: Any, cfg: HubAPIConfig, *, token: s
         is_analytics_consumer=bool(row.is_analytics_consumer),
     )
     new_token = await create_session_token(
-        async_dal, dal, cfg, user=user, tenant_slug=payload.get("tenant")
+        async_dal, dal, cfg, user=user, tenant_slug=payload.get("tenant"), auth_method="refresh"
     )
     await async_dal.update_async(
         dal.hub_sessions.session_token == token,

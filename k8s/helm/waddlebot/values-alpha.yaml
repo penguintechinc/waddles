@@ -15,7 +15,11 @@ global:
   # here, this chart pulls from here.
   imageRegistry: "localhost:32000/waddlebot"
   imageTag: "alpha"
-  imagePullPolicy: IfNotPresent  # Never makes containerd skip localhost:32000 (ErrImageNeverPull) -- images are pushed, not side-loaded
+  # IfNotPresent: every alpha deploy gets a unique per-deploy global.imageTag (SHA8), and kind e2e /
+  # alpha local builds load images onto the node -- Always would force a registry pull that fails
+  # and hang the pod. (Never would make containerd skip localhost:32000 -> ErrImageNeverPull.)
+  # This now governs EVERY workload incl. hub-api + the Rust svc-*/bundle-executor Deployments.
+  imagePullPolicy: IfNotPresent
   deploymentTier: "alpha"
   # gRPC transport TLS (PR #264) -- alpha is single-node local dev with no cert material
   # provisioned, so it uses flask_core's own documented dev-only escape hatch instead of
