@@ -391,7 +391,26 @@ interface reputation {
 /// number of concurrent calls can never overdraw a balance. Every applied
 /// movement writes an append-only ledger row in the same statement. A bundle
 /// can only MOVE existing balance here; it can never mint beyond the
-/// host-bounded payout multiple of a stake it actually held.
+/// host-bounded payout multiple of a stake it actually held, and the total a
+/// user's wagers may PAY OUT per day is capped (the mint cap is on the
+/// payout, not the stake).
+///
+/// **Only the invocation's own actor's money moves.** The account whose funds
+/// a call moves -- `wager`'s `user`, `transfer`'s `from-user` -- MUST be the
+/// account that triggered this invocation (the same user `identity.
+/// resolve-actor` returns); anything else is `denied("actor_mismatch")` and
+/// nothing is written. A bundle can pay the actor's money TO anyone, but can
+/// never pull anyone else's. Reads (`balance`, `max-bet`, `leaderboard`) are
+/// not bound.
+///
+/// **Idempotent by construction.** The host keys every `wager`/`transfer` by
+/// the event being handled plus the call's ordinal, so an event the platform
+/// redelivers (after a crash, a retry) credits ONCE: the replayed call is
+/// answered with the original result and moves nothing. A replay whose
+/// parameters differ from the original (a re-rolled payout, a different
+/// recipient) is `denied("idempotency_conflict")` and never applied. After a
+/// `backend` error -- the one outcome that may or may not have committed --
+/// retry the SAME call: it presents the same key and applies at most once.
 ///
 /// Wire note: like `reputation`, calls are carried as `capability = db`,
 /// `op = "economy.balance"|"economy.wager"|"economy.transfer"|
@@ -402,7 +421,11 @@ interface economy {
   variant error {
     /// The gate denied the call (not granted, amount out of bounds,
     /// quota/rate exceeded, instance policy, ...); carries the gate's stable
-    /// denial code.
+    /// denial code. Also the money-safety refusals: `actor_mismatch` (the
+    /// account named as payer is not the invocation's actor),
+    /// `idempotency_conflict` (a replayed call's parameters differ from the
+    /// original) and `not_linked` (the actor has no resolved community
+    /// identity, so nothing can be bound to them).
     denied(string),
     /// The debited user holds less than the stake/amount; carries the balance
     /// they do hold.
@@ -431,13 +454,18 @@ interface economy {
   balance: func(user: string) -> result<s64, error>;
 
   /// Atomically debits `stake` and credits `payout` (net `payout - stake`;
-  /// `payout` is 0 for a loss) and returns the NEW balance. `stake` must be
+  /// `payout` is 0 for a loss) and returns the NEW balance. `user` MUST be the
+  /// invocation's actor (`denied("actor_mismatch")` otherwise). `stake` must be
   /// >= 1, within `max-bet`, and held by the user; `payout` may be at most
-  /// 100x `stake`.
+  /// 100x `stake` and counts against the daily PAYOUT (mint) cap. Idempotent
+  /// per event and call ordinal: a replay returns the original balance.
   wager: func(user: string, stake: u64, payout: u64) -> result<s64, error>;
 
   /// Atomically moves `amount` (>= 1) from `from-user` to `to-user` (both
-  /// members, distinct). Within the community-declared `max_amount`.
+  /// members, distinct). `from-user` MUST be the invocation's actor
+  /// (`denied("actor_mismatch")` otherwise); `to-user` may be any member.
+  /// Within the community-declared `max_amount`. Idempotent per event and call
+  /// ordinal: a replay moves nothing.
   transfer: func(from-user: string, to-user: string, amount: u64) -> result<_, error>;
 
   /// The largest stake `user` may place right now: the server-enforced

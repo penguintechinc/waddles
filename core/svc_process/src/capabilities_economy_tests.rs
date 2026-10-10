@@ -1,18 +1,27 @@
 //! `economy.*` host-capability tests (issue #714): the REAL
 //! [`CapabilityGate`] (grants, declared `max_bet`/`max_amount`, the economy's
-//! own amount quotas, membership pre-filter for every named user) and the REAL
-//! `handle` dispatch run against a recording store double; the store's own SQL
+//! own amount quotas, membership pre-filter for every named user), the REAL
+//! `handle` dispatch and the REAL actor binding / idempotency-key derivation
+//! ([`InvocationIdentity`], [`identity::resolve_actor`]) run against a
+//! recording store double and a scripted member directory; the store's own SQL
 //! is proven against a real Postgres in
 //! `core/bundle_host_economy/tests/postgres_integration.rs` and the two joined
-//! in `tests/economy_pg_e2e.rs`.
+//! in `tests/economy_pg_e2e.rs` / `tests/identity_pg_e2e.rs`.
+//!
+//! The #751 money-safety regressions live at the bottom: theft (a bundle
+//! naming another member as the payer), the mint cap (payout, not stake) and
+//! double-spend (replay / retry idempotency).
 
 use super::*;
+use crate::identity::{
+    BoxFuture as IdentityFuture, IdentityWiring, InvocationIdentity, MemberDirectory,
+};
 use crate::license::test_support::FixedGate;
 use bundle_capability_gate::{
     GrantScopeKey, GrantSet, GrantedPermission, InMemoryGrantSnapshot,
     InMemoryInstancePolicySnapshot, InMemoryMembership, InMemoryQuotaLedger,
 };
-use bundle_host_economy::{EconomyCaps, LeaderboardEntry};
+use bundle_host_economy::{EconomyCaps, IdempotencyKey, LeaderboardEntry};
 use bundle_host_http::egress::{ReqwestTransport, StaticFlag};
 use std::sync::Mutex;
 use uuid::Uuid;
@@ -21,6 +30,12 @@ const TENANT_ID: i32 = 7;
 const COMMUNITY_ID: i32 = 3;
 const APP_ID: &str = "waddles.core.test-economy";
 const VERSION: i64 = 1;
+/// The spine event this invocation handles (a UUID v4, as the hop MAC covers).
+const EVENT_ID: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+/// A different spine event.
+const OTHER_EVENT_ID: &str = "6f1f5a2e-9d0b-4c53-8a7e-1b2c3d4e5f60";
+/// The platform account id of the account that triggered the invocation.
+const ACTOR_ACCOUNT: &str = "1001";
 
 /// One recorded store call: `(op, scope, users, numbers)`.
 type Recorded = (String, EconomyScope, Vec<Uuid>, Vec<i64>);
@@ -29,6 +44,8 @@ type Recorded = (String, EconomyScope, Vec<Uuid>, Vec<i64>);
 #[derive(Default)]
 struct RecordingStore {
     calls: Mutex<Vec<Recorded>>,
+    /// The idempotency key of every money-moving call, in call order.
+    keys: Mutex<Vec<String>>,
     next_i64: Mutex<Option<Result<i64, EconomyError>>>,
     next_unit: Mutex<Option<Result<(), EconomyError>>>,
     next_board: Mutex<Option<Result<Vec<LeaderboardEntry>, EconomyError>>>,
@@ -40,6 +57,13 @@ impl RecordingStore {
     }
     fn call_count(&self) -> usize {
         self.calls.lock().unwrap().len()
+    }
+    fn keys(&self) -> Vec<String> {
+        self.keys.lock().unwrap().clone()
+    }
+    /// Scripts the next transfer's answer.
+    fn answer_unit(&self, r: Result<(), EconomyError>) {
+        *self.next_unit.lock().unwrap() = Some(r);
     }
     fn record(&self, op: &str, scope: &EconomyScope, users: Vec<Uuid>, nums: Vec<i64>) {
         self.calls
@@ -82,8 +106,10 @@ impl EconomyStore for RecordingStore {
         payout: i64,
         max_bet: i64,
         caps: EconomyCaps,
+        key: &'a IdempotencyKey,
     ) -> bundle_host_economy::BoxFuture<'a, Result<i64, EconomyError>> {
         Box::pin(async move {
+            self.keys.lock().unwrap().push(key.to_string());
             self.record(
                 "wager",
                 scope,
@@ -107,8 +133,10 @@ impl EconomyStore for RecordingStore {
         amount: i64,
         max_amount: i64,
         caps: EconomyCaps,
+        key: &'a IdempotencyKey,
     ) -> bundle_host_economy::BoxFuture<'a, Result<(), EconomyError>> {
         Box::pin(async move {
+            self.keys.lock().unwrap().push(key.to_string());
             self.record(
                 "transfer",
                 scope,
@@ -139,11 +167,100 @@ impl EconomyStore for RecordingStore {
     }
 }
 
+/// Scripted membership directory: platform account id -> the community user
+/// that account is. Only the ACTOR path (`resolve_actor`) is exercised here.
+#[derive(Default)]
+struct ActorDirectory {
+    by_account: Mutex<std::collections::HashMap<String, Result<Uuid, IdentityError>>>,
+    looked_up: Mutex<usize>,
+}
+
+impl ActorDirectory {
+    fn set(&self, account: &str, answer: Result<Uuid, IdentityError>) {
+        self.by_account
+            .lock()
+            .unwrap()
+            .insert(account.to_string(), answer);
+    }
+
+    /// How many platform-account lookups the directory served.
+    fn lookups(&self) -> usize {
+        *self.looked_up.lock().unwrap()
+    }
+}
+
+impl MemberDirectory for ActorDirectory {
+    fn member_by_platform_id<'a>(
+        &'a self,
+        _scope: IdentityScope,
+        _platform: &'a str,
+        platform_user_id: &'a str,
+    ) -> IdentityFuture<'a, Result<Uuid, IdentityError>> {
+        Box::pin(async move {
+            *self.looked_up.lock().unwrap() += 1;
+            self.by_account
+                .lock()
+                .unwrap()
+                .get(platform_user_id)
+                .cloned()
+                .unwrap_or(Err(IdentityError::NotAMember))
+        })
+    }
+
+    fn confirm_member<'a>(
+        &'a self,
+        _scope: IdentityScope,
+        user: Uuid,
+    ) -> IdentityFuture<'a, Result<Uuid, IdentityError>> {
+        Box::pin(async move { Ok(user) })
+    }
+}
+
+/// What the invocation knows about WHO triggered it and WHICH event it is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Facts {
+    /// Identity wired; the event carries alice's account id and an event id.
+    Alice,
+    /// No identity capability wiring at all.
+    NoIdentityWiring,
+    /// Identity wired, but the event carries no event id.
+    NoEventId,
+    /// Identity wired and an event id, but no triggering account id on it.
+    NoActorAccount,
+    /// As [`Facts::Alice`], but for a different event.
+    OtherEvent,
+    /// As [`Facts::Alice`] with the `identity` capability's own flag OFF: the
+    /// actor binding is a platform guarantee, not that bundle-facing feature.
+    IdentityFlagOff,
+}
+
 struct Fixture {
     caps: StageCapabilities,
     store: Arc<RecordingStore>,
+    directory: Arc<ActorDirectory>,
     alice: Uuid,
     bob: Uuid,
+}
+
+/// A fresh invocation's host-derived facts for event `event_id`.
+fn invocation_for(event_id: Option<&str>, account: Option<&str>) -> Arc<InvocationIdentity> {
+    let inv = InvocationIdentity::new("twitch", account.map(str::to_string), vec![]);
+    Arc::new(match event_id {
+        Some(id) => inv.with_event_id(id),
+        None => inv,
+    })
+}
+
+fn identity_wiring_with_flag(directory: &Arc<ActorDirectory>, flag_on: bool) -> IdentityWiring {
+    IdentityWiring {
+        directory: Arc::clone(directory) as Arc<dyn MemberDirectory>,
+        handles: None,
+        flag: Arc::new(FixedGate(flag_on)),
+    }
+}
+
+fn identity_wiring(directory: &Arc<ActorDirectory>) -> IdentityWiring {
+    identity_wiring_with_flag(directory, true)
 }
 
 fn grants(ids: &[(&str, serde_json::Value)]) -> GrantSet {
@@ -169,6 +286,16 @@ fn fixture_with(
     flag_on: bool,
     wired: bool,
     community: Option<(&str, i32)>,
+) -> Fixture {
+    fixture_facts(grant_set, flag_on, wired, community, Facts::Alice)
+}
+
+fn fixture_facts(
+    grant_set: GrantSet,
+    flag_on: bool,
+    wired: bool,
+    community: Option<(&str, i32)>,
+    facts: Facts,
 ) -> Fixture {
     let snapshot = InMemoryGrantSnapshot::new();
     snapshot.set(
@@ -227,9 +354,35 @@ fn fixture_with(
             flag: Arc::new(FixedGate(flag_on)),
         });
     }
+    let directory = Arc::new(ActorDirectory::default());
+    directory.set(ACTOR_ACCOUNT, Ok(alice));
+    let caps = match facts {
+        Facts::NoIdentityWiring => caps,
+        Facts::Alice => caps.with_identity(
+            identity_wiring(&directory),
+            invocation_for(Some(EVENT_ID), Some(ACTOR_ACCOUNT)),
+        ),
+        Facts::NoEventId => caps.with_identity(
+            identity_wiring(&directory),
+            invocation_for(None, Some(ACTOR_ACCOUNT)),
+        ),
+        Facts::NoActorAccount => caps.with_identity(
+            identity_wiring(&directory),
+            invocation_for(Some(EVENT_ID), None),
+        ),
+        Facts::OtherEvent => caps.with_identity(
+            identity_wiring(&directory),
+            invocation_for(Some(OTHER_EVENT_ID), Some(ACTOR_ACCOUNT)),
+        ),
+        Facts::IdentityFlagOff => caps.with_identity(
+            identity_wiring_with_flag(&directory, false),
+            invocation_for(Some(EVENT_ID), Some(ACTOR_ACCOUNT)),
+        ),
+    };
     Fixture {
         caps,
         store,
+        directory,
         alice,
         bob,
     }
@@ -793,6 +946,7 @@ fn economy_wire_error_helpers_cover_every_variant() {
             EconomyError::ScopeQuotaExceeded { cap: 1 },
             "quota_exceeded",
         ),
+        (EconomyError::IdempotencyConflict, "idempotency_conflict"),
         (EconomyError::NotAMember, "not_a_member"),
         (
             EconomyError::InsufficientFunds { balance: 1 },
@@ -804,4 +958,510 @@ fn economy_wire_error_helpers_cover_every_variant() {
     ] {
         assert_eq!(economy_error_to_host(err).code, code);
     }
+}
+
+// ---- #751 money-safety regressions -------------------------------------------
+
+fn wager_args(user: Uuid, stake: i64, payout: i64) -> serde_json::Value {
+    serde_json::json!({ "user": user.to_string(), "stake": stake, "payout": payout })
+}
+
+fn transfer_args(from: Uuid, to: Uuid, amount: i64) -> serde_json::Value {
+    serde_json::json!({ "from": from.to_string(), "to": to.to_string(), "amount": amount })
+}
+
+fn key(event: &str, kind: &str, ordinal: u32) -> String {
+    format!("{event}:{kind}:{ordinal}")
+}
+
+/// Regression (#751 review, NO ACTOR-BINDING / theft): a bundle that passes
+/// another member's UUID as the payer must NOT be able to move that member's
+/// funds. The payer must be the account that triggered the invocation.
+#[tokio::test]
+async fn a_transfer_from_a_victim_is_rejected_and_never_reaches_the_store() {
+    // alice triggered this invocation; bob is the victim.
+    let f = fixture();
+    // Steal INTO the actor, and out to a third party: both name the victim as
+    // the payer.
+    let steal = transfer_args(f.bob, f.alice, 10);
+    let denied = f
+        .caps
+        .handle(eco_call("economy.transfer", steal))
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code, "actor_mismatch");
+    // The refusal is a fixed constant: it names nobody (no UUID, no account id).
+    assert!(
+        !denied.message.contains(&f.bob.to_string()),
+        "{}",
+        denied.message
+    );
+    assert!(
+        !denied.message.contains(&f.alice.to_string()),
+        "{}",
+        denied.message
+    );
+    assert!(
+        !denied.message.contains(ACTOR_ACCOUNT),
+        "{}",
+        denied.message
+    );
+    assert_eq!(
+        f.store.call_count(),
+        0,
+        "the victim's funds were never touched"
+    );
+    assert!(f.store.keys().is_empty());
+}
+
+#[tokio::test]
+async fn a_wager_on_a_victims_account_is_rejected_and_never_reaches_the_store() {
+    let f = fixture();
+    assert_eq!(
+        code_of(&f, "economy.wager", wager_args(f.bob, 10, 25)).await,
+        "actor_mismatch"
+    );
+    // ... including a "losing" wager of the victim's funds.
+    assert_eq!(
+        code_of(&f, "economy.wager", wager_args(f.bob, 10, 0)).await,
+        "actor_mismatch"
+    );
+    assert_eq!(f.store.call_count(), 0);
+}
+
+#[tokio::test]
+async fn the_actor_can_still_move_its_own_funds_to_anyone() {
+    let f = fixture();
+    f.caps
+        .handle(eco_call(
+            "economy.transfer",
+            transfer_args(f.alice, f.bob, 10),
+        ))
+        .await
+        .expect("the actor pays a member");
+    f.store.answer(Ok(90));
+    f.caps
+        .handle(eco_call("economy.wager", wager_args(f.alice, 10, 0)))
+        .await
+        .expect("the actor wagers its own funds");
+    let calls = f.store.calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].2, vec![f.alice, f.bob]);
+    assert_eq!(calls[1].2, vec![f.alice]);
+}
+
+/// The payer string is parsed to a UUID before the comparison, so alternate
+/// spellings of the VICTIM'S uuid cannot slip past a string compare, and
+/// alternate spellings of the ACTOR'S uuid are (correctly) still the actor.
+#[tokio::test]
+async fn the_binding_compares_uuids_not_strings() {
+    let f = fixture();
+    let bob_upper = f.bob.to_string().to_uppercase();
+    let bob_braced = format!("{{{}}}", f.bob);
+    for spelling in [bob_upper, bob_braced, f.bob.simple().to_string()] {
+        let args = serde_json::json!({ "from": spelling, "to": f.alice.to_string(), "amount": 1 });
+        let code = code_of(&f, "economy.transfer", args).await;
+        // Either rejected as malformed or as the wrong payer -- never accepted.
+        assert!(
+            code == "actor_mismatch" || code == "invalid_args",
+            "{spelling:?} -> {code}"
+        );
+    }
+    let alice_upper = f.alice.to_string().to_uppercase();
+    f.caps
+        .handle(eco_call(
+            "economy.transfer",
+            serde_json::json!({ "from": alice_upper, "to": f.bob.to_string(), "amount": 1 }),
+        ))
+        .await
+        .expect("the actor's own uuid, spelled differently, is still the actor");
+    assert_eq!(f.store.call_count(), 1);
+}
+
+/// Reads are not mutations: any member's balance/limit can be read, as before.
+#[tokio::test]
+async fn reads_of_other_members_are_not_actor_bound() {
+    let f = fixture();
+    f.store.answer(Ok(5));
+    let out = f
+        .caps
+        .handle(eco_call(
+            "economy.balance",
+            serde_json::json!({ "user": f.bob.to_string() }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(out, serde_json::json!({ "balance": 5 }));
+    f.store.answer(Ok(5));
+    f.caps
+        .handle(eco_call(
+            "economy.max_bet",
+            serde_json::json!({ "user": f.bob.to_string() }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(f.directory.lookups(), 0, "reads never resolve an actor");
+}
+
+/// The gate still answers first: an ungranted bundle learns `not_granted`, not
+/// whose account the actor is.
+#[tokio::test]
+async fn the_gate_runs_before_the_actor_binding() {
+    let f = fixture_with(grants(&[]), true, true, Some(("main", COMMUNITY_ID)));
+    assert_eq!(
+        code_of(&f, "economy.wager", wager_args(f.bob, 1, 0)).await,
+        "not_granted"
+    );
+    assert_eq!(f.directory.lookups(), 0);
+}
+
+/// An attempt keeps its POSITIONAL ordinal even when it is refused, so what
+/// follows is keyed the same on every delivery of the event.
+#[tokio::test]
+async fn a_refused_attempt_still_occupies_its_ordinal() {
+    let f = fixture();
+    assert_eq!(
+        code_of(&f, "economy.wager", wager_args(f.bob, 1, 0)).await,
+        "actor_mismatch"
+    );
+    f.caps
+        .handle(eco_call("economy.wager", wager_args(f.alice, 1, 0)))
+        .await
+        .unwrap();
+    assert_eq!(f.store.keys(), vec![key(EVENT_ID, "wager", 1)]);
+}
+
+/// Regression (found in adversarial review): a gate denial that a redelivery
+/// does NOT reproduce (an in-memory quota reset by the restart that caused the
+/// redelivery, a grant or membership that changed) must not shift the ordinals
+/// of the calls after it -- otherwise a later call would inherit another call's
+/// key on the replay and apply a second time.
+#[tokio::test]
+async fn a_gate_denial_not_reproduced_on_redelivery_does_not_shift_later_keys() {
+    // First delivery: max_bet 50 refuses the 51 stake; the 10 stake applies.
+    let first = fixture();
+    assert_eq!(
+        code_of(&first, "economy.wager", wager_args(first.alice, 51, 0)).await,
+        "amount_out_of_bounds"
+    );
+    first
+        .caps
+        .handle(eco_call("economy.wager", wager_args(first.alice, 10, 25)))
+        .await
+        .unwrap();
+    // Redelivery: the declared bound was raised meanwhile, so the 51 now passes.
+    let replay = fixture_with(
+        grants(&[
+            ("economy.read", serde_json::json!({})),
+            ("economy.wager", serde_json::json!({"max_bet": 100})),
+            ("economy.transfer", serde_json::json!({"max_amount": 200})),
+        ]),
+        true,
+        true,
+        Some(("main", COMMUNITY_ID)),
+    );
+    replay
+        .caps
+        .handle(eco_call("economy.wager", wager_args(replay.alice, 51, 0)))
+        .await
+        .unwrap();
+    replay
+        .caps
+        .handle(eco_call("economy.wager", wager_args(replay.alice, 10, 25)))
+        .await
+        .unwrap();
+    // The 10/25 wager is :1 on BOTH deliveries, so the store dedupes it; it did
+    // not slide to :0 (the key the 51 stake claims) on the first run.
+    assert_eq!(first.store.keys(), vec![key(EVENT_ID, "wager", 1)]);
+    assert_eq!(
+        replay.store.keys(),
+        vec![key(EVENT_ID, "wager", 0), key(EVENT_ID, "wager", 1)]
+    );
+}
+
+/// Fail-closed: no way to bind an actor (or to key the call) means the money
+/// mover is refused loudly, never run unbound.
+#[tokio::test]
+async fn money_movers_fail_closed_when_the_actor_or_event_cannot_be_established() {
+    for (facts, want) in [
+        (Facts::NoIdentityWiring, "not_implemented"),
+        (Facts::NoEventId, "not_implemented"),
+        (Facts::NoActorAccount, "not_linked"),
+    ] {
+        let f = fixture_facts(
+            full_grants(),
+            true,
+            true,
+            Some(("main", COMMUNITY_ID)),
+            facts,
+        );
+        assert_eq!(
+            code_of(&f, "economy.wager", wager_args(f.alice, 1, 0)).await,
+            want
+        );
+        assert_eq!(
+            code_of(&f, "economy.transfer", transfer_args(f.alice, f.bob, 1)).await,
+            want
+        );
+        assert_eq!(f.store.call_count(), 0, "nothing ran unbound or unkeyed");
+    }
+    // Reads need neither an actor nor an event.
+    let f = fixture_facts(
+        full_grants(),
+        true,
+        true,
+        Some(("main", COMMUNITY_ID)),
+        Facts::NoIdentityWiring,
+    );
+    f.store.answer(Ok(1));
+    f.caps
+        .handle(eco_call(
+            "economy.balance",
+            serde_json::json!({ "user": f.alice.to_string() }),
+        ))
+        .await
+        .expect("reads work without identity wiring");
+}
+
+#[tokio::test]
+async fn an_unresolvable_actor_surfaces_the_identity_refusal_and_nothing_runs() {
+    for (answer, want) in [
+        (Err(IdentityError::NotAMember), "not_a_member"),
+        (Err(IdentityError::NotLinked), "not_linked"),
+        (Err(IdentityError::Unavailable("x".into())), "unavailable"),
+        (
+            Err(IdentityError::Backend("password=hunter2".into())),
+            "backend",
+        ),
+        // A nil UUID is never an identity.
+        (Ok(Uuid::nil()), "backend"),
+    ] {
+        let f = fixture();
+        f.directory.set(ACTOR_ACCOUNT, answer);
+        let denied = f
+            .caps
+            .handle(eco_call("economy.wager", wager_args(f.alice, 1, 0)))
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code, want);
+        assert!(!denied.message.contains("hunter2"), "{}", denied.message);
+        assert_eq!(f.store.call_count(), 0);
+    }
+}
+
+/// The binding is a platform guarantee: it needs neither the bundle to hold
+/// `identity.resolve` (the full grant set has none) nor the identity
+/// capability's own feature flag to be ON.
+#[tokio::test]
+async fn the_binding_needs_neither_the_identity_grant_nor_the_identity_flag() {
+    assert!(!full_grants().grants.contains_key("identity.resolve"));
+    let f = fixture_facts(
+        full_grants(),
+        true,
+        true,
+        Some(("main", COMMUNITY_ID)),
+        Facts::IdentityFlagOff,
+    );
+    f.caps
+        .handle(eco_call("economy.wager", wager_args(f.alice, 1, 0)))
+        .await
+        .expect("bound with the identity flag OFF");
+    assert_eq!(
+        code_of(&f, "economy.wager", wager_args(f.bob, 1, 0)).await,
+        "actor_mismatch"
+    );
+}
+
+/// Regression (#751 review, MINT CAP WRONG): the daily cap that bounds how much
+/// a wager mints summed the STAKE, so a bundle choosing its own payouts could
+/// mint without bound. The mint budget is the PAYOUT.
+#[tokio::test]
+async fn the_wager_mint_cap_is_the_payout_not_the_stake() {
+    let f = fixture_with(
+        grants(&[("economy.wager", serde_json::json!({}))]),
+        true,
+        true,
+        Some(("main", COMMUNITY_ID)),
+    );
+    // Two stake-50 wagers each paying 5_000 (100x): 10_000 = the per-user daily
+    // mint ceiling, on a combined STAKE of just 100 (of its 10_000).
+    for _ in 0..2 {
+        f.caps
+            .handle(eco_call("economy.wager", wager_args(f.alice, 50, 5_000)))
+            .await
+            .expect("within the daily mint budget");
+    }
+    // A stake-metered cap would wave through a hundred more of these.
+    assert_eq!(
+        code_of(&f, "economy.wager", wager_args(f.alice, 1, 1)).await,
+        "quota_exceeded"
+    );
+    assert_eq!(
+        f.store.call_count(),
+        2,
+        "the over-budget mint never reached the store"
+    );
+    // Losing wagers mint nothing: the stake budget is the only thing they spend.
+    f.caps
+        .handle(eco_call("economy.wager", wager_args(f.alice, 50, 0)))
+        .await
+        .expect("a losing wager mints nothing, so the spent mint budget does not block it");
+}
+
+/// Regression (#751 review, NO IDEMPOTENCY / double-spend): the stage derives a
+/// replay-stable key per mutation from the event id, the kind and an ordinal.
+#[tokio::test]
+async fn each_mutation_is_keyed_by_event_kind_and_ordinal() {
+    let f = fixture();
+    f.caps
+        .handle(eco_call("economy.wager", wager_args(f.alice, 1, 0)))
+        .await
+        .unwrap();
+    f.caps
+        .handle(eco_call("economy.wager", wager_args(f.alice, 1, 0)))
+        .await
+        .unwrap();
+    f.caps
+        .handle(eco_call(
+            "economy.transfer",
+            transfer_args(f.alice, f.bob, 1),
+        ))
+        .await
+        .unwrap();
+    f.caps
+        .handle(eco_call("economy.wager", wager_args(f.alice, 1, 0)))
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store.keys(),
+        vec![
+            key(EVENT_ID, "wager", 0),
+            // An identical second call in ONE invocation is its own operation.
+            key(EVENT_ID, "wager", 1),
+            key(EVENT_ID, "transfer", 0),
+            key(EVENT_ID, "wager", 2),
+        ]
+    );
+}
+
+/// A redelivered event (a fresh invocation of the same envelope) whose bundle
+/// repeats its calls presents the SAME keys, so the store credits once; a
+/// different event never collides with it.
+#[tokio::test]
+async fn a_redelivered_event_reproduces_the_same_keys() {
+    async fn run(f: &Fixture) -> Vec<String> {
+        f.caps
+            .handle(eco_call("economy.wager", wager_args(f.alice, 10, 25)))
+            .await
+            .unwrap();
+        f.caps
+            .handle(eco_call(
+                "economy.transfer",
+                transfer_args(f.alice, f.bob, 3),
+            ))
+            .await
+            .unwrap();
+        f.store.keys()
+    }
+    let first = run(&fixture()).await;
+    let replay = run(&fixture()).await;
+    assert_eq!(first, replay, "the redelivery maps to the original keys");
+    assert_eq!(
+        first,
+        vec![key(EVENT_ID, "wager", 0), key(EVENT_ID, "transfer", 0)]
+    );
+    let other = run(&fixture_facts(
+        full_grants(),
+        true,
+        true,
+        Some(("main", COMMUNITY_ID)),
+        Facts::OtherEvent,
+    ))
+    .await;
+    assert_eq!(
+        other,
+        vec![
+            key(OTHER_EVENT_ID, "wager", 0),
+            key(OTHER_EVENT_ID, "transfer", 0)
+        ]
+    );
+    assert!(first.iter().all(|k| !other.contains(k)));
+}
+
+/// A replay that re-rolls its payout presents the same key with different
+/// parameters: the store's `idempotency_conflict` reaches the bundle as a
+/// denial, never as a second credit.
+#[tokio::test]
+async fn a_store_idempotency_conflict_surfaces_as_a_denial() {
+    let f = fixture();
+    f.store.answer(Err(EconomyError::IdempotencyConflict));
+    let denied = f
+        .caps
+        .handle(eco_call("economy.wager", wager_args(f.alice, 10, 99)))
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code, "idempotency_conflict");
+    f.store.answer_unit(Err(EconomyError::IdempotencyConflict));
+    assert_eq!(
+        code_of(&f, "economy.transfer", transfer_args(f.alice, f.bob, 3)).await,
+        "idempotency_conflict"
+    );
+}
+
+/// A backend failure is INDETERMINATE (it may have committed): the ordinal is
+/// given back so the guest's retry presents the SAME key and applies at most
+/// once. A definitive refusal keeps its ordinal.
+#[tokio::test]
+async fn an_indeterminate_failure_frees_the_ordinal_for_the_retry_but_a_refusal_does_not() {
+    let f = fixture();
+    // 1. backend failure -> retry reuses wager:0
+    f.store
+        .answer(Err(EconomyError::Backend("connection reset".into())));
+    assert_eq!(
+        code_of(&f, "economy.wager", wager_args(f.alice, 10, 25)).await,
+        "backend"
+    );
+    f.caps
+        .handle(eco_call("economy.wager", wager_args(f.alice, 10, 25)))
+        .await
+        .unwrap();
+    // 2. a definitive refusal keeps its ordinal (wager:1), the next call gets :2
+    f.store
+        .answer(Err(EconomyError::InsufficientFunds { balance: 0 }));
+    assert_eq!(
+        code_of(&f, "economy.wager", wager_args(f.alice, 10, 25)).await,
+        "insufficient_funds"
+    );
+    f.caps
+        .handle(eco_call("economy.wager", wager_args(f.alice, 10, 25)))
+        .await
+        .unwrap();
+    assert_eq!(
+        f.store.keys(),
+        vec![
+            key(EVENT_ID, "wager", 0),
+            key(EVENT_ID, "wager", 0),
+            key(EVENT_ID, "wager", 1),
+            key(EVENT_ID, "wager", 2),
+        ]
+    );
+}
+
+#[test]
+fn the_mutation_ordinals_are_per_kind_and_only_the_latest_can_be_given_back() {
+    let inv = InvocationIdentity::new("twitch", None, vec![]).with_event_id(EVENT_ID);
+    assert_eq!(inv.reserve_mutation("wager"), Some((EVENT_ID, 0)));
+    assert_eq!(inv.reserve_mutation("wager"), Some((EVENT_ID, 1)));
+    assert_eq!(inv.reserve_mutation("transfer"), Some((EVENT_ID, 0)));
+    // Giving back an ordinal that is not the latest must not rewind past a
+    // later reservation (two overlapping calls).
+    inv.release_mutation("wager", 0);
+    assert_eq!(inv.reserve_mutation("wager"), Some((EVENT_ID, 2)));
+    inv.release_mutation("wager", 2);
+    assert_eq!(inv.reserve_mutation("wager"), Some((EVENT_ID, 2)));
+    // Releasing an unknown kind is a no-op, and no event id means no key.
+    inv.release_mutation("nope", 0);
+    let bare = InvocationIdentity::new("twitch", None, vec![]);
+    assert_eq!(bare.reserve_mutation("wager"), None);
+    assert!(format!("{inv:?}").contains("has_event_id: true"));
 }

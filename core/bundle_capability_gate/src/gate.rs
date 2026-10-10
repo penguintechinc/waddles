@@ -20,7 +20,7 @@ use crate::denied::Denied;
 use crate::grant::GrantSnapshot;
 use crate::instance_policy::{InstanceAction, InstancePolicySnapshot};
 use crate::membership::MembershipCheck;
-use crate::permission::{PermissionId, Quota};
+use crate::permission::{PermissionFamily, PermissionId, Quota};
 use crate::quota::{QuotaDenial, QuotaLedger};
 use crate::resource::{
     resolve_kv_key_prefix, resolve_object_prefix, resolve_overlay, resolve_table,
@@ -278,6 +278,14 @@ impl CapabilityGate {
     /// `target_user`, the sender for a transfer); the per-community daily
     /// aggregate. Any breach of the first two is `amount_out_of_bounds`, of
     /// the aggregates `quota_exceeded`. Nothing is consumed by a denied call.
+    ///
+    /// A wager meters TWO things against the SAME ceilings, each in its own
+    /// window: the STAKE (throughput -- how much a user can put at risk, which
+    /// also bounds ledger growth) and the PAYOUT (the currency the call
+    /// CREDITS, i.e. what it mints). The mint cap is on the payout, never the
+    /// stake: a wager of 1 that pays 100 consumes 100 of the mint budget, and a
+    /// large losing stake consumes none of it. A wager without a payout, or
+    /// with a negative one, is `amount_out_of_bounds` (fail-closed).
     fn check_economy_quota(
         &self,
         scope: &InvokeScope,
@@ -337,6 +345,16 @@ impl CapabilityGate {
         if amount < 1 || amount > bound {
             return Err(self.deny(scope, permission, Denied::AmountOutOfBounds));
         }
+        // A wager's payout is validated up front, before anything is consumed:
+        // a missing or negative one is a malformed call, not a free pass.
+        let wager_payout = if family == PermissionFamily::EconomyWager {
+            match target.payout.filter(|p| *p >= 0) {
+                Some(p) => Some(p),
+                None => return Err(self.deny(scope, permission, Denied::AmountOutOfBounds)),
+            }
+        } else {
+            None
+        };
 
         // A money-moving call must name the acting user: without one there
         // is no per-user aggregate to charge, so fail closed.
@@ -357,21 +375,48 @@ impl CapabilityGate {
         {
             return Err(self.deny(scope, permission, Denied::QuotaExceeded));
         }
+        let aggregate = Quota::EconomyAmount {
+            per_call_abs_max,
+            per_user_daily_abs_max,
+            per_scope_daily_abs_max,
+        };
         if self
             .quota
-            .check_and_consume(
-                key,
-                canonical_id,
-                &Quota::EconomyAmount {
-                    per_call_abs_max,
-                    per_user_daily_abs_max,
-                    per_scope_daily_abs_max,
-                },
-                amount,
-            )
+            .check_and_consume(key, canonical_id, &aggregate, amount)
             .is_err()
         {
             return Err(self.deny(scope, permission, Denied::QuotaExceeded));
+        }
+
+        // The mint cap: a wager's PAYOUT is metered against its own windows
+        // (distinct ledger key -- the quota ledger fixes a window's shape at
+        // first use, so it must not share the stake's), against the same
+        // per-user / per-community ceilings. Payout is NOT bounded per call by
+        // `bound` (that is the stake's bound); the store bounds it to
+        // `stake * MAX_PAYOUT_MULTIPLE`.
+        if let Some(payout) = wager_payout {
+            let payout_key = format!("{canonical_id}#payout");
+            if self
+                .quota
+                .check_and_consume_per_user(
+                    key,
+                    &payout_key,
+                    acting_user,
+                    per_user_daily_abs_max,
+                    ECONOMY_AGGREGATE_WINDOW,
+                    payout,
+                )
+                .is_err()
+            {
+                return Err(self.deny(scope, permission, Denied::QuotaExceeded));
+            }
+            if self
+                .quota
+                .check_and_consume(key, &payout_key, &aggregate, payout)
+                .is_err()
+            {
+                return Err(self.deny(scope, permission, Denied::QuotaExceeded));
+            }
         }
         Ok(())
     }

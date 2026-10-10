@@ -53,6 +53,8 @@ const READER_PW: &str = "waddles_bundle_reader_test_pw";
 const APP_ID: &str = "waddles.core.test-identity";
 const IDENTITY_DDL: &str = include_str!("../../../scripts/db/bundle_identity_resolve.sql");
 const ECONOMY_DDL: &str = include_str!("../../../scripts/db/bundle_economy_store.sql");
+const ECONOMY_IDEMPOTENCY_DDL: &str =
+    include_str!("../../../scripts/db/bundle_economy_idempotency.sql");
 
 /// Tenant 1 has communities 10 (the one under test) and 11 (a sibling);
 /// tenant 2 has community 20 -- and reuses the SAME platform account id as
@@ -172,6 +174,7 @@ async fn world() -> World {
     )
     .await;
     exec(&su, ECONOMY_DDL).await;
+    exec(&su, ECONOMY_IDEMPOTENCY_DDL).await;
     // The shipped identity DDL (also grants the view to waddles_bundle_reader).
     exec(&su, IDENTITY_DDL).await;
 
@@ -311,6 +314,7 @@ async fn stage(
             grants: [
                 grant("identity.resolve", serde_json::json!({})),
                 grant("economy.read", serde_json::json!({})),
+                grant("economy.wager", serde_json::json!({"max_bet": 50})),
                 grant("economy.transfer", serde_json::json!({"max_amount": 200})),
             ]
             .into_iter()
@@ -419,11 +423,20 @@ fn placeholder_tokens(text: &str) -> Vec<String> {
 /// Tokenizes `raw` exactly as `spine::handle_delivered` does and builds the
 /// invocation's identity facts from the RAW event + the mention bindings.
 async fn invocation_for(raw: &PlatformEvent) -> (InvocationIdentity, PlatformEvent) {
+    invocation_for_event(raw, &Uuid::new_v4().to_string()).await
+}
+
+/// As [`invocation_for`] for the spine event `event_id`: building it twice with
+/// the same id is a redelivery of that event.
+async fn invocation_for_event(
+    raw: &PlatformEvent,
+    event_id: &str,
+) -> (InvocationIdentity, PlatformEvent) {
     let tokenized = tokenize_event_with_mentions(raw, "acme", &RandomPseudonymMinter)
         .await
         .unwrap();
     (
-        InvocationIdentity::from_event(raw, tokenized.mentions),
+        InvocationIdentity::from_event(raw, tokenized.mentions).with_event_id(event_id),
         tokenized.event,
     )
 }
@@ -714,4 +727,123 @@ async fn the_reader_role_resolves_through_the_view_but_cannot_read_pii() {
         .unwrap()
         .unwrap();
     assert_eq!(row.try_get_by_index::<i64>(0).unwrap(), 0);
+}
+
+async fn fund(w: &World, user: Uuid, amount: i64) {
+    exec(
+        &w.su,
+        &format!(
+            "INSERT INTO economy_balances (tenant_id, community_id, user_uuid, balance) \
+             VALUES (1, 10, '{user}', {amount}) \
+             ON CONFLICT (tenant_id, community_id, user_uuid) DO UPDATE SET balance = {amount}"
+        ),
+    )
+    .await;
+}
+
+async fn balance_of(w: &World, user: Uuid) -> i64 {
+    w.su.query_one_raw(Statement::from_string(
+        sea_orm::DbBackend::Postgres,
+        format!("SELECT balance FROM economy_balances WHERE user_uuid = '{user}'"),
+    ))
+    .await
+    .unwrap()
+    .unwrap()
+    .try_get_by_index::<i64>(0)
+    .unwrap()
+}
+
+/// Regression (#751 review, theft) with the REAL directory: the actor is
+/// derived from the event's platform account (alice, `1001`), so a `!steal
+/// <@2002>` bundle that resolves bob and then names HIM as the payer is
+/// refused -- the funds move only in the direction the actor chose.
+#[tokio::test]
+async fn a_bundle_that_resolves_the_mention_cannot_use_it_as_the_payer() {
+    let w = world().await;
+    fund(&w, w.bob, 300).await;
+    let raw = event("1001", "!steal <@2002> 100");
+    let (invocation, visible) = invocation_for(&raw).await;
+    let bob_token = placeholder_tokens(visible.payload["text"].as_str().unwrap()).remove(0);
+    let caps = stage(&w, TENANT, COMMUNITY, invocation, None).await;
+    let actor = user_of(&caps, "identity.resolve_actor", serde_json::json!({})).await;
+    let target = user_of(
+        &caps,
+        "identity.resolve_mention",
+        serde_json::json!({ "token": bob_token }),
+    )
+    .await;
+    assert_eq!((actor, target), (w.alice, w.bob));
+
+    // Theft: pay FROM the mentioned member (to the actor), and wager their funds.
+    for (op, args) in [
+        (
+            "economy.transfer",
+            serde_json::json!({"from": target.to_string(), "to": actor.to_string(), "amount": 100}),
+        ),
+        (
+            "economy.wager",
+            serde_json::json!({"user": target.to_string(), "stake": 50, "payout": 0}),
+        ),
+    ] {
+        let err = refusal(&caps, op, args).await;
+        assert_eq!(err.code, "actor_mismatch", "{op}: {}", err.message);
+    }
+    assert_eq!(
+        balance_of(&w, w.bob).await,
+        300,
+        "the victim was not debited"
+    );
+    assert_eq!(balance_of(&w, w.alice).await, 500);
+
+    // The direction the actor chose is fine.
+    caps.handle(call(
+        "economy.transfer",
+        serde_json::json!({"from": actor.to_string(), "to": target.to_string(), "amount": 100}),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(balance_of(&w, w.alice).await, 400);
+    assert_eq!(balance_of(&w, w.bob).await, 400);
+}
+
+/// An actor the directory cannot bind (unlinked / not a member / no account on
+/// the event) cannot move money at all -- loudly, never unbound.
+#[tokio::test]
+async fn an_actor_the_directory_cannot_bind_cannot_move_money() {
+    let w = world().await;
+    let args = |w: &World| serde_json::json!({"from": w.alice.to_string(), "to": w.bob.to_string(), "amount": 5});
+    for (account, want) in [
+        ("3003", "not_linked"),   // active member, user_uuid NULL
+        ("4004", "not_a_member"), // left
+        ("9999", "not_a_member"), // no such account
+    ] {
+        let (inv, _) = invocation_for(&event(account, "!pay")).await;
+        let caps = stage(&w, TENANT, COMMUNITY, inv, None).await;
+        let err = refusal(&caps, "economy.transfer", args(&w)).await;
+        assert_eq!(err.code, want, "{account}");
+    }
+    assert_eq!(balance_of(&w, w.alice).await, 500);
+}
+
+/// Regression (#751 review, double-spend) with the REAL directory: the same
+/// event redelivered through a fresh invocation credits once.
+#[tokio::test]
+async fn a_redelivered_steal_event_moves_the_money_once() {
+    let w = world().await;
+    let event_id = Uuid::new_v4().to_string();
+    let raw = event("1001", "!steal <@2002> 120");
+    for delivery in 0..3 {
+        let (inv, _) = invocation_for_event(&raw, &event_id).await;
+        let caps = stage(&w, TENANT, COMMUNITY, inv, None).await;
+        caps.handle(call(
+            "economy.transfer",
+            serde_json::json!({
+                "from": w.alice.to_string(), "to": w.bob.to_string(), "amount": 120
+            }),
+        ))
+        .await
+        .unwrap_or_else(|e| panic!("delivery {delivery}: {} {}", e.code, e.message));
+    }
+    assert_eq!(balance_of(&w, w.alice).await, 380);
+    assert_eq!(balance_of(&w, w.bob).await, 120);
 }

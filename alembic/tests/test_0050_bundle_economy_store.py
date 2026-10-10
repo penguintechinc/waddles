@@ -134,6 +134,8 @@ class TestSchema:
                 "payout",
                 "balance_after",
                 "occurred_at",
+                # Added by 0052_economy_idempotency (the chain runs to head).
+                "idempotency_key",
             }
 
     def test_balance_check_rejects_a_negative_balance(

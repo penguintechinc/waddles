@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 
 use bundle_capability_gate::{MemberRow, SnapshotMembership};
 use sea_orm::{
-    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr, Statement,
-    TransactionTrait, Value,
+    ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, DbErr, SqlErr,
+    Statement, TransactionTrait, Value,
 };
 use uuid::Uuid;
 
 use crate::{
     metrics, validate_transfer, validate_wager, BoxFuture, EconomyCaps, EconomyError, EconomyScope,
-    EconomyStore, LeaderboardEntry, MAX_LEADERBOARD_LIMIT,
+    EconomyStore, IdempotencyKey, LeaderboardEntry, MAX_LEADERBOARD_LIMIT,
 };
 
 /// Per-transaction statement timeout, so a stuck row lock can never hold a
@@ -88,6 +88,110 @@ fn outcome_of<T>(r: &Result<T, EconomyError>) -> &'static str {
         Ok(_) => "ok",
         Err(e) => e.wire_code(),
     }
+}
+
+/// Maps a failure of the money-moving statement. A unique-index violation can
+/// only be the ledger's idempotency index (the statement touches no other
+/// unique constraint), i.e. the key was claimed by a concurrent movement the
+/// per-kind advisory lock does not serialize against (a wager and a transfer
+/// racing on one key): that is a conflict, never a backend fault.
+fn write_err(e: DbErr) -> EconomyError {
+    if matches!(e.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) {
+        return EconomyError::IdempotencyConflict;
+    }
+    backend_err(e)
+}
+
+/// Logs (PII-free: ids and the key only) and builds the conflict error for a
+/// key reused with different parameters.
+fn conflict(op: &'static str, scope: &EconomyScope, key: &IdempotencyKey) -> EconomyError {
+    tracing::warn!(
+        op,
+        tenant_id = scope.tenant_id,
+        community_id = scope.community_id,
+        app_id = %scope.app_id,
+        idempotency_key = %key,
+        "economy idempotency conflict: the key was already used by a different operation"
+    );
+    EconomyError::IdempotencyConflict
+}
+
+/// The keyed ledger row a prior call left behind (the `wager` row, or the
+/// `transfer_out` row of a transfer).
+#[derive(Debug, PartialEq, Eq)]
+struct PriorMovement {
+    kind: String,
+    user: Uuid,
+    counterparty: Option<Uuid>,
+    delta: i64,
+    stake: Option<i64>,
+    payout: Option<i64>,
+    balance_after: i64,
+}
+
+impl PriorMovement {
+    /// `Some(balance_after)` iff this prior row is exactly the wager now being
+    /// asked for -- same player, stake and payout.
+    fn replays_wager(&self, user: Uuid, stake: i64, payout: i64) -> Option<i64> {
+        (self.kind == "wager"
+            && self.user == user
+            && self.stake == Some(stake)
+            && self.payout == Some(payout))
+        .then_some(self.balance_after)
+    }
+
+    /// `true` iff this prior row is exactly the transfer now being asked for --
+    /// same sender, recipient and amount.
+    fn replays_transfer(&self, from: Uuid, to: Uuid, amount: i64) -> bool {
+        self.kind == "transfer_out"
+            && self.user == from
+            && self.counterparty == Some(to)
+            && self.delta.checked_neg() == Some(amount)
+    }
+}
+
+/// Looks up the movement `key` already produced in this scope, if any. MUST
+/// run under [`lock_scope`], after which a keyed row is either committed
+/// (visible here) or its transaction is still holding the lock (we would be
+/// waiting on it): the check-then-write below cannot race a same-kind twin.
+async fn find_prior<C: ConnectionTrait>(
+    conn: &C,
+    scope: &EconomyScope,
+    key: &IdempotencyKey,
+) -> Result<Option<PriorMovement>, EconomyError> {
+    let Some(row) = conn
+        .query_one_raw(stmt(
+            "SELECT kind, user_uuid, counterparty_uuid, delta, stake, payout, balance_after \
+             FROM economy_ledger \
+             WHERE tenant_id = $1 AND community_id = $2 AND app_id = $3 \
+               AND idempotency_key = $4",
+            vec![
+                Value::Int(Some(scope.tenant_id)),
+                Value::Int(Some(scope.community_id)),
+                Value::String(Some(scope.app_id.clone())),
+                Value::String(Some(key.as_str().to_string())),
+            ],
+        ))
+        .await
+        .map_err(backend_err)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(PriorMovement {
+        kind: row.try_get("", "kind").map_err(backend_err)?,
+        user: row.try_get("", "user_uuid").map_err(backend_err)?,
+        counterparty: row
+            .try_get::<Option<Uuid>>("", "counterparty_uuid")
+            .map_err(backend_err)?,
+        delta: row.try_get("", "delta").map_err(backend_err)?,
+        stake: row
+            .try_get::<Option<i64>>("", "stake")
+            .map_err(backend_err)?,
+        payout: row
+            .try_get::<Option<i64>>("", "payout")
+            .map_err(backend_err)?,
+        balance_after: row.try_get("", "balance_after").map_err(backend_err)?,
+    }))
 }
 
 /// Takes the transaction-scoped advisory lock serializing every money-moving
@@ -246,6 +350,7 @@ impl PostgresEconomyStore {
         Ok(self.balance_impl(scope, user).await?.min(cap))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn wager_impl(
         &self,
         scope: &EconomyScope,
@@ -254,6 +359,7 @@ impl PostgresEconomyStore {
         payout: i64,
         max_bet: i64,
         caps: EconomyCaps,
+        key: &IdempotencyKey,
     ) -> Result<i64, EconomyError> {
         validate_wager(stake, payout, max_bet)?;
         validate_caps(caps)?;
@@ -276,9 +382,10 @@ impl PostgresEconomyStore {
              ), led AS ( \
                  INSERT INTO economy_ledger \
                      (tenant_id, community_id, app_id, user_uuid, kind, delta, stake, payout, \
-                      balance_after) \
+                      balance_after, idempotency_key) \
                  SELECT $1::INT, $2::INT, $6::TEXT, $3::UUID, 'wager', \
-                        $5::BIGINT - $4::BIGINT, $4::BIGINT, $5::BIGINT, upd.balance FROM upd \
+                        $5::BIGINT - $4::BIGINT, $4::BIGINT, $5::BIGINT, upd.balance, \
+                        $7::TEXT FROM upd \
              ) \
              SELECT balance FROM upd"
         );
@@ -286,6 +393,7 @@ impl PostgresEconomyStore {
         values.push(Value::BigInt(Some(stake)));
         values.push(Value::BigInt(Some(payout)));
         values.push(Value::String(Some(scope.app_id.clone())));
+        values.push(Value::String(Some(key.as_str().to_string())));
 
         let txn = self.conn.begin().await.map_err(backend_err)?;
         txn.execute_raw(stmt(
@@ -295,15 +403,41 @@ impl PostgresEconomyStore {
         .await
         .map_err(backend_err)?;
 
-        // Durable daily aggregates first (under the per-scope advisory lock,
-        // always this transaction's first lock), then the one atomic statement.
+        // The per-scope advisory lock is always this transaction's first lock.
         lock_scope(&txn, scope, "wager").await?;
+
+        // Idempotency BEFORE any budget or balance check: a call that already
+        // applied returns its original result even when its own budget is now
+        // spent, and moves nothing.
+        if let Some(prior) = find_prior(&txn, scope, key).await? {
+            return match prior.replays_wager(user, stake, payout) {
+                Some(balance_after) => {
+                    metrics::record_replay("wager");
+                    tracing::debug!(
+                        tenant_id = scope.tenant_id,
+                        community_id = scope.community_id,
+                        app_id = %scope.app_id,
+                        idempotency_key = %key,
+                        "economy wager replayed; returning the original result"
+                    );
+                    Ok(balance_after)
+                }
+                None => Err(conflict("wager", scope, key)),
+            };
+        }
+
+        // Durable daily aggregates: the STAKE (throughput) and, separately,
+        // the PAYOUT -- the currency this call mints, the cap that bounds a
+        // bundle choosing its own payouts. A zero payout mints nothing.
         enforce_daily_caps(&txn, scope, user, "wager", "stake", stake, caps).await?;
+        if payout > 0 {
+            enforce_daily_caps(&txn, scope, user, "wager", "payout", payout, caps).await?;
+        }
 
         let Some(row) = txn
             .query_one_raw(stmt(&sql, values))
             .await
-            .map_err(backend_err)?
+            .map_err(write_err)?
         else {
             let refusal = Self::diagnose_refusal(&txn, scope, user).await?;
             return Err(refusal);
@@ -311,9 +445,11 @@ impl PostgresEconomyStore {
         let new_balance: i64 = row.try_get("", "balance").map_err(backend_err)?;
         txn.commit().await.map_err(backend_err)?;
         metrics::record_applied_amount("wager", stake);
+        metrics::record_applied_amount("wager_payout", payout);
         Ok(new_balance)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn transfer_impl(
         &self,
         scope: &EconomyScope,
@@ -322,6 +458,7 @@ impl PostgresEconomyStore {
         amount: i64,
         max_amount: i64,
         caps: EconomyCaps,
+        key: &IdempotencyKey,
     ) -> Result<(), EconomyError> {
         validate_transfer(from, to, amount, max_amount)?;
         validate_caps(caps)?;
@@ -334,9 +471,26 @@ impl PostgresEconomyStore {
         .await
         .map_err(backend_err)?;
 
-        // 0. Per-scope advisory lock (this transaction's first lock) and the
-        // durable daily aggregates, charged against the SENDER.
+        // 0. Per-scope advisory lock (this transaction's first lock); then
+        // idempotency (a transfer that already applied is a no-op replay,
+        // checked before any budget); then the durable daily aggregates,
+        // charged against the SENDER.
         lock_scope(&txn, scope, "transfer").await?;
+        if let Some(prior) = find_prior(&txn, scope, key).await? {
+            return if prior.replays_transfer(from, to, amount) {
+                metrics::record_replay("transfer");
+                tracing::debug!(
+                    tenant_id = scope.tenant_id,
+                    community_id = scope.community_id,
+                    app_id = %scope.app_id,
+                    idempotency_key = %key,
+                    "economy transfer replayed; nothing moved"
+                );
+                Ok(())
+            } else {
+                Err(conflict("transfer", scope, key))
+            };
+        }
         enforce_daily_caps(&txn, scope, from, "transfer_out", "-delta", amount, caps).await?;
 
         // 1. Live membership of BOTH sides, inside the write transaction.
@@ -396,9 +550,9 @@ impl PostgresEconomyStore {
              ), led_out AS ( \
                  INSERT INTO economy_ledger \
                      (tenant_id, community_id, app_id, user_uuid, counterparty_uuid, kind, delta, \
-                      balance_after) \
+                      balance_after, idempotency_key) \
                  SELECT $1::INT, $2::INT, $6::TEXT, $3::UUID, $5::UUID, 'transfer_out', \
-                        -$4::BIGINT, debit.balance FROM debit \
+                        -$4::BIGINT, debit.balance, $7::TEXT FROM debit \
              ), led_in AS ( \
                  INSERT INTO economy_ledger \
                      (tenant_id, community_id, app_id, user_uuid, counterparty_uuid, kind, delta, \
@@ -412,10 +566,11 @@ impl PostgresEconomyStore {
         values.push(Value::BigInt(Some(amount)));
         values.push(Value::Uuid(Some(to)));
         values.push(Value::String(Some(scope.app_id.clone())));
+        values.push(Value::String(Some(key.as_str().to_string())));
         let row = txn
             .query_one_raw(stmt(sql, values))
             .await
-            .map_err(backend_err)?
+            .map_err(write_err)?
             .ok_or_else(|| backend_err("transfer statement returned no row"))?;
         let from_balance: Option<i64> = row.try_get("", "from_balance").map_err(backend_err)?;
         let to_balance: Option<i64> = row.try_get("", "to_balance").map_err(backend_err)?;
@@ -520,11 +675,12 @@ impl EconomyStore for PostgresEconomyStore {
         payout: i64,
         max_bet: i64,
         caps: EconomyCaps,
+        key: &'a IdempotencyKey,
     ) -> BoxFuture<'a, Result<i64, EconomyError>> {
         Box::pin(async move {
             let start = Instant::now();
             let result = self
-                .wager_impl(scope, user, stake, payout, max_bet, caps)
+                .wager_impl(scope, user, stake, payout, max_bet, caps, key)
                 .await;
             metrics::record_call("wager", outcome_of(&result), start.elapsed().as_secs_f64());
             result
@@ -539,11 +695,12 @@ impl EconomyStore for PostgresEconomyStore {
         amount: i64,
         max_amount: i64,
         caps: EconomyCaps,
+        key: &'a IdempotencyKey,
     ) -> BoxFuture<'a, Result<(), EconomyError>> {
         Box::pin(async move {
             let start = Instant::now();
             let result = self
-                .transfer_impl(scope, from, to, amount, max_amount, caps)
+                .transfer_impl(scope, from, to, amount, max_amount, caps, key)
                 .await;
             metrics::record_call(
                 "transfer",

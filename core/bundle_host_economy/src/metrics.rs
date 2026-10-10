@@ -12,6 +12,7 @@ struct Instruments {
     op_duration_seconds: Histogram<f64>,
     calls_total: Counter<u64>,
     amount: Histogram<f64>,
+    replays_total: Counter<u64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -31,7 +32,15 @@ fn instruments() -> &'static Instruments {
                 .build(),
             amount: meter
                 .f64_histogram("waddles_bundle_economy_amount")
-                .with_description("Amount moved by APPLIED economy ops (stake / transfer amount)")
+                .with_description(
+                    "Amount moved by APPLIED economy ops (wager stake, wager payout minted, transfer amount)",
+                )
+                .build(),
+            replays_total: meter
+                .u64_counter("waddles_bundle_economy_replays_total")
+                .with_description(
+                    "Economy ops answered from the ledger by idempotency key (no money moved), by op",
+                )
                 .build(),
         }
     })
@@ -50,4 +59,12 @@ pub(crate) fn record_applied_amount(op: &'static str, amount: i64) {
     instruments()
         .amount
         .record(amount as f64, &[KeyValue::new("op", op)]);
+}
+
+/// Records one money-moving op that was a replay (answered from the ledger by
+/// its idempotency key; nothing moved).
+pub(crate) fn record_replay(op: &'static str) {
+    instruments()
+        .replays_total
+        .add(1, &[KeyValue::new("op", op)]);
 }
