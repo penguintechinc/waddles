@@ -26,13 +26,14 @@ FROM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca92
 
 WORKDIR /app
 
-# Upgrade all base-image OS packages to the latest Debian bookworm security
-# point release first -- clears HIGH/CRITICAL OS-package CVEs (libpcre2,
-# perl/perl-base, libcap, libgnutls, etc.) the pinned node:24-bookworm-slim
-# digest still ships -- then install dumb-init, curl for healthcheck, and
+# OS-package CVE fix: pin the Debian bookworm security release that clears the
+# HIGH/CRITICAL perl-base findings the pinned node:24-bookworm-slim digest still
+# ships (CVE-2026-13221 et al., trivy gate). Explicit exact pin, never a blanket
+# `apt-get upgrade` (devops-containers.md). Drop the pin once the base digest is
+# rebuilt upstream with this version. Then dumb-init, curl for healthcheck, and
 # build tools for native modules (bcrypt).
-RUN apt-get update && apt-get upgrade -y --no-install-recommends \
-    && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    perl-base=5.36.0-7+deb12u4 \
     dumb-init curl make g++ \
     && rm -rf /var/lib/apt/lists/*
 

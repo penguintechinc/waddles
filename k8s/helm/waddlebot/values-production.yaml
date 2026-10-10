@@ -54,3 +54,10 @@ egressPolicy:
 
 spire:
   environment: "production"
+
+# Production admits only signed, SBOM-attested Waddles images (Kyverno, Enforce).
+# Requires the Kyverno CRDs installed in the production cluster. See docs/SUPPLY_CHAIN.md.
+supplyChain:
+  verifyImages:
+    enabled: true
+    enforce: true

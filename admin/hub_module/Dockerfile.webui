@@ -3,8 +3,10 @@
 # Builds the React/Vite frontend and serves it via a minimal Express
 # static-file + API-proxy server -- never nginx (house convention).
 
+# node:20 reached upstream EOL 2026-04-30; bumped to node:24 (same interim pin as
+# admin/hub_module/Dockerfile -- org target node:26 not yet adopted here).
 # Stage 1: Build frontend
-FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS frontend-build
+FROM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS frontend-build
 
 WORKDIR /build/admin/hub_module/frontend
 
@@ -19,17 +21,15 @@ COPY admin/hub_module/frontend/ ./
 RUN npm run build
 
 # Stage 2: Express runtime -- static serving + /api proxy only
-FROM node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
+FROM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 
 WORKDIR /app
 
-# Upgrade all base-image OS packages to the latest Debian bookworm security
-# point release before installing anything -- clears HIGH/CRITICAL OS-package
-# CVEs (libpcre2, perl/perl-base, libcap, libgnutls, etc.) that the pinned
-# node:20-bookworm-slim digest still ships; the pinned digest above is bumped
-# on every touch, this closes the gap until the next rebuild lands upstream.
-RUN apt-get update && apt-get upgrade -y --no-install-recommends \
-    && apt-get install -y --no-install-recommends dumb-init curl \
+# OS-package CVE fix: exact pin of the Debian bookworm security release for
+# perl-base (trivy HIGH/CRITICAL gate). Never a blanket `apt-get upgrade`
+# (devops-containers.md); drop the pin once the base digest is rebuilt upstream.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    perl-base=5.36.0-7+deb12u4 dumb-init curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -38,7 +38,13 @@ RUN groupadd -g 1001 nodejs && \
 
 # Install the exact locked server dependency graph (express + http-proxy-middleware)
 COPY admin/hub_module/webui-server/package*.json ./
-RUN npm ci --omit=dev --ignore-scripts
+# Install the locked server dependencies, then remove the base image's bundled global npm.
+# The runtime entrypoint is `node server.js` -- npm/npx/corepack are never invoked after
+# this point, and npm's vendored node_modules (tar, brace-expansion, sigstore, undici, ...)
+# carry independent CVEs unrelated to this lockfile, so they are removed in the same layer.
+RUN npm ci --omit=dev --ignore-scripts \
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+    /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 
 # Copy the proxy/static server and the built frontend assets
 COPY --chown=nodejs:nodejs admin/hub_module/webui-server/server.js ./server.js
