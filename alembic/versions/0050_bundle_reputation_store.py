@@ -40,7 +40,7 @@ the Rust integration tests). 0045 therefore OWNS them: this migration's
 downgrade must not drop them.
 
 Revision ID: 0050_bundle_reputation_store
-Revises: 0049_sso_connections
+Revises: 0053_audit_events_hash_chain
 Create Date: 2026-10-09
 """
 
@@ -53,7 +53,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0050_bundle_reputation_store"
-down_revision = "0049_sso_connections"
+down_revision = "0053_audit_events_hash_chain"
 branch_labels = None
 depends_on = None
 

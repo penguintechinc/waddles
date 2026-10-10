@@ -36,10 +36,10 @@ def _load_migration():  # type: ignore[no-untyped-def]
 
 
 class TestMigrationMetadata:
-    def test_chains_off_0049_sso_connections(self) -> None:
+    def test_chains_off_0053_audit_events_hash_chain(self) -> None:
         migration = _load_migration()
         assert migration.revision == "0050_bundle_reputation_store"
-        assert migration.down_revision == "0049_sso_connections"
+        assert migration.down_revision == "0053_audit_events_hash_chain"
 
     def test_revision_id_fits_alembic_version_num_varchar32(self) -> None:
         assert len(_load_migration().revision) <= 32
