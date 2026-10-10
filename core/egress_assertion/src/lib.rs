@@ -48,8 +48,47 @@ use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ipnet::IpNet;
+use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+
+/// Closed vocabulary of reasons [`verify_with_key`] can reject an assertion
+/// with. The strings are identical to the `outcome`/`REASON_*` values in
+/// `core/service_auth`'s `jwt_hardening` module (and the Python
+/// `flask_core.jwt_hardening`), so `egress_proxy` can feed them straight
+/// into `waddles_jwt_verifications_total{outcome}` without translation.
+/// This crate deliberately has no `service_auth` dependency, so the literals
+/// are repeated here and pinned by a cross-crate test in `egress_proxy`.
+pub mod reason {
+    /// Not a decodable JWS.
+    pub const MALFORMED: &str = "malformed";
+    /// Header `alg` is not EdDSA.
+    pub const ALG_MISMATCH: &str = "alg_mismatch";
+    /// Signature does not verify.
+    pub const BAD_SIGNATURE: &str = "bad_signature";
+    /// `exp` has passed.
+    pub const EXPIRED: &str = "expired";
+    /// `iat` is in the future beyond the skew allowance.
+    pub const IMMATURE: &str = "immature";
+    /// A required claim is missing.
+    pub const MISSING_CLAIM: &str = "missing_claim";
+    /// A claim is present but empty or of the wrong type.
+    pub const INVALID_CLAIM: &str = "invalid_claim";
+    /// Anything else (an unexpected library failure).
+    pub const INVALID: &str = "invalid";
+
+    /// Every reason above -- for cross-crate vocabulary checks.
+    pub const ALL: [&str; 8] = [
+        MALFORMED,
+        ALG_MISMATCH,
+        BAD_SIGNATURE,
+        EXPIRED,
+        IMMATURE,
+        MISSING_CLAIM,
+        INVALID_CLAIM,
+        INVALID,
+    ];
+}
 
 /// Header carrying the signed [`EgressAssertion`].
 pub const ASSERTION_HEADER: &str = "x-waddles-egress-assertion";
@@ -112,8 +151,11 @@ pub struct EgressAssertion {
 
 #[derive(thiserror::Error, Debug)]
 pub enum AssertionError {
+    /// The assertion failed verification; the payload is one of [`reason`]'s
+    /// constants -- never `jsonwebtoken` error text, a header value or a
+    /// claim value, so the error is safe to log and to stringify.
     #[error("invalid assertion: {0}")]
-    Invalid(String),
+    Rejected(&'static str),
     #[error("assertion ttl {actual}s exceeds max {max}s")]
     TtlTooLong { actual: u64, max: u64 },
     #[error("failed to load Ed25519 signing key: {0}")]
@@ -211,13 +253,89 @@ pub fn build_assertion(
     }
 }
 
-/// Verifies signature and `exp`/`iat`/max-TTL against a single already-
-/// resolved `decoding_key` -- the dependency-free primitive a JWKS-aware
-/// verifier (looking `kid` up first) builds on. Does **not** check `sub`
-/// against a caller identity, replay/`jti` uniqueness, or destination/port
-/// match -- those are the calling verifier's job
+/// The assertion exactly as it arrives on the wire: every field optional so
+/// a *missing* claim (`missing_claim`) is told apart from a *mistyped* one
+/// (`invalid_claim`, via the deserializer error) without parsing library text.
+#[derive(Deserialize)]
+struct WireAssertion {
+    sub: Option<String>,
+    tenant: Option<String>,
+    community: Option<String>,
+    app: Option<String>,
+    category: Option<DestinationCategory>,
+    destination: Option<String>,
+    port: Option<u16>,
+    jti: Option<String>,
+    iat: Option<u64>,
+    exp: Option<u64>,
+}
+
+/// A required wire field, or `missing_claim`.
+fn required<T>(field: Option<T>) -> Result<T, AssertionError> {
+    field.ok_or(AssertionError::Rejected(reason::MISSING_CLAIM))
+}
+
+/// A required wire string that must carry at least one non-whitespace
+/// character: an empty `sub`/`tenant`/`jti` is "missing" by another name and
+/// must never authorize anything (fail closed, no default-tenant fallback).
+fn required_text(field: Option<String>) -> Result<String, AssertionError> {
+    let value = required(field)?;
+    if value.trim().is_empty() {
+        return Err(AssertionError::Rejected(reason::INVALID_CLAIM));
+    }
+    Ok(value)
+}
+
+impl WireAssertion {
+    /// Shape-check the claims and build the typed [`EgressAssertion`].
+    fn into_assertion(self) -> Result<EgressAssertion, AssertionError> {
+        Ok(EgressAssertion {
+            sub: required_text(self.sub)?,
+            tenant: required_text(self.tenant)?,
+            community: required(self.community)?,
+            app: required(self.app)?,
+            category: required(self.category)?,
+            destination: required(self.destination)?,
+            port: required(self.port)?,
+            jti: required_text(self.jti)?,
+            iat: required(self.iat)?,
+            exp: required(self.exp)?,
+        })
+    }
+}
+
+/// Map a `jsonwebtoken` failure to a closed [`reason`] -- never its text.
+fn classify_decode_error(kind: &ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::ExpiredSignature => reason::EXPIRED,
+        ErrorKind::ImmatureSignature => reason::IMMATURE,
+        ErrorKind::InvalidSignature => reason::BAD_SIGNATURE,
+        ErrorKind::MissingRequiredClaim(_) => reason::MISSING_CLAIM,
+        ErrorKind::InvalidClaimFormat(_) | ErrorKind::Json(_) => reason::INVALID_CLAIM,
+        ErrorKind::InvalidAlgorithm
+        | ErrorKind::InvalidAlgorithmName
+        | ErrorKind::MissingAlgorithm => reason::ALG_MISMATCH,
+        ErrorKind::InvalidToken | ErrorKind::Base64(_) | ErrorKind::Utf8(_) => reason::MALFORMED,
+        _ => reason::INVALID,
+    }
+}
+
+/// Verifies signature, pinned algorithm (EdDSA only), required claims,
+/// `exp`/`iat` (bounded skew) and the max-TTL ceiling against a single
+/// already-resolved `decoding_key` -- the dependency-free primitive a
+/// JWKS-aware verifier (looking `kid` up first, and vetting the JOSE header
+/// for `alg: none` / `jku` / `jwk` / `x5u` / `x5c` / `crit` via
+/// `service_auth::jwt_hardening`) builds on. Every rejection is
+/// [`AssertionError::Rejected`] with a closed [`reason`]. Does **not** check
+/// `sub` against a caller identity, replay/`jti` uniqueness, or
+/// destination/port match -- those are the calling verifier's job
 /// ([`destination_matches`]/[`resolved_matches`] below cover the latter;
 /// `egress_proxy::proxy::validate` covers the former two).
+///
+/// There is no `iss`/`aud` here by design: an assertion is a per-call grant
+/// bound to its signer through `sub`, which `egress_proxy` compares with the
+/// machine JWT it authenticated on the same connection; `sub`, `tenant` and
+/// `jti` must be non-empty (there is no default-tenant fallback).
 pub fn verify_with_key(
     token: &str,
     decoding_key: &DecodingKey,
@@ -225,13 +343,16 @@ pub fn verify_with_key(
 ) -> Result<EgressAssertion, AssertionError> {
     let mut validation = Validation::new(Algorithm::EdDSA);
     validation.leeway = ASSERTION_CLOCK_SKEW_SECONDS;
-    validation.set_required_spec_claims(&["exp", "iat"]);
+    validation.set_required_spec_claims(&["exp", "sub"]);
     validation.validate_aud = false;
 
-    let data = jsonwebtoken::decode::<EgressAssertion>(token, decoding_key, &validation)
-        .map_err(|e| AssertionError::Invalid(e.to_string()))?;
-    let claims = data.claims;
+    let data = jsonwebtoken::decode::<WireAssertion>(token, decoding_key, &validation)
+        .map_err(|e| AssertionError::Rejected(classify_decode_error(e.kind())))?;
+    let claims = data.claims.into_assertion()?;
 
+    if claims.iat > now_secs().saturating_add(ASSERTION_CLOCK_SKEW_SECONDS) {
+        return Err(AssertionError::Rejected(reason::IMMATURE));
+    }
     let ttl = claims.exp.saturating_sub(claims.iat);
     if ttl > max_ttl_secs {
         return Err(AssertionError::TtlTooLong {
@@ -452,7 +573,7 @@ mod tests {
         // a forged/tampered token.
         let token = forged_signing_key().sign(&assertion).expect("signs");
         let err = verify_with_key(&token, &decoding_key(), ASSERTION_MAX_TTL_SECONDS).unwrap_err();
-        assert!(matches!(err, AssertionError::Invalid(_)));
+        assert!(matches!(err, AssertionError::Rejected(_)));
     }
 
     #[test]
@@ -462,7 +583,7 @@ mod tests {
         assertion.exp = now_secs() - 60;
         let token = signing_key().sign(&assertion).expect("signs");
         let err = verify_with_key(&token, &decoding_key(), ASSERTION_MAX_TTL_SECONDS).unwrap_err();
-        assert!(matches!(err, AssertionError::Invalid(_)));
+        assert!(matches!(err, AssertionError::Rejected(_)));
     }
 
     #[test]
@@ -841,14 +962,246 @@ mod tests {
 
     #[test]
     fn error_display_strings() {
-        assert!(AssertionError::Invalid("x".into())
+        assert!(AssertionError::Rejected(reason::EXPIRED)
             .to_string()
-            .contains("invalid assertion"));
+            .contains("invalid assertion: expired"));
         assert!(AssertionError::TtlTooLong { actual: 9, max: 5 }
             .to_string()
             .contains("exceeds max"));
         assert!(AssertionError::SigningFailed("x".into())
             .to_string()
             .contains("failed to sign"));
+    }
+
+    // ---- Phase-0 hardening (RFC 8725) ------------------------------------
+
+    use base64::Engine as _;
+    use serde_json::{json, Value};
+
+    fn b64(value: &Value) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string())
+    }
+
+    /// Sign arbitrary header + claims JSON with key A.
+    fn raw_token(header: &Value, claims: &Value) -> String {
+        let message = format!("{}.{}", b64(header), b64(claims));
+        let signature = jsonwebtoken::crypto::sign(
+            message.as_bytes(),
+            &EncodingKey::from_ed_der(KEY_A_PRIV_DER),
+            Algorithm::EdDSA,
+        )
+        .expect("sign");
+        format!("{message}.{signature}")
+    }
+
+    fn good_claims() -> Value {
+        let now = now_secs();
+        json!({
+            "sub": "spiffe://penguintech.io/alpha/svc-process",
+            "tenant": "tenant-a", "community": "community-a", "app": "waddles.a.b.c",
+            "category": "fqdn", "destination": "discord.com", "port": 443,
+            "jti": "jti-1", "iat": now, "exp": now + 30,
+        })
+    }
+
+    fn verify_raw(claims: &Value) -> Result<EgressAssertion, AssertionError> {
+        let header = json!({"alg": "EdDSA", "kid": "k1"});
+        verify_with_key(
+            &raw_token(&header, claims),
+            &decoding_key(),
+            ASSERTION_MAX_TTL_SECONDS,
+        )
+    }
+
+    fn rejected_reason(result: Result<EgressAssertion, AssertionError>) -> &'static str {
+        match result {
+            Err(AssertionError::Rejected(reason)) => reason,
+            other => panic!("expected a Rejected assertion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_hand_built_token_with_every_claim_verifies() {
+        let verified = verify_raw(&good_claims()).expect("complete claim set verifies");
+        assert_eq!(verified.tenant, "tenant-a");
+        assert_eq!(verified.jti, "jti-1");
+        assert_eq!(verified.port, 443);
+    }
+
+    #[test]
+    fn tampered_and_expired_assertions_name_their_reason() {
+        let assertion = base_assertion();
+        let token = signing_key().sign(&assertion).expect("signs");
+        let mut parts: Vec<&str> = token.split('.').collect();
+        let forged = forged_signing_key().sign(&assertion).expect("signs");
+        let forged_sig = forged.split('.').nth(2).expect("sig").to_string();
+        parts[2] = &forged_sig;
+        assert_eq!(
+            rejected_reason(verify_with_key(
+                &parts.join("."),
+                &decoding_key(),
+                ASSERTION_MAX_TTL_SECONDS
+            )),
+            reason::BAD_SIGNATURE
+        );
+
+        let mut claims = good_claims();
+        claims["iat"] = json!(now_secs() - 120);
+        claims["exp"] = json!(now_secs() - 60);
+        assert_eq!(rejected_reason(verify_raw(&claims)), reason::EXPIRED);
+    }
+
+    #[test]
+    fn every_required_claim_missing_is_missing_claim() {
+        for name in [
+            "sub",
+            "tenant",
+            "community",
+            "app",
+            "category",
+            "destination",
+            "port",
+            "jti",
+            "iat",
+            "exp",
+        ] {
+            let mut claims = good_claims();
+            claims.as_object_mut().expect("object").remove(name);
+            assert_eq!(
+                rejected_reason(verify_raw(&claims)),
+                reason::MISSING_CLAIM,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_identity_claims_fail_closed_with_no_default_tenant() {
+        for name in ["sub", "tenant", "jti"] {
+            for empty in ["", "   ", "\t\n"] {
+                let mut claims = good_claims();
+                claims[name] = json!(empty);
+                assert_eq!(
+                    rejected_reason(verify_raw(&claims)),
+                    reason::INVALID_CLAIM,
+                    "{name}={empty:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mistyped_claims_are_invalid_claim() {
+        for (name, value) in [
+            ("port", json!("443")),
+            ("port", json!(70000)),
+            ("port", json!(-1)),
+            ("category", json!("bogus")),
+            ("tenant", json!(7)),
+            ("jti", json!(["x"])),
+            ("destination", json!(false)),
+            ("iat", json!("now")),
+        ] {
+            let mut claims = good_claims();
+            claims[name] = value.clone();
+            assert_eq!(
+                rejected_reason(verify_raw(&claims)),
+                reason::INVALID_CLAIM,
+                "{name}={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn iat_in_the_future_is_bounded_by_the_skew() {
+        let mut claims = good_claims();
+        claims["iat"] = json!(now_secs() + ASSERTION_CLOCK_SKEW_SECONDS + 60);
+        claims["exp"] = json!(now_secs() + ASSERTION_CLOCK_SKEW_SECONDS + 90);
+        assert_eq!(rejected_reason(verify_raw(&claims)), reason::IMMATURE);
+
+        let mut claims = good_claims();
+        claims["iat"] = json!(now_secs() + ASSERTION_CLOCK_SKEW_SECONDS - 2);
+        claims["exp"] = json!(now_secs() + ASSERTION_CLOCK_SKEW_SECONDS + 20);
+        verify_raw(&claims).expect("iat inside the skew allowance verifies");
+    }
+
+    #[test]
+    fn alg_none_and_alg_confusion_are_refused_by_the_pinned_validation() {
+        // The JWKS-aware verifier vets the header first (see `egress_proxy`);
+        // this proves the primitive itself is independently pinned to EdDSA.
+        let claims = good_claims();
+        let none = format!("{}.{}.", b64(&json!({"alg": "none"})), b64(&claims));
+        assert!(matches!(
+            verify_with_key(&none, &decoding_key(), ASSERTION_MAX_TTL_SECONDS),
+            Err(AssertionError::Rejected(_))
+        ));
+
+        for alg in [Algorithm::HS256, Algorithm::HS384, Algorithm::HS512] {
+            let token = jsonwebtoken::encode(
+                &Header::new(alg),
+                &claims,
+                &EncodingKey::from_secret(KEY_A_PUB_RAW),
+            )
+            .expect("encode");
+            assert_eq!(
+                rejected_reason(verify_with_key(
+                    &token,
+                    &decoding_key(),
+                    ASSERTION_MAX_TTL_SECONDS
+                )),
+                reason::ALG_MISMATCH,
+                "{alg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn structurally_broken_tokens_are_rejected_with_a_closed_reason() {
+        for token in ["", "not-a-jwt", "a.b", "a.b.c", "%%%.%%%.%%%"] {
+            let reason = rejected_reason(verify_with_key(
+                token,
+                &decoding_key(),
+                ASSERTION_MAX_TTL_SECONDS,
+            ));
+            assert!(
+                super::reason::ALL.contains(&reason),
+                "{token:?} -> {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejection_is_a_closed_vocabulary_with_no_library_text() {
+        let err = AssertionError::Rejected(reason::BAD_SIGNATURE);
+        assert_eq!(err.to_string(), "invalid assertion: bad_signature");
+        assert_eq!(reason::ALL.len(), 8);
+        let mut sorted = reason::ALL.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), reason::ALL.len(), "no duplicate reasons");
+    }
+
+    #[test]
+    fn decode_errors_map_to_closed_reasons() {
+        for (kind, expected) in [
+            (ErrorKind::ExpiredSignature, reason::EXPIRED),
+            (ErrorKind::ImmatureSignature, reason::IMMATURE),
+            (ErrorKind::InvalidSignature, reason::BAD_SIGNATURE),
+            (
+                ErrorKind::MissingRequiredClaim("sub".into()),
+                reason::MISSING_CLAIM,
+            ),
+            (
+                ErrorKind::InvalidClaimFormat("exp".into()),
+                reason::INVALID_CLAIM,
+            ),
+            (ErrorKind::InvalidAlgorithm, reason::ALG_MISMATCH),
+            (ErrorKind::InvalidAlgorithmName, reason::ALG_MISMATCH),
+            (ErrorKind::MissingAlgorithm, reason::ALG_MISMATCH),
+            (ErrorKind::InvalidToken, reason::MALFORMED),
+            (ErrorKind::InvalidEddsaKey, reason::INVALID),
+        ] {
+            assert_eq!(classify_decode_error(&kind), expected, "{kind:?}");
+        }
     }
 }

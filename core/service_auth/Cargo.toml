@@ -54,10 +54,18 @@ base64 = "=0.22.1"
 # startup (`opentelemetry::global::set_meter_provider`); with none
 # installed the instruments are no-ops and verification is unaffected.
 opentelemetry = { version = "=0.32.0", default-features = false, features = ["metrics"] }
+# Only for `test_support` (the in-memory metric capture) -- off by default and
+# never part of a service binary.
+opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["metrics"], optional = true }
+
+[features]
+default = []
+# Exposes `service_auth::test_support::Capture` to dependents' tests.
+test-support = ["dep:opentelemetry_sdk"]
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }
-# Test-only: `InMemoryMetricExporter` proves the counter/histogram carry the
+# Test-only: the capturing exporter proves the counter/histogram carry the
 # exact `waddles_jwt_verifications_total{verifier,alg,outcome}` label set the
 # Python verifiers emit. Never linked into a service binary.
 opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["metrics"] }

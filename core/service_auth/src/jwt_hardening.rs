@@ -83,6 +83,27 @@ pub const REASON_SCOPE_DENIED: &str = "scope_denied";
 /// Rejection reason: anything else (an unexpected library failure).
 pub const REASON_INVALID: &str = "invalid";
 
+/// Every `REASON_*` -- the closed set a rejection's `outcome` label is drawn
+/// from (plus [`OUTCOME_OK`]). Used by cross-crate vocabulary checks.
+pub const ALL_REASONS: [&str; 16] = [
+    REASON_MALFORMED,
+    REASON_ALG_NONE,
+    REASON_ALG_MISMATCH,
+    REASON_FORBIDDEN_HEADER,
+    REASON_BAD_KID,
+    REASON_UNKNOWN_KID,
+    REASON_NO_KEY,
+    REASON_BAD_SIGNATURE,
+    REASON_EXPIRED,
+    REASON_IMMATURE,
+    REASON_BAD_ISSUER,
+    REASON_BAD_AUDIENCE,
+    REASON_MISSING_CLAIM,
+    REASON_INVALID_CLAIM,
+    REASON_SCOPE_DENIED,
+    REASON_INVALID,
+];
+
 /// JOSE header parameters that let a token pick its own verification key
 /// (see the module doc). Identical set to the Python `FORBIDDEN_HEADER_PARAMS`.
 pub const FORBIDDEN_HEADER_PARAMS: [&str; 5] = ["jku", "jwk", "x5u", "x5c", "crit"];
@@ -415,149 +436,6 @@ pub fn report_outcome(
     }
 }
 
-/// In-memory metrics capture for tests: an SDK meter provider whose exporter
-/// snapshots every data point, so a test can assert the exact instrument
-/// names, units and label sets without any network or global state.
-#[cfg(test)]
-pub(crate) mod test_support {
-    use std::collections::BTreeMap;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-
-    use opentelemetry_sdk::error::OTelSdkResult;
-    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
-    use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
-    use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider, Temporality};
-
-    use super::JwtMetrics;
-
-    /// One exported data point: counter value, or histogram observation count.
-    #[derive(Debug, Clone, PartialEq)]
-    pub(crate) struct Point {
-        pub(crate) name: String,
-        pub(crate) unit: String,
-        pub(crate) attrs: BTreeMap<String, String>,
-        pub(crate) value: u64,
-        pub(crate) bounds: Vec<f64>,
-    }
-
-    #[derive(Clone, Debug, Default)]
-    struct Snapshot {
-        points: Arc<Mutex<Vec<Point>>>,
-    }
-
-    impl PushMetricExporter for Snapshot {
-        async fn export(&self, metrics: &ResourceMetrics) -> OTelSdkResult {
-            let mut out = Vec::new();
-            for scope in metrics.scope_metrics() {
-                for metric in scope.metrics() {
-                    let attrs_of = |iter: &mut dyn Iterator<Item = &opentelemetry::KeyValue>| {
-                        iter.map(|kv| (kv.key.to_string(), kv.value.as_str().to_string()))
-                            .collect::<BTreeMap<_, _>>()
-                    };
-                    match metric.data() {
-                        AggregatedMetrics::U64(MetricData::Sum(sum)) => {
-                            for dp in sum.data_points() {
-                                out.push(Point {
-                                    name: metric.name().to_string(),
-                                    unit: metric.unit().to_string(),
-                                    attrs: attrs_of(&mut dp.attributes()),
-                                    value: dp.value(),
-                                    bounds: Vec::new(),
-                                });
-                            }
-                        }
-                        AggregatedMetrics::F64(MetricData::Histogram(hist)) => {
-                            for dp in hist.data_points() {
-                                out.push(Point {
-                                    name: metric.name().to_string(),
-                                    unit: metric.unit().to_string(),
-                                    attrs: attrs_of(&mut dp.attributes()),
-                                    value: dp.count(),
-                                    bounds: dp.bounds().collect(),
-                                });
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            *self.points.lock().expect("snapshot lock") = out;
-            Ok(())
-        }
-
-        fn force_flush(&self) -> OTelSdkResult {
-            Ok(())
-        }
-
-        fn shutdown_with_timeout(&self, _timeout: Duration) -> OTelSdkResult {
-            Ok(())
-        }
-
-        fn temporality(&self) -> Temporality {
-            Temporality::Cumulative
-        }
-    }
-
-    /// A capturing provider plus the [`JwtMetrics`] bound to it.
-    pub(crate) struct Capture {
-        snapshot: Snapshot,
-        provider: SdkMeterProvider,
-        pub(crate) metrics: JwtMetrics,
-    }
-
-    impl Capture {
-        /// A fresh provider with an hour-long export interval (flushed by hand).
-        pub(crate) fn new() -> Self {
-            let snapshot = Snapshot::default();
-            let reader = PeriodicReader::builder(snapshot.clone())
-                .with_interval(Duration::from_secs(3600))
-                .build();
-            let provider = SdkMeterProvider::builder().with_reader(reader).build();
-            let metrics = JwtMetrics::new(&provider);
-            Self {
-                snapshot,
-                provider,
-                metrics,
-            }
-        }
-
-        /// Every exported data point named `name`, after a forced flush.
-        pub(crate) fn points(&self, name: &str) -> Vec<Point> {
-            self.provider.force_flush().expect("flush meter provider");
-            self.snapshot
-                .points
-                .lock()
-                .expect("snapshot lock")
-                .iter()
-                .filter(|point| point.name == name)
-                .cloned()
-                .collect()
-        }
-
-        /// The counter value for the exact `(verifier, alg, outcome)` label set.
-        pub(crate) fn count(&self, verifier: &str, alg: &str, outcome: &str) -> u64 {
-            self.points(super::METRIC_VERIFICATIONS)
-                .into_iter()
-                .filter(|p| {
-                    p.attrs.get("verifier").map(String::as_str) == Some(verifier)
-                        && p.attrs.get("alg").map(String::as_str) == Some(alg)
-                        && p.attrs.get("outcome").map(String::as_str) == Some(outcome)
-                })
-                .map(|p| p.value)
-                .sum()
-        }
-
-        /// The sum of every counter data point (total verifications recorded).
-        pub(crate) fn total(&self) -> u64 {
-            self.points(super::METRIC_VERIFICATIONS)
-                .iter()
-                .map(|p| p.value)
-                .sum()
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -809,6 +687,24 @@ mod tests {
     }
 
     #[test]
+    fn all_reasons_are_unique_snake_case_and_include_the_ok_free_set() {
+        let mut sorted = ALL_REASONS.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ALL_REASONS.len(), "no duplicates");
+        assert!(!ALL_REASONS.contains(&OUTCOME_OK), "ok is not a rejection");
+        for reason in ALL_REASONS {
+            assert!(
+                reason.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{reason} must be a bounded snake_case label"
+            );
+        }
+        for alarming in ALARMING_REASONS {
+            assert!(ALL_REASONS.contains(&alarming), "{alarming}");
+        }
+    }
+
+    #[test]
     fn rejection_display_is_the_reason_only() {
         let rejection = JwtRejection::new(REASON_BAD_KID, "eddsa");
         assert_eq!(rejection.to_string(), "bad_kid");
@@ -825,7 +721,7 @@ mod tests {
 
     #[test]
     fn counter_and_histogram_carry_the_python_instrument_contract() {
-        let capture = test_support::Capture::new();
+        let capture = crate::test_support::Capture::new();
         capture
             .metrics
             .record(VERIFIER_PLATFORM_HS256, "hs256", OUTCOME_OK, Instant::now());
@@ -874,7 +770,7 @@ mod tests {
 
     #[test]
     fn report_outcome_records_ok_and_rejections() {
-        let capture = test_support::Capture::new();
+        let capture = crate::test_support::Capture::new();
         report_outcome(
             &capture.metrics,
             VERIFIER_EGRESS_ASSERTION,

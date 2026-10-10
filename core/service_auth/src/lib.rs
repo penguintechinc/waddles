@@ -23,6 +23,8 @@
 //! (`svc_process`, `svc_action`) don't change either.
 
 pub mod jwt_hardening;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1025,11 +1027,11 @@ mod tests {
 
     // ---- Phase-0 hardening (RFC 8725) ------------------------------------
 
-    use crate::jwt_hardening::test_support::Capture;
     use crate::jwt_hardening::{
         FORBIDDEN_HEADER_PARAMS, REASON_ALG_MISMATCH, REASON_ALG_NONE, REASON_BAD_KID,
         REASON_FORBIDDEN_HEADER, REASON_NO_KEY,
     };
+    use crate::test_support::Capture;
     use serde_json::json;
 
     const AUD: &str = "waddlebot-internal";
