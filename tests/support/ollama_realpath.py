@@ -66,7 +66,7 @@ LOCK_ACQUIRE_TIMEOUT_SECONDS = 900.0
 _LOCK_POLL_SECONDS = 0.05
 
 
-class SingleFlightViolation(RuntimeError):  # noqa: N818 - reads as the rule it enforces
+class SingleFlightViolation(RuntimeError):
     """A request broke a real-path safety rail (foreign host / over budget / lock timeout)."""
 
 
@@ -168,7 +168,9 @@ class SingleFlightGuard:
                 path=request.url.path,
                 host=request.url.host,
                 headers=request.headers,
-                body=request.content if request.stream is not None and _is_buffered(request) else b"",
+                body=request.content
+                if request.stream is not None and _is_buffered(request)
+                else b"",
             )
         )
         try:
@@ -299,10 +301,10 @@ def single_flight(ollama_url: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[
     yield guard
     leaked = len(guard._open_fds)
     guard.release_all()
-    assert guard.max_in_flight <= 1, (
-        f"single-flight violated: {guard.max_in_flight} requests were in flight at once"
-    )
-    assert leaked == 0, f"{leaked} response(s) were never closed (lock held past the test)"
+    if guard.max_in_flight > 1:
+        pytest.fail(f"single-flight violated: {guard.max_in_flight} requests in flight at once")
+    if leaked:
+        pytest.fail(f"{leaked} response(s) were never closed (lock held past the test)")
 
 
 __all__ = [

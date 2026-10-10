@@ -65,6 +65,18 @@ def _env_flag(name: str, *, default: bool) -> bool:
     raise ValueError(f"{name}={raw!r} is not a boolean (use true/false/1/0/yes/no/on/off)")
 
 
+def _describe_http_error(exc: httpx.HTTPError) -> str:
+    """Non-sensitive one-liner for a self-hosted Ollama failure: status or class, never the URL.
+
+    `str(httpx.HTTPError)` embeds the request URL -- for the free/premium tiers that is
+    the internal Ollama address, which must not be relayed to API callers via
+    `provider_error()`. The full exception is logged server-side instead.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    return type(exc).__name__
+
+
 def _require_completion_text(text: str, *, provider: str, detail: str) -> str:
     """Return `text`, or raise `provider_error()` if the provider returned a blank completion.
 
@@ -187,7 +199,9 @@ class OllamaClient:
                 exc,
                 exc_info=True,
             )
-            raise provider_error(f"Ollama ({tier}) request failed: {exc}") from exc
+            raise provider_error(
+                f"Ollama ({tier}) request failed: {_describe_http_error(exc)}"
+            ) from exc
 
         data = self._parse_body(response, tier=tier)
         done_reason = data.get("done_reason")
