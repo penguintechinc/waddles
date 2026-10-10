@@ -27,6 +27,17 @@ service IdentityService {
   // display names in one call, so callers batch instead of N+1. Required
   // scope: "identity:displayname:read".
   rpc ResolveDisplayNames(ResolveDisplayNamesRequest) returns (ResolveDisplayNamesResponse);
+
+  // Resolves ONE raw user reference as a chat user typed it -- a platform
+  // handle ("@bob", "bob") or a Discord mention ("<@123>", "<@!123>") -- to
+  // the stable UUID of that identity, entirely inside the hub-api PII
+  // boundary: the raw handle is matched here and never stored, echoed or
+  // logged; only the UUID comes back. NOT_FOUND = no such identity in the
+  // tenant (or tenant unknown), FAILED_PRECONDITION = the handle matches
+  // more than one identity (never guessed), INVALID_ARGUMENT = malformed
+  // or non-user reference (role/channel mention, @everyone). Required
+  // scope: "identity:handle:resolve".
+  rpc ResolveHandle(ResolveHandleRequest) returns (ResolveHandleResponse);
 }
 
 message MintEphemeralPseudonymRequest {
@@ -75,4 +86,28 @@ message ResolveDisplayNamesResponse {
   // known pseudonym -- never an error, since a stale/evicted pseudonym
   // is an expected condition, not a caller bug.
   repeated string unresolved_uuids = 2;
+}
+
+// How a ResolveHandle reference matched. Carries no PII.
+enum MatchKind {
+  MATCH_KIND_UNSPECIFIED = 0;
+  // Discord-style mention: the platform user id was embedded in the token.
+  MATCH_KIND_MENTION = 1;
+  // Free-text handle matched against a linked or pseudonymised identity.
+  MATCH_KIND_HANDLE = 2;
+}
+
+message ResolveHandleRequest {
+  string tenant_id = 1;
+  string platform = 2;
+  // Raw reference exactly as typed (1..255 chars, no control characters).
+  // PII: stays inside hub-api, never persisted or logged.
+  string target = 3;
+}
+
+message ResolveHandleResponse {
+  // hub_users.uuid when the identity is linked to a hub user, else its
+  // stable per-tenant ephemeral pseudonym.
+  string uuid = 1;
+  MatchKind match_kind = 2;
 }

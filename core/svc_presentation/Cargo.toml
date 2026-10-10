@@ -23,7 +23,10 @@ path = "src/main.rs"
 # versions of the same crate.
 [dependencies]
 tokio = { version = "=1.53.1", features = ["full"] }
-axum = "=0.8.9"
+# "ws" (not a default axum feature) -- P4's live overlay viewer channel
+# (`http::overlay::live_ws`) needs `axum::extract::ws`; "tokio" (default)
+# already covers `axum::serve` itself.
+axum = { version = "=0.8.9", features = ["ws"] }
 tower = { version = "=0.5.3", features = ["util"] }
 tower-http = { version = "=0.7.1", features = ["trace", "cors"] }
 hyper = { version = "=1.11.1", features = ["full"] }
@@ -87,6 +90,12 @@ overlay_auth = { path = "../overlay_auth", version = "=0.1.0" }
 # second direct use of the same already-resolved crate, not new surface.
 service_auth = { path = "../service_auth", version = "=0.1.0" }
 
+# P3's live SSE stream (`overlay::hub`/`http::overlay::live_event_stream`)
+# builds a `Stream` by hand with `futures::stream::unfold` rather than
+# pulling in `async-stream`'s proc-macro -- same exact version/feature pin
+# as core/svc_streaming/Cargo.toml so cargo-deny sees one resolved version.
+futures = { version = "=0.3.34", default-features = false, features = ["std", "async-await"] }
+
 [dev-dependencies]
 http-body-util = "=0.1.3"
 # Test-only: `MockDatabase` for `overlay::view_store`/`http::health`/
@@ -100,6 +109,12 @@ sea-orm = { version = "=2.0.2", default-features = false, features = ["mock"] }
 # version/feature pin as core/overlay_auth/Cargo.toml and
 # core/service_auth/Cargo.toml so cargo-deny sees one resolved version.
 jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs"] }
+# Test-only real websocket client -- `tests/overlay_live.rs` connects to a
+# genuinely bound TCP listener running the real axum app (same `axum::serve`
+# pattern as `tests/run.rs`) rather than mocking the upgrade; exact same
+# version axum's own "ws" feature pins above, so cargo-deny sees one
+# resolved version, not two.
+tokio-tungstenite = "=0.29.0"
 
 [profile.release]
 opt-level = 3

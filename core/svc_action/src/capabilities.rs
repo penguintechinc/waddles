@@ -20,9 +20,11 @@
 //! leftover scope.
 //!
 //! `relay` (Twitch outbound via Valkey `LPUSH`, drained by svc-ingest's own
-//! persistent IRC connection; Discord outbound via a direct, stateless bot
+//! persistent IRC connection; Discord `chat.send` via a direct, stateless bot
 //! REST send -- see [`StageCapabilities::handle_discord_relay`]'s doc for
-//! why Discord takes a different path than Twitch), `clock`, `context`,
+//! why Discord takes a different path than Twitch; Discord `chat.delete`/
+//! `dm.send` via the Valkey queue with a **confirmation handshake**, see
+//! [`StageCapabilities::handle_discord_queued_op`]), `clock`, `context`,
 //! `log`, and `kv` are fully wired. `http` is wired to
 //! `crate::egress::EgressGuard` (spec §8's full SSRF guard). `kv` is wired
 //! to `bundle_host_kv::KvHost` (the crate shared with `core/svc_process` --
@@ -43,6 +45,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use bundle_capability_gate::{
     AppScopedResource, CapabilityGate, Denied, HostInvokeScopeBuilder, PermissionId, ResourceRef,
@@ -223,7 +226,269 @@ pub fn outbound_relay_queue_key(provider: &str) -> String {
 /// [`StageCapabilities::handle_relay`] (Valkey `LPUSH` vs. a direct bot
 /// REST send), documented on that function and
 /// [`StageCapabilities::handle_discord_relay`]. Action-stage bundles only.
+///
+/// **Membership here is NOT support.** A provider listed here is merely a
+/// name the capability recognises; which `(provider, op)` pairs actually have
+/// a live sender behind them is the explicit table in [`relay_op_supported`].
+/// Adding a provider here without adding its table rows leaves every op
+/// refused `unsupported_op` -- a new provider is unsupported until someone
+/// deliberately opts it in, never auto-supported onto an undrained queue.
 const RELAY_PROVIDERS: &[&str] = &["twitch", "discord"];
+
+/// Valkey key the Discord outbound drain (`svc_ingest::outbound::
+/// run_discord`) keeps alive (short TTL, heartbeat-refreshed) while it is
+/// actually running with a working bot token. Discord `chat.delete`/`dm.send`
+/// are refused loudly when it is absent, so a misconfigured deployment (drain
+/// flag off, `DISCORD_BOT_TOKEN` missing, spine config missing, drain crashed)
+/// fails at the producer instead of queueing ops nothing will ever drain.
+/// Byte-identical to `svc_ingest::outbound::DISCORD_DRAIN_READY_KEY`
+/// (duplicated, not imported -- separate crates; both sides pin the literal
+/// in a test).
+pub const DISCORD_DRAIN_READY_KEY: &str = "waddles:transport:discord:drain-ready";
+
+/// Prefix of the per-op result key (`<prefix><op_id>`) the drain posts an
+/// op's outcome under; the producer polls it. Byte-identical to
+/// `svc_ingest::outbound::DISCORD_OP_ACK_KEY_PREFIX`.
+pub const DISCORD_OP_ACK_KEY_PREFIX: &str = "waddles:transport:discord:ack:";
+
+/// Hard upper bound on an outbound relay list: after every push the list is
+/// trimmed to its newest `OUTBOUND_QUEUE_MAX_LEN` entries, so an undrained
+/// queue can never grow without limit.
+const OUTBOUND_QUEUE_MAX_LEN: isize = 1000;
+
+/// TTL (seconds) re-armed on the list key by every push. An undrained list
+/// evaporates this long after its last push, so a stale `chat.delete`/
+/// `dm.send` is never executed hours later if a drain comes back.
+const OUTBOUND_QUEUE_TTL_SECS: i64 = 300;
+
+/// How long a queued Discord op waits for the drain to confirm it. Must fit,
+/// twice over (delete then DM), inside the bundle invoke budget
+/// (`limits.timeout_ms`, capped by the executor at 10s). Also stamped on the
+/// envelope as its deadline, so the drain drops an entry the producer has
+/// already given up on instead of executing an op it reported as failed.
+const DISCORD_OP_ACK_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Poll interval while waiting for the drain's result. Polling (`GETDEL`)
+/// rather than a blocking pop: a blocking command would stall every other
+/// command multiplexed on this stage's shared Valkey connection (`kv`,
+/// usage metering, relay pushes).
+const DISCORD_OP_ACK_POLL: Duration = Duration::from_millis(50);
+
+/// Discord's hard limit on a message's `content`. A `dm.send` longer than this
+/// can never be delivered, so it is refused up front rather than queued (the
+/// list bound is by entry count, not size).
+const DISCORD_MAX_CONTENT_CHARS: usize = 2000;
+
+/// `dm.send` throttle: fixed window (seconds) shared by both limits below.
+/// Enforced in Valkey so every `svc_action` replica counts against the same
+/// budget.
+const DM_SEND_WINDOW_SECS: u64 = 60;
+
+/// Max `dm.send` ops per `(tenant, community, app)` per window.
+const DM_SEND_APP_LIMIT: u64 = 10;
+
+/// Max `dm.send` ops to one target user per tenant per window -- caps how
+/// hard any bundle (or several) can hammer a single person.
+const DM_SEND_TARGET_LIMIT: u64 = 3;
+
+/// Version stamped on every outbound action envelope this host queues
+/// (`"v"`). The consumer (`svc_ingest::outbound_ops`) treats a missing `v`
+/// as the legacy text-only shape and rejects any version above the one it
+/// knows -- bump only with a consumer that understands it.
+const OUTBOUND_SCHEMA_VERSION: u32 = 1;
+
+/// The verb of an outbound platform action (provider-framework Step 0,
+/// issue #719). Mirrors `svc_ingest::outbound_ops::OutboundAction`; the
+/// wire string is the same `op` field the queue envelope carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RelayOp {
+    ChatSend,
+    ChatDelete,
+    DmSend,
+}
+
+impl RelayOp {
+    /// Parses the wire `op` string; `None` for an unknown verb (the caller
+    /// fails loud rather than defaulting to `chat.send`).
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "chat.send" => Some(Self::ChatSend),
+            "chat.delete" => Some(Self::ChatDelete),
+            "dm.send" => Some(Self::DmSend),
+            _ => None,
+        }
+    }
+
+    /// The wire/permission-family spelling of this op.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ChatSend => "chat.send",
+            Self::ChatDelete => "chat.delete",
+            Self::DmSend => "dm.send",
+        }
+    }
+
+    /// The catalog permission id this op requires for `provider`.
+    fn permission(self, provider: &str) -> PermissionId {
+        match self {
+            Self::ChatSend => PermissionId::ChatSend(provider.to_string()),
+            Self::ChatDelete => PermissionId::ChatDelete(provider.to_string()),
+            Self::DmSend => PermissionId::DmSend(provider.to_string()),
+        }
+    }
+}
+
+/// Whether `(provider, op)` has a live sender behind it today -- an
+/// **explicit opt-in table**, deliberately without a wildcard arm: a provider
+/// (or a new op) is unsupported until a row is added here, so adding a name to
+/// [`RELAY_PROVIDERS`] can never silently route ops onto a queue nothing
+/// drains. Today: Twitch `chat.send` (IRC drain in `svc_ingest`); Discord
+/// `chat.send` (inline bot REST, [`StageCapabilities::handle_discord_relay`])
+/// and Discord `chat.delete`/`dm.send` (bot-token REST sender behind the
+/// confirmation handshake, [`StageCapabilities::handle_discord_queued_op`]).
+/// Twitch `chat.delete`/`dm.send` stay authorized-then-refused
+/// (`unsupported_op`) until the Helix client lands -- never queued into a
+/// consumer that cannot act on them, so the bundle sees the failure instead of
+/// a silent black hole.
+fn relay_op_supported(provider: &str, op: RelayOp) -> bool {
+    matches!(
+        (provider, op),
+        ("twitch", RelayOp::ChatSend)
+            | (
+                "discord",
+                RelayOp::ChatSend | RelayOp::ChatDelete | RelayOp::DmSend
+            )
+    )
+}
+
+/// Optional fields of the outbound queue envelope beyond the always-present
+/// `v`/`op`/`platform`; only the ones an op needs are set.
+#[derive(Default)]
+struct EnvelopeFields<'a> {
+    channel: Option<&'a str>,
+    text: Option<&'a str>,
+    message_id: Option<&'a str>,
+    user_id: Option<&'a str>,
+    /// The triggering event's channel -- `dm.send` only: lets the sender bind
+    /// the DM target to that channel's community.
+    origin_channel: Option<&'a str>,
+}
+
+/// Producer-side builder for the versioned outbound queue envelope
+/// (`svc_ingest::outbound_ops::parse_outbound_entry` is the consumer). Only
+/// the fields the op needs are emitted; `channel`/`text` stay top-level for
+/// the legacy-consumer rolling-upgrade guarantee on `chat.send`.
+fn build_outbound_envelope(
+    op: RelayOp,
+    provider: &str,
+    fields: &EnvelopeFields<'_>,
+) -> serde_json::Value {
+    let mut env = serde_json::json!({
+        "v": OUTBOUND_SCHEMA_VERSION,
+        "op": op.as_str(),
+        "platform": provider,
+    });
+    if let Some(obj) = env.as_object_mut() {
+        for (key, value) in [
+            ("channel", fields.channel),
+            ("text", fields.text),
+            ("message_id", fields.message_id),
+            ("user_id", fields.user_id),
+            ("origin_channel", fields.origin_channel),
+        ] {
+            if let Some(v) = value {
+                obj.insert(key.to_string(), serde_json::Value::String(v.to_string()));
+            }
+        }
+    }
+    env
+}
+
+/// Stamps the confirmation handshake onto a queued envelope: `op_id` (the
+/// id the drain posts its result under) and `exp_ms` (epoch-ms deadline after
+/// which the producer has stopped waiting and the drain must not execute the
+/// op).
+fn stamp_handshake(env: &mut serde_json::Value, op_id: &str, exp_ms: u64) {
+    if let Some(obj) = env.as_object_mut() {
+        obj.insert(
+            "op_id".to_string(),
+            serde_json::Value::String(op_id.to_string()),
+        );
+        obj.insert("exp_ms".to_string(), serde_json::Value::from(exp_ms));
+    }
+}
+
+/// Wall-clock now in epoch milliseconds. A clock before the epoch reads `0`
+/// (the resulting deadline then looks already-expired and the op fails loudly
+/// rather than being executed late).
+fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// A short, non-reversible tag for a platform user id, for use in Valkey
+/// rate-limit keys -- the raw id (a user identifier) never becomes part of a
+/// key name.
+fn user_tag(user_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(user_id.as_bytes());
+    hex::encode(&hash[..8])
+}
+
+/// The drain's outcome for one queued op, as read from its result key.
+#[derive(Debug, PartialEq, Eq)]
+enum AckOutcome {
+    /// The platform performed the op.
+    Confirmed,
+    /// The drain reported the op was not performed, and why.
+    Refused(AckFailure),
+}
+
+/// Why the drain did not perform a queued op -- a closed set, so an
+/// unexpected string in the result key can never become an arbitrary error
+/// code surfaced to a bundle.
+#[derive(Debug, PartialEq, Eq)]
+enum AckFailure {
+    NotInCommunity,
+    Unsupported,
+    Failed,
+}
+
+/// Parses the drain's result JSON (`{"ok":true}` / `{"ok":false,"code":..}`).
+/// `Err` is a malformed/unrecognisable result -- the caller treats the op as
+/// unconfirmed, never as done.
+fn parse_ack(raw: &str) -> Result<AckOutcome, String> {
+    let v: serde_json::Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    match v.get("ok").and_then(serde_json::Value::as_bool) {
+        Some(true) => Ok(AckOutcome::Confirmed),
+        Some(false) => Ok(AckOutcome::Refused(
+            match v.get("code").and_then(serde_json::Value::as_str) {
+                Some("not_in_community") => AckFailure::NotInCommunity,
+                Some("unsupported") => AckFailure::Unsupported,
+                _ => AckFailure::Failed,
+            },
+        )),
+        None => Err("result has no boolean 'ok'".to_string()),
+    }
+}
+
+/// Peeks the `op` a bundle's `message_json` asks for. Absent, unparsable or
+/// non-string `op` is the legacy `chat.send` shape -- the later field-level
+/// validation in `handle_relay` still produces the same `invalid_args`
+/// errors it always did for malformed input. `Err` carries an unknown op
+/// string.
+fn peek_relay_op(args: &serde_json::Value) -> Result<RelayOp, String> {
+    let op = args
+        .get("message_json")
+        .and_then(|v| v.as_str())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|m| m.get("op").and_then(|o| o.as_str()).map(str::to_string));
+    match op {
+        None => Ok(RelayOp::ChatSend),
+        Some(raw) => RelayOp::parse(&raw).ok_or(raw),
+    }
+}
 
 /// Strips CR/LF and every other control character before an outbound relay
 /// write -- a byte-exact port of `waddle_transports.transports.irc.
@@ -301,15 +566,86 @@ fn sanitize_bundle_log_message(raw_message: &str) -> String {
     message
 }
 
-/// The one Valkey operation the `relay` capability needs -- narrow and easy
-/// to fake in tests (mirrors `libs/waddle_transports`'s own
+/// The narrow set of Valkey operations the `relay` capability needs -- easy
+/// to fake in tests (the `lpush` core mirrors `libs/waddle_transports`'s own
 /// `RelayRedisLike` protocol on the Python side).
+///
+/// Beyond `lpush`, the Discord confirmation handshake needs three more
+/// primitives (readiness probe, per-op result read, rate-limit counter). They
+/// default to a loud error rather than a silent value, so a fake or queue
+/// that does not support them fails the op visibly instead of passing.
 pub trait RelayQueue: Send + Sync {
+    /// Appends `value` to the list `key`. The production implementation is
+    /// **bounded**: the list is trimmed to [`OUTBOUND_QUEUE_MAX_LEN`] entries
+    /// and its TTL re-armed ([`OUTBOUND_QUEUE_TTL_SECS`]) on every push, so an
+    /// undrained queue can neither grow without limit nor outlive its entries'
+    /// usefulness.
     fn lpush<'a>(
         &'a self,
         key: &'a str,
         value: String,
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+
+    /// Whether `key` currently exists (the drain-ready probe).
+    fn key_exists<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+        let _ = key;
+        Box::pin(async { Err("this RelayQueue has no key-exists support".to_string()) })
+    }
+
+    /// Atomically increments the fixed-window counter `key` (creating it with
+    /// a `window_secs` TTL on first use) and returns the new count.
+    fn incr_window<'a>(
+        &'a self,
+        key: &'a str,
+        window_secs: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send + 'a>> {
+        let _ = (key, window_secs);
+        Box::pin(async { Err("this RelayQueue has no rate-window support".to_string()) })
+    }
+
+    /// Reads and deletes the string at `key` (`GETDEL`); `Ok(None)` if absent.
+    fn take<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<String>, String>> + Send + 'a>> {
+        let _ = key;
+        Box::pin(async { Err("this RelayQueue has no result-read support".to_string()) })
+    }
+}
+
+/// Lua for [`RelayQueue::incr_window`]: `INCR`, and arm the window TTL only
+/// when this call created the key -- atomic, so a crash can never leave a
+/// counter without an expiry (which would block its subject forever).
+const INCR_WINDOW_SCRIPT: &str = r"
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+";
+
+/// The atomic `MULTI`/`EXEC` pipeline behind the bounded [`RelayQueue::lpush`]:
+/// push, trim to the newest [`OUTBOUND_QUEUE_MAX_LEN`] entries, re-arm the TTL.
+/// Built separately from the connection so its exact commands are unit-tested.
+fn bounded_push_pipeline(key: &str, value: &str) -> redis::Pipeline {
+    let mut pipe = redis::pipe();
+    pipe.atomic()
+        .cmd("LPUSH")
+        .arg(key)
+        .arg(value)
+        .cmd("LTRIM")
+        .arg(key)
+        .arg(0)
+        .arg(OUTBOUND_QUEUE_MAX_LEN - 1)
+        .ignore()
+        .cmd("EXPIRE")
+        .arg(key)
+        .arg(OUTBOUND_QUEUE_TTL_SECS)
+        .ignore();
+    pipe
 }
 
 impl RelayQueue for redis::aio::MultiplexedConnection {
@@ -320,7 +656,59 @@ impl RelayQueue for redis::aio::MultiplexedConnection {
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         let mut conn = self.clone();
         Box::pin(async move {
-            redis::AsyncCommands::lpush::<_, _, ()>(&mut conn, key, value)
+            let (len,): (i64,) = bounded_push_pipeline(key, &value)
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| e.to_string())?;
+            if len > i64::try_from(OUTBOUND_QUEUE_MAX_LEN).unwrap_or(i64::MAX) {
+                tracing::warn!(
+                    key,
+                    len,
+                    "outbound relay queue exceeded its bound; oldest entries trimmed (is the drain running?)"
+                );
+            }
+            Ok(())
+        })
+    }
+
+    fn key_exists<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+        let mut conn = self.clone();
+        Box::pin(async move {
+            redis::AsyncCommands::exists::<_, bool>(&mut conn, key)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    fn incr_window<'a>(
+        &'a self,
+        key: &'a str,
+        window_secs: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send + 'a>> {
+        let mut conn = self.clone();
+        Box::pin(async move {
+            let count: i64 = redis::Script::new(INCR_WINDOW_SCRIPT)
+                .key(key)
+                .arg(window_secs)
+                .invoke_async(&mut conn)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(u64::try_from(count).unwrap_or(0))
+        })
+    }
+
+    fn take<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<String>, String>> + Send + 'a>> {
+        let mut conn = self.clone();
+        Box::pin(async move {
+            redis::cmd("GETDEL")
+                .arg(key)
+                .query_async::<Option<String>>(&mut conn)
                 .await
                 .map_err(|e| e.to_string())
         })
@@ -401,6 +789,10 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Multiplex
     /// See [`DiscordRelay`]'s doc; `None` until [`Self::with_discord`] is
     /// called.
     discord: Option<DiscordRelay>,
+    /// How long a queued Discord `chat.delete`/`dm.send` waits for the
+    /// drain's confirmation ([`DISCORD_OP_ACK_TIMEOUT`] unless overridden by
+    /// [`Self::with_discord_ack_timeout`]).
+    discord_ack_timeout: Duration,
     /// See [`Self::with_kv`]'s doc; `None` until it is called (mirrors
     /// [`Self::discord`]'s graceful-degradation shape: a bundle sees
     /// `not_implemented` rather than this process failing to start if a
@@ -458,11 +850,22 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             egress,
             usage,
             discord: None,
+            discord_ack_timeout: DISCORD_OP_ACK_TIMEOUT,
             kv: None,
             gate,
             db: None,
             detokenize: None,
         }
+    }
+
+    /// Overrides how long a queued Discord op waits for the drain's
+    /// confirmation (default [`DISCORD_OP_ACK_TIMEOUT`]). Must stay well
+    /// inside the bundle invoke budget; exposed mainly so tests can use a
+    /// short wait.
+    #[must_use]
+    pub fn with_discord_ack_timeout(mut self, timeout: Duration) -> Self {
+        self.discord_ack_timeout = timeout;
+        self
     }
 
     /// Enables the outbound PII-detokenization pass for every `relay` host
@@ -575,16 +978,39 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 format!("relay provider {provider:?} is not in the compiled-in allowlist"),
             ));
         }
-        // Gate call FIRST (spec SS5), now that `provider` is known well
-        // enough to name the specific `chat.send:<platform>` permission id
-        // this call maps to.
+        // The op defaults to `chat.send` (legacy shape); an unknown op is
+        // refused loudly, never defaulted.
+        let op = peek_relay_op(args).map_err(|raw| {
+            denied(
+                "unknown_op",
+                format!("relay op {raw:?} is not one of chat.send/chat.delete/dm.send"),
+            )
+        })?;
+        // Gate call FIRST (spec SS5), now that `provider` and `op` are known
+        // well enough to name the specific `<op>:<platform>` permission id
+        // this call maps to (`chat.send:`/`chat.delete:`/`dm.send:`).
         self.gate
             .authorize(
                 &scope.gate_scope(),
-                PermissionId::ChatSend(provider.to_string()),
+                op.permission(provider),
                 ResourceRef::AppScoped(AppScopedResource::None),
             )
             .map_err(denied_from_gate)?;
+        if !relay_op_supported(provider, op) {
+            tracing::error!(
+                provider,
+                op = op.as_str(),
+                app_id = %scope.app_id,
+                "relay op authorized but no sender implements it yet"
+            );
+            return Err(denied(
+                "unsupported_op",
+                format!(
+                    "relay op {:?} has no sender for provider {provider:?}",
+                    op.as_str()
+                ),
+            ));
+        }
         // WIT `relay.push(provider: string, message-json: string)`
         // (`wit/waddle-bundle/stage.wit`) carries the message as an
         // opaque, provider-shaped JSON *string* -- `channel`/`text` are
@@ -612,7 +1038,14 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 format!("relay.send message_json is not valid JSON: {e}"),
             )
         })?;
-        // `text` is common to every provider; `channel` resolution below is
+        // Discord `chat.delete`/`dm.send` are executed by svc-ingest's
+        // bot-token REST sender via the outbound queue, behind a
+        // confirmation handshake; they do not share the `text`-required
+        // shape below (delete has no text).
+        if provider == "discord" && op != RelayOp::ChatSend {
+            return self.handle_discord_queued_op(scope, op, &message).await;
+        }
+        // `text` is common to every provider; `channel` resolution is
         // NOT -- Discord branches off before ever looking at
         // `message.channel` (see `handle_discord_relay`'s doc for why).
         let text = message
@@ -626,13 +1059,32 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 )
             })?;
 
-        if provider == "discord" {
-            return self.handle_discord_relay(scope, text).await;
+        // Explicit per-provider dispatch: there is deliberately no implicit
+        // "everything else is Twitch" arm. `relay_op_supported` already
+        // refused any provider/op without a table row above; this match
+        // keeps the send path itself equally explicit.
+        match provider {
+            "discord" => self.handle_discord_relay(scope, text).await,
+            "twitch" => self.handle_twitch_relay(scope, op, &message, text).await,
+            other => Err(denied(
+                "unsupported_op",
+                format!("relay provider {other:?} has no send path"),
+            )),
         }
+    }
 
-        // Twitch, the only other compiled-in provider: `channel` comes from
-        // the bundle's own `message_json`, unchanged from this capability's
-        // original (Twitch-only) landing.
+    /// Twitch `chat.send`: `LPUSH`es the versioned envelope onto
+    /// `waddles:transport:irc:twitch:outbound` for svc-ingest's persistent
+    /// IRC drain. `channel` comes from the bundle's own `message_json`,
+    /// unchanged from this capability's original (Twitch-only) landing.
+    async fn handle_twitch_relay(
+        &self,
+        scope: &InvokeScope,
+        op: RelayOp,
+        message: &serde_json::Value,
+        text: &str,
+    ) -> Result<serde_json::Value, HostResultError> {
+        let provider = "twitch";
         let channel = message
             .get("channel")
             .and_then(|v| v.as_str())
@@ -657,7 +1109,20 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         }
 
         let key = outbound_relay_queue_key(provider);
-        let payload = serde_json::json!({"channel": channel, "text": text}).to_string();
+        // Versioned envelope. `channel`/`text` stay top-level so a not-yet-
+        // upgraded consumer (which ignores unknown fields) still delivers it
+        // during a rolling upgrade; `v`/`op`/`platform` are what the new
+        // consumer dispatches on.
+        let payload = build_outbound_envelope(
+            op,
+            provider,
+            &EnvelopeFields {
+                channel: Some(&channel),
+                text: Some(&text),
+                ..EnvelopeFields::default()
+            },
+        )
+        .to_string();
         let outbound_bytes = payload.len() as u64;
         self.relay_queue
             .lpush(&key, payload)
@@ -676,6 +1141,429 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 outbound_bytes,
             );
         Ok(serde_json::json!({"queued": true, "provider": provider}))
+    }
+
+    /// Refuses a Discord queued op unless the outbound drain advertises
+    /// readiness ([`DISCORD_DRAIN_READY_KEY`]). The drain only runs when its
+    /// flag is ON, `DISCORD_BOT_TOKEN` is set and the spine config loads; any
+    /// other state used to queue ops that nothing would ever drain while the
+    /// bundle was told `{"queued":true}`. Now it is a loud, immediate error
+    /// and **nothing is queued**. A readiness probe that itself errors is
+    /// refused too (cannot prove the drain is up), never read as "ready".
+    async fn require_discord_drain_ready(
+        &self,
+        scope: &InvokeScope,
+        op: RelayOp,
+    ) -> Result<(), HostResultError> {
+        match self.relay_queue.key_exists(DISCORD_DRAIN_READY_KEY).await {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                tracing::error!(
+                    provider = "discord",
+                    op = op.as_str(),
+                    app_id = %scope.app_id,
+                    "discord outbound drain is not ready (drain flag off, DISCORD_BOT_TOKEN missing, spine config missing, or drain down); refusing op, nothing queued"
+                );
+                // The guest-facing text names the effect only; the deployment
+                // causes (flag / token / spine config) stay in the host log
+                // above -- a bundle is third-party code.
+                Err(denied(
+                    "relay_unavailable",
+                    format!(
+                        "discord {} refused: the discord outbound drain is not running; nothing was queued",
+                        op.as_str()
+                    ),
+                ))
+            }
+            Err(e) => {
+                tracing::error!(
+                    provider = "discord",
+                    op = op.as_str(),
+                    app_id = %scope.app_id,
+                    error = %e,
+                    "could not verify the discord outbound drain is ready; refusing op, nothing queued"
+                );
+                Err(denied(
+                    "relay_unavailable",
+                    format!(
+                        "discord {} refused: could not verify the discord outbound drain is running: {e}",
+                        op.as_str()
+                    ),
+                ))
+            }
+        }
+    }
+
+    /// The real throttle on `dm.send` (the catalog's `UsageBatcher` is
+    /// write-only metering and never refuses anything). Two fixed-window
+    /// counters in Valkey -- shared by every `svc_action` replica -- both of
+    /// which must admit the call: per `(tenant, community, app)`
+    /// ([`DM_SEND_APP_LIMIT`]) and per target user within the tenant
+    /// ([`DM_SEND_TARGET_LIMIT`], keyed by a hash of the id, never the raw
+    /// id). A limiter that cannot be read fails **closed**.
+    async fn throttle_dm_send(
+        &self,
+        scope: &InvokeScope,
+        user_id: &str,
+    ) -> Result<(), HostResultError> {
+        let app_key = format!(
+            "waddles:ratelimit:dm.send:app:{}:{}:{}",
+            scope.tenant_id, scope.community_id, scope.app_id
+        );
+        let target_key = format!(
+            "waddles:ratelimit:dm.send:target:{}:{}",
+            scope.tenant_id,
+            user_tag(user_id)
+        );
+        for (key, limit, subject) in [
+            (app_key, DM_SEND_APP_LIMIT, "this app in this community"),
+            (target_key, DM_SEND_TARGET_LIMIT, "this recipient"),
+        ] {
+            match self
+                .relay_queue
+                .incr_window(&key, DM_SEND_WINDOW_SECS)
+                .await
+            {
+                Ok(count) if count <= limit => {}
+                Ok(count) => {
+                    tracing::warn!(
+                        provider = "discord",
+                        app_id = %scope.app_id,
+                        count,
+                        limit,
+                        window_secs = DM_SEND_WINDOW_SECS,
+                        subject,
+                        "dm.send rate limit exceeded; refusing op, nothing queued"
+                    );
+                    return Err(denied(
+                        "rate_limited",
+                        format!(
+                            "discord dm.send rate limit exceeded for {subject} \
+                             ({limit} per {DM_SEND_WINDOW_SECS}s)"
+                        ),
+                    ));
+                }
+                Err(e) => {
+                    tracing::error!(
+                        provider = "discord",
+                        app_id = %scope.app_id,
+                        error = %e,
+                        "dm.send rate limiter unavailable; refusing op (fail closed), nothing queued"
+                    );
+                    return Err(denied(
+                        "relay_unavailable",
+                        format!("discord dm.send refused: rate limiter unavailable: {e}"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Waits for the drain's result for `op_id` and maps it onto this host
+    /// call's own result: `Ok` **only** when the platform confirmed it
+    /// performed the op. A drain that accepted the entry but never answers
+    /// (down, wedged, dropped it) is `relay_unconfirmed`, never success -- a
+    /// bundle must not treat "queued" as "done" (the `!secret` bundle would
+    /// otherwise DM a link while the plaintext was still public).
+    async fn await_discord_ack(
+        &self,
+        scope: &InvokeScope,
+        op: RelayOp,
+        op_id: &str,
+    ) -> Result<(), HostResultError> {
+        let key = format!("{DISCORD_OP_ACK_KEY_PREFIX}{op_id}");
+        let deadline = tokio::time::Instant::now() + self.discord_ack_timeout;
+        loop {
+            match self.relay_queue.take(&key).await {
+                Ok(Some(raw)) => {
+                    return match parse_ack(&raw) {
+                        Ok(AckOutcome::Confirmed) => Ok(()),
+                        Ok(AckOutcome::Refused(failure)) => {
+                            tracing::warn!(
+                                provider = "discord",
+                                op = op.as_str(),
+                                app_id = %scope.app_id,
+                                reason = ?failure,
+                                "discord op was not performed"
+                            );
+                            Err(match failure {
+                                AckFailure::NotInCommunity => denied(
+                                    "target_not_in_community",
+                                    format!(
+                                        "discord {} refused: the target is not a member of the triggering community",
+                                        op.as_str()
+                                    ),
+                                ),
+                                AckFailure::Unsupported => denied(
+                                    "unsupported_op",
+                                    format!(
+                                        "discord {} is unsupported by the outbound drain",
+                                        op.as_str()
+                                    ),
+                                ),
+                                AckFailure::Failed => denied(
+                                    "relay_failed",
+                                    format!("discord {} failed at the platform", op.as_str()),
+                                ),
+                            })
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                provider = "discord",
+                                op = op.as_str(),
+                                app_id = %scope.app_id,
+                                error = %e,
+                                "malformed discord op result; treating the op as unconfirmed"
+                            );
+                            Err(denied(
+                                "relay_unconfirmed",
+                                format!(
+                                    "discord {} result was unreadable; the op is unconfirmed",
+                                    op.as_str()
+                                ),
+                            ))
+                        }
+                    };
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(
+                        provider = "discord",
+                        op = op.as_str(),
+                        app_id = %scope.app_id,
+                        error = %e,
+                        "could not read the discord op result"
+                    );
+                    return Err(denied(
+                        "relay_unavailable",
+                        format!(
+                            "discord {} could not be confirmed: result read failed: {e}",
+                            op.as_str()
+                        ),
+                    ));
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::error!(
+                    provider = "discord",
+                    op = op.as_str(),
+                    app_id = %scope.app_id,
+                    waited_ms = u64::try_from(self.discord_ack_timeout.as_millis()).unwrap_or(u64::MAX),
+                    "discord op accepted but not confirmed in time (drain slow, wedged or down); reporting failure"
+                );
+                return Err(denied(
+                    "relay_unconfirmed",
+                    format!(
+                        "discord {} was queued but not confirmed by the outbound drain in time; treat it as NOT done",
+                        op.as_str()
+                    ),
+                ));
+            }
+            tokio::time::sleep(DISCORD_OP_ACK_POLL).await;
+        }
+    }
+
+    /// Discord `chat.delete` / `dm.send`: validates the arguments, builds
+    /// the versioned envelope, queues it for svc-ingest's bot-token REST
+    /// sender (`svc_ingest::outbound::run_discord`) and **waits for the
+    /// drain's confirmation** before reporting success.
+    ///
+    /// **Confirmation, not queueing, is the result.** The WIT `relay.push`
+    /// returns nothing to the guest -- it only raises on error -- so a
+    /// bundle can only learn an op failed if this host call fails. Hence:
+    /// the op is refused up front unless the drain is advertising readiness
+    /// ([`Self::require_discord_drain_ready`]); the entry carries an `op_id`
+    /// and an `exp_ms` deadline; and this call returns `Ok` only once the
+    /// drain posts `{"ok":true}` under that id. A refusal, a platform
+    /// failure, or silence until the deadline is an error the bundle sees.
+    ///
+    /// **Security (moderation delete + DM surface).** `chat.delete` targets
+    /// ONLY the triggering event's own channel (`scope.origin_channel_id`,
+    /// same cross-tenant reasoning as `Self::handle_discord_relay`) -- the
+    /// bundle names the message, never the channel. `dm.send` names its
+    /// recipient (the bundle's choice), so the envelope also carries the
+    /// triggering channel and the sender delivers only to a member of that
+    /// channel's community; it is additionally throttled
+    /// ([`Self::throttle_dm_send`]). Every id must be a snowflake (no path
+    /// injection into the REST URL). `dm.send` text goes through the egress
+    /// detokenizer like every other Discord sink. Both ops were already
+    /// authorized by the capability gate in the caller (`chat.delete:discord`
+    /// / `dm.send:discord`, both dangerous).
+    async fn handle_discord_queued_op(
+        &self,
+        scope: &InvokeScope,
+        op: RelayOp,
+        message: &serde_json::Value,
+    ) -> Result<serde_json::Value, HostResultError> {
+        let str_field = |name: &str| {
+            message
+                .get(name)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        };
+        let origin = |what: &str| -> Result<&str, HostResultError> {
+            let channel_id = scope.origin_channel_id.as_deref().ok_or_else(|| {
+                denied(
+                    "invalid_args",
+                    format!(
+                        "discord {what} requires an origin channel id on the delivered envelope"
+                    ),
+                )
+            })?;
+            if !is_discord_snowflake(channel_id) {
+                return Err(denied(
+                    "invalid_args",
+                    format!("discord {what} origin channel id is not a valid snowflake"),
+                ));
+            }
+            Ok(channel_id)
+        };
+        // Phase 1: validate arguments only (no I/O), so an invalid call is
+        // refused before it can touch readiness, the rate budget or the
+        // detokenizer.
+        enum Pending<'a> {
+            Delete {
+                channel_id: &'a str,
+                message_id: &'a str,
+            },
+            Dm {
+                origin_channel: &'a str,
+                user_id: &'a str,
+                text: &'a str,
+            },
+        }
+        let pending = match op {
+            RelayOp::ChatDelete => {
+                let channel_id = origin("chat.delete")?;
+                let message_id = str_field("message_id")
+                    .filter(|id| is_discord_snowflake(id))
+                    .ok_or_else(|| {
+                        denied(
+                            "invalid_args",
+                            "discord chat.delete requires a snowflake 'message_id'",
+                        )
+                    })?;
+                Pending::Delete {
+                    channel_id,
+                    message_id,
+                }
+            }
+            RelayOp::DmSend => {
+                let origin_channel = origin("dm.send")?;
+                let user_id = str_field("user_id")
+                    .filter(|id| is_discord_snowflake(id))
+                    .ok_or_else(|| {
+                        denied(
+                            "invalid_args",
+                            "discord dm.send requires a snowflake 'user_id'",
+                        )
+                    })?;
+                let text = str_field("text").ok_or_else(|| {
+                    denied("invalid_args", "discord dm.send requires non-empty 'text'")
+                })?;
+                if text.chars().count() > DISCORD_MAX_CONTENT_CHARS {
+                    return Err(denied(
+                        "invalid_args",
+                        format!(
+                            "discord dm.send 'text' exceeds Discord's {DISCORD_MAX_CONTENT_CHARS}-character message limit"
+                        ),
+                    ));
+                }
+                Pending::Dm {
+                    origin_channel,
+                    user_id,
+                    text,
+                }
+            }
+            RelayOp::ChatSend => {
+                // Discord chat.send is sent inline by `handle_discord_relay`,
+                // never queued.
+                return Err(denied(
+                    "unsupported_op",
+                    "discord chat.send is not queued".to_string(),
+                ));
+            }
+        };
+
+        // Phase 2: producer-side safety checks, cheapest and most
+        // fundamental first -- is anything draining, then is this call within
+        // its rate budget. A refused call costs no detokenizer round-trip.
+        self.require_discord_drain_ready(scope, op).await?;
+        if let Pending::Dm { user_id, .. } = &pending {
+            self.throttle_dm_send(scope, user_id).await?;
+        }
+
+        // Phase 3: build the envelope (the DM text passes through the egress
+        // detokenizer like every other Discord sink) and queue it.
+        let mut payload = match pending {
+            Pending::Delete {
+                channel_id,
+                message_id,
+            } => build_outbound_envelope(
+                op,
+                "discord",
+                &EnvelopeFields {
+                    channel: Some(channel_id),
+                    message_id: Some(message_id),
+                    ..EnvelopeFields::default()
+                },
+            ),
+            Pending::Dm {
+                origin_channel,
+                user_id,
+                text,
+            } => {
+                let text = self
+                    .detokenize_text(&scope.tenant, text, egress_detokenizer::Sink::Discord)
+                    .await;
+                build_outbound_envelope(
+                    op,
+                    "discord",
+                    &EnvelopeFields {
+                        text: Some(&text),
+                        user_id: Some(user_id),
+                        origin_channel: Some(origin_channel),
+                        ..EnvelopeFields::default()
+                    },
+                )
+            }
+        };
+
+        let op_id = uuid::Uuid::new_v4().to_string();
+        let exp_ms = now_epoch_ms().saturating_add(
+            u64::try_from(self.discord_ack_timeout.as_millis()).unwrap_or(u64::MAX),
+        );
+        stamp_handshake(&mut payload, &op_id, exp_ms);
+        let payload = payload.to_string();
+        let outbound_bytes = payload.len() as u64;
+        self.relay_queue
+            .lpush(&outbound_relay_queue_key("discord"), payload)
+            .await
+            .map_err(|e| denied("relay_unavailable", e))?;
+        self.await_discord_ack(scope, op, &op_id).await?;
+        tracing::info!(
+            provider = "discord",
+            op = op.as_str(),
+            app_id = %scope.app_id,
+            "discord outbound op confirmed"
+        );
+        self.usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_relay_call(
+                &scope.tenant,
+                scope.community.as_deref(),
+                "",
+                &scope.app_id,
+                outbound_bytes,
+            );
+        Ok(serde_json::json!({
+            "queued": true,
+            "confirmed": true,
+            "provider": "discord",
+            "op": op.as_str(),
+        }))
     }
 
     /// Discord relay send: a stateless bot REST `POST
@@ -1372,10 +2260,54 @@ mod tests {
     use crate::distribution::BundleCatalog;
     use std::sync::Mutex;
 
+    /// In-memory [`RelayQueue`] standing in for Valkey plus the Discord drain
+    /// on the other end of it.
+    ///
+    /// * `pushed` -- every `lpush`, in order.
+    /// * `ready` -- whether the drain-ready key "exists" (what a live drain's
+    ///   heartbeat would assert). Default `false` = no drain.
+    /// * `auto_ack` -- `Some(json)`: a live drain that executes every pushed
+    ///   entry carrying an `op_id` and posts `json` as its result. `None`
+    ///   (default) with `ready` set: a drain that is advertised ready but
+    ///   accepts entries and never answers (the async-drop case).
+    /// * `fail*` -- inject a Valkey outage on one primitive.
     #[derive(Default)]
     struct FakeRelayQueue {
         pushed: Mutex<Vec<(String, String)>>,
         fail: bool,
+        fail_key_exists: bool,
+        fail_incr: bool,
+        fail_take: bool,
+        ready: bool,
+        auto_ack: Option<String>,
+        acks: Mutex<std::collections::HashMap<String, String>>,
+        windows: Mutex<std::collections::HashMap<String, u64>>,
+    }
+
+    impl FakeRelayQueue {
+        /// A queue with a live, healthy drain: ready, and every op acked `ok`.
+        fn with_live_drain() -> Self {
+            Self::with_drain_result(r#"{"ok":true}"#)
+        }
+
+        /// A queue with a live drain that answers every op with `ack_json`.
+        fn with_drain_result(ack_json: &str) -> Self {
+            Self {
+                ready: true,
+                auto_ack: Some(ack_json.to_string()),
+                ..Self::default()
+            }
+        }
+
+        /// The parsed envelopes pushed so far.
+        fn envelopes(&self) -> Vec<serde_json::Value> {
+            self.pushed
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, raw)| serde_json::from_str(raw).unwrap())
+                .collect()
+        }
     }
 
     impl RelayQueue for FakeRelayQueue {
@@ -1388,8 +2320,59 @@ mod tests {
                 if self.fail {
                     return Err("simulated relay outage".to_string());
                 }
+                if let Some(ack) = &self.auto_ack {
+                    if let Some(op_id) = serde_json::from_str::<serde_json::Value>(&value)
+                        .ok()
+                        .and_then(|v| v.get("op_id").and_then(|i| i.as_str()).map(str::to_string))
+                    {
+                        self.acks
+                            .lock()
+                            .unwrap()
+                            .insert(format!("{DISCORD_OP_ACK_KEY_PREFIX}{op_id}"), ack.clone());
+                    }
+                }
                 self.pushed.lock().unwrap().push((key.to_string(), value));
                 Ok(())
+            })
+        }
+
+        fn key_exists<'a>(
+            &'a self,
+            key: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+            Box::pin(async move {
+                if self.fail_key_exists {
+                    return Err("simulated readiness-probe outage".to_string());
+                }
+                Ok(key == DISCORD_DRAIN_READY_KEY && self.ready)
+            })
+        }
+
+        fn incr_window<'a>(
+            &'a self,
+            key: &'a str,
+            _window_secs: u64,
+        ) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send + 'a>> {
+            Box::pin(async move {
+                if self.fail_incr {
+                    return Err("simulated limiter outage".to_string());
+                }
+                let mut windows = self.windows.lock().unwrap();
+                let count = windows.entry(key.to_string()).or_insert(0);
+                *count += 1;
+                Ok(*count)
+            })
+        }
+
+        fn take<'a>(
+            &'a self,
+            key: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<String>, String>> + Send + 'a>> {
+            Box::pin(async move {
+                if self.fail_take {
+                    return Err("simulated result-read outage".to_string());
+                }
+                Ok(self.acks.lock().unwrap().remove(key))
             })
         }
     }
@@ -1555,6 +2538,10 @@ mod tests {
                 "storage.kv",
                 "chat.send:twitch",
                 "chat.send:discord",
+                "chat.delete:twitch",
+                "chat.delete:discord",
+                "dm.send:twitch",
+                "dm.send:discord",
                 "net.http.fqdn:example.com",
                 "storage.tables",
                 "flags.read",
@@ -2146,6 +3133,684 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&pushed[0].1).unwrap();
         assert_eq!(parsed["channel"], "#somechannel");
         assert_eq!(parsed["text"], "hi");
+        // Versioned op envelope (provider-framework Step 0) alongside the
+        // legacy top-level fields.
+        assert_eq!(parsed["v"], 1);
+        assert_eq!(parsed["op"], "chat.send");
+        assert_eq!(parsed["platform"], "twitch");
+    }
+
+    #[test]
+    fn relay_op_parse_round_trips_and_rejects_unknown() {
+        for op in [RelayOp::ChatSend, RelayOp::ChatDelete, RelayOp::DmSend] {
+            assert_eq!(RelayOp::parse(op.as_str()), Some(op));
+        }
+        assert_eq!(RelayOp::parse("chat.nuke"), None);
+        assert!(relay_op_supported("twitch", RelayOp::ChatSend));
+        assert!(!relay_op_supported("twitch", RelayOp::ChatDelete));
+        assert!(relay_op_supported("discord", RelayOp::ChatSend));
+        assert!(relay_op_supported("discord", RelayOp::ChatDelete));
+        assert!(relay_op_supported("discord", RelayOp::DmSend));
+        assert!(!relay_op_supported("twitch", RelayOp::DmSend));
+    }
+
+    /// Regression (adversarial review, LOW): `relay_op_supported` used to have
+    /// a `(_, ChatSend)` wildcard, so a provider added to `RELAY_PROVIDERS`
+    /// was auto-"supported" and its sends queued to a key nothing drains. The
+    /// table is now explicit opt-in. This test pins it row by row, and fails
+    /// when someone adds a `RELAY_PROVIDERS` entry without stating here what
+    /// that provider supports.
+    #[test]
+    fn every_relay_provider_has_an_explicit_support_decision() {
+        let expected: &[(&str, [bool; 3])] = &[
+            // chat.send, chat.delete, dm.send
+            ("twitch", [true, false, false]),
+            ("discord", [true, true, true]),
+        ];
+        assert_eq!(
+            RELAY_PROVIDERS.len(),
+            expected.len(),
+            "every RELAY_PROVIDERS entry needs an explicit row in this test (and in relay_op_supported)"
+        );
+        for (provider, supported) in expected {
+            assert!(RELAY_PROVIDERS.contains(provider), "{provider}");
+            for (op, want) in [RelayOp::ChatSend, RelayOp::ChatDelete, RelayOp::DmSend]
+                .into_iter()
+                .zip(supported)
+            {
+                assert_eq!(relay_op_supported(provider, op), *want, "{provider} {op:?}");
+            }
+        }
+        // A provider with no row is unsupported for every op -- the default.
+        for provider in ["slack", "kick", "youtube", "some-new-provider"] {
+            for op in [RelayOp::ChatSend, RelayOp::ChatDelete, RelayOp::DmSend] {
+                assert!(!relay_op_supported(provider, op), "{provider} {op:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn outbound_envelope_builder_emits_only_op_fields() {
+        let del = build_outbound_envelope(
+            RelayOp::ChatDelete,
+            "discord",
+            &EnvelopeFields {
+                channel: Some("1"),
+                message_id: Some("2"),
+                ..EnvelopeFields::default()
+            },
+        );
+        assert_eq!(
+            del,
+            serde_json::json!({"v":1,"op":"chat.delete","platform":"discord","channel":"1","message_id":"2"})
+        );
+        let dm = build_outbound_envelope(
+            RelayOp::DmSend,
+            "discord",
+            &EnvelopeFields {
+                text: Some("hi"),
+                user_id: Some("3"),
+                origin_channel: Some("1"),
+                ..EnvelopeFields::default()
+            },
+        );
+        assert_eq!(
+            dm,
+            serde_json::json!({"v":1,"op":"dm.send","platform":"discord","text":"hi","user_id":"3","origin_channel":"1"})
+        );
+    }
+
+    #[test]
+    fn stamp_handshake_adds_the_op_id_and_deadline() {
+        let mut env = serde_json::json!({"v":1,"op":"chat.delete"});
+        stamp_handshake(&mut env, "abc-1", 1_700_000_003_000);
+        assert_eq!(env["op_id"], "abc-1");
+        assert_eq!(env["exp_ms"], 1_700_000_003_000_u64);
+        assert_eq!(env["op"], "chat.delete");
+    }
+
+    /// The three cross-crate Valkey names are duplicated in `svc_ingest`
+    /// (separate crates, no shared code): pin the literals here and in that
+    /// crate's own test so neither side drifts.
+    #[test]
+    fn drain_handshake_keys_match_the_svc_ingest_literals() {
+        assert_eq!(
+            outbound_relay_queue_key("discord"),
+            "waddles:transport:irc:discord:outbound"
+        );
+        assert_eq!(
+            DISCORD_DRAIN_READY_KEY,
+            "waddles:transport:discord:drain-ready"
+        );
+        assert_eq!(DISCORD_OP_ACK_KEY_PREFIX, "waddles:transport:discord:ack:");
+    }
+
+    fn discord_call(message: &serde_json::Value) -> HostCallBody {
+        call(
+            CapabilityKind::Relay,
+            "send",
+            serde_json::json!({"provider":"discord","message_json":message.to_string()}),
+        )
+    }
+
+    fn delete_message() -> serde_json::Value {
+        serde_json::json!({"op":"chat.delete","message_id":"222"})
+    }
+
+    fn dm_message(user_id: &str) -> serde_json::Value {
+        serde_json::json!({"op":"dm.send","user_id":user_id,"text":"hello"})
+    }
+
+    /// Discord chat.delete/dm.send are queued for svc-ingest's REST sender and
+    /// reported successful only after the drain confirms; the delete channel
+    /// is the event's origin channel, never the bundle's, and the DM carries
+    /// that origin channel so the sender can bind the target to its community.
+    #[tokio::test]
+    async fn discord_delete_and_dm_are_queued_and_confirmed_with_origin_channel() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        let del = serde_json::json!({"op":"chat.delete","message_id":"222","channel":"999999999999999999"});
+        let out = caps
+            .handle(&discord_scope(), discord_call(&del))
+            .await
+            .unwrap();
+        assert_eq!(out["queued"], true);
+        assert_eq!(out["confirmed"], true);
+        assert_eq!(out["op"], "chat.delete");
+        let out = caps
+            .handle(&discord_scope(), discord_call(&dm_message("333")))
+            .await
+            .unwrap();
+        assert_eq!(out["confirmed"], true);
+
+        let pushed = caps.relay_queue.pushed.lock().unwrap();
+        assert_eq!(pushed.len(), 2);
+        assert_eq!(pushed[0].0, "waddles:transport:irc:discord:outbound");
+        drop(pushed);
+        let envelopes = caps.relay_queue.envelopes();
+        let (d, m) = (&envelopes[0], &envelopes[1]);
+        assert_eq!(d["op"], "chat.delete");
+        assert_eq!(
+            d["channel"], "123456789012345678",
+            "origin channel, not the bundle's"
+        );
+        assert_eq!(d["message_id"], "222");
+        assert_eq!(m["op"], "dm.send");
+        assert_eq!(m["user_id"], "333");
+        assert_eq!(m["text"], "hello");
+        assert_eq!(
+            m["origin_channel"], "123456789012345678",
+            "dm.send is bound to the triggering event's channel"
+        );
+        for e in [d, m] {
+            assert!(
+                e["op_id"].as_str().is_some_and(|id| !id.is_empty()),
+                "handshake op_id present: {e}"
+            );
+            assert!(
+                e["exp_ms"].as_u64().is_some_and(|ms| ms > now_epoch_ms()),
+                "handshake deadline is in the future: {e}"
+            );
+        }
+        assert_ne!(d["op_id"], m["op_id"], "each op gets its own id");
+    }
+
+    #[tokio::test]
+    async fn discord_queued_ops_reject_bad_arguments_and_queue_nothing() {
+        let bad_origin = InvokeScope {
+            origin_channel_id: Some("not-a-snowflake".to_string()),
+            ..scope()
+        };
+        let cases = [
+            (discord_scope(), serde_json::json!({"op":"chat.delete"})),
+            (
+                discord_scope(),
+                serde_json::json!({"op":"chat.delete","message_id":"../x"}),
+            ),
+            (
+                scope(),
+                serde_json::json!({"op":"chat.delete","message_id":"2"}),
+            ),
+            (
+                bad_origin.clone(),
+                serde_json::json!({"op":"chat.delete","message_id":"2"}),
+            ),
+            (
+                discord_scope(),
+                serde_json::json!({"op":"dm.send","text":"x"}),
+            ),
+            (
+                discord_scope(),
+                serde_json::json!({"op":"dm.send","user_id":"u","text":"x"}),
+            ),
+            (
+                discord_scope(),
+                serde_json::json!({"op":"dm.send","user_id":"3"}),
+            ),
+            // Longer than Discord accepts: refused up front, never queued.
+            (
+                discord_scope(),
+                serde_json::json!({
+                    "op":"dm.send",
+                    "user_id":"3",
+                    "text":"x".repeat(DISCORD_MAX_CONTENT_CHARS + 1)
+                }),
+            ),
+            // dm.send is only valid in response to a channel event: it needs
+            // the origin channel to bind the target's community.
+            (
+                scope(),
+                serde_json::json!({"op":"dm.send","user_id":"3","text":"x"}),
+            ),
+            (
+                bad_origin,
+                serde_json::json!({"op":"dm.send","user_id":"3","text":"x"}),
+            ),
+        ];
+        for (sc, message) in cases {
+            let caps = caps(FakeRelayQueue::with_live_drain());
+            let err = caps.handle(&sc, discord_call(&message)).await.unwrap_err();
+            assert_eq!(err.code, "invalid_args", "{message}");
+            assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+            assert!(
+                caps.relay_queue.windows.lock().unwrap().is_empty(),
+                "an invalid call must not consume rate budget: {message}"
+            );
+        }
+    }
+
+    /// A `dm.send` exactly at Discord's content limit is still delivered.
+    #[tokio::test]
+    async fn dm_send_text_at_the_discord_limit_is_accepted() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        let message = serde_json::json!({
+            "op":"dm.send",
+            "user_id":"333",
+            "text":"x".repeat(DISCORD_MAX_CONTENT_CHARS)
+        });
+        let out = caps
+            .handle(&discord_scope(), discord_call(&message))
+            .await
+            .unwrap();
+        assert_eq!(out["confirmed"], true);
+    }
+
+    /// The dangerous Discord ops are gate-denied (and never queued) without
+    /// their own grant.
+    #[tokio::test]
+    async fn discord_queued_ops_require_their_own_grant() {
+        for message in [delete_message(), dm_message("333")] {
+            let caps = caps_denied(FakeRelayQueue::with_live_drain());
+            let err = caps
+                .handle(&discord_scope(), discord_call(&message))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_granted", "{message}");
+            assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn discord_queued_op_surfaces_queue_outage() {
+        let caps = caps(FakeRelayQueue {
+            fail: true,
+            ..FakeRelayQueue::with_live_drain()
+        });
+        let err = caps
+            .handle(&discord_scope(), discord_call(&dm_message("333")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "relay_unavailable");
+    }
+
+    /// Regression (adversarial review, HIGH): with no drain running (flag
+    /// off / `DISCORD_BOT_TOKEN` unset / spine config missing) the op used to
+    /// be `LPUSH`ed and acknowledged `{"queued":true}` into a list nothing
+    /// would ever drain. It is now refused loudly and NOTHING is queued, and
+    /// no rate budget is spent on it.
+    #[tokio::test]
+    async fn discord_ops_are_refused_loudly_and_queue_nothing_when_no_drain_is_ready() {
+        for message in [delete_message(), dm_message("333")] {
+            let caps = caps(FakeRelayQueue::default());
+            let err = caps
+                .handle(&discord_scope(), discord_call(&message))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "relay_unavailable", "{message}");
+            assert!(
+                err.message.contains("drain is not running"),
+                "the error names the cause: {}",
+                err.message
+            );
+            assert!(
+                err.message.contains("nothing was queued"),
+                "{}",
+                err.message
+            );
+            assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+            assert!(caps.relay_queue.windows.lock().unwrap().is_empty());
+        }
+    }
+
+    /// A readiness probe that itself fails cannot prove the drain is up: the
+    /// op is refused (fail closed), never treated as ready.
+    #[tokio::test]
+    async fn discord_ops_are_refused_when_the_readiness_probe_errors() {
+        let caps = caps(FakeRelayQueue {
+            fail_key_exists: true,
+            ..FakeRelayQueue::with_live_drain()
+        });
+        let err = caps
+            .handle(&discord_scope(), discord_call(&delete_message()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "relay_unavailable");
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+    }
+
+    /// Regression (adversarial review, HIGH, the `!secret` hole): a drain
+    /// that is advertised ready but ACCEPTS the entry and never confirms it
+    /// (down mid-flight, wedged, dropped it) must be an ERROR for the bundle,
+    /// not `{"queued":true}`. The `relay.push` WIT call returns nothing to
+    /// the guest, so an error here is the only way `!secret` can learn the
+    /// plaintext delete did not happen and skip the DM.
+    #[tokio::test(start_paused = true)]
+    async fn discord_op_accepted_but_never_confirmed_is_an_error_not_success() {
+        for message in [delete_message(), dm_message("333")] {
+            let usage = Arc::new(Mutex::new(UsageBatcher::new()));
+            let caps = caps_with_usage(
+                FakeRelayQueue {
+                    ready: true,
+                    auto_ack: None, // accepts, never answers
+                    ..FakeRelayQueue::default()
+                },
+                Arc::clone(&usage),
+            );
+            let err = caps
+                .handle(&discord_scope(), discord_call(&message))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "relay_unconfirmed", "{message}");
+            assert!(err.message.contains("NOT done"), "{}", err.message);
+            assert_eq!(
+                caps.relay_queue.pushed.lock().unwrap().len(),
+                1,
+                "the entry WAS accepted -- this is the async-drop case"
+            );
+            assert_eq!(
+                usage.lock().unwrap().pending_len(),
+                0,
+                "an unconfirmed op is not metered as delivered"
+            );
+        }
+    }
+
+    /// Whatever the drain reports as not-performed becomes a distinct error
+    /// the bundle sees; an unreadable result is "unconfirmed", never success.
+    #[tokio::test]
+    async fn discord_drain_failure_results_surface_as_errors() {
+        for (ack, code) in [
+            (r#"{"ok":false,"code":"failed"}"#, "relay_failed"),
+            (r#"{"ok":false,"code":"mystery"}"#, "relay_failed"),
+            (r#"{"ok":false}"#, "relay_failed"),
+            (
+                r#"{"ok":false,"code":"not_in_community"}"#,
+                "target_not_in_community",
+            ),
+            (r#"{"ok":false,"code":"unsupported"}"#, "unsupported_op"),
+            ("not json", "relay_unconfirmed"),
+            (r#"{"nope":1}"#, "relay_unconfirmed"),
+        ] {
+            let usage = Arc::new(Mutex::new(UsageBatcher::new()));
+            let caps = caps_with_usage(FakeRelayQueue::with_drain_result(ack), Arc::clone(&usage));
+            let err = caps
+                .handle(&discord_scope(), discord_call(&delete_message()))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code, "ack {ack}");
+            assert_eq!(usage.lock().unwrap().pending_len(), 0, "ack {ack}");
+        }
+    }
+
+    #[tokio::test]
+    async fn discord_op_result_read_outage_is_reported_not_swallowed() {
+        let caps = caps(FakeRelayQueue {
+            fail_take: true,
+            ..FakeRelayQueue::with_live_drain()
+        });
+        let err = caps
+            .handle(&discord_scope(), discord_call(&delete_message()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "relay_unavailable");
+    }
+
+    /// A confirmed op is metered exactly once.
+    #[tokio::test]
+    async fn confirmed_discord_op_records_one_relay_call() {
+        let usage = Arc::new(Mutex::new(UsageBatcher::new()));
+        let caps = caps_with_usage(FakeRelayQueue::with_live_drain(), Arc::clone(&usage));
+        caps.handle(&discord_scope(), discord_call(&delete_message()))
+            .await
+            .unwrap();
+        assert_eq!(usage.lock().unwrap().pending_len(), 1);
+    }
+
+    /// Regression (adversarial review, MED): `dm.send` had no real throttle
+    /// (the catalog's `UsageBatcher` is write-only metering). Per
+    /// `(tenant, community, app)`: the 11th DM in a window is refused and
+    /// never queued.
+    #[tokio::test]
+    async fn dm_send_is_throttled_per_app_and_community() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        for i in 0..DM_SEND_APP_LIMIT {
+            let admitted = caps
+                .handle(
+                    &discord_scope(),
+                    discord_call(&dm_message(&format!("30{i}"))),
+                )
+                .await;
+            assert!(admitted.is_ok(), "dm {i} should be admitted: {admitted:?}");
+        }
+        let err = caps
+            .handle(&discord_scope(), discord_call(&dm_message("399")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "rate_limited");
+        assert_eq!(
+            caps.relay_queue.pushed.lock().unwrap().len(),
+            usize::try_from(DM_SEND_APP_LIMIT).unwrap(),
+            "the throttled DM was never queued"
+        );
+        // The budget is keyed by tenant + community + app, so another
+        // community (or app) never shares it.
+        let windows = caps.relay_queue.windows.lock().unwrap();
+        assert!(
+            windows.contains_key("waddles:ratelimit:dm.send:app:7:3:waddles.bot.commands.default"),
+            "{:?}",
+            windows.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// One person cannot be hammered: the 4th DM to the same target in a
+    /// window is refused even though the app-level budget has room.
+    #[tokio::test]
+    async fn dm_send_is_throttled_per_target_user() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        for _ in 0..DM_SEND_TARGET_LIMIT {
+            caps.handle(&discord_scope(), discord_call(&dm_message("333")))
+                .await
+                .unwrap();
+        }
+        let err = caps
+            .handle(&discord_scope(), discord_call(&dm_message("333")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "rate_limited");
+        assert!(err.message.contains("recipient"), "{}", err.message);
+        // A different recipient is unaffected.
+        caps.handle(&discord_scope(), discord_call(&dm_message("334")))
+            .await
+            .unwrap();
+    }
+
+    /// A limiter that cannot be read fails CLOSED -- the DM is refused and
+    /// nothing is queued, rather than the throttle silently disappearing.
+    #[tokio::test]
+    async fn dm_send_limiter_outage_fails_closed() {
+        let caps = caps(FakeRelayQueue {
+            fail_incr: true,
+            ..FakeRelayQueue::with_live_drain()
+        });
+        let err = caps
+            .handle(&discord_scope(), discord_call(&dm_message("333")))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "relay_unavailable");
+        assert!(err.message.contains("rate limiter unavailable"));
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+    }
+
+    /// The throttle is a `dm.send` control: `chat.delete` is not counted
+    /// against it.
+    #[tokio::test]
+    async fn chat_delete_is_not_subject_to_the_dm_throttle() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        for _ in 0..(DM_SEND_APP_LIMIT + 5) {
+            caps.handle(&discord_scope(), discord_call(&delete_message()))
+                .await
+                .unwrap();
+        }
+        assert!(caps.relay_queue.windows.lock().unwrap().is_empty());
+    }
+
+    /// Rate-limit keys never embed the raw platform user id.
+    #[tokio::test]
+    async fn dm_throttle_keys_never_contain_the_raw_user_id() {
+        let caps = caps(FakeRelayQueue::with_live_drain());
+        caps.handle(&discord_scope(), discord_call(&dm_message("777888999")))
+            .await
+            .unwrap();
+        let windows = caps.relay_queue.windows.lock().unwrap();
+        assert_eq!(windows.len(), 2);
+        for key in windows.keys() {
+            assert!(!key.contains("777888999"), "{key}");
+        }
+    }
+
+    #[test]
+    fn user_tag_is_short_stable_hex_and_not_the_id() {
+        let tag = user_tag("123456789012345678");
+        assert_eq!(tag.len(), 16);
+        assert!(tag.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(tag, user_tag("123456789012345678"));
+        assert_ne!(tag, user_tag("123456789012345679"));
+    }
+
+    #[test]
+    fn parse_ack_distinguishes_confirmed_refused_and_unreadable() {
+        assert_eq!(parse_ack(r#"{"ok":true}"#), Ok(AckOutcome::Confirmed));
+        assert_eq!(
+            parse_ack(r#"{"ok":false,"code":"not_in_community"}"#),
+            Ok(AckOutcome::Refused(AckFailure::NotInCommunity))
+        );
+        assert_eq!(
+            parse_ack(r#"{"ok":false,"code":"unsupported"}"#),
+            Ok(AckOutcome::Refused(AckFailure::Unsupported))
+        );
+        assert_eq!(
+            parse_ack(r#"{"ok":false,"code":"anything-else"}"#),
+            Ok(AckOutcome::Refused(AckFailure::Failed))
+        );
+        assert!(parse_ack("not json").is_err());
+        assert!(parse_ack(r#"{"ok":"yes"}"#).is_err());
+        assert!(parse_ack("{}").is_err());
+    }
+
+    /// The production push is ONE atomic `MULTI`/`EXEC`: push, trim to the
+    /// newest `OUTBOUND_QUEUE_MAX_LEN` entries, re-arm the TTL -- in that
+    /// order, so a list is never left unbounded or immortal between steps.
+    #[test]
+    fn bounded_push_pipeline_pushes_trims_and_arms_ttl_atomically() {
+        let packed = bounded_push_pipeline("waddles:transport:irc:discord:outbound", "{}")
+            .get_packed_pipeline();
+        let wire = String::from_utf8_lossy(&packed).to_string();
+        let pos = |needle: &str| {
+            wire.find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing from pipeline: {wire:?}"))
+        };
+        assert!(pos("MULTI") < pos("LPUSH"));
+        assert!(pos("LPUSH") < pos("LTRIM"));
+        assert!(pos("LTRIM") < pos("EXPIRE"));
+        assert!(pos("EXPIRE") < pos("EXEC"));
+        assert!(wire.contains(&(OUTBOUND_QUEUE_MAX_LEN - 1).to_string()));
+        assert!(wire.contains(&OUTBOUND_QUEUE_TTL_SECS.to_string()));
+        const {
+            assert!(OUTBOUND_QUEUE_MAX_LEN > 0 && OUTBOUND_QUEUE_TTL_SECS > 0);
+        }
+    }
+
+    /// A queue that only implements `lpush` (as the simple fakes do) gets
+    /// LOUD errors from the handshake primitives -- never a silent
+    /// "not ready" / "within limit" / "no result" default.
+    #[tokio::test]
+    async fn default_relay_queue_primitives_fail_loud() {
+        struct PushOnly;
+        impl RelayQueue for PushOnly {
+            fn lpush<'a>(
+                &'a self,
+                _key: &'a str,
+                _value: String,
+            ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+                Box::pin(async { Ok(()) })
+            }
+        }
+        let q = PushOnly;
+        assert!(q.key_exists("k").await.is_err());
+        assert!(q.incr_window("k", 60).await.is_err());
+        assert!(q.take("k").await.is_err());
+    }
+
+    #[test]
+    fn peek_relay_op_defaults_to_chat_send_and_flags_unknown() {
+        let legacy = serde_json::json!({"message_json": r#"{"channel":"c","text":"hi"}"#});
+        assert_eq!(peek_relay_op(&legacy), Ok(RelayOp::ChatSend));
+        assert_eq!(
+            peek_relay_op(&serde_json::json!({"provider": "twitch"})),
+            Ok(RelayOp::ChatSend)
+        );
+        let del = serde_json::json!({"message_json": r#"{"op":"chat.delete"}"#});
+        assert_eq!(peek_relay_op(&del), Ok(RelayOp::ChatDelete));
+        let bad = serde_json::json!({"message_json": r#"{"op":"bogus"}"#});
+        assert_eq!(peek_relay_op(&bad), Err("bogus".to_string()));
+    }
+
+    #[tokio::test]
+    async fn relay_unknown_op_fails_loud_and_queues_nothing() {
+        let caps = caps(FakeRelayQueue::default());
+        let message_json = serde_json::json!({"op": "bogus", "channel": "#c", "text": "hi"});
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "message_json": message_json.to_string()}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "unknown_op");
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn relay_new_ops_fail_loud_unsupported_and_queue_nothing() {
+        for (provider, message) in [
+            (
+                "twitch",
+                serde_json::json!({"op": "chat.delete", "channel": "#c", "message_id": "m1"}),
+            ),
+            (
+                "twitch",
+                serde_json::json!({"op": "dm.send", "user_id": "u1", "text": "hi"}),
+            ),
+        ] {
+            let caps = caps(FakeRelayQueue::default());
+            let err = caps
+                .handle(
+                    &scope(),
+                    call(
+                        CapabilityKind::Relay,
+                        "send",
+                        serde_json::json!({"provider": provider, "message_json": message.to_string()}),
+                    ),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "unsupported_op", "{provider} {message}");
+            assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_new_ops_require_their_own_grant_not_chat_send() {
+        // `caps_denied` has an empty grant snapshot; a `chat.send` grant must
+        // never stand in for `chat.delete:`/`dm.send:`.
+        let caps = caps_denied(FakeRelayQueue::default());
+        let message = serde_json::json!({"op": "dm.send", "user_id": "u1", "text": "hi"});
+        let err = caps
+            .handle(
+                &scope(),
+                call(
+                    CapabilityKind::Relay,
+                    "send",
+                    serde_json::json!({"provider": "twitch", "message_json": message.to_string()}),
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, "not_granted");
+        assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
     }
 
     /// Minimal [`egress_detokenizer::DisplayNameResolver`] test fixture:

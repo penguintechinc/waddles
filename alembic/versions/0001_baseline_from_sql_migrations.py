@@ -101,47 +101,73 @@ def upgrade() -> None:
         ")"
     ))
 
-    for sql_file in sql_files:
-        fname = os.path.basename(sql_file)
-        version = fname.replace('.sql', '')
+    # Multi-pass apply (fresh DB only -- an already-migrated DB returned above,
+    # so this never re-orders anything on an incremental upgrade). Pure
+    # filename-sorted order cannot express cross-file dependencies: duplicate
+    # numeric prefixes (e.g. 031_rls_policies sorts before 031_scoped_database_
+    # users, which creates the roles it references) are real forward
+    # references. A file that fails is rolled back to its savepoint and
+    # deferred; passes repeat until one makes no progress. Files that never
+    # apply are a hard failure -- never a silent skip, which is how a fresh
+    # replay used to ship an incomplete schema.
+    pending = list(sql_files)
+    pass_no = 0
+    last_errors = {}
+    while pending:
+        pass_no += 1
+        deferred = []
+        progressed = False
+        for sql_file in pending:
+            fname = os.path.basename(sql_file)
+            version = fname.replace('.sql', '')
 
-        # Check if already applied (defensive)
-        already = conn.execute(sa.text(
-            "SELECT 1 FROM schema_migrations WHERE version = :v"
-        ), {"v": version}).fetchone()
-
-        if already:
-            print(f"  Skipping (already applied): {fname}")
-            continue
-
-        print(f"  Applying: {fname}")
-        with open(sql_file, 'r') as f:
-            sql_content = f.read()
-
-        # Use psycopg2's native multi-statement execution which correctly
-        # handles $$-delimited blocks, /* */ comments, and string literals.
-        prepared = _prepare_sql(sql_content)
-        if prepared:
-            raw_conn = conn.connection.dbapi_connection
-            cursor = raw_conn.cursor()
-            try:
-                # Savepoint so a single file failure doesn't abort the txn.
-                # Legacy migrations may reference tables created by app code
-                # (hub-api, ai-researcher, etc.) that don't exist on fresh DB.
-                cursor.execute("SAVEPOINT sp_migration")
-                cursor.execute(prepared)
-                cursor.execute("RELEASE SAVEPOINT sp_migration")
-            except Exception as e:
-                cursor.execute("ROLLBACK TO SAVEPOINT sp_migration")
-                cursor.execute("RELEASE SAVEPOINT sp_migration")
-                cursor.close()
-                print(f"    WARNING: {fname} skipped — {str(e).strip().splitlines()[0]}")
+            already = conn.execute(sa.text(
+                "SELECT 1 FROM schema_migrations WHERE version = :v"
+            ), {"v": version}).fetchone()
+            if already:
+                print(f"  Skipping (already applied): {fname}")
+                progressed = True
                 continue
-            cursor.close()
 
-        conn.execute(sa.text(
-            "INSERT INTO schema_migrations (version) VALUES (:v) ON CONFLICT DO NOTHING"
-        ), {"v": version})
+            with open(sql_file, 'r') as f:
+                sql_content = f.read()
+
+            # psycopg2 native multi-statement execution handles $$ blocks,
+            # /* */ comments, and string literals.
+            prepared = _prepare_sql(sql_content)
+            if prepared:
+                raw_conn = conn.connection.dbapi_connection
+                cursor = raw_conn.cursor()
+                try:
+                    cursor.execute("SAVEPOINT sp_migration")
+                    cursor.execute(prepared)
+                    cursor.execute("RELEASE SAVEPOINT sp_migration")
+                except Exception as e:
+                    cursor.execute("ROLLBACK TO SAVEPOINT sp_migration")
+                    cursor.execute("RELEASE SAVEPOINT sp_migration")
+                    cursor.close()
+                    last_errors[fname] = str(e).strip().splitlines()[0]
+                    print(f"  Deferred (pass {pass_no}): {fname} -- {last_errors[fname]}")
+                    deferred.append(sql_file)
+                    continue
+                cursor.close()
+
+            print(f"  Applied: {fname}")
+            conn.execute(sa.text(
+                "INSERT INTO schema_migrations (version) VALUES (:v) ON CONFLICT DO NOTHING"
+            ), {"v": version})
+            progressed = True
+
+        if deferred and not progressed:
+            details = "; ".join(
+                f"{os.path.basename(f)}: {last_errors[os.path.basename(f)]}"
+                for f in deferred
+            )
+            raise RuntimeError(
+                f"[baseline] {len(deferred)} legacy SQL migration(s) cannot be "
+                f"applied on a fresh database: {details}"
+            )
+        pending = deferred
 
     print("[baseline] Legacy SQL migrations applied.")
 

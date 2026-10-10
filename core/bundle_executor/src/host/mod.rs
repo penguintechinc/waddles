@@ -55,6 +55,14 @@ pub struct ExecState {
     /// error string surfaced through a host-call failure to spoof or
     /// evade classification -- see `CapTrackingLimits`'s own doc).
     pub limits: CapTrackingLimits,
+    /// The invoking tenant as the stage reported it (`context`/`get-context`,
+    /// host-derived from the invoke key, never guest-suppliable), cached by
+    /// `crate::host::connector_imports`'s `identity.lookup` so a connector
+    /// that looks up many identities in one invocation pays one `context`
+    /// round trip, not one per lookup. `None` until the first lookup
+    /// establishes it; it is fresh per call (like every other field here),
+    /// so a tenant can never leak from one invocation into the next.
+    pub(crate) identity_tenant: Option<String>,
 }
 
 impl ExecState {
@@ -70,6 +78,7 @@ impl ExecState {
             app_id,
             call_id,
             limits: CapTrackingLimits::new(StoreLimitsBuilder::new().build()),
+            identity_tenant: None,
         }
     }
 
