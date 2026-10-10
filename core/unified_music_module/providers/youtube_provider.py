@@ -78,10 +78,13 @@ def _api_error_reason(response: httpx.Response) -> Optional[str]:
     """
     try:
         reason = response.json()["error"]["errors"][0]["reason"]
-    except Exception:  # noqa: BLE001 -- body may be non-JSON or shaped differently
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        # body is non-JSON or shaped differently -- expected for proxies / HTML error pages
+        logger.debug("YouTube error body has no usable reason: %s", type(exc).__name__)
         return None
     if isinstance(reason, str) and _REASON_RE.fullmatch(reason):
         return reason
+    logger.debug("YouTube error reason is not a plain identifier; dropped")
     return None
 
 
