@@ -17,13 +17,19 @@
 //! * **Write** -- [`bind_value`] picks the bind type from the *declared*
 //!   column type (never from the guest value) and [`param_cast`] emits the
 //!   matching explicit SQL cast (`$n::uuid`, `$n::timestamptz`,
-//!   `$n::jsonb`), so the statement is explicit about types regardless of
-//!   how the parameter happens to be typed on the wire. Only typed columns
-//!   are cast -- a `text`/`int`/`bool` parameter is never wrapped.
+//!   `$n::jsonb`, `$n::numeric`), so the statement is explicit about types
+//!   regardless of how the parameter happens to be typed on the wire. Only
+//!   typed columns are cast -- a `text`/`int`/`bool` parameter is never
+//!   wrapped.
 //! * **Read** -- [`select_expr`] projects `timestamptz` as an RFC 3339 UTC
-//!   string and `jsonb` as JSON text *in SQL*, so the host decodes a plain
-//!   `String` and the form is independent of the connection's `TimeZone`/
-//!   `DateStyle`. `uuid` decodes natively (it always could).
+//!   string and `jsonb`/`numeric` as text *in SQL*, so the host decodes a
+//!   plain `String` and the form is independent of the connection's
+//!   `TimeZone`/`DateStyle`. `uuid` decodes natively (it always could).
+//!
+//! **`numeric(p,s)`** is an exact decimal, so it is written as a decimal
+//! string ([`validate_numeric_text`]) or an integer
+//! ([`validate_numeric_int`]) -- never a float, whose binary rounding would
+//! silently corrupt a decimal -- and read back as its exact decimal text.
 //!
 //! Malformed values fail loud as [`DbError::InvalidValue`] -- validated
 //! host-side first ([`validate_timestamptz`], plus the existing uuid/jsonb
@@ -36,6 +42,7 @@ use sea_orm::{DbErr, Value};
 use uuid::Uuid;
 
 use crate::backend::{db_value_to_sea_value, DbError, DbValue};
+use crate::limits::MAX_NUMERIC_TEXT_BYTES;
 use crate::schema::{ColumnDef, ColumnType};
 use crate::scope::quote_ident;
 
@@ -58,12 +65,18 @@ pub(crate) fn effective_type(col: &ColumnDef) -> ColumnType {
 }
 
 /// The explicit SQL cast suffix for a write placeholder (`$n` + this):
-/// non-empty only for the three types Postgres will not assign from `text`.
+/// non-empty only for the types Postgres will not assign from the bound
+/// parameter type (`text`, or `bigint` for an integer written to a
+/// `numeric`). A `numeric` cast is the unconstrained `::numeric`: the
+/// column's own `numeric(p,s)` typmod applies on assignment, and
+/// [`validate_numeric_text`]/[`validate_numeric_int`] already guarantee the
+/// value fits it exactly (no silent rounding, no overflow).
 pub(crate) fn param_cast(col: &ColumnDef) -> &'static str {
     match effective_type(col) {
         ColumnType::Uuid => "::uuid",
         ColumnType::Timestamptz => "::timestamptz",
         ColumnType::Jsonb => "::jsonb",
+        ColumnType::Numeric { .. } => "::numeric",
         ColumnType::Int4 | ColumnType::Int8 | ColumnType::Bool | ColumnType::Text => "",
     }
 }
@@ -110,7 +123,9 @@ pub(crate) fn select_expr(col: &ColumnDef) -> String {
              THEN to_char({ident} AT TIME ZONE 'UTC', '{TIMESTAMPTZ_OUT_FORMAT}') \
              ELSE {ident}::text END AS {ident}"
         ),
-        ColumnType::Jsonb => format!("{ident}::text AS {ident}"),
+        // `numeric` reads as its exact decimal text (scale digits kept,
+        // e.g. `1.50`), never a float: nothing is lost on the way out.
+        ColumnType::Jsonb | ColumnType::Numeric { .. } => format!("{ident}::text AS {ident}"),
         ColumnType::Uuid
         | ColumnType::Int4
         | ColumnType::Int8
@@ -219,6 +234,66 @@ pub(crate) fn validate_timestamptz(s: &str) -> Result<(), &'static str> {
     } else {
         Err(EXPECTED)
     }
+}
+
+/// Checks a decimal string written to a `numeric(precision, scale)` column:
+/// an optional sign, digits with an optional single `.` (`12`, `-1.50`,
+/// `.5`, `5.`), and nothing else -- no exponent, whitespace, `NaN` or
+/// `Infinity`. It must also fit the column **exactly**: more significant
+/// fractional digits than `scale`, or more integer digits than
+/// `precision - scale`, is rejected rather than silently rounded (Postgres
+/// would round the former and only error on the latter). Zero padding is
+/// harmless and ignored (`1.50` fits `numeric(5,1)`).
+///
+/// Anything this accepts, Postgres's `::numeric` cast accepts too.
+pub(crate) fn validate_numeric_text(s: &str, precision: u8, scale: u8) -> Result<(), &'static str> {
+    const EXPECTED: &str = "must be a plain decimal number (e.g. -12.50)";
+    let bytes = s.as_bytes();
+    if bytes.len() > MAX_NUMERIC_TEXT_BYTES {
+        return Err("is too long to be a decimal number");
+    }
+    let unsigned = match bytes.first() {
+        Some(b'+' | b'-') => &bytes[1..],
+        _ => bytes,
+    };
+    let (int_part, frac_part) = match unsigned.iter().position(|&b| b == b'.') {
+        Some(dot) => (&unsigned[..dot], &unsigned[dot + 1..]),
+        None => (unsigned, &[][..]),
+    };
+    if int_part.is_empty() && frac_part.is_empty() {
+        return Err(EXPECTED);
+    }
+    if !int_part.iter().chain(frac_part).all(u8::is_ascii_digit) {
+        return Err(EXPECTED);
+    }
+    let int_digits = int_part.len() - int_part.iter().take_while(|&&b| b == b'0').count();
+    let frac_digits = frac_part.len() - frac_part.iter().rev().take_while(|&&b| b == b'0').count();
+    if frac_digits > usize::from(scale) {
+        return Err("has more fractional digits than the column's scale allows");
+    }
+    if int_digits > usize::from(precision.saturating_sub(scale)) {
+        return Err("has more integer digits than the column's precision allows");
+    }
+    Ok(())
+}
+
+/// Checks an integer written to a `numeric(precision, scale)` column: its
+/// digit count must fit the `precision - scale` integer digits the column
+/// has (`0` has none, so it always fits).
+pub(crate) fn validate_numeric_int(
+    value: i64,
+    precision: u8,
+    scale: u8,
+) -> Result<(), &'static str> {
+    let digits = if value == 0 {
+        0
+    } else {
+        value.unsigned_abs().ilog10() + 1
+    };
+    if digits > u32::from(precision.saturating_sub(scale)) {
+        return Err("has more integer digits than the column's precision allows");
+    }
+    Ok(())
 }
 
 /// Maps a failed `INSERT`/`UPDATE` to the right [`DbError`]: a Postgres
@@ -405,6 +480,139 @@ mod tests {
             ts.contains(r#"'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'"#),
             "RFC 3339 pattern: {ts}"
         );
+    }
+
+    const NUMERIC_10_2: ColumnType = ColumnType::Numeric {
+        precision: 10,
+        scale: 2,
+    };
+
+    #[test]
+    fn numeric_is_cast_bound_plainly_and_read_back_as_exact_text() {
+        let c = col("amt", NUMERIC_10_2, false);
+        assert_eq!(param_cast(&c), "::numeric");
+        assert_eq!(select_expr(&c), "\"amt\"::text AS \"amt\"");
+        // A decimal keeps its exact text, an integer binds as bigint, and
+        // NULL is a text NULL the `::numeric` cast then types.
+        assert_eq!(
+            bind_value(&c, &DbValue::Text("-12.50".into())).unwrap(),
+            Value::String(Some("-12.50".into()))
+        );
+        assert_eq!(
+            bind_value(&c, &DbValue::Int(7)).unwrap(),
+            Value::BigInt(Some(7))
+        );
+        assert_eq!(bind_value(&c, &DbValue::Null).unwrap(), Value::String(None));
+        assert_eq!(effective_type(&c), NUMERIC_10_2);
+        // user_ref still wins over a numeric cached type.
+        assert_eq!(
+            effective_type(&col("amt", NUMERIC_10_2, true)),
+            ColumnType::Uuid
+        );
+    }
+
+    #[test]
+    fn numeric_text_that_fits_the_column_exactly_is_accepted() {
+        for ok in [
+            "0",
+            "12",
+            "-12",
+            "+12",
+            "12.5",
+            "12.50",
+            "12.500", // trailing zeros are not significant
+            ".5",
+            "5.",
+            "-0.01",
+            "00012.34", // leading zeros are not significant
+            "99999999.99",
+            "-99999999.9900",
+        ] {
+            assert_eq!(validate_numeric_text(ok, 10, 2), Ok(()), "{ok:?}");
+        }
+        // Edge shapes of the (precision, scale) pair itself.
+        assert_eq!(validate_numeric_text("0.12345", 5, 5), Ok(()));
+        assert_eq!(validate_numeric_text("0", 5, 5), Ok(()));
+        assert_eq!(validate_numeric_text("999", 3, 0), Ok(()));
+        assert_eq!(validate_numeric_text("1.0", 3, 0), Ok(()));
+    }
+
+    #[test]
+    fn numeric_text_that_is_not_a_plain_decimal_is_rejected() {
+        for bad in [
+            "",
+            "-",
+            "+",
+            ".",
+            "-.",
+            "1.2.3",
+            "1e5",
+            "1E5",
+            "NaN",
+            "Infinity",
+            "-Infinity",
+            " 1",
+            "1 ",
+            "1,5",
+            "--1",
+            "+-1",
+            "0x10",
+            "1_000",
+            "\u{0661}\u{0662}",
+            "1.5f",
+        ] {
+            let err = validate_numeric_text(bad, 10, 2).unwrap_err();
+            assert!(err.contains("plain decimal"), "{bad:?} -> {err}");
+        }
+    }
+
+    #[test]
+    fn numeric_text_is_rejected_rather_than_rounded_or_overflowed() {
+        for (value, precision, scale, reason) in [
+            ("1.234", 10, 2, "fractional"),
+            ("0.001", 10, 2, "fractional"),
+            ("-12.505", 10, 2, "fractional"),
+            ("1.5", 3, 0, "fractional"),
+            ("100000000", 10, 2, "integer"),
+            ("-100000000.00", 10, 2, "integer"),
+            ("123456789.1", 10, 2, "integer"),
+            ("1000", 3, 0, "integer"),
+            ("1", 5, 5, "integer"),
+            ("1.00000", 5, 5, "integer"),
+        ] {
+            let err = validate_numeric_text(value, precision, scale).unwrap_err();
+            assert!(
+                err.contains(reason),
+                "{value:?} in numeric({precision},{scale}) -> {err}"
+            );
+        }
+        let too_long = "0".repeat(MAX_NUMERIC_TEXT_BYTES + 1);
+        assert!(validate_numeric_text(&too_long, 10, 2)
+            .unwrap_err()
+            .contains("too long"));
+        // Zero padding up to the cap is still just zero.
+        assert_eq!(
+            validate_numeric_text(&"0".repeat(MAX_NUMERIC_TEXT_BYTES), 10, 2),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn numeric_int_must_fit_the_integer_digits_of_the_column() {
+        for ok in [0, 1, -1, 99_999_999, -99_999_999] {
+            assert_eq!(validate_numeric_int(ok, 10, 2), Ok(()), "{ok}");
+        }
+        for bad in [100_000_000, -100_000_000, i64::MAX, i64::MIN] {
+            assert!(validate_numeric_int(bad, 10, 2).is_err(), "{bad}");
+        }
+        assert_eq!(
+            validate_numeric_int(0, 5, 5),
+            Ok(()),
+            "zero has no integer digits"
+        );
+        assert!(validate_numeric_int(1, 5, 5).is_err());
+        assert_eq!(validate_numeric_int(i64::MAX, 38, 0), Ok(()));
+        assert_eq!(validate_numeric_int(i64::MIN, 38, 0), Ok(()));
     }
 
     #[test]

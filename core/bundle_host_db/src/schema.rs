@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use crate::limits::{MAX_NUMERIC_PRECISION, MAX_NUMERIC_SCALE};
 use crate::scope::{validate_identifier, AppSchema};
 
 /// The type allowlist a bundle-declared column may have (design doc SS3.1).
@@ -35,6 +36,46 @@ pub enum ColumnType {
     Timestamptz,
     /// `max_bytes` <= 16 KiB (design doc SS3.1).
     Jsonb,
+    /// Exact decimal, `numeric(precision, scale)` -- the manifest's
+    /// `numeric(p,s)` (`hub_api/services/bundle_data_schema.py`). Build one
+    /// with [`ColumnType::numeric`] (bounds-checked); a value written to it
+    /// is a decimal string or an integer, read back as the column's exact
+    /// decimal text -- never a float (see `crate::typed`).
+    Numeric {
+        precision: u8,
+        scale: u8,
+    },
+}
+
+impl ColumnType {
+    /// A bounds-checked [`ColumnType::Numeric`]: the same limits the
+    /// manifest validator enforces at approval time (precision
+    /// `1..=`[`MAX_NUMERIC_PRECISION`], scale `0..=`[`MAX_NUMERIC_SCALE`],
+    /// scale <= precision).
+    pub fn numeric(precision: u8, scale: u8) -> Result<Self, String> {
+        validate_numeric_params(precision, scale)?;
+        Ok(Self::Numeric { precision, scale })
+    }
+}
+
+/// Re-checks a numeric column's `(precision, scale)` against the manifest
+/// validator's limits -- [`ColumnType::Numeric`]'s fields are public, so
+/// [`TableSchema::validated`] cannot assume [`ColumnType::numeric`] built it.
+fn validate_numeric_params(precision: u8, scale: u8) -> Result<(), String> {
+    if !(1..=MAX_NUMERIC_PRECISION).contains(&precision) {
+        return Err(format!(
+            "numeric precision {precision} is outside 1..={MAX_NUMERIC_PRECISION}"
+        ));
+    }
+    if scale > MAX_NUMERIC_SCALE {
+        return Err(format!("numeric scale {scale} exceeds {MAX_NUMERIC_SCALE}"));
+    }
+    if scale > precision {
+        return Err(format!(
+            "numeric scale {scale} exceeds precision {precision}"
+        ));
+    }
+    Ok(())
 }
 
 /// One bundle-declared column, already validated at manifest-approval time
@@ -129,6 +170,10 @@ impl TableSchema {
                     "column {:?} collides with a platform-owned column",
                     col.name
                 ));
+            }
+            if let ColumnType::Numeric { precision, scale } = col.sql_type {
+                validate_numeric_params(precision, scale)
+                    .map_err(|e| format!("invalid column {:?}: {e}", col.name))?;
             }
         }
         Ok(Self {
@@ -323,6 +368,44 @@ mod tests {
             .unwrap()
             .with_cross_community_read();
         assert!(schema.cross_community_read);
+    }
+
+    #[test]
+    fn numeric_accepts_the_manifest_bounds_and_rejects_everything_else() {
+        for (p, sc) in [(1, 0), (10, 2), (12, 12), (38, 12), (38, 0)] {
+            assert_eq!(
+                ColumnType::numeric(p, sc),
+                Ok(ColumnType::Numeric {
+                    precision: p,
+                    scale: sc
+                }),
+                "numeric({p},{sc})"
+            );
+        }
+        for (p, sc) in [(0, 0), (39, 0), (10, 13), (5, 6), (255, 255)] {
+            assert!(ColumnType::numeric(p, sc).is_err(), "numeric({p},{sc})");
+        }
+    }
+
+    #[test]
+    fn validated_rechecks_a_directly_constructed_numeric_column() {
+        let numeric_column = |precision, scale| ColumnDef {
+            name: "amount".to_string(),
+            sql_type: ColumnType::Numeric { precision, scale },
+            nullable: true,
+            is_user_ref: false,
+        };
+        assert!(
+            TableSchema::validated(AppSchema::Core, "money", vec![numeric_column(10, 2)]).is_ok()
+        );
+        for (p, sc) in [(0, 0), (39, 2), (10, 13), (2, 5)] {
+            let err = TableSchema::validated(AppSchema::Core, "money", vec![numeric_column(p, sc)])
+                .unwrap_err();
+            assert!(
+                err.contains("amount") && err.contains("numeric"),
+                "numeric({p},{sc}) -> {err}"
+            );
+        }
     }
 
     #[test]
