@@ -14,8 +14,17 @@ declare module 'waddle:bundle/http@1.0.0' {
     headers: Array<Header>,
     body?: Uint8Array,
     /**
-     * Header name -> secret reference name. The stage resolves the reference
-     * and injects the header; the secret value never enters the component.
+     * Secret slot -> secret reference name. The stage resolves the reference
+     * host-side and injects the value; the secret value never enters the
+     * component. A plain slot name is a HEADER ref: `Authorization` sends the
+     * resolved value as that request header. A slot name prefixed with `?` is
+     * a QUERY-PARAMETER ref: `?key` appends `key=VALUE` to the request URL's
+     * query (replacing any same-named parameter the bundle supplied), for
+     * APIs that authenticate by query string. A query ref is injected only on
+     * the first hop, to the granted net.http.fqdn host, and is dropped on
+     * every redirect hop. The value is scrubbed from error strings and from
+     * response headers/body. A ref that cannot be resolved fails the call
+     * (denied) instead of sending it unauthenticated.
      */
     secretRefs: Array<[string, string]>,
   }

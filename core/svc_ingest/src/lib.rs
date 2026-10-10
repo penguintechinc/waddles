@@ -64,12 +64,14 @@
 
 pub mod config;
 pub mod crypto;
+pub mod discord_rest;
 pub mod error;
 pub mod http;
 pub mod ingest;
 pub mod license;
 pub mod normalize;
 pub mod outbound;
+pub mod outbound_ops;
 pub mod publish;
 pub mod telemetry;
 
@@ -280,11 +282,15 @@ where
             Arc::clone(&receiver_readiness),
         );
         try_start_twitch_outbound(&config);
+        try_start_discord_outbound(&config);
         state.eventsub = try_build_eventsub_state(&config, ingest_metrics.clone()).await;
     } else {
-        tracing::info!(
+        // WARN, not INFO: with the flag OFF no outbound drain runs, so
+        // `svc_action` refuses every Discord chat.delete/dm.send (no
+        // drain-ready key) -- that must be visible to an operator.
+        tracing::warn!(
             flag = license::RUST_DATA_PLANE_FLAG,
-            "flag is OFF; receive/produce/outbound-drain not started"
+            "flag is OFF; receive/produce/outbound-drain NOT started -- discord chat.delete/dm.send bundle ops will be refused until it is ON"
         );
     }
 
@@ -555,6 +561,49 @@ fn try_start_twitch_outbound(config: &config::Config) {
     tokio::spawn(async move {
         if let Err(err) = outbound::run(&spine_cfg, identity, shutdown_rx).await {
             tracing::error!(error = %err, "twitch outbound relay drain exited");
+        }
+    });
+}
+
+/// Attempts to start the Discord outbound drain (`crate::outbound::
+/// run_discord`): executes `chat.send`/`chat.delete`/`dm.send` queued by
+/// `svc_action` over the bot-token REST client, and advertises readiness
+/// (`outbound::DISCORD_DRAIN_READY_KEY`) while it runs. Never starts (and
+/// never panics) when `DISCORD_BOT_TOKEN` is unset or the spine/Valkey config
+/// is unavailable -- but each of those is logged at WARN/ERROR, never INFO:
+/// without the drain `svc_action` refuses every Discord `chat.delete`/
+/// `dm.send` (no readiness key), so an operator must be able to see why. The
+/// token is read from the same `DISCORD_BOT_TOKEN` the Gateway receiver uses
+/// and is never logged.
+fn try_start_discord_outbound(config: &config::Config) {
+    let Some(token) = config.discord_bot_token.clone() else {
+        tracing::warn!(
+            "DISCORD_BOT_TOKEN not set; discord outbound drain NOT started -- bundle chat.delete/dm.send ops (e.g. !secret) will be refused until it is configured"
+        );
+        return;
+    };
+    let spine_cfg = match penguin_spine::SpineConfig::from_env() {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            tracing::error!(error = %err, "spine config unavailable; discord outbound drain NOT started -- bundle chat.delete/dm.send ops will be refused");
+            return;
+        }
+    };
+    let rest = match discord_rest::DiscordRestClient::new(token, discord_rest::DEFAULT_API_BASE) {
+        Ok(rest) => rest,
+        Err(err) => {
+            tracing::error!(error = %err, "discord REST client build failed; discord outbound drain NOT started -- bundle chat.delete/dm.send ops will be refused");
+            return;
+        }
+    };
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(());
+    });
+    tokio::spawn(async move {
+        if let Err(err) = outbound::run_discord(&spine_cfg, &rest, shutdown_rx).await {
+            tracing::error!(error = %err, "discord outbound drain exited; bundle chat.delete/dm.send ops will be refused once its readiness key expires");
         }
     });
 }
@@ -1075,6 +1124,32 @@ mod tests {
                 "k1:0102030405060708090a0b0c0d0e0f10",
             ));
             try_start_discord(&config, test_ingest_metrics(), test_readiness());
+            unsafe {
+                std::env::remove_var("VALKEY_URL");
+                std::env::remove_var("VALKEY_PASSWORD");
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+
+    #[tokio::test]
+    async fn try_start_discord_outbound_noop_when_not_configured() {
+        try_start_discord_outbound(&base_config());
+    }
+
+    #[tokio::test]
+    async fn try_start_discord_outbound_spawns_when_everything_is_valid() {
+        crypto::ensure_installed();
+        {
+            let _guard = ENV_LOCK.lock().unwrap();
+            // SAFETY: serialized by ENV_LOCK above.
+            unsafe {
+                std::env::set_var("VALKEY_URL", "rediss://127.0.0.1:1/");
+                std::env::set_var("VALKEY_PASSWORD", "test-valkey-pass");
+            }
+            let mut config = base_config();
+            config.discord_bot_token = Some(crate::config::Secret::new("test-token"));
+            try_start_discord_outbound(&config);
             unsafe {
                 std::env::remove_var("VALKEY_URL");
                 std::env::remove_var("VALKEY_PASSWORD");

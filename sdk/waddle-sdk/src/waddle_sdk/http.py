@@ -31,9 +31,13 @@ class NonRetryableTransportError(Exception):
 
 
 class SecretRef:
-    """An opaque reference to a secret the STAGE resolves and injects as a header.
+    """An opaque reference to a secret the STAGE resolves and injects host-side.
 
-    The value never enters this component (spec Sec8.3).
+    The value never enters this component (spec Sec8.3). Used as a
+    ``secret_refs`` value keyed by a plain header name (``{"Authorization": ref}``,
+    injected as that header) or by ``"?<param>"`` (``{"?key": ref}``, injected
+    as that URL query parameter on the first hop to the granted FQDN only, for
+    APIs that authenticate by query string).
     """
 
     __slots__ = ("name",)

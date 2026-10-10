@@ -134,6 +134,8 @@ _HOST_RE = re.compile(
     r"^(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
 )
 _CHAT_SEND_RE = re.compile(r"^chat\.send:(?P<platform>[a-z0-9_-]+)$")
+_CHAT_DELETE_RE = re.compile(r"^chat\.delete:(?P<platform>[a-z0-9_-]+)$")
+_DM_SEND_RE = re.compile(r"^dm\.send:(?P<platform>[a-z0-9_-]+)$")
 _MODERATION_RE = re.compile(r"^moderation\.(?P<platform>[a-z0-9_-]+)$")
 _NET_HTTP_FQDN_RE = re.compile(r"^net\.http\.fqdn:(?P<host>.+)$")
 _NET_HTTP_PUBLIC_IP_RE = re.compile(r"^net\.http\.public-ip:(?P<ip>.+)$")
@@ -177,6 +179,16 @@ def resolve_risk(permission_id: str) -> Risk | None:
     if match and match.group("platform") in RELAY_PROVIDERS:
         return "normal"
 
+    # `chat.delete:<platform>` (destructive moderation-class) and
+    # `dm.send:<platform>` (reaches a user outside any public channel,
+    # PII-adjacent) are both `dangerous` -- mirrors the Rust catalog in
+    # `core/bundle_capability_gate/src/permission.rs` (provider-framework
+    # Step 0, issue #719). Keep the two in sync.
+    for pattern in (_CHAT_DELETE_RE, _DM_SEND_RE):
+        match = pattern.match(permission_id)
+        if match and match.group("platform") in RELAY_PROVIDERS:
+            return "dangerous"
+
     match = _MODERATION_RE.match(permission_id)
     if match and match.group("platform") in RELAY_PROVIDERS:
         return "dangerous"
@@ -199,6 +211,10 @@ def permission_family(permission_id: str) -> str:
             return prefix.rstrip(":")
     if _CHAT_SEND_RE.match(permission_id):
         return "chat.send"
+    if _CHAT_DELETE_RE.match(permission_id):
+        return "chat.delete"
+    if _DM_SEND_RE.match(permission_id):
+        return "dm.send"
     if _MODERATION_RE.match(permission_id):
         return "moderation"
     return permission_id
