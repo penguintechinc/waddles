@@ -25,8 +25,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from flask_core import describe_db_error
 
 logger = logging.getLogger(__name__)
+
+# SECURITY (PII in logs): httpx logs every request URL at INFO ("HTTP Request: GET <url>"),
+# and a user-configured webhook URL routinely carries tokens / ids in its query string.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class WebhookExecutionError(Exception):
@@ -284,10 +289,10 @@ class ExpressionTemplater:
             try:
                 return str(SafeExpressionEvaluator(context).evaluate(expr))
             except UnsafeExpressionError as e:
-                logger.warning(f"Rejected unsafe expression '{expr}': {e}")
+                logger.warning(f"Rejected unsafe expression '{expr}': {describe_db_error(e)}")
                 return match.group(0)  # Return original if expression is disallowed
             except Exception as e:
-                logger.warning(f"Failed to evaluate expression '{expr}': {e}")
+                logger.warning(f"Failed to evaluate expression '{expr}': {describe_db_error(e)}")
                 return match.group(0)  # Return original if evaluation fails
 
         result = ExpressionTemplater.BRACKET_PATTERN.sub(evaluate_expression, result)
@@ -375,7 +380,10 @@ class ResponseExtractor:
                 value = ResponseExtractor._get_nested_value(data, path)
                 extracted[var_name] = value
             except (KeyError, IndexError, TypeError, AttributeError) as e:
-                logger.warning(f"Failed to extract variable '{var_name}' from path '{path}': {e}")
+                logger.warning(
+                f"Failed to extract variable '{var_name}' from path '{path}': "
+                f"{describe_db_error(e)}"
+            )
                 extracted[var_name] = None
 
         return extracted
@@ -661,7 +669,7 @@ class WebhookExecutor:
                     if attempt < self.retry_policy.max_retries:
                         delay = self.retry_policy.get_delay(attempt)
                         logger.warning(
-                            f"Webhook request failed: {e}, retrying in {delay}s "
+                            f"Webhook request failed: {describe_db_error(e)}, retrying in {delay}s "
                             f"(attempt {attempt + 1}/{self.retry_policy.max_retries + 1})"
                         )
                         await asyncio.sleep(delay)
@@ -680,7 +688,7 @@ class WebhookExecutor:
                 if isinstance(e, WebhookRetryableError) and attempt < self.retry_policy.max_retries:
                     delay = self.retry_policy.get_delay(attempt)
                     logger.warning(
-                        f"Webhook request failed: {e}, retrying in {delay}s "
+                        f"Webhook request failed: {describe_db_error(e)}, retrying in {delay}s "
                         f"(attempt {attempt + 1}/{self.retry_policy.max_retries + 1})"
                     )
                     await asyncio.sleep(delay)
@@ -835,7 +843,10 @@ class WebhookActionNode:
             }
 
         except Exception as e:
-            logger.error(f"Webhook execution failed for node {self.node_id}: {e}")
+            logger.error(
+                f"Webhook execution failed for node {self.node_id}: "
+                f"{describe_db_error(e)}"
+            )
             return {
                 "node_id": self.node_id,
                 "type": "webhook",

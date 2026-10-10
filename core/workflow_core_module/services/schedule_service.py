@@ -45,6 +45,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
 from croniter import croniter
+from flask_core import describe_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,19 @@ class InvalidScheduleException(ScheduleServiceException):
     """Raised when schedule configuration is invalid"""
     def __init__(self, message: str):
         super().__init__(f"Invalid schedule configuration: {message}", status_code=400)
+
+
+def _failure_detail(exc: BaseException) -> str:
+    """Describe `exc` for an exception message that is surfaced to API clients.
+
+    This module's own exceptions carry authored text and pass through unchanged;
+    anything else (a DB driver / Redis / HTTP error) is reduced to its type and
+    SQLSTATE so bound values (message content, usernames) never reach a client
+    or a downstream log line that re-logs the message.
+    """
+    if isinstance(exc, ScheduleServiceException):
+        return exc.message
+    return describe_db_error(exc)
 
 
 class ScheduleService:
@@ -181,15 +195,14 @@ class ScheduleService:
 
         except Exception as e:
             self.logger.error(
-                f"Failed to start scheduler: {str(e)}",
+                f"Failed to start scheduler: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "scheduler_start",
                     "result": "FAILURE",
-                },
-                exc_info=True
+                }
             )
-            raise ScheduleServiceException(f"Failed to start scheduler: {str(e)}")
+            raise ScheduleServiceException(f"Failed to start scheduler: {_failure_detail(e)}")
 
     async def stop_scheduler(self) -> bool:
         """
@@ -222,12 +235,11 @@ class ScheduleService:
 
         except Exception as e:
             self.logger.error(
-                f"Error stopping scheduler: {str(e)}",
+                f"Error stopping scheduler: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "scheduler_stop",
-                },
-                exc_info=True
+                }
             )
             return False
 
@@ -400,17 +412,16 @@ class ScheduleService:
             raise
         except Exception as e:
             self.logger.error(
-                f"Failed to create schedule: {str(e)}",
+                f"Failed to create schedule: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "schedule_create",
                     "workflow_id": workflow_id,
                     "user": str(user_id),
                     "result": "FAILURE",
-                },
-                exc_info=True
+                }
             )
-            raise ScheduleServiceException(f"Failed to create schedule: {str(e)}")
+            raise ScheduleServiceException(f"Failed to create schedule: {_failure_detail(e)}")
 
     async def remove_schedule(self, schedule_id: str, user_id: int) -> bool:
         """
@@ -472,17 +483,16 @@ class ScheduleService:
             raise
         except Exception as e:
             self.logger.error(
-                f"Failed to remove schedule {schedule_id}: {str(e)}",
+                f"Failed to remove schedule {schedule_id}: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "schedule_remove",
                     "schedule_id": schedule_id,
                     "user": str(user_id),
                     "result": "FAILURE",
-                },
-                exc_info=True
+                }
             )
-            raise ScheduleServiceException(f"Failed to remove schedule: {str(e)}")
+            raise ScheduleServiceException(f"Failed to remove schedule: {_failure_detail(e)}")
 
     async def update_schedule(
         self,
@@ -594,17 +604,16 @@ class ScheduleService:
             raise
         except Exception as e:
             self.logger.error(
-                f"Failed to update schedule {schedule_id}: {str(e)}",
+                f"Failed to update schedule {schedule_id}: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "schedule_update",
                     "schedule_id": schedule_id,
                     "user": str(user_id),
                     "result": "FAILURE",
-                },
-                exc_info=True
+                }
             )
-            raise ScheduleServiceException(f"Failed to update schedule: {str(e)}")
+            raise ScheduleServiceException(f"Failed to update schedule: {_failure_detail(e)}")
 
     async def check_due_schedules(self) -> List[Dict[str, Any]]:
         """
@@ -731,29 +740,27 @@ class ScheduleService:
 
                 except Exception as e:
                     self.logger.error(
-                        f"Error triggering schedule {row[0]}: {str(e)}",
+                        f"Error triggering schedule {row[0]}: {describe_db_error(e)}",
                         extra={
                             "event_type": "ERROR",
                             "action": "schedule_trigger_error",
                             "schedule_id": row[0],
                             "result": "FAILURE",
-                        },
-                        exc_info=True
+                        }
                     )
 
             return triggered
 
         except Exception as e:
             self.logger.error(
-                f"Error checking due schedules: {str(e)}",
+                f"Error checking due schedules: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "check_due_schedules",
                     "result": "FAILURE",
-                },
-                exc_info=True
+                }
             )
-            raise ScheduleServiceException(f"Error checking schedules: {str(e)}")
+            raise ScheduleServiceException(f"Error checking schedules: {_failure_detail(e)}")
 
     @staticmethod
     def calculate_next_execution(
@@ -858,12 +865,11 @@ class ScheduleService:
 
         except Exception as e:
             self.logger.error(
-                f"Error loading schedules: {str(e)}",
+                f"Error loading schedules: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "load_schedules",
-                },
-                exc_info=True
+                }
             )
 
     async def _register_schedule_with_scheduler(
@@ -904,13 +910,12 @@ class ScheduleService:
 
         except Exception as e:
             self.logger.error(
-                f"Error registering schedule with APScheduler: {str(e)}",
+                f"Error registering schedule with APScheduler: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "register_schedule",
                     "schedule_id": schedule_id,
-                },
-                exc_info=True
+                }
             )
 
     async def _handle_schedule_execution(
@@ -968,14 +973,13 @@ class ScheduleService:
 
         except Exception as e:
             self.logger.error(
-                f"Error executing scheduled workflow: {str(e)}",
+                f"Error executing scheduled workflow: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "schedule_execution",
                     "schedule_id": schedule_id,
                     "workflow_id": workflow_id,
-                },
-                exc_info=True
+                }
             )
 
     async def _execute_scheduled_workflow(
@@ -1039,15 +1043,14 @@ class ScheduleService:
 
         except Exception as e:
             self.logger.error(
-                f"Error executing scheduled workflow {schedule_id}: {str(e)}",
+                f"Error executing scheduled workflow {schedule_id}: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "schedule_execution_error",
                     "schedule_id": schedule_id,
                     "workflow_id": workflow_id,
                     "result": "FAILURE",
-                },
-                exc_info=True
+                }
             )
 
     async def _check_due_schedules_loop(self) -> None:
@@ -1059,12 +1062,11 @@ class ScheduleService:
 
             except Exception as e:
                 self.logger.error(
-                    f"Error in check_due_schedules loop: {str(e)}",
+                    f"Error in check_due_schedules loop: {describe_db_error(e)}",
                     extra={
                         "event_type": "ERROR",
                         "action": "check_due_schedules_loop",
-                    },
-                    exc_info=True
+                    }
                 )
 
     def _scheduler_event_listener(self, event) -> None:
@@ -1092,10 +1094,9 @@ class ScheduleService:
                     )
         except Exception as e:
             self.logger.error(
-                f"Error in scheduler event listener: {str(e)}",
+                f"Error in scheduler event listener: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "scheduler_listener_error",
-                },
-                exc_info=True
+                }
             )

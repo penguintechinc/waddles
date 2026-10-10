@@ -32,6 +32,7 @@ from models.workflow import (
     WorkflowStatus,
     WorkflowConnection,
 )
+from flask_core import describe_db_error
 
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,19 @@ class WorkflowPermissionException(WorkflowServiceException):
             f"Permission denied for workflow {workflow_id}: {permission} required",
             status_code=403
         )
+
+
+def _failure_detail(exc: BaseException) -> str:
+    """Describe `exc` for an exception message that is surfaced to API clients.
+
+    This module's own exceptions carry authored text and pass through unchanged;
+    anything else (a DB driver / Redis / HTTP error) is reduced to its type and
+    SQLSTATE so bound values (message content, usernames) never reach a client
+    or a downstream log line that re-logs the message.
+    """
+    if isinstance(exc, WorkflowServiceException):
+        return exc.message
+    return describe_db_error(exc)
 
 
 class WorkflowService:
@@ -243,17 +257,16 @@ class WorkflowService:
             raise
         except Exception as e:
             self.logger.error(
-                f"Failed to create workflow: {str(e)}",
+                f"Failed to create workflow: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "create_workflow",
                     "community": str(community_id),
                     "user": str(user_id),
                     "result": "FAILURE",
-                },
-                exc_info=True
+                }
             )
-            raise WorkflowServiceException(f"Failed to create workflow: {str(e)}")
+            raise WorkflowServiceException(f"Failed to create workflow: {_failure_detail(e)}")
 
     async def get_workflow(
         self,
@@ -354,17 +367,16 @@ class WorkflowService:
             raise
         except Exception as e:
             self.logger.error(
-                f"Failed to get workflow: {str(e)}",
+                f"Failed to get workflow: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "get_workflow",
                     "user": str(user_id),
                     "workflow_id": workflow_id,
                     "result": "FAILURE",
-                },
-                exc_info=True
+                }
             )
-            raise WorkflowServiceException(f"Failed to get workflow: {str(e)}")
+            raise WorkflowServiceException(f"Failed to get workflow: {_failure_detail(e)}")
 
     async def update_workflow(
         self,
@@ -475,17 +487,16 @@ class WorkflowService:
             raise
         except Exception as e:
             self.logger.error(
-                f"Failed to update workflow: {str(e)}",
+                f"Failed to update workflow: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "update_workflow",
                     "user": str(user_id),
                     "workflow_id": workflow_id,
                     "result": "FAILURE",
-                },
-                exc_info=True
+                }
             )
-            raise WorkflowServiceException(f"Failed to update workflow: {str(e)}")
+            raise WorkflowServiceException(f"Failed to update workflow: {_failure_detail(e)}")
 
     async def delete_workflow(
         self,
@@ -572,17 +583,16 @@ class WorkflowService:
             raise
         except Exception as e:
             self.logger.error(
-                f"Failed to delete workflow: {str(e)}",
+                f"Failed to delete workflow: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "delete_workflow",
                     "user": str(user_id),
                     "workflow_id": workflow_id,
                     "result": "FAILURE",
-                },
-                exc_info=True
+                }
             )
-            raise WorkflowServiceException(f"Failed to delete workflow: {str(e)}")
+            raise WorkflowServiceException(f"Failed to delete workflow: {_failure_detail(e)}")
 
     async def list_workflows(
         self,
@@ -706,17 +716,16 @@ class WorkflowService:
 
         except Exception as e:
             self.logger.error(
-                f"Failed to list workflows: {str(e)}",
+                f"Failed to list workflows: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "list_workflows",
                     "user": str(user_id),
                     "entity_id": entity_id,
                     "result": "FAILURE",
-                },
-                exc_info=True
+                }
             )
-            raise WorkflowServiceException(f"Failed to list workflows: {str(e)}")
+            raise WorkflowServiceException(f"Failed to list workflows: {_failure_detail(e)}")
 
     async def publish_workflow(
         self,
@@ -807,17 +816,16 @@ class WorkflowService:
             raise
         except Exception as e:
             self.logger.error(
-                f"Failed to publish workflow: {str(e)}",
+                f"Failed to publish workflow: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "publish_workflow",
                     "user": str(user_id),
                     "workflow_id": workflow_id,
                     "result": "FAILURE",
-                },
-                exc_info=True
+                }
             )
-            raise WorkflowServiceException(f"Failed to publish workflow: {str(e)}")
+            raise WorkflowServiceException(f"Failed to publish workflow: {_failure_detail(e)}")
 
     async def validate_workflow(
         self,
@@ -884,16 +892,15 @@ class WorkflowService:
             raise
         except Exception as e:
             self.logger.error(
-                f"Failed to validate workflow: {str(e)}",
+                f"Failed to validate workflow: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "validate_workflow",
                     "workflow_id": workflow_id,
                     "result": "FAILURE",
-                },
-                exc_info=True
+                }
             )
-            raise WorkflowServiceException(f"Failed to validate workflow: {str(e)}")
+            raise WorkflowServiceException(f"Failed to validate workflow: {_failure_detail(e)}")
 
     # =========================================================================
     # Private Helper Methods
@@ -936,7 +943,7 @@ class WorkflowService:
 
         except Exception as e:
             self.logger.error(
-                f"Failed to log audit event: {str(e)}",
+                f"Failed to log audit event: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": "audit_log",

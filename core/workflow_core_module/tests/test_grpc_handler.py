@@ -321,7 +321,10 @@ class TestExecutionFailure:
         context.abort.assert_awaited_once()
         code, message = context.abort.await_args.args
         assert code == grpc.StatusCode.INTERNAL
-        assert "boom" in message
+        # SECURITY (PII in logs): the abort message is also what gets logged, so it carries
+        # the exception TYPE only -- never the exception text (which can embed bound values).
+        assert "RuntimeError" in message
+        assert "boom" not in message
         logger.error.assert_called_once()
 
 

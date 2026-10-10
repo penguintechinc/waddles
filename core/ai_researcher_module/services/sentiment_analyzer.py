@@ -20,6 +20,7 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 
 from config import Config
+from flask_core import describe_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -196,8 +197,7 @@ class SentimentAnalyzer:
 
         except Exception as e:
             logger.error(
-                f"Sentiment analysis error: {e}",
-                exc_info=True,
+                f"Sentiment analysis error: {describe_db_error(e)}",
                 extra={'community_id': community_id}
             )
             return SentimentResult(
@@ -208,7 +208,7 @@ class SentimentAnalyzer:
                 sentiment_distribution={},
                 trends=[],
                 processing_time_ms=int((time.time() - start_time) * 1000),
-                error=str(e)
+                error=describe_db_error(e)
             )
 
     async def _get_messages_for_period(
@@ -265,7 +265,7 @@ class SentimentAnalyzer:
             return messages
 
         except Exception as e:
-            logger.error(f"Get messages error: {e}")
+            logger.error(f"Get messages error: {describe_db_error(e)}")
             return []
 
     async def _classify_message_sentiment(self, message: Dict[str, Any]) -> Dict[str, Any]:
@@ -306,7 +306,7 @@ class SentimentAnalyzer:
             }
 
         except Exception as e:
-            logger.error(f"Message sentiment classification error: {e}")
+            logger.error(f"Message sentiment classification error: {describe_db_error(e)}")
             return {'sentiment': 'neutral', 'confidence': 0.0}
 
     def _calculate_overall_sentiment(self, sentiments: List[Dict[str, Any]]) -> str:
@@ -447,7 +447,7 @@ class SentimentAnalyzer:
             return trends
 
         except Exception as e:
-            logger.error(f"Sentiment trend analysis error: {e}")
+            logger.error(f"Sentiment trend analysis error: {describe_db_error(e)}")
             return []
 
     def _simple_sentiment_classify(self, text: str) -> str:
@@ -510,7 +510,7 @@ class SentimentAnalyzer:
             return None
 
         except Exception as e:
-            logger.error(f"Sentiment analysis storage error: {e}")
+            logger.error(f"Sentiment analysis storage error: {describe_db_error(e)}")
             return None
 
     def _parse_timeframe(self, timeframe: str) -> int:

@@ -20,6 +20,7 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 
 from config import Config
+from flask_core import describe_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -227,8 +228,7 @@ class BehaviorProfiler:
 
         except Exception as e:
             logger.error(
-                f"Behavior profiling error: {e}",
-                exc_info=True,
+                f"Behavior profiling error: {describe_db_error(e)}",
                 extra={'platform_user_id': platform_user_id}
             )
             return BehaviorProfile(
@@ -243,7 +243,7 @@ class BehaviorProfiler:
                 total_messages=0,
                 community_role='error',
                 processing_time_ms=int((time.time() - start_time) * 1000),
-                error=str(e)
+                error=describe_db_error(e)
             )
 
     async def _get_user_statistics(
@@ -296,7 +296,7 @@ class BehaviorProfiler:
             }
 
         except Exception as e:
-            logger.error(f"User statistics error: {e}")
+            logger.error(f"User statistics error: {describe_db_error(e)}")
             return None
 
     async def _analyze_temporal_patterns(
@@ -340,7 +340,7 @@ class BehaviorProfiler:
             return sorted(hours)
 
         except Exception as e:
-            logger.error(f"Temporal pattern analysis error: {e}")
+            logger.error(f"Temporal pattern analysis error: {describe_db_error(e)}")
             return []
 
     def _classify_activity_level(self, total_messages: int) -> str:
@@ -466,7 +466,7 @@ class BehaviorProfiler:
             return None
 
         except Exception as e:
-            logger.error(f"Profile storage error: {e}")
+            logger.error(f"Profile storage error: {describe_db_error(e)}")
             return None
 
     async def get_user_profile(
@@ -518,7 +518,7 @@ class BehaviorProfiler:
             }
 
         except Exception as e:
-            logger.error(f"Get profile error: {e}")
+            logger.error(f"Get profile error: {describe_db_error(e)}")
             return None
 
     async def get_community_profiles(
@@ -575,5 +575,5 @@ class BehaviorProfiler:
             return profiles
 
         except Exception as e:
-            logger.error(f"Get community profiles error: {e}")
+            logger.error(f"Get community profiles error: {describe_db_error(e)}")
             return []
