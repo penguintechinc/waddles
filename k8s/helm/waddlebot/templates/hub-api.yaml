@@ -200,6 +200,9 @@ spec:
         # Enterprise SSO (hub_api/services/sso_*.py) -- encryption key (optional: SSO is
         # entitlement-gated), tuning, SSRF allowlist, shared Google client. See templates/_sso.tpl.
         {{- include "waddlebot.sso.hubApiEnv" . | nindent 8 }}
+        # Ban-evasion suppression (hub_api/services/ban_suppression.py): K_master (the platform
+        # tenant KEK) -- hub-api only -- and the optional retention ceiling. See templates/_suppression.tpl.
+        {{- include "waddlebot.suppression.hubApiEnv" . | nindent 8 }}
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         # regression: seeder VALKEY_URL REPLACE_ME / missing TLS wiring -- hub-api itself
         # calls hub_api/services/valkey_admin_client.py::build_client() (via

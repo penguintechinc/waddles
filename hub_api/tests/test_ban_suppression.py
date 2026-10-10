@@ -1154,6 +1154,48 @@ class TestStoreEdges:
         assert "suppression.identity_skipped" in caplog.text
 
 
+class TestStoreEdgesMore:
+    def test_identities_of_collapses_duplicates_and_skips_blank_rows(self, db: Any) -> None:
+        user = _user(db, name="dupes")
+        for _ in range(2):
+            _link_identity(db, user_id=user, platform="discord", platform_user_id=PUID)
+        _link_identity(db, user_id=user, platform="twitch", platform_user_id="")
+        _link_identity(db, user_id=user, platform="twitch", platform_user_id="42")
+
+        pairs = bs.identities_of(db.dal, user)
+        db.dal.commit()
+
+        assert sorted(pairs) == [("discord", PUID), ("twitch", "42")]
+
+    def test_tenants_of_with_no_communities_is_empty(self, db: Any) -> None:
+        assert bs.tenants_of(db.dal, []) == {}
+        assert bs.tenants_of(db.dal, [None]) == {}  # type: ignore[list-item]
+
+    def test_rows_under_two_key_versions_merge_to_the_strongest_reason_and_latest_expiry(
+        self, db: Any
+    ) -> None:
+        tenant = _tenant(db, "acme")
+        soon, later = _now() + timedelta(days=1), _now() + timedelta(days=9)
+        _insert_row(
+            db, tenant_id=tenant, reason="auto_ban", expires_at=soon, source=_source(MASTER_HEX)
+        )
+        _insert_row(db, tenant_id=tenant, reason="ban", expires_at=later, source=_source(OTHER_HEX))
+
+        match = bs.find_suppression(
+            db.dal,
+            tenant_id=tenant,
+            platform="discord",
+            platform_user_id=PUID,
+            keys=_source(MASTER_HEX, previous=OTHER_HEX),  # both versions are loaded: both rows hit
+            now=_now(),
+        )
+        db.dal.commit()
+
+        assert match is not None
+        assert match.reason is RestrictionReason.BAN
+        assert abs(match.expires_at.replace(tzinfo=UTC) - later) < timedelta(seconds=1)
+
+
 class TestObservability:
     """Logs, spans and metric labels carry counts and enums -- never an id, a code or an email."""
 
@@ -1328,6 +1370,31 @@ class TestPurgeLoop:
             await task
 
         assert len(_rows(db)) == 1  # not ready -> nothing touched
+
+    async def test_cancellation_during_a_pass_propagates(
+        self, db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        started = asyncio.Event()
+
+        async def hang(async_dal: Any, dal: Any) -> int:
+            started.set()
+            await asyncio.sleep(30)
+            return 0
+
+        monkeypatch.setattr(bs, "purge_expired_async", hang)
+        task = asyncio.create_task(bs.run_purge_loop(db, db.dal, interval_seconds=0.05))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    async def test_a_pass_that_deletes_nothing_is_silent(
+        self, db: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("INFO", logger=bs.logger.name):
+            assert await bs.purge_expired_async(db, db.dal) == 0
+        assert "suppression.purged" not in caplog.text
 
     def test_purge_with_nothing_expired_deletes_nothing(self, db: Any) -> None:
         assert bs.purge_expired(db.dal, now=_now()) == 0

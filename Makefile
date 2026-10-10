@@ -6,7 +6,8 @@
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
         check-no-stubs check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
-        verify-audit-chain verify-audit-export test-supply-chain
+        verify-audit-chain verify-audit-export test-supply-chain \
+        suppression-stats suppression-purge suppression-lift suppression-check
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -222,6 +223,32 @@ test-csharp-bundle-compile:
 verify-audit-chain:
 	@cd hub_api && python3 -m cli.verify_audit_chain $(if $(ALLOW_EMPTY),--allow-empty) \
 		$(foreach e,$(EXPECT),--expect $(e))
+
+# Ban-evasion suppression list (docs/compliance/suppression-LIA.md, hub_api/cli/suppression.py).
+# Run from hub_api so `cli.*` resolves; DATABASE_URL / DB_* env, TENANT_KEK_HEX for `lift`.
+#   suppression-stats: live/expired rows per tenant, type and key version (when can
+#                      TENANT_KEK_HEX_PREVIOUS be dropped after a KEK rotation?).
+#   suppression-purge: delete every expired row now (hub-api also does this hourly).
+#   suppression-lift:  delete one identity's row in one tenant (restriction lifted / objection
+#                      upheld). The platform id goes in via the PLATFORM_USER_ID environment
+#                      variable and stdin -- never argv, so it stays out of shell history/ps.
+#   make suppression-lift TENANT_ID=3 PLATFORM=discord PLATFORM_USER_ID=<id>
+#   suppression-check: read-only -- is there a live row for this identity in this tenant?
+#                      (the answer to an Art. 15 access request / an Art. 21 objection).
+#   make suppression-check TENANT_ID=3 PLATFORM=discord PLATFORM_USER_ID=<id>
+suppression-stats:
+	@cd hub_api && python3 -m cli.suppression stats
+
+suppression-purge:
+	@cd hub_api && python3 -m cli.suppression purge
+
+suppression-check:
+	@test -n "$(TENANT_ID)" -a -n "$(PLATFORM)" -a -n "$$PLATFORM_USER_ID" || { echo "usage: PLATFORM_USER_ID=<id> make suppression-check TENANT_ID=<n> PLATFORM=<name>" >&2; exit 2; }
+	@cd hub_api && printf '%s\n' "$$PLATFORM_USER_ID" | python3 -m cli.suppression check --tenant-id "$(TENANT_ID)" --platform "$(PLATFORM)" --platform-user-id-stdin
+
+suppression-lift:
+	@test -n "$(TENANT_ID)" -a -n "$(PLATFORM)" -a -n "$$PLATFORM_USER_ID" || { echo "usage: PLATFORM_USER_ID=<id> make suppression-lift TENANT_ID=<n> PLATFORM=<name>" >&2; exit 2; }
+	@cd hub_api && printf '%s\n' "$$PLATFORM_USER_ID" | python3 -m cli.suppression lift --tenant-id "$(TENANT_ID)" --platform "$(PLATFORM)" --platform-user-id-stdin
 
 # verify-audit-export: verify downloaded export file(s) offline -- no server, DB or network.
 #   make verify-audit-export EXPORT="page1.json page2.json" [ANCHOR=<hash>] [HEAD_SEQ=42] [HEAD_HASH=<hash>]

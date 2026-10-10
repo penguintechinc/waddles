@@ -473,7 +473,11 @@ async def link_callback(
     if existing and existing.first().hub_user_id != user_id:
         raise bad_request("Platform account already linked to another user")
     if existing:
-        return  # already linked to this same user
+        # Already linked to this same user -- but a previous attempt may have inserted the link and
+        # then failed inside the suppression re-check (e.g. key outage): re-run it so a retry can
+        # never leave a banned person's memberships un-flipped.
+        await ban_suppression.reapply_for_hub_user_async(async_dal, dal, hub_user_id=user_id)
+        return
 
     await async_dal.insert_async(
         dal.hub_user_identities,
