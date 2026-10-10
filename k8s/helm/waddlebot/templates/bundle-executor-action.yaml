@@ -60,7 +60,8 @@ spec:
         # Same image as templates/bundle-executor.yaml -- literally the same crate/binary,
         # pointed at a different stage purely via env vars below.
         image: "{{ .Values.bundleExecutor.image.repository }}:{{ .Values.bundleExecutor.image.tag | default .Values.global.imageTag | toString }}"
-        imagePullPolicy: Always
+        # Values-driven -- same as templates/bundle-executor.yaml (see svc-process-rust.yaml).
+        imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
         securityContext:
           runAsNonRoot: true
           runAsUser: 10001
