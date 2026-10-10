@@ -533,3 +533,170 @@ def test_kv_key_constants_are_colon_free() -> None:
         # Regression guard: the shared fake validates the exact host charset (gh-631), so a
         # key that would be host-rejected raises here too, never only in production.
         FakeKvHost().get(key)
+
+
+# ---------------------------------------------------------------------------
+# fail-loud: every kv op, corrupt-store shapes, grammar errors never leak the input
+# ---------------------------------------------------------------------------
+
+
+def _fail_kv_op(attr: str, *, only_for_key: str | None = None) -> Any:
+    """Make one `kv` host op raise (optionally only for `only_for_key`); returns a restore fn."""
+    kv_ns = sys.modules["wit_world"].imports.kv
+    original = getattr(kv_ns, attr)
+
+    def _raise(key: str, *args: Any) -> Any:
+        if only_for_key is None or key == only_for_key:
+            raise RuntimeError("backend down")
+        return original(key, *args)
+
+    setattr(kv_ns, attr, _raise)
+    return lambda: setattr(kv_ns, attr, original)
+
+
+def test_tell_kv_get_failure_on_registry_is_loud(fake_host: _FakeHost) -> None:
+    restore = _fail_kv_op("get")
+    try:
+        with pytest.raises(RuntimeError, match="compliment load_registry failed"):
+            _run(dispatch(_envelope("tell"), {}, http_client=None))
+    finally:
+        restore()
+    assert "unavailable" in _last_reply_text(fake_host)
+    assert any(m == "compliment.kv_error" for _lvl, m, _f in fake_host.log_calls)
+
+
+def test_tell_kv_get_failure_on_last_ref_is_loud(fake_host: _FakeHost) -> None:
+    restore = _fail_kv_op("get", only_for_key=_scoped(_LAST_COMPLIMENT_KEY))
+    try:
+        with pytest.raises(RuntimeError, match="compliment get_last failed"):
+            _run(dispatch(_envelope("tell"), {}, http_client=None))
+    finally:
+        restore()
+    assert "unavailable" in _last_reply_text(fake_host)
+
+
+def test_tell_kv_set_failure_on_last_ref_is_loud(fake_host: _FakeHost) -> None:
+    restore = _fail_kv_op("set", only_for_key=_scoped(_LAST_COMPLIMENT_KEY))
+    try:
+        with pytest.raises(RuntimeError, match="compliment set_last failed"):
+            _run(dispatch(_envelope("tell"), {}, http_client=None))
+    finally:
+        restore()
+    assert "unavailable" in _last_reply_text(fake_host)
+    assert _scoped(_LAST_COMPLIMENT_KEY) not in fake_host.kv.store
+
+
+@pytest.mark.parametrize(
+    "bad_registry",
+    [json.dumps(["not", "an", "object"]), json.dumps({"1": 2}), json.dumps({"1": None}), "\"str\""],
+    ids=["list", "non-str-value", "null-value", "bare-string"],
+)
+def test_corrupt_registry_shapes_fail_loud_and_are_never_reset(
+    bad_registry: str, fake_host: _FakeHost
+) -> None:
+    fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)] = bad_registry.encode()
+    with pytest.raises(RuntimeError, match="compliment load_registry failed"):
+        _run(dispatch(_envelope("tell"), {}, http_client=None))
+    with pytest.raises(RuntimeError, match="compliment add failed"):
+        _run(dispatch(_envelope("add", arg="x", is_mod=True), {}, http_client=None))
+    assert fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)] == bad_registry.encode()
+
+
+def test_corrupt_registry_invalid_utf8_fails_loud(fake_host: _FakeHost) -> None:
+    fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)] = b"\xff\xfe\x00"
+    with pytest.raises(RuntimeError, match="compliment load_registry failed"):
+        _run(dispatch(_envelope("tell"), {}, http_client=None))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "!compliment enable",
+        "!compliment disable",
+        "!compliment disable PIIREST_a PIIREST_b",
+        "!compliment enable ai",
+        "!compliment list",
+        "!compliment set x",
+    ],
+)
+def test_toggle_and_unimplemented_verbs_reply_usage(text: str, fake_host: _FakeHost) -> None:
+    result = _run(transform(_event(text)))
+    assert result is not None
+    assert result.payload["command"] == "usage"
+
+
+# regression: gh-674 -- the grammar-error DEBUG log must carry only the exception class,
+# never the raw user-typed remainder (it used to log `rest=rest, error=str(exc)`).
+def test_grammar_error_log_carries_only_the_exception_class(fake_host: _FakeHost) -> None:
+    _run(transform(_event("!compliment disable PIIREST_a PIIREST_b")))
+    grammar_logs = [f for _lvl, m, f in fake_host.log_calls if m == "compliment.invalid_grammar"]
+    assert len(grammar_logs) == 1
+    assert json.loads(grammar_logs[0]) == {"error": "CommandUsageError"}
+
+
+# ---------------------------------------------------------------------------
+# PII-free logs (gh-674)
+# ---------------------------------------------------------------------------
+
+_PII_ACTOR = "PIIACTOR_alice"
+_PII_TARGET = "PIITARGET_bob"
+_PII_TEXT = "PIITEXT_secret_phrase"
+
+
+def _roundtrip(text: str, **role: bool) -> Any:
+    """Run `transform()` then `dispatch()` -- the real two-stage path -- with PII sentinels."""
+    event = _event(text, actor=_PII_ACTOR, **role)
+    out = _run(transform(event))
+    assert out is not None
+    envelope = StageEnvelope(
+        tenant="tenant-1",
+        community="comm-1",
+        app_id="waddles.core.example.compliment",
+        stage="action",
+        event=out,
+        ts="2026-10-07T00:00:00.000Z",
+    )
+    return _run(dispatch(envelope, {}, http_client=None))
+
+
+def _assert_logs_pii_free(host: _FakeHost, *sentinels: str) -> int:
+    """Assert no sentinel appears in any recorded log call; return how many were examined."""
+    assert host.log_calls, "no log calls recorded -- the PII check would pass vacuously"
+    for _lvl, message, fields_json in host.log_calls:
+        blob = f"{message} {fields_json}".lower()
+        for sentinel in sentinels:
+            assert sentinel.lower() not in blob
+    return len(host.log_calls)
+
+
+# regression: gh-674 -- no actor, `<user>` target or typed text may reach any log call.
+def test_logs_never_contain_actor_target_or_typed_text(fake_host: _FakeHost) -> None:
+    _roundtrip("!compliment")  # self-addressed: actor lands in the reply only
+    _roundtrip(f"!compliment @{_PII_TARGET}")
+    _roundtrip(f"!compliment {_PII_TARGET}!!")  # invalid target chars -> error reply
+    _roundtrip(f"!compliment {_PII_TARGET} {_PII_TEXT}")  # multi-word -> usage
+    _roundtrip(f"!compliment add {_PII_TEXT}", is_mod=True)  # applied
+    _roundtrip(f"!compliment add {_PII_TEXT}")  # denied: no role signal
+    _roundtrip(f"!compliment add {_PII_TEXT}", is_mod=False, is_broadcaster=False)  # denied
+    _roundtrip(f"!compliment disable {_PII_TARGET} {_PII_TEXT}")  # grammar error
+    assert actor_in_reply(fake_host)  # sanity: the actor is in a reply, not in a log
+    assert _assert_logs_pii_free(fake_host, _PII_ACTOR, _PII_TARGET, _PII_TEXT) >= 12
+
+
+def actor_in_reply(host: _FakeHost) -> bool:
+    return any(_PII_ACTOR in json.loads(msg)["text"] for _prov, msg in host.relay_calls)
+
+
+# regression: gh-674 -- error-path logs carry the host error text, never the typed text.
+def test_kv_error_logs_never_contain_actor_target_or_typed_text(fake_host: _FakeHost) -> None:
+    restore = _fail_kv_op("increment")
+    try:
+        with pytest.raises(RuntimeError, match="compliment add failed"):
+            _roundtrip(f"!compliment add {_PII_TEXT}", is_mod=True)
+    finally:
+        restore()
+    fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)] = b"not json"
+    with pytest.raises(RuntimeError, match="compliment load_registry failed"):
+        _roundtrip(f"!compliment @{_PII_TARGET}")
+    assert sum(1 for _lvl, m, _f in fake_host.log_calls if m == "compliment.kv_error") == 2
+    _assert_logs_pii_free(fake_host, _PII_ACTOR, _PII_TARGET, _PII_TEXT)

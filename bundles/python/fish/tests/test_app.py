@@ -689,3 +689,129 @@ def test_caller_role_signal_true_from_mod() -> None:
 
 def test_caller_role_signal_false_when_both_false() -> None:
     assert _caller_role_signal({"is_mod": False, "is_broadcaster": False}) is False
+
+
+# -- remaining branch + kv charset + PII-free logs + corrupt-state ERROR logging ----------------
+
+
+def test_list_with_count_but_no_biggest_record_says_nothing_yet(fake_host: _FakeHost) -> None:
+    """Total present but the biggest-catch key absent -> `nothing yet`, never a crash."""
+    fake_host.store[_scoped(_count_key(_expected_pseudonym("viewer-1")))] = b"3"
+    _run(dispatch(_sample_envelope("twitch", "list"), {}, http_client=None))
+    _provider, message_json = fake_host.relay_calls[-1]
+    assert json.loads(message_json)["text"] == "Total catches: 3. Biggest catch: nothing yet."
+
+
+# regression: gh-631 -- this suite's hand-rolled kv fake accepts ANY key (the exact blind spot
+# that hid `count`/`lurk`'s colon keys), so assert the real host charset over EVERY key a full
+# cast/list/set-cooldown flow touches.
+def test_every_kv_key_touched_satisfies_the_host_charset(fake_host: _FakeHost) -> None:
+    from waddle_sdk.kv import validate_key
+
+    _run(dispatch(_sample_envelope("twitch", "cast"), {}, http_client=None))
+    _run(dispatch(_sample_envelope("twitch", "list"), {}, http_client=None))
+    _run(
+        dispatch(
+            _sample_envelope("twitch", "config_set_cooldown", arg="cooldown 30", is_mod=True),
+            {},
+            http_client=None,
+        )
+    )
+    touched = {call[1] for call in fake_host.kv_calls}
+    assert len(touched) == 4, f"expected count/lastcast/biggest/config keys, got {sorted(touched)}"
+    for key in touched:
+        validate_key(key)  # raises if any byte falls outside the real host's allowed charset
+        assert ":" not in key
+
+
+_PII_ACTOR = "PIIACTOR_alice"
+_PII_TEXT = "PIITEXT_secret_phrase"
+
+
+def _roundtrip(text: str, **role: bool) -> Any:
+    """Run `transform()` then `dispatch()` -- the real two-stage path -- with PII sentinels."""
+    event = _sample_event(text, **role)
+    event.actor = _PII_ACTOR
+    out = _run(transform(event))
+    assert out is not None
+    envelope = StageEnvelope(
+        tenant="tenant-1",
+        community="comm-1",
+        app_id="waddles.core.example.fish",
+        stage="action",
+        event=out,
+        ts="2026-10-05T00:00:00.000Z",
+    )
+    return _run(dispatch(envelope, {}, http_client=None))
+
+
+def _assert_logs_pii_free(host: _FakeHost, *sentinels: str) -> int:
+    """Assert no sentinel appears in any recorded log call; return how many were examined."""
+    assert host.log_calls, "no log calls recorded -- the PII check would pass vacuously"
+    for _lvl, message, fields_json in host.log_calls:
+        blob = f"{message} {fields_json}".lower()
+        for sentinel in sentinels:
+            assert sentinel.lower() not in blob
+    return len(host.log_calls)
+
+
+# regression: gh-674 -- no actor, pseudonym or typed text may reach any log call, on any branch
+# (transform AND dispatch; the existing PII test only exercised dispatch with no typed text).
+def test_logs_never_contain_actor_pseudonym_or_typed_text(fake_host: _FakeHost) -> None:
+    _roundtrip("!fish")
+    _roundtrip("!fish")  # cooldown rejection
+    _roundtrip("!fish list")
+    _roundtrip(f"!fish set cooldown {_PII_TEXT}", is_mod=True)  # invalid seconds
+    _roundtrip(f"!fish set cooldown 99999999 {_PII_TEXT}", is_mod=True)  # wrong arity
+    _roundtrip("!fish set cooldown 30", is_mod=True)  # applied
+    _roundtrip("!fish set cooldown 30")  # denied: no role signal
+    _roundtrip("!fish set cooldown 30", is_mod=False, is_broadcaster=False)  # denied
+    _roundtrip(f"!fish bogus {_PII_TEXT}")  # usage
+    _roundtrip(f"!fish list {_PII_TEXT}")  # usage
+    pseudonym = _expected_pseudonym(_PII_ACTOR)
+    assert _assert_logs_pii_free(fake_host, _PII_ACTOR, _PII_TEXT, pseudonym, pseudonym[:8]) >= 15
+
+
+# regression: gh-674 -- backend-error logs carry the error class only, never typed text.
+def test_kv_error_logs_never_contain_actor_or_typed_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    host = _FakeHost()
+    _install(monkeypatch, host, kv_set_raises=_KvError())
+    with pytest.raises(RuntimeError, match="kv set failed"):
+        _roundtrip("!fish")
+    assert any(m == "fish.kv_error" for _lvl, m, _f in host.log_calls)
+    _assert_logs_pii_free(host, _PII_ACTOR, _expected_pseudonym(_PII_ACTOR))
+
+
+@pytest.mark.parametrize(
+    ("key_fn", "corrupt_value", "command", "log_name"),
+    [
+        (lambda p: "fish.count." + p, b"NaN", "list", "fish.count_corrupt"),
+        (lambda p: "fish.lastcast." + p, b"\xff\xfe", "cast", "fish.cooldown_state_corrupt"),
+        (lambda p: "fish.config.cooldown", b"abc", "cast", "fish.cooldown_config_corrupt"),
+    ],
+    ids=["count", "lastcast", "cooldown-config"],
+)
+def test_corrupt_state_self_heals_but_always_logs_at_error(
+    key_fn: Any, corrupt_value: bytes, command: str, log_name: str, fake_host: _FakeHost
+) -> None:
+    if command == "list":
+        fake_host.store[_scoped(_count_key(_expected_pseudonym("viewer-1")))] = corrupt_value
+    else:
+        fake_host.store[_scoped(key_fn(_expected_pseudonym("viewer-1")))] = corrupt_value
+    _run(dispatch(_sample_envelope("twitch", command), {}, http_client=None))
+    levels = [lvl for lvl, m, _f in fake_host.log_calls if m == log_name]
+    assert levels, f"{log_name} was not logged"
+    assert set(levels) == {0}  # the fake host's Level.ERROR
+
+
+def test_set_cooldown_lifecycle_is_per_community(fake_host: _FakeHost) -> None:
+    """Config set in one community never leaks into another community's cast gate."""
+    _run(
+        dispatch(
+            _sample_envelope("twitch", "config_set_cooldown", arg="cooldown 5", is_mod=True),
+            {},
+            http_client=None,
+        )
+    )
+    assert fake_host.store[_scoped("fish.config.cooldown", "comm-1")] == b"5"
+    assert _scoped("fish.config.cooldown", "comm-2") not in fake_host.store

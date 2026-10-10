@@ -580,3 +580,260 @@ def test_kv_key_helpers_contain_no_colon() -> None:
 
     assert ":" not in _registry_key("comm-1")
     assert ":" not in _timers_key("comm-1")
+
+
+# ---------------------------------------------------------------------------
+# mod-gate fail-closed: absent role fields (Discord today) must deny, never allow
+# ---------------------------------------------------------------------------
+
+
+def _no_role_event(text: str) -> PlatformEvent:
+    """A Discord-shaped event: no `is_mod`/`is_broadcaster` keys at all."""
+    event = _event(text)
+    del event.payload["is_mod"]
+    del event.payload["is_broadcaster"]
+    return event
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "!command set !greet hi",
+        "!command remove !greet",
+        "!command timer !greet set 5m",
+        "!command timer !greet enable",
+        "!command timer !greet disable",
+    ],
+)
+def test_every_management_write_is_denied_when_role_fields_are_absent(
+    text: str, fake_host
+) -> None:
+    result = _run(transform(_no_role_event(text)))
+    assert result is not None
+    assert result.payload["action"] == "reply"
+    assert result.payload["text"] == "only broadcasters/mods can manage custom commands"
+    assert fake_host.kv_store == {}
+
+
+def test_list_and_direct_invocation_stay_open_without_role_fields(fake_host) -> None:
+    _seed_registry(fake_host, "comm-1", {"greet": "hi there"})
+    listed = _run(transform(_no_role_event("!command list")))
+    assert listed is not None and listed.payload["action"] == "list_commands"
+    with _ctx("comm-1"):
+        invoked = _run(transform(_no_role_event("!greet")))
+    assert invoked is not None and invoked.payload["text"] == "hi there"
+
+
+# ---------------------------------------------------------------------------
+# remaining branches: invalid dynamic token, >15 list cap, kv failures on every write path
+# ---------------------------------------------------------------------------
+
+
+def test_dynamic_lookup_with_invalid_name_returns_none(fake_host) -> None:
+    """A token that can never be a valid command name is 'not ours' -- no kv read at all."""
+    with _ctx("comm-1"):
+        assert _run(transform(_event("!hello!world"))) is None
+        assert _run(transform(_event("!" + "x" * 40))) is None
+    assert fake_host.kv_store == {}
+
+
+def test_list_caps_display_at_fifteen_and_reports_the_remainder(fake_host) -> None:
+    _seed_registry(fake_host, "comm-1", {f"cmd{i:02d}": "x" for i in range(18)})
+    transformed = _run(transform(_event("!command list")))
+    assert transformed is not None
+    _run(dispatch(_envelope(transformed), {}, http_client=None))
+
+    text = json.loads(fake_host.relay_calls[0][1])["text"]
+    assert text.startswith("custom commands: !cmd00, !cmd01")
+    assert "!cmd14" in text and "!cmd15" not in text
+    assert text.endswith("…and 3 more")
+
+
+def _fail_kv(fake_host, op: str) -> None:
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("kv backend unavailable")
+
+    setattr(fake_host.wit_world.imports.kv, op, _boom)
+
+
+@pytest.mark.parametrize(
+    ("action", "payload", "seed"),
+    [
+        ("set_command", {"name": "greet", "text": "hi"}, None),
+        ("remove_command", {"name": "greet"}, {"greet": "hi"}),
+        ("timer_set", {"name": "greet", "interval_seconds": 300}, {"greet": "hi"}),
+    ],
+)
+def test_dispatch_kv_failure_on_every_registry_write_path_is_loud(
+    action: str, payload: dict, seed: dict | None, fake_host
+) -> None:
+    if seed is not None:
+        _seed_registry(fake_host, "comm-1", seed)
+    _fail_kv(fake_host, "set")
+    event = _event("!command x", is_mod=True)
+    event.payload = {"action": action, "channel_id": "12345", **payload}
+    _run(dispatch(_envelope(event), {}, http_client=None))
+
+    assert "temporarily unavailable" in json.loads(fake_host.relay_calls[-1][1])["text"]
+    assert any("dispatch.kv_error" in msg for _lvl, msg, _f in fake_host.log_calls)
+
+
+def test_dispatch_kv_failure_on_registry_read_during_set_is_loud(fake_host) -> None:
+    _fail_kv(fake_host, "get")
+    event = _event("!command x", is_mod=True)
+    event.payload = {"action": "set_command", "channel_id": "12345", "name": "g", "text": "hi"}
+    _run(dispatch(_envelope(event), {}, http_client=None))
+    assert "temporarily unavailable" in json.loads(fake_host.relay_calls[-1][1])["text"]
+    assert fake_host.kv_store == {}
+
+
+@pytest.mark.parametrize("action", ["remove_command", "timer_set"])
+def test_dispatch_kv_failure_on_registry_read_is_loud(action: str, fake_host) -> None:
+    _fail_kv(fake_host, "get")
+    event = _event("!command x", is_mod=True)
+    event.payload = {
+        "action": action,
+        "channel_id": "12345",
+        "name": "greet",
+        "interval_seconds": 300,
+    }
+    _run(dispatch(_envelope(event), {}, http_client=None))
+    assert "temporarily unavailable" in json.loads(fake_host.relay_calls[-1][1])["text"]
+    assert any("dispatch.kv_error" in msg for _lvl, msg, _f in fake_host.log_calls)
+
+
+@pytest.mark.parametrize("action", ["timer_enable", "timer_disable"])
+def test_dispatch_kv_failure_on_timer_toggle_is_loud(action: str, fake_host) -> None:
+    _seed_timers(fake_host, "comm-1", {"greet": {"interval_seconds": 300, "enabled": False}})
+    _fail_kv(fake_host, "set")
+    event = _event("!command x", is_mod=True)
+    event.payload = {"action": action, "channel_id": "12345", "name": "greet"}
+    _run(dispatch(_envelope(event), {}, http_client=None))
+
+    assert "temporarily unavailable" in json.loads(fake_host.relay_calls[-1][1])["text"]
+    assert any("timer_toggle" in fields for _lvl, _msg, fields in fake_host.log_calls)
+    # the failed write never reached the store: the persisted flag is unchanged
+    assert json.loads(fake_host.kv_store["command.timers.comm-1"])["greet"]["enabled"] is False
+
+
+# ---------------------------------------------------------------------------
+# corrupt-store fail-loud
+# ---------------------------------------------------------------------------
+
+
+def test_corrupt_registry_json_is_loud_on_list_lookup_and_never_overwritten(fake_host) -> None:
+    """Invalid JSON in the registry blob: replies unavailable + ERROR log, bytes left intact."""
+    fake_host.kv_store["command.registry.comm-1"] = b"\xff\xfe not json"
+
+    listed = _run(transform(_event("!command list")))
+    assert listed is not None
+    _run(dispatch(_envelope(listed), {}, http_client=None))
+    assert "temporarily unavailable" in json.loads(fake_host.relay_calls[-1][1])["text"]
+
+    with _ctx("comm-1"):
+        looked_up = _run(transform(_event("!greet")))
+    assert looked_up is not None  # never silently dropped
+    assert "temporarily unavailable" in looked_up.payload["text"]
+
+    event = _event("!command x", is_mod=True)
+    event.payload = {"action": "set_command", "channel_id": "12345", "name": "g", "text": "hi"}
+    _run(dispatch(_envelope(event), {}, http_client=None))
+    assert "temporarily unavailable" in json.loads(fake_host.relay_calls[-1][1])["text"]
+
+    assert fake_host.kv_store["command.registry.comm-1"] == b"\xff\xfe not json"
+    assert sum(1 for _lvl, m, _f in fake_host.log_calls if "kv_error" in m) >= 3
+
+
+def test_corrupt_timers_json_is_loud_and_never_overwritten(fake_host) -> None:
+    _seed_registry(fake_host, "comm-1", {"greet": "hi"})
+    fake_host.kv_store["command.timers.comm-1"] = b"{broken"
+    event = _event("!command x", is_mod=True)
+    event.payload = {"action": "timer_enable", "channel_id": "12345", "name": "greet"}
+    _run(dispatch(_envelope(event), {}, http_client=None))
+    assert "temporarily unavailable" in json.loads(fake_host.relay_calls[-1][1])["text"]
+    assert fake_host.kv_store["command.timers.comm-1"] == b"{broken"
+
+
+# ---------------------------------------------------------------------------
+# PII-free logs (gh-674)
+# ---------------------------------------------------------------------------
+
+
+def _assert_logs_pii_free(host, *sentinels: str) -> int:
+    """Assert no sentinel appears in any recorded log call; return how many were examined."""
+    assert host.log_calls, "no log calls recorded -- the PII check would pass vacuously"
+    for _lvl, message, fields_json in host.log_calls:
+        blob = f"{message} {fields_json}".lower()
+        for sentinel in sentinels:
+            assert sentinel.lower() not in blob
+    return len(host.log_calls)
+
+
+# regression: gh-674 -- no raw actor and no typed/stored text may reach a log call. The stored
+# text embeds `$(username)`, so the rendered reply carries the actor -- but never the logs.
+def test_logs_never_contain_actor_or_command_text(fake_host) -> None:
+    actor = "PIIACTOR_alice"
+    secret = "PIITEXT_secret_phrase"
+
+    def say(text: str, *, is_mod: bool = True, community: str | None = "comm-1") -> None:
+        event = _event(text, actor=actor, is_mod=is_mod)
+        with _ctx(community):
+            out = _run(transform(event))
+        if out is not None:
+            _run(dispatch(_envelope(out, community=community), {}, http_client=None))
+
+    say(f"!command set !greet hi $(username) {secret}")
+    say(f"!command set !greet hi $(username) {secret}", is_mod=False)  # denied
+    say("!greet")  # renders the actor into the reply only
+    say("!command list")
+    say(f"!command timer !greet set 5m {secret}")  # malformed trailing text
+    say("!command timer !greet set 5m")
+    say("!command timer !greet enable")
+    say(f"!command bogus {secret}")  # usage
+    say(f"!command remove !greet {secret}")
+    say("!command remove !greet")
+    rendered = json.loads(fake_host.relay_calls[2][1])["text"]
+    assert actor in rendered  # sanity: the reply (not the log) is where the actor appears
+    assert _assert_logs_pii_free(fake_host, actor, secret) >= 10
+
+
+# regression: gh-674 -- error-path logs carry the host error text, never the typed text.
+def test_kv_error_logs_never_contain_actor_or_command_text(fake_host) -> None:
+    secret = "PIITEXT_secret_phrase"
+    _fail_kv(fake_host, "set")
+    event = _event(f"!command set !greet {secret}", actor="PIIACTOR_alice", is_mod=True)
+    out = _run(transform(event))
+    assert out is not None
+    _run(dispatch(_envelope(out), {}, http_client=None))
+    assert any("dispatch.kv_error" in m for _lvl, m, _f in fake_host.log_calls)
+    _assert_logs_pii_free(fake_host, "PIIACTOR_alice", secret)
+
+
+# ---------------------------------------------------------------------------
+# gh-613: timers persist config only -- no replies may claim periodic firing
+# ---------------------------------------------------------------------------
+
+
+# regression: gh-613 -- no scheduled/periodic trigger exists in the `stage` WIT world, so every
+# timer reply that implies firing must say so loudly; the config is saved, nothing fires.
+def test_timer_replies_cite_gh_613_and_never_claim_periodic_firing(fake_host) -> None:
+    _seed_registry(fake_host, "comm-1", {"greet": "hi"})
+    texts: list[str] = []
+    for text in (
+        "!command timer !greet set 5m",
+        "!command timer !greet enable",
+        "!command timer !greet disable",
+    ):
+        out = _run(transform(_event(text, is_mod=True)))
+        assert out is not None
+        _run(dispatch(_envelope(out), {}, http_client=None))
+        texts.append(json.loads(fake_host.relay_calls[-1][1])["text"])
+
+    set_reply, enable_reply, disable_reply = texts
+    assert "gh-613" in set_reply and "not wired yet" in set_reply
+    assert "gh-613" in enable_reply and "not wired yet" in enable_reply
+    assert disable_reply == "timer disabled for !greet"  # disabling needs no firing caveat
+    assert json.loads(fake_host.kv_store["command.timers.comm-1"])["greet"] == {
+        "interval_seconds": 300,
+        "enabled": False,
+    }

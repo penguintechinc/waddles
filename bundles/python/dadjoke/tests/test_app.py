@@ -568,3 +568,140 @@ def test_kv_key_constants_are_colon_free() -> None:
         # Regression guard: the shared fake validates the exact host charset (gh-631), so a
         # key that would be host-rejected raises here too, never only in production.
         FakeKvHost().get(key)
+
+
+# ---------------------------------------------------------------------------
+# lifecycle, fail-closed gate, corrupt-store shapes
+# ---------------------------------------------------------------------------
+
+
+def _said(host: _FakeHost) -> str:
+    return cast(str, json.loads(host.relay_calls[-1][1])["text"])
+
+
+def test_add_list_remove_lifecycle_and_ids_are_never_reused(fake_host: _FakeHost) -> None:
+    for text in ("first", "second"):
+        _run(dispatch(_envelope("add", arg=text, is_mod=True), {}, http_client=None))
+    _run(dispatch(_envelope("list"), {}, http_client=None))
+    assert _said(fake_host) == "Custom dad jokes: #1: first | #2: second"
+
+    _run(dispatch(_envelope("remove", arg="1", is_mod=True), {}, http_client=None))
+    _run(dispatch(_envelope("add", arg="third", is_mod=True), {}, http_client=None))
+    assert "#3" in _said(fake_host)  # id 1 is gone for good, 3 is next -- never reused
+    _run(dispatch(_envelope("list"), {}, http_client=None))
+    assert _said(fake_host) == "Custom dad jokes: #2: second | #3: third"
+
+
+def test_list_orders_ids_numerically_not_lexically(fake_host: _FakeHost) -> None:
+    registry = {str(i): f"joke {i}" for i in (10, 2, 1)}
+    fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)] = json.dumps(registry).encode()
+    _run(dispatch(_envelope("list"), {}, http_client=None))
+    assert _said(fake_host) == "Custom dad jokes: #1: joke 1 | #2: joke 2 | #10: joke 10"
+
+
+def test_removed_custom_joke_leaves_the_draw_pool(
+    monkeypatch: pytest.MonkeyPatch, fake_host: _FakeHost
+) -> None:
+    _run(dispatch(_envelope("add", arg="custom-only", is_mod=True), {}, http_client=None))
+    _run(dispatch(_envelope("remove", arg="1", is_mod=True), {}, http_client=None))
+    seen: list[list[tuple[str, str]]] = []
+    import app
+
+    def _pick(candidates: list[tuple[str, str]]) -> tuple[str, str]:
+        seen.append(list(candidates))
+        return candidates[0]
+
+    monkeypatch.setattr(app.random, "choice", _pick)
+    _run(dispatch(_envelope("tell"), {}, http_client=None))
+    assert all(text != "custom-only" for _ref, text in seen[0])
+
+
+def test_remove_rejected_when_role_signal_entirely_absent(fake_host: _FakeHost) -> None:
+    """Discord today has no is_mod/is_broadcaster at all -- must deny, never implicitly allow."""
+    _run(dispatch(_envelope("add", arg="keep me", is_mod=True), {}, http_client=None))
+    result = _run(dispatch(_envelope("remove", arg="1"), {}, http_client=None))
+    assert result.detail == "remove:denied"
+    assert json.loads(fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)]) == {"1": "keep me"}
+
+
+@pytest.mark.parametrize(
+    "bad_registry",
+    [json.dumps(["not", "an", "object"]), json.dumps({"1": 2}), json.dumps({"1": None}), "\"s\""],
+    ids=["list", "non-str-value", "null-value", "bare-string"],
+)
+def test_corrupt_registry_shapes_fail_loud_and_are_never_reset(
+    bad_registry: str, fake_host: _FakeHost
+) -> None:
+    fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)] = bad_registry.encode()
+    for command in ("tell", "list"):
+        with pytest.raises(RuntimeError, match=f"dadjoke (load_registry|{command}) failed"):
+            _run(dispatch(_envelope(command), {}, http_client=None))
+    with pytest.raises(RuntimeError, match="dadjoke add failed"):
+        _run(dispatch(_envelope("add", arg="x", is_mod=True), {}, http_client=None))
+    assert fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)] == bad_registry.encode()
+
+
+def test_corrupt_registry_invalid_utf8_fails_loud(fake_host: _FakeHost) -> None:
+    fake_host.kv.store[_scoped(_CUSTOM_REGISTRY_KEY)] = b"\xff\xfe\x00"
+    with pytest.raises(RuntimeError, match="dadjoke list failed"):
+        _run(dispatch(_envelope("list"), {}, http_client=None))
+    assert "unavailable" in _said(fake_host)
+
+
+# ---------------------------------------------------------------------------
+# PII-free logs (gh-674)
+# ---------------------------------------------------------------------------
+
+_PII_ACTOR = "PIIACTOR_alice"
+_PII_TEXT = "PIITEXT_secret_phrase"
+
+
+def _roundtrip(text: str, **role: bool) -> Any:
+    """Run `transform()` then `dispatch()` -- the real two-stage path -- with PII sentinels."""
+    event = _event(text, **role)
+    event.actor = _PII_ACTOR
+    out = _run(transform(event))
+    assert out is not None
+    envelope = StageEnvelope(
+        tenant="tenant-1",
+        community="comm-1",
+        app_id="waddles.core.example.dadjoke",
+        stage="action",
+        event=out,
+        ts="2026-10-08T00:00:00.000Z",
+    )
+    return _run(dispatch(envelope, {}, http_client=None))
+
+
+def _assert_logs_pii_free(host: _FakeHost, *sentinels: str) -> int:
+    """Assert no sentinel appears in any recorded log call; return how many were examined."""
+    assert host.log_calls, "no log calls recorded -- the PII check would pass vacuously"
+    for _lvl, message, fields_json in host.log_calls:
+        blob = f"{message} {fields_json}".lower()
+        for sentinel in sentinels:
+            assert sentinel.lower() not in blob
+    return len(host.log_calls)
+
+
+# regression: gh-674 -- no actor or typed text (joke body, remove argument) may reach any log.
+def test_logs_never_contain_actor_or_typed_text(fake_host: _FakeHost) -> None:
+    _roundtrip("!dadjoke")
+    _roundtrip(f"!dadjoke add {_PII_TEXT}", is_mod=True)  # applied
+    _roundtrip(f"!dadjoke add {_PII_TEXT}")  # denied: no role signal
+    _roundtrip(f"!dadjoke add {_PII_TEXT}", is_mod=False, is_broadcaster=False)  # denied
+    _roundtrip("!dadjoke list")
+    _roundtrip(f"!dadjoke remove {_PII_TEXT}", is_mod=True)  # non-numeric id -> error reply
+    _roundtrip("!dadjoke remove 1", is_mod=True)  # applied
+    _roundtrip(f"!dadjoke list {_PII_TEXT}")  # usage
+    _roundtrip(f"!dadjoke bogus {_PII_TEXT}")  # usage
+    assert _assert_logs_pii_free(fake_host, _PII_ACTOR, _PII_TEXT) >= 15
+
+
+# regression: gh-674 -- error-path logs carry the host error text, never the typed text.
+def test_kv_error_logs_never_contain_actor_or_typed_text(fake_host: _FakeHost) -> None:
+    kv_ns = sys.modules["wit_world"].imports.kv
+    _fail_kv_op(kv_ns, "get", only_for_key=_scoped(_CUSTOM_REGISTRY_KEY))
+    with pytest.raises(RuntimeError, match="dadjoke add failed"):
+        _roundtrip(f"!dadjoke add {_PII_TEXT}", is_mod=True)
+    assert any(m == "dadjoke.kv_error" for _lvl, m, _f in fake_host.log_calls)
+    _assert_logs_pii_free(fake_host, _PII_ACTOR, _PII_TEXT)

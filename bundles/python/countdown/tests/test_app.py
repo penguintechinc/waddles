@@ -509,3 +509,120 @@ def test_set_leading_whitespace_yields_empty_duration_token_is_invalid(
     assert result.detail == "set"
     assert "not a valid" in _relay_text(fake_host)
     assert _scoped(_TARGET_KEY) not in fake_host.store
+
+
+# ---------------------------------------------------------------------------
+# PII-free logs (gh-674) + corrupt-store ERROR logging
+# ---------------------------------------------------------------------------
+
+_PII_ACTOR = "PIIACTOR_alice"
+_PII_TEXT = "PIITEXT_secret_phrase"
+
+
+def _roundtrip(text: str) -> Any:
+    """Run `transform()` then `dispatch()` -- the real two-stage path -- with PII sentinels."""
+    out = _run(transform(_sample_event(text, actor=_PII_ACTOR)))
+    assert out is not None
+    envelope = StageEnvelope(
+        tenant="tenant-1",
+        community="comm-1",
+        app_id="waddles.core.example.countdown",
+        stage="action",
+        event=out,
+        ts="2026-10-07T00:00:00.000Z",
+    )
+    return _run(dispatch(envelope, {}, http_client=None))
+
+
+def _assert_logs_pii_free(host: _FakeHost, *sentinels: str) -> int:
+    """Assert no sentinel appears in any recorded log call; return how many were examined."""
+    assert host.log_calls, "no log calls recorded -- the PII check would pass vacuously"
+    for _lvl, message, fields_json in host.log_calls:
+        blob = f"{message} {fields_json}".lower()
+        for sentinel in sentinels:
+            assert sentinel.lower() not in blob
+    return len(host.log_calls)
+
+
+# regression: gh-674 -- no actor, typed time token or label may reach any log call, on any
+# branch (valid set, invalid token, usage errors, report, reset).
+def test_logs_never_contain_actor_time_token_or_label(fake_host: _FakeHost) -> None:
+    _roundtrip(f"!countdown set 1d {_PII_TEXT}")  # valid, label echoed in the reply only
+    _roundtrip("!countdown")  # report
+    _roundtrip(f"!countdown set {_PII_TEXT}_notatime {_PII_TEXT}")  # invalid time token
+    _roundtrip("!countdown set")  # set without args -> usage
+    _roundtrip(f"!countdown reset {_PII_TEXT}")  # reset with args -> usage
+    _roundtrip(f"!countdown bogus {_PII_TEXT}")  # grammar error -> usage
+    _roundtrip(f"!countdown list {_PII_TEXT}")  # grammar-legal, unimplemented verb
+    _roundtrip("!countdown reset")  # clear
+    assert any(_PII_TEXT in _relay_text(fake_host, i) for i in range(len(fake_host.relay_calls)))
+    assert _assert_logs_pii_free(fake_host, _PII_ACTOR, _PII_TEXT) >= 16
+
+
+# regression: gh-674 -- backend-error logs carry the error class only, never the typed text.
+def test_kv_error_logs_never_contain_actor_or_typed_text(
+    fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(community_kv, "set", _raise_err)
+    with pytest.raises(RuntimeError, match="countdown kv set failed"):
+        _roundtrip(f"!countdown set 1d {_PII_TEXT}")
+    assert any(m == "countdown.kv_error" for _lvl, m, _f in fake_host.log_calls)
+    _assert_logs_pii_free(fake_host, _PII_ACTOR, _PII_TEXT)
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        b"\xff\xfe\x00",
+        b"[1, 2, 3]",
+        json.dumps({"label": "no target_ms"}).encode(),
+        json.dumps({"target_ms": "soon"}).encode(),
+        json.dumps({"target_ms": 1.5}).encode(),
+    ],
+    ids=["invalid-utf8", "not-a-dict", "missing-target-ms", "str-target-ms", "float-target-ms"],
+)
+def test_every_corrupt_target_shape_logs_an_error_and_replies_unset(
+    stored: bytes, fake_host: _FakeHost
+) -> None:
+    """Documented self-heal: corrupt state is never silent -- an ERROR log is always emitted."""
+    fake_host.store[_scoped(_TARGET_KEY)] = stored
+    result = _run(dispatch(_envelope("report"), {}, http_client=None))
+    assert result.detail == "report"
+    assert _relay_text(fake_host) == _NO_TARGET
+    corrupt = [lvl for lvl, m, _f in fake_host.log_calls if m == "countdown.state_corrupt"]
+    assert corrupt, "corrupt state was not logged"
+    assert set(corrupt) == {0}  # the fake host's Level.ERROR
+    assert fake_host.store[_scoped(_TARGET_KEY)] == stored  # a read never rewrites the state
+
+
+def test_set_after_corrupt_target_overwrites_it_cleanly(fake_host: _FakeHost) -> None:
+    fake_host.store[_scoped(_TARGET_KEY)] = b"not json"
+    _run(dispatch(_envelope("set", arg="1d Fresh"), {}, http_client=None))
+    assert json.loads(fake_host.store[_scoped(_TARGET_KEY)])["label"] == "Fresh"
+    _run(dispatch(_envelope("report"), {}, http_client=None))
+    assert "until Fresh" in _relay_text(fake_host)
+
+
+def test_iso_timestamp_with_offset_and_naive_utc_resolve_to_the_same_instant(
+    fake_host: _FakeHost,
+) -> None:
+    _run(dispatch(_envelope("set", arg="2030-01-01T00:00:00+00:00 A"), {}, http_client=None))
+    with_offset = json.loads(fake_host.store[_scoped(_TARGET_KEY)])["target_ms"]
+    _run(dispatch(_envelope("set", arg="2030-01-01T00:00:00 A"), {}, http_client=None))
+    naive = json.loads(fake_host.store[_scoped(_TARGET_KEY)])["target_ms"]
+    assert with_offset == naive == 1_893_456_000_000
+
+
+def test_set_in_the_past_is_stored_and_reported_as_already_happened(fake_host: _FakeHost) -> None:
+    _run(dispatch(_envelope("set", arg="2001-01-01T00:00:00Z Y2K"), {}, http_client=None))
+    assert "already happened" in _relay_text(fake_host)
+    _run(dispatch(_envelope("report"), {}, http_client=None))
+    assert "Y2K happened" in _relay_text(fake_host) and "ago" in _relay_text(fake_host)
+
+
+def test_every_verb_matrix_resolves_to_a_reply_never_none(fake_host: _FakeHost) -> None:
+    """No silent drop: every grammar verb on `!countdown` yields a non-empty reply event."""
+    for verb in ("set", "add", "sub", "enable", "disable", "remove", "delete", "list", "reset"):
+        result = _run(transform(_sample_event(f"!countdown {verb}")))
+        assert result is not None, verb
+        assert result.payload["action"] in {"usage", "clear"}, verb
