@@ -20,7 +20,12 @@
 //!   `config/postgres/migrations/101_overlay_images.sql`) -- backs
 //!   [`crate::images::asset_store::SeaOrmImageAssetStore`] (P6 upload /
 //!   P9 render).
+//! - `caption_events` (migration 102,
+//!   `config/postgres/migrations/102_caption_events_rust_port.sql`) --
+//!   backs [`crate::overlay::caption_store::SeaOrmCaptionStore`] (the
+//!   caption overlay's reconnect-replay history).
 
+pub mod caption_event;
 pub mod overlay_image;
 pub mod overlay_surface;
 pub mod overlay_view_credential;

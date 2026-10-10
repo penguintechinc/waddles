@@ -243,6 +243,7 @@ interface overlay {
     goals,
     ticker,
     image,
+    caption,
   }
 
   /// One widget this bundle offers the overlay designer's palette
