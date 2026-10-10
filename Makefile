@@ -69,13 +69,16 @@ check-no-stubs:
 	@bash scripts/ci/check-no-stubs.sh
 
 # Bundle hygiene gates (.github/workflows/bundle-hygiene.yml): raw user input in
-# bundle log calls, legacy bare-string `permissions:` in hub-manifest.yaml, and
-# broad silent `except` swallows. Each prints the count it examined and exits
-# non-zero on a hit (or on zero examined). Needs PyYAML for the manifest check.
+# bundle log calls, legacy bare-string `permissions:` in hub-manifest.yaml, broad
+# silent `except` swallows, and role badges (`is_mod`, ...) read through Python
+# truthiness (`bool("false")` is True -> mod-gate bypass) in bundles AND the
+# legacy svc-ingest tree. Each prints the count it examined and exits non-zero on
+# a hit (or on zero examined). Needs PyYAML for the manifest check.
 check-bundle-hygiene:
 	@python3 scripts/ci/check-bundle-source-hygiene.py --check log-pii
 	@python3 scripts/ci/check-bundle-manifest-permissions.py
 	@python3 scripts/ci/check-bundle-source-hygiene.py --check silent-except
+	@python3 scripts/ci/check-bundle-source-hygiene.py --check badge-truthiness
 
 test:
 	@$(MAKE) test-unit

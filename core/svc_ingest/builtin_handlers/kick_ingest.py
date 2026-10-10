@@ -68,6 +68,7 @@ from flask_core import PlatformEvent
 from flask_core.app_registry import AppRegistry
 
 from fanout import RedisLike, fan_out_event
+from receivers.badge_flags import strict_flag
 
 # Re-exported from the receiver -- ONE source of truth for the tag value,
 # matching this handler's own task spec while avoiding a second, driftable
@@ -183,9 +184,11 @@ async def normalize(raw: dict[str, Any]) -> PlatformEvent:
             "author_id": author_id,
             "display_name": raw.get("display_name"),
             "badges": raw_badges if isinstance(raw_badges, list) else [],
-            "is_mod": bool(raw.get("is_mod")),
-            "is_subscriber": bool(raw.get("is_subscriber")),
-            "is_owner": bool(raw.get("is_owner")),
+            "is_mod": strict_flag(raw.get("is_mod"), field="is_mod", platform="kick"),
+            "is_subscriber": strict_flag(
+                raw.get("is_subscriber"), field="is_subscriber", platform="kick"
+            ),
+            "is_owner": strict_flag(raw.get("is_owner"), field="is_owner", platform="kick"),
             "message_id": raw.get("message_id"),
             "created_at": raw.get("created_at"),
         },

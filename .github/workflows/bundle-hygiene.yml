@@ -13,8 +13,12 @@ name: Bundle Hygiene
 #                         semgrep layer does not match).
 #   4. badge-truthiness -- `bool(is_mod)` / bare truthiness over a role badge:
 #                         a string badge ("false") is truthy, so a non-mod
-#                         passes the mod gate. Static gate + a behavioural
-#                         suite over every badge-reading bundle.
+#                         passes the mod gate. Static gate over the bundles AND
+#                         the legacy svc-ingest tree (core/svc_ingest/**, each
+#                         scope with its own denominator) + a behavioural suite
+#                         over every badge-reading bundle. The svc-ingest
+#                         behavioural regression runs in the unit suite
+#                         (core/svc_ingest/tests/test_badge_flags_regression.py).
 #
 # ci-gate.yml aggregates every check-run on the head SHA, so each failure here
 # is fatal to the merge queue with no ci-gate edit. No `paths:` filter on
@@ -73,7 +77,7 @@ jobs:
       - name: Bundle handlers do not silently swallow broad exceptions
         run: python3 scripts/ci/check-bundle-source-hygiene.py --check silent-except
 
-      - name: Bundle role badges are read as strict booleans (mod-gate bypass)
+      - name: Role badges are read as strict booleans in bundles + svc-ingest (mod-gate bypass)
         run: python3 scripts/ci/check-bundle-source-hygiene.py --check badge-truthiness
 
       # Behavioural proof on the real modules: every bundle's gate helper denies hostile
