@@ -2,7 +2,7 @@
 Core/Platform Module -- Feature contracts + default App bindings
 ====================================================================
 
-Declares the 14 Core/platform capability Features spanning the six
+Declares the 15 Core/platform capability Features spanning the six
 namespaces added to :data:`flask_core.app_manifest.KNOWN_MODULES` alongside
 the 4 product Modules (see that module's docstring): ``analytics``,
 ``video_proxy``, ``auth``, ``compliance``, ``integrations``, ``tenancy``.
@@ -31,6 +31,7 @@ TestCatalogMatchesContracts`` fails on any drift.
 | ``auth.sso_google``                     | professional | ``waddles.auth.sso_google``                     |
 | ``auth.sso_saml``                       | enterprise   | ``waddles.auth.sso_saml``                       |
 | ``compliance.audit_logs``               | enterprise   | ``waddles.compliance.audit_logs``               |
+| ``compliance.audit_export``             | enterprise   | ``waddles.compliance.audit_export``             |
 | ``compliance.external_kms``             | enterprise   | ``waddles.compliance.external_kms``             |
 | ``integrations.waddleai``               | enterprise   | ``waddles.integrations.waddleai``               |
 | ``tenancy.multi_tenant``                | enterprise   | ``waddles.tenancy.multi_tenant``                |
@@ -165,12 +166,27 @@ _FEATURE_DEFS: Tuple[Dict[str, Any], ...] = (
         "flag": "waddles.auth.sso_saml",
     },
     {
+        # Scope is `:admin`, not `:read`: `create_session_token` hands EVERY session the
+        # `*:read` wildcard, and `require_scope` honours `*:<action>` wildcards, so a
+        # `compliance.audit:read` requirement would be satisfied by any logged-in user.
+        # `*:admin` is held only by platform super-admins, and the tenant-owner bundle
+        # lists `compliance.audit:admin` explicitly (flask_core.auth.SCOPE_BUNDLES).
         "id": "compliance.audit_logs",
         "version": 1,
         "module": "compliance",
-        "requires_scopes": frozenset({"compliance.audit:read"}),
+        "requires_scopes": frozenset({"compliance.audit:admin"}),
         "min_tier": "enterprise",
         "flag": "waddles.compliance.audit_logs",
+    },
+    {
+        # Exporting the tamper-evident log is a separately licensed capability on top of
+        # recording/reading it (GRC #3: "export capability also Enterprise").
+        "id": "compliance.audit_export",
+        "version": 1,
+        "module": "compliance",
+        "requires_scopes": frozenset({"compliance.audit:admin"}),
+        "min_tier": "enterprise",
+        "flag": "waddles.compliance.audit_export",
     },
     {
         "id": "compliance.external_kms",
@@ -323,7 +339,18 @@ _DEFAULT_APP_DEFS: Tuple[Dict[str, Any], ...] = (
         "module": "compliance",
         "provider": "builtin",
         "surfaces": ("process",),
-        "permissions": ("compliance.audit:read",),
+        "permissions": ("compliance.audit:admin",),
+        "is_default": True,
+    },
+    {
+        "app_id": "waddles.compliance.audit_export.default",
+        "name": "Audit Log Export (default)",
+        "version": "1.0.0",
+        "feature": "waddles.compliance.audit_export",
+        "module": "compliance",
+        "provider": "builtin",
+        "surfaces": ("process",),
+        "permissions": ("compliance.audit:admin",),
         "is_default": True,
     },
     {
@@ -363,12 +390,12 @@ _DEFAULT_APP_DEFS: Tuple[Dict[str, Any], ...] = (
 
 
 def build_contracts() -> Tuple[FeatureContract, ...]:
-    """Parse and validate the 14 Core/platform Feature contracts, without registering them."""
+    """Parse and validate the 15 Core/platform Feature contracts, without registering them."""
     return tuple(parse_feature_contract(raw) for raw in _FEATURE_DEFS)
 
 
 def build_default_apps() -> Tuple[AppManifest, ...]:
-    """Parse and validate the 14 Core/platform default App manifests, without registering them."""
+    """Parse and validate the 15 Core/platform default App manifests, without registering them."""
     return tuple(parse_manifest(raw) for raw in _DEFAULT_APP_DEFS)
 
 
@@ -378,7 +405,7 @@ def register_all(
     app_registry: Optional[AppRegistry] = None,
 ) -> Tuple[Tuple[FeatureContract, ...], Tuple[AppManifest, ...]]:
     """
-    Parse, validate and register all 14 Core/platform Features and their
+    Parse, validate and register all 15 Core/platform Features and their
     shipped default Apps.
 
     Defaults to the process-wide singletons

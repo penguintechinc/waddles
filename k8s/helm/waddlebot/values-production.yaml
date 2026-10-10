@@ -10,6 +10,8 @@ global:
   # PenguinTech images require a SHA256-digest pin in production (critical-rules.md
   # Dependency Pinning) -- imageTag here MUST be a digest reference once the production
   # image pipeline exists, never a mutable tag like alpha/beta use.
+  # IfNotPresent is correct for digest-pinned prod images (immutable ref -> a cached layer is the
+  # same image); also governs hub-api + the Rust data-plane Deployments (no hardcoded Always).
   imagePullPolicy: IfNotPresent
 
 pipeline:

@@ -141,9 +141,20 @@ The following table lists the main configurable parameters of the WaddleBot char
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `global.imageRegistry` | Global Docker image registry | `docker.io/waddlebot` |
-| `global.imagePullPolicy` | Global image pull policy | `IfNotPresent` |
+| `global.imagePullPolicy` | Image pull policy for **every** workload container, including `hub-api`, `svc-{action,ingest,process}-rust`, `svc-presentation` and both `bundle-executor` Deployments (no template hardcodes a policy) | `IfNotPresent` |
 | `global.imagePullSecrets` | Global image pull secrets | `[]` |
 | `global.storageClass` | Global storage class for PVCs | `standard` |
+
+#### Image pull policy
+
+Every deploy carries a unique per-deploy `global.imageTag` (alpha SHA8, beta `beta-<epoch>`,
+gamma `gamma-<epoch>`, production digest), so `IfNotPresent` is correct in every environment
+(`values-alpha.yaml`, `-beta`, `-gamma`, `-production` all declare it). `Always` is **not** safe
+as a blanket default: for locally-loaded images (kind e2e, alpha local builds) the node already
+has the image, `Always` forces a registry pull that fails, and the pod never becomes Ready.
+Set `--set global.imagePullPolicy=Always` per deployment only when deploying a mutable tag
+(e.g. `latest`); `values-local.yaml` keeps `Always` for that reason.
+`tests/test_image_pull_policy_render.py` pins this behavior.
 
 ### Namespace
 

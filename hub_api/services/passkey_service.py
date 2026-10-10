@@ -203,7 +203,7 @@ async def finish_login(
         is_vendor=bool(is_vendor),
         is_analytics_consumer=bool(is_analytics_consumer),
     )
-    token = await create_session_token(async_dal, dal, cfg, user=user)
+    token = await create_session_token(async_dal, dal, cfg, user=user, auth_method="passkey")
     return token, user
 
 
