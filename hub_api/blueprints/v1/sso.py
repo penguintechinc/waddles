@@ -282,7 +282,7 @@ class CreateConnectionRequest:
     issuer: str | None = None
     discoveryUrl: str | None = None
     clientId: str | None = None
-    clientSecret: str | None = None
+    clientSecret: str | None = field(default=None, repr=False)
     scopes: list[str] | None = None
     hostedDomain: str | None = None
     usePlatformClient: bool | None = None
@@ -308,7 +308,7 @@ class UpdateConnectionRequest:
     issuer: str | None = None
     discoveryUrl: str | None = None
     clientId: str | None = None
-    clientSecret: str | None = None
+    clientSecret: str | None = field(default=None, repr=False)
     clearClientSecret: bool = False
     scopes: list[str] | None = None
     hostedDomain: str | None = None
@@ -499,7 +499,12 @@ async def _complete_and_redirect(
         outcome = await start_completion()
         return await _finish_redirect(public_id, outcome.token, outcome.protocol)
     except SsoError as exc:
-        return _login_error_redirect(exc.reason)
+        # Already logged (type, code, frames) and counted by services.sso_service.complete_*.
+        reason = exc.reason  # a fixed REASON_* constant, never attacker-controlled text
+        logger.debug(
+            "sso.callback.rejected connection=%s reason=%s code=%s", public_id, reason, exc.code
+        )
+        return _login_error_redirect(reason)
     except Exception as exc:
         log_sso_error(logger, "sso.callback.unexpected_failure", exc, connection=public_id)
         return _login_error_redirect(REASON_UNAVAILABLE)
@@ -581,6 +586,12 @@ async def list_sso_connections() -> SsoConnectionListResponse | tuple[dict[str, 
         conns = await list_connections(ctx, tenant.id)
         dtos = [await _connection_dto(ctx, tenant, c) for c in conns]
     except ApiError as exc:
+        logger.debug(
+            "sso.admin.request_rejected path=%s status=%s code=%s",
+            request.path,
+            exc.status_code,
+            exc.code,
+        )
         return _err(exc)
     except SsoError as exc:
         log_sso_error(logger, "sso.admin.list_failed", exc)
@@ -609,6 +620,12 @@ async def create_sso_connection(
         )
         dto = await _connection_dto(ctx, tenant, conn)
     except ApiError as exc:
+        logger.debug(
+            "sso.admin.request_rejected path=%s status=%s code=%s",
+            request.path,
+            exc.status_code,
+            exc.code,
+        )
         return _err(exc)
     except SsoError as exc:
         log_sso_error(logger, "sso.admin.create_failed", exc)
@@ -630,6 +647,12 @@ async def get_sso_connection(
         conn = await get_connection(ctx, tenant.id, public_id)
         dto = await _connection_dto(ctx, tenant, conn)
     except ApiError as exc:
+        logger.debug(
+            "sso.admin.request_rejected path=%s status=%s code=%s",
+            request.path,
+            exc.status_code,
+            exc.code,
+        )
         return _err(exc)
     except SsoError as exc:
         log_sso_error(logger, "sso.admin.get_failed", exc, connection=public_id)
@@ -658,6 +681,12 @@ async def update_sso_connection(
         )
         dto = await _connection_dto(ctx, tenant, conn)
     except ApiError as exc:
+        logger.debug(
+            "sso.admin.request_rejected path=%s status=%s code=%s",
+            request.path,
+            exc.status_code,
+            exc.code,
+        )
         return _err(exc)
     except SsoError as exc:
         log_sso_error(logger, "sso.admin.update_failed", exc, connection=public_id)
@@ -679,6 +708,12 @@ async def delete_sso_connection(
             _ctx(), tenant=tenant, actor_id=get_current_user_id(request), public_id=public_id
         )
     except ApiError as exc:
+        logger.debug(
+            "sso.admin.request_rejected path=%s status=%s code=%s",
+            request.path,
+            exc.status_code,
+            exc.code,
+        )
         return _err(exc)
     except SsoError as exc:
         log_sso_error(logger, "sso.admin.delete_failed", exc, connection=public_id)

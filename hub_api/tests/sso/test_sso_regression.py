@@ -116,6 +116,30 @@ class TestResponseShapesAreExplicit:
         assert set(body) == {"success", "redirectUrl", "protocol"}
 
 
+class TestSecretsNeverReprd:
+    """A stray `%r` / f-string of a request or domain object must not print a secret."""
+
+    def test_request_dtos_hide_the_client_secret(self) -> None:
+        from blueprints.v1.sso import CreateConnectionRequest, UpdateConnectionRequest
+
+        marker = "S3CR3T-" + "MARKER"
+        create = CreateConnectionRequest(
+            protocol="oidc", displayName="x", allowedDomains=["a.test"], clientSecret=marker
+        )
+        update = UpdateConnectionRequest(clientSecret=marker)
+        assert marker not in repr(create) + repr(update) + str(create) + str(update)
+
+    def test_service_inputs_and_identities_hide_pii_and_secrets(self) -> None:
+        from services.sso_service import ConnectionInput
+        from services.sso_types import ExternalIdentity, LoginOutcome
+
+        marker = "S3CR3T-" + "MARKER"
+        blob = repr(ConnectionInput(client_secret=marker))
+        blob += repr(ExternalIdentity(subject=marker, email=marker, display_name=marker))
+        blob += repr(LoginOutcome(marker, "uuid", "pid", "oidc", False))
+        assert marker not in blob
+
+
 class TestRegressions:
     async def test_unknown_protocol_is_400_not_503(self, kit: Kit) -> None:
         # regression: sso-protocol-order

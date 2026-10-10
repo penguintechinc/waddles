@@ -238,4 +238,6 @@ connection's `clientSecret`. Plan for a short maintenance window.
 * No authenticated "link existing account" flow, group/role mapping, DNS-verified domain claims, or
   SCIM — all additive on top of this design.
 * One in-flight login per connection per browser (a second `start` replaces the binder cookie).
+* No "SSO required" enforcement yet: a provisioned user can still set a local password through the existing
+  password-reset flow. Enforcing SSO-only sign-in for a tenant's domains is an additive follow-up.
 * The React login page does not render SSO buttons yet; the contract above is what it consumes.
