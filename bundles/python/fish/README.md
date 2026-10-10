@@ -24,6 +24,24 @@ First bundle in this repo to use the shared command-grammar parser
 Any other grammar-legal verb (`add`/`sub`/`enable`/`disable`/`remove`/`reset`) or a malformed
 `!fish ...` replies with usage text -- never silently dropped.
 
+```text
+!fish                      -> 🎣 viewer-1 casts a line... a scrappy bass puts up a fight! Caught a uncommon Bass (3.1 lbs). Total catches: 1.
+!fish                      -> 🎣 slow down, viewer-1! try again in 58s.
+!fish list                 -> Total catches: 1. Biggest catch: uncommon Bass (3.1 lbs).
+!fish set cooldown 30      (mod) -> fish cooldown set to 30s
+!fish set cooldown 30   (viewer) -> only moderators/broadcasters can configure !fish
+```
+
+Platforms: Twitch + Discord (`chat.message`). The mod/broadcaster gate **fails closed** -- with
+no `is_mod`/`is_broadcaster` on the event (Discord today) `set cooldown` is denied.
+
+## Permissions (V2)
+
+| id | why |
+|---|---|
+| `flags.read` | gates the command behind `waddles.command-fish` |
+| `storage.kv` | persists per-community fishing state and tallies |
+
 ## State (kv, community-scoped only)
 
 All state goes through `waddle_sdk.community_kv`, keyed by `community_id` -- never global or
@@ -79,28 +97,21 @@ docker run --rm --user "$(id -u):$(id -g)" \
       waddle_sdk._component_entry -o /tmp/fish.wasm"
 ```
 
-**Not yet wired into `bundles/Dockerfile.core-bundles`** -- that file is being genericized in
-a parallel PR (`chore/genericize-core-bundles-dockerfile`); this bundle's CI wasm build is
-blocked on that PR landing. The command above is the same `componentize-py` invocation that
-Dockerfile uses for the `python-batch1-builder` stage, run standalone to confirm this bundle
-compiles today.
+The same `componentize-py` invocation `bundles/Dockerfile.core-bundles` uses (driven by
+`bundles/core-bundles.yaml`), run standalone to confirm this bundle compiles.
 
 ## Test
 
 ```bash
 cd bundles/python/fish
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e ../../../sdk/waddle-sdk
-pip install pytest==8.3.3 mypy==1.14.1 ruff==0.14.1
-pytest --cov=src --cov-report=term-missing
-mypy --strict src
-ruff check .
+python3 -m pytest --cov=app --cov-branch --cov-report=term-missing
 ```
+
+`tests/conftest.py` wires `src/` and `sdk/waddle-sdk/src` onto `sys.path`; no WASM build or SDK
+install needed. Covered: cast/list/set-cooldown, cooldown gate + config bounds, mod-gate
+fail-closed, kv backend errors (get/set/increment) fail loud, corrupt-state self-heal logged at
+ERROR, PII-free logs (gh-674), kv key charset over every key touched (gh-631).
 
 ## Activation
 
-Catalog row added to `bundles/core-bundles.yaml` (`waddles.core.example.fish`) -- see that
-file's own comment next to the entry for the Dockerfile dependency above. Until the
-genericization PR lands and a wasm is built, the core-bundle-seeder will not find
-`fish.wasm`/`fish.manifest.yaml` in a built image; this is expected and tracked, not a bug in
-the catalog entry itself.
+Registered in `bundles/core-bundles.yaml` (`waddles.core.example.fish`).

@@ -629,3 +629,137 @@ def _current_period(fake_host: _FakeHost) -> str:
 
     now = datetime.fromtimestamp(fake_host.now_ms / 1000, tz=UTC)
     return now.strftime("%Y%m%d")
+
+
+# ---------------------------------------------------------------------------
+# PII-free logs (gh-674) + corrupt-state ERROR logging + CRUD-ish lifecycle
+# ---------------------------------------------------------------------------
+
+_PII_ACTOR = "PIIACTOR_alice"
+_PII_TEXT = "PIITEXT_secret_phrase"
+
+
+def _roundtrip(text: str, *, actor: str = _PII_ACTOR, **role: bool) -> Any:
+    """Run `transform()` then `dispatch()` -- the real two-stage path -- with PII sentinels."""
+    out = _run(transform(_sample_event(text, actor=actor, **role)))
+    assert out is not None
+    envelope = StageEnvelope(
+        tenant="tenant-1",
+        community="comm-1",
+        app_id="waddles.core.example.first",
+        stage="action",
+        event=out,
+        ts="2026-10-05T00:00:00.000Z",
+    )
+    return _run(dispatch(envelope, {}, http_client=None))
+
+
+def _assert_logs_pii_free(host: _FakeHost, *sentinels: str) -> int:
+    """Assert no sentinel appears in any recorded log call; return how many were examined."""
+    assert host.log_calls, "no log calls recorded -- the PII check would pass vacuously"
+    for _lvl, message, fields_json in host.log_calls:
+        blob = f"{message} {fields_json}".lower()
+        for sentinel in sentinels:
+            assert sentinel.lower() not in blob
+    return len(host.log_calls)
+
+
+# regression: gh-674 -- `first` used to log `error=str(exc)` (the CommandUsageError echo, which
+# quotes the raw typed token); no actor, pseudonym, typed token or text may reach any log call.
+def test_logs_never_contain_actor_pseudonym_or_typed_text(fake_host: _FakeHost) -> None:
+    import hashlib
+
+    pseudonym = hashlib.sha256(_PII_ACTOR.encode()).hexdigest()
+    _roundtrip("!first")  # claim -> winner
+    _roundtrip("!first", actor="PIIACTOR_bob")  # already claimed
+    _roundtrip("!first list")
+    _roundtrip("!first leaderboard")
+    _roundtrip(f"!first {_PII_TEXT}")  # grammar error echoing the typed token in the reply
+    _roundtrip(f"!first list {_PII_TEXT}")  # list with trailing text
+    _roundtrip(f"!first leaderboard {_PII_TEXT}")  # leaderboard with a trailing verb/text
+    _roundtrip("!first reset")  # denied: no role signal
+    _roundtrip("!first reset", is_mod=False, is_broadcaster=False)  # denied
+    _roundtrip("!first reset", is_mod=True)  # applied
+    examined = _assert_logs_pii_free(
+        fake_host, _PII_ACTOR, "PIIACTOR_bob", _PII_TEXT, pseudonym, pseudonym[:8]
+    )
+    assert examined >= 20
+
+
+def test_usage_error_log_carries_only_the_exception_class(fake_host: _FakeHost) -> None:
+    _run(transform(_sample_event(f"!first {_PII_TEXT}")))
+    usage_logs = [f for _lvl, m, f in fake_host.log_calls if m == "first.transform usage_error"]
+    assert len(usage_logs) == 1
+    assert json.loads(usage_logs[0]) == {"error_type": "CommandUsageError"}
+
+
+# regression: gh-674 -- backend-error logs carry the error class only, never typed text.
+def test_kv_error_logs_never_contain_actor_or_typed_text(
+    fake_host: _FakeHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _raise_err(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("backend")
+
+    monkeypatch.setattr(community_kv, "increment", _raise_err)
+    with pytest.raises(RuntimeError, match="first kv increment failed"):
+        _roundtrip("!first")
+    assert any(m == "first.kv_error" for _lvl, m, _f in fake_host.log_calls)
+    _assert_logs_pii_free(fake_host, _PII_ACTOR)
+
+
+@pytest.mark.parametrize(
+    ("setup", "action", "context"),
+    [
+        ("attempts", "list", "attempts"),
+        ("winner", "list", "winner"),
+        ("registry-json", "leaderboard", "leaderboard_registry"),
+        ("registry-shape", "leaderboard", "leaderboard_registry"),
+        ("wins", "leaderboard", "wins"),
+    ],
+)
+def test_every_corrupt_state_shape_logs_an_error_with_its_context(
+    setup: str, action: str, context: str, fake_host: _FakeHost
+) -> None:
+    """Self-heal is never silent: each corrupt shape emits `first.state_corrupt` at ERROR."""
+    period = _current_period(fake_host)
+    pseudo = _pseudonym("viewer-1")
+    if setup == "attempts":
+        fake_host.store[_scoped(_winner_key(period))] = pseudo.encode()
+        fake_host.store[_scoped(_attempts_key(period))] = b"not-a-number"
+    elif setup == "winner":
+        fake_host.store[_scoped(_winner_key(period))] = b"\xff\xfe"
+    elif setup == "registry-json":
+        fake_host.store[_scoped(_LEADERBOARD_REGISTRY_KEY)] = b"{broken"
+    elif setup == "registry-shape":
+        fake_host.store[_scoped(_LEADERBOARD_REGISTRY_KEY)] = b'{"a": 1}'
+    else:  # wins
+        fake_host.store[_scoped(_LEADERBOARD_REGISTRY_KEY)] = json.dumps([pseudo]).encode()
+        fake_host.store[_scoped(_wins_key(pseudo))] = b"NaN"
+    _run(dispatch(_envelope(action), {}, http_client=None))
+    corrupt = [
+        (lvl, json.loads(f))
+        for lvl, m, f in fake_host.log_calls
+        if m == "first.state_corrupt"
+    ]
+    assert corrupt, "corrupt state was not logged"
+    assert all(lvl == 0 for lvl, _f in corrupt)  # the fake host's Level.ERROR
+    assert all(f["context"] == context for _lvl, f in corrupt)
+
+
+def test_reset_then_claim_lifecycle_keeps_all_time_wins(fake_host: _FakeHost) -> None:
+    """claim -> reset -> claim again: today's race restarts, all-time wins accumulate."""
+    _run(dispatch(_envelope("claim", actor="alice"), {}, http_client=None))
+    _run(dispatch(_envelope("reset", is_mod=True), {}, http_client=None))
+    _run(dispatch(_envelope("claim", actor="bob"), {}, http_client=None))
+    assert "bob claimed first today" in _relay_text(fake_host)
+    _run(dispatch(_envelope("leaderboard"), {}, http_client=None))
+    text = _relay_text(fake_host)
+    assert text.count("(1)") == 2  # alice and bob each hold one all-time win
+
+
+def test_every_grammar_verb_resolves_to_a_reply_never_none(fake_host: _FakeHost) -> None:
+    """No silent drop: every shared-grammar verb on `!first` yields a reply action."""
+    for verb in ("set", "add", "sub", "enable", "disable", "remove", "delete", "list", "reset"):
+        result = _run(transform(_sample_event(f"!first {verb}")))
+        assert result is not None, verb
+        assert result.payload["action"] in {"usage", "list", "reset"}, verb
