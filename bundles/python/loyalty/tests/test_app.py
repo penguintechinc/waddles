@@ -20,6 +20,7 @@ import wit_fake_db
 from waddle_sdk.command import CommandSpec, ParsedCommand, parse_command
 from waddle_sdk.community_kv import _scoped_key
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
+from waddle_sdk.kv import validate_key
 
 from app import (
     _KNOWN_COMMANDS,
@@ -886,3 +887,384 @@ def test_caller_role_signal_true_from_mod() -> None:
 
 def test_caller_role_signal_false_when_both_false() -> None:
     assert _caller_role_signal({"is_mod": False, "is_broadcaster": False}) is False
+
+
+# -- PII-free logs -- regression: gh-674 (bundle-logs-must-be-pii-free) ----------
+
+#: Lower-case on purpose: chat-typed targets are lower-cased before hashing, so a lower-case
+#: sentinel round-trips (actor == target) through every code path below.
+_SENTINEL = "sentinelpii9f3a"
+
+#: Strict per-message allowlist: a log line may carry ONLY these fields. A new field (e.g. a
+#: raw `target=`/`amount_text=`/`actor=`) fails here instead of silently shipping user input.
+_ALLOWED_LOG_FIELDS: dict[str, frozenset[str]] = {
+    "loyalty.transform matched": frozenset({"command"}),
+    "loyalty.adjust_invalid_amount": frozenset({"command"}),
+    "loyalty.dispatch relayed": frozenset({"platform", "command"}),
+    "loyalty.dispatch adjusted": frozenset({"command"}),
+    "loyalty.adjust_denied": frozenset({"command", "role_signal"}),
+    "loyalty.backend_error": frozenset({"op", "error"}),
+    "loyalty.missing_community": frozenset({"command"}),
+}
+
+
+def _assert_logs_pii_free(host: _FakeHost, *, minimum_lines: int) -> set[str]:
+    """Every captured log line is allow-listed field-by-field and free of the sentinel.
+
+    Asserts a non-empty denominator first -- a check that examined zero log lines proves nothing.
+    Returns the distinct messages seen so callers can prove each branch was exercised.
+    """
+    assert len(host.log_calls) >= minimum_lines
+    for _lvl, message, fields_json in host.log_calls:
+        assert _SENTINEL not in message
+        assert _SENTINEL not in fields_json
+        assert message in _ALLOWED_LOG_FIELDS, f"unexpected log message {message!r}"
+        assert set(json.loads(fields_json)) <= _ALLOWED_LOG_FIELDS[message]
+    return {message for _lvl, message, _f in host.log_calls}
+
+
+def _go(
+    command: str,
+    *,
+    target: str | None = None,
+    amount: int | None = None,
+    role: bool | None = None,
+    actor: str | None = "viewer-1",
+    community: str | None = "comm-1",
+) -> Any:
+    envelope = _sample_envelope(
+        "twitch",
+        command,
+        actor=actor,
+        target=target,
+        amount=amount,
+        is_mod=role,
+        community=community,
+    )
+    return _run(dispatch(envelope, {}, http_client=None))
+
+
+def test_transform_logs_never_carry_user_input(fake_host: _FakeHost) -> None:
+    # regression: gh-674
+    for text in (
+        f"!points {_SENTINEL}",
+        f"!points add 5 {_SENTINEL}",
+        f"!points sub 5 {_SENTINEL}",
+        f"!points add abc {_SENTINEL}",  # invalid amount -> DEBUG line, still no raw text
+        f"!points {_SENTINEL} extra",
+        f"!points set {_SENTINEL}",
+        "!points top",
+        "!points",
+    ):
+        event = _sample_event(text, is_mod=True)
+        event.actor = _SENTINEL
+        assert _run(transform(event)) is not None
+    seen = _assert_logs_pii_free(fake_host, minimum_lines=8)
+    assert seen == {"loyalty.transform matched", "loyalty.adjust_invalid_amount"}
+
+
+def test_dispatch_logs_never_carry_user_input_on_any_command(fake_host: _FakeHost) -> None:
+    # regression: gh-674 -- sentinel as actor AND target, across every outcome.
+    _go("add", target=_SENTINEL, amount=5, role=True, actor=_SENTINEL)
+    _go("add", target=_SENTINEL, amount=5, role=True, actor=_SENTINEL)
+    _go("sub", target=_SENTINEL, amount=3, role=True, actor=_SENTINEL)
+    _go("sub", target=_SENTINEL, amount=999, role=True, actor=_SENTINEL)  # clamps at 0
+    _go("balance_self", actor=_SENTINEL)
+    _go("balance_other", target=_SENTINEL, actor=_SENTINEL)
+    _go("leaderboard", actor=_SENTINEL)
+    _go("add", target=_SENTINEL, amount=5, role=False, actor=_SENTINEL)  # denied
+    _go("sub", target=_SENTINEL, amount=5, actor=_SENTINEL)  # denied, no role signal
+    _go("usage", actor=_SENTINEL)
+
+    seen = _assert_logs_pii_free(fake_host, minimum_lines=8)
+    assert seen == {
+        "loyalty.dispatch relayed",
+        "loyalty.dispatch adjusted",
+        "loyalty.adjust_denied",
+    }
+    assert all(_SENTINEL not in call[1] for call in fake_host.kv_calls)
+    assert all(
+        _SENTINEL not in str(row.get("actor_hash", "")) for row in fake_host.db.rows.values()
+    )
+
+
+def test_failure_paths_never_log_user_input(fake_host: _FakeHost) -> None:
+    # regression: gh-674 -- a backend failure whose own exception text echoes user-ish data, a
+    # kv index holding user-ish bytes, and the missing-community guard.
+    fake_host.db.raise_on["insert"] = wit_fake_db.WitDbError(
+        wit_fake_db.Error_Backend(f"detail {_SENTINEL}")
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        _go("add", target=_SENTINEL, amount=5, role=True, actor=_SENTINEL)
+    assert _SENTINEL not in str(excinfo.value)
+    fake_host.db.raise_on.clear()
+
+    fake_host.kv_store[_scoped(_index_key(_pseudonym(_SENTINEL)))] = _SENTINEL.encode()
+    with pytest.raises(RuntimeError):
+        _go("balance_self", actor=_SENTINEL)
+    with pytest.raises(ValueError):
+        _go("balance_self", actor=_SENTINEL, community=None)
+
+    seen = _assert_logs_pii_free(fake_host, minimum_lines=3)
+    assert seen == {"loyalty.backend_error", "loyalty.missing_community"}
+    errors = [json.loads(f) for _lvl, m, f in fake_host.log_calls if m == "loyalty.backend_error"]
+    # `waddle_sdk.db` re-raises the WIT error as its own `DbError`; only that class name is logged.
+    assert errors == [
+        {"op": "db_insert", "error": "DbError"},
+        {"op": "index_stale", "error": "RuntimeError"},
+    ]
+
+
+# -- mod gate: add/sub fail closed, before any kv/db access ---------------------------
+
+_NO_ADJUST_ROLE = [
+    pytest.param({}, id="no-signal-at-all"),
+    pytest.param({"is_mod": False}, id="mod-false"),
+    pytest.param({"is_broadcaster": False}, id="broadcaster-false"),
+    pytest.param({"is_mod": False, "is_broadcaster": False}, id="both-false"),
+]
+
+
+@pytest.mark.parametrize("verb", ["add", "sub"])
+@pytest.mark.parametrize("role", _NO_ADJUST_ROLE)
+def test_adjustments_are_denied_without_any_kv_or_db_access(
+    verb: str, role: dict[str, bool], fake_host: _FakeHost
+) -> None:
+    result = _run(
+        dispatch(
+            _sample_envelope("twitch", verb, target="alice", amount=5, **role), {}, http_client=None
+        )
+    )
+    assert result.detail == f"{verb}:denied"
+    assert _reply_text(fake_host) == "only moderators/broadcasters can adjust points"
+    assert fake_host.kv_calls == []
+    assert fake_host.db.calls == []
+
+
+@pytest.mark.parametrize("verb", ["add", "sub"])
+@pytest.mark.parametrize(
+    "role",
+    [{"is_mod": True}, {"is_broadcaster": True}, {"is_mod": True, "is_broadcaster": True}],
+)
+def test_either_badge_alone_opens_the_gate(
+    verb: str, role: dict[str, bool], fake_host: _FakeHost
+) -> None:
+    result = _run(
+        dispatch(
+            _sample_envelope("twitch", verb, target="alice", amount=5, **role), {}, http_client=None
+        )
+    )
+    assert result.detail == verb
+
+
+def test_present_but_null_badge_fields_are_denied(fake_host: _FakeHost) -> None:
+    envelope = _sample_envelope("twitch", "add", target="alice", amount=5)
+    envelope.event.payload["is_mod"] = None
+    envelope.event.payload["is_broadcaster"] = None
+    result = _run(dispatch(envelope, {}, http_client=None))
+    assert result.detail == "add:denied"
+    assert fake_host.db.calls == []
+
+
+@pytest.mark.parametrize("command", ["balance_self", "balance_other", "leaderboard"])
+def test_read_commands_never_need_a_role(command: str, fake_host: _FakeHost) -> None:
+    result = _run(
+        dispatch(
+            _sample_envelope("discord", command, target="alice", is_mod=False), {}, http_client=None
+        )
+    )
+    assert result.detail == command
+
+
+# -- corrupt store -----------------------------------------------------------------------
+
+
+def test_non_utf8_index_value_raises_instead_of_inventing_a_balance(fake_host: _FakeHost) -> None:
+    fake_host.kv_store[_scoped(_index_key(_pseudonym("viewer-1")))] = b"\xff\xfe"
+    with pytest.raises((ValueError, RuntimeError)):
+        _go("balance_self")
+    assert fake_host.relay_calls == []
+    assert fake_host.db.calls == []
+
+
+@pytest.mark.parametrize("verb", ["add", "sub"])
+def test_adjust_fails_loud_on_a_stale_index_for_both_verbs(verb: str, fake_host: _FakeHost) -> None:
+    fake_host.kv_store[_scoped(_index_key(_pseudonym("alice")))] = _MISSING_ROW_ID
+    with pytest.raises(RuntimeError, match="loyalty index_stale failed"):
+        _go(verb, target="alice", amount=5, role=True)
+    assert "temporarily unavailable" in _reply_text(fake_host)
+    assert len(fake_host.relay_calls) == 1
+    assert fake_host.db.rows == {}
+
+
+@pytest.mark.parametrize("bad_balance", ["abc", None], ids=["text", "null"])
+@pytest.mark.parametrize("command", ["balance_self", "add"])
+def test_corrupt_balance_column_raises_instead_of_rendering_garbage(
+    command: str, bad_balance: object, fake_host: _FakeHost
+) -> None:
+    _go("add", target="viewer-1", amount=5, role=True)
+    (row,) = fake_host.db.rows.values()
+    row["balance"] = bad_balance
+    relay_before = len(fake_host.relay_calls)
+    with pytest.raises((ValueError, TypeError, RuntimeError)):
+        _go(command, target="viewer-1", amount=1, role=True)
+    assert not any(
+        "points" in json.loads(m)["text"] for _p, m in fake_host.relay_calls[relay_before:]
+    )
+
+
+def test_leaderboard_raises_on_a_corrupt_balance_row(fake_host: _FakeHost) -> None:
+    _go("add", target="alice", amount=5, role=True)
+    (row,) = fake_host.db.rows.values()
+    row["balance"] = "abc"
+    relay_before = len(fake_host.relay_calls)
+    with pytest.raises((ValueError, TypeError, RuntimeError)):
+        _go("leaderboard")
+    assert len(fake_host.relay_calls) == relay_before
+
+
+# -- no silent fallback ------------------------------------------------------------------
+
+
+def test_every_backend_failure_replies_once_and_raises(fake_host: _FakeHost) -> None:
+    cases = [
+        ("insert", "add", "db_insert"),
+        ("query", "leaderboard", "db_query"),
+    ]
+    for raise_on, command, op in cases:
+        fake_host.relay_calls.clear()
+        fake_host.log_calls.clear()
+        fake_host.db.raise_on[raise_on] = wit_fake_db.WitDbError(wit_fake_db.Error_Backend("down"))
+        with pytest.raises(RuntimeError, match=f"loyalty {op} failed"):
+            _go(command, target="alice", amount=5, role=True)
+        assert len(fake_host.relay_calls) == 1
+        assert "temporarily unavailable" in _reply_text(fake_host)
+        errors = [
+            (lvl, json.loads(f)["op"])
+            for lvl, m, f in fake_host.log_calls
+            if m == "loyalty.backend_error"
+        ]
+        assert errors == [(0, op)]
+        fake_host.db.raise_on.clear()
+
+
+def test_relay_failure_propagates_and_is_not_logged_as_relayed(fake_host: _FakeHost) -> None:
+    def _boom(provider: str, msg: str) -> None:
+        raise RuntimeError("relay down")
+
+    sys.modules["wit_world"].imports.relay = types.SimpleNamespace(push=_boom)
+    with pytest.raises(RuntimeError, match="relay down"):
+        _go("balance_self")
+    assert not any(m == "loyalty.dispatch relayed" for _lvl, m, _f in fake_host.log_calls)
+
+
+def test_missing_community_logs_error_and_touches_no_state(fake_host: _FakeHost) -> None:
+    with pytest.raises(ValueError, match="community"):
+        _go("add", target="alice", amount=5, role=True, community=None)
+    assert fake_host.kv_calls == []
+    assert fake_host.db.calls == []
+    assert fake_host.relay_calls == []
+    errors = [
+        (lvl, json.loads(f))
+        for lvl, m, f in fake_host.log_calls
+        if m == "loyalty.missing_community"
+    ]
+    assert errors == [(0, {"command": "add"})]
+
+
+# -- ledger behavior ----------------------------------------------------------------------
+
+
+def test_balances_never_leak_across_communities(fake_host: _FakeHost) -> None:
+    _go("add", target="alice", amount=50, role=True, community="comm-1")
+    _go("balance_other", target="alice", community="comm-2")
+    assert _reply_text(fake_host) == "alice has 0 points."
+
+
+def test_balance_reads_do_not_write(fake_host: _FakeHost) -> None:
+    _go("add", target="viewer-1", amount=5, role=True)
+    kv_before = dict(fake_host.kv_store)
+    rows_before = {k: dict(v) for k, v in fake_host.db.rows.items()}
+    for command in ("balance_self", "balance_other", "leaderboard"):
+        _go(command, target="viewer-1")
+    assert fake_host.kv_store == kv_before
+    assert fake_host.db.rows == rows_before
+
+
+def test_leaderboard_is_capped_at_ten_entries(fake_host: _FakeHost) -> None:
+    for i in range(12):
+        _go("add", target=f"user{i:02d}", amount=i + 1, role=True)
+    _go("leaderboard")
+    text = _reply_text(fake_host)
+    assert text.count("player-") == 10
+    assert text.startswith("Top points: 1. player-")
+    assert ": 12," in text and ": 3" in text and ": 2," not in text
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ("007 alice", ("add", "alice", 7)),
+        ("+5 alice", ("add", "alice", 5)),
+        ("5.5 alice", ("usage", None, None)),
+        ("1e3 alice", ("usage", None, None)),
+        ("five alice", ("usage", None, None)),
+        ("5 alice bob", ("usage", None, None)),
+    ],
+)
+def test_resolve_adjust_amount_shapes(
+    args: str, expected: tuple[str, str | None, int | None], fake_host: _FakeHost
+) -> None:
+    assert _resolve_adjust("add", args) == expected
+
+
+# -- transform(): payload shape + flag gate -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "keys"),
+    [
+        ("!points", {"command", "channel_id"}),
+        ("!points top", {"command", "channel_id"}),
+        ("!points alice", {"command", "channel_id", "target"}),
+        ("!points add 5 alice", {"command", "channel_id", "target", "amount"}),
+        ("!POINTS Sub 5 alice", {"command", "channel_id", "target", "amount"}),
+        ("!points add alice", {"command", "channel_id"}),
+    ],
+)
+def test_transform_forwards_only_the_fields_dispatch_needs(
+    text: str, keys: set[str], fake_host: _FakeHost
+) -> None:
+    result = _run(transform(_sample_event(text)))
+    assert result is not None
+    assert set(result.payload) == keys
+
+
+def test_flag_is_checked_by_key_and_defaults_off(fake_host: _FakeHost) -> None:
+    seen: list[tuple[str, bool]] = []
+
+    def _enabled(key: str, default_value: bool) -> bool:
+        seen.append((key, default_value))
+        return False
+
+    sys.modules["wit_world"].imports.flags = types.SimpleNamespace(enabled=_enabled)
+    assert _run(transform(_sample_event("!points"))) is None
+    assert seen == [("waddles.command-loyalty", False)]
+    assert fake_host.kv_calls == [] and fake_host.db.calls == []
+
+
+# -- kv key charset -- regression: gh-631 ---------------------------------------------------
+
+
+def test_every_kv_key_the_bundle_touches_satisfies_the_host_charset(fake_host: _FakeHost) -> None:
+    # regression: gh-631 -- the host rejects any guest key outside ASCII alnum + `_`/`-`/`.`
+    # (notably `:`). This suite's own kv fake is permissive, so check the keys directly.
+    _go("add", target="alice", amount=5, role=True)
+    _go("balance_other", target="alice")
+    _go("add", target="alice", amount=5, role=True)
+    keys = [call[1] for call in fake_host.kv_calls]
+    assert keys
+    for key in keys:
+        validate_key(key)
+        assert ":" not in key
+    validate_key(_index_key(_pseudonym("alice")))
