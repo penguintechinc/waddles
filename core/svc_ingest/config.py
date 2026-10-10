@@ -300,10 +300,50 @@ class Config:
         "on",
     }
 
+    # Spectrum org sync -- roster join/leave/role changes + event create/update/RSVP
+    # (receivers/spectrum_poll.py `roster`/`events` kinds, gh #101). Needs BOTH
+    # `waddles.spectrum-integration` and `waddles.spectrum-org-sync` ON (ENV baseline
+    # `FLAG_WADDLES_SPECTRUM_ORG_SYNC`, default OFF -- see `spectrum_org_flag_baseline()`).
+    # Comma-separated Spectrum community ids; each gets a lease-guarded roster poller
+    # and events poller sharing SPECTRUM_RSI_TOKEN_REF.
+    SPECTRUM_ORG_COMMUNITIES = [
+        c.strip() for c in os.getenv("SPECTRUM_ORG_COMMUNITIES", "").split(",") if c.strip()
+    ]
+    # Org snapshots change slowly and a roster fetch is several paged requests: poll
+    # slowly (the receiver additionally enforces a 60s floor).
+    SPECTRUM_ORG_POLL_INTERVAL_S = float(os.getenv("SPECTRUM_ORG_POLL_INTERVAL_S", "300.0"))
+    # Shrink guard: a roster that loses more than this fraction in one poll is treated as
+    # an RSI glitch (snapshot not advanced, poller backs off) instead of mass-departure
+    # events. Raise to 1.0 to accept a genuine mass change; see docs/integrations/spectrum.md.
+    SPECTRUM_ROSTER_MAX_DEPARTURE_RATIO = float(
+        os.getenv("SPECTRUM_ROSTER_MAX_DEPARTURE_RATIO", "0.5")
+    )
+    # Emit the whole current roster/event list as joined/created on the FIRST poll (a
+    # deliberate bootstrap -- default false: connecting only primes, it never floods).
+    SPECTRUM_ORG_EMIT_BACKLOG = os.getenv("SPECTRUM_ORG_EMIT_BACKLOG", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    # Valkey TTL of a stored org snapshot; after this long without a poll the next run
+    # simply re-primes (no events) instead of diffing against a stale picture.
+    SPECTRUM_SNAPSHOT_TTL_S = int(os.getenv("SPECTRUM_SNAPSHOT_TTL_S", str(30 * 24 * 3600)))
+
     @classmethod
     def spectrum_flag_baseline(cls) -> bool:
         """ENV baseline for `waddles.spectrum-integration` (default OFF; PostHog overrides)."""
         return os.getenv("FLAG_WADDLES_SPECTRUM_INTEGRATION", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    @classmethod
+    def spectrum_org_flag_baseline(cls) -> bool:
+        """ENV baseline for `waddles.spectrum-org-sync` (default OFF; PostHog overrides)."""
+        return os.getenv("FLAG_WADDLES_SPECTRUM_ORG_SYNC", "").strip().lower() in {
             "1",
             "true",
             "yes",

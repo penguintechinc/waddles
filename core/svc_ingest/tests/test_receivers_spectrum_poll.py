@@ -29,6 +29,7 @@ from builtin_handlers.spectrum_ingest import SPECTRUM_MANIFEST, normalize, regis
 from fanout import fan_out_event
 from receivers.spectrum_poll import (
     CONSUMES_TAG,
+    ORG_CONSUMES_TAG,
     RsiRestProvider,
     SpectrumAuthError,
     SpectrumEndpointError,
@@ -498,7 +499,7 @@ class TestIngestPathEndToEnd:
     async def test_receiver_fanout_normalize_real_path(self, redis_client: Any) -> None:
         registry = AppRegistry()
         manifest = register_default_bundles(registry)
-        assert manifest.stage_specs["ingest"].consumes == (CONSUMES_TAG,)
+        assert manifest.stage_specs["ingest"].consumes == (CONSUMES_TAG, ORG_CONSUMES_TAG)
         prov = ScriptedProvider(
             [[_item("1", text="  o7 fleet  ")], [_item("1"), _item("2", text="second")]]
         )

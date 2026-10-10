@@ -559,7 +559,7 @@ class TestSpectrumReceiverRegistration:
     async def test_manifest_registered_even_without_config(self) -> None:
         async with quart_app.test_app():
             manifest = quart_app.config["registry"].get("waddles.bot.spectrum.default")
-            assert manifest.stage_specs["ingest"].consumes == ("spectrum.message",)
+            assert manifest.stage_specs["ingest"].consumes == ("spectrum.message", "spectrum.org")
 
     async def test_skipped_without_sources(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(Config, "SPECTRUM_FORUM_CHANNELS", [])
