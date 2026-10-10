@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-hype"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!hype` -> a per-community kv-backed hype counter. Mirrors bundles/python/count."
 requires-python = ">=3.13"
 dependencies = []

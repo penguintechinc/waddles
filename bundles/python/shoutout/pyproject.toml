@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-shoutout"
-version = "1.0.2"
+version = "1.0.3"
 description = "`!so <user>` -> a customizable, per-community shoutout command, migrated from the bot_process monolith's `!so` feature. Two default-OFF sub-modules: `auto` (auto-shoutout list) and `ai` (Professional-tier-gated AI-generated text, toggle only -- see module docstring). Inspired by superpenguintv (Psychoboy)'s PenguinTwitchBot `!so` -- original implementation, no code/text reused."
 requires-python = ">=3.13"
 dependencies = []

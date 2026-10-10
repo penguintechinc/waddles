@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-rip"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!rip` -> a per-community kv-backed respects counter. Mirrors bundles/python/count."
 requires-python = ">=3.13"
 dependencies = []
