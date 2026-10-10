@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import jwt
+import psycopg2.errors
 import pytest
 from pydal import DAL, Field
 
@@ -35,6 +36,12 @@ from flask_core.tenancy import (
 )
 
 SECRET = "test-secret-key-not-for-production-use-only"
+
+
+class _PoisonedConnectionError(psycopg2.errors.InFailedSqlTransaction):
+    """A genuine psycopg2 `InFailedSqlTransaction` (SQLSTATE 25P02), pgcode fixed for the test."""
+
+    pgcode = "25P02"  # type: ignore[assignment]  # psycopg2 sets this from a live result
 
 
 @pytest.fixture
@@ -278,8 +285,8 @@ class TestResolveTenantContextDbResilience:
                 call_count["n"] += 1
                 if call_count["n"] == 1:
                     query_set.select = MagicMock(
-                        side_effect=RuntimeError(
-                            "InFailedSqlTransaction: current transaction is aborted, "
+                        side_effect=_PoisonedConnectionError(
+                            "current transaction is aborted, "
                             "commands ignored until end of transaction block"
                         )
                     )
@@ -290,15 +297,24 @@ class TestResolveTenantContextDbResilience:
             payload = {"tenant": "tenant-a"}
 
             with caplog.at_level(logging.ERROR):
-                with pytest.raises(RuntimeError, match="InFailedSqlTransaction"):
+                with pytest.raises(_PoisonedConnectionError):
                     await resolve_tenant_context(payload, db)
 
             rollback_spy.assert_called_once()
             error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+            # The real trigger must stay identifiable (operation + type + SQLSTATE
+            # + category), not just the downstream cascade -- but never via the raw
+            # driver message, which can embed bound values (PII/tokens).
             assert any(
-                "resolve_tenant_context" in r.message and "InFailedSqlTransaction" in r.message
+                "resolve_tenant_context" in r.message
+                and "_PoisonedConnectionError" in r.message
+                and "sqlstate=25P02" in r.message
+                and "category=in_failed_sql_transaction" in r.message
                 for r in error_records
             ), "the real trigger exception must be logged, not just the downstream cascade"
+            assert not any(
+                "current transaction is aborted" in r.message for r in error_records
+            ), "raw driver message leaked into the log (bound-value leak risk)"
 
             # Next call on the SAME dal/connection succeeds -- the connection
             # self-healed instead of staying poisoned (the "recurs every
