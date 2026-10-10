@@ -45,7 +45,9 @@ use crate::pipeline::model::{
     OutputSpec, PipelineEngine, PipelineError, PipelineHandle, PipelineId, PipelineSpec,
     PipelineState, PipelineStatus,
 };
+use crate::redact::scrub_diagnostic;
 use crate::store::{SecretRef, SecretResolver};
+use crate::telemetry::stream::{Stage, StreamMetrics};
 
 /// Tunable timings for the ffmpeg lifecycle (spec §6). [`Default`] matches
 /// the spec's production defaults; tests inject a config with millisecond-
@@ -166,12 +168,19 @@ struct Metrics {
     active_pipelines: Gauge<i64>,
     restarts_total: Counter<u64>,
     output_failures_total: Counter<u64>,
+    /// Shared stream data-plane instruments: the ffmpeg lifecycle stages
+    /// (`ffmpeg_spawn`, `ffmpeg_first_progress`, `ffmpeg_stop`) land in the
+    /// same `stream_stage_duration_seconds{stage}` histogram as the
+    /// orchestrator's setup stages, so one panel shows the whole pipeline
+    /// timeline.
+    stream: StreamMetrics,
 }
 
 impl Metrics {
     fn new() -> Self {
         let meter = global::meter("svc_streaming_pipeline");
         Self {
+            stream: StreamMetrics::shared(),
             pipeline_start_ms: meter
                 .u64_histogram("pipeline_start_ms")
                 .with_description("Time from ffmpeg spawn to first progress event")
@@ -580,7 +589,11 @@ async fn run_pipeline(
         // supervisor never observes EOF. See `terminate_process_group`.
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(cmd.as_inner_mut(), 0);
+        let spawn_syscall_start = Instant::now();
         let spawn_result = attempt_span.in_scope(|| cmd.spawn());
+        metrics
+            .stream
+            .record_stage(Stage::FfmpegSpawn, spawn_syscall_start.elapsed());
         let mut child = match spawn_result {
             Ok(child) => child,
             Err(err) => {
@@ -633,14 +646,22 @@ async fn run_pipeline(
                 let tx2 = tx.clone();
                 Some(std::thread::spawn(move || {
                     for event in iter {
+                        // ffmpeg's diagnostics echo the resolved secret URLs
+                        // it was handed (`Error opening output
+                        // rtmp://host/app/<stream key>`), so every error line
+                        // is scrubbed before it can reach a log line or the
+                        // pipeline's `last_error` (exposed via the status
+                        // API).
                         let forwarded = match event {
                             FfmpegEvent::Progress(p) => {
                                 tx2.blocking_send(MonitorEvent::Progress(p))
                             }
-                            FfmpegEvent::Error(e) => tx2.blocking_send(MonitorEvent::Error(e)),
+                            FfmpegEvent::Error(e) => {
+                                tx2.blocking_send(MonitorEvent::Error(scrub_diagnostic(&e)))
+                            }
                             FfmpegEvent::Log(LogLevel::Error, msg)
                             | FfmpegEvent::Log(LogLevel::Fatal, msg) => {
-                                tx2.blocking_send(MonitorEvent::Error(msg))
+                                tx2.blocking_send(MonitorEvent::Error(scrub_diagnostic(&msg)))
                             }
                             _ => Ok(()),
                         };
@@ -666,7 +687,11 @@ async fn run_pipeline(
             tokio::select! {
                 _ = slot.stop_notify.notified() => {
                     if slot.stopping.load(Ordering::SeqCst) {
+                        let stop_started = Instant::now();
                         graceful_stop(id, &mut child, &mut rx, &slot, &config).await;
+                        metrics
+                            .stream
+                            .record_stage(Stage::FfmpegStop, stop_started.elapsed());
                         break 'attempt;
                     }
                 }
@@ -677,6 +702,9 @@ async fn run_pipeline(
                                 metrics
                                     .pipeline_start_ms
                                     .record(spawn_start.elapsed().as_millis() as u64, &pid_kv);
+                                metrics
+                                    .stream
+                                    .record_stage(Stage::FfmpegFirstProgress, spawn_start.elapsed());
                                 got_first_progress = true;
                             }
                             metrics.encode_speed.record(p.speed as f64, &pid_kv);

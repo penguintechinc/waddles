@@ -23,12 +23,14 @@ pub mod policy;
 pub mod target;
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use tokio::sync::RwLock;
 
 use crate::egress::{OutputSink, SinkError};
 use crate::pipeline::model::{OutputSpec, PipelineId};
 use crate::store::{DefaultSecretResolver, SecretResolver};
+use crate::telemetry::stream::StreamMetrics;
 
 pub use error::RelayError;
 pub use health::{FailureReasonKind, TargetHealth};
@@ -43,6 +45,9 @@ pub use target::{RelayTargetKind, RelayTargetSpec, ResolvedRelayTarget, TeeSlave
 struct PipelineRelayState {
     targets: Vec<ResolvedRelayTarget>,
     health: Vec<TargetHealth>,
+    /// When each target (parallel to `targets`) started -- the zero point
+    /// for `stream_relay_session_seconds`, recorded when it stops.
+    started: Vec<Instant>,
 }
 
 /// RTMP/SRT relay sink. Generic over [`SecretResolver`] so tests can
@@ -53,6 +58,7 @@ pub struct RelaySink<R: SecretResolver = DefaultSecretResolver> {
     resolver: R,
     policy: RelayPolicy,
     metrics: Option<RelayMetrics>,
+    stream_metrics: StreamMetrics,
     state: RwLock<HashMap<PipelineId, PipelineRelayState>>,
 }
 
@@ -89,8 +95,16 @@ impl<R: SecretResolver> RelaySink<R> {
             resolver,
             policy,
             metrics: None,
+            stream_metrics: StreamMetrics::shared(),
             state: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Replaces the process-wide stream instruments with an explicit handle
+    /// -- for tests that install their own meter provider.
+    pub fn with_stream_metrics(mut self, stream_metrics: StreamMetrics) -> Self {
+        self.stream_metrics = stream_metrics;
+        self
     }
 
     /// Attaches Prometheus metric handles (from [`register_relay_metrics`])
@@ -248,6 +262,7 @@ impl<R: SecretResolver> RelaySink<R> {
 
         entry.targets.push(resolved);
         entry.health.push(TargetHealth::Active);
+        entry.started.push(Instant::now());
         let active = entry.targets.len();
         drop(state);
 
@@ -284,8 +299,21 @@ impl<R: SecretResolver> OutputSink for RelaySink<R> {
 
     async fn stop(&self, pipeline_id: PipelineId) -> Result<(), SinkError> {
         let mut state = self.state.write().await;
-        state.remove(&pipeline_id);
+        let removed = state.remove(&pipeline_id);
         drop(state);
+
+        // One lifetime sample per relay target (RTMP/SRT push), labeled by
+        // protocol only -- never the redacted URL, which is per-destination.
+        if let Some(removed) = removed {
+            for (target, started) in removed.targets.iter().zip(&removed.started) {
+                let kind = match target.kind {
+                    RelayTargetKind::Rtmp => "rtmp",
+                    RelayTargetKind::Srt => "srt",
+                };
+                self.stream_metrics
+                    .record_relay_session(kind, started.elapsed());
+            }
+        }
 
         if let Some(metrics) = &self.metrics {
             let _ = metrics

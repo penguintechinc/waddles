@@ -96,6 +96,12 @@ object_store = { version = "=0.14.1", features = ["aws"] }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"
+# `testing` (dev-only feature of the already-declared `opentelemetry_sdk`)
+# unlocks `InMemoryMetricExporter`/`InMemorySpanExporter`, which the
+# telemetry-emission tests read back to assert histograms and spans really
+# emit. Never linked into the release binary; adds no new crate to
+# Cargo.lock.
+opentelemetry_sdk = { version = "=0.32.1", features = ["rt-tokio", "testing"] }
 # `test-util` (already-declared `tokio` crate, dev-only feature) unlocks
 # `tokio::time::{pause,advance}` so `ingest::rtmp`'s >5s backpressure-stall
 # disconnect path can be tested against a virtual clock instead of a real

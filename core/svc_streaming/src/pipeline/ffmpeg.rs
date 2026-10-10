@@ -25,6 +25,7 @@ use crate::pipeline::model::{
     AudioCodec, InputSpec, ObjectStoreRef, OutputSpec, PipelineError, PipelineId, PipelineSpec,
     TranscodeProfile, VideoCodec,
 };
+use crate::redact::scrub_diagnostic;
 use crate::store::SecretRef;
 
 /// Runtime path/secret inputs [`build_argv`] needs to turn a
@@ -33,7 +34,12 @@ use crate::store::SecretRef;
 /// builder stays a pure, easily golden-tested function -- callers (the
 /// supervisor) resolve secrets via [`crate::store::SecretResolver`] once at
 /// spawn time and populate this struct.
-#[derive(Debug, Clone, Default)]
+///
+/// `Debug` is hand-written: `resolved_secrets` holds the raw resolved relay
+/// URLs (stream keys) and `whip_sdp_paths` file names embed the WHIP token,
+/// so a derived `{:?}` would print credentials. The manual impl lists only
+/// the secret *references* and masks the token in each SDP path.
+#[derive(Clone, Default)]
 pub struct Paths {
     /// Local filesystem root for recordings/segments/HLS output
     /// (`STREAM_DATA_DIR`).
@@ -52,6 +58,24 @@ pub struct Paths {
     /// allocated in `spec.inputs` then `spec.outputs` order -- see
     /// [`rtp_legs`].
     pub rtp_base_port: u16,
+}
+
+impl std::fmt::Debug for Paths {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut secret_refs: Vec<&String> = self.resolved_secrets.keys().collect();
+        secret_refs.sort();
+        let sdp_paths: std::collections::BTreeMap<usize, String> = self
+            .whip_sdp_paths
+            .iter()
+            .map(|(index, path)| (*index, scrub_diagnostic(&path.display().to_string())))
+            .collect();
+        f.debug_struct("Paths")
+            .field("stream_data_dir", &self.stream_data_dir)
+            .field("resolved_secret_refs", &secret_refs)
+            .field("whip_sdp_paths", &sdp_paths)
+            .field("rtp_base_port", &self.rtp_base_port)
+            .finish()
+    }
 }
 
 /// Deterministic map key for a [`SecretRef`], used to look up its resolved

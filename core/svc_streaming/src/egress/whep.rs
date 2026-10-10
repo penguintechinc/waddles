@@ -40,6 +40,7 @@ use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
 use tokio::sync::{Notify, RwLock};
+use tracing::Instrument as _;
 use uuid::Uuid;
 use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
 use webrtc::media_stream::track_local::TrackLocal;
@@ -163,19 +164,30 @@ fn spawn_viewer_forward(
     ssrc: u32,
     metrics: RtcMetrics,
 ) {
-    runtime.spawn(Box::pin(async move {
-        let mut subscriber = fanout.subscribe();
-        while let Some(mut packet) = subscriber.recv(&metrics).await {
-            packet.header.ssrc = ssrc;
-            metrics
-                .rtp_packets_total
-                .with_label_values(&["egress"])
-                .inc();
-            if track.write_rtp(packet).await.is_err() {
-                break;
+    // Created here (not inside the task) so it parents to the signaling
+    // request's span: the viewer's whole forwarding lifetime is one child of
+    // the `POST /whep/...` trace. Carries only a packet count -- no viewer
+    // address or SSRC.
+    let span = tracing::info_span!("egress.whep_forward", packets = tracing::field::Empty);
+    runtime.spawn(Box::pin(
+        async move {
+            let mut subscriber = fanout.subscribe();
+            let mut forwarded: u64 = 0;
+            while let Some(mut packet) = subscriber.recv(&metrics).await {
+                packet.header.ssrc = ssrc;
+                metrics
+                    .rtp_packets_total
+                    .with_label_values(&["egress"])
+                    .inc();
+                if track.write_rtp(packet).await.is_err() {
+                    break;
+                }
+                forwarded += 1;
             }
+            tracing::Span::current().record("packets", forwarded);
         }
-    }));
+        .instrument(span),
+    ));
 }
 
 /// Builds a send-only local track for one viewer, with a fresh SSRC

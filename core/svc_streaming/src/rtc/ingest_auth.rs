@@ -24,6 +24,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::Config;
+use crate::telemetry::stream::{ExternalPeer, StreamMetrics};
+use crate::telemetry::trace_context::inject_current_context;
 
 /// Errors calling the ingest-auth endpoint.
 #[derive(Debug, Error)]
@@ -47,7 +49,9 @@ pub trait WhipTokenAuthorizer: Send + Sync {
     async fn authorize(&self, token: &str) -> Result<bool, IngestAuthError>;
 }
 
-#[derive(Debug, Serialize)]
+/// Request body for the loopback ingest-auth hop. Deliberately not `Debug`:
+/// `key` is the presented WHIP token, a bearer credential.
+#[derive(Serialize)]
 struct IngestAuthRequestBody<'a> {
     kind: &'a str,
     key: &'a str,
@@ -75,6 +79,7 @@ pub struct InternalIngestAuthClient {
     http: reqwest::Client,
     base_url: String,
     service_key: String,
+    metrics: StreamMetrics,
 }
 
 impl std::fmt::Debug for InternalIngestAuthClient {
@@ -100,7 +105,15 @@ impl InternalIngestAuthClient {
             http,
             base_url: format!("http://127.0.0.1:{}/api/v1", config.cli.http_port),
             service_key: config.service_api_key.expose().to_string(),
+            metrics: StreamMetrics::shared(),
         })
+    }
+
+    /// Replaces the process-wide stream instruments with an explicit handle
+    /// -- for tests that install their own meter provider.
+    pub fn with_stream_metrics(mut self, metrics: StreamMetrics) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// Builds a client against an explicit base URL -- used by tests
@@ -114,6 +127,7 @@ impl InternalIngestAuthClient {
                 .expect("client builds"),
             base_url,
             service_key,
+            metrics: StreamMetrics::shared(),
         }
     }
 }
@@ -122,15 +136,25 @@ impl InternalIngestAuthClient {
 impl WhipTokenAuthorizer for InternalIngestAuthClient {
     async fn authorize(&self, token: &str) -> Result<bool, IngestAuthError> {
         let url = format!("{}/internal/streaming/ingest-auth", self.base_url);
+        // The loopback hop re-enters this service's own router, whose
+        // request span parents itself to this `traceparent` -- the whole
+        // WHIP authorization is one trace.
+        let mut trace_headers = reqwest::header::HeaderMap::new();
+        inject_current_context(&mut trace_headers);
         let response = self
-            .http
-            .post(url)
-            .header("x-service-key", &self.service_key)
-            .json(&IngestAuthRequestBody {
-                kind: "whip",
-                key: token,
-            })
-            .send()
+            .metrics
+            .time_external(
+                ExternalPeer::IngestAuth,
+                self.http
+                    .post(url)
+                    .headers(trace_headers)
+                    .header("x-service-key", &self.service_key)
+                    .json(&IngestAuthRequestBody {
+                        kind: "whip",
+                        key: token,
+                    })
+                    .send(),
+            )
             .await
             .map_err(|err| IngestAuthError::Request(err.to_string()))?;
 

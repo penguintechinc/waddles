@@ -47,17 +47,18 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
+use tracing::Instrument as _;
 
 use crate::config::Config;
 use crate::db::entities::{community, streaming_config, streaming_target, tenant};
-use crate::egress::hls::{HlsSink, RunningPipeline, RunningPipelines};
+use crate::egress::hls::{HlsSink, IngestOrigin, RunningPipeline, RunningPipelines};
 use crate::egress::record::RecordSink;
 use crate::egress::relay::RelaySink;
 use crate::egress::OutputSink;
@@ -71,6 +72,7 @@ use crate::pipeline::{
 };
 use crate::rtc::ingest_auth::{IngestAuthError, WhipTokenAuthorizer};
 use crate::store::SecretRef;
+use crate::telemetry::stream::{protocol_label, SessionFailure, Stage, StreamMetrics};
 
 /// Profile name every HLS/relay output shares -- MVP is single-profile
 /// (spec §2: "MVP = separate pipelines, one per source", no ladder).
@@ -468,6 +470,7 @@ pub struct Orchestrator {
     record: Option<Arc<RecordSink>>,
     registry: Arc<PipelineRegistry>,
     whip_state: Arc<WhipState>,
+    stream_metrics: StreamMetrics,
 }
 
 impl Orchestrator {
@@ -489,35 +492,69 @@ impl Orchestrator {
             record,
             registry,
             whip_state,
+            stream_metrics: StreamMetrics::shared(),
         }
+    }
+
+    /// Replaces the process-wide stream instruments with an explicit handle
+    /// -- for tests that install their own meter provider.
+    pub fn with_stream_metrics(mut self, stream_metrics: StreamMetrics) -> Self {
+        self.stream_metrics = stream_metrics;
+        self
     }
 
     /// Drains `rx` until the channel closes (every ingest listener/router
     /// holding a sender has been dropped), spawning
     /// [`Self::handle_session`] per accepted session so a stalled publisher
     /// never blocks the next one from starting.
+    ///
+    /// Each session runs inside an `orchestrator.handle_session` span parented
+    /// to the listener's connection span ([`IngestSession::span`]) -- a
+    /// `tokio::spawn` carries no tracing context, so the parent is wired
+    /// explicitly. The span never records the routing key (a credential).
     pub async fn run(self: Arc<Self>, mut rx: mpsc::Receiver<IngestSession>) {
         tracing::info!("orchestrator: ingest dispatch loop started");
         while let Some(session) = rx.recv().await {
+            // Stamped on receipt, not after the DB lookups: the
+            // time-to-first-egress histogram measures from acceptance.
+            let origin = IngestOrigin::now(session.kind);
+            let span = tracing::info_span!(
+                parent: &session.span,
+                "orchestrator.handle_session",
+                protocol = protocol_label(session.kind),
+                pipeline_id = tracing::field::Empty,
+                community_id = tracing::field::Empty,
+            );
             let this = Arc::clone(&self);
-            tokio::spawn(async move {
-                this.handle_session(session).await;
-            });
+            tokio::spawn(
+                async move {
+                    this.handle_session(session, origin).await;
+                }
+                .instrument(span),
+            );
         }
         tracing::info!("orchestrator: ingest channel closed, dispatch loop exiting");
     }
 
-    async fn handle_session(self: Arc<Self>, session: IngestSession) {
+    async fn handle_session(self: Arc<Self>, session: IngestSession, origin: IngestOrigin) {
         let kind = session.kind;
-        let db = match crate::db::get_or_connect(&self.config).await {
+        let metrics = self.stream_metrics.clone();
+        let db = match metrics
+            .time_stage(Stage::DbConnect, crate::db::get_or_connect(&self.config))
+            .await
+        {
             Ok(db) => db,
             Err(err) => {
                 tracing::error!(error = %err, ?kind, "orchestrator: no database connection, dropping ingest session");
+                metrics.record_session_failure(kind, SessionFailure::NoDatabase);
                 return;
             }
         };
 
-        let config = match find_enabled_config(&db, &session.key).await {
+        let config = match metrics
+            .time_stage(Stage::ConfigLookup, find_enabled_config(&db, &session.key))
+            .await
+        {
             Some(config) => config,
             None => {
                 // Should be rare: the listener/router already ran the same
@@ -525,14 +562,22 @@ impl Orchestrator {
                 // accepting -- a config disabled in the gap between accept
                 // and here is the main legitimate cause.
                 tracing::warn!(?kind, "orchestrator: ingest session key no longer matches an enabled streaming_config, dropping");
+                metrics.record_session_failure(kind, SessionFailure::ConfigNotFound);
                 return;
             }
         };
 
-        let tenant_slug = match resolve_tenant_slug(&db, config.community_id).await {
+        let tenant_slug = match metrics
+            .time_stage(
+                Stage::TenantResolve,
+                resolve_tenant_slug(&db, config.community_id),
+            )
+            .await
+        {
             Ok(slug) => slug,
             Err(err) => {
                 tracing::error!(error = %err, community_id = config.community_id, "orchestrator: failed to resolve tenant, dropping ingest session");
+                metrics.record_session_failure(kind, SessionFailure::TenantUnresolved);
                 return;
             }
         };
@@ -549,41 +594,76 @@ impl Orchestrator {
             },
         };
 
-        let spec = match build_pipeline_spec_for_ingest(&db, &config, &tenant_slug, input).await {
+        let spec = match metrics
+            .time_stage(
+                Stage::SpecBuild,
+                build_pipeline_spec_for_ingest(&db, &config, &tenant_slug, input),
+            )
+            .await
+        {
             Ok(spec) => spec,
             Err(err) => {
                 tracing::error!(error = %err, config_id = config.id, "orchestrator: failed to build pipeline spec, dropping ingest session");
+                metrics.record_session_failure(kind, SessionFailure::SpecBuildFailed);
                 return;
             }
         };
         let pipeline_id = spec.id;
         let community_id = config.community_id;
 
-        self.start_egress_sinks(pipeline_id, community_id, &spec)
+        let span = tracing::Span::current();
+        span.record("pipeline_id", tracing::field::display(pipeline_id));
+        span.record("community_id", community_id);
+
+        // Hand the HLS sink the ingest-acceptance instant *before* its poller
+        // spawns (`start_egress_sinks` -> `HlsSink::start`), so the first
+        // published segment can be turned into a time-to-first-egress
+        // observation.
+        self.hls.mark_ingest_origin(pipeline_id, origin);
+        metrics
+            .time_stage(
+                Stage::EgressStart,
+                self.start_egress_sinks(pipeline_id, community_id, &spec),
+            )
             .await;
 
-        let start_result = match kind {
-            IngestKind::Whip => match self.whip_state.sdp_path_for(&session.key).await {
-                Some(sdp_path) => {
-                    let mut whip_sdp_paths = HashMap::new();
-                    whip_sdp_paths.insert(0usize, sdp_path);
-                    self.supervisor
-                        .start_with_whip_sdp(spec, whip_sdp_paths)
-                        .await
+        // `Ok(false)` = a WHIP session with no registered transcode-bridge SDP
+        // path (cannot start ffmpeg); the other branches never produce it.
+        let start_result = metrics
+            .time_stage(Stage::EngineStart, async {
+                match kind {
+                    IngestKind::Whip => match self.whip_state.sdp_path_for(&session.key).await {
+                        Some(sdp_path) => {
+                            let mut whip_sdp_paths = HashMap::new();
+                            whip_sdp_paths.insert(0usize, sdp_path);
+                            self.supervisor
+                                .start_with_whip_sdp(spec, whip_sdp_paths)
+                                .await
+                                .map(|_| true)
+                        }
+                        None => Ok(false),
+                    },
+                    IngestKind::Rtmp | IngestKind::Srt => {
+                        self.supervisor.start(spec).await.map(|_| true)
+                    }
                 }
-                None => {
-                    tracing::error!(%pipeline_id, "orchestrator: no WHIP transcode-bridge SDP path registered for this token, cannot start ffmpeg");
-                    self.stop_pipeline(pipeline_id).await;
-                    return;
-                }
-            },
-            IngestKind::Rtmp | IngestKind::Srt => self.supervisor.start(spec).await,
-        };
+            })
+            .await;
 
-        if let Err(err) = start_result {
-            tracing::error!(%pipeline_id, error = %err, "orchestrator: ffmpeg supervisor failed to start the pipeline");
-            self.stop_pipeline(pipeline_id).await;
-            return;
+        match start_result {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::error!(%pipeline_id, "orchestrator: no WHIP transcode-bridge SDP path registered for this token, cannot start ffmpeg");
+                metrics.record_session_failure(kind, SessionFailure::WhipSdpMissing);
+                self.stop_pipeline(pipeline_id).await;
+                return;
+            }
+            Err(err) => {
+                tracing::error!(%pipeline_id, error = %err, "orchestrator: ffmpeg supervisor failed to start the pipeline");
+                metrics.record_session_failure(kind, SessionFailure::EngineStartFailed);
+                self.stop_pipeline(pipeline_id).await;
+                return;
+            }
         }
 
         self.registry
@@ -593,12 +673,18 @@ impl Orchestrator {
         if matches!(kind, IngestKind::Rtmp | IngestKind::Srt) {
             match self.supervisor.stdin_writer(pipeline_id).await {
                 Ok(stdin) => {
-                    pump_ingest_to_stdin(session.stream, stdin, pipeline_id).await;
+                    // Live for exactly as long as bytes are being pumped; the
+                    // guard's `Drop` records the session lifetime and
+                    // decrements the active gauge on every exit path.
+                    let session_guard = metrics.session_started(kind);
+                    pump_ingest_to_stdin(session.stream, stdin, pipeline_id, kind, &metrics).await;
                     tracing::info!(%pipeline_id, "orchestrator: ingest stream ended, tearing pipeline down");
                     self.stop_pipeline(pipeline_id).await;
+                    drop(session_guard);
                 }
                 Err(err) => {
                     tracing::error!(%pipeline_id, error = %err, "orchestrator: could not obtain the ffmpeg stdin handle -- pipeline is running but will never receive ingest bytes");
+                    metrics.record_session_failure(kind, SessionFailure::StdinUnavailable);
                 }
             }
         }
@@ -659,6 +745,14 @@ impl Orchestrator {
     /// more than once for the same `pipeline_id`, and safe to call for a
     /// pipeline that only partially started.
     pub async fn stop_pipeline(&self, pipeline_id: PipelineId) {
+        self.stream_metrics
+            .time_stage(Stage::Teardown, self.teardown(pipeline_id))
+            .await;
+    }
+
+    /// The body of [`Self::stop_pipeline`], split out so the whole teardown
+    /// runs inside one `pipeline.teardown` span / stage-duration sample.
+    async fn teardown(&self, pipeline_id: PipelineId) {
         if let Err(err) = PipelineEngine::stop(self.supervisor.as_ref(), pipeline_id).await {
             tracing::warn!(%pipeline_id, error = %err, "orchestrator: engine stop failed");
         }
@@ -700,33 +794,66 @@ impl Orchestrator {
 /// EOF (publisher disconnected) or errors -- the caller tears the pipeline
 /// down on return.
 async fn pump_ingest_to_stdin(
+    stream: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
+    stdin: crate::pipeline::StdinHandle,
+    pipeline_id: PipelineId,
+    kind: IngestKind,
+    metrics: &StreamMetrics,
+) {
+    let span = tracing::info_span!(
+        "ingest.pump",
+        protocol = protocol_label(kind),
+        %pipeline_id,
+        bytes_total = tracing::field::Empty,
+    );
+    let pumped = pump_loop(stream, stdin, pipeline_id, kind, metrics)
+        .instrument(span.clone())
+        .await;
+    span.record("bytes_total", pumped);
+}
+
+/// The read/write loop behind [`pump_ingest_to_stdin`]; returns the number
+/// of bytes successfully written to ffmpeg's stdin. Each chunk's
+/// read-to-written handoff time and size land in
+/// `stream_ingest_handoff_seconds` / `stream_ingest_bytes_total`; a failed
+/// write still contributes its handoff time (it is the backpressure signal)
+/// but zero bytes.
+async fn pump_loop(
     mut stream: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
     stdin: crate::pipeline::StdinHandle,
     pipeline_id: PipelineId,
-) {
+    kind: IngestKind,
+    metrics: &StreamMetrics,
+) -> u64 {
     let mut buf = vec![0u8; 64 * 1024];
+    let mut pumped: u64 = 0;
     loop {
         let n = match stream.read(&mut buf).await {
             Ok(0) => {
                 tracing::debug!(%pipeline_id, "pump_ingest_to_stdin: source stream reached EOF");
-                return;
+                return pumped;
             }
             Ok(n) => n,
             Err(err) => {
                 tracing::warn!(%pipeline_id, error = %err, "pump_ingest_to_stdin: source stream read error, stopping pump");
-                return;
+                return pumped;
             }
         };
         let chunk = buf[..n].to_vec();
         let stdin = stdin.clone();
+        let handoff_started = Instant::now();
         match tokio::task::spawn_blocking(move || stdin.write(&chunk)).await {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                pumped += n as u64;
+                metrics.record_ingest_chunk(kind, handoff_started.elapsed(), n as u64);
+            }
             Ok(Err(err)) => {
+                metrics.record_ingest_chunk(kind, handoff_started.elapsed(), 0);
                 tracing::debug!(%pipeline_id, error = %err, "pump_ingest_to_stdin: ffmpeg stdin write failed (possibly mid-restart), continuing");
             }
             Err(join_err) => {
                 tracing::warn!(%pipeline_id, error = %join_err, "pump_ingest_to_stdin: blocking write task panicked, stopping pump");
-                return;
+                return pumped;
             }
         }
     }
@@ -1133,5 +1260,145 @@ mod tests {
         let orchestrator = test_orchestrator(data_dir.clone());
         assert!(orchestrator.registry().list("42").is_empty());
         tokio::fs::remove_dir_all(&data_dir).await.ok();
+    }
+
+    // --- Telemetry ---
+
+    #[tokio::test]
+    async fn stop_pipeline_is_timed_as_the_teardown_stage() {
+        use crate::telemetry::stream::test_support::{harness, histogram};
+
+        let (stream_metrics, provider, exporter) = harness();
+        let data_dir =
+            std::env::temp_dir().join(format!("svc-streaming-orch-unit-{}", Uuid::new_v4()));
+        let orchestrator = test_orchestrator(data_dir.clone()).with_stream_metrics(stream_metrics);
+        orchestrator.stop_pipeline(Uuid::new_v4()).await;
+        orchestrator.stop_pipeline(Uuid::new_v4()).await;
+
+        let (count, _) = histogram(
+            &provider,
+            &exporter,
+            "stream_stage_duration_seconds",
+            &[("stage", "teardown")],
+        );
+        assert_eq!(count, 2, "every stop_pipeline call is one teardown sample");
+        tokio::fs::remove_dir_all(&data_dir).await.ok();
+    }
+
+    /// A supervisor-registered pure-copy WHIP->WHEP pipeline has no ffmpeg
+    /// process, so its stdin handle exists but every write fails -- the
+    /// shape of "ffmpeg is mid-restart" the pump must survive.
+    async fn stdin_handle_without_a_process() -> (crate::pipeline::StdinHandle, PipelineId) {
+        let supervisor = FfmpegSupervisor::new(
+            std::path::PathBuf::from("/nonexistent/ffmpeg-for-pump-unit-tests"),
+            std::env::temp_dir(),
+            41100,
+            Arc::new(crate::store::DefaultSecretResolver),
+            crate::pipeline::SupervisorConfig::default(),
+        );
+        let id = Uuid::new_v4();
+        let spec = PipelineSpec {
+            id,
+            tenant: "tenant-1".into(),
+            community_id: "42".into(),
+            inputs: vec![InputSpec::Whip {
+                token: "tok".into(),
+            }],
+            profiles: vec![TranscodeProfile {
+                name: "copy".into(),
+                video: VideoCodec::Copy,
+                audio: AudioCodec::Copy,
+                resolution: None,
+                fps: None,
+            }],
+            outputs: vec![OutputSpec::Whep {
+                profile: "copy".into(),
+            }],
+        };
+        PipelineEngine::start(&supervisor, spec)
+            .await
+            .expect("no-ffmpeg pipeline registers");
+        let stdin = supervisor.stdin_writer(id).await.expect("slot registered");
+        (stdin, id)
+    }
+
+    #[tokio::test]
+    async fn pump_records_handoff_time_but_zero_bytes_when_stdin_writes_fail() {
+        use crate::telemetry::stream::test_support::{harness, histogram, sum_counter};
+        use tokio::io::AsyncWriteExt as _;
+
+        let (metrics, provider, exporter) = harness();
+        let (stdin, id) = stdin_handle_without_a_process().await;
+        let (mut publisher, ingest) = tokio::io::duplex(4096);
+        publisher.write_all(b"flv-bytes").await.unwrap();
+        drop(publisher);
+
+        pump_ingest_to_stdin(Box::new(ingest), stdin, id, IngestKind::Rtmp, &metrics).await;
+
+        let (count, _) = histogram(
+            &provider,
+            &exporter,
+            "stream_ingest_handoff_seconds",
+            &[("protocol", "rtmp")],
+        );
+        assert_eq!(count, 1, "the failed write still has a handoff time");
+        assert_eq!(
+            sum_counter(
+                &provider,
+                &exporter,
+                "stream_ingest_bytes_total",
+                &[("protocol", "rtmp")]
+            ),
+            0,
+            "a write that never reached ffmpeg must not count as pumped bytes"
+        );
+    }
+
+    /// An `AsyncRead` that always errors, standing in for a reset ingest
+    /// connection.
+    struct ResetReader;
+
+    impl tokio::io::AsyncRead for ResetReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "reset by peer",
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn pump_stops_cleanly_on_a_read_error_without_recording_a_chunk() {
+        use crate::telemetry::stream::test_support::{harness, histogram};
+
+        let (metrics, provider, exporter) = harness();
+        let (stdin, id) = stdin_handle_without_a_process().await;
+        let pumped = pump_loop(Box::new(ResetReader), stdin, id, IngestKind::Srt, &metrics).await;
+        assert_eq!(pumped, 0);
+        assert_eq!(
+            histogram(&provider, &exporter, "stream_ingest_handoff_seconds", &[]).0,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pump_with_an_immediately_closed_source_returns_zero_bytes() {
+        use crate::telemetry::stream::test_support::harness;
+
+        let (metrics, _provider, _exporter) = harness();
+        let (stdin, id) = stdin_handle_without_a_process().await;
+        let pumped = pump_loop(
+            Box::new(tokio::io::empty()),
+            stdin,
+            id,
+            IngestKind::Rtmp,
+            &metrics,
+        )
+        .await;
+        assert_eq!(pumped, 0);
     }
 }
