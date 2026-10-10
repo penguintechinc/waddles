@@ -30,10 +30,9 @@ concurrency:
   group: containers-${{ github.event.merge_group.head_sha || github.head_ref || github.ref }}
   cancel-in-progress: true
 
+# Least privilege at workflow level; write scopes are granted per job below.
 permissions:
   contents: read
-  packages: write
-  security-events: write
 
 env:
   REGISTRY: ghcr.io
@@ -59,43 +58,43 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           fetch-depth: 2
+          persist-credentials: false
 
       - name: Determine version and suffix
         id: version
+        env:
+          REF: ${{ github.ref }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           # Read version from .version file
           if [ -f .version ]; then
-            VERSION=$(cat .version | tr -d '[:space:]')
+            VERSION=$(tr -d '[:space:]' < .version)
           else
             VERSION="0.0.0"
           fi
 
-          echo "version=v${VERSION}" >> $GITHUB_OUTPUT
+          echo "version=v${VERSION}" >> "$GITHUB_OUTPUT"
 
           # Determine suffix based on ref type
           # Tagged push (v*) = release + latest
           # Release branch (v*.x) or PR from one = beta
           # Main branch push = gamma (pre-release)
           # Everything else = alpha
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            SUFFIX=""
-            echo "suffix=" >> $GITHUB_OUTPUT
-            echo "is_release=true" >> $GITHUB_OUTPUT
+          if [[ "$REF" == refs/tags/v* ]]; then
+            echo "suffix=" >> "$GITHUB_OUTPUT"
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
             echo "Building RELEASE: v${VERSION} and latest"
-          elif [[ "${{ github.ref }}" == refs/heads/v* ]] || [[ "${{ github.head_ref }}" == v* ]]; then
-            SUFFIX="-beta"
-            echo "suffix=-beta" >> $GITHUB_OUTPUT
-            echo "is_release=false" >> $GITHUB_OUTPUT
+          elif [[ "$REF" == refs/heads/v* ]] || [[ "$HEAD_REF" == v* ]]; then
+            echo "suffix=-beta" >> "$GITHUB_OUTPUT"
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
             echo "Building BETA: v${VERSION}-beta"
-          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            SUFFIX="-gamma"
-            echo "suffix=-gamma" >> $GITHUB_OUTPUT
-            echo "is_release=false" >> $GITHUB_OUTPUT
+          elif [ "$REF" = "refs/heads/main" ]; then
+            echo "suffix=-gamma" >> "$GITHUB_OUTPUT"
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
             echo "Building GAMMA (pre-release): v${VERSION}-gamma"
           else
-            SUFFIX="-alpha"
-            echo "suffix=-alpha" >> $GITHUB_OUTPUT
-            echo "is_release=false" >> $GITHUB_OUTPUT
+            echo "suffix=-alpha" >> "$GITHUB_OUTPUT"
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
             echo "Building ALPHA: v${VERSION}-alpha"
           fi
 
@@ -107,9 +106,9 @@ jobs:
           # step -- see gh-577: a static `include:` + dynamic `exclude:`
           # sibling resolves to zero matrix jobs.)
           if [[ "${BUILD_PLATFORMS}" == *,* ]]; then
-            echo "multi_arch=true" >> $GITHUB_OUTPUT
+            echo "multi_arch=true" >> "$GITHUB_OUTPUT"
           else
-            echo "multi_arch=false" >> $GITHUB_OUTPUT
+            echo "multi_arch=false" >> "$GITHUB_OUTPUT"
           fi
 
   # Detect changed modules
@@ -143,6 +142,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
           fetch-depth: 2
+          persist-credentials: false
 
       - name: Detect changes
         uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4
@@ -356,7 +356,7 @@ jobs:
     needs: [determine-version, detect-changes]
     permissions:
       contents: read
-      packages: write
+      packages: write  # GHCR push of per-arch images (build-push-action)
     if: >
       github.event_name != 'pull_request' &&
       github.event_name != 'merge_group' &&
@@ -387,6 +387,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
 
       # Native per-arch builds (amd64 on ubuntu-latest, arm64 on ubuntu-24.04-arm)
       # require no QEMU emulation. Docker setup is gated on matrix.condition so
@@ -408,9 +410,11 @@ jobs:
 
       - name: Extract platform suffix
         id: platform-suffix
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
-          PLATFORM_SUFFIX=$(echo "${{ matrix.platform }}" | sed 's|linux/||')
-          echo "suffix=${PLATFORM_SUFFIX}" >> $GITHUB_OUTPUT
+          PLATFORM_SUFFIX="${PLATFORM#linux/}"
+          echo "suffix=${PLATFORM_SUFFIX}" >> "$GITHUB_OUTPUT"
 
       # Single-platform builds (BUILD_PLATFORMS has no comma) skip this
       # module's merge-manifests entry entirely, so this step must also
@@ -483,40 +487,13 @@ jobs:
           matrix.port != 0 &&
           ((github.event_name != 'pull_request' && github.event_name != 'merge_group') ||
           matrix.platform == 'linux/amd64')
-        run: |
-          docker run --rm --name test-${{ matrix.module }} -d -p ${{ matrix.port }}:${{ matrix.port }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ steps.platform-suffix.outputs.suffix }}
-
-          # Retry health check with exponential backoff (up to 60s total).
-          # Accept 200 (healthy) or 503 (degraded but running) as success.
-          # Fail only on connection refused, timeout, or container exit.
-          # Services with deep readiness checks (e.g. hub-api with DB ping) legitimately
-          # return 503 when dependencies are absent; the test proves the service booted and routed.
-          MAX_RETRIES=12
-          RETRY=0
-          WAIT=5
-          while [ $RETRY -lt $MAX_RETRIES ]; do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${{ matrix.port }}/health 2>/dev/null || echo "000")
-            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "503" ]; then
-              echo "Health check passed for ${{ matrix.module }} (HTTP $HTTP_CODE)"
-              docker stop test-${{ matrix.module }}
-              exit 0
-            fi
-            if ! docker ps --filter "name=test-${{ matrix.module }}" --quiet | grep -q .; then
-              echo "Container exited before health check passed"
-              docker logs test-${{ matrix.module }} 2>&1 || true
-              exit 1
-            fi
-            RETRY=$((RETRY + 1))
-            if [ $RETRY -lt $MAX_RETRIES ]; then
-              echo "Health check attempt $RETRY/$MAX_RETRIES failed (HTTP $HTTP_CODE), retrying in ${WAIT}s..."
-              sleep $WAIT
-              WAIT=$((WAIT + 2))
-            fi
-          done
-          echo "Health check failed for ${{ matrix.module }} after $MAX_RETRIES attempts"
-          docker logs test-${{ matrix.module }} 2>&1 || true
-          docker stop test-${{ matrix.module }}
-          exit 1
+        env:
+          MODULE: ${{ matrix.module }}
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ steps.platform-suffix.outputs.suffix }}
+          PORT: ${{ matrix.port }}
+        # Boot-and-health smoke test. Logs are preserved on failure (no --rm);
+        # hub-api gets a Postgres sidecar, hub-webui gets HUB_API_URL -- see script header.
+        run: scripts/ci/container-smoke.sh "$MODULE" "$IMAGE_REF" "$PORT"
 
   # PR/merge_group path: same matrix, amd64-only effective work (steps
   # below already gate on matrix.platform == 'linux/amd64' for PR), no
@@ -557,6 +534,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
 
       # Native per-arch builds (amd64 on ubuntu-latest, arm64 on ubuntu-24.04-arm)
       # require no QEMU emulation. Docker setup is gated on matrix.condition so
@@ -578,9 +557,11 @@ jobs:
 
       - name: Extract platform suffix
         id: platform-suffix
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
-          PLATFORM_SUFFIX=$(echo "${{ matrix.platform }}" | sed 's|linux/||')
-          echo "suffix=${PLATFORM_SUFFIX}" >> $GITHUB_OUTPUT
+          PLATFORM_SUFFIX="${PLATFORM#linux/}"
+          echo "suffix=${PLATFORM_SUFFIX}" >> "$GITHUB_OUTPUT"
 
       # Single-platform builds (BUILD_PLATFORMS has no comma) skip this
       # module's merge-manifests entry entirely, so this step must also
@@ -653,48 +634,24 @@ jobs:
           matrix.port != 0 &&
           ((github.event_name != 'pull_request' && github.event_name != 'merge_group') ||
           matrix.platform == 'linux/amd64')
-        run: |
-          docker run --rm --name test-${{ matrix.module }} -d -p ${{ matrix.port }}:${{ matrix.port }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ steps.platform-suffix.outputs.suffix }}
-
-          # Retry health check with exponential backoff (up to 60s total).
-          # Accept 200 (healthy) or 503 (degraded but running) as success.
-          # Fail only on connection refused, timeout, or container exit.
-          # Services with deep readiness checks (e.g. hub-api with DB ping) legitimately
-          # return 503 when dependencies are absent; the test proves the service booted and routed.
-          MAX_RETRIES=12
-          RETRY=0
-          WAIT=5
-          while [ $RETRY -lt $MAX_RETRIES ]; do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${{ matrix.port }}/health 2>/dev/null || echo "000")
-            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "503" ]; then
-              echo "Health check passed for ${{ matrix.module }} (HTTP $HTTP_CODE)"
-              docker stop test-${{ matrix.module }}
-              exit 0
-            fi
-            if ! docker ps --filter "name=test-${{ matrix.module }}" --quiet | grep -q .; then
-              echo "Container exited before health check passed"
-              docker logs test-${{ matrix.module }} 2>&1 || true
-              exit 1
-            fi
-            RETRY=$((RETRY + 1))
-            if [ $RETRY -lt $MAX_RETRIES ]; then
-              echo "Health check attempt $RETRY/$MAX_RETRIES failed (HTTP $HTTP_CODE), retrying in ${WAIT}s..."
-              sleep $WAIT
-              WAIT=$((WAIT + 2))
-            fi
-          done
-          echo "Health check failed for ${{ matrix.module }} after $MAX_RETRIES attempts"
-          docker logs test-${{ matrix.module }} 2>&1 || true
-          docker stop test-${{ matrix.module }}
-          exit 1
+        env:
+          MODULE: ${{ matrix.module }}
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.module }}:${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}-${{ steps.platform-suffix.outputs.suffix }}
+          PORT: ${{ matrix.port }}
+        # Boot-and-health smoke test. Logs are preserved on failure (no --rm);
+        # hub-api gets a Postgres sidecar, hub-webui gets HUB_API_URL -- see script header.
+        run: scripts/ci/container-smoke.sh "$MODULE" "$IMAGE_REF" "$PORT"
 
   # ============================================================
   # Merge multi-arch manifests
   # ============================================================
   merge-manifests:
-    name: Merge ${{ matrix.module }} Manifest
+    name: Merge ${{ matrix.name }} Manifest
     runs-on: ubuntu-latest
     needs: [determine-version, detect-changes, build-platform]
+    permissions:
+      contents: read
+      packages: write  # GHCR push of multi-arch manifest lists (imagetools create)
     # No-ops cleanly when BUILD_PLATFORMS is amd64-only -- build-platform's
     # "Compute image tags" step already pushed the plain/:latest tags
     # directly per module in that case, so there is nothing to merge.
@@ -786,6 +743,165 @@ jobs:
           fi
 
   # ============================================================
+  # Supply-chain self-test: proves scripts/ci/supply-chain.sh signs, attests and
+  # verifies against a throwaway local registry (key-based, ephemeral keys) and that
+  # its negative cases fail. Runs on every event -- needs no secrets.
+  # ============================================================
+  supply-chain-selftest:
+    name: Supply-chain self-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        with:
+          cosign-release: 'v3.1.3'
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
+
+      - name: Run supply-chain self-test
+        run: scripts/ci/test-supply-chain.sh
+
+  # ============================================================
+  # Supply chain: sign, SBOM-attest and SLSA-attest every released image digest,
+  # then fail-closed verify. Push path only -- id-token/attestations write must never
+  # be granted to a job that builds untrusted PR code. Signs the digest that
+  # ${VERSION} resolves to (manifest list for multi-arch). See docs/SUPPLY_CHAIN.md.
+  # ============================================================
+  supply-chain:
+    name: Supply chain ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    needs: [determine-version, detect-changes, build-platform, merge-manifests, supply-chain-selftest]
+    if: >
+      always() &&
+      github.event_name != 'pull_request' &&
+      github.event_name != 'merge_group' &&
+      needs.build-platform.result == 'success' &&
+      needs.supply-chain-selftest.result == 'success' &&
+      (needs.merge-manifests.result == 'success' || needs.merge-manifests.result == 'skipped')
+    permissions:
+      contents: read
+      packages: write        # push cosign signatures/attestations next to the image in GHCR
+      id-token: write        # keyless Sigstore signing identity (GitHub OIDC -> Fulcio)
+      attestations: write    # SLSA build provenance (actions/attest-build-provenance)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: router
+            condition: ${{ needs.detect-changes.outputs.router == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+          - image: marketplace
+            condition: ${{ needs.detect-changes.outputs.marketplace == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+          - image: hub-api
+            condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+          - image: hub-webui
+            condition: ${{ needs.detect-changes.outputs.hub == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+          - image: trigger-streaming
+            condition: ${{ needs.detect-changes.outputs.trigger-streaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+          - image: trigger-webhooks
+            condition: ${{ needs.detect-changes.outputs.trigger-webhooks == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+          - image: interactive-social
+            condition: ${{ needs.detect-changes.outputs.interactive-social == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+          - image: interactive-gaming
+            condition: ${{ needs.detect-changes.outputs.interactive-gaming == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+          - image: interactive-media
+            condition: ${{ needs.detect-changes.outputs.interactive-media == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+          - image: interactive-productivity
+            condition: ${{ needs.detect-changes.outputs.interactive-productivity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+          - image: core-data
+            condition: ${{ needs.detect-changes.outputs.core-data == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+          - image: core-identity
+            condition: ${{ needs.detect-changes.outputs.core-identity == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+          - image: core-community
+            condition: ${{ needs.detect-changes.outputs.core-community == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+          - image: action-platforms
+            condition: ${{ needs.detect-changes.outputs.action-platforms == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+          - image: action-serverless
+            condition: ${{ needs.detect-changes.outputs.action-serverless == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+          - image: migrations
+            condition: ${{ needs.detect-changes.outputs.migrations == 'true' || needs.detect-changes.outputs.libs == 'true' }}
+    steps:
+      - name: Checkout code
+        if: matrix.condition == 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        if: matrix.condition == 'true'
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
+
+      - name: Log in to Container Registry
+        if: matrix.condition == 'true'
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        if: matrix.condition == 'true'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        with:
+          cosign-release: 'v3.1.3'
+
+      - name: Install syft
+        if: matrix.condition == 'true'
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
+
+      - name: Resolve released image digest
+        id: digest
+        if: matrix.condition == 'true'
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.image }}
+          VERSION: ${{ needs.determine-version.outputs.version }}${{ needs.determine-version.outputs.suffix }}
+        run: |
+          set -euo pipefail
+          DIGEST="$(scripts/ci/supply-chain.sh digest "$IMAGE" "$VERSION")"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "signing ${IMAGE}@${DIGEST}"
+
+      - name: Sign image (keyless cosign)
+        if: matrix.condition == 'true'
+        env:
+          REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.image }}@${{ steps.digest.outputs.digest }}
+        run: scripts/ci/supply-chain.sh sign "$REF"
+
+      - name: Generate SBOM (SPDX, syft)
+        if: matrix.condition == 'true'
+        env:
+          REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.image }}@${{ steps.digest.outputs.digest }}
+        run: scripts/ci/supply-chain.sh sbom "$REF" "$RUNNER_TEMP/sbom.spdx.json"
+
+      - name: Attest SBOM (cosign SPDX attestation)
+        if: matrix.condition == 'true'
+        env:
+          REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.image }}@${{ steps.digest.outputs.digest }}
+        run: scripts/ci/supply-chain.sh attest "$REF" "$RUNNER_TEMP/sbom.spdx.json"
+
+      - name: Attest SLSA build provenance
+        if: matrix.condition == 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.image }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify signature, SBOM and provenance (fail-closed)
+        if: matrix.condition == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/${{ matrix.image }}@${{ steps.digest.outputs.digest }}
+        run: scripts/ci/supply-chain.sh verify "$REF"
+
+  # ============================================================
   # Security scanning
   # Security scan is informational only and does not block deployment
   # ============================================================
@@ -793,6 +909,10 @@ jobs:
     name: Security Scan
     runs-on: ubuntu-latest
     needs: [determine-version, detect-changes, merge-manifests]
+    permissions:
+      contents: read
+      packages: read  # pull scanned images from GHCR
+      security-events: write  # SARIF upload to code scanning (upload-sarif)
     # merge-manifests is intentionally skipped (not failed) when
     # BUILD_PLATFORMS is amd64-only -- the plain tag this scans still
     # exists (pushed directly by build-platform in that case), so tolerate
@@ -879,16 +999,21 @@ jobs:
       needs.determine-version.outputs.is_release == 'true' &&
       (needs.merge-manifests.result == 'success' || needs.merge-manifests.result == 'skipped')
     permissions:
-      contents: write
+      contents: write  # creates the GitHub Release object for a tagged build
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
 
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION_IN: ${{ needs.determine-version.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
-          VERSION="${{ needs.determine-version.outputs.version }}"
+          VERSION="$VERSION_IN"
 
           # Check if release already exists
           if gh release view "$VERSION" > /dev/null 2>&1; then
@@ -902,7 +1027,7 @@ jobs:
 
           **Container Images Built:**
           - All modules tagged with \`$VERSION\` and \`latest\`
-          - Available at \`ghcr.io/${{ github.repository }}\`
+          - Available at \`ghcr.io/${REPOSITORY}\`
 
           ### Changes
 
@@ -915,7 +1040,7 @@ jobs:
           gh release create "$VERSION" \
             --title "$VERSION" \
             --notes-file release_notes.md \
-            --target ${{ github.sha }}
+            --target "$COMMIT_SHA"
 
           echo "Created release $VERSION"
 
@@ -925,13 +1050,18 @@ jobs:
   notify:
     name: Notify Build Status
     runs-on: ubuntu-latest
-    needs: [determine-version, merge-manifests]
+    needs: [determine-version, build-platform, merge-manifests]
     if: always()
     steps:
       - name: Build Status Summary
+        env:
+          PLATFORM_RESULT: ${{ needs.build-platform.result }}
+          MANIFEST_RESULT: ${{ needs.merge-manifests.result }}
         run: |
-          echo "## Container Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "| Component | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Platform Builds | ${{ needs.build-platform.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Manifest Merge | ${{ needs.merge-manifests.result }} |" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Container Build Summary"
+            echo "| Component | Status |"
+            echo "|-----------|--------|"
+            echo "| Platform Builds | ${PLATFORM_RESULT} |"
+            echo "| Manifest Merge | ${MANIFEST_RESULT} |"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -35,7 +35,7 @@ coverage:
 # header comment for why (same-repo path dependencies on overlay_schema/
 # overlay_auth/service_auth).
 docker-build:
-	docker build -f Dockerfile.rust -t localhost:32000/waddlebot/svc-presentation:alpha-$$(date +%s) ..
+	docker build -f Dockerfile.rust --build-context proto=../../proto -t localhost:32000/waddlebot/svc-presentation:alpha-$$(date +%s) ..
 
 clean:
 	cargo clean

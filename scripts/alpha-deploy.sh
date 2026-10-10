@@ -315,7 +315,7 @@ service_image_tag() {
 # so a local alpha build failed with "proto: not found"/a missing COPY source.
 service_build_context_args() {
     case "$1" in
-        svc-process|svc-action) echo "--build-context proto=proto" ;;
+        svc-process|svc-action|svc-presentation) echo "--build-context proto=proto" ;;
         *) echo "" ;;
     esac
 }

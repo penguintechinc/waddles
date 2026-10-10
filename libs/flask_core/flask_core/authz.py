@@ -69,6 +69,12 @@ def _parse_scope_claim(raw_scope: Any) -> FrozenSet[str]:
     return frozenset(raw_scope.split())
 
 
+#: Public name for the space-delimited OIDC ``scope`` claim parser -- callers outside this module
+#: (e.g. hub-api's AI path, which re-authorises model-requested tool calls against the invoking
+#: user's scopes) must parse the claim exactly the way :func:`require_scope` does.
+parse_scope_claim = _parse_scope_claim
+
+
 def _scope_covers(granted: str, required: str) -> bool:
     """
     True if a single granted scope string satisfies ``required``.

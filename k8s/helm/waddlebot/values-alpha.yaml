@@ -242,12 +242,15 @@ pipeline:
       limits: { cpu: "500m", memory: "512Mi" }
   # Issue #287 -- transcode-capable min-spec (higher than the generic pipeline tier above)
   # plus fixed alpha NodePorts for direct RTMP/SRT/HTTP media ingest (OBS/ffmpeg target
-  # localhost:31935 for RTMP push). PUBLIC_BASE_URL uses the node LAN IP + the http
-  # NodePort below so playback URLs resolve off-laptop, matching webui.publicUrl's pattern.
+  # localhost:31935 for RTMP push). PUBLIC_BASE_URL is derived at runtime from the node the
+  # pod runs on (downward API status.hostIP) + the http NodePort below, so playback URLs
+  # resolve off-laptop without a hardcoded LAN IP that goes stale when the host's network
+  # changes (it did: 192.168.10.75 -> 192.168.2.210).
   svcStreaming:
     enabled: true
     replicas: 1
-    publicBaseUrl: "http://192.168.10.75:31208"
+    publicBaseUrl: ""
+    publicBaseUrlFromNodeIP: true
     nodePort:
       enabled: true
       rtmpPort: 31935
@@ -426,9 +429,11 @@ presentation:
   service:
     type: NodePort
     nodePort: 31032
-  # Matches pipeline.svcStreaming.publicBaseUrl above -- same media NodePort host, so
-  # live_stream.py's browser-facing HLS URLs resolve off-laptop like svc-streaming's own.
-  publicStreamingUrl: "http://192.168.10.75:31208"
+  # Matches pipeline.svcStreaming.publicBaseUrl above -- same media NodePort host, derived
+  # from the node IP at runtime, so live_stream.py's browser-facing HLS URLs resolve
+  # off-laptop like svc-streaming's own.
+  publicStreamingUrl: ""
+  publicStreamingUrlFromNodeIP: true
   # chore/deploy-svc-presentation-rust-alpha -- deploy the Rust svc-presentation (overlay +
   # image surface) instead of the Python one. Overlay view/SSE port reachable on-host at
   # localhost:31032 (same NodePort the Python service held). Image built by

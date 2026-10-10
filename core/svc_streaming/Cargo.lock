@@ -4236,6 +4236,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "jsonwebtoken",
+ "nix",
  "object_store",
  "opentelemetry",
  "opentelemetry-otlp",

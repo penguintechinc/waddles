@@ -9,6 +9,7 @@
 pub mod captions;
 pub mod health;
 pub mod overlay;
+pub mod overlay_page;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -24,11 +25,13 @@ use tower_http::trace::TraceLayer;
 use crate::config::Config;
 use crate::images::store::ObjectStoreImageStore;
 use crate::images::{AssetStore, ImageStore, SeaOrmImageAssetStore};
+use crate::overlay::detok::{register_detok_metrics, DetokMetrics, OverlayDetokenizer};
+use crate::overlay::render::{register_render_metrics, RenderMetrics, RenderedFrame};
 use crate::overlay::{
-    AppPushTrustSource, CaptionStore, PresentationHub, SeaOrmCaptionStore,
-    SeaOrmViewCredentialStore,
+    AppPushTrustSource, CaptionStore, CommunityContextStore, PresentationHub, SeaOrmCaptionStore,
+    SeaOrmCommunityContextStore, SeaOrmViewCredentialStore,
 };
-use crate::telemetry::{CaptionMetrics, ImageMetrics, RequestMetrics};
+use crate::telemetry::{CaptionMetrics, ImageMetrics, PushMetrics, RequestMetrics};
 
 /// Shared state handed to every axum handler via `Router::with_state`.
 /// Cheap to clone: everything behind an `Arc` (or already `Clone`, like
@@ -60,9 +63,33 @@ pub struct AppState {
     pub image_asset_store: Arc<dyn AssetStore>,
     pub image_upload_flag: Arc<dyn crate::flags::FeatureFlag>,
     pub image_metrics: ImageMetrics,
-    /// P3's in-process push fan-out -- shared by every `overlay::live_sse`/
-    /// `live_ws` subscriber and the `overlay::push` handler's publisher.
+    /// The raw-push fan-out the caption pipeline owns (`crate::http::
+    /// captions` validates and renders its own frames). Generic overlay
+    /// routes never touch it: nothing here is detokenized or HTML-escaped, so
+    /// it must never be subscribed to by a route that hands frames straight
+    /// to a browser.
     pub hub: Arc<PresentationHub>,
+    /// The fan-out `overlay::live_sse`/`live_ws` subscribe to and the
+    /// `overlay::push` handler publishes into. It carries only
+    /// [`RenderedFrame`]s -- output of the per-surface renderers run under
+    /// [`Self::detokenizer`] -- so a frame that reaches a browser through
+    /// these routes has already been detokenized and HTML-escaped.
+    pub frame_hub: Arc<PresentationHub<RenderedFrame>>,
+    /// Resolves `{user:<uuid>}` references to hub-api display names and
+    /// renders the push with them in scope. Production replaces the default
+    /// with a connected one via [`Self::with_hub_client`] (or an explicitly
+    /// disabled one via [`Self::with_detokenization_disabled`]); a bare
+    /// [`Self::new`] holds a loud, leak-free "unconfigured" one.
+    pub detokenizer: Arc<OverlayDetokenizer>,
+    /// The detokenizer's metric handles, kept so replacing the detokenizer
+    /// (see [`Self::with_hub_client`]) never re-registers them.
+    pub detok_metrics: DetokMetrics,
+    /// Per-surface render duration/outcome metrics.
+    pub render_metrics: RenderMetrics,
+    /// Push-route metrics (end-to-end handling time, outcome).
+    pub push_metrics: PushMetrics,
+    /// Credential-community -> tenant + theme lookup for the push route.
+    pub community_ctx: Arc<dyn CommunityContextStore>,
     /// Caption overlay (`crate::http::captions`): the reconnect-replay
     /// history store, its feature flag (OFF by default -- the Python
     /// `browser_source_core_module` stays the live caption path until it is
@@ -82,6 +109,9 @@ impl AppState {
         let image_metrics = crate::telemetry::register_image_metrics(&metrics);
         let hub_metrics = crate::overlay::hub::register_hub_metrics(&metrics);
         let caption_metrics = crate::telemetry::register_caption_metrics(&metrics);
+        let push_metrics = crate::telemetry::register_push_metrics(&metrics);
+        let render_metrics = register_render_metrics(&metrics);
+        let detok_metrics = register_detok_metrics(&metrics);
         let view_store = Arc::new(SeaOrmViewCredentialStore::new(db.clone()));
         let push_trust_source = Arc::new(AppPushTrustSource::from_config(&config));
         let image_asset_store: Arc<dyn AssetStore> =
@@ -107,7 +137,14 @@ impl AppState {
         let image_upload_flag = crate::flags::image_upload_flag(&license_client);
         let captions_flag = crate::flags::captions_flag(&license_client);
         let caption_store: Arc<dyn CaptionStore> = Arc::new(SeaOrmCaptionStore::new(db.clone()));
-        let hub = Arc::new(PresentationHub::new(hub_metrics));
+        // Both hubs share one set of metric handles (labeled by surface), so
+        // the registry sees each series exactly once.
+        let hub = Arc::new(PresentationHub::new(hub_metrics.clone()));
+        let frame_hub = Arc::new(PresentationHub::new(hub_metrics));
+        let detokenizer =
+            Arc::new(OverlayDetokenizer::unconfigured().with_metrics(detok_metrics.clone()));
+        let community_ctx: Arc<dyn CommunityContextStore> =
+            Arc::new(SeaOrmCommunityContextStore::new(db.clone()));
         Self {
             config: Arc::new(config),
             metrics: Arc::new(metrics),
@@ -121,10 +158,44 @@ impl AppState {
             image_upload_flag,
             image_metrics,
             hub,
+            frame_hub,
+            detokenizer,
+            detok_metrics,
+            render_metrics,
+            push_metrics,
+            community_ctx,
             caption_store,
             captions_flag,
             caption_metrics,
         }
+    }
+
+    /// Resolves overlay display names through `client` (hub-api's
+    /// `IdentityService.ResolveDisplayNames`). The production path.
+    #[must_use]
+    pub fn with_hub_client(mut self, client: Arc<hub_client::HubClient>) -> Self {
+        self.detokenizer = Arc::new(
+            OverlayDetokenizer::from_hub_client(client).with_metrics(self.detok_metrics.clone()),
+        );
+        self
+    }
+
+    /// Swaps in an arbitrary detokenizer (tests inject a fake resolver; the
+    /// metric handles are the caller's responsibility).
+    #[must_use]
+    pub fn with_detokenizer(mut self, detokenizer: OverlayDetokenizer) -> Self {
+        self.detokenizer = Arc::new(detokenizer);
+        self
+    }
+
+    /// The operator escape hatch (`PII_DETOKENIZATION_ENABLED=false`): no
+    /// name is ever resolved, every user renders as the neutral label, and
+    /// output stays escaped and leak-free.
+    #[must_use]
+    pub fn with_detokenization_disabled(mut self) -> Self {
+        self.detokenizer =
+            Arc::new(OverlayDetokenizer::disabled().with_metrics(self.detok_metrics.clone()));
+        self
     }
 }
 
@@ -187,14 +258,16 @@ async fn record_http_metrics(State(state): State<AppState>, req: Request, next: 
 /// generic VIEW routes while `.../image/push` and `.../caption/push` reach
 /// their own handlers. `tests/routing.rs` pins every one of those pairs.
 ///
-/// REMAINING EXTENSION POINT (P2): the plain full-page surface route
-/// (`GET /overlay/{community}/{surface}`, no `/live`/`/push` suffix) still
-/// needs to be added the same way -- wrapped with
-/// `crate::overlay::router::with_view_guard` and merged in below -- once a
-/// render handler exists.
+/// The browser overlay page (`GET /overlay/{community}/{surface}`, no
+/// `/live`/`/push` suffix -- [`overlay_page`]) is mounted behind the same VIEW
+/// guard as the live channels. It sits beside the literal
+/// `/overlay/captions/{key}` caption page: matchit prefers the literal
+/// `captions` segment, and a community id is numeric, so the two never
+/// collide (`tests/routing.rs` pins it).
 pub fn router(state: AppState) -> Router {
     let overlay_view = crate::overlay::router::with_view_guard(
         Router::new()
+            .route("/overlay/{community}/{surface}", get(overlay_page::page))
             .route(
                 "/overlay/{community}/{surface}/live",
                 get(overlay::live_sse),
