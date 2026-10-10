@@ -21,7 +21,11 @@ global:
   # Image tag to deploy (e.g., "latest", commit SHA, or version tag)
   imageTag: "latest"
 
-  # Image pull policy
+  # Image pull policy -- applied to EVERY workload container (hub-api, svc-*-rust,
+  # bundle-executor included; no template hardcodes a policy). IfNotPresent is correct
+  # given unique per-deploy global.imageTag values; and mandatory for locally-loaded images
+  # (kind e2e, alpha local builds), where Always forces a registry pull the node cannot
+  # satisfy. Override to Always per-env only for a mutable tag.
   imagePullPolicy: IfNotPresent
 
   # Secrets for pulling from private registries (if needed)
