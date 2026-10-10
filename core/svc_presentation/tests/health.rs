@@ -143,23 +143,21 @@ async fn unknown_route_on_main_router_is_404() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-/// P3/P4 mounted the `/live`, `/live/ws`, and `/push` overlay routes (see
-/// `tests/overlay_live.rs`), but the plain full-page surface render route
-/// (`GET /overlay/{community}/{surface}`, no suffix) is still P2's
-/// pending job -- it 404s like any other unknown path today, honestly,
-/// rather than serving a stub.
+/// The plain full-page surface route (`GET /overlay/{community}/{surface}`)
+/// is mounted behind the VIEW guard like `/live`: without a `?key=` the guard
+/// answers 400 (never a 404 -- the route exists -- and never the page).
 #[tokio::test]
-async fn overlay_path_is_404_until_p2_adds_the_real_render_route() {
+async fn overlay_page_route_is_mounted_behind_the_view_guard() {
     let app = router(test_state());
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/overlay/42/media?key=anything")
+                .uri("/overlay/42/media")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }

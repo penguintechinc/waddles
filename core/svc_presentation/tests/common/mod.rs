@@ -303,3 +303,78 @@ pub async fn serve(router: Router) -> std::net::SocketAddr {
 pub fn arc_store(store: FakeCaptionStore) -> Arc<FakeCaptionStore> {
     Arc::new(store)
 }
+
+/// A [`DisplayNameResolver`] answering from a fixed table and recording the
+/// tenant of every call -- the hub-api stand-in for the render pipeline
+/// tests (no gRPC; the real `hub_client` path needs a live hub-api).
+#[derive(Default)]
+pub struct TableResolver {
+    pub table: std::collections::HashMap<String, String>,
+    pub tenants: Mutex<Vec<String>>,
+    pub fail: bool,
+}
+
+impl TableResolver {
+    pub fn with(pairs: &[(&str, &str)]) -> Self {
+        Self {
+            table: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    pub fn failing() -> Self {
+        Self {
+            fail: true,
+            ..Default::default()
+        }
+    }
+}
+
+type ResolveFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    std::collections::HashMap<String, String>,
+                    egress_detokenizer::DetokenizeError,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+impl egress_detokenizer::DisplayNameResolver for TableResolver {
+    fn resolve_many<'a>(&'a self, tenant_id: &'a str, tokens: Vec<String>) -> ResolveFuture<'a> {
+        self.tenants.lock().unwrap().push(tenant_id.to_string());
+        Box::pin(async move {
+            if self.fail {
+                return Err(egress_detokenizer::DetokenizeError::ResolutionUnavailable(
+                    "hub-api unreachable (simulated)".to_string(),
+                ));
+            }
+            Ok(tokens
+                .into_iter()
+                .filter_map(|t| self.table.get(&t).cloned().map(|n| (t, n)))
+                .collect())
+        })
+    }
+}
+
+/// Points `state` at `resolver` (hub-api stand-in) and a community lookup
+/// that answers `tenant_id` for every community.
+pub fn with_overlay_fakes(
+    mut state: AppState,
+    resolver: Arc<TableResolver>,
+    tenant_id: &str,
+) -> AppState {
+    state.detokenizer = Arc::new(
+        svc_presentation::overlay::detok::OverlayDetokenizer::new(resolver)
+            .with_metrics(state.detok_metrics.clone()),
+    );
+    state.community_ctx = Arc::new(
+        svc_presentation::overlay::community_ctx::StaticCommunityContextStore::ok(tenant_id),
+    );
+    state
+}
