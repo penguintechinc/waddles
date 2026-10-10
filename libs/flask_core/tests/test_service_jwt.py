@@ -760,3 +760,27 @@ class TestRequireServiceScopeDecorator:
         token = _signed(priv, service_id, kid="not-in-bundle")
         response = await client.get("/mint", headers={"Authorization": f"Bearer {token}"})
         assert response.status_code == 401
+
+
+def test_issue_with_claims_returns_exactly_what_was_signed(
+    issuer: ServiceJwtIssuer, service_id: str
+) -> None:
+    token, claims = issuer.issue_with_claims(service_id, SCOPE)
+    signed = pyjwt.decode(token, options={"verify_signature": False})
+    assert claims == signed
+    assert {"iss", "aud", "sub", "scope", "iat", "nbf", "exp", "jti"} <= claims.keys()
+    assert issuer.as_verifier().verify(token, required_scope=SCOPE) == claims
+
+
+def test_issue_still_returns_a_bare_token_string(issuer: ServiceJwtIssuer, service_id: str) -> None:
+    token = issuer.issue(service_id, SCOPE)
+    assert isinstance(token, str) and token.count(".") == 2
+
+
+def test_issue_with_claims_enforces_the_same_guards(
+    issuer: ServiceJwtIssuer, service_id: str
+) -> None:
+    with pytest.raises(BootstrapRejected):
+        issuer.issue_with_claims(service_id, "not:allow-listed")
+    with pytest.raises(ServiceJwtError):
+        issuer.issue_with_claims(service_id, SCOPE, ttl_seconds=3601)

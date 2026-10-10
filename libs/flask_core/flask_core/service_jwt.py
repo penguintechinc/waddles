@@ -281,6 +281,17 @@ class ServiceJwtIssuer:
         doesn't carry `scope`, and `ServiceJwtError` if `ttl_seconds`
         exceeds the 1h platform ceiling.
         """
+        return self.issue_with_claims(service_id, scope, ttl_seconds=ttl_seconds)[0]
+
+    def issue_with_claims(
+        self, service_id: str, scope: str, *, ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS
+    ) -> tuple[str, dict[str, Any]]:
+        """Mint a JWT like `issue()` and also return the exact claims that were signed.
+
+        Lets the token endpoint audit-log `jti`/`exp`/`tenant` straight from what it just
+        minted, instead of re-decoding its own output with signature verification
+        disabled (an unverified decode is a footgun this codebase no longer carries).
+        """
         if ttl_seconds > MAX_TOKEN_TTL_SECONDS:
             raise ServiceJwtError(f"ttl_seconds {ttl_seconds} exceeds {MAX_TOKEN_TTL_SECONDS}s ceiling")
         identity = self.identities.get(service_id)
@@ -290,7 +301,7 @@ class ServiceJwtIssuer:
         if key.private_key is None:
             raise ServiceJwtError(f"active key {self.active_kid!r} has no private key loaded")
         now = int(time.time())
-        payload = {
+        payload: dict[str, Any] = {
             "iss": ISSUER,
             "aud": self.audience,
             "sub": service_id,
@@ -315,9 +326,10 @@ class ServiceJwtIssuer:
         # ever created (and immediately discarded) an extra copy of the
         # private key material in memory, widening its exposure window for
         # no benefit.
-        return jwt.encode(
+        token = jwt.encode(
             payload, key.private_key, algorithm=SERVICE_JWT_ALGORITHM, headers={"kid": key.kid}
         )
+        return token, dict(payload)
 
     def get_public_key(self, kid: str) -> Ed25519PublicKey | None:
         """Implements `TrustBundleSource` -- hub-api verifies its own JWKS today."""
