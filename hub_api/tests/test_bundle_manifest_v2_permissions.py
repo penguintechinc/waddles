@@ -573,3 +573,38 @@ def test_economy_ceiling_mirrors_the_rust_catalog() -> None:
         )
     }
     assert ceilings == {_MAX_ECONOMY_AMOUNT}, ceilings
+
+
+# --- identity.resolve (bundle actor/mention -> community user_uuid) ----------
+
+
+def test_identity_resolve_is_in_the_closed_catalog_as_normal_risk() -> None:
+    from services.bundle_permission_catalog import resolve_risk
+
+    assert resolve_risk("identity.resolve") == "normal"
+    # The catalog is closed: neighbouring/invented ids stay unknown.
+    assert resolve_risk("identity.read") is None
+    assert resolve_risk("identity.resolve.any") is None
+
+
+def test_identity_resolve_needs_no_params_beyond_justification() -> None:
+    manifest = _parse(
+        [{"id": "identity.resolve", "justification": "Names the chatter for the points game."}]
+    )
+    decl = manifest.permission_declarations[0]  # type: ignore[attr-defined]
+    assert decl.id == "identity.resolve"
+    assert decl.risk == "normal"
+
+
+def test_identity_resolve_catalog_id_mirrors_the_rust_catalog() -> None:
+    from services.bundle_permission_catalog import STATIC_PERMISSIONS
+
+    rust = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "core"
+        / "bundle_capability_gate"
+        / "src"
+        / "permission.rs"
+    ).read_text()
+    assert 'Self::IdentityResolve => "identity.resolve"' in rust
+    assert "identity.resolve" in STATIC_PERMISSIONS

@@ -922,6 +922,126 @@ mod tests {
         assert_eq!(err, Denied::RateLimited);
     }
 
+    /// `identity.resolve` is a plain AppScoped/None family: granted =>
+    /// authorized with no derived resource; ungranted => `not_granted`
+    /// (fail-closed, a bundle that never declared it can never resolve an
+    /// identity); a wrong resource shape => `resource_scope_mismatch`.
+    #[test]
+    fn identity_resolve_authorizes_only_when_granted_and_with_the_none_resource() {
+        let snapshot = InMemoryGrantSnapshot::new();
+        snapshot.set(
+            GrantScopeKey::from_scope(&scope()),
+            grants(&[("identity.resolve", serde_json::json!({}))]),
+        );
+        let gate = gate_with(Arc::new(snapshot));
+        let call = gate
+            .authorize(
+                &scope(),
+                PermissionId::IdentityResolve,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .expect("granted");
+        assert_eq!(call.resource, ResolvedResource::None);
+
+        let err = gate
+            .authorize(
+                &scope(),
+                PermissionId::IdentityResolve,
+                ResourceRef::AppScoped(AppScopedResource::KvState),
+            )
+            .unwrap_err();
+        assert_eq!(err, Denied::ResourceScopeMismatch);
+
+        // A reputation-shaped target is not valid for this family either.
+        let err = gate
+            .authorize(
+                &scope(),
+                PermissionId::IdentityResolve,
+                ResourceRef::ReputationScoped(ReputationTarget {
+                    target_user: Uuid::new_v4(),
+                    scope_kind: ScopeKind::Community,
+                    delta: None,
+                }),
+            )
+            .unwrap_err();
+        assert_eq!(err, Denied::ResourceScopeMismatch);
+    }
+
+    #[test]
+    fn identity_resolve_without_a_grant_is_denied_not_granted() {
+        let snapshot = InMemoryGrantSnapshot::new();
+        // Holding every OTHER capability must not imply identity.resolve.
+        snapshot.set(
+            GrantScopeKey::from_scope(&scope()),
+            grants(&[
+                ("economy.read", serde_json::json!({})),
+                ("reputation.read", serde_json::json!({})),
+            ]),
+        );
+        let gate = gate_with(Arc::new(snapshot));
+        let err = gate
+            .authorize(
+                &scope(),
+                PermissionId::IdentityResolve,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .unwrap_err();
+        assert_eq!(err, Denied::NotGranted);
+    }
+
+    #[test]
+    fn identity_resolve_is_rate_limited_to_twenty_calls_per_second() {
+        let snapshot = InMemoryGrantSnapshot::new();
+        snapshot.set(
+            GrantScopeKey::from_scope(&scope()),
+            grants(&[("identity.resolve", serde_json::json!({}))]),
+        );
+        let gate = gate_with(Arc::new(snapshot));
+        for n in 0..20 {
+            assert!(
+                gate.authorize(
+                    &scope(),
+                    PermissionId::IdentityResolve,
+                    ResourceRef::AppScoped(AppScopedResource::None),
+                )
+                .is_ok(),
+                "call {n} within the window must be allowed"
+            );
+        }
+        let err = gate
+            .authorize(
+                &scope(),
+                PermissionId::IdentityResolve,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .unwrap_err();
+        assert_eq!(err, Denied::RateLimited);
+    }
+
+    /// An instance-wide deny of the family overrides even a live grant.
+    #[test]
+    fn identity_resolve_honors_an_instance_wide_deny() {
+        let snapshot = InMemoryGrantSnapshot::new();
+        snapshot.set(
+            GrantScopeKey::from_scope(&scope()),
+            grants(&[("identity.resolve", serde_json::json!({}))]),
+        );
+        let policy = InMemoryInstancePolicySnapshot::new();
+        policy.set(
+            crate::permission::PermissionFamily::IdentityResolve,
+            InstanceAction::Deny,
+        );
+        let gate = gate_with_policy(Arc::new(snapshot), Arc::new(policy));
+        let err = gate
+            .authorize(
+                &scope(),
+                PermissionId::IdentityResolve,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .unwrap_err();
+        assert_eq!(err, Denied::InstanceDenied);
+    }
+
     /// Revoked/stale grant version test: a `GrantCache` refreshed for
     /// version 1, then `invalidate`d (simulating a push-invalidation
     /// revocation landing mid-connection, spec SS5.3), denies the very next

@@ -1,6 +1,6 @@
-//! Shared harness for the `stage-next` `reputation` and `economy` integration tests
-//! (`stage_next_reputation.rs` -- Rust fixture; `stage_next_python_reputation_e2e.rs`
-//! -- freshly built Python bundle). The executor side is entirely real
+//! Shared harness for the `stage-next` `reputation`, `economy` and `identity`
+//! integration tests (`stage_next_reputation.rs` -- Rust fixture;
+//! `stage_next_python_reputation_e2e.rs` -- freshly built Python bundle). The executor side is entirely real
 //! (`Executor`, wasmtime, the production `Linker`, the frame codec); only the
 //! STAGE half of the connection is simulated -- it answers the single
 //! `reputation.*` host-call a bundle makes per invoke with a canned
@@ -55,11 +55,50 @@ pub fn test_config() -> CliConfig {
     .expect("static test args always parse")
 }
 
-/// What the simulated stage answers to a `reputation.*` host-call.
+/// One scripted stage answer: a host-result value, or a `(code, message)` refusal.
+pub type ScriptedAnswer = Result<serde_json::Value, (&'static str, &'static str)>;
+
+/// What the simulated stage answers to a `reputation.*` / `economy.*` /
+/// `identity.*` host-call.
 #[derive(Clone)]
 pub enum StageAnswer {
     Ok(serde_json::Value),
     Err(&'static str, &'static str),
+    /// For a bundle that makes SEVERAL host-calls in one invoke (e.g. a game
+    /// resolving an actor, then a mention, then moving currency): answers each
+    /// call by its EXACT op. A call whose op has no entry fails the test loudly
+    /// (a bundle making a call the scenario did not script is a finding).
+    PerOp(Vec<(&'static str, ScriptedAnswer)>),
+}
+
+impl StageAnswer {
+    /// The `HostResultBody` the simulated stage replies with for `op`.
+    fn body_for(&self, op: &str) -> HostResultBody {
+        let one = |answer: &ScriptedAnswer| match answer {
+            Ok(v) => HostResultBody {
+                result: Some(v.clone()),
+                error: None,
+            },
+            Err((code, message)) => HostResultBody {
+                result: None,
+                error: Some(HostResultError {
+                    code: (*code).to_string(),
+                    message: (*message).to_string(),
+                }),
+            },
+        };
+        match self {
+            Self::Ok(v) => one(&Ok(v.clone())),
+            Self::Err(code, message) => one(&Err((*code, *message))),
+            Self::PerOp(table) => {
+                let answer = table
+                    .iter()
+                    .find(|(scripted, _)| *scripted == op)
+                    .unwrap_or_else(|| panic!("no scripted stage answer for host-call {op:?}"));
+                one(&answer.1)
+            }
+        }
+    }
 }
 
 /// One `transform` invoke: the event the bundle receives and how the stage
@@ -72,8 +111,13 @@ pub struct Scenario {
 }
 
 /// What the stage observed for one [`Scenario`]:
-/// `(host-call op, host-call args, guest result tag)`.
+/// `(host-call op, host-call args, guest result tag)` -- the LAST capability
+/// call the bundle made.
 pub type Observed = (String, serde_json::Value, String);
+
+/// Every capability host-call one invoke made, in order (`(op, args)`), plus
+/// the guest's result tag.
+pub type ObservedAll = (Vec<(String, serde_json::Value)>, String);
 
 /// Runs load + one `transform` invoke against `wasm` (a single scenario).
 pub async fn run_one(
@@ -107,6 +151,26 @@ pub async fn run_many(
     memory_mb: u32,
     scenarios: Vec<Scenario>,
 ) -> Vec<Observed> {
+    run_many_detailed(wasm, app_id, memory_mb, scenarios)
+        .await
+        .into_iter()
+        .map(|(mut calls, result)| {
+            let (op, args) = calls
+                .pop()
+                .expect("the bundle must have made a reputation.*/economy.*/identity.* call");
+            (op, args, result)
+        })
+        .collect()
+}
+
+/// [`run_many`], but reporting EVERY capability host-call each invoke made (in
+/// order) instead of only the last -- for bundles that compose several imports.
+pub async fn run_many_detailed(
+    wasm: &[u8],
+    app_id: &'static str,
+    memory_mb: u32,
+    scenarios: Vec<Scenario>,
+) -> Vec<ObservedAll> {
     let (executor_io, stage_io) = tokio::io::duplex(256 * 1024);
     let executor = Arc::new(
         Executor::new(&test_config(), WasmSource(wasm.to_vec())).expect("executor builds"),
@@ -188,7 +252,7 @@ pub async fn run_many(
             .await
             .expect("write invoke");
 
-            let mut rep_call = None;
+            let mut cap_calls: Vec<(String, serde_json::Value)> = Vec::new();
             let result = loop {
                 let frame = read_frame(&mut io)
                     .await
@@ -197,30 +261,19 @@ pub async fn run_many(
                     Message::Result(body) => break body,
                     Message::HostCall(call)
                         if call.op.starts_with("reputation.")
-                            || call.op.starts_with("economy.") =>
+                            || call.op.starts_with("economy.")
+                            || call.op.starts_with("identity.") =>
                     {
                         assert_eq!(
                             call.capability,
                             CapabilityKind::Db,
-                            "reputation/economy ride the db wire kind"
+                            "reputation/economy/identity ride the db wire kind"
                         );
-                        let body = match &scenario.answer {
-                            StageAnswer::Ok(v) => HostResultBody {
-                                result: Some(v.clone()),
-                                error: None,
-                            },
-                            StageAnswer::Err(code, message) => HostResultBody {
-                                result: None,
-                                error: Some(HostResultError {
-                                    code: (*code).to_string(),
-                                    message: (*message).to_string(),
-                                }),
-                            },
-                        };
+                        let body = scenario.answer.body_for(&call.op);
                         write_frame(&mut io, &Frame::new(frame.id, Message::HostResult(body)))
                             .await
                             .expect("write host-result");
-                        rep_call = Some((call.op, call.args));
+                        cap_calls.push((call.op, call.args));
                     }
                     Message::HostCall(call) => {
                         // Always-granted housekeeping calls (the Python entry's
@@ -250,15 +303,17 @@ pub async fn run_many(
                     other => panic!("expected a host-call or result, got {other:?}"),
                 }
             };
-            let (op, args) = rep_call.expect("the bundle must have made a reputation.* call");
+            assert!(
+                !cap_calls.is_empty(),
+                "the bundle must have made a reputation.*/economy.*/identity.* call"
+            );
             let payload_json = result.payload["payload_json"]
                 .as_str()
                 .expect("payload_json is a string");
             let parsed: serde_json::Value =
                 serde_json::from_str(payload_json).expect("guest result json");
             observed.push((
-                op,
-                args,
+                cap_calls,
                 parsed["result"].as_str().expect("result tag").to_string(),
             ));
         }

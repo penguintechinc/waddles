@@ -126,6 +126,14 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     "economy.read": "normal",
     "economy.wager": "dangerous",
     "economy.transfer": "dangerous",
+    #: Resolves the invocation's triggering actor (and an @mention target the
+    #: triggering message carried) to the community `user_uuid` that
+    #: `economy.*`/`reputation.*` name their targets by -- UUID-only, never a
+    #: platform id/handle/name (`core/bundle_capability_gate`'s
+    #: `identity.resolve`). `normal`: it exposes nothing a bundle does not
+    #: already hold (the `{user:<uuid>}` placeholder), grants no write, and is
+    #: rate limited; the host fails closed on unlinked/non-member/ambiguous.
+    "identity.resolve": "normal",
     "flags.read": "normal",
     "platform.scheduled": "normal",
     "platform.context": "normal",

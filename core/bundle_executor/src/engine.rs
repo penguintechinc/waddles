@@ -41,8 +41,8 @@ wasmtime::component::bindgen!({
 /// contract). Every interface `stage-next` shares byte-for-byte with `stage`
 /// is remapped (`with`) onto the `stage` bindings generated above, so the
 /// one `Host` impl per shared interface on [`ExecState`] serves both worlds
-/// and only the genuinely new imports (`overlay`, `reputation`, `economy`) get their
-/// own generated `Host` traits + `add_to_linker`.
+/// and only the genuinely new imports (`overlay`, `reputation`, `economy`,
+/// `identity`) get their own generated `Host` traits + `add_to_linker`.
 pub mod stage_next_world {
     wasmtime::component::bindgen!({
         path: "../../wit/waddle-bundle",
@@ -73,17 +73,19 @@ impl HasData for HasStageNextState {
     type Data<'a> = &'a mut ExecState;
 }
 
-/// Links the `stage-next`-only host imports (`overlay`, `reputation`, `economy`) onto
-/// `linker`. A `stage` 1.0.0 component never declares these imports, so
-/// registering them is inert for it; a `stage-next` component that imports
-/// them instantiates and reaches the real `Host` impls in
-/// `crate::host::stage_next_imports`. Every call still passes through the
-/// stage-side capability gate -- linking is reachability, never authority.
+/// Links the `stage-next`-only host imports (`overlay`, `reputation`, `economy`,
+/// `identity`) onto `linker`. A `stage` 1.0.0 component never declares these
+/// imports, so registering them is inert for it; a `stage-next` component that
+/// imports them instantiates and reaches the real `Host` impls in
+/// `crate::host::stage_next_imports` / `stage_next_economy` /
+/// `stage_next_identity`. Every call still passes through the stage-side
+/// capability gate -- linking is reachability, never authority.
 fn link_stage_next_imports(linker: &mut Linker<ExecState>) -> Result<(), ExecutorError> {
-    use stage_next_world::waddle::bundle::{economy, overlay, reputation};
+    use stage_next_world::waddle::bundle::{economy, identity, overlay, reputation};
     overlay::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     reputation::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     economy::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
+    identity::add_to_linker::<_, HasStageNextState>(linker, |s| s)?;
     Ok(())
 }
 

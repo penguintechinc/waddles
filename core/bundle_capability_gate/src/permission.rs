@@ -149,6 +149,10 @@ pub enum CapabilityKind {
     /// `economy.read`/`economy.wager`/`economy.transfer` -- the shared
     /// community currency (issue #714).
     Economy,
+    /// `identity.resolve` -- resolves the triggering actor / a mention target
+    /// to the community `user_uuid` the economy and reputation capabilities
+    /// require (UUID-only, never PII).
+    Identity,
     Flags,
     Context,
     Clock,
@@ -251,6 +255,11 @@ pub enum PermissionFamily {
     EconomyWager,
     /// `economy.transfer` -- member-to-member currency transfer (issue #714).
     EconomyTransfer,
+    /// `identity.resolve` -- resolve the invocation's triggering actor (and a
+    /// mention target the triggering message carried) to the community
+    /// `user_uuid` that `economy.*`/`reputation.*` name their targets by.
+    /// UUID-only: the bundle never receives a platform id, handle or name.
+    IdentityResolve,
     FlagsRead,
     PlatformScheduled,
     PlatformContext,
@@ -303,6 +312,7 @@ impl PermissionFamily {
         Self::EconomyRead,
         Self::EconomyWager,
         Self::EconomyTransfer,
+        Self::IdentityResolve,
         Self::FlagsRead,
         Self::PlatformScheduled,
         Self::PlatformContext,
@@ -335,6 +345,7 @@ impl PermissionFamily {
             Self::EconomyRead => "economy.read",
             Self::EconomyWager => "economy.wager",
             Self::EconomyTransfer => "economy.transfer",
+            Self::IdentityResolve => "identity.resolve",
             Self::FlagsRead => "flags.read",
             Self::PlatformScheduled => "platform.scheduled",
             Self::PlatformContext => "platform.context",
@@ -610,6 +621,18 @@ impl PermissionFamily {
                 },
                 notes: "issue #714; amount metered against the SENDER; declared params.max_amount clamped to the per-call ceiling",
             },
+            Self::IdentityResolve => CatalogEntry {
+                family: *self,
+                risk: Risk::Normal,
+                capability_kind: CapabilityKind::Identity,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 20,
+                    window: Duration::from_secs(1),
+                },
+                notes: "actor + @mention target -> community user_uuid, UUID-only (no PII); \
+                        fail-closed on unlinked/non-member/ambiguous; mention lookups are \
+                        limited to references present in the triggering message",
+            },
             Self::FlagsRead => CatalogEntry {
                 family: *self,
                 risk: Risk::Normal,
@@ -704,6 +727,7 @@ pub enum PermissionId {
     EconomyRead,
     EconomyWager,
     EconomyTransfer,
+    IdentityResolve,
     FlagsRead,
     PlatformScheduled,
     PlatformContext,
@@ -764,6 +788,7 @@ impl PermissionId {
             Self::EconomyRead => PermissionFamily::EconomyRead,
             Self::EconomyWager => PermissionFamily::EconomyWager,
             Self::EconomyTransfer => PermissionFamily::EconomyTransfer,
+            Self::IdentityResolve => PermissionFamily::IdentityResolve,
             Self::FlagsRead => PermissionFamily::FlagsRead,
             Self::PlatformScheduled => PermissionFamily::PlatformScheduled,
             Self::PlatformContext => PermissionFamily::PlatformContext,
@@ -918,6 +943,7 @@ impl PermissionId {
             "economy.read" => Ok(Self::EconomyRead),
             "economy.wager" => Ok(Self::EconomyWager),
             "economy.transfer" => Ok(Self::EconomyTransfer),
+            "identity.resolve" => Ok(Self::IdentityResolve),
             "flags.read" => Ok(Self::FlagsRead),
             "platform.scheduled" => Ok(Self::PlatformScheduled),
             "platform.context" => Ok(Self::PlatformContext),
@@ -970,6 +996,34 @@ mod tests {
             id.family().catalog_entry().capability_kind,
             CapabilityKind::Interaction
         );
+    }
+
+    #[test]
+    fn identity_resolve_is_normal_risk_app_scoped_and_round_trips() {
+        let id = PermissionId::parse("identity.resolve").unwrap();
+        assert_eq!(id.canonical_id(), "identity.resolve");
+        assert_eq!(id, PermissionId::IdentityResolve);
+        assert_eq!(id.family(), PermissionFamily::IdentityResolve);
+        assert_eq!(id.risk(), Risk::Normal);
+        assert_eq!(
+            id.family().catalog_entry().capability_kind,
+            CapabilityKind::Identity
+        );
+        // Plain AppScoped/None: no target-user shape (the bundle names no
+        // user to this capability -- the host derives the actor and only
+        // looks up mention tokens it already minted for this invocation).
+        assert!(id.family().is_app_scoped());
+        assert!(!id.family().is_reputation_scoped());
+        assert!(!id.family().is_economy_scoped());
+        assert_eq!(
+            id.family().expected_app_scoped_resource(),
+            crate::resource::AppScopedResource::None
+        );
+        // Rate limited, never unlimited: a resolve loop must not be free.
+        assert!(matches!(
+            id.default_quota(),
+            Quota::CallsPerWindow { max_calls: 20, .. }
+        ));
     }
 
     #[test]
