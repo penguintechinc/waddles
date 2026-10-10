@@ -45,10 +45,12 @@ from waddle_sdk.kv import InvalidKvKeyError, validate_key
 
 __all__ = [
     "FakeEconomyHost",
+    "FakeIdentityHost",
     "FakeKvHost",
     "FakeReputationHost",
     "InvalidKvKeyError",
     "install_fake_economy_host",
+    "install_fake_identity_host",
     "install_fake_kv_host",
     "install_fake_reputation_host",
 ]
@@ -310,5 +312,101 @@ def install_fake_economy_host(monkeypatch: Any, members: set[str] | None = None)
     )
     fake_wit_world = types.ModuleType("wit_world")
     fake_wit_world.imports = types.SimpleNamespace(economy=eco_mod)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
+    return host
+
+
+_Error_NotLinked = _variant("Error_NotLinked", False)
+_Error_NotFound = _variant("Error_NotFound", False)
+_Error_Ambiguous = _variant("Error_Ambiguous", False)
+
+
+@dataclass(slots=True)
+class FakeIdentityHost:
+    """In-memory stand-in for `wit_world.imports.identity`, enforcing the real host's rules.
+
+    Mirrors what the real stage does (gate + resolver): `granted` False denies
+    every call `not_granted`; `resolve_actor` answers the triggering actor's
+    community uuid (`actor`; `None` = identity not linked -> `Error_NotLinked`;
+    an actor outside `members` -> `Error_NotAMember`); `resolve_mention` answers
+    ONLY tokens registered for this "message" (an unknown token -- including a
+    raw handle -- is `Error_NotFound`, so a bundle cannot probe for identities),
+    accepting a bare token or a full `{user:<token>}` placeholder, case-insensitive.
+    A mention registered as unlinked / ambiguous raises `Error_NotLinked` /
+    `Error_Ambiguous`; a resolved uuid outside `members` is `Error_NotAMember`.
+    Every refusal raises the same-named `Error_*` variant the generated binding
+    would, wrapped in an `Err`-shaped exception, so a bundle's error handling is
+    exercised for real. `calls` records every call (`"actor"` / `"mention:<token>"`).
+    """
+
+    members: set[str] = field(default_factory=set)
+    actor: str | None = None
+    granted: bool = True
+    calls: list[str] = field(default_factory=list)
+    _mentions: dict[str, tuple[str, str | None]] = field(default_factory=dict)
+
+    @staticmethod
+    def _norm(token: str) -> str:
+        text = token.strip()
+        if text.startswith("{user:") and text.endswith("}"):
+            text = text[len("{user:") : -1].strip()
+        return text.lower()
+
+    def add_mention(self, token: str, user: str) -> None:
+        """Register `token` (as shown in the message) as resolving to community uuid `user`."""
+        self._mentions[self._norm(token)] = ("ok", user)
+
+    def add_unlinked_mention(self, token: str) -> None:
+        """Register `token` as a target whose identity is not linked yet."""
+        self._mentions[self._norm(token)] = ("not_linked", None)
+
+    def add_ambiguous_mention(self, token: str) -> None:
+        """Register `token` as a handle matching more than one identity."""
+        self._mentions[self._norm(token)] = ("ambiguous", None)
+
+    def _gate(self) -> None:
+        if not self.granted:
+            raise _FakeWitError(_Error_Denied("not_granted"))
+
+    def resolve_actor(self) -> str:
+        """Return the triggering actor's community uuid, or raise the host's refusal."""
+        self._gate()
+        self.calls.append("actor")
+        if self.actor is None:
+            raise _FakeWitError(_Error_NotLinked())
+        if self.actor not in self.members:
+            raise _FakeWitError(_Error_NotAMember())
+        return self.actor
+
+    def resolve_mention(self, token: str) -> str:
+        """Return the community uuid a registered mention token names, or raise the refusal."""
+        self._gate()
+        key = self._norm(token)
+        self.calls.append(f"mention:{key}")
+        if not key or len(key.encode("utf-8")) > 256:
+            raise _FakeWitError(_Error_Invalid("mention token must be 1..=256 bytes"))
+        entry = self._mentions.get(key)
+        if entry is None:
+            raise _FakeWitError(_Error_NotFound())
+        kind, user = entry
+        if kind == "not_linked":
+            raise _FakeWitError(_Error_NotLinked())
+        if kind == "ambiguous":
+            raise _FakeWitError(_Error_Ambiguous())
+        if user not in self.members:
+            raise _FakeWitError(_Error_NotAMember())
+        return str(user)
+
+
+def install_fake_identity_host(
+    monkeypatch: Any, members: set[str] | None = None, actor: str | None = None
+) -> FakeIdentityHost:
+    """Install a fresh `FakeIdentityHost` as `wit_world.imports.identity` and return it."""
+    host = FakeIdentityHost(members=set(members or ()), actor=actor)
+    identity_mod = types.SimpleNamespace(
+        resolve_actor=host.resolve_actor, resolve_mention=host.resolve_mention
+    )
+    fake_wit_world = types.ModuleType("wit_world")
+    fake_wit_world.imports = types.SimpleNamespace(identity=identity_mod)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
     return host

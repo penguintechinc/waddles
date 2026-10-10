@@ -131,6 +131,7 @@ for _wit_capability in (
     "clock",
     "reputation",  # stage-next only (issue #726); absent from a stage-1.0.0 world, hence the guard
     "economy",  # stage-next only (issue #714); same guard
+    "identity",  # stage-next only (actor/mention -> community user_uuid); same guard
 ):
     try:
         importlib.import_module(f"wit_world.imports.{_wit_capability}")

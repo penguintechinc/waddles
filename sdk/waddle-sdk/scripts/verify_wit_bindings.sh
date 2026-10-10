@@ -178,6 +178,20 @@ check "wit_world/imports/economy.py" "def transfer(from_user: str, to_user: str,
 check "wit_world/imports/economy.py" "def max_bet(user: str) -> int:" "economy.max_bet signature"
 check "wit_world/imports/economy.py" "def leaderboard(limit: int) -> List[Entry]:" "economy.leaderboard signature"
 
+# ---- world stage-next: waddle_sdk/identity.py (actor/mention -> user_uuid) ----
+# Same second bindings run as reputation/economy above; every assertion
+# confirmed against a real `componentize-py==0.25.1 -w stage-next bindings` run.
+check "wit_world/imports/identity.py" "class Error_Denied:" "identity.Error_Denied"
+check "wit_world/imports/identity.py" "class Error_NotLinked:" "identity.Error_NotLinked"
+check "wit_world/imports/identity.py" "class Error_NotAMember:" "identity.Error_NotAMember"
+check "wit_world/imports/identity.py" "class Error_NotFound:" "identity.Error_NotFound"
+check "wit_world/imports/identity.py" "class Error_Ambiguous:" "identity.Error_Ambiguous"
+check "wit_world/imports/identity.py" "class Error_Invalid:" "identity.Error_Invalid"
+check "wit_world/imports/identity.py" "class Error_Unavailable:" "identity.Error_Unavailable"
+check "wit_world/imports/identity.py" "class Error_Backend:" "identity.Error_Backend"
+check "wit_world/imports/identity.py" "def resolve_actor() -> str:" "identity.resolve_actor signature"
+check "wit_world/imports/identity.py" "def resolve_mention(token: str) -> str:" "identity.resolve_mention signature"
+
 echo ""
 echo "Checked ${CHECKS} binding-shape assertions against componentize-py's real generated output."
 if [ "${FAILURES}" -gt 0 ]; then
