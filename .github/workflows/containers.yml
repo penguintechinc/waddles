@@ -356,7 +356,7 @@ jobs:
     needs: [determine-version, detect-changes]
     permissions:
       contents: read
-      packages: write
+      packages: write  # GHCR push of per-arch images (build-push-action)
     if: >
       github.event_name != 'pull_request' &&
       github.event_name != 'merge_group' &&
@@ -651,7 +651,7 @@ jobs:
     needs: [determine-version, detect-changes, build-platform]
     permissions:
       contents: read
-      packages: write
+      packages: write  # GHCR push of multi-arch manifest lists (imagetools create)
     # No-ops cleanly when BUILD_PLATFORMS is amd64-only -- build-platform's
     # "Compute image tags" step already pushed the plain/:latest tags
     # directly per module in that case, so there is nothing to merge.
@@ -911,8 +911,8 @@ jobs:
     needs: [determine-version, detect-changes, merge-manifests]
     permissions:
       contents: read
-      packages: read
-      security-events: write
+      packages: read  # pull scanned images from GHCR
+      security-events: write  # SARIF upload to code scanning (upload-sarif)
     # merge-manifests is intentionally skipped (not failed) when
     # BUILD_PLATFORMS is amd64-only -- the plain tag this scans still
     # exists (pushed directly by build-platform in that case), so tolerate
@@ -999,7 +999,7 @@ jobs:
       needs.determine-version.outputs.is_release == 'true' &&
       (needs.merge-manifests.result == 'success' || needs.merge-manifests.result == 'skipped')
     permissions:
-      contents: write
+      contents: write  # creates the GitHub Release object for a tagged build
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -1010,6 +1010,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION_IN: ${{ needs.determine-version.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
           VERSION="$VERSION_IN"
 
@@ -1025,7 +1027,7 @@ jobs:
 
           **Container Images Built:**
           - All modules tagged with \`$VERSION\` and \`latest\`
-          - Available at \`ghcr.io/${{ github.repository }}\`
+          - Available at \`ghcr.io/${REPOSITORY}\`
 
           ### Changes
 
@@ -1038,7 +1040,7 @@ jobs:
           gh release create "$VERSION" \
             --title "$VERSION" \
             --notes-file release_notes.md \
-            --target ${{ github.sha }}
+            --target "$COMMIT_SHA"
 
           echo "Created release $VERSION"
 
