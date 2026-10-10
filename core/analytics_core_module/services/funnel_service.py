@@ -4,6 +4,7 @@ Funnel Service - Engagement funnel tracking and conversion analysis
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta, date
 from decimal import Decimal
+from .log_safety import log_failure
 
 
 class FunnelService:
@@ -84,7 +85,7 @@ class FunnelService:
             }
 
         except Exception as e:
-            self.logger.error(f"Failed to track engagement funnel: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to track engagement funnel", e, community_id=community_id)
             raise
 
     async def _calculate_funnel_steps(
@@ -226,7 +227,7 @@ class FunnelService:
             return results
 
         except Exception as e:
-            self.logger.error(f"Failed to calculate funnel steps: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to calculate funnel steps", e, community_id=community_id)
             return []
 
     async def _store_funnel_data(
@@ -265,7 +266,7 @@ class FunnelService:
             self.dal.commit()
 
         except Exception as e:
-            self.logger.error(f"Failed to store funnel data: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to store funnel data", e, community_id=community_id)
 
     def _summarize_funnel(self, funnel_steps: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Generate funnel summary metrics."""
@@ -301,7 +302,7 @@ class FunnelService:
             }
 
         except Exception as e:
-            self.logger.error(f"Failed to summarize funnel: {e}")
+            log_failure(self.logger, "Failed to summarize funnel", e)
             return {}
 
     def _generate_recommendations(self, funnel_steps: List[Dict[str, Any]]) -> List[str]:
@@ -346,5 +347,5 @@ class FunnelService:
                 return {'is_premium': result[0][0]}
             return {'is_premium': False}
         except Exception as e:
-            self.logger.error(f"Failed to get config: {e}", community_id=community_id)
+            log_failure(self.logger, "Failed to get config", e, community_id=community_id)
             return {'is_premium': False}

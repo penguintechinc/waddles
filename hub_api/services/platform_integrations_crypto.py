@@ -34,6 +34,7 @@ import os
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from flask_core.safe_logging import log_exc_safe
 
 logger = logging.getLogger(__name__)
 
@@ -104,5 +105,9 @@ def decrypt_if_needed(value: str | None, *, is_encrypted: bool) -> str | None:
     try:
         return decrypt_value(value)
     except PlatformCredentialCryptoError as exc:
-        logger.error("Failed to decrypt platform_integrations credential: %s", exc)
+        # Redacted: only type/category (e.g. crypto_auth_failed) -- never the message or
+        # chained cause text, which on a crypto failure can echo key/ciphertext fragments.
+        log_exc_safe(
+            logger, logging.ERROR, "Failed to decrypt platform_integrations credential", exc
+        )
         return value

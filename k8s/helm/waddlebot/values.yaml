@@ -2754,10 +2754,16 @@ serviceJwt:
   # Per-service allow-list mapping a k8s ServiceAccount identity to a
   # SPIFFE-shaped service id + permitted scopes. hub-api is the only
   # consumer; it never trusts a caller-supplied service id.
+  # `tenant` is stamped into every issued token's `tenant` claim (never taken from
+  # the caller): `system` = operator plane (svc-process/svc-action serve every
+  # tenant, so they may name any tenant in a request); any other value confines
+  # the token to that one tenant. hub-api's internal gRPC server rejects tokens
+  # with no tenant claim -- an identity with `tenant` unset cannot call identity RPCs.
   identities:
     svc-process:
       spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-process"
       serviceAccount: svc-process
+      tenant: system
       allowedScopes:
         - "identity:ephemeral:mint"
         # feature/egress-proxy-service -- required to call core/egress_proxy
@@ -2766,6 +2772,7 @@ serviceJwt:
     svc-action:
       spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-action"
       serviceAccount: svc-action
+      tenant: system
       allowedScopes:
         # feature/hub-grpc-env-wiring -- was "users:display-name:resolve", which does
         # not match hub_api/grpc_internal/servicers.py REQUIRED_SCOPES's

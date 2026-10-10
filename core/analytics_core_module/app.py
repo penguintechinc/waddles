@@ -20,6 +20,7 @@ from flask_core import (
     install_security_headers,
 )
 from config import Config
+from services.log_safety import INTERNAL_ERROR_MESSAGE, log_failure
 
 # Create Quart app
 app = Quart(__name__)
@@ -111,7 +112,7 @@ async def startup():
         logger.system("Analytics core module started", result="SUCCESS")
 
     except Exception as e:
-        logger.error(f"Startup failed: {e}", action="startup", result="FAILED")
+        log_failure(logger, "Startup failed", e, action="startup", result="FAILED")
         raise
 
 
@@ -150,8 +151,8 @@ async def get_basic_stats(community_id: int):
         stats = await analytics_service.get_basic_stats(community_id)
         return success_response(stats)
     except Exception as e:
-        logger.error(f"Failed to get basic stats: {e}", community_id=community_id)
-        return error_response(str(e), 500)
+        log_failure(logger, "Failed to get basic stats", e, community_id=community_id)
+        return error_response(INTERNAL_ERROR_MESSAGE, 500)
 
 
 @api_bp.route('/<int:community_id>/metrics', methods=['GET'])
@@ -180,8 +181,8 @@ async def get_metrics(community_id: int):
         )
         return success_response(metrics)
     except Exception as e:
-        logger.error(f"Failed to get metrics: {e}", community_id=community_id)
-        return error_response(str(e), 500)
+        log_failure(logger, "Failed to get metrics", e, community_id=community_id)
+        return error_response(INTERNAL_ERROR_MESSAGE, 500)
 
 
 @api_bp.route('/<int:community_id>/poll', methods=['GET'])
@@ -197,8 +198,8 @@ async def poll_updates(community_id: int):
         updates = await polling_service.get_updates(community_id, since)
         return success_response(updates)
     except Exception as e:
-        logger.error(f"Failed to poll updates: {e}", community_id=community_id)
-        return error_response(str(e), 500)
+        log_failure(logger, "Failed to poll updates", e, community_id=community_id)
+        return error_response(INTERNAL_ERROR_MESSAGE, 500)
 
 
 @api_bp.route('/<int:community_id>/config', methods=['GET'])
@@ -208,8 +209,8 @@ async def get_config(community_id: int):
         config = await analytics_service.get_config(community_id)
         return success_response(config)
     except Exception as e:
-        logger.error(f"Failed to get config: {e}", community_id=community_id)
-        return error_response(str(e), 500)
+        log_failure(logger, "Failed to get config", e, community_id=community_id)
+        return error_response(INTERNAL_ERROR_MESSAGE, 500)
 
 
 @api_bp.route('/<int:community_id>/config', methods=['PUT'])
@@ -220,8 +221,8 @@ async def update_config(community_id: int):
         config = await analytics_service.update_config(community_id, data)
         return success_response(config)
     except Exception as e:
-        logger.error(f"Failed to update config: {e}", community_id=community_id)
-        return error_response(str(e), 500)
+        log_failure(logger, "Failed to update config", e, community_id=community_id)
+        return error_response(INTERNAL_ERROR_MESSAGE, 500)
 
 
 # ============================================================================
@@ -252,8 +253,8 @@ async def receive_events():
         result = await analytics_service.process_events(data['events'])
         return success_response(result)
     except Exception as e:
-        logger.error(f"Failed to process events: {e}")
-        return error_response(str(e), 500)
+        log_failure(logger, "Failed to process events", e)
+        return error_response(INTERNAL_ERROR_MESSAGE, 500)
 
 
 @internal_bp.route('/aggregate', methods=['POST'])
@@ -275,8 +276,8 @@ async def trigger_aggregation():
         result = await analytics_service.run_aggregation(community_id, force)
         return success_response(result)
     except Exception as e:
-        logger.error(f"Failed to trigger aggregation: {e}")
-        return error_response(str(e), 500)
+        log_failure(logger, "Failed to trigger aggregation", e)
+        return error_response(INTERNAL_ERROR_MESSAGE, 500)
 
 
 # ============================================================================
@@ -294,8 +295,8 @@ async def get_bot_score(community_id: int):
         score = await bot_score_service.get_score(community_id)
         return success_response(score)
     except Exception as e:
-        logger.error(f"Failed to get bot score: {e}", community_id=community_id)
-        return error_response(str(e), 500)
+        log_failure(logger, "Failed to get bot score", e, community_id=community_id)
+        return error_response(INTERNAL_ERROR_MESSAGE, 500)
 
 
 @api_bp.route('/<int:community_id>/bot-score/calculate', methods=['POST'])
@@ -307,8 +308,8 @@ async def calculate_bot_score(community_id: int):
         score = await bot_score_service.calculate_score(community_id)
         return success_response(score)
     except Exception as e:
-        logger.error(f"Failed to calculate bot score: {e}", community_id=community_id)
-        return error_response(str(e), 500)
+        log_failure(logger, "Failed to calculate bot score", e, community_id=community_id)
+        return error_response(INTERNAL_ERROR_MESSAGE, 500)
 
 
 @api_bp.route('/<int:community_id>/suspected-bots', methods=['GET'])
@@ -329,8 +330,8 @@ async def get_suspected_bots(community_id: int):
         )
         return success_response({'suspected_bots': bots})
     except Exception as e:
-        logger.error(f"Failed to get suspected bots: {e}", community_id=community_id)
-        return error_response(str(e), 500)
+        log_failure(logger, "Failed to get suspected bots", e, community_id=community_id)
+        return error_response(INTERNAL_ERROR_MESSAGE, 500)
 
 
 @api_bp.route('/<int:community_id>/suspected-bots/<int:bot_id>/review', methods=['PUT'])
@@ -353,8 +354,8 @@ async def review_suspected_bot(community_id: int, bot_id: int):
         )
         return success_response(result)
     except Exception as e:
-        logger.error(f"Failed to review suspected bot: {e}", community_id=community_id)
-        return error_response(str(e), 500)
+        log_failure(logger, "Failed to review suspected bot", e, community_id=community_id)
+        return error_response(INTERNAL_ERROR_MESSAGE, 500)
 
 
 # Register blueprints

@@ -8,6 +8,7 @@ ID) rather than an unauthenticated, spoofable value.
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
@@ -34,8 +35,14 @@ MAX_RPC_DEADLINE_SECONDS = 5.0
 #: safe without additional locking.
 service_claims: ContextVar[dict[str, Any] | None] = ContextVar("service_claims", default=None)
 
+logger = logging.getLogger(__name__)
+
 _tracer = trace.get_tracer("hub_api.grpc_internal")
 _meter = metrics.get_meter("hub_api.grpc_internal")
+_tenantless_counter = _meter.create_counter(
+    name="grpc_server_tenantless_token_rejections",
+    description="Valid machine JWTs rejected for carrying no tenant claim, by RPC method.",
+)
 _latency_histogram = _meter.create_histogram(
     name="grpc_server_request_duration_seconds",
     unit="s",
@@ -93,6 +100,13 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
     ``/waddles.hub.internal.v1.IdentityService/MintEphemeralPseudonyms``) to
     the scope it requires -- an unlisted method fails closed
     (UNAUTHENTICATED), never defaults to "no scope required".
+
+    A token that verifies but carries no `tenant` claim is rejected
+    (PERMISSION_DENIED): every internal token is tenant-bound by the issuer
+    (`flask_core.service_jwt.ServiceIdentity.tenant`; `system` = operator
+    plane), and the servicers read that claim from `service_claims` to confine
+    each request -- they never trust a tenant named in the request body alone
+    (security.md Tenant Isolation: "Every token MUST carry tenant claim").
     """
 
     verifier: ServiceJwtVerifier
@@ -136,6 +150,18 @@ class AuthInterceptor(grpc.aio.ServerInterceptor):
                 # Never distinguish which check failed to the caller
                 # (security.md Service-to-Service Auth / JWT Claims).
                 await context.abort(grpc.StatusCode.UNAUTHENTICATED, "unauthorized")
+            tenant_claim = claims.get("tenant")
+            if not isinstance(tenant_claim, str) or not tenant_claim.strip():
+                _tenantless_counter.add(1, {"rpc.method": method})
+                logger.warning(
+                    "internal rpc rejected: token carries no tenant claim",
+                    extra={
+                        "action": "grpc_tenantless_token",
+                        "rpc_method": method,
+                        "caller": str(claims.get("sub", ""))[:128],
+                    },
+                )
+                await context.abort(grpc.StatusCode.PERMISSION_DENIED, "tenant claim required")
             service_claims.set(claims)
             return await inner(request, cast(grpc.ServicerContext, context))
 
