@@ -9,6 +9,7 @@
 //! [`router::with_push_guard`], consuming [`hub::PresentationHub`]
 //! directly rather than any route in this module.
 
+pub mod detok;
 pub mod hub;
 pub mod push_trust;
 pub mod render;

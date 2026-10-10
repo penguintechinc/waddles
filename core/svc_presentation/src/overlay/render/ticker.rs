@@ -3,6 +3,11 @@
 //! [`super::shared::validate_text`]/[`super::shared::TextContent`] rather
 //! than a second text key (see `overlay_schema::OverlayPush::text`'s own
 //! doc for why the wire type already shares the field).
+//!
+//! `text` is bundle-authored free text: [`super::shared::validate_text`]
+//! returns it HTML-escaped with its `{user:<token>}` placeholders replaced by
+//! hub-api-resolved display names (or `Unknown User`) -- see
+//! `crate::overlay::detok`.
 
 use overlay_schema::OverlayPush;
 use overlay_schema::Surface;
@@ -84,5 +89,48 @@ mod tests {
     #[test]
     fn surface_reports_ticker() {
         assert_eq!(TickerRenderer.surface(), Surface::Ticker);
+    }
+
+    use crate::overlay::detok::test_support::{names, USER_A, USER_UNKNOWN};
+    use crate::overlay::detok::with_names;
+    use egress_detokenizer::NEUTRAL_LABEL;
+
+    #[test]
+    fn text_is_escaped_and_user_tokens_resolved() {
+        let push = OverlayPush {
+            text: Some(format!(
+                "<img src=x onerror=alert(1)> {{user:{USER_A}}} {{user:{USER_UNKNOWN}}}"
+            )),
+            ..Default::default()
+        };
+        let frame = with_names(names(&[(USER_A, "A\"lice")]), || {
+            TickerRenderer.render(&push, &theme()).unwrap()
+        });
+        let RenderedContent::Ticker(content) = frame else {
+            panic!("expected Ticker content");
+        };
+        assert_eq!(
+            content.text.as_deref(),
+            Some(
+                format!("&lt;img src=x onerror=alert(1)&gt; A&quot;lice {NEUTRAL_LABEL}").as_str()
+            )
+        );
+    }
+
+    /// regression: a raw token/UUID/`<script>` never reaches the output,
+    /// even when the renderer runs with no resolved-name scope at all.
+    #[test]
+    fn no_raw_token_uuid_or_markup_reaches_the_output_without_a_scope() {
+        let push = OverlayPush {
+            text: Some(format!("<script>x</script>{{user:{USER_A}}}")),
+            ..Default::default()
+        };
+        let frame = TickerRenderer.render(&push, &theme()).unwrap();
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(
+            !json.contains("<script") && !json.contains(USER_A),
+            "{json}"
+        );
+        assert!(json.contains(NEUTRAL_LABEL));
     }
 }

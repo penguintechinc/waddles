@@ -67,6 +67,56 @@ machine JWTs verified against `PUSH_JWKS_URL` (`overlay_auth`,
   interface (`world stage-next`); kept in lockstep with `overlay_schema`'s
   `Surface` enum per that crate's own module doc.
 
+## Overlay Output Safety: Detokenization + HTML Escaping
+
+Overlay surfaces render only hub-api-resolved display names, never a raw
+PII value, UUID or `{user:<token>}` placeholder, and every free-text
+field is HTML-escaped exactly once (`src/overlay/detok.rs`,
+`src/overlay/render/shared.rs`). Bundles reference users by tokenized UUID
+only (`rules/critical-rules.md` PII Tokenization); this is the overlay
+sink of the same outbound pass `core/egress_detokenizer` runs for chat.
+
+| Step | Where | Behavior |
+|---|---|---|
+| Resolve (async, once per push) | `OverlayDetokenizer::resolve` | Collects every canonical-UUID user reference (`chat_message.user`, `alert.user`, `{user:<uuid>}` in text), one batched, tenant-scoped `ResolveDisplayNames` call via `hub_client` (cap 100, 3s timeout) |
+| Render (sync, per surface) | `render/shared.rs::sanitize_text` | HTML-escape the bundle text, then substitute each placeholder with its resolved name (`Sink::Overlay` escapes the name) or `Unknown User` |
+
+- **Surfaces sanitized:** `alert_box`, `chat`, `crawler`, `full_screen`,
+  `goals`, `media`, `ticker`. `music` carries no push-derived text (asserted
+  by test); `image` is still the fail-loud stub.
+- **Fail-safe-empty:** hub-api unreachable, circuit open, timeout, empty
+  tenant, or an unknown UUID all render `Unknown User` (logged `ERROR`/`WARN`,
+  counts only) -- the push still renders, nothing leaks, nothing is dropped.
+- **The renderer is the last line of defense:** names reach the (signature-
+  frozen, synchronous) renderers through `detok::with_names`; rendered with no
+  resolved-name scope, every token becomes `Unknown User` and the caller's
+  own `display_name` is never trusted. `chat`/`alert_box` `display_name` is
+  always the resolved name for `user`; the `user` UUID is no longer emitted.
+- **`image_url`** is validated, not escaped (the client assigns it to
+  `img.src`, where `&amp;` would corrupt query strings): plain `http(s)://`,
+  no whitespace/quote/bracket/control characters, no embedded `{user:` token --
+  otherwise a loud `InvalidField`.
+- **Tenant scoping:** `DetokScope::tenant_id` must come from the validated
+  credential (never a request body/path); hub-api scopes the lookup by it.
+  Resolution is tenant-scoped on the wire; `community_id` is log/trace context.
+- **No PII in logs/metrics:** nothing logs a UUID, token, name or push text
+  (`detokenize_resolving` is deliberately not used -- it logs unresolved
+  token values). `ResolvedNames`'s `Debug` prints the entry count only.
+- **Metrics:** `svc_presentation_overlay_detok_resolutions_total{outcome}`,
+  `..._detok_resolve_duration_seconds`, `..._detok_unresolved_tokens_total`
+  (`register_detok_metrics`); trace span `overlay.detok.resolve`.
+- **Clients must treat these strings as HTML**, not `textContent`: the
+  legacy Python `render.py` page used `textContent` and would show `&lt;`
+  literally for escaped output.
+
+`OverlayDetokenizer::render`/`render_with_metrics` are the entry points a
+push route calls instead of `render::render` directly. **Not yet wired:** the
+P4 `POST .../push` handler still publishes the raw `OverlayPush` to the hub
+(it never calls the renderer); hooking it up needs an `AppState` field
+(`Arc<OverlayDetokenizer>`, built from a `hub_client::HubClient` -- see
+`core/svc_action/src/lib.rs::build_hub_client` for the env/mTLS shape) and
+is a follow-up, not part of this chunk.
+
 ## Make Targets
 
 ```

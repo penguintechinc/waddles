@@ -146,6 +146,23 @@ penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git"
 # as core/svc_streaming/Cargo.toml so cargo-deny sees one resolved version.
 futures = { version = "=0.3.34", default-features = false, features = ["std", "async-await"] }
 
+# -- Overlay detokenization (`overlay::detok`) additions below --
+
+# Outbound PII-detokenization pass (`{user:<token>}` -> display name,
+# per-sink escaped, fail-safe-empty) -- same-repo path dependency, same
+# version `core/svc_action` and `core/svc_process` already resolve. Only
+# `Sink::Overlay`, the `DisplayNameResolver` seam and the pure
+# `extract_tokens`/`detokenize` functions are used here; `detokenize_resolving`
+# is deliberately NOT called (it logs unresolved token values, and this
+# crate's own logs must carry no UUID/token at all -- see `overlay::detok`).
+egress_detokenizer = { path = "../egress_detokenizer", version = "=0.1.0" }
+# `waddles.hub.internal.v1.IdentityService.ResolveDisplayNames` client --
+# named directly (not only transitively via `egress_detokenizer`) so
+# `overlay::detok::OverlayDetokenizer::from_hub_client` can take an
+# `Arc<hub_client::HubClient>`. Its build.rs compiles the repo-root
+# `proto/` tree (needs `protoc`; see Dockerfile.rust).
+hub_client = { path = "../hub_client", version = "=0.1.0" }
+
 [dev-dependencies]
 http-body-util = "=0.1.3"
 # Test-only: `MockDatabase` for `overlay::view_store`/`http::health`/
