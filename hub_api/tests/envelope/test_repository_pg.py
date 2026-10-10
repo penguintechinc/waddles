@@ -1,7 +1,7 @@
 """The envelope key store against a REAL, fully-migrated Postgres (production DDL, run for real).
 
 ``alembic/tests/pg_docker.py`` boots one Postgres 17 container and runs the actual Alembic chain
-to ``head`` -- including ``0049_tenant_external_kms`` -- so the SQL in
+to ``head`` -- including ``0054_tenant_external_kms`` -- so the SQL in
 ``services/envelope/repository.py`` is proven against the migration's own schema, indexes,
 constraints and RBAC grants rather than a hand-copied DDL. It also drives the real
 ``TenantEnvelopeService`` through that repository (key creation, rotation, BYOK re-wrap) with the
@@ -188,7 +188,7 @@ class TestMigratedSchema:
 
         path = Path(__file__).resolve().parents[3] / "alembic" / "versions"
         spec = importlib.util.spec_from_file_location(
-            "migration_0049", path / "0049_tenant_external_kms.py"
+            "migration_0054", path / "0054_tenant_external_kms.py"
         )
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)

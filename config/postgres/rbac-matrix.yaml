@@ -747,7 +747,7 @@ grants:
     privileges: [SELECT, INSERT, UPDATE, DELETE]
 
   # Per-tenant envelope encryption key store + Enterprise BYOK config (migration
-  # 0049_tenant_external_kms; design 2026-09-28-tenant-envelope-encryption Sec4/Sec6).
+  # 0054_tenant_external_kms; design 2026-09-28-tenant-envelope-encryption Sec4/Sec6).
   # hub_api is the sole reader/writer. Every data-plane role gets an explicit
   # empty row: a compromised svc_* credential must not read even a *wrapped* DEK.
   # keystore.tenant_encryption_keys: SELECT/INSERT/UPDATE only -- keys are retired,

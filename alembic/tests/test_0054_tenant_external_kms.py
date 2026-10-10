@@ -1,4 +1,4 @@
-"""Tests for 0049_tenant_external_kms (per-tenant key store + Enterprise external-KMS config).
+"""Tests for 0054_tenant_external_kms (per-tenant key store + Enterprise external-KMS config).
 
 Text-level (no database), same split as the sibling migration tests: revision metadata and the
 single-head invariant, the emitted DDL/GRANT shape, and the downgrade's deliberate refusal to
@@ -25,7 +25,7 @@ _VERSIONS = _ALEMBIC_DIR / "versions"
 
 def _load() -> ModuleType:
     spec = importlib.util.spec_from_file_location(
-        "migration_0049_tenant_external_kms", _VERSIONS / "0049_tenant_external_kms.py"
+        "migration_0054_tenant_external_kms", _VERSIONS / "0054_tenant_external_kms.py"
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -46,9 +46,9 @@ def _emitted(migration: ModuleType, fn: str) -> list[str]:
 
 
 def test_revision_metadata_and_a_single_alembic_head(migration: ModuleType) -> None:
-    assert migration.revision == "0049_tenant_external_kms"
+    assert migration.revision == "0054_tenant_external_kms"
     assert len(migration.revision) <= 32  # alembic_version.version_num is VARCHAR(32)
-    assert migration.down_revision == "0048_identity_forged_uuid"
+    assert migration.down_revision == "0049_sso_connections"
     config = Config(str(_REPO_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(_ALEMBIC_DIR))
     script = ScriptDirectory.from_config(config)

@@ -19,7 +19,7 @@ protect. The dedicated *role/connection and short-retention backup
 policy* for that schema are infrastructure follow-ups: hand this class an
 ``AsyncDB`` authenticated as that role and nothing else changes.
 
-The DDL these queries target is ``alembic/versions/0049_tenant_external_
+The DDL these queries target is ``alembic/versions/0054_tenant_external_
 kms.py``; its key-store table is a superset-compatible ``IF NOT EXISTS`` of
 the one in the open DEK-broker PR (#442), so the two migrations are
 order-independent.

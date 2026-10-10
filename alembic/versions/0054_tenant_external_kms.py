@@ -46,8 +46,8 @@ svc_streaming/webui/waddles_publisher -- gets `privileges: []`, so a
 compromised data-plane credential cannot read even a wrapped DEK. On the key
 table hub_api gets `SELECT, INSERT, UPDATE` only (keys are retired, not deleted).
 
-Revision ID: 0049_tenant_external_kms
-Revises: 0048_identity_forged_uuid
+Revision ID: 0054_tenant_external_kms
+Revises: 0049_sso_connections
 Create Date: 2026-10-09
 """
 
@@ -60,8 +60,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0049_tenant_external_kms"
-down_revision = "0048_identity_forged_uuid"
+revision = "0054_tenant_external_kms"
+down_revision = "0049_sso_connections"
 branch_labels = None
 depends_on = None
 
@@ -147,11 +147,11 @@ _DOWNGRADE_STATEMENTS: tuple[str, ...] = (
 
 
 def _load_matrix_module():  # type: ignore[no-untyped-def]
-    spec = importlib.util.spec_from_file_location("waddles_rbac_matrix_0049", _MATRIX_MODULE_PATH)
+    spec = importlib.util.spec_from_file_location("waddles_rbac_matrix_0054", _MATRIX_MODULE_PATH)
     module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
     # Registered before exec_module() -- rbac_matrix.py's dataclasses resolve their own
     # module via sys.modules during class creation (same note as 0020/0034).
-    sys.modules["waddles_rbac_matrix_0049"] = module
+    sys.modules["waddles_rbac_matrix_0054"] = module
     spec.loader.exec_module(module)  # type: ignore[union-attr]
     return module
 

@@ -13,7 +13,7 @@ TenantEnvelopeService ──► KmsAdapter (Protocol) ──► PlatformKekAdapt
         │ keys/configs             │ built by KmsProviderRegistry (only providers the deployment enabled)
         ▼                          │
  PenguinDalEnvelopeRepository   providers.py  <-- ENVELOPE_KMS_PROVIDERS (default: none == flag OFF)
- keystore.tenant_encryption_keys / tenant_kms_configs   (migration 0049, RBAC from rbac-matrix.yaml)
+ keystore.tenant_encryption_keys / tenant_kms_configs   (migration 0054, RBAC from rbac-matrix.yaml)
 ```
 
 | Module | Responsibility |

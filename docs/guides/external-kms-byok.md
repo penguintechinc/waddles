@@ -255,7 +255,7 @@ make test-seaweedfs-sse-kms     # opt-in: chart-rendered config against the real
 
 The mocks are real HTTP servers on loopback speaking the genuine AWS (SigV4/JSON-1.1/STS), Google (RS256
 JWT-bearer + REST) and Azure (Entra + RSA-OAEP-256) wire protocols; only the provider API is faked. The
-key store tests run the **production migration** (`0049_tenant_external_kms`) in a real Postgres.
+key store tests run the **production migration** (`0054_tenant_external_kms`) in a real Postgres.
 
 ## Not in scope / follow-ups
 
