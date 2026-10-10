@@ -99,6 +99,17 @@ ai_request = AIRequest(prompt=user_text, tools=registry)
 | researcher `AIProviderService` | Ollama `system` field instead of string concatenation; untrusted-data notice always present; tool calls refused; replies sanitised; `generate_with_context` no longer renders `role:` lines |
 | researcher `SafetyLayer` | patterns run on the NFKC / lookalike-folded view; adds role-spoof, tenant-switch, scope-escalation, exfiltration, tool-abuse categories; logs carry category names only |
 
+## Bounds (cost and bypass)
+
+* Every regex in the guard is linear-time: patterns start at run boundaries (lookbehind) and open
+  quantifiers are bounded; `TestLinearTimeOnAdversarialInput` feeds each one inputs a quadratic
+  pattern would need minutes for. (The pre-existing email / JWT redaction patterns were quadratic.)
+* The completion proxy rejects prompts over `MAX_PROMPT_CHARS` (100 000) with `400` before any scan,
+  redaction or provider call.
+* The detector reads the first `SCAN_MAX_CHARS` (50 000) characters. `SafetyLayer` blocks anything
+  longer ("Prompt too long to screen") rather than under-scan it, and retrieved items are scanned on
+  exactly the normalised, bounded text that would be rendered.
+
 Out of scope here: `hub_api/services/bot_ai_knowledge.py` (covered by `sec-llm01-audit`),
 `core/svc_process` moderation gate (chat moderation, not the AI completion path), and the
 `/chat/completions` message roles supplied by an authenticated API client about their own session.

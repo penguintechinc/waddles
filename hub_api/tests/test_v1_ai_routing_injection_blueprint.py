@@ -131,6 +131,27 @@ class TestGrantedScopesComeFromTheVerifiedJwt:
         assert seen["granted_scopes"] == frozenset({"community:read"})
         assert seen["tenant"] == TENANT_SLUG
 
+    async def test_oversized_prompt_is_rejected_before_any_work(
+        self, ai_routing_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        called: list[bool] = []
+
+        async def fake(*args: Any, **kwargs: Any) -> AIResponse:  # pragma: no cover - must not run
+            called.append(True)
+            raise AssertionError("route_completion reached with an oversized prompt")
+
+        monkeypatch.setattr(bp_module, "route_completion", fake)
+        headers, community_id = _member(ai_routing_db, scope="community:read")
+        client = _app(ai_routing_db).test_client()
+        url = f"/api/v1/community/{community_id}/ai/completions"
+
+        too_big = await client.post(
+            url, headers=headers, json={"prompt": "x" * (bp_module.MAX_PROMPT_CHARS + 1)}
+        )
+
+        assert too_big.status_code == 400 and called == []
+        assert (await too_big.get_json())["error"]["code"] == "BAD_REQUEST"
+
     def test_request_dto_field_set_is_pinned(self) -> None:
         # regression: any new DTO field is a new client-controlled input -- add it deliberately.
         assert [f.name for f in dataclasses.fields(CompletionRequestDTO)] == [

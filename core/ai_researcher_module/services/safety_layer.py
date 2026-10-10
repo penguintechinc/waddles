@@ -21,6 +21,7 @@ from typing import Optional
 
 from flask_core.ai_guard import (
     CATEGORY_EXFIL_BEACON,
+    SCAN_MAX_CHARS,
     fold_for_scan,
     neutralize_markup,
     normalize_untrusted,
@@ -159,6 +160,19 @@ class SafetyLayer:
             return SafetyCheckResult(
                 is_safe=False,
                 blocked_reason="Empty prompt",
+                detected_patterns=[],
+                detected_topics=[],
+            )
+
+        # The detectors only look at the first SCAN_MAX_CHARS characters; a longer prompt would
+        # be partly unscreened (filler followed by a payload). Fail closed instead of under-scanning.
+        if len(prompt) > SCAN_MAX_CHARS:
+            logger.warning(
+                f"AUDIT SafetyLayer blocked prompt: too long to screen ({len(prompt)} chars)"
+            )
+            return SafetyCheckResult(
+                is_safe=False,
+                blocked_reason="Prompt too long to screen",
                 detected_patterns=[],
                 detected_topics=[],
             )

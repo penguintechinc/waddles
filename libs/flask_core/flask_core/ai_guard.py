@@ -147,7 +147,10 @@ _CONTROL_TOKEN_RE = re.compile(r"<\|[^|>\n]{1,48}\|>|\[/?INST\]|<</?SYS>>|</?s>"
 def _tag_re(names: tuple[str, ...]) -> re.Pattern[str]:
     """Build (and cache) the case/whitespace-tolerant matcher for the given tag names."""
     alternation = "|".join(sorted({re.escape(n) for n in names}, key=len, reverse=True))
-    return re.compile(rf"<\s*(/?)\s*({alternation})\b(?:[^>\n]{{0,80}}>)?", re.IGNORECASE)
+    # Whitespace runs are bounded: unbounded `\s*(/?)\s*` backtracks quadratically on "<" + spaces.
+    return re.compile(
+        rf"<\s{{0,64}}(/?)\s{{0,64}}({alternation})\b(?:[^>\n]{{0,80}}>)?", re.IGNORECASE
+    )
 
 
 def neutralize_markup(text: str, *, extra_tags: Iterable[str] = ()) -> str:
@@ -272,7 +275,8 @@ _RULES: tuple[tuple[str, re.Pattern[str], bool], ...] = (
     (
         CATEGORY_ROLE_SPOOF,
         re.compile(
-            r"(?:^|[>\]])\s*(?:#{1,4}\s*)?(?:system|assistant|developer|tool)\s*(?::|prompt\b)",
+            r"(?:^|[>\]])[ \t]{0,16}(?:#{1,4}[ \t]{0,4})?(?:system|assistant|developer|tool)"
+            r"[ \t]{0,4}(?::|prompt\b)",
             re.M,
         ),
         True,
@@ -478,13 +482,18 @@ def render_retrieved_data(
         if len(rendered) >= max_items:
             dropped += 1
             continue
-        scan = scan_for_injection(f"{item.title}\n{item.text}")
+        # Scan exactly what would be rendered (normalised, bounded) -- an oversized title must
+        # not use up the scan window and leave the body unread. Delimiters are neutralised only
+        # AFTER the scan so a defanged `<|im_start|>` still counts as an attack.
+        title_norm = normalize_untrusted(item.title, max_chars=200)
+        text_norm = normalize_untrusted(item.text, max_chars=max_item_chars)
+        scan = scan_for_injection(f"{title_norm}\n{text_norm}")
         if scan.flagged:
             seen |= scan.categories
             if drop_flagged:
                 dropped += 1
                 continue
-        body = neutralize_markup(normalize_untrusted(item.text, max_chars=max_item_chars))
+        body = neutralize_markup(text_norm)
         lines = [f'<retrieved_item index="{len(rendered) + 1}">']
         if item.title:
             lines.append(f"title: {_one_line(item.title, 200)}")
@@ -542,18 +551,22 @@ def render_search_results(results: Iterable[Any], *, source: str = "web_search")
 # Egress: PII redaction and model-output hygiene
 # --------------------------------------------------------------------------------------
 
-_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+# Every pattern below is linear-time on adversarial input: each starts only at the beginning of a
+# character run (lookbehind) and every open-ended quantifier is bounded, so a 1 MB prompt of
+# "aaaa..." / "a-a-a-..." / repeated "-----BEGIN" cannot pin a worker (ReDoS regression tests
+# pin this). The unanchored `[A-Za-z0-9._%+-]+@` form tried every start position in a run.
+_EMAIL_RE = re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,}")
 
 # Token/secret-shaped strings worth redacting on sight (see hub_api ai_routing for history):
 #   OpenAI/Anthropic "sk-...", WaddleAI "wa-...", "Bearer <token>", JWTs, AWS access key ids,
 #   GitHub / Slack tokens and PEM private-key blocks.
 _TOKEN_RE = re.compile(
     r"""
-    -----BEGIN\ [A-Z\ ]{0,30}PRIVATE\ KEY-----.*?-----END\ [A-Z\ ]{0,30}PRIVATE\ KEY-----
+    -----BEGIN\ [A-Z\ ]{0,30}PRIVATE\ KEY-----.{0,8192}?-----END\ [A-Z\ ]{0,30}PRIVATE\ KEY-----
     | \bsk-[A-Za-z0-9_-]{10,}\b
     | \bwa-[A-Za-z0-9_-]{10,}\b
     | \bBearer\s+[A-Za-z0-9._-]{10,}\b
-    | \b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b
+    | (?<![A-Za-z0-9_-])[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b
     | \bAKIA[0-9A-Z]{16}\b
     | \bgh[pousr]_[A-Za-z0-9]{30,}\b
     | \bxox[abprs]-[A-Za-z0-9-]{10,}\b

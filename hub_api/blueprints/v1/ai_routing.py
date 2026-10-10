@@ -51,6 +51,11 @@ from services.community_access import require_community_admin, require_community
 from services.current_user import get_current_scopes, get_current_user_id
 from services.errors import ApiError
 
+#: Upper bound on the prompt characters the completion proxy accepts. Bounds the CPU the injection
+#: scan / PII redaction / provider call can be made to spend on one request (OWASP LLM10) -- every
+#: pre-provider pass over the prompt is linear, but linear in an unbounded body is still unbounded.
+MAX_PROMPT_CHARS = 100_000
+
 ai_config_bp = Blueprint("v1_ai_config", __name__, url_prefix="/api/v1/admin")
 ai_completions_bp = Blueprint("v1_ai_completions", __name__, url_prefix="/api/v1/community")
 
@@ -381,6 +386,8 @@ async def create_completion(
         if ctx is None:  # pragma: no cover -- `_require_member` already raises if this is None
             raise ApiError("Tenant context not resolved", 403, "FORBIDDEN")
 
+        if len(data.prompt) > MAX_PROMPT_CHARS:
+            raise ApiError(f"prompt exceeds {MAX_PROMPT_CHARS} characters", 400, "BAD_REQUEST")
         if data.requested_tier not in (None, "free", "premium", "byok"):
             raise ApiError("invalid requested_tier", 400, "BAD_REQUEST")
         if data.byok_provider not in (None, "openai", "anthropic"):
