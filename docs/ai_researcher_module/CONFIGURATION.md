@@ -514,3 +514,13 @@ Database per-community settings (lowest priority)
 ```
 
 Settings are evaluated in order, with higher priority values overriding lower priority.
+
+## Prompt-Injection Hardening (OWASP LLM01)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AI_MAX_UNTRUSTED_CHARS` | `4000` | Upper bound on the characters of any single user-supplied value (topic, question) embedded in a prompt |
+
+Everything else is always on (fail-closed): untrusted-data delimiting, injection screening of
+retrieved search results / memories / chat logs, tool-call refusal and reply sanitising. See
+[`docs/security/ai-prompt-injection-hardening.md`](../security/ai-prompt-injection-hardening.md).

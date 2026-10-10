@@ -86,6 +86,10 @@ class Config:
     OLLAMA_MAX_TOKENS = int(os.getenv('OLLAMA_MAX_TOKENS', '2000'))
     OLLAMA_TIMEOUT = int(os.getenv('OLLAMA_TIMEOUT', '60'))
 
+    # Upper bound on the characters of any single user-supplied value embedded in a
+    # prompt (OWASP LLM01: bounds the room an injection payload has to work in).
+    MAX_PROMPT_CHARS = int(os.getenv('AI_MAX_UNTRUSTED_CHARS', '4000'))
+
     # Model capabilities -- describe whatever OLLAMA_MODEL is configured to.
     # OLLAMA_SUPPORTS_JSON=false (default) is the TEXT-ONLY path: no structured
     # output params are sent and prompts/parsers are plain text. Set true only
@@ -517,6 +521,8 @@ class Config:
             errors.append("OLLAMA_TEMPERATURE must be between 0 and 2")
         if cls.OLLAMA_MAX_TOKENS < 1:
             errors.append("OLLAMA_MAX_TOKENS must be positive")
+        if cls.MAX_PROMPT_CHARS < 1:
+            errors.append("AI_MAX_UNTRUSTED_CHARS must be positive")
         if cls.SEMANTIC_CACHE_THRESHOLD < 0 or cls.SEMANTIC_CACHE_THRESHOLD > 1:
             errors.append("SEMANTIC_CACHE_THRESHOLD must be between 0 and 1")
         if cls.VECTOR_SCORE_THRESHOLD < 0 or cls.VECTOR_SCORE_THRESHOLD > 1:

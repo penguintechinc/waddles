@@ -32,7 +32,7 @@ python3 -m pytest -m ollama_realpath -v -rs
 make test-ollama-realpath WADDLE_TEST_OLLAMA_URL=http://192.168.2.105:11434/
 ```
 
-`-rs` prints the skip reasons. All three suites together are 37 tests and send about 37 requests
+`-rs` prints the skip reasons. All three suites together are 40 tests and send about 40 requests
 (roughly 22 generations, mostly 16-128 tokens; the rest are metadata GETs or instant 404s); the three
 runs take well under two minutes on an idle box.
 

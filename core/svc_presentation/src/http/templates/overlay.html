@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="referrer" content="no-referrer">
+<title>Waddles Overlay</title>
+<style>
+  :root {
+    --primary: #1db954;
+    --secondary: #1ed760;
+    --font: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    color: #fff;
+    font-family: var(--font);
+  }
+  #root { position: fixed; inset: 0; pointer-events: none; }
+  #status {
+    position: fixed; top: 8px; right: 8px; z-index: 10;
+    padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: bold;
+    background: rgba(244, 67, 54, 0.85);
+  }
+  #status[hidden] { display: none; }
+
+  .card {
+    background: rgba(0, 0, 0, 0.72);
+    border-left: 4px solid var(--primary);
+    border-radius: 8px;
+    padding: 12px 16px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(8px);
+  }
+  .fade-in { animation: fadeIn 0.35s ease-out; }
+  .fade-out { animation: fadeOut 0.5s ease-in forwards; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+  @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+
+  /* alert_box */
+  .alert { position: absolute; top: 12%; left: 50%; transform: translateX(-50%); min-width: 320px; max-width: 80%; text-align: center; }
+  .alert .alert-type { color: var(--primary); font-size: 14px; letter-spacing: 1px; text-transform: uppercase; }
+  .alert .alert-name { font-size: 32px; font-weight: bold; margin: 4px 0; }
+  .alert .alert-amount { color: var(--secondary); font-size: 22px; font-weight: bold; }
+  .alert .alert-message { font-size: 18px; margin-top: 6px; color: #ddd; word-wrap: break-word; }
+
+  /* chat */
+  .chat { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 6px; }
+  .chat .line { font-size: 18px; line-height: 1.35; word-wrap: break-word; padding: 6px 10px; border-left-width: 3px; }
+  .chat .platform { color: var(--secondary); font-size: 12px; margin-right: 6px; text-transform: uppercase; }
+  .chat .name { color: var(--primary); font-weight: bold; }
+  .chat .sep { margin: 0 6px 0 2px; color: #aaa; }
+
+  /* goals */
+  .goal { position: absolute; left: 50%; bottom: 8%; transform: translateX(-50%); width: min(80%, 720px); }
+  .goal .goal-head { display: flex; justify-content: space-between; font-size: 20px; margin-bottom: 8px; }
+  .goal .goal-bar { height: 18px; border-radius: 9px; background: rgba(255, 255, 255, 0.18); overflow: hidden; }
+  .goal .goal-fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--primary), var(--secondary)); transition: width 0.6s ease; }
+
+  /* ticker / crawler */
+  .tape { position: absolute; left: 0; right: 0; bottom: 0; height: 52px; overflow: hidden; background: rgba(0, 0, 0, 0.72); border-top: 3px solid var(--primary); white-space: nowrap; }
+  .tape .tape-text { display: inline-block; line-height: 52px; font-size: 24px; padding: 0 24px; }
+  .tape.scroll .tape-text { padding-left: 100%; animation: crawl var(--crawl-seconds, 20s) linear infinite; }
+  @keyframes crawl { from { transform: translateX(0); } to { transform: translateX(-100%); } }
+
+  /* full_screen / media */
+  .stage { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 4%; text-align: center; background: rgba(0, 0, 0, 0.55); }
+  body.surface-media .stage { inset: auto; right: 4%; bottom: 6%; max-width: 40%; padding: 16px; border-radius: 8px; background: rgba(0, 0, 0, 0.72); }
+  .stage .stage-title { font-size: 44px; font-weight: bold; }
+  .stage .stage-body { font-size: 24px; color: #ddd; word-wrap: break-word; }
+  .stage img { max-width: 100%; max-height: 60vh; border-radius: 6px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="status" hidden>Connecting...</div>
+<script>
+'use strict';
+
+/*
+ * Waddles overlay client. This page is static: it embeds no community data,
+ * no key and no pushed text. Everything dynamic arrives over the SSE stream
+ * as a frame the SERVER has already detokenized and HTML-escaped
+ * (svc-presentation: overlay::detok + overlay::render).
+ *
+ * Sink discipline -- the only way server text reaches the DOM:
+ *   setHtml(el, html)  the single innerHTML sink; its input is built only
+ *                      from safeHtml(), which passes server-escaped text
+ *                      through and re-escapes anything carrying a raw
+ *                      < > " ' (belt and braces: a server regression must
+ *                      degrade to visible text, never to markup);
+ *   textContent        for anything the server did not escape;
+ *   img.src            only for an http(s) URL that passes validImageUrl().
+ * No eval, new Function, document.write, outerHTML or insertAdjacentHTML.
+ */
+
+var SURFACES = ['alert_box', 'chat', 'goals', 'ticker', 'crawler', 'full_screen', 'media'];
+
+var root = document.getElementById('root');
+var statusEl = document.getElementById('status');
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function intParam(params, name, fallback, min, max) {
+  var parsed = parseInt(params.get(name), 10);
+  return clamp(isNaN(parsed) ? fallback : parsed, min, max);
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/* Server text is already escaped (no raw < > " '); re-escape if it is not. */
+function safeHtml(value) {
+  var text = (value === null || value === undefined) ? '' : String(value);
+  return /[<>"']/.test(text) ? escapeHtml(text) : text;
+}
+
+function setHtml(el, html) {
+  if (typeof html !== 'string') { el.textContent = ''; return; }
+  el.innerHTML = html;
+}
+
+function el(tag, className) {
+  var node = document.createElement(tag);
+  if (className) { node.className = className; }
+  return node;
+}
+
+function validImageUrl(url) {
+  return typeof url === 'string' && /^https?:\/\/[^\s"'<>\\`]+$/i.test(url);
+}
+
+function setStatus(text) {
+  if (text) { statusEl.textContent = text; statusEl.hidden = false; }
+  else { statusEl.hidden = true; }
+}
+
+function setVar(name, value, pattern) {
+  if (typeof value === 'string' && pattern.test(value)) {
+    document.documentElement.style.setProperty(name, value);
+  }
+}
+
+function applyTheme(theme) {
+  if (!theme || typeof theme !== 'object') { return; }
+  setVar('--primary', theme.primary_color, /^#[0-9a-fA-F]{3,8}$/);
+  setVar('--secondary', theme.secondary_color, /^#[0-9a-fA-F]{3,8}$/);
+  setVar('--font', theme.font_family, /^[A-Za-z0-9 ,'"_.\-]{1,200}$/);
+}
+
+/* A number (or numeric string) for display; anything else is dropped. */
+function finiteNumber(value) {
+  var number = typeof value === 'number' ? value : parseFloat(value);
+  return isFinite(number) ? number : null;
+}
+
+/* amount is open JSON (bits count, sub tier, donation...). Strings are
+ * server-escaped; numbers are formatted here; objects flatten to
+ * "key value" pairs; nothing else is shown. */
+function formatAmount(amount) {
+  if (amount === null || amount === undefined) { return ''; }
+  if (typeof amount === 'string') { return safeHtml(amount); }
+  if (typeof amount === 'number') { return finiteNumber(amount) === null ? '' : String(amount); }
+  if (typeof amount === 'object') {
+    var parts = [];
+    Object.keys(amount).slice(0, 6).forEach(function (key) {
+      var inner = formatAmount(amount[key]);
+      if (inner) { parts.push(safeHtml(key) + ' ' + inner); }
+    });
+    return parts.join(' &middot; ');
+  }
+  return '';
+}
+
+var params = new URLSearchParams(window.location.search);
+var match = /\/overlay\/([0-9]+)\/([a-z_]+)\/?$/.exec(window.location.pathname);
+var surface = match ? match[2] : null;
+
+/* ---- per-surface renderers: each takes one sanitized frame ---- */
+
+var alertQueue = [];
+var alertBusy = false;
+var alertMs = intParam(params, 'duration', 6000, 1000, 60000);
+
+function showNextAlert() {
+  if (alertBusy || alertQueue.length === 0) { return; }
+  alertBusy = true;
+  var frame = alertQueue.shift();
+  root.textContent = '';
+  var card = el('div', 'card alert fade-in');
+  var html = '<div class="alert-type">' + safeHtml(frame.alert_type) + '</div>' +
+    '<div class="alert-name">' + safeHtml(frame.display_name || '') + '</div>';
+  var amount = formatAmount(frame.amount);
+  if (amount) { html += '<div class="alert-amount">' + amount + '</div>'; }
+  if (frame.message) { html += '<div class="alert-message">' + safeHtml(frame.message) + '</div>'; }
+  setHtml(card, html);
+  root.appendChild(card);
+  setTimeout(function () {
+    card.className = 'card alert fade-out';
+    setTimeout(function () {
+      root.textContent = '';
+      alertBusy = false;
+      showNextAlert();
+    }, 500);
+  }, alertMs);
+}
+
+function renderAlertBox(frame) {
+  if (alertQueue.length < 20) { alertQueue.push(frame); }
+  showNextAlert();
+}
+
+var chatMax = intParam(params, 'max', 8, 1, 50);
+var chatTtlMs = intParam(params, 'ttl', 30, 3, 600) * 1000;
+var chatBox = null;
+
+function renderChat(frame) {
+  if (!chatBox) { chatBox = el('div', 'chat'); root.appendChild(chatBox); }
+  var line = el('div', 'card line fade-in');
+  setHtml(line,
+    '<span class="platform">' + safeHtml(frame.platform) + '</span>' +
+    '<span class="name">' + safeHtml(frame.display_name) + '</span>' +
+    '<span class="sep">:</span>' + safeHtml(frame.text));
+  chatBox.appendChild(line);
+  while (chatBox.childNodes.length > chatMax) { chatBox.removeChild(chatBox.firstChild); }
+  setTimeout(function () {
+    line.className = 'card line fade-out';
+    setTimeout(function () { if (line.parentNode) { line.parentNode.removeChild(line); } }, 500);
+  }, chatTtlMs);
+}
+
+function renderGoals(frame) {
+  root.textContent = '';
+  var current = finiteNumber(frame.current);
+  var target = finiteNumber(frame.target);
+  var percent = (current !== null && target !== null && target > 0)
+    ? clamp((current / target) * 100, 0, 100) : 0;
+  var card = el('div', 'card goal fade-in');
+  var unit = frame.unit ? ' ' + safeHtml(frame.unit) : '';
+  setHtml(card,
+    '<div class="goal-head"><span>' + safeHtml(frame.label) + '</span><span>' +
+    (current === null ? '?' : String(current)) + ' / ' + (target === null ? '?' : String(target)) +
+    unit + '</span></div><div class="goal-bar"><div class="goal-fill"></div></div>');
+  root.appendChild(card);
+  /* CSSOM, not a style attribute: a numeric clamp, never server text. */
+  card.querySelector('.goal-fill').style.width = percent + '%';
+}
+
+function renderTape(frame, scrolling) {
+  root.textContent = '';
+  if (!frame.text) { return; }
+  var tape = el('div', scrolling ? 'tape scroll' : 'tape');
+  var text = el('span', 'tape-text');
+  setHtml(text, safeHtml(frame.text));
+  tape.appendChild(text);
+  root.appendChild(tape);
+  var seconds = intParam(params, 'speed', 20, 5, 300);
+  tape.style.setProperty('--crawl-seconds', seconds + 's');
+}
+
+function renderStage(frame) {
+  root.textContent = '';
+  if (frame.cleared) { return; }
+  var stage = el('div', 'stage fade-in');
+  if (validImageUrl(frame.image_url)) {
+    var img = document.createElement('img');
+    img.referrerPolicy = 'no-referrer';
+    img.alt = '';
+    img.src = frame.image_url;
+    stage.appendChild(img);
+  }
+  if (frame.title) {
+    var title = el('div', 'stage-title');
+    setHtml(title, safeHtml(frame.title));
+    stage.appendChild(title);
+  }
+  if (frame.body) {
+    var body = el('div', 'stage-body');
+    setHtml(body, safeHtml(frame.body));
+    stage.appendChild(body);
+  }
+  root.appendChild(stage);
+}
+
+var HANDLERS = {
+  alert_box: renderAlertBox,
+  chat: renderChat,
+  goals: renderGoals,
+  ticker: function (frame) { renderTape(frame, false); },
+  crawler: function (frame) { renderTape(frame, true); },
+  full_screen: renderStage,
+  media: renderStage
+};
+
+function onFrame(raw) {
+  var frame;
+  try { frame = JSON.parse(raw); } catch (err) { console.warn('overlay: unparseable frame dropped'); return; }
+  if (!frame || typeof frame !== 'object') { return; }
+  /* The first frame on a connection is {community, surface} with no
+   * content_type: it only confirms the stream is live. */
+  if (typeof frame.content_type !== 'string') { setStatus(null); return; }
+  if (frame.surface !== surface) { return; }
+  applyTheme(frame.theme);
+  var handler = HANDLERS[frame.content_type];
+  if (handler) { handler(frame); }
+}
+
+function connect() {
+  var liveUrl = window.location.pathname.replace(/\/+$/, '') + '/live' + window.location.search;
+  var source = new EventSource(liveUrl);
+  source.onopen = function () { setStatus(null); };
+  source.onmessage = function (event) { onFrame(event.data); };
+  source.onerror = function () { setStatus('Reconnecting...'); };
+}
+
+if (!match || SURFACES.indexOf(surface) < 0 || !params.get('key')) {
+  setStatus('Invalid overlay URL');
+} else {
+  document.body.className = 'surface-' + surface;
+  connect();
+}
+</script>
+</body>
+</html>
