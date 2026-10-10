@@ -100,6 +100,10 @@ spec:
         - secretRef:
             name: {{ .Values.serviceJwt.signingSecretName }}
             optional: true
+        # Enterprise external KMS / BYOK (templates/_kms.tpl): the -kms ConfigMap, the baseline
+        # tenant KEK and any referenced provider-credential Secrets. Renders nothing unless
+        # kms.enabled -- the platform-managed baseline needs none of it.
+        {{- with (include "waddlebot.kms.hubApiEnvFrom" .) }}{{ . | nindent 8 }}{{- end }}
         env:
         # `flask_core.service_jwt.load_issuer_from_env` also reads
         # SERVICE_JWT_PUBLIC_KEY_<kid> for every still-valid-for-verification
