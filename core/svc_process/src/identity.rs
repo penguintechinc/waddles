@@ -244,10 +244,11 @@ pub struct IdentityWiring {
     pub flag: Arc<dyn FeatureGate>,
 }
 
-/// Host-derived identity facts of ONE invocation: who triggered it and which
-/// mentions its message carried. Built by the stage from the event it
-/// delivered; never from guest input. Everything raw is private and `Debug`
-/// is counts-only.
+/// Host-derived facts of ONE invocation: who triggered it, which mentions its
+/// message carried, and which event it is handling (the replay-stable anchor of
+/// the `economy` capability's idempotency keys). Built by the stage from the
+/// event it delivered; never from guest input. Everything raw is private and
+/// `Debug` is counts-only.
 pub struct InvocationIdentity {
     platform: String,
     actor_platform_user_id: Option<String>,
@@ -256,6 +257,15 @@ pub struct InvocationIdentity {
     /// resolving the same identity repeatedly costs one lookup. Successes only
     /// -- a refusal is always re-evaluated. Never held across an `.await`.
     resolved: Mutex<HashMap<String, Uuid>>,
+    /// The spine envelope's `event_id` (a UUID v4 the hop MAC covers): identical
+    /// across every redelivery of the same event, so economy calls made while
+    /// handling a replayed event map to the keys they had the first time.
+    /// `None` until [`Self::with_event_id`]: an invocation without one cannot
+    /// make a money-moving call (it could not be made idempotent).
+    event_id: Option<String>,
+    /// Next ordinal per economy mutation kind (`wager` | `transfer`); see
+    /// [`Self::reserve_mutation`]. Never held across an `.await`.
+    mutation_seq: Mutex<HashMap<&'static str, u32>>,
 }
 
 impl fmt::Debug for InvocationIdentity {
@@ -264,6 +274,7 @@ impl fmt::Debug for InvocationIdentity {
             .field("platform", &self.platform)
             .field("has_actor", &self.actor_platform_user_id.is_some())
             .field("mentions", &self.mentions.len())
+            .field("has_event_id", &self.event_id.is_some())
             .finish()
     }
 }
@@ -315,6 +326,8 @@ impl InvocationIdentity {
             actor_platform_user_id,
             mentions,
             resolved: Mutex::new(HashMap::new()),
+            event_id: None,
+            mutation_seq: Mutex::new(HashMap::new()),
         }
     }
 
@@ -358,6 +371,49 @@ impl InvocationIdentity {
             actor_platform_user_id,
             mentions: table,
             resolved: Mutex::new(HashMap::new()),
+            event_id: None,
+            mutation_seq: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Anchors this invocation's economy idempotency keys to the event it
+    /// handles. `event_id` is the hop-verified spine envelope id, never guest
+    /// input. Without it every money-moving economy call is refused.
+    pub fn with_event_id(mut self, event_id: impl Into<String>) -> Self {
+        self.event_id = Some(event_id.into());
+        self
+    }
+
+    /// Claims the next ordinal for a `kind` (`wager` | `transfer`) economy
+    /// mutation and returns it with the event id, i.e. the pair an
+    /// idempotency key is derived from. `None` when the invocation has no event
+    /// id (or its counter is poisoned): the caller must refuse the call.
+    ///
+    /// Ordinals count the invocation's mutations of each kind in call order, so
+    /// a redelivered event whose bundle repeats the same calls reproduces the
+    /// same keys -- and a second identical call in ONE invocation is a distinct
+    /// operation with its own key, not a replay.
+    pub fn reserve_mutation(&self, kind: &'static str) -> Option<(&str, u32)> {
+        let event_id = self.event_id.as_deref()?;
+        let mut seq = self.mutation_seq.lock().ok()?;
+        let next = seq.entry(kind).or_insert(0);
+        let ordinal = *next;
+        *next = next.saturating_add(1);
+        Some((event_id, ordinal))
+    }
+
+    /// Gives back the ordinal [`Self::reserve_mutation`] handed out, but only
+    /// when nothing was reserved after it. Called when a call's outcome is
+    /// INDETERMINATE (a backend failure: it may or may not have committed), so
+    /// the guest's retry of that call presents the SAME key and is applied at
+    /// most once. A definitive outcome (applied, or refused) keeps its ordinal.
+    pub fn release_mutation(&self, kind: &'static str, ordinal: u32) {
+        if let Ok(mut seq) = self.mutation_seq.lock() {
+            if let Some(next) = seq.get_mut(kind) {
+                if *next == ordinal.saturating_add(1) {
+                    *next = ordinal;
+                }
+            }
         }
     }
 
@@ -380,6 +436,7 @@ impl InvocationIdentity {
 struct Instruments {
     duration_seconds: Histogram<f64>,
     resolutions_total: Counter<u64>,
+    actor_bindings_total: Counter<u64>,
 }
 
 static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
@@ -397,6 +454,12 @@ fn instruments() -> &'static Instruments {
                 .u64_counter("waddles_bundle_identity_resolutions_total")
                 .with_description("Bundle `identity` resolutions, by op, via and outcome")
                 .build(),
+            actor_bindings_total: meter
+                .u64_counter("waddles_bundle_economy_actor_bindings_total")
+                .with_description(
+                    "Economy mutations checked against the invocation's bound actor, by op and outcome",
+                )
+                .build(),
         }
     })
 }
@@ -411,6 +474,16 @@ fn record(op: &'static str, via: &'static str, outcome: &'static str, seconds: f
     ];
     instruments().duration_seconds.record(seconds, &attrs);
     instruments().resolutions_total.add(1, &attrs);
+}
+
+/// Records one economy mutation's actor-binding check. `outcome` is a fixed
+/// vocabulary (`bound`, `mismatch`, or the failed resolution's wire code);
+/// never a user id.
+pub(crate) fn record_actor_binding(op: &'static str, outcome: &'static str) {
+    instruments().actor_bindings_total.add(
+        1,
+        &[KeyValue::new("op", op), KeyValue::new("outcome", outcome)],
+    );
 }
 
 /// A non-nil UUID or a loud backend error: a nil UUID is never a legitimate

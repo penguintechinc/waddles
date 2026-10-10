@@ -67,7 +67,7 @@ use bundle_host_db::{
     CapabilitySnapshot as DbCapabilitySnapshot, DbError, DbHost, DbScope, DbValue, PostgresBackend,
     SchemaCache,
 };
-use bundle_host_economy::{EconomyCaps, EconomyError, EconomyScope, EconomyStore};
+use bundle_host_economy::{EconomyCaps, EconomyError, EconomyScope, EconomyStore, IdempotencyKey};
 use bundle_host_http::egress::{EgressGuard, EgressRuleRow, EgressRuleSource};
 use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use bundle_host_reputation::{ReputationCaps, ReputationError, ReputationScope, ReputationStore};
@@ -122,7 +122,8 @@ fn reputation_error_to_host(err: ReputationError) -> HostResultError {
 /// money-moving economy permission -- the catalog's own
 /// `per_user_daily_abs_max` / `per_scope_daily_abs_max`, so the gate's
 /// in-memory quota and the store's durable caps can never disagree about the
-/// ceilings. Any non-`EconomyAmount` shape (a wiring bug, unit-tested away in
+/// ceilings. (For a wager the store applies them to the stake AND, in its own
+/// window, to the payout it mints.) Any non-`EconomyAmount` shape (a wiring bug, unit-tested away in
 /// the gate crate) caps both at zero, refusing every call rather than guessing.
 fn economy_caps(family: PermissionFamily) -> EconomyCaps {
     match family.catalog_entry().default_quota {
@@ -656,13 +657,21 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// parsing -- users must be UUIDs, amounts positive in-range integers (a
     /// transfer to oneself is malformed); (2) the community must be a real one;
     /// (3) **the gate authorizes FIRST** with an `EconomyScoped` resource, so
-    /// grant, declared `max_bet`/`max_amount`, the economy's own amount quotas,
-    /// instance policy and the membership pre-filter (every named user) all run
-    /// before anything else can leak state; (4) wiring/flag state; (5) the
-    /// store, which re-verifies membership and enforces the per-call cap --
-    /// computed HERE from the grant's declared bound clamped to the catalog
-    /// ceiling, never from guest input -- and the durable per-user/per-scope
-    /// rolling-24h caps ([`economy_caps`]) inside its own atomic write. Scope (tenant/community/
+    /// grant, declared `max_bet`/`max_amount`, the economy's own amount quotas
+    /// (a wager's stake AND its payout -- the mint), instance policy and the
+    /// membership pre-filter (every named user) all run before anything else
+    /// can leak state; (4) wiring/flag state; (5) **actor binding** (money
+    /// movers only): the account whose funds move -- a wager's `user`, a
+    /// transfer's `from` -- MUST be the invocation's authenticated actor
+    /// ([`Self::bind_actor`]: derived host-side from the event, never from an
+    /// argument), else `actor_mismatch`; a bundle can spend only the funds of
+    /// whoever triggered it; (6) an **idempotency key** derived from the event
+    /// id and the mutation's ordinal ([`InvocationIdentity::reserve_mutation`]),
+    /// so a retried or replayed call credits once; (7) the store, which
+    /// re-verifies membership and enforces the per-call cap -- computed HERE
+    /// from the grant's declared bound clamped to the catalog ceiling, never
+    /// from guest input -- and the durable per-user/per-scope rolling-24h caps
+    /// ([`economy_caps`]) inside its own atomic write. Scope (tenant/community/
     /// app) is always `self`'s host-derived scope, never an argument.
     async fn handle_economy(
         &self,
@@ -731,11 +740,11 @@ impl<K: KvBackend> StageCapabilities<K> {
         // `max_bet` describes the WAGER capability's own limit, so it is
         // authorized under `economy.wager` (carrying no amount: it is rate
         // limited, not metered); balance/leaderboard are `economy.read`.
-        let (permission, amount) = match op {
-            Op::Balance | Op::Leaderboard(_) => (PermissionId::EconomyRead, None),
-            Op::MaxBet => (PermissionId::EconomyWager, None),
-            Op::Wager(stake, _) => (PermissionId::EconomyWager, Some(stake)),
-            Op::Transfer(amount) => (PermissionId::EconomyTransfer, Some(amount)),
+        let (permission, amount, payout) = match op {
+            Op::Balance | Op::Leaderboard(_) => (PermissionId::EconomyRead, None, None),
+            Op::MaxBet => (PermissionId::EconomyWager, None, None),
+            Op::Wager(stake, payout) => (PermissionId::EconomyWager, Some(stake), Some(payout)),
+            Op::Transfer(amount) => (PermissionId::EconomyTransfer, Some(amount), None),
         };
         let family = permission.family();
         let authorized = self
@@ -747,6 +756,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                     target_user,
                     counterparty,
                     amount,
+                    payout,
                 }),
             )
             .map_err(denied_from_gate)?;
@@ -771,6 +781,38 @@ impl<K: KvBackend> StageCapabilities<K> {
             app_id: self.app_id.clone(),
         };
         let user = target_user.unwrap_or_default();
+
+        // Actor binding + idempotency key for the money movers. Neither is
+        // optional: with no resolvable actor, or no event to anchor a key to,
+        // the mutation is refused loudly rather than run unbound/unkeyed.
+        let mut reservation: Option<(&InvocationIdentity, &'static str, u32)> = None;
+        let mut idempotency: Option<IdempotencyKey> = None;
+        if let Op::Wager(..) | Op::Transfer(_) = op {
+            let kind = if matches!(op, Op::Wager(..)) {
+                "wager"
+            } else {
+                "transfer"
+            };
+            self.bind_actor(kind, user).await?;
+            let Some(invocation) = self.invocation_identity.as_deref() else {
+                return Err(denied(
+                    "not_implemented",
+                    "this invocation carries no triggering-event facts to key an economy mutation to",
+                ));
+            };
+            let Some((event_id, ordinal)) = invocation.reserve_mutation(kind) else {
+                return Err(denied(
+                    "not_implemented",
+                    "this invocation carries no replay-stable event id; economy mutations cannot be made idempotent",
+                ));
+            };
+            idempotency = Some(
+                IdempotencyKey::for_event(event_id, kind, ordinal)
+                    .map_err(economy_error_to_host)?,
+            );
+            reservation = Some((invocation, kind, ordinal));
+        }
+
         let result = match op {
             Op::Balance => wiring
                 .store
@@ -794,9 +836,12 @@ impl<K: KvBackend> StageCapabilities<K> {
                 let cap = family
                     .economy_amount_bound(&authorized.params)
                     .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
+                let key = idempotency
+                    .as_ref()
+                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
                 wiring
                     .store
-                    .wager(&scope, user, stake, payout, cap, economy_caps(family))
+                    .wager(&scope, user, stake, payout, cap, economy_caps(family), key)
                     .await
                     .map(|balance| serde_json::json!({ "balance": balance }))
             }
@@ -805,9 +850,12 @@ impl<K: KvBackend> StageCapabilities<K> {
                     .economy_amount_bound(&authorized.params)
                     .ok_or_else(|| denied("backend", "economy cap unavailable"))?;
                 let to = counterparty.unwrap_or_default();
+                let key = idempotency
+                    .as_ref()
+                    .ok_or_else(|| denied("backend", "economy mutation has no idempotency key"))?;
                 wiring
                     .store
-                    .transfer(&scope, user, to, amount, cap, economy_caps(family))
+                    .transfer(&scope, user, to, amount, cap, economy_caps(family), key)
                     .await
                     .map(|()| serde_json::json!({}))
             }
@@ -823,7 +871,70 @@ impl<K: KvBackend> StageCapabilities<K> {
                 })
             }),
         };
+        // A backend failure is INDETERMINATE (it may have committed before the
+        // connection died): give the ordinal back so the guest's retry of the
+        // same call presents the SAME key and is applied at most once. Every
+        // definitive outcome (applied or refused) keeps its ordinal.
+        if let (Some((invocation, kind, ordinal)), Err(EconomyError::Backend(_))) =
+            (reservation, &result)
+        {
+            invocation.release_mutation(kind, ordinal);
+        }
         result.map_err(economy_error_to_host)
+    }
+
+    /// Binds an economy money mover to the invocation's authenticated actor:
+    /// resolves the TRIGGERING actor host-side ([`identity::resolve_actor`]
+    /// over the event the stage delivered -- no argument can name whose
+    /// identity it is) and requires `named`, the account whose funds the call
+    /// would move (a wager's player, a transfer's sender), to be that actor.
+    ///
+    /// Without this a bundle could pass any member's UUID as the payer and move
+    /// THEIR funds (theft). It deliberately does not consult the `identity`
+    /// capability's flag or the bundle's `identity.resolve` grant: this is a
+    /// platform guarantee about whose money a bundle may move, not a
+    /// bundle-facing feature. Fail-closed at every step: no identity wiring or
+    /// invocation facts (`not_implemented`), an unresolvable actor (the
+    /// identity wire code -- `not_linked`, `not_a_member`, ...), a different
+    /// account (`actor_mismatch`). Logs carry UUIDs only.
+    async fn bind_actor(&self, op: &'static str, named: uuid::Uuid) -> Result<(), HostResultError> {
+        let (Some(wiring), Some(invocation)) = (&self.identity, &self.invocation_identity) else {
+            identity::record_actor_binding(op, "unwired");
+            return Err(denied(
+                "not_implemented",
+                "economy mutations are bound to the invocation's actor, but this deployment has \
+                 no identity wiring (no DB reader account configured for the stage)",
+            ));
+        };
+        let scope = IdentityScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+        };
+        let actor = match identity::resolve_actor(wiring, invocation, scope).await {
+            Ok(actor) => actor,
+            Err(e) => {
+                identity::record_actor_binding(op, e.wire_code());
+                return Err(identity_error_to_host(e));
+            }
+        };
+        if actor != named {
+            identity::record_actor_binding(op, "mismatch");
+            tracing::warn!(
+                op,
+                tenant_id = self.tenant_id,
+                community_id = self.community_id,
+                app_id = %self.app_id,
+                actor = %actor,
+                named = %named,
+                "economy mutation refused: the named account is not the invocation's actor"
+            );
+            return Err(denied(
+                "actor_mismatch",
+                "an economy mutation may only move the funds of the account that triggered this invocation",
+            ));
+        }
+        identity::record_actor_binding(op, "bound");
+        Ok(())
     }
 
     /// `reputation.get` / `reputation.adjust` (`wit/waddle-bundle/stage.wit`

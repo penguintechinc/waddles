@@ -202,7 +202,8 @@ pub enum Quota {
     /// points-nudge scale and would make a currency unusable, while the
     /// currency amounts here are `i64` (a `BIGINT` balance), unsigned in the
     /// WIT, and metered as the call's absolute amount (a wager meters its
-    /// STAKE; a transfer its amount). A per-call breach is
+    /// STAKE and, separately against the same ceilings, the PAYOUT it credits
+    /// -- the mint cap; a transfer its amount). A per-call breach is
     /// [`crate::denied::Denied::AmountOutOfBounds`]; either aggregate breach
     /// is [`crate::denied::Denied::QuotaExceeded`].
     EconomyAmount {
@@ -608,7 +609,7 @@ impl PermissionFamily {
                     per_user_daily_abs_max: 10_000,
                     per_scope_daily_abs_max: 250_000,
                 },
-                notes: "issue #714; stake metered; declared params.max_bet clamped to the per-call ceiling",
+                notes: "issue #714; stake AND payout (the mint) metered; declared params.max_bet clamped to the per-call ceiling",
             },
             Self::EconomyTransfer => CatalogEntry {
                 family: *self,
