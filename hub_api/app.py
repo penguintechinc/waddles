@@ -48,6 +48,7 @@ from openapi.routes import register_openapi_docs
 from services.bundle_active_set_watermark_job import BundleActiveSetWatermarkJob
 from services.bundle_install_dal import build_install_dal
 from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
+from services.identity_resolution_service import run_uuid_availability_monitor
 from services.rate_limiting import install_rate_limiting
 from services.schema import (
     bind_ai_routing_tables,
@@ -356,6 +357,14 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
                 "hub-api internal gRPC server not started: service_jwt issuer unconfigured",
                 extra={"action": "grpc_startup_skipped"},
             )
+        # Surfaces community members whose user_uuid the membership trigger could not
+        # derive (alembic 0048 fail-closed NULLs) as a gauge + WARNING -- a dead pass
+        # is logged and retried, never a request failure. Waits for schema readiness.
+        app.config["identity_uuid_monitor"] = None
+        if cfg.database_url.startswith("postgres"):
+            app.config["identity_uuid_monitor"] = asyncio.create_task(
+                run_uuid_availability_monitor(async_dal, is_ready=lambda: bootstrap_status.is_ready)
+            )
         logger.system("hub-api started", action="startup", result="SUCCESS")
 
     @app.after_serving
@@ -381,6 +390,14 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
                 if not isinstance(exc, asyncio.CancelledError):
                     logger.warning(f"Error stopping bootstrap task on shutdown: {exc}")
+        uuid_monitor = app.config.get("identity_uuid_monitor")
+        if uuid_monitor is not None:
+            uuid_monitor.cancel()
+            try:
+                await uuid_monitor
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(f"Error stopping identity uuid monitor on shutdown: {exc}")
         watermark_job = app.config.get("bundle_active_set_watermark_job")
         if watermark_job is not None:
             try:

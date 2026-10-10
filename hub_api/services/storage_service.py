@@ -24,11 +24,13 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from typing import Any
 
 import boto3
 from botocore.client import Config as BotoConfig
+from flask_core.safe_logging import describe_exc, log_exc_safe
 
 logger = logging.getLogger(__name__)
 
@@ -239,19 +241,20 @@ async def read_bundle_sidecar(app_id: str, version: str, sha256_hex: str) -> dic
             if "NoSuchKey" in str(exc) or "404" in str(exc):
                 logger.debug(
                     "bundle sidecar not found (generic ClientError 404/NoSuchKey): "
-                    "bucket=%s key=%s exc_type=%s exc=%s",
+                    "bucket=%s key=%s %s",
                     _bucket(),
                     key,
-                    type(exc).__name__,
-                    exc,
+                    describe_exc(exc),
                 )
                 return None
-            logger.error(
-                "bundle sidecar read failed: bucket=%s key=%s exc_type=%s exc=%s",
-                _bucket(),
-                key,
-                type(exc).__name__,
+            # Redacted: type/code/category only -- the botocore message can echo request detail.
+            log_exc_safe(
+                logger,
+                logging.ERROR,
+                "bundle sidecar read failed",
                 exc,
+                bucket=_bucket(),
+                key=key,
             )
             raise
         body = resp["Body"].read()
@@ -259,6 +262,16 @@ async def read_bundle_sidecar(app_id: str, version: str, sha256_hex: str) -> dic
         return result
 
     return await asyncio.to_thread(_get)
+
+
+def _key_prefix(key: str) -> str:
+    """Return the key's top-level folder (`avatars`, `community-assets`, ...) or a constant.
+
+    Gives enough context to tell which asset class a failed delete belonged to without
+    logging the object key itself, which embeds a caller-supplied URL path.
+    """
+    prefix = key.split("/", 1)[0]
+    return prefix if re.fullmatch(r"[a-z0-9_-]{1,32}", prefix) else "<unrecognized>"
 
 
 async def delete_object(url: str) -> None:
@@ -272,6 +285,15 @@ async def delete_object(url: str) -> None:
         try:
             _client().delete_object(Bucket=_bucket(), Key=key)
         except Exception as exc:  # noqa: BLE001 - best-effort cleanup, matches Node's deleteFile()
-            logger.warning("Failed to delete storage object", extra={"key": key, "error": str(exc)})
+            # Redacted: `key` is derived from a caller-supplied URL (may carry a query-string
+            # signature or other secret) and `str(exc)` can echo it -- log only the key's
+            # top-level folder plus type/code/category.
+            log_exc_safe(
+                logger,
+                logging.WARNING,
+                "Failed to delete storage object",
+                exc,
+                key_prefix=_key_prefix(key),
+            )
 
     await asyncio.to_thread(_delete)

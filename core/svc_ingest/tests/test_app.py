@@ -553,6 +553,84 @@ class TestKickReceiverRegistration:
             assert len(quart_app.config["kick_leased_receivers"]) == 2
 
 
+class TestSpectrumReceiverRegistration:
+    """`_register_spectrum_receivers` -- skip paths, per-source leases, flag (gh #101)."""
+
+    async def test_manifest_registered_even_without_config(self) -> None:
+        async with quart_app.test_app():
+            manifest = quart_app.config["registry"].get("waddles.bot.spectrum.default")
+            assert manifest.stage_specs["ingest"].consumes == ("spectrum.message",)
+
+    async def test_skipped_without_sources(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(Config, "SPECTRUM_FORUM_CHANNELS", [])
+        monkeypatch.setattr(Config, "SPECTRUM_LOBBIES", [])
+        async with quart_app.test_app():
+            assert "spectrum_leased_receivers" not in quart_app.config
+
+    async def test_skipped_loudly_without_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(Config, "SPECTRUM_LOBBIES", ["L1"])
+        monkeypatch.delenv("SPECTRUM_RSI_TOKEN", raising=False)
+        warned: list[str] = []
+        monkeypatch.setattr(
+            app_module.logger, "warning", lambda message, **kw: warned.append(message)
+        )
+        async with quart_app.test_app():
+            assert "spectrum_leased_receivers" not in quart_app.config
+        assert any("Spectrum ingest NOT started" in m for m in warned)
+
+    async def test_registers_one_leased_receiver_per_source(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(Config, "SPECTRUM_FORUM_CHANNELS", ["F1"])
+        monkeypatch.setattr(Config, "SPECTRUM_LOBBIES", ["L1", "L2"])
+        monkeypatch.setenv("SPECTRUM_RSI_TOKEN", "tok")
+
+        class _StubSpectrumReceiver:
+            name = "spectrum_poll"
+
+            def __init__(self, **kwargs: Any) -> None:
+                self.kwargs = kwargs
+
+            async def receive(self, config: dict[str, Any]) -> Any:
+                return
+                yield  # pragma: no cover
+
+        monkeypatch.setattr(app_module, "SpectrumPollReceiver", _StubSpectrumReceiver)
+
+        async with quart_app.test_app():
+            registered = set(quart_app.config["supervisor"]._receivers)  # noqa: SLF001
+            expected = {"spectrum_poll:forum-F1", "spectrum_poll:lobby-L1"}
+            expected.add("spectrum_poll:lobby-L2")
+            assert expected <= registered
+            assert len(quart_app.config["spectrum_leased_receivers"]) == 3
+
+    @pytest.mark.parametrize("baseline", [True, False])
+    async def test_flag_check_uses_env_baseline_as_default(
+        self, monkeypatch: pytest.MonkeyPatch, baseline: bool
+    ) -> None:
+        seen: dict[str, Any] = {}
+
+        async def fake_feature_enabled(key: str, **kw: Any) -> bool:
+            seen.update(key=key, **kw)
+            return bool(kw["default"])
+
+        monkeypatch.setattr("flask_core.feature_flags.feature_enabled", fake_feature_enabled)
+        monkeypatch.setenv("FLAG_WADDLES_SPECTRUM_INTEGRATION", "true" if baseline else "")
+        assert await app_module._spectrum_flag_enabled() is baseline  # noqa: SLF001
+        assert seen["key"] == "waddles.spectrum-integration"
+        assert seen["default"] is baseline
+
+    def test_token_presence_and_flag_baseline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("SPECTRUM_RSI_TOKEN", raising=False)
+        monkeypatch.delenv("FLAG_WADDLES_SPECTRUM_INTEGRATION", raising=False)
+        assert Config.spectrum_token_configured() is False
+        assert Config.spectrum_flag_baseline() is False  # default OFF
+        monkeypatch.setenv("SPECTRUM_RSI_TOKEN", "t")
+        monkeypatch.setenv("FLAG_WADDLES_SPECTRUM_INTEGRATION", "ON")
+        assert Config.spectrum_token_configured() is True
+        assert Config.spectrum_flag_baseline() is True
+
+
 class TestKickWebhookRoute:
     """`POST /webhook/kick` (gh #287 S10) -- mounted like `eventsub_bp`'s own Twitch route."""
 

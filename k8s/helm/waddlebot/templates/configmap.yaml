@@ -118,6 +118,10 @@ data:
   KICK_PUSHER_KEY: {{ .Values.config.kickPusherKey | default "" | quote }}
   KICK_PUSHER_CLUSTER: {{ .Values.config.kickPusherCluster | default "" | quote }}
   YOUTUBE_LIVE_CHANNELS: {{ .Values.config.youtubeLiveChannels | default "" | quote }}
+  # RSI Spectrum one-way ingest (gh #101). Flag baseline defaults OFF; PostHog overrides when connected.
+  SPECTRUM_FORUM_CHANNELS: {{ .Values.config.spectrumForumChannels | default "" | quote }}
+  SPECTRUM_LOBBIES: {{ .Values.config.spectrumLobbies | default "" | quote }}
+  FLAG_WADDLES_SPECTRUM_INTEGRATION: {{ .Values.config.spectrumIntegrationEnabled | default false | quote }}
 
   # Service Discovery URLs
   HUB_API_URL: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:8204"
