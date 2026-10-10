@@ -17,6 +17,19 @@ Signals (no PII, no prompt/response text, no secrets in any attribute or label):
 * counter ``waddles.ai.provider.errors`` -- failed calls; label ``error.code`` (a class name or
   typed error code, never a message).
 
+Prompt-injection / tool-authorisation signals (:mod:`flask_core.ai_guard`,
+:mod:`flask_core.ai_tool_authz`; labels are closed vocabularies, never request text):
+
+* counter ``waddles.ai.guard.injection_signals`` -- injection categories seen in retrieved/untrusted
+  content; labels ``source``, ``category``.
+* counter ``waddles.ai.guard.items`` -- retrieved items kept vs dropped; labels ``source``,
+  ``outcome`` (``kept``/``dropped``).
+* histogram ``waddles.ai.guard.duration`` (ms) -- screening / tool-authorisation overhead; label
+  ``op``.
+* counter ``waddles.ai.tool_call.decisions`` -- model-requested tool calls; labels ``decision``
+  (``allowed``/``denied``), ``reason`` (a stable code), ``tool`` (a registered tool name or
+  ``unknown`` -- model-chosen names never become a label).
+
 Usage::
 
     telemetry = AITelemetry("waddles.my_service.ai")
@@ -49,6 +62,10 @@ class Instruments:
     duration: Any
     tokens: Any
     errors: Any
+    injection_signals: Any
+    guard_items: Any
+    guard_duration: Any
+    tool_decisions: Any
 
 
 class AITelemetry:
@@ -76,6 +93,26 @@ class AITelemetry:
                 "waddles.ai.provider.errors",
                 unit="{call}",
                 description="Failed model-provider calls",
+            ),
+            injection_signals=meter.create_counter(
+                "waddles.ai.guard.injection_signals",
+                unit="{signal}",
+                description="Prompt-injection categories seen in untrusted content",
+            ),
+            guard_items=meter.create_counter(
+                "waddles.ai.guard.items",
+                unit="{item}",
+                description="Retrieved items kept or dropped by the injection guard",
+            ),
+            guard_duration=meter.create_histogram(
+                "waddles.ai.guard.duration",
+                unit="ms",
+                description="Injection-screening / tool-authorisation overhead",
+            ),
+            tool_decisions=meter.create_counter(
+                "waddles.ai.tool_call.decisions",
+                unit="{call}",
+                description="Model-requested tool calls, by authorisation decision",
             ),
         )
         return self._instruments
@@ -140,5 +177,54 @@ class AITelemetry:
                 inst.tokens.add(input_tokens, {**labels, "direction": "input"})
             if output_tokens:
                 inst.tokens.add(output_tokens, {**labels, "direction": "output"})
+        except Exception as exc:  # telemetry must never fail the request
+            logger.warning("ai_telemetry_failed %s", describe_db_error(exc))
+
+    def record_guard_screen(
+        self,
+        *,
+        source: str,
+        categories: frozenset[str],
+        kept: int,
+        dropped: int,
+        duration_ms: float,
+    ) -> None:
+        """Record one retrieved-content screening pass (counts, categories). Never raises."""
+        try:
+            inst = self.instruments()
+            inst.guard_duration.record(duration_ms, {"op": "screen"})
+            if kept:
+                inst.guard_items.add(kept, {"source": source, "outcome": "kept"})
+            if dropped:
+                inst.guard_items.add(dropped, {"source": source, "outcome": "dropped"})
+            for category in categories:
+                inst.injection_signals.add(1, {"source": source, "category": category})
+        except Exception as exc:  # telemetry must never fail the request
+            logger.warning("ai_telemetry_failed %s", describe_db_error(exc))
+
+    def record_injection_signals(self, *, source: str, categories: frozenset[str]) -> None:
+        """Record injection categories seen in a direct (non-retrieved) input. Never raises."""
+        try:
+            inst = self.instruments()
+            for category in categories:
+                inst.injection_signals.add(1, {"source": source, "category": category})
+        except Exception as exc:  # telemetry must never fail the request
+            logger.warning("ai_telemetry_failed %s", describe_db_error(exc))
+
+    def record_tool_decision(
+        self, *, allowed: bool, reason: str, tool: str, duration_ms: float | None = None
+    ) -> None:
+        """Record one model-requested tool call's authorisation decision. Never raises.
+
+        ``tool`` must be a name from the server-side registry or the literal ``"unknown"``:
+        a model-chosen string is attacker-controlled and must never become a metric label.
+        """
+        try:
+            inst = self.instruments()
+            inst.tool_decisions.add(
+                1, {"decision": "allowed" if allowed else "denied", "reason": reason, "tool": tool}
+            )
+            if duration_ms is not None:
+                inst.guard_duration.record(duration_ms, {"op": "tool_authz"})
         except Exception as exc:  # telemetry must never fail the request
             logger.warning("ai_telemetry_failed %s", describe_db_error(exc))

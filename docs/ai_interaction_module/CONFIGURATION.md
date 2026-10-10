@@ -588,3 +588,15 @@ Configuration errors: AI_TEMPERATURE must be between 0 and 2
 6. **Test Configuration**: Use `/api/v1/ai/test` endpoint before deployment
 7. **Set Response Prefix**: Help users identify AI responses
 8. **Configure Event Responses**: Only enable events you want AI to respond to
+
+## Prompt-Injection Hardening (OWASP LLM01)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AI_REDACT_PII_SELF_HOSTED` | `false` | Also redact PII / secret-shaped strings from prompts sent to self-hosted Ollama. WaddleAI traffic leaves our infrastructure and is **always** redacted |
+
+Always on: delimiter-proof untrusted-content wrapping, tool-call refusal (a tool call in an answer
+raises `ToolCallDenied`; `AIService` serves the canned reply and meters `error.code=ToolCallDenied`),
+reply sanitising (remote-image beacons, mass mentions, hidden characters) and `safe_label`
+validation of the platform / event type before they reach the system prompt. See
+[`docs/security/ai-prompt-injection-hardening.md`](../security/ai-prompt-injection-hardening.md).

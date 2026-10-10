@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import ast
 import logging
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -58,36 +60,57 @@ class TestConsentProofTrail:
 
 
 class TestFailedDeletionRecord:
-    def _dal(self, *, insert_error: Exception | None) -> MagicMock:
+    """The "failed" ledger row of an erasure is itself an audit write that must not vanish.
+
+    Erasure runs as ONE executor job (`_sync_erase`, all-or-nothing -- see
+    `test_data_privacy_erasure.py::TestAtomicity`), so the original failure is injected as the
+    first statement of that job raising on the (mocked) DAL, with a REAL single-thread executor
+    standing in for `AsyncDAL.executor`.
+    """
+
+    @pytest.fixture
+    def executor(self) -> Iterator[ThreadPoolExecutor]:
+        pool = ThreadPoolExecutor(max_workers=1)
+        yield pool
+        pool.shutdown(wait=True)
+
+    def _dals(
+        self, executor: ThreadPoolExecutor, *, insert_error: Exception | None
+    ) -> tuple[MagicMock, MagicMock]:
         async_dal = MagicMock()
+        async_dal.executor = executor
         async_dal.select_async = AsyncMock(
             return_value=[SimpleNamespace(email="alice@example.com", password_hash=None)]
         )
-        async_dal.delete_async = AsyncMock(side_effect=RuntimeError("the ORIGINAL failure"))
         async_dal.insert_async = AsyncMock(side_effect=insert_error)
-        return async_dal
+        dal = MagicMock()
+        dal.return_value.delete.side_effect = RuntimeError("the ORIGINAL failure")
+        return async_dal, dal
 
     async def test_failure_to_record_the_failure_is_loud_and_does_not_mask_the_original(
-        self, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture, executor: ThreadPoolExecutor
     ) -> None:
-        async_dal = self._dal(insert_error=RuntimeError(f"audit insert failed: {SECRET}"))
+        async_dal, dal = self._dals(
+            executor, insert_error=RuntimeError(f"audit insert failed: {SECRET}")
+        )
         caplog.set_level(logging.ERROR, logger="services.audit_service")
         with pytest.raises(RuntimeError, match="the ORIGINAL failure"):
             await data_privacy_service.request_data_deletion(
-                async_dal, MagicMock(), user_id=7, password=None
+                async_dal, dal, user_id=7, password=None
             )
         text = "\n".join(r.getMessage() for r in caplog.records)
         assert "action=privacy.deletion_failure_record" in text
         assert "type=RuntimeError" in text and SECRET not in text
+        dal.rollback.assert_called()  # the erasure itself was rolled back, not half-applied
 
     async def test_when_the_failure_record_is_written_nothing_extra_is_logged(
-        self, caplog: pytest.LogCaptureFixture
+        self, caplog: pytest.LogCaptureFixture, executor: ThreadPoolExecutor
     ) -> None:
-        async_dal = self._dal(insert_error=None)
+        async_dal, dal = self._dals(executor, insert_error=None)
         caplog.set_level(logging.ERROR, logger="services.audit_service")
         with pytest.raises(RuntimeError, match="the ORIGINAL failure"):
             await data_privacy_service.request_data_deletion(
-                async_dal, MagicMock(), user_id=7, password=None
+                async_dal, dal, user_id=7, password=None
             )
         assert not [r for r in caplog.records if "audit write FAILED" in r.getMessage()]
         assert async_dal.insert_async.await_count == 1  # the "failed" bookkeeping row
