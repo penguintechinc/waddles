@@ -96,11 +96,13 @@ encode` log lines per started pipeline. Notes:
   detected, not assumed (a newer ffmpeg picks AV1 hardware up automatically).
 - A GPU needs more than this code: the container needs the device
   (`/dev/dri/renderD128` + `supplementalGroups`, or the NVIDIA device
-  plugin) **and** a user-space driver (Mesa `va-driver` / NVIDIA runtime) in
-  the image. The base image ships neither, which is why the trial encode
-  exists -- on `penguin-frame` (AMD Phoenix1, `renderD128` present) VA-API
-  fails with *"Failed to initialise VAAPI connection"* and the service
-  correctly stays on the CPU.
+  plugin) **and** a user-space driver in the image. The `cpu` image ships
+  neither; the `amd` image adds the VA-API driver, the `nvidia` image asks
+  the NVIDIA runtime for the host-matched NVENC library (see Container). The
+  trial encode is what keeps a mismatch safe -- on `penguin-frame` (AMD
+  Phoenix1, `renderD128` present) VA-API fails with *"Failed to initialise
+  VAAPI connection"* on the `cpu` image and the service correctly stays on
+  the CPU.
 - NVENC on consumer cards caps concurrent sessions; a session that fails to
   open at runtime is a pipeline failure the supervisor restarts, not a
   per-start CPU re-fallback.
@@ -288,14 +290,98 @@ reap the whole group and never starve the runtime).
 ## Container
 
 `Dockerfile.rust` -- multi-stage `rust:1.97-slim-bookworm` builder ->
-`debian:bookworm-slim` runtime + `ffmpeg`. Named `Dockerfile.rust` (not
-`Dockerfile`) until the Python alpha (`Dockerfile`, `app.py`, ...) is
-retired; the reusable `build-container.yml` workflow currently only builds
-`./<module_path>/Dockerfile`, so CI wiring for this Rust build lives in
-`.github/workflows/rust-svc-streaming.yml` (lint/test) --
-`build-svc-streaming.yml`'s container job will need `build-container.yml`
-extended with a `dockerfile` input (or this file renamed) before it builds
-the Rust image in CI; that is a known follow-up, not done in this change.
+`debian:bookworm-slim` `runtime-base` (ffmpeg 5.1.9) -> one of three
+variant targets. Named `Dockerfile.rust` (not `Dockerfile`) until the Python
+alpha (`Dockerfile`, `app.py`, ...) is retired.
 
-Non-root `appuser` (uid 10001), binary `HEALTHCHECK` (`svc-streaming
---healthcheck`, no `curl`), `EXPOSE 8208 9090 1935 9000/udp`.
+```
+builder ──► runtime-base ──┬──► cpu     svc-streaming:<tag>-cpu
+ (rust)     (ffmpeg,      ├──► amd     svc-streaming:<tag>-amd
+            appuser)      └──► nvidia  svc-streaming:<tag>-nvidia
+```
+
+| Target | Tag | Adds to `runtime-base` | GPU encoders compiled + usable with | AV1 |
+|---|---|---|---|---|
+| `cpu` | `-cpu` | nothing | none | CPU (`libsvtav1`) |
+| `amd` | `-amd` | `libva2`, `libva-drm2`, `mesa-va-drivers` (radeonsi) | `h264_vaapi`, `hevc_vaapi` with `/dev/dri/renderD*` | CPU |
+| `nvidia` | `-nvidia` | `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video` | `h264_nvenc`, `hevc_nvenc` with the NVIDIA runtime | CPU |
+
+- **NVIDIA driver libraries are not baked in.** `libnvidia-encode` and
+  `libcuda` must match the host kernel module; nvidia-container-toolkit
+  injects them when the pod runs with the NVIDIA runtime and the `video`
+  capability.
+- Build one variant: `make -C core/svc_streaming docker-build VARIANT=amd`.
+  Without `--target` Docker builds the last stage, which is `cpu`.
+- Smoke-test a built variant: `make -C core/svc_streaming image-smoke
+  VARIANT=amd IMAGE=<ref>` -- asserts the image label, non-root uid, the
+  encoders the variant claims, the driver wiring, and a libx264 trial encode.
+  It prints `PASSED n/m checks`; zero checks is a failure.
+- CI: `.github/workflows/build-svc-streaming.yml` builds all three from the
+  same context, pushes `ghcr.io/<org>/<repo>/svc-streaming:<version><suffix>-<variant>`
+  (`latest-<variant>` on a release tag), smoke-tests the pushed digest, and
+  gates on HIGH/CRITICAL Trivy findings. amd64 only (same toggle as the other
+  `build-*.yml` workflows).
+- Non-root `appuser` (uid 10001), binary `HEALTHCHECK` (`svc-streaming
+  --healthcheck`, no `curl`), `EXPOSE 8208 9090 1935 9000/udp`.
+
+## Choosing a variant
+
+Set `streaming.gpuVariant` (`values.yaml`, default `cpu`) per deploy or per
+node pool. The chart appends the variant to the tag and wires the pod.
+
+| Node hardware | `gpuVariant` | Needed on the node | Chart wiring |
+|---|---|---|---|
+| No GPU, or unknown | `cpu` | nothing | none |
+| AMD GPU with VA-API (`/dev/dri/renderD*`) | `amd` | AMD k8s-device-plugin (`amd.com/gpu`); render GID: `getent group render` | `amd.com/gpu: 1` limit + `supplementalGroups` |
+| NVIDIA GPU | `nvidia` | driver, nvidia-container-toolkit, `RuntimeClass nvidia`, device plugin | `runtimeClassName: nvidia`, `nvidia.com/gpu: 1`, GPU toleration |
+
+Set `streaming.amd.supplementalGroups` to the host's render GID(s) when
+`gpuVariant=amd`; the render fails when the list is empty. Confirm the
+choice on a running pod: `encoder selected` log lines (and the
+`encoder_backend{codec,backend,encoder}` gauge) show `backend=software`,
+`vaapi` or `nvenc` per codec family.
+
+What a mismatch does:
+
+| Mismatch | Result | Fix |
+|---|---|---|
+| `cpu` image on a GPU node | CPU encoders | intended -- switch `gpuVariant` to use the GPU |
+| `amd` image, node without `amd.com/gpu` | pod Pending (`Insufficient amd.com/gpu`) | run it on a GPU pool, or `streaming.amd.deviceResource=""` + `devDri=false` for CPU-only |
+| `amd` image, `/dev/dri` present but wrong GID | trial encode fails (permission), CPU encoders, warn log | set `supplementalGroups` |
+| `nvidia` image on a CPU node, default values | pod Pending (`nvidia.com/gpu`) | `streaming.nvidia.runtimeClassName=""` and `gpuLimit=0` -- the pod starts and runs CPU-only |
+| `nvidia` image, GPU present, no NVIDIA runtime | no device nodes, CPU encoders | set the runtimeClass |
+
+The in-container trial encode degrades to CPU in every case where the pod
+starts; the scheduler gates (`/dev/dri` hostPath, `nvidia.com/gpu`,
+`runtimeClassName`) are what can stop a pod before it starts.
+
+Why the amd default is a device-plugin resource, not a hostPath: a bind mount
+of `/dev/dri` alone is denied by the container's device cgroup -- opening
+`renderD128` fails with `EPERM` for a non-privileged pod (verified: `docker run
+-v /dev/dri:/dev/dri` fails, `--device /dev/dri/renderD128` works). The device
+plugin declares the devices, so the runtime allows them. The hostPath is also
+rejected by PodSecurity `restricted`; it stays as an explicit fallback only
+(`streaming.amd.deviceResource=""`).
+
+Verify a GPU node by hand (CI has no GPU):
+
+```bash
+docker run --rm --read-only --tmpfs /tmp --device /dev/dri/renderD128 \
+  --group-add <render-gid> --user 10001:10001 --entrypoint /usr/bin/ffmpeg \
+  <repo>/svc-streaming:<tag>-amd -hide_banner -loglevel error \
+  -init_hw_device vaapi=va:/dev/dri/renderD128 -filter_hw_device va \
+  -f lavfi -i testsrc=size=640x360:rate=1 -vf format=nv12,hwupload \
+  -frames:v 10 -c:v h264_vaapi -f null -
+```
+
+## Follow-up: AV1-GPU and enhanced-RTMP (ffmpeg 6.1)
+
+Not in any variant. Debian bookworm's ffmpeg 5.1.9 has no `av1_nvenc` or
+`av1_vaapi`, and it cannot carry enhanced-RTMP (HEVC/AV1 in FLV). Both need
+the separate ffmpeg 6.1 build, tracked as its own PR. Until it lands, AV1 is
+CPU-only on every variant, and the encoder selection detects that rather than
+assuming it.
+
+Intel iGPUs have no variant: Debian's `mesa-va-drivers` carries no Intel (iHD)
+VA driver. Covering them needs `intel-media-va-driver-non-free`, a non-free
+package -- a decision for the owner, not made here.
