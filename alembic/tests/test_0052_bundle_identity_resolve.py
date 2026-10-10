@@ -326,7 +326,9 @@ class TestDowngradeRoundTrip:
                 assert _priv(cur, _VIEW, "SELECT") is True, (
                     "downgrade must re-grant the reader"
                 )
-            alembic("upgrade", "head")
+            # Re-apply exactly this migration (not `head`): later revisions in the chain
+            # (e.g. 0055_per_service_db_roles) need credentials this harness does not stage.
+            alembic("upgrade", "0052_bundle_identity_resolve")
             assert view_columns() == _EXPECTED_COLUMNS
 
 
