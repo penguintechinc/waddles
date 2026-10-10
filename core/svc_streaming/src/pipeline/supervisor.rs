@@ -45,6 +45,7 @@ use crate::pipeline::model::{
     OutputSpec, PipelineEngine, PipelineError, PipelineHandle, PipelineId, PipelineSpec,
     PipelineState, PipelineStatus,
 };
+use crate::redact::scrub_diagnostic;
 use crate::store::{SecretRef, SecretResolver};
 use crate::telemetry::stream::{Stage, StreamMetrics};
 
@@ -645,14 +646,22 @@ async fn run_pipeline(
                 let tx2 = tx.clone();
                 Some(std::thread::spawn(move || {
                     for event in iter {
+                        // ffmpeg's diagnostics echo the resolved secret URLs
+                        // it was handed (`Error opening output
+                        // rtmp://host/app/<stream key>`), so every error line
+                        // is scrubbed before it can reach a log line or the
+                        // pipeline's `last_error` (exposed via the status
+                        // API).
                         let forwarded = match event {
                             FfmpegEvent::Progress(p) => {
                                 tx2.blocking_send(MonitorEvent::Progress(p))
                             }
-                            FfmpegEvent::Error(e) => tx2.blocking_send(MonitorEvent::Error(e)),
+                            FfmpegEvent::Error(e) => {
+                                tx2.blocking_send(MonitorEvent::Error(scrub_diagnostic(&e)))
+                            }
                             FfmpegEvent::Log(LogLevel::Error, msg)
                             | FfmpegEvent::Log(LogLevel::Fatal, msg) => {
-                                tx2.blocking_send(MonitorEvent::Error(msg))
+                                tx2.blocking_send(MonitorEvent::Error(scrub_diagnostic(&msg)))
                             }
                             _ => Ok(()),
                         };

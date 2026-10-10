@@ -12,6 +12,10 @@ use std::fmt;
 
 use crate::config::Secret;
 use crate::pipeline::model::OutputSpec;
+// The shared push-URL redactor (see its docs for the redaction rules) -- the
+// relay targets' `url_redacted` form and every other log-safe rendering of a
+// secret URL in this crate come from the same function.
+use crate::redact::redact_url as redact;
 use crate::store::SecretRef;
 
 use super::error::RelayError;
@@ -176,46 +180,6 @@ impl fmt::Display for TeeSlave {
 /// `observe_stderr_line`'s `Output #<N>` index parsing relies on.
 pub fn tee_slaves(targets: &[ResolvedRelayTarget]) -> Vec<TeeSlave> {
     targets.iter().map(TeeSlave::from_target).collect()
-}
-
-/// Redacts the sensitive suffix of a relay push URL for safe logging.
-/// Content-driven, not `kind`-driven, so a malformed/mismatched-scheme URL
-/// (e.g. an SRT-shaped value passed where an RTMP url was expected -- see
-/// [`validate`]'s scheme check) still redacts fully instead of falling
-/// through a kind-specific branch that doesn't match its actual shape:
-///
-/// - A query string present (SRT-style `?streamid=...`) is always dropped
-///   wholesale (`scheme://host[:port]?****`) -- it commonly carries the
-///   equivalent of a stream key.
-/// - Otherwise, a path present (RTMP-style `/app/<streamkey>`) keeps every
-///   segment but the last, which is replaced (`scheme://host/app/****`).
-/// - Neither present: `scheme://host/****`.
-/// - No `scheme://` at all: redacts wholesale as `****`.
-fn redact(raw: &str) -> String {
-    let Some((scheme, rest)) = raw.split_once("://") else {
-        return "****".to_string();
-    };
-    let (before_query, has_query) = match rest.split_once('?') {
-        Some((before, _)) => (before, true),
-        None => (rest, false),
-    };
-    let (authority, path) = match before_query.split_once('/') {
-        Some((authority, path)) => (authority, Some(path)),
-        None => (before_query, None),
-    };
-    if has_query {
-        return format!("{scheme}://{authority}?****");
-    }
-    match path {
-        Some(path) if !path.is_empty() => {
-            let mut segments: Vec<&str> = path.split('/').collect();
-            if let Some(last) = segments.last_mut() {
-                *last = "****";
-            }
-            format!("{scheme}://{authority}/{}", segments.join("/"))
-        }
-        _ => format!("{scheme}://{authority}/****"),
-    }
 }
 
 /// Validates `raw` has the expected `scheme://host[:port]` shape for

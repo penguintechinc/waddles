@@ -49,7 +49,9 @@ pub trait WhipTokenAuthorizer: Send + Sync {
     async fn authorize(&self, token: &str) -> Result<bool, IngestAuthError>;
 }
 
-#[derive(Debug, Serialize)]
+/// Request body for the loopback ingest-auth hop. Deliberately not `Debug`:
+/// `key` is the presented WHIP token, a bearer credential.
+#[derive(Serialize)]
 struct IngestAuthRequestBody<'a> {
     kind: &'a str,
     key: &'a str,

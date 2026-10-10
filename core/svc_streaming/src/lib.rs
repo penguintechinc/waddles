@@ -15,6 +15,7 @@ pub mod http;
 pub mod ingest;
 pub mod orchestrator;
 pub mod pipeline;
+pub mod redact;
 pub mod rtc;
 pub mod store;
 pub mod telemetry;

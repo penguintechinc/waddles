@@ -54,6 +54,7 @@ use webrtc::runtime::Runtime;
 
 use crate::error::ApiError;
 use crate::ingest::{IngestKind, IngestListener, IngestSession};
+use crate::redact::fingerprint;
 use crate::rtc::fanout::MediaFanouts;
 use crate::rtc::ingest_auth::WhipTokenAuthorizer;
 use crate::rtc::metrics::RtcMetrics;
@@ -413,8 +414,10 @@ async fn create_session(
         })
         .is_err()
     {
+        // The token is a bearer credential: log only its fingerprint,
+        // never the raw value, at any level.
         tracing::debug!(
-            token = %token,
+            key_hash = %fingerprint(&token),
             "ingest channel full or no receiver -- WHIP session accepted, pipeline hand-off skipped"
         );
     }
