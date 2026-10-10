@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.example.quote
 name: Quote Book Bundle (Python)
-# 1.0.0: strangler extraction of core/svc_process/bundles/social_quote_process.py's
+# 1.0.0: strangler extraction of core/svc_process/builtin_handlers/social_quote_process.py's
 # `!quote` command into its own componentize-py bundle -- feature/bundle-quote.
 # BUILD-ONLY / INERT: ships flag-OFF and is not yet wired into the strangler
 # cut-over (bot_process._FEATURE_MODULES still owns `quote` live traffic until
@@ -9,7 +9,7 @@ name: Quote Book Bundle (Python)
 # Ported off the retired `waddle_sdk.db` DAL-style facade (create_dal/TableProxy/
 # AsyncQuerySet) onto the structured insert/get/query/update/delete API -- see
 # src/app.py's module docstring for the full rationale.
-version: 1.0.0
+version: 1.0.2
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -60,11 +60,14 @@ limits:
 # (hub_api/services/bundle_approval_service.py::KV_PERMISSION_ID); used here as a
 # seq -> row_id lookup index + an atomic sequence counter (see src/app.py).
 permissions:
-  - storage.kv
+  - id: storage.kv
+    justification: "persists the per-community quote store and its id sequence"
+  - id: flags.read
+    justification: "gates the command behind its waddles.command-quote feature flag"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.0"
-  min_version: "1.0.0"
+  tested_with: "1.0.2"
+  min_version: "1.0.2"
   max_version: null

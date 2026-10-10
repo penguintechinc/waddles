@@ -196,6 +196,13 @@ spec:
               name: {{ .Values.pipeline.hubApi.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
               key: BUNDLE_SIGNING_KEY_ID
               optional: true
+        # #684 / PR #718 -- OTS AES-256-GCM key (64 hex), auto-provisioned by
+        # auto-provisioned-secrets.yaml; hub-api fails at startup if blank, so not optional.
+        - name: ONE_TIME_SECRET_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.autoProvisionedKeys.oneTimeSecret.secretName }}
+              key: {{ .Values.autoProvisionedKeys.oneTimeSecret.secretKey }}
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         # regression: seeder VALKEY_URL REPLACE_ME / missing TLS wiring -- hub-api itself
         # calls hub_api/services/valkey_admin_client.py::build_client() (via

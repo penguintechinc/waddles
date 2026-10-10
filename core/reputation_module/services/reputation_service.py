@@ -127,7 +127,7 @@ class ReputationService:
         `str(hub_user_id)` once a member is linked to a hub account (see
         `flask_core.community_access`'s identical
         `dal.community_members.user_id == str(user_id)` convention, and
-        `core/svc_process/bundles/community_reputation_process.py`'s
+        `core/svc_process/builtin_handlers/community_reputation_process.py`'s
         matching read path). The platform-identity lookup queries
         `community_members.platform`/`platform_user_id` directly -- those
         columns already live on the row itself, no join through

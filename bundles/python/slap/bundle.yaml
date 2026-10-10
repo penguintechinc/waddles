@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.example.slap
 name: Slap Example Bundle (Python)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -42,11 +42,13 @@ limits:
   timeout_ms: 2000
   memory_mb: 64
   egress_rps: 10
-permissions: []
+permissions:
+  - id: flags.read
+    justification: "reads the waddles.command-slap PostHog feature flag via feature_enabled to gate the command"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.0"
-  min_version: "1.0.0"
+  tested_with: "1.0.1"
+  min_version: "1.0.1"
   max_version: null

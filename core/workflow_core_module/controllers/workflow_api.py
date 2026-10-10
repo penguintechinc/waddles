@@ -35,6 +35,7 @@ from flask_core import (
     require_community_admin,
     require_community_member,
     CommunityAccessError,
+    describe_db_error,
 )
 from services.workflow_service import (
     WorkflowService,
@@ -47,6 +48,7 @@ from services.community_scope import (
     WorkflowCommunityNotFoundError,
     resolve_workflow_community_id,
 )
+from controllers.error_logging import log_internal_error
 
 
 logger = logging.getLogger(__name__)
@@ -174,13 +176,12 @@ def handle_workflow_errors(f: Callable) -> Callable:
             )
         except Exception as e:
             logger.error(
-                f"Unexpected error in {f.__name__}: {str(e)}",
+                f"Unexpected error in {f.__name__}: {describe_db_error(e)}",
                 extra={
                     "event_type": "ERROR",
                     "action": f.__name__,
                     "result": "FAILURE"
-                },
-                exc_info=True
+                }
             )
             return error_response(
                 message="Internal server error",
@@ -693,12 +694,17 @@ async def not_found(error):
 
 @workflow_api.errorhandler(500)
 async def internal_error(error):
-    """Handle 500 Internal Server Error."""
-    logger.error(f"Internal server error: {str(error)}", exc_info=True)
+    """Handle 500 Internal Server Error.
+
+    SECURITY (PII in logs): logs an ``error_id`` + exception type only -- never the
+    exception text/traceback, which can embed bound DB values.
+    """
+    error_id = log_internal_error(logger, error)
     return error_response(
         message="Internal server error",
         status_code=500,
-        error_code="INTERNAL_ERROR"
+        error_code="INTERNAL_ERROR",
+        details={"error_id": error_id}
     )
 
 

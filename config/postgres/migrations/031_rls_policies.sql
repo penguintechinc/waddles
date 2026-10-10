@@ -452,14 +452,16 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO mod_core_security;
 -- PART 3G: ROUTER MODULE - Broad read access
 -- ============================================================================
 
-GRANT SELECT ON servers, community_servers, communities, modules TO mod_router;
-GRANT SELECT, INSERT, UPDATE ON commands, command_aliases, module_configs TO mod_router;
+SELECT grant_privs_if_exists('SELECT', ARRAY['servers', 'community_servers', 'communities', 'modules'], 'mod_router');  -- 'servers' has no CREATE TABLE anywhere; helper from 031_scoped_database_users skips absent tables
+GRANT SELECT, INSERT, UPDATE ON commands, command_aliases TO mod_router;
+-- module_configs has no CREATE TABLE in any migration; skip (with a NOTICE) until it exists.
+SELECT grant_privs_if_exists('SELECT, INSERT, UPDATE', ARRAY['module_configs'], 'mod_router');
 
 -- ============================================================================
 -- PART 3H: WORKFLOW CORE - Read on workflow tables
 -- ============================================================================
 
-GRANT SELECT ON servers, community_servers, communities, modules TO mod_core_workflow;
+SELECT grant_privs_if_exists('SELECT', ARRAY['servers', 'community_servers', 'communities', 'modules'], 'mod_core_workflow');
 
 -- ============================================================================
 -- PART 4: SEQUENCE PERMISSIONS (CRITICAL)

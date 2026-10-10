@@ -50,7 +50,7 @@ jobs:
   lint-test:
     name: "${{ inputs.crate_name }}: fmt + clippy + deny + coverage"
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
@@ -92,6 +92,25 @@ jobs:
         with:
           toolchain: "1.97.1"
           components: rustfmt, clippy, llvm-tools-preview
+
+      # Persistent cargo cache (GitHub-hosted cache service, survives the
+      # runner's hourly docker prune). Keyed per crate + toolchain +
+      # Cargo.lock so a dependency change gets a fresh entry; restore-keys
+      # fall back to the newest cache for the same crate/toolchain so an
+      # incremental rebuild never starts fully cold. Release-branch push
+      # runs seed it for PR runs. A cache miss only costs time, never
+      # correctness (all cargo steps still run with --locked).
+      - name: Cache cargo registry + git + target
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4  # zizmor: ignore[cache-poisoning]
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ${{ inputs.working_directory }}/target
+          key: cargo-${{ inputs.crate_name }}-1.97.1-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', inputs.working_directory)) }}
+          restore-keys: |
+            cargo-${{ inputs.crate_name }}-1.97.1-${{ runner.os }}-
 
       - name: Install cargo-deny + cargo-llvm-cov
         if: ${{ !inputs.extra_security_scanners }}

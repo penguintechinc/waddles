@@ -119,7 +119,7 @@ bundles:
   # fresh publish+activate. Mirrors bundles/csharp/csping/hub-manifest.yaml's own 1.0.0/1.0.1
   # retirement (fix/csping-version-bump, #575).
   - app_id: waddles.core.example.eightball
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/eightball
     manifest_path: eightball.manifest.yaml
@@ -128,7 +128,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.roll
-    version: "1.0.2"
+    version: "1.0.3"
     language: python
     source_dir: python/roll
     manifest_path: roll.manifest.yaml
@@ -150,7 +150,7 @@ bundles:
   # (`community_id: null` below) instead of only erroring -- scoped under
   # `waddle_sdk.community_kv.TENANT_WIDE_SENTINEL`, see src/app.py's module docstring.
   - app_id: waddles.core.example.lurk
-    version: "1.0.6"
+    version: "1.0.8"
     language: python
     source_dir: python/lurk
     manifest_path: lurk.manifest.yaml
@@ -164,7 +164,7 @@ bundles:
   # fix (gh-631, #638) -- app_versions is immutable per (app_id, version), so 1.0.3's digest
   # still points at the pre-fix wasm; this bump is the only way the fixed build reaches alpha.
   - app_id: waddles.core.example.count
-    version: "1.0.4"
+    version: "1.0.6"
     language: python
     source_dir: python/count
     manifest_path: count.manifest.yaml
@@ -179,7 +179,7 @@ bundles:
   # firing has no scheduler yet (gh-613) -- `timer ...` persists config and replies saying so, loud
   # not silent; static command CRUD does not depend on that gap.
   - app_id: waddles.core.example.command
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/command
     manifest_path: command.manifest.yaml
@@ -203,7 +203,7 @@ bundles:
   # (`"rps.wins.<hash>"`, `"music.queue"`) before registration here, matching
   # `count`'s own `"count.registry"` convention. Fixed in this PR, not on the source branches.
   - app_id: waddles.core.example.rps
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/rps
     manifest_path: rps.manifest.yaml
@@ -212,7 +212,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.music
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/music
     manifest_path: music.manifest.yaml
@@ -221,7 +221,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.coinflip
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/coinflip
     manifest_path: coinflip.manifest.yaml
@@ -230,13 +230,13 @@ bundles:
       - tenant_slug: global
         community_id: null
   # `waddles.command-announce` has a known command-prefix collision with the legacy
-  # `core/svc_process/bundles/community_announcements_process.py` / `..._action.py`
-  # `!announce publish <id>` script bundle (bundles/python/announce/README.md's own note) --
+  # `core/svc_process/builtin_handlers/community_announcements_process.py` / `..._action.py`
+  # `!announce publish <id>` built-in stage handlers (bundles/python/announce/README.md's own note) --
   # registered here (installed) but its flag MUST stay OFF in PostHog until the migration
   # owner resolves the overlap; `feature_enabled(FLAG_KEY, default=False)` in its own
   # `transform()` keeps it silent by default either way.
   - app_id: waddles.core.example.announce
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/announce
     manifest_path: announce.manifest.yaml
@@ -245,7 +245,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.raffle
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/raffle
     manifest_path: raffle.manifest.yaml
@@ -254,7 +254,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.social
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/social
     manifest_path: social.manifest.yaml
@@ -263,7 +263,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.wheel
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/wheel
     manifest_path: wheel.manifest.yaml
@@ -272,7 +272,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.love
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/love
     manifest_path: love.manifest.yaml
@@ -281,7 +281,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.roulette
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/roulette
     manifest_path: roulette.manifest.yaml
@@ -290,7 +290,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.joke
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/joke
     manifest_path: joke.manifest.yaml
@@ -299,7 +299,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.first
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/first
     manifest_path: first.manifest.yaml
@@ -315,7 +315,7 @@ bundles:
   # `waddles.command-<name>` PostHog flag (default OFF) inside `transform()` -- this catalog
   # entry only installs the bundle, it does not make it respond.
   - app_id: waddles.core.example.about
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/about
     manifest_path: about.manifest.yaml
@@ -324,7 +324,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.compliment
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/compliment
     manifest_path: compliment.manifest.yaml
@@ -333,7 +333,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.rules
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/rules
     manifest_path: rules.manifest.yaml
@@ -342,7 +342,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.trivia
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/trivia
     manifest_path: trivia.manifest.yaml
@@ -351,7 +351,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.hangman
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/hangman
     manifest_path: hangman.manifest.yaml
@@ -360,7 +360,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.countdown
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/countdown
     manifest_path: countdown.manifest.yaml
@@ -369,7 +369,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.remind
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/remind
     manifest_path: remind.manifest.yaml
@@ -378,7 +378,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.duel
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/duel
     manifest_path: duel.manifest.yaml
@@ -387,7 +387,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.slots
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/slots
     manifest_path: slots.manifest.yaml
@@ -396,7 +396,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.fish
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/fish
     manifest_path: fish.manifest.yaml
@@ -405,7 +405,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.poll
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/poll
     manifest_path: poll.manifest.yaml
@@ -414,7 +414,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.shoutout
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/shoutout
     manifest_path: shoutout.manifest.yaml
@@ -431,7 +431,7 @@ bundles:
   # gates its own reply behind a `waddles.command-<name>` PostHog flag (default OFF) inside
   # `transform()` -- this catalog entry only installs the bundle, it does not make it respond.
   - app_id: waddles.core.example.rank
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/rank
     manifest_path: rank.manifest.yaml
@@ -440,7 +440,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.quote
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/quote
     manifest_path: quote.manifest.yaml
@@ -449,7 +449,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.loyalty
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/loyalty
     manifest_path: loyalty.manifest.yaml
@@ -458,7 +458,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.inventory
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/inventory
     manifest_path: inventory.manifest.yaml
@@ -467,7 +467,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.choose
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/choose
     manifest_path: choose.manifest.yaml
@@ -476,7 +476,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.dadjoke
-    version: "1.0.0"
+    version: "1.0.2"
     language: python
     source_dir: python/dadjoke
     manifest_path: dadjoke.manifest.yaml
@@ -485,7 +485,7 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.wave
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/wave
     manifest_path: wave.manifest.yaml
@@ -494,11 +494,47 @@ bundles:
       - tenant_slug: global
         community_id: null
   - app_id: waddles.core.example.slap
-    version: "1.0.0"
+    version: "1.0.1"
     language: python
     source_dir: python/slap
     manifest_path: slap.manifest.yaml
     artifact_path: slap.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.hug
+    version: "1.0.0"
+    language: python
+    source_dir: python/hug
+    manifest_path: hug.manifest.yaml
+    artifact_path: hug.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.boop
+    version: "1.0.0"
+    language: python
+    source_dir: python/boop
+    manifest_path: boop.manifest.yaml
+    artifact_path: boop.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.highfive
+    version: "1.0.0"
+    language: python
+    source_dir: python/highfive
+    manifest_path: highfive.manifest.yaml
+    artifact_path: highfive.wasm
+    activation_targets:
+      - tenant_slug: global
+        community_id: null
+  - app_id: waddles.core.example.secret
+    version: "1.0.0"
+    language: python
+    source_dir: python/secret
+    manifest_path: secret.manifest.yaml
+    artifact_path: secret.wasm
     activation_targets:
       - tenant_slug: global
         community_id: null

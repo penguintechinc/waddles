@@ -18,7 +18,7 @@ from typing import Dict, Any, Optional, List
 import json
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'libs'))
-from flask_core import setup_aaa_logging  # noqa: E402
+from flask_core import describe_db_error, setup_aaa_logging  # noqa: E402
 
 logger = setup_aaa_logging('ai_researcher_summary', '1.0.0')
 
@@ -146,9 +146,9 @@ class SummaryService:
 
         except Exception as e:
             logger.error(
-                f"Failed to generate stream summary: {e}",
+                f"Failed to generate stream summary: {describe_db_error(e)}",
                 community=community_id,
-                error=str(e)
+                error=describe_db_error(e)
             )
             raise
 
@@ -277,9 +277,9 @@ class SummaryService:
 
         except Exception as e:
             logger.error(
-                f"Failed to generate weekly summary: {e}",
+                f"Failed to generate weekly summary: {describe_db_error(e)}",
                 community=community_id,
-                error=str(e)
+                error=describe_db_error(e)
             )
             raise
 
@@ -335,9 +335,9 @@ class SummaryService:
 
         except Exception as e:
             logger.error(
-                f"Failed to retrieve recent summaries: {e}",
+                f"Failed to retrieve recent summaries: {describe_db_error(e)}",
                 community=community_id,
-                error=str(e)
+                error=describe_db_error(e)
             )
             raise
 
@@ -369,7 +369,7 @@ class SummaryService:
                 try:
                     embedding_vector = await self.mem0_service.generate_embedding(content)
                 except Exception as e:
-                    logger.error(f"Failed to generate embedding: {e}")
+                    logger.error(f"Failed to generate embedding: {describe_db_error(e)}")
 
             # Extract period from metadata if present
             period_start = None
@@ -417,9 +417,9 @@ class SummaryService:
 
         except Exception as e:
             logger.error(
-                f"Failed to save insight: {e}",
+                f"Failed to save insight: {describe_db_error(e)}",
                 community=community_id,
-                error=str(e)
+                error=describe_db_error(e)
             )
             raise
 

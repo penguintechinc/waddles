@@ -1,4 +1,4 @@
-"""Per-user community context store -- backs the `!cc` context-switch bundle (gh #311).
+"""Per-user community context store -- backs the `!cc` context-switch handler (gh #311).
 
 Two independent reads this module serves:
 
@@ -33,7 +33,7 @@ not a new convention.
 
 Every public function takes an optional `dal`/`redis_client` override
 (keyword-only, defaulting to `None`) purely for test injection -- the `!cc`
-bundle calls every function with ONLY the documented required keyword
+handler calls every function with ONLY the documented required keyword
 arguments; the defaults resolve to `flask_core.get_bundle_dal()` and this
 module's own lazily-constructed process-wide Redis client
 (`config.Config.VALKEY_URL`, same construction `app.py` uses for the
@@ -103,7 +103,7 @@ def _get_redis_client() -> Any:
     (`redis.asyncio.from_url(Config.VALKEY_URL, encoding="utf-8",
     decode_responses=True)`) -- a second connection is intentional rather
     than threading the runner's existing client through: this module has no
-    parameter to receive one (the `!cc` bundle's frozen `transform(event)`
+    parameter to receive one (the `!cc` handler's frozen `transform(event)`
     entrypoint carries no side channel for it, same reason
     `flask_core.bundle_runtime` exists at all), so it owns its own client
     the same way `services/moderation_gate.py`'s `_get_default_classifier()`
@@ -177,7 +177,7 @@ async def list_channel_communities(
     """Return every APPROVED community linked to this channel/server, primary first.
 
     This is the security gate for context switching -- `!cc` (and
-    `set_context`, indirectly, via the bundle's own validation) only ever
+    `set_context`, indirectly, via the handler's own validation) only ever
     offers/accepts a `community_id` drawn from this list. Ordered
     `is_primary DESC, name ASC` so the channel's default community always
     sorts first, remaining choices alphabetical.
@@ -265,7 +265,7 @@ async def set_context(
     """Upsert this user's per-channel community override, table then cache.
 
     No validation against `list_channel_communities` happens here -- the
-    caller (the `!cc` bundle) is expected to have already confirmed
+    caller (the `!cc` handler) is expected to have already confirmed
     `community_id` is one of this channel's approved links before calling;
     an invalid `community_id` still raises (FK violation on
     `user_platform_context.community_id REFERENCES communities(id)`) rather

@@ -47,6 +47,16 @@ class Config:  # noqa: E302
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
     SECRET_KEY = require_secret_key()
 
+    # Service-to-service auth: hub-api's `EventCalendarProxyClient`
+    # (hub_api/services/event_calendar_proxy.py) is the only legitimate
+    # caller of this module and sends this key as `X-API-Key` alongside
+    # the post-JWT `X-User-Context` it builds. Empty default is
+    # intentional -- `flask_core.auth.verify_service_key` fails CLOSED
+    # (rejects every request) when the expected key is falsy, so an
+    # unconfigured deployment never silently accepts unauthenticated
+    # calendar requests.
+    SERVICE_API_KEY = os.getenv('SERVICE_API_KEY', '')
+
     # Redis Configuration (for credential refresh notifications)
     REDIS_URL: str = os.getenv('REDIS_URL', '')
 

@@ -319,6 +319,55 @@ async def test_seed_one_with_no_community_id_activates_tenant_wide(
     assert approval_row.approval_source == "system:core-seeder"
 
 
+async def test_seed_one_tenant_wide_grants_ensure_the_sentinel_community_row(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: tenant-wide grants need the sentinel `communities` row (id 0) to exist.
+
+    `community_permission_grants.community_id` FKs `communities(id)` but tenant-wide grants
+    use sentinel 0, which no migration ever created -> `Key (community_id)=(0) is not
+    present` on Postgres (36/40 core bundles failed to grant, #480 kind-e2e). The seeder
+    must create the row itself (idempotently) before granting.
+    """
+    _patch_validator_and_storage(monkeypatch)
+    entry = _write_bundle(tmp_path)  # community_id=None -> tenant-wide
+
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())  # idempotent
+
+    sentinel = await install_dal(
+        install_dal.communities.id == seeder.TENANT_WIDE_COMMUNITY_SENTINEL
+    ).select()
+    assert len(sentinel) == 1
+    assert sentinel.first().name == seeder._SENTINEL_COMMUNITY_NAME
+    grants = await install_dal(
+        (install_dal.community_permission_grants.app_id == entry.app_id)
+        & (
+            install_dal.community_permission_grants.community_id
+            == seeder.TENANT_WIDE_COMMUNITY_SENTINEL
+        )
+    ).select()
+    assert {r.permission_id for r in grants} == {"storage.kv"}
+
+
+async def test_grant_helper_logs_and_continues_on_an_unexpected_error(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Defence-in-depth: a non-ApiError (e.g. IntegrityError) never aborts the seeder run."""
+    _patch_validator_and_storage(monkeypatch)
+    monkeypatch.setattr(
+        seeder, "grant_community_permissions", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+    entry = _write_bundle(tmp_path)
+    with caplog.at_level(logging.ERROR):
+        results = await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert [r.outcome for r in results] == ["made_available", "activated"]
+    assert "RuntimeError: boom" in caplog.text
+
+
 async def test_seed_one_with_no_community_id_rerun_is_a_no_op(
     install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

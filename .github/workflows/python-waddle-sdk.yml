@@ -5,7 +5,7 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'sdk/waddle-sdk/**'
-      - 'core/svc_process/bundles/social_alias_process.py'
+      - 'core/svc_process/builtin_handlers/social_alias_process.py'
       - 'core/svc_process/services/command_alias_store.py'
       - 'wit/waddle-bundle/**'
       - '.github/workflows/python-waddle-sdk.yml'
@@ -13,13 +13,17 @@ on:
     branches: [main, 'release/**']
     paths:
       - 'sdk/waddle-sdk/**'
-      - 'core/svc_process/bundles/social_alias_process.py'
+      - 'core/svc_process/builtin_handlers/social_alias_process.py'
       - 'core/svc_process/services/command_alias_store.py'
       - 'wit/waddle-bundle/**'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint-type-test:

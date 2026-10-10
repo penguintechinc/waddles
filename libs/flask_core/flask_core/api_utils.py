@@ -14,6 +14,8 @@ import os
 import psutil
 from datetime import datetime
 
+from .db_errors import describe_db_error, format_sanitized_traceback, is_db_driver_error
+
 logger = logging.getLogger(__name__)
 
 # Metrics storage for Prometheus format
@@ -348,16 +350,27 @@ def async_endpoint(f: Callable) -> Callable:
         except Exception as e:
             # Server error
             execution_time = int((time.time() - start_time) * 1000)
+            # A DB driver error's message (and any traceback rendering it) can
+            # embed bound values (PII/tokens) -- log type/SQLSTATE only, and a
+            # frame-only traceback at DEBUG. Non-DB errors keep the full detail.
+            db_failure = is_db_driver_error(e)
             logger.error(
-                f"Request to {f.__name__} failed with exception: {str(e)}",
+                f"Request to {f.__name__} failed with exception: "
+                f"{describe_db_error(e) if db_failure else str(e)}",
                 extra={
                     'event_type': 'API_REQUEST',
                     'action': f.__name__,
                     'result': 'ERROR',
                     'execution_time': execution_time
                 },
-                exc_info=True
+                exc_info=not db_failure
             )
+            if db_failure and logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Request to %s failed: sanitized traceback\n%s",
+                    f.__name__,
+                    format_sanitized_traceback(e),
+                )
             return error_response("Internal server error", status_code=500)
 
     return decorated_function

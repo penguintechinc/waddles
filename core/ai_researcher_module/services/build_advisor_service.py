@@ -19,6 +19,8 @@ import logging
 import time
 from dataclasses import dataclass, field
 
+from flask_core import describe_db_error
+
 logger = logging.getLogger(__name__)
 
 BUILD_SEARCH_SYSTEM_PROMPT = (
@@ -246,7 +248,7 @@ class BuildAdvisorService:
             )
 
         except Exception as exc:
-            logger.error("Build search failed: %s", exc)
+            logger.error("Build search failed: %s", describe_db_error(exc))
             return BuildAdvisorResult(
                 success=False,
                 content="An internal error occurred during build search.",
@@ -393,7 +395,7 @@ class BuildAdvisorService:
             )
 
         except Exception as exc:
-            logger.error("Meta search failed: %s", exc)
+            logger.error("Meta search failed: %s", describe_db_error(exc))
             return BuildAdvisorResult(
                 success=False,
                 content="An internal error occurred during meta search.",
@@ -436,7 +438,7 @@ class BuildAdvisorService:
             ttl = getattr(self.config, 'BUILD_CACHE_TTL', 10800)
             await self.redis.setex(key, ttl, json.dumps(value))
         except Exception as exc:
-            logger.warning("Cache set failed: %s", exc)
+            logger.warning("Cache set failed: %s", describe_db_error(exc))
 
     async def _log_search(
         self,
@@ -466,4 +468,4 @@ class BuildAdvisorService:
                  processing_time_ms],
             )
         except Exception as exc:
-            logger.warning("Failed to log build advisor search: %s", exc)
+            logger.warning("Failed to log build advisor search: %s", describe_db_error(exc))

@@ -23,6 +23,55 @@ exists in this world yet), and the prize is announced generically as
 "points" rather than a per-streamer-configured point-type name (no
 cross-bundle points ledger exists yet).
 
+## Commands
+
+| Command | Who | Behavior |
+|---|---|---|
+| `!roll` / `!dice` | anyone | Rolls two six-sided dice for the caller. Doubles win a prize (name + amount from the original's table, boxcars on double sixes); any other roll loses. Win/lose flavor text is picked from the original's verbatim message pools. Each alias has its own independent 180 s per-user cooldown; a command received inside the window is **silently dropped** exactly like the original (no reply, no error). |
+
+```text
+viewer> !roll
+bot>    <actor> rolls a [3] and [3]. <prize name> for <amount> points! <win flavor text>
+viewer> !roll
+         (no reply -- inside the 180 s cooldown, matching the original)
+```
+
+(Exact prize names/amounts and flavor strings are the original `Roll.cs` tables, kept verbatim in
+`RollLogic.cs`; `!roll` here is distinct from the first-party Python `!roll NdM` bundle -- see
+"Feature flag".)
+
+## Permissions (V2 structured)
+
+`permissions: []` in `bundle.yaml` -- **none requested**:
+
+| Capability | Why not needed |
+|---|---|
+| `storage.kv` | The cooldown uses the host `kv` capability (via `CooldownGuard`), which degrades gracefully when denied (see "kv availability"); no extra grant is declared. |
+| `db` | Stateless apart from the cooldown (`data.tables: []`). |
+| egress | `egress: []`; the reply goes out over the `relay` host import to the event's own origin platform. |
+
+## Platforms
+
+`consumes` **Twitch** and **Discord** `chat.message` with `command_prefix: ["!roll", "!dice"]`; the
+reply is relayed to `envelope.event.platform` (never a hardcoded provider -- regression-tested for
+both).
+
+## Logging / PII
+
+The bundle writes **no log lines**. The public reply names the caller by the opaque `actor` id the
+event carries (a documented simplification of the original's display name, going back to the same
+channel it came from); only `{channel, text}` cross the relay boundary -- the actor id is not
+relayed separately (`the_relayed_message_carries_only_the_channel_and_reply_text`).
+
+## Failure semantics (fail loud)
+
+| Condition | Behavior |
+|---|---|
+| Missing `channel_id` on the reply | fatal `MISSING_CHANNEL` (`WaddleTransportException`) |
+| Reply payload is not a roll reply (e.g. a JSON array) | fatal `BAD_PAYLOAD` |
+| Relay host failure (`Backend` or `Denied`) | retryable `RELAY_PUSH_FAILED` -- never swallowed into a success |
+| `kv` denied (today's host) | the roll still replies; only the cooldown goes unenforced |
+
 ## Files
 
 | File | Role |
@@ -72,6 +121,13 @@ make test-superpenguin-roll
 # or:
 bash scripts/test-superpenguin-roll.sh
 ```
+
+26 xUnit tests on the host CLR (the pinned, containerized .NET SDK image); line coverage of
+`RollLogic.cs` + `RollDispatch.cs` is 100% (branch ~93-100%), gated by
+`tests/coverlet.runsettings`. The suite covers the prize table, both aliases, per-alias and
+per-user cooldown independence, the kv-denied graceful degradation, flag-off (and that a disabled
+flag never burns the cooldown slot), the flag's documented key + fail-closed default, relay target
+= the event's origin platform, and every dispatch failure code above.
 
 ## Feature flag
 

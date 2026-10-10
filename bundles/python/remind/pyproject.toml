@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-remind"
-version = "1.0.0"
+version = "1.0.2"
 description = "`!remind` -> per-user, per-community reminder store/list/cancel (!remind set <duration> <text>, bare !remind / !remind list, !remind remove <id>). STORE/LIST/CANCEL ONLY -- due-time delivery is not wired in this release, see src/app.py's module docstring. Modeled on bundles/python/first's waddle_sdk.community_kv/waddle_sdk.command structure."
 requires-python = ">=3.13"
 dependencies = []

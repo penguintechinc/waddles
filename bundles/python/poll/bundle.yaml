@@ -1,11 +1,11 @@
 schema_version: 2
 app_id: waddles.core.example.poll
 name: Community Polls Bundle (Python)
-# 1.0.0: extracted from the bot_process monolith (core/svc_process/bundles/
+# 1.0.0: extracted from the bot_process monolith (core/svc_process/builtin_handlers/
 # community_polls_process.py) onto waddle_sdk.command's standard grammar and
 # waddle_sdk.db's structured facade -- feature/bundle-poll. BUILD-ONLY: flag-gated OFF
 # (waddles.command-poll), bot_process._FEATURE_MODULES left untouched.
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.example
 module: core
 provider: builtin
@@ -50,11 +50,13 @@ limits:
   timeout_ms: 2000
   memory_mb: 64
   egress_rps: 10
-permissions: []
+permissions:
+  - id: flags.read
+    justification: "reads the waddles.command-poll PostHog feature flag via feature_enabled to gate the command"
 config_schema: {}
 compatible_with: []
 incompatible_with: []
 platform_compatibility:
-  tested_with: "1.0.0"
-  min_version: "1.0.0"
+  tested_with: "1.0.1"
+  min_version: "1.0.1"
   max_version: null

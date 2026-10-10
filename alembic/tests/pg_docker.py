@@ -61,13 +61,44 @@ CREATE TABLE tenants (
 );
 CREATE TABLE communities (
     id SERIAL PRIMARY KEY,
-    name TEXT
+    name TEXT,
+    tenant_id INTEGER  -- 0045 trigger reads it (legacy NOT NULL column)
 );
 CREATE TABLE hub_users (
-    id SERIAL PRIMARY KEY
+    id SERIAL PRIMARY KEY,
+    -- a PII column outside 0043's column-scoped reader grant (uuid, id), so
+    -- `SELECT *` as waddles_bundle_reader is still denied (test_0032).
+    username TEXT,
+    -- identity_resolution_service.resolve_display_names reads it (hub profile name)
+    display_name TEXT
 );
+-- 0044_connector_pii_reader_role column-grants on this legacy table
+-- (config/postgres/migrations/000_create_base_schema.sql); only the
+-- columns it grants/joins on.
+CREATE TABLE hub_user_identities (
+    id SERIAL PRIMARY KEY,
+    hub_user_id INTEGER NOT NULL REFERENCES hub_users(id) ON DELETE CASCADE,
+    platform VARCHAR(50) NOT NULL,
+    platform_user_id VARCHAR(255) NOT NULL,
+    platform_username VARCHAR(255)
+);
+-- `stages` (legacy SQL 071): 0047_builtin_handler_paths rewrites the per-stage
+-- `entrypoint` strings inside it, so the bootstrap table needs the column
+-- (same JSONB type/default as 071). Mirrored in pr-validation.yml's bootstrap.
 CREATE TABLE app_catalog (
-    app_id VARCHAR(255) PRIMARY KEY
+    app_id VARCHAR(255) PRIMARY KEY,
+    stages JSONB DEFAULT '{}'::jsonb
+);
+-- 0043_hub_users_identity_uuid creates a view over community_members (a
+-- legacy config/postgres table, same minimal-bootstrap convention): only the
+-- columns the view projects/joins on.
+CREATE TABLE community_members (
+    id SERIAL PRIMARY KEY,
+    community_id INTEGER REFERENCES communities(id) ON DELETE CASCADE,
+    user_id VARCHAR(255),
+    platform VARCHAR(50),
+    platform_user_id VARCHAR(255),
+    display_name VARCHAR(255)
 );
 -- 0039_event_sync_enabled is the first Alembic migration to FK into
 -- calendar_events -- a legacy table owned by config/postgres/migrations/

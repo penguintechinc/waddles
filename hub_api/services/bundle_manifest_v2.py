@@ -60,6 +60,10 @@ _ALLOWED_STAGES = frozenset({"process", "action", "presentation"})
 _MAX_TIMEOUT_MS = 10000
 _MAX_MEMORY_MB = 256
 _MAX_EGRESS_RPS = 10
+#: First-party ingest/chat platforms a bundle may name in `supported_platforms`
+#: (a `custom:<name>` entry is additionally validated against the tenant's
+#: registered custom platforms, same as `consumes[].platform`).
+KNOWN_SUPPORTED_PLATFORMS = frozenset({"discord", "twitch", "slack", "youtube", "kick"})
 
 
 class ManifestV2Error(ValueError):
@@ -156,6 +160,47 @@ class BundleManifestV2:
     # fixtures, `bundle_approval_service._reparse_trusted`) keeps working
     # unchanged; `parse_bundle_manifest_v2` always passes it explicitly.
     permission_declarations: tuple[PermissionDeclaration, ...] = ()
+    # Issue #685 -- platforms this bundle may run on. `None` (field absent)
+    # means ALL platforms (back-compat for every pre-existing bundle). Rides
+    # in the stored `manifest_json` blob; no DB column.
+    supported_platforms: tuple[str, ...] | None = None
+
+    def supports_platform(self, platform: str) -> bool:
+        """Return True when this bundle may run on `platform` (absent field = every platform)."""
+        return self.supported_platforms is None or platform in self.supported_platforms
+
+
+def _parse_supported_platforms(
+    raw_value: Any, *, known_custom_platforms: frozenset[str]
+) -> tuple[str, ...] | None:
+    """Validate the optional `supported_platforms` list; `None` when absent (all platforms)."""
+    if raw_value is None:
+        return None
+    _require(
+        isinstance(raw_value, list) and bool(raw_value),
+        "invalid_supported_platforms",
+        "supported_platforms must be a non-empty list when present",
+    )
+    seen: list[str] = []
+    for entry in raw_value:
+        _require(
+            isinstance(entry, str), "invalid_supported_platforms", f"{entry!r} is not a string"
+        )
+        if entry.startswith("custom:"):
+            _require(
+                entry.removeprefix("custom:") in known_custom_platforms,
+                "invalid_supported_platforms",
+                f"{entry!r} is not registered for this tenant",
+            )
+        else:
+            _require(
+                entry in KNOWN_SUPPORTED_PLATFORMS,
+                "invalid_supported_platforms",
+                f"{entry!r} is not one of {sorted(KNOWN_SUPPORTED_PLATFORMS)}",
+            )
+        if entry not in seen:
+            seen.append(entry)
+    return tuple(seen)
 
 
 def _require(condition: bool, reason: str, detail: str) -> None:
@@ -480,6 +525,17 @@ def parse_bundle_manifest_v2(
             "an action stage must not declare consumes",
         )
 
+    supported_platforms = _parse_supported_platforms(
+        raw.get("supported_platforms"), known_custom_platforms=known_custom_platforms
+    )
+    if supported_platforms is not None:
+        for rule in consumes:
+            _require(
+                rule.platform in supported_platforms,
+                "consumes_platform_unsupported",
+                f"consumes platform {rule.platform!r} is not in supported_platforms",
+            )
+
     egress_rules: list[EgressRule] = []
     for entry in raw.get("egress") or []:
         host = entry.get("host", "")
@@ -547,4 +603,5 @@ def parse_bundle_manifest_v2(
         homepage_url=homepage_url,
         notice=notice,
         category=category,
+        supported_platforms=supported_platforms,
     )
