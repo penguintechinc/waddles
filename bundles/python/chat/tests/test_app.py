@@ -249,3 +249,99 @@ class TestDispatch:
         )
         with pytest.raises(ValueError, match="text"):
             _run(dispatch(envelope, {}, http_client=None))
+
+
+class TestRegressionsAndFailLoud:
+    """gh-678 (no serving capability) + gh-674 (PII-free logs) + fail-closed flag."""
+
+    # regression: gh-678 -- the read has no serving capability; every recognized invocation must
+    # say so loudly (explicit reply citing the tracking issue + a WARN log), never go silent,
+    # never fall back to an empty/fake "no messages" result.
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "!chat-history",
+            "!chat-history list",
+            "!channels",
+            "!channels list",
+            "!CHAT-HISTORY LIST",
+        ],
+    )
+    def test_unavailable_reply_is_explicit_and_cites_gh_678(
+        self, text: str, fake_host: Any
+    ) -> None:
+        result = _run(transform(_event(text)))
+        assert result is not None
+        reply = result.payload["text"]
+        assert reply and "issues/678" in reply and "aren't available" in reply
+        assert "chat.read_unavailable" in [m for m, _ in fake_host.log_calls]
+
+    # regression: gh-678 -- the bundle must not touch kv/db at all (it has no such capability);
+    # the fake host exposes only flags/log/relay, so any kv/db access would raise AttributeError.
+    def test_no_storage_capability_is_touched(self, fake_host: Any) -> None:
+        for text in ("!chat-history", "!channels list"):
+            assert _run(transform(_event(text))) is not None
+
+    # regression: gh-674 -- bundles must never log raw user input or raw identity.
+    def test_logs_never_contain_actor_or_typed_text(self, fake_host: Any) -> None:
+        for text in (
+            "!chat-history",
+            "!chat-history PIIEXTRA_secret",
+            "!channels list PIIEXTRA_secret",
+            "!channels bogus PIIEXTRA_secret",
+        ):
+            event = _event(text, author_id="PIIAUTHOR_id")
+            event.actor = "PIIACTOR_alice"
+            out = _run(transform(event))
+            assert out is not None
+            envelope = StageEnvelope(
+                tenant=TENANT_ID,
+                community=COMMUNITY_ID,
+                app_id="waddles.core.example.chat",
+                stage="action",
+                event=out,
+                ts="2026-01-01T00:00:00+00:00",
+            )
+            _run(dispatch(envelope, {}, http_client=None))
+
+        assert len(fake_host.log_calls) >= 8, "too few log calls -- PII check would be vacuous"
+        for message, fields_json in fake_host.log_calls:
+            blob = f"{message} {fields_json}".lower()
+            for sentinel in ("piiactor_alice", "piiextra_secret", "piiauthor_id"):
+                assert sentinel not in blob
+
+    def test_flag_is_queried_default_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        asked: list[tuple[str, bool]] = []
+
+        def _enabled(key: str, default_value: bool) -> bool:
+            asked.append((key, default_value))
+            return default_value
+
+        fake_wit_world = types.ModuleType("wit_world")
+        fake_wit_world.imports = types.SimpleNamespace(  # type: ignore[attr-defined]
+            flags=types.SimpleNamespace(enabled=_enabled)
+        )
+        monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
+
+        assert _run(transform(_event("!channels"))) is None
+        assert asked == [("waddles.command-chat", False)]
+
+    def test_dispatch_empty_text_raises(self, fake_host: Any) -> None:
+        """`transform` never emits empty text; an empty one reaching `dispatch` fails loud."""
+        envelope = StageEnvelope(
+            tenant=TENANT_ID,
+            community=COMMUNITY_ID,
+            app_id="waddles.core.example.chat",
+            stage="action",
+            event=PlatformEvent(
+                platform="discord",
+                event_type="chat.message",
+                actor=None,
+                payload={"channel_id": "chan-1", "text": ""},
+                occurred_at="2026-01-01T00:00:00+00:00",
+            ),
+            ts="2026-01-01T00:00:00+00:00",
+        )
+        with pytest.raises(ValueError, match="text"):
+            _run(dispatch(envelope, {}, http_client=None))
+        assert fake_host.relay_calls == []

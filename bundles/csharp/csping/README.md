@@ -26,6 +26,42 @@ history -- the build facts, exports/imports, and performance numbers are
 unaffected by the SDK port (same `componentize-dotnet`/NativeAOT-LLVM
 pins, same WIT world, same compiled output shape).
 
+## At a glance
+
+| | |
+|---|---|
+| App id | `waddles.core.example.csping` (`provider: builtin`, `language: csharp`, WASI component) |
+| Command | `!csping` -> `pong (c#)`; the command name matches case-sensitively (`!CSPING`, `!csping-not-quite`, `hello` produce no reply) |
+| Verbs | none -- trailing arguments are ignored, there are no sub-commands |
+| Platforms | Twitch, Discord (`chat.message`); the pong relays to the event's **own** origin platform |
+| PostHog flag | none -- a toolchain-spike/example bundle, unlike the flag-gated `bundles/python/*` commands |
+| Permissions (V2) | `[]` -- calls only the always-granted `relay` import (action stage) |
+| State | none (no `kv`, no DB, no egress) |
+| Catalog | registered in `bundles/core-bundles.yaml` (`csharp`, built by its own `Dockerfile`) |
+
+```text
+!csping          -> pong (c#)
+!csping extra    -> pong (c#)    # trailing arguments are ignored
+!CSPING          -> (no reply)   # command names are case-sensitive (ChatCommand.Is is Ordinal)
+```
+
+**Behavior notes.** A non-matching or non-chat payload returns `null` (no reply) instead of
+throwing; `dispatch` fails loud -- `MISSING_CHANNEL` (fatal), `BAD_PAYLOAD` (fatal),
+`RELAY_PUSH_FAILED` (retryable) -- never a silent drop. **PII-free logs:** the bundle writes no
+log lines of its own, and neither the actor nor the message text is ever copied into a reply
+payload, a relay message or a log (gh-674); the reply text is the constant `pong (c#)`.
+
+## Test
+
+```bash
+make test-csping          # scripts/test-csping.sh: xUnit + coverlet in the pinned .NET 10 SDK image
+```
+
+Containerized (needs `docker`); the script fails below a 90% line-coverage floor or if no
+`coverage.cobertura.xml` is produced. Suite: `tests/CspingLogicTests.cs`
+(`Csping.Tests.csproj` is a separate host-CLR project -- it cannot reference the wasi-wasm
+bundle project, see its header comment).
+
 ## Toolchain versions (as built and verified)
 
 | Component | Version |

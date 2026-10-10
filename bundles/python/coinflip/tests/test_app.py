@@ -831,3 +831,162 @@ def test_caller_role_signal_true_from_mod() -> None:
 
 def test_caller_role_signal_false_when_both_false() -> None:
     assert _caller_role_signal({"is_mod": False, "is_broadcaster": False}) is False
+
+
+# -- kv charset + PII-free logs + corrupt-state ERROR logging + lifecycle ---------------------
+
+
+# regression: gh-631 -- this suite's hand-rolled kv fake accepts ANY key (the exact blind spot
+# that hid `count`/`lurk`'s colon keys), so assert the real host charset over EVERY key a full
+# flip/call/list/set-cooldown flow touches.
+def test_every_kv_key_touched_satisfies_the_host_charset(fake_host: _FakeHost) -> None:
+    from waddle_sdk.kv import validate_key
+
+    _run(dispatch(_sample_envelope("twitch", "flip"), {}, http_client=None))
+    fake_host.advance(60)
+    _run(dispatch(_sample_envelope("twitch", "flip", call="heads"), {}, http_client=None))
+    _run(dispatch(_sample_envelope("twitch", "list"), {}, http_client=None))
+    _run(
+        dispatch(
+            _sample_envelope("twitch", "config_set_cooldown", arg="cooldown 30", is_mod=True),
+            {},
+            http_client=None,
+        )
+    )
+    touched = {call[1] for call in fake_host.kv_calls}
+    assert len(touched) >= 4, f"flow touched too few keys: {sorted(touched)}"
+    for key in touched:
+        validate_key(key)  # raises if any byte falls outside the real host's allowed charset
+        assert ":" not in key
+
+
+_PII_ACTOR = "PIIACTOR_alice"
+_PII_TEXT = "PIITEXT_secret_phrase"
+
+
+def _roundtrip(text: str, **role: bool) -> Any:
+    """Run `transform()` then `dispatch()` -- the real two-stage path -- with PII sentinels."""
+    event = _sample_event(text, **role)
+    event.actor = _PII_ACTOR
+    out = _run(transform(event))
+    assert out is not None
+    envelope = StageEnvelope(
+        tenant="tenant-1",
+        community="comm-1",
+        app_id="waddles.core.example.coinflip",
+        stage="action",
+        event=out,
+        ts="2026-10-05T00:00:00.000Z",
+    )
+    return _run(dispatch(envelope, {}, http_client=None))
+
+
+def _assert_logs_pii_free(host: _FakeHost, *sentinels: str) -> int:
+    """Assert no sentinel appears in any recorded log call; return how many were examined."""
+    assert host.log_calls, "no log calls recorded -- the PII check would pass vacuously"
+    for _lvl, message, fields_json in host.log_calls:
+        blob = f"{message} {fields_json}".lower()
+        for sentinel in sentinels:
+            assert sentinel.lower() not in blob
+    return len(host.log_calls)
+
+
+# regression: gh-674 -- `coinflip` used to log the raw typed cooldown value
+# (`raw=parts[1], error=str(exc)`); no actor, pseudonym or typed text may reach any log call.
+def test_logs_never_contain_actor_pseudonym_or_typed_text(fake_host: _FakeHost) -> None:
+    _roundtrip("!flip")
+    fake_host.advance(60)
+    _roundtrip("!coinflip tails")
+    _roundtrip("!flip list")
+    _roundtrip(f"!flip set cooldown {_PII_TEXT}", is_mod=True)  # invalid seconds
+    _roundtrip(f"!flip set cooldown 99999999 {_PII_TEXT}", is_mod=True)  # wrong arity
+    _roundtrip("!flip set cooldown 30", is_mod=True)  # applied
+    _roundtrip("!flip set cooldown 30")  # denied: no role signal
+    _roundtrip("!flip set cooldown 30", is_mod=False, is_broadcaster=False)  # denied
+    _roundtrip(f"!flip bogus {_PII_TEXT}")  # usage
+    _roundtrip(f"!flip heads list {_PII_TEXT}")  # call combined with a verb -> usage
+    pseudonym = _expected_pseudonym(_PII_ACTOR)
+    assert _assert_logs_pii_free(fake_host, _PII_ACTOR, _PII_TEXT, pseudonym, pseudonym[:8]) >= 15
+
+
+def test_invalid_cooldown_log_carries_only_the_exception_class(fake_host: _FakeHost) -> None:
+    _roundtrip(f"!flip set cooldown {_PII_TEXT}", is_mod=True)
+    invalid = [f for _lvl, m, f in fake_host.log_calls if m == "coinflip.invalid_cooldown"]
+    assert len(invalid) == 1
+    assert json.loads(invalid[0]) == {"error_type": "ValueError"}
+
+
+# regression: gh-674 -- backend-error logs carry the error class only, never typed text.
+def test_kv_error_logs_never_contain_actor_or_typed_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    host = _FakeHost()
+    _install(monkeypatch, host, kv_set_raises=_KvError())
+    with pytest.raises(RuntimeError, match="kv set failed"):
+        _roundtrip("!flip")
+    assert any(m == "coinflip.kv_error" for _lvl, m, _f in host.log_calls)
+    _assert_logs_pii_free(host, _PII_ACTOR, _expected_pseudonym(_PII_ACTOR))
+
+
+@pytest.mark.parametrize(
+    ("corrupt_key", "command", "log_name"),
+    [
+        ("flips", "list", "coinflip.flips_corrupt"),
+        ("wins", "list", "coinflip.wins_corrupt"),
+        ("lastflip", "flip", "coinflip.cooldown_state_corrupt"),
+        ("cooldown", "flip", "coinflip.cooldown_config_corrupt"),
+    ],
+)
+def test_corrupt_state_self_heals_but_always_logs_at_error(
+    corrupt_key: str, command: str, log_name: str, fake_host: _FakeHost
+) -> None:
+    pseudo = _expected_pseudonym("viewer-1")
+    if corrupt_key == "wins":
+        fake_host.store[_scoped(_flips_key(pseudo))] = b"2"  # `list` only reads wins when flips > 0
+    key = {
+        "flips": _flips_key(pseudo),
+        "wins": _wins_key(pseudo),
+        "lastflip": _lastflip_key(pseudo),
+        "cooldown": "coinflip.config.cooldown",
+    }[corrupt_key]
+    fake_host.store[_scoped(key)] = b"\xff\xfe"
+    _run(dispatch(_sample_envelope("twitch", command), {}, http_client=None))
+    levels = [lvl for lvl, m, _f in fake_host.log_calls if m == log_name]
+    assert levels, f"{log_name} was not logged"
+    assert set(levels) == {0}  # the fake host's Level.ERROR
+
+
+def test_called_flip_lifecycle_tracks_wins_only_for_correct_calls(
+    monkeypatch: pytest.MonkeyPatch, fake_host: _FakeHost
+) -> None:
+    """flip -> call right -> call wrong -> list: flips count all three, wins count one."""
+    import app
+
+    pseudo = _expected_pseudonym("viewer-1")
+    monkeypatch.setattr(app.random, "choice", lambda seq: "heads" if "heads" in seq else seq[0])
+    _run(dispatch(_sample_envelope("twitch", "flip"), {}, http_client=None))
+    fake_host.advance(60)
+    _run(dispatch(_sample_envelope("twitch", "flip", call="heads"), {}, http_client=None))
+    fake_host.advance(60)
+    _run(dispatch(_sample_envelope("twitch", "flip", call="tails"), {}, http_client=None))
+    _run(dispatch(_sample_envelope("twitch", "list"), {}, http_client=None))
+    assert fake_host.store[_scoped(_flips_key(pseudo))] == b"3"
+    assert fake_host.store[_scoped(_wins_key(pseudo))] == b"1"
+    assert json.loads(fake_host.relay_calls[-1][1])["text"] == "Flips: 3. Correct calls: 1."
+
+
+def test_coinflip_holds_only_its_own_community_scoped_keys_and_no_economy_state(
+    fake_host: _FakeHost,
+) -> None:
+    """The documented no-betting-ties rule: only `coinflip.*` keys, community-scoped, no balance."""
+    _run(dispatch(_sample_envelope("twitch", "flip", call="heads"), {}, http_client=None))
+    _run(dispatch(_sample_envelope("twitch", "list"), {}, http_client=None))
+    _run(
+        dispatch(
+            _sample_envelope("twitch", "config_set_cooldown", arg="cooldown 30", is_mod=True),
+            {},
+            http_client=None,
+        )
+    )
+    assert fake_host.store, "flow wrote no state -- the key check would be vacuous"
+    for key in fake_host.store:
+        assert key.startswith("c.comm-1.coinflip."), key
+        assert not any(word in key for word in ("points", "balance", "wallet", "wager", "stake"))

@@ -437,3 +437,75 @@ def test_kv_key_constant_is_colon_free() -> None:
     # Regression guard: the shared fake validates the exact host charset (gh-631), so a key
     # that would be host-rejected raises here too, never only in production.
     FakeKvHost().get(_BLURB_KEY)
+
+
+# ---------------------------------------------------------------------------
+# PII-free logs (gh-674) + corrupt-store fail-loud
+# ---------------------------------------------------------------------------
+
+_PII_ACTOR = "PIIACTOR_alice"
+_PII_TEXT = "PIITEXT_secret_phrase"
+
+
+def _roundtrip(text: str, **role: bool) -> Any:
+    """Run `transform()` then `dispatch()` -- the real two-stage path -- with PII sentinels."""
+    event = _event(text, **role)
+    event.actor = _PII_ACTOR
+    out = _run(transform(event))
+    assert out is not None
+    envelope = StageEnvelope(
+        tenant="tenant-1",
+        community="comm-1",
+        app_id="waddles.core.example.about",
+        stage="action",
+        event=out,
+        ts="2026-10-07T00:00:00.000Z",
+    )
+    return _run(dispatch(envelope, {}, http_client=None))
+
+
+def _assert_logs_pii_free(host: _FakeHost, *sentinels: str) -> int:
+    """Assert no sentinel appears in any recorded log call; return how many were examined."""
+    assert host.log_calls, "no log calls recorded -- the PII check would pass vacuously"
+    for _lvl, message, fields_json in host.log_calls:
+        blob = f"{message} {fields_json}".lower()
+        for sentinel in sentinels:
+            assert sentinel.lower() not in blob
+    return len(host.log_calls)
+
+
+# regression: gh-674 -- bundles must never log raw user input (typed text) or raw identity.
+@pytest.mark.parametrize("alias", ["!about", "!bot"])
+def test_logs_never_contain_actor_or_typed_text(alias: str, fake_host: _FakeHost) -> None:
+    _roundtrip(f"{alias} set {_PII_TEXT}", is_mod=True)  # applied
+    _roundtrip(f"{alias} set {_PII_TEXT}")  # denied: no role signal at all
+    _roundtrip(f"{alias} set {_PII_TEXT}", is_mod=False, is_broadcaster=False)  # denied
+    _roundtrip(f"{alias} bogus {_PII_TEXT}")  # usage
+    _roundtrip(alias)  # show
+    assert _assert_logs_pii_free(fake_host, _PII_ACTOR, _PII_TEXT) >= 10
+
+
+# regression: gh-674 -- the error path logs the host's error, never the typed text.
+def test_kv_error_logs_never_contain_actor_or_typed_text(fake_host: _FakeHost) -> None:
+    kv_ns = sys.modules["wit_world"].imports.kv
+    original = kv_ns.set
+
+    def _raise(key: str, value: bytes, ttl: int) -> None:
+        raise RuntimeError("backend down")
+
+    kv_ns.set = _raise
+    try:
+        with pytest.raises(RuntimeError, match="about set failed"):
+            _roundtrip(f"!about set {_PII_TEXT}", is_mod=True)
+    finally:
+        kv_ns.set = original
+    assert any(m == "about.kv_error" for _lvl, m, _f in fake_host.log_calls)
+    _assert_logs_pii_free(fake_host, _PII_ACTOR, _PII_TEXT)
+
+
+def test_show_corrupt_blurb_bytes_fail_loud_not_default(fake_host: _FakeHost) -> None:
+    """A non-UTF-8 stored blurb raises -- it is never silently replaced by the default blurb."""
+    fake_host.kv.store[_scoped(_BLURB_KEY)] = b"\xff\xfe\x00"
+    with pytest.raises(UnicodeDecodeError):
+        _run(dispatch(_envelope("show"), {}, http_client=None))
+    assert fake_host.relay_calls == []

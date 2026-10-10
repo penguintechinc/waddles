@@ -543,3 +543,126 @@ def test_kv_key_constants_satisfy_host_guest_key_charset() -> None:
     _validate_guest_key(_value_key("die"))
     assert ":" not in REGISTRY_KEY
     assert ":" not in VALUE_KEY_PREFIX
+
+
+# ---------------------------------------------------------------------------
+# PII-free logs (gh-674), mod-gate matrix, corrupt-store fail-loud, no-silent-fallback
+# ---------------------------------------------------------------------------
+
+
+def _assert_logs_pii_free(host, *sentinels: str) -> int:
+    """Assert no sentinel appears in any recorded log call; return how many were examined."""
+    assert host.log_calls, "no log calls recorded -- the PII check would pass vacuously"
+    for _lvl, message, fields_json in host.log_calls:
+        blob = f"{message} {fields_json}".lower()
+        for sentinel in sentinels:
+            assert sentinel.lower() not in blob
+    return len(host.log_calls)
+
+
+# regression: gh-674 -- `count` used to log the raw typed amount (`raw=raw, error=str(exc)`);
+# no typed argument or raw actor may reach any log call, on any branch.
+def test_logs_never_contain_actor_or_typed_arguments(fake_host) -> None:
+    def say(text: str, **role: bool) -> None:
+        event = _event(text, **role)
+        event.actor = "PIIACTOR_alice"
+        out = _run(transform(event))
+        if out is not None:
+            envelope = _envelope("twitch", {"channel_id": "12345", "text": out.payload["text"]})
+            envelope.event.actor = "PIIACTOR_alice"
+            _run(dispatch(envelope, {}, http_client=None))
+
+    say("!count add !die", is_mod=True)
+    say("!count add !die", is_mod=False, is_broadcaster=False)  # denied
+    say("!die add PIIRAW_amount", is_mod=True)  # invalid amount
+    say("!die set PIIRAW_amount", is_mod=True)  # invalid amount
+    say("!die PIIRAW_op", is_mod=True)  # unknown operation
+    say("!count PIIRAW_sub")  # unknown subcommand
+    say("!die add 1", is_mod=False, is_broadcaster=False)  # denied
+    say("!die add 1", is_mod=True)
+    say("!die")
+    say("!count remove !die", is_mod=True)
+    assert _assert_logs_pii_free(fake_host, "PIIACTOR_alice", "PIIRAW_") >= 10
+
+
+# regression: gh-674 -- kv-failure logs carry the host error text, never the typed argument.
+def test_kv_failure_logs_never_contain_typed_arguments(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    fake_host.kv.fail_ops = {"increment"}
+    result = _run(transform(_event("!die add 5", is_mod=True)))
+    assert "went wrong" in _reply_text(result)
+    assert any(msg == "count.kv_failure" for _lvl, msg, _f in fake_host.log_calls)
+    _assert_logs_pii_free(fake_host, "PIIACTOR_alice", "PIIRAW_")
+
+
+def test_corrupt_registry_does_not_fall_back_to_empty_or_get_overwritten(fake_host) -> None:
+    """No silent fallback: a corrupt registry fails the add, and the bad bytes are left intact."""
+    fake_host.kv.store["count.registry"] = b"not json"
+    result = _run(transform(_event("!count add !die", is_mod=True)))
+    assert "went wrong" in _reply_text(result)
+    assert fake_host.kv.store["count.registry"] == b"not json"
+    assert "count.value.die" not in fake_host.kv.store
+
+
+def test_corrupt_registry_fails_loud_on_counter_read_too(fake_host) -> None:
+    fake_host.kv.store["count.registry"] = b"\xff\xfe"
+    result = _run(transform(_event("!die")))
+    assert result is not None and "went wrong" in _reply_text(result)
+    assert any(msg == "count.kv_failure" for _lvl, msg, _f in fake_host.log_calls)
+
+
+@pytest.mark.parametrize(
+    "role",
+    [
+        {"is_mod": True},
+        {"is_broadcaster": True},
+        {"is_mod": True, "is_broadcaster": True},
+    ],
+)
+def test_privileged_role_combinations_may_mutate(role: dict, fake_host) -> None:
+    created = _run(transform(_event("!count add !die", **role)))
+    assert "Created counter" in _reply_text(created)
+
+
+@pytest.mark.parametrize("value", ["yes", 1, "true", None])
+def test_non_bool_role_fields_fail_closed(value, fake_host) -> None:
+    """Only a real `bool` counts as role info -- truthy non-bools never grant mutation."""
+    event = _no_role_event("!count add !die", platform="twitch")
+    event.payload["is_mod"] = value
+    event.payload["is_broadcaster"] = value
+    result = _run(transform(event))
+    assert "Only the broadcaster or a moderator" in _reply_text(result)
+    assert "count.registry" not in fake_host.kv.store
+
+
+def test_every_counter_mutation_is_denied_when_role_info_absent(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    for text in ("!die add 1", "!die sub 1", "!die set 9", "!count remove !die"):
+        result = _run(transform(_no_role_event(text)))
+        assert "Only the broadcaster or a moderator" in _reply_text(result)
+    assert fake_host.kv.store["count.value.die"] == b"0"
+    assert json.loads(fake_host.kv.store["count.registry"]) == ["die"]
+
+
+def test_remove_then_recreate_counter_starts_fresh(fake_host) -> None:
+    """CRUD lifecycle: create -> mutate -> remove -> recreate yields a clean zero counter."""
+    _run(transform(_event("!count add !die", is_mod=True)))
+    _run(transform(_event("!die set 41", is_mod=True)))
+    assert _reply_text(_run(transform(_event("!die add 1", is_mod=True)))) == "die: 42"
+    _run(transform(_event("!count remove !die", is_mod=True)))
+    assert _run(transform(_event("!die"))) is None  # no longer ours
+    _run(transform(_event("!count add !die", is_mod=True)))
+    assert _reply_text(_run(transform(_event("!die")))) == "die: 0"
+
+
+def test_sub_can_go_negative_and_set_accepts_negative(fake_host) -> None:
+    _run(transform(_event("!count add !die", is_mod=True)))
+    assert _reply_text(_run(transform(_event("!die sub 3", is_mod=True)))) == "die: -3"
+    assert _reply_text(_run(transform(_event("!die set -10", is_mod=True)))) == "die: -10"
+
+
+def test_registry_is_sorted_and_deduplicated_on_save(fake_host) -> None:
+    for name in ("zeta", "alpha", "mid"):
+        _run(transform(_event(f"!count add !{name}", is_mod=True)))
+    assert json.loads(fake_host.kv.store["count.registry"]) == ["alpha", "mid", "zeta"]
+    assert _reply_text(_run(transform(_event("!count list")))) == "Counters: alpha, mid, zeta"
