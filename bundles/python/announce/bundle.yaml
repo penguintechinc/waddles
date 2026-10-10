@@ -4,8 +4,8 @@ name: Saved Announcements Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !announce <key> (get) / !announce set <key> <message> (mod) /
 # !announce remove <key> (mod) / !announce list. See src/app.py's own module docstring for full
 # scope, including the documented !announce command-prefix overlap with the pre-existing,
-# DB-backed core/svc_process/bundles/community_announcements_process.py `!announce publish <id>`
-# script bundle (a different, legacy runner architecture) -- flagged there for the migration
+# DB-backed core/svc_process/builtin_handlers/community_announcements_process.py `!announce publish <id>`
+# built-in stage handler (a different, legacy runner architecture) -- flagged there for the migration
 # owner to resolve, not silently papered over.
 version: 1.0.2
 feature: waddles.core.example

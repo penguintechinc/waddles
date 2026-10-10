@@ -1,6 +1,6 @@
 """Live ON/OFF status projection (gh #287 S10) -- feeds the overlay/webui "LIVE" badge.
 
-`core/svc_ingest/bundles/twitch_eventsub_ingest.py` normalizes a Twitch
+`core/svc_ingest/builtin_handlers/twitch_eventsub_ingest.py` normalizes a Twitch
 EventSub `stream.online`/`stream.offline` notification into a
 `PlatformEvent` (`event.payload['broadcaster_id']`/`['broadcaster_login']`,
 `event.payload['metadata']['started_at'|'type'|'viewer_count']` when
@@ -11,7 +11,7 @@ firing best-effort for every such event alongside the raid-shoutout hook
 Writes the SAME `coordination` table (`config/postgres/migrations/
 004_add_missing_tables.sql`, `UNIQUE(platform, channel_id)`) every
 existing live-stream READ path already queries --
-`core/svc_action/bundles/streaming_stream_action.py`,
+`core/svc_action/builtin_handlers/streaming_stream_action.py`,
 `hub_api/services/stream_service.py`, `hub_api/services/public_service.py`,
 `hub_api/services/community_music_queue_service.py`, and this task's own
 `hub_api/services/live_status_service.py` -- rather than inventing a
@@ -27,8 +27,8 @@ endpoints. `server_id`/`channel_id` are BOTH set to `broadcaster_id` --
 above uses) must match `coordination.channel_id`
 (`UNIQUE(platform, channel_id)`) for the join to ever resolve a row.
 
-`app_catalog`'s `waddles.streaming.stream.default` action-stage bundle
-(`core/svc_action/bundles/streaming_stream_action.py::list_streams`) has
+`app_catalog`'s `waddles.streaming.stream.default` action-stage handler
+(`core/svc_action/builtin_handlers/streaming_stream_action.py::list_streams`) has
 no `subcommand`-based online/offline announcement handler today (its
 entrypoint only serves `get_live_streams`/`get_featured_streams`/
 `get_stream_details` READ queries) -- per this task's own spec, this
@@ -58,7 +58,7 @@ class _ExecutableDal(Protocol):
 
 
 #: The two `PlatformEvent.event_type` values this module ever acts on --
-#: matches `core/svc_ingest/bundles/twitch_eventsub_ingest.py`'s own
+#: matches `core/svc_ingest/builtin_handlers/twitch_eventsub_ingest.py`'s own
 #: `KNOWN_EVENT_TYPES` entries.
 STREAM_ONLINE_EVENT_TYPE = "stream.online"
 STREAM_OFFLINE_EVENT_TYPE = "stream.offline"

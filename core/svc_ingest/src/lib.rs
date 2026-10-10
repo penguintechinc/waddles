@@ -12,7 +12,7 @@
 //! ingest.md`, this chunk wires the primary e2e path end to end: a real
 //! Twitch IRC chat message (`crate::ingest::twitch`, secondary: Discord
 //! Gateway, `crate::ingest::discord`) is normalized (`crate::normalize`,
-//! ported from the Python predecessor's `bundles/{twitch,discord}_ingest.py`
+//! ported from the Python predecessor's `builtin_handlers/{twitch,discord}_ingest.py`
 //! plus `receivers/twitch_irc.py`'s IRCv3 tag decoding), minted into a
 //! D30-complete envelope (`workstream_id`/`event_id`/`trace`/
 //! `binding.mac`, via `penguin_spine::KeyRing`/`compute_binding_mac`,

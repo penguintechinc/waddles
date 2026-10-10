@@ -37,7 +37,7 @@ def _manifest(app_id: str, feature: str, *, consumes: tuple[str, ...], is_defaul
             "is_default": is_default,
             "stages": {
                 "ingest": {
-                    "entrypoint": "bundles.discord_ingest:normalize",
+                    "entrypoint": "builtin_handlers.discord_ingest:normalize",
                     "consumes": list(consumes),
                 }
             },
