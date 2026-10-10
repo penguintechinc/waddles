@@ -48,6 +48,7 @@ pub mod grant_gate;
 pub mod hop;
 pub mod host_api;
 pub mod http;
+pub mod identity;
 pub mod license;
 pub mod pii_tokenize;
 pub mod source_supervisor;
@@ -72,6 +73,82 @@ pub const SERVICE_NAME: &str = "svc-process";
 /// `MintEphemeralPseudonyms` only; this service never calls
 /// `ResolveDisplayNames`/`GetStreamDek`.
 const HUB_IDENTITY_MINT_SCOPE: &str = "identity:ephemeral:mint";
+
+/// hub-api internal gRPC scope for `IdentityService.ResolveHandle`
+/// (`hub_api/grpc_internal/servicers.py::REQUIRED_SCOPES`) -- requested by the
+/// SECOND, `identity`-capability-only `hub_client::HubClient`
+/// ([`build_hub_handle_client`]); a client is single-scope, so the mint client
+/// above cannot be reused.
+const HUB_IDENTITY_RESOLVE_HANDLE_SCOPE: &str = "identity:handle:resolve";
+
+/// Builds the `hub_client::HubClient` the `identity` capability resolves
+/// free-text `@handle` mentions through (`IdentityService.ResolveHandle`).
+///
+/// **Non-fatal, unlike [`build_hub_client`].** The capability is opt-in and
+/// flag-gated, and the actor and platform-id (`<@123>`) mentions resolve
+/// without hub-api, so a missing/unreachable hub-api only makes free-text
+/// handles `unavailable` (fail-closed, an explicit error to the bundle) -- it
+/// must never stop the stage from starting. Single connect attempt at startup;
+/// a `None` here lasts for the process lifetime and is logged loudly.
+async fn build_hub_handle_client(cli: &config::CliConfig) -> Option<Arc<hub_client::HubClient>> {
+    if cli.hub_api_grpc_endpoint.is_empty() || cli.service_jwt_token_endpoint.is_empty() {
+        tracing::info!(
+            "HUB_API_GRPC_ENDPOINT/SERVICE_JWT_TOKEN_ENDPOINT unset; identity capability \
+             cannot resolve free-text @handle mentions (platform-id mentions and the actor \
+             still resolve)"
+        );
+        return None;
+    }
+    match hub_client::HubClient::connect(
+        cli.hub_api_grpc_endpoint.clone(),
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+        HUB_IDENTITY_RESOLVE_HANDLE_SCOPE,
+        (!cli.hub_api_grpc_ca_file.is_empty()).then_some(cli.hub_api_grpc_ca_file.as_str()),
+    )
+    .await
+    {
+        Ok(client) => {
+            tracing::info!(
+                endpoint = %cli.hub_api_grpc_endpoint,
+                "hub_client (identity:handle:resolve) connected; identity capability can \
+                 resolve free-text @handle mentions"
+            );
+            Some(Arc::new(client))
+        }
+        Err(err) => {
+            tracing::warn!(
+                endpoint = %cli.hub_api_grpc_endpoint,
+                error = %err,
+                "hub_client (identity:handle:resolve) connect failed; identity capability \
+                 cannot resolve free-text @handle mentions until the stage restarts \
+                 (platform-id mentions and the actor still resolve)"
+            );
+            None
+        }
+    }
+}
+
+/// Builds the `identity` bundle host capability's production wiring
+/// (`spine::ProcessDeps::identity_wiring`) over the stage's EXISTING read-only
+/// DB reader connection (`waddles_bundle_reader`, the one the grant loader
+/// already uses -- no new role/password/privilege; it reads the PII-free
+/// `community_member_identities` view, alembic 0048), the optional hub-api
+/// handle resolver, and the `BUNDLE_IDENTITY_CAPABILITY_FLAG` gate (default OFF).
+fn build_identity_wiring(
+    reader: sea_orm::DatabaseConnection,
+    license_client: &Arc<penguin_licensing::LicenseClient>,
+    handle_client: Option<Arc<hub_client::HubClient>>,
+) -> identity::IdentityWiring {
+    identity::IdentityWiring {
+        directory: Arc::new(identity::PgMemberDirectory::new(reader)),
+        handles: handle_client
+            .map(|c| Arc::new(identity::HubHandleResolver(c)) as Arc<dyn identity::HandleResolver>),
+        flag: Arc::new(license::BundleIdentityCapabilityGate::new(Arc::clone(
+            license_client,
+        ))),
+    }
+}
 
 /// Builds and connects the shared `hub_client::HubClient` the inbound
 /// PII-tokenization pass (`crate::pii_tokenize`) needs, or `Ok(None)` when
@@ -1259,6 +1336,12 @@ fn try_start_process_loop(
                 db_wiring: db_wiring.clone(),
                 reputation_wiring: reputation_wiring.clone(),
                 economy_wiring: economy_wiring.clone(),
+                // The legacy single-bundle path runs at the `(0, 0)` fail-closed
+                // scope (no resolved tenant/community), where every
+                // community-scoped capability -- `identity` included -- refuses
+                // with `invalid_args`; it is wired only on the multi-tenant
+                // path, which holds the resolved scope and the DB reader.
+                identity_wiring: None,
                 // Env-only legacy mode has no `BUNDLE_SCOPE_TENANT_ID`/DB
                 // reader to resolve a real tenant from -- `(0, 0)` fails
                 // closed (denies every non-platform permission) rather than
@@ -1760,6 +1843,20 @@ fn try_start_changelog_consumer(
                         }
                         None => None,
                     };
+                    // `identity` host capability: reads the stage's own
+                    // read-only DB reader (`db`, the connection the grant
+                    // loader above already shares) -- no new credential --
+                    // and resolves free-text handles through a second,
+                    // single-scope hub-api client. Same license-client
+                    // dependency as the capabilities above.
+                    deps.identity_wiring = match &bundle_db_license_client {
+                        Some(client) => Some(build_identity_wiring(
+                            db.clone(),
+                            client,
+                            build_hub_handle_client(&config.cli).await,
+                        )),
+                        None => None,
+                    };
                     Some(Arc::new(source_supervisor::SpineConsumerSupervisor {
                         deps: Arc::new(deps),
                     })
@@ -1870,6 +1967,7 @@ async fn build_source_supervisor_deps(
         db_wiring: None,
         reputation_wiring: None,
         economy_wiring: None,
+        identity_wiring: None,
     })
 }
 
@@ -2792,6 +2890,81 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("hub-api"));
+    }
+
+    /// The identity capability's handle client is OPTIONAL (unlike the minter's):
+    /// unconfigured hub-api env is a quiet `None`, never an error -- actor and
+    /// platform-id mentions resolve without it.
+    #[tokio::test]
+    async fn build_hub_handle_client_is_none_when_hub_api_is_unconfigured() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert_eq!(cli.hub_api_grpc_endpoint, "");
+        assert!(build_hub_handle_client(&cli).await.is_none());
+    }
+
+    /// An unreachable hub-api degrades to `None` (logged, never fatal, never a
+    /// panic): handle mentions become `unavailable`, the stage still starts.
+    #[tokio::test]
+    async fn build_hub_handle_client_is_none_when_hub_api_is_unreachable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral port");
+        let addr = listener.local_addr().expect("local_addr");
+        drop(listener); // nothing listening now -- connection refused
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--hub-api-grpc-endpoint",
+            &format!("http://{addr}"),
+            "--service-jwt-token-endpoint",
+            &format!("http://{addr}/internal/service-token"),
+        ]);
+        assert!(build_hub_handle_client(&cli).await.is_none());
+    }
+
+    /// With a connectable hub-api the handle client is built, with the
+    /// `identity:handle:resolve` scope (a client is single-scope, so it cannot
+    /// be the minter's).
+    #[tokio::test]
+    async fn build_hub_handle_client_connects_to_a_listening_hub_api() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral port");
+        let addr = listener.local_addr().expect("local_addr");
+        tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--hub-api-grpc-endpoint",
+            &format!("http://{addr}"),
+            "--service-jwt-token-endpoint",
+            &format!("http://{addr}/internal/service-token"),
+        ]);
+        assert!(build_hub_handle_client(&cli).await.is_some());
+        assert_eq!(
+            HUB_IDENTITY_RESOLVE_HANDLE_SCOPE, "identity:handle:resolve",
+            "must match hub_api/grpc_internal/servicers.py::REQUIRED_SCOPES"
+        );
+        assert_ne!(HUB_IDENTITY_RESOLVE_HANDLE_SCOPE, HUB_IDENTITY_MINT_SCOPE);
+    }
+
+    /// The wiring is built over the stage's own reader connection, with the
+    /// flag gate fail-closed (a never-seen opt-in flag is OFF) and no handle
+    /// resolver unless one was supplied.
+    #[tokio::test]
+    async fn build_identity_wiring_is_fail_closed_by_default() {
+        let reader =
+            sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection();
+        let wiring = build_identity_wiring(reader, &test_license_client(), None);
+        assert!(wiring.handles.is_none());
+        assert!(
+            !wiring.flag.enabled().await,
+            "the identity capability flag must default OFF"
+        );
     }
 
     #[tokio::test]

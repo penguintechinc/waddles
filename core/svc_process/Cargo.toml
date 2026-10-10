@@ -163,6 +163,18 @@ bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0
 # Target-user id parsing for the `reputation` capability (`handle_reputation`):
 # a bundle names its target as a UUID string; same pin as the gate crate.
 uuid = { version = "=1.26.1" }
+# `src/identity.rs` (the `identity` bundle host capability): an OTel latency
+# histogram + outcome counter for identity resolutions, reading the global
+# meter provider `penguin-logging` installs (never building its own), exactly
+# as `core/bundle_host_economy`'s `metrics.rs` does. Already resolved in this
+# crate's `Cargo.lock` at this exact version (via the `bundle-host-*` crates);
+# declared directly so this crate does not depend on that staying true.
+opentelemetry = "=0.32.0"
+# `tonic::Code`, to classify a `hub_client` `ResolveHandle` failure
+# (`identity::hub_error_to_identity`): NOT_FOUND / FAILED_PRECONDITION /
+# INVALID_ARGUMENT are the caller's-input outcomes. Same exact pin
+# `core/hub_client` uses; default features off so this adds no transport code.
+tonic = { version = "=0.14.6", default-features = false }
 # The shared `db` bundle host-capability implementation (insert/get/update/
 # delete against a bundle's own `app_core`/`app_community` table) -- a
 # same-repo path dependency, same rationale as `bundle-active-set` above:

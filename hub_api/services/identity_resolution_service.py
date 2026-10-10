@@ -258,6 +258,7 @@ SELECT DISTINCT cand.uuid::text FROM (
         ON hui.platform = ep.platform AND hui.platform_user_id = ep.platform_user_id
       LEFT JOIN hub_users hu ON hu.id = hui.hub_user_id
      WHERE ep.tenant_id = %s AND ep.platform = %s AND lower(ep.handle) = lower(%s)
+       AND ep.platform_user_id NOT LIKE 'handle:%%'
     UNION
     SELECT hu.uuid
       FROM hub_user_identities hui

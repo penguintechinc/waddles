@@ -693,6 +693,14 @@ pub struct ProcessDeps<S: SpineOps> {
     /// when `BUNDLE_ECONOMY_PASSWORD` is unset or the connection failed
     /// (every `economy.*` call then denies `not_implemented`).
     pub economy_wiring: Option<crate::capabilities::EconomyWiring>,
+    /// The `identity` host capability's production wiring
+    /// (`crate::lib::try_build_identity_wiring`), cloned into every per-invoke
+    /// `StageCapabilities` like [`ProcessDeps::economy_wiring`] -- paired there
+    /// with that invocation's host-derived [`crate::identity::InvocationIdentity`]
+    /// (built in [`handle_delivered`] from the raw event). `None` when no DB
+    /// reader account is configured (every `identity.*` call then denies
+    /// `not_implemented`).
+    pub identity_wiring: Option<crate::identity::IdentityWiring>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -755,17 +763,23 @@ async fn handle_delivered<S: SpineOps>(
     // closed: any resolution failure (hub-api unreachable, circuit open,
     // no minter configured) dead-letters the entry for redelivery rather
     // than ever forwarding the raw event.
-    let tokenized_event: PlatformEvent = if deps.pii_gate.enabled().await {
+    // The mention bindings (token a bundle is shown -> raw reference) are
+    // produced by the same pass and kept HOST-SIDE for the `identity`
+    // capability; `None` when tokenization is switched off.
+    let (tokenized_event, mention_bindings): (
+        PlatformEvent,
+        Option<Vec<crate::identity::MentionBinding>>,
+    ) = if deps.pii_gate.enabled().await {
         match &deps.pii_minter {
             Some(minter) => {
-                match crate::pii_tokenize::tokenize_event(
+                match crate::pii_tokenize::tokenize_event_with_mentions(
                     &d.env.event,
                     &d.env.tenant,
                     minter.as_ref(),
                 )
                 .await
                 {
-                    Ok(tokenized) => tokenized,
+                    Ok(tokenized) => (tokenized.event, Some(tokenized.mentions)),
                     Err(reason) => {
                         tracing::error!(
                             app_id = %d.env.app_id,
@@ -807,7 +821,7 @@ async fn handle_delivered<S: SpineOps>(
     } else {
         // Kill-switch ON: documented, explicit opt-out -- legacy
         // pre-tokenization behavior (raw PII reaches the bundle).
-        d.env.event.clone()
+        (d.env.event.clone(), None)
     };
 
     // Resolve the digest to load/invoke with BEFORE ever checking for an
@@ -977,6 +991,23 @@ async fn handle_delivered<S: SpineOps>(
         };
         let caps = match &deps.economy_wiring {
             Some(eco) => caps.with_economy(eco.clone()),
+            None => caps,
+        };
+        // `identity`: the invocation's host-derived identity facts come from
+        // the RAW event (never the tokenized copy a bundle sees) plus the
+        // mention bindings the tokenization pass produced.
+        let caps = match &deps.identity_wiring {
+            Some(identity) => {
+                let invocation = match mention_bindings {
+                    Some(bindings) => {
+                        crate::identity::InvocationIdentity::from_event(&d.env.event, bindings)
+                    }
+                    None => {
+                        crate::identity::InvocationIdentity::for_untokenized_event(&d.env.event)
+                    }
+                };
+                caps.with_identity(identity.clone(), Arc::new(invocation))
+            }
             None => caps,
         };
         Arc::new(caps)
@@ -1867,6 +1898,7 @@ mod tests {
             db_wiring: None,
             reputation_wiring: None,
             economy_wiring: None,
+            identity_wiring: None,
         };
         (deps, metrics)
     }
@@ -3109,5 +3141,289 @@ mod tests {
         .await
         .expect("drain_loop must return promptly once shutdown resolves");
         assert!(result.is_ok());
+    }
+
+    /// Scripted [`crate::identity::MemberDirectory`]: platform account id ->
+    /// community `user_uuid`, plus the set of confirmed members.
+    struct SpineDirectory {
+        by_platform: HashMap<String, uuid::Uuid>,
+    }
+
+    impl crate::identity::MemberDirectory for SpineDirectory {
+        fn member_by_platform_id<'a>(
+            &'a self,
+            _scope: crate::identity::IdentityScope,
+            _platform: &'a str,
+            platform_user_id: &'a str,
+        ) -> crate::identity::BoxFuture<'a, Result<uuid::Uuid, crate::identity::IdentityError>>
+        {
+            Box::pin(async move {
+                self.by_platform
+                    .get(platform_user_id)
+                    .copied()
+                    .ok_or(crate::identity::IdentityError::NotAMember)
+            })
+        }
+
+        fn confirm_member<'a>(
+            &'a self,
+            _scope: crate::identity::IdentityScope,
+            user: uuid::Uuid,
+        ) -> crate::identity::BoxFuture<'a, Result<uuid::Uuid, crate::identity::IdentityError>>
+        {
+            Box::pin(async move {
+                if self.by_platform.values().any(|u| *u == user) {
+                    Ok(user)
+                } else {
+                    Err(crate::identity::IdentityError::NotAMember)
+                }
+            })
+        }
+    }
+
+    /// What the scripted executor-side "bundle" observed during one invoke.
+    #[derive(Default)]
+    struct BundleObservation {
+        /// The tokenized event the bundle was delivered (`payload_json`).
+        delivered_payload_json: String,
+        delivered_actor: Option<String>,
+        /// `(op, host-result)` per host-call it made, in order.
+        host_results: Vec<(String, penguin_bundle_host::wire::HostResultBody)>,
+    }
+
+    /// A fake executor that, on its single `invoke`, behaves like a points-game
+    /// bundle: reads the placeholder token out of the message text it was
+    /// delivered, then calls `identity.resolve_actor`, `identity.resolve_mention`
+    /// with that token, and `identity.resolve_mention` with a raw handle it was
+    /// never shown -- recording every answer.
+    async fn connected_registry_with_scripted_identity_bundle(
+    ) -> (Arc<ConnectionRegistry>, Arc<Mutex<BundleObservation>>) {
+        use crate::capabilities::DenyAllCapabilities;
+        use penguin_bundle_host::wire::{
+            read_frame, write_frame, CapabilityKind, Frame, HelloBody, HelloOkBody, HostCallBody,
+            ResultBody, SandboxInfo,
+        };
+
+        let observed = Arc::new(Mutex::new(BundleObservation::default()));
+        let observed_task = Arc::clone(&observed);
+        let (stage_io, mut executor_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    1,
+                    Message::Hello(HelloBody {
+                        protocol_version: 1,
+                        executor_version: "0.1.0".to_string(),
+                        wasmtime_version: "test".to_string(),
+                        wasmtime_abi: "test".to_string(),
+                        collector: "drc".to_string(),
+                        sandbox: SandboxInfo {
+                            runtime: "runc".to_string(),
+                            verified: false,
+                        },
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+            let hello_ok = read_frame(&mut executor_io).await.unwrap();
+            assert!(matches!(hello_ok.message, Message::HelloOk(_)));
+
+            let invoke = read_frame(&mut executor_io).await.unwrap();
+            let invoke_id = invoke.id;
+            let Message::Invoke(body) = invoke.message else {
+                panic!("expected invoke");
+            };
+            let payload_json = body.payload["payload_json"]
+                .as_str()
+                .expect("payload_json string")
+                .to_string();
+            let delivered: serde_json::Value = serde_json::from_str(&payload_json).unwrap();
+            let text = delivered["text"].as_str().unwrap_or_default().to_string();
+            // The token inside the first `{user:<token>}` placeholder.
+            let token = text
+                .split("{user:")
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .unwrap_or_default()
+                .to_string();
+            {
+                let mut o = observed_task.lock().unwrap();
+                o.delivered_payload_json = payload_json;
+                o.delivered_actor = body.payload["actor"].as_str().map(str::to_string);
+            }
+
+            let calls: Vec<(&str, serde_json::Value)> = vec![
+                ("identity.resolve_actor", serde_json::json!({})),
+                (
+                    "identity.resolve_mention",
+                    serde_json::json!({ "token": token }),
+                ),
+                (
+                    "identity.resolve_mention",
+                    serde_json::json!({ "token": "@some_handle_never_shown" }),
+                ),
+            ];
+            for (n, (op, args)) in calls.into_iter().enumerate() {
+                write_frame(
+                    &mut executor_io,
+                    &Frame::new(
+                        100 + n as u64,
+                        Message::HostCall(HostCallBody {
+                            app_id: "waddles.bot.commands.default".to_string(),
+                            capability: CapabilityKind::Db,
+                            op: op.to_string(),
+                            args,
+                            call_id: invoke_id,
+                        }),
+                    ),
+                )
+                .await
+                .unwrap();
+                let reply = read_frame(&mut executor_io).await.unwrap();
+                let Message::HostResult(result) = reply.message else {
+                    panic!("expected host-result");
+                };
+                observed_task
+                    .lock()
+                    .unwrap()
+                    .host_results
+                    .push((op.to_string(), result));
+            }
+
+            write_frame(
+                &mut executor_io,
+                &Frame::new(
+                    invoke_id,
+                    Message::Result(ResultBody {
+                        payload: serde_json::json!(null),
+                        duration_ms: 1,
+                        fuel_used: 0,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+
+        let (connection, read_loop) = crate::host_api::run_connection(
+            stage_io,
+            HelloOkBody {
+                stage: "svc-process".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 2000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 32,
+                },
+            },
+            false,
+            Arc::new(DenyAllCapabilities),
+        )
+        .await
+        .expect("handshake succeeds");
+        tokio::spawn(read_loop);
+        let registry = Arc::new(ConnectionRegistry::new());
+        registry.set_active(connection);
+        (registry, observed)
+    }
+
+    /// The glue `handle_delivered` owns and nothing else tests: the RAW event's
+    /// platform account id and the tokenization pass's mention bindings become
+    /// the invocation's host-side identity facts, wired into the very
+    /// capability handler the executor's host-calls reach. Proven end to end
+    /// through the real host-API connection: the "bundle" sees only a
+    /// tokenized event, yet resolves its actor and its mention to community
+    /// UUIDs -- and a raw handle it was never shown resolves to nothing.
+    #[tokio::test]
+    async fn handle_delivered_wires_the_invocation_identity_into_the_executors_host_calls() {
+        let ring = test_ring();
+        let mut d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        d.env.event.payload = serde_json::json!({
+            "user_id": "1001",
+            "author_id": "1001",
+            "text": "!steal <@2002> 120",
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+
+        let (alice, bob) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let (connections, observed) = connected_registry_with_scripted_identity_bundle().await;
+        let mut deps = test_deps(FakeSpineOps::default(), connections);
+        deps.tenant_id = 7;
+        deps.community_id = 3;
+        deps.pii_gate = Arc::new(crate::license::test_support::FixedGate(true));
+        deps.pii_minter = Some(Arc::new(FixtureMinter));
+        // A real gate granting `identity.resolve` for exactly this scope
+        // (`app_version` 1: the snapshot `test_deps_with_metrics` seeds).
+        let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
+        snapshot.set(
+            bundle_capability_gate::GrantScopeKey {
+                tenant_id: 7,
+                community_id: 3,
+                app_id: "waddles.bot.commands.default".to_string(),
+                app_version: 1,
+            },
+            bundle_capability_gate::GrantSet {
+                permission_snapshot_hash: "t".to_string(),
+                grants: [(
+                    "identity.resolve".to_string(),
+                    bundle_capability_gate::GrantedPermission {
+                        permission_id: "identity.resolve".to_string(),
+                        params: serde_json::json!({}),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
+        );
+        deps.gate = Arc::new(bundle_capability_gate::CapabilityGate::new(
+            Arc::new(snapshot),
+            Arc::new(bundle_capability_gate::InMemoryMembership::new()),
+            Arc::new(bundle_capability_gate::InMemoryQuotaLedger::new()),
+            Arc::new(bundle_capability_gate::InMemoryInstancePolicySnapshot::new()),
+        ));
+        deps.identity_wiring = Some(crate::identity::IdentityWiring {
+            directory: Arc::new(SpineDirectory {
+                by_platform: [("1001".to_string(), alice), ("2002".to_string(), bob)]
+                    .into_iter()
+                    .collect(),
+            }),
+            handles: None,
+            flag: Arc::new(crate::license::test_support::FixedGate(true)),
+        });
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+        assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+
+        let o = observed.lock().unwrap();
+        // What the bundle was delivered: tokenized, no raw mention, no raw handle.
+        assert!(o.delivered_payload_json.contains("{user:tok-2002}"));
+        assert!(!o.delivered_payload_json.contains("<@2002>"));
+        assert_eq!(o.delivered_actor.as_deref(), Some("{user:tok-1001}"));
+        assert!(!o.delivered_payload_json.contains("some_user"));
+
+        // What it could resolve: actor and mention -> community UUIDs; a raw
+        // handle it was never shown -> not_found.
+        assert_eq!(o.host_results.len(), 3);
+        let result_of = |i: usize| &o.host_results[i].1;
+        assert_eq!(
+            result_of(0).result,
+            Some(serde_json::json!({ "user": alice.to_string() })),
+            "{:?}",
+            result_of(0).error
+        );
+        assert_eq!(
+            result_of(1).result,
+            Some(serde_json::json!({ "user": bob.to_string() })),
+            "{:?}",
+            result_of(1).error
+        );
+        let refusal = result_of(2).error.as_ref().expect("raw handle is refused");
+        assert_eq!(refusal.code, "not_found");
     }
 }

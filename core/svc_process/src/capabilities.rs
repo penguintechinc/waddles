@@ -73,6 +73,9 @@ use bundle_host_kv::{KvBackend, KvError, KvHost, KvScope};
 use bundle_host_reputation::{ReputationCaps, ReputationError, ReputationScope, ReputationStore};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody, HostResultError};
 
+use crate::identity::{
+    self, IdentityError, IdentityScope, IdentityWiring, InvocationIdentity, MAX_MENTION_TOKEN_LEN,
+};
 use crate::license::FeatureGate;
 
 /// The durable rolling-24h absolute-delta caps the store enforces for
@@ -149,6 +152,18 @@ fn economy_error_to_host(err: EconomyError) -> HostResultError {
         return denied("backend", "economy store backend error");
     }
     denied(err.wire_code(), err.wire_message())
+}
+
+/// Maps an [`IdentityError`] onto the `{code, message}` wire error the
+/// executor decodes back into the WIT `identity.error` variant
+/// (`bundle_executor::host::stage_next_identity`). Messages are the fixed,
+/// PII-free constants of [`IdentityError`]; a backend failure's detail is
+/// logged (by `crate::identity`) and never handed to a guest.
+fn identity_error_to_host(err: IdentityError) -> HostResultError {
+    if let IdentityError::Backend(_) = &err {
+        return denied("backend", "identity store backend error");
+    }
+    denied(err.wire_code(), err.to_string())
 }
 
 /// Reads a required positive-or-zero integer argument as an `i64` -- the
@@ -403,6 +418,15 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// `not_implemented` in that state (never panics, never a silent default
     /// balance).
     economy: Option<EconomyWiring>,
+    /// `None` until [`Self::with_identity`] -- every `identity.*` call denies
+    /// `not_implemented` in that state (never panics, never a default or
+    /// guessed identity).
+    identity: Option<IdentityWiring>,
+    /// The HOST-derived identity facts of THIS invocation (who triggered it,
+    /// which mentions its message carried) -- built by `crate::spine` from the
+    /// event it delivered, never from guest input. Paired with [`Self::identity`]
+    /// by [`Self::with_identity`].
+    invocation_identity: Option<Arc<InvocationIdentity>>,
 }
 
 impl<K: KvBackend> StageCapabilities<K> {
@@ -442,6 +466,8 @@ impl<K: KvBackend> StageCapabilities<K> {
             db: None,
             reputation: None,
             economy: None,
+            identity: None,
+            invocation_identity: None,
         }
     }
 
@@ -508,6 +534,116 @@ impl<K: KvBackend> StageCapabilities<K> {
     pub fn with_economy(mut self, economy: EconomyWiring) -> Self {
         self.economy = Some(economy);
         self
+    }
+
+    /// Attaches the `identity` capability's live wiring plus THIS invocation's
+    /// host-derived identity facts -- called once per invoke with a clone of the
+    /// process-wide [`IdentityWiring`] and an [`InvocationIdentity`] built from
+    /// the event being delivered. The two are inseparable by construction: the
+    /// wiring says HOW to resolve, the invocation says WHO.
+    pub fn with_identity(
+        mut self,
+        identity: IdentityWiring,
+        invocation: Arc<InvocationIdentity>,
+    ) -> Self {
+        self.identity = Some(identity);
+        self.invocation_identity = Some(invocation);
+        self
+    }
+
+    /// `identity.resolve_actor` / `identity.resolve_mention`
+    /// (`wit/waddle-bundle/stage.wit` `interface identity`), carried as
+    /// `capability = db`, `op = "identity.*"` (`penguin-bundle-host`'s closed
+    /// `CapabilityKind` has no identity member; see the WIT doc).
+    ///
+    /// Same fail-loud order as [`Self::handle_economy`]: (1) argument parsing --
+    /// `resolve_mention` needs a bounded, clean `token` string, `resolve_actor`
+    /// takes none (and nothing in `args` can name whose identity to resolve:
+    /// the actor is host-derived); (2) the activation must be community-scoped
+    /// with a resolved numeric tenant AND community; (3) **the gate authorizes
+    /// FIRST** (`identity.resolve`: grant, rate limit, instance policy) so an
+    /// ungranted call reports `not_granted`, never `not_implemented`/
+    /// `feature_disabled`; (4) wiring/flag state; (5) the resolution itself
+    /// ([`identity::resolve_actor`] / [`identity::resolve_mention`]). Scope
+    /// (tenant/community) is always `self`'s host-derived scope, never an
+    /// argument. The success value is `{"user": "<uuid>"}` and nothing else.
+    async fn handle_identity(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        enum Op<'a> {
+            Actor,
+            Mention(&'a str),
+        }
+        let op = match call.op.as_str() {
+            "identity.resolve_actor" => Op::Actor,
+            "identity.resolve_mention" => {
+                let token = call
+                    .args
+                    .get("token")
+                    .and_then(|v| v.as_str())
+                    .filter(|t| !t.is_empty() && t.len() <= MAX_MENTION_TOKEN_LEN)
+                    .ok_or_else(|| {
+                        denied(
+                            "invalid_args",
+                            format!("token must be a string of 1..={MAX_MENTION_TOKEN_LEN} bytes"),
+                        )
+                    })?;
+                Op::Mention(token)
+            }
+            other => {
+                return Err(denied(
+                    "unknown_op",
+                    format!("identity op {other:?} not supported"),
+                ))
+            }
+        };
+
+        if self.tenant_id == 0 || self.community_id == 0 || self.community.is_none() {
+            return Err(denied(
+                "invalid_args",
+                "identity is community-scoped; this activation has no resolved tenant/community",
+            ));
+        }
+
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                PermissionId::IdentityResolve,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .map_err(denied_from_gate)?;
+
+        let Some(wiring) = &self.identity else {
+            return Err(denied(
+                "not_implemented",
+                "identity capability is not provisioned in this deployment \
+                 (no DB reader account configured for the stage)",
+            ));
+        };
+        if !wiring.flag.enabled().await {
+            return Err(denied(
+                "feature_disabled",
+                "identity capability is disabled (waddles.bundle-identity-capability is OFF)",
+            ));
+        }
+        let Some(invocation) = &self.invocation_identity else {
+            return Err(denied(
+                "not_implemented",
+                "this invocation carries no triggering-event identity to resolve",
+            ));
+        };
+
+        let scope = IdentityScope {
+            tenant_id: self.tenant_id,
+            community_id: self.community_id,
+        };
+        let user = match op {
+            Op::Actor => identity::resolve_actor(wiring, invocation, scope).await,
+            Op::Mention(token) => identity::resolve_mention(wiring, invocation, scope, token).await,
+        }
+        .map_err(identity_error_to_host)?;
+        Ok(serde_json::json!({ "user": user.to_string() }))
     }
 
     /// `economy.balance` / `economy.wager` / `economy.transfer` /
@@ -1421,6 +1557,12 @@ impl<K: KvBackend> CapabilityHandler for StageCapabilities<K> {
                 // handler, never the `storage.tables` path.
                 CapabilityKind::Db if call.op.starts_with("economy.") => {
                     self.handle_economy(&call).await
+                }
+                // `identity.*` ops likewise: own gate permission
+                // (`identity.resolve`), own handler, never the
+                // `storage.tables` path.
+                CapabilityKind::Db if call.op.starts_with("identity.") => {
+                    self.handle_identity(&call).await
                 }
                 CapabilityKind::Db => self.handle_db(&call).await,
                 // `enabled` is wired to a real `penguin_licensing::
@@ -2932,3 +3074,7 @@ mod reputation_tests;
 #[cfg(test)]
 #[path = "capabilities_economy_tests.rs"]
 mod economy_tests;
+
+#[cfg(test)]
+#[path = "capabilities_identity_tests.rs"]
+mod identity_tests;
