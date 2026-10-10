@@ -43,6 +43,22 @@ axum = "=0.8.9"
 # wired here -- and the verify primitive core/egress_proxy's own verifier
 # wraps). Same pin as egress-assertion's own Cargo.toml.
 jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+# Test-only: `tests/executor_wire_e2e.rs` drives the REAL bundle-executor
+# (wasmtime, a real compiled guest, the real host-API frame codec) against
+# THIS crate's real `EgressGuard`, so the executor <-> guard `http.send` JSON
+# wire can never drift again undetected (it silently dropped every request
+# body and failed to decode every response with headers before that test).
+# A dev-dependency only: never linked into a release binary, and not walked
+# by `scripts/ci/check-dockerfile-rust-path-deps.py` (which scans
+# `[dependencies]`/`[build-dependencies]`) -- no Dockerfile needs a COPY for
+# it. bundle-executor itself may not depend on this crate (its `reqwest` is
+# banned from that binary, `core/bundle_executor/tests/dependency_policy.rs`),
+# which is why the cross-crate test lives here.
+bundle-executor = { path = "../bundle_executor", version = "=0.1.0" }
+# Test-only, same pins as bundle-executor: `CliConfig::try_parse_from` (the
+# `Parser` trait) and the fixture component's `sha256:` digest.
+clap = { version = "=4.6.6", features = ["derive", "env"] }
+sha2 = "=0.10.9"
 
 [profile.release]
 opt-level = 3

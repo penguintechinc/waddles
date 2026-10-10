@@ -240,10 +240,25 @@ pub struct EgressLimits {
 
 /// One `http.send` request as decoded from a bundle's host-call `args`
 /// (this crate's own JSON-wire convention for the WIT `http::request`
-/// record of spec §6.5). `body`/response `body` are base64 rather than a
-/// JSON byte array or lossy UTF-8, to stay byte-exact with the WIT
+/// record of spec §6.5). The request body (`body_base64`) and the response
+/// body (`body_base64` in [`EgressGuard::send`]'s result) are base64 rather
+/// than a JSON byte array or lossy UTF-8, to stay byte-exact with the WIT
 /// `list<u8>` without a JSON array of small integers.
+///
+/// **The other half of this wire is `core/bundle_executor`'s
+/// `host::http_wire`** (the only producer of these `args` and the only
+/// consumer of [`EgressGuard::send`]'s result for guest calls); it cannot be
+/// linked here (this crate's `reqwest` is banned from that binary), so
+/// `tests/executor_wire_e2e.rs` drives the real executor against the real
+/// guard to keep the two in lockstep.
+///
+/// `deny_unknown_fields`: a key this guard does not know is rejected
+/// `invalid_args` instead of ignored. That is what turns wire drift into a
+/// loud failure -- the original defect was an executor sending the body as
+/// `body` (a byte array) while this struct reads `body_base64`, which serde
+/// silently ignored, so every request went out with no body at all.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HttpSendArgs {
     method: String,
     url: String,
@@ -557,6 +572,7 @@ fn redact_url_for_log(url: &str) -> String {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HttpHeaderArg {
     name: String,
     value: String,
@@ -5098,6 +5114,163 @@ mod tests {
         assert_eq!(
             requests[1].url,
             "https://api.weatherapi.com/v1/current.json"
+        );
+    }
+
+    // -- The executor <-> guard `http.send` JSON wire (the request body and
+    // the response headers/body). `core/bundle_host_http/tests/
+    // executor_wire_e2e.rs` drives the real executor against this guard;
+    // these pin the guard's half at unit level. --
+
+    /// A hermetic guard holding `GET`/`POST` grants on `api.example.test`,
+    /// DNS stubbed to one fixed public address, sending through `transport`.
+    fn wire_guard(transport: &Arc<FakeTransport>) -> EgressGuard {
+        EgressGuard::new(
+            Arc::clone(transport) as Arc<dyn HttpTransport>,
+            default_limits(),
+            catalog_with_row(
+                QS_APP,
+                vec![(
+                    "api.example.test".to_string(),
+                    vec!["GET".to_string(), "POST".to_string()],
+                )],
+            ),
+            test_metrics(),
+            boxed(StaticFlag(true)),
+        )
+        .with_resolver(Arc::new(CountingResolver {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            addr: "93.184.216.34:443".parse().unwrap(),
+        }) as Arc<dyn Resolver>)
+    }
+
+    /// Regression (mismatch b): the executor used to send the body as a
+    /// `body` byte array, which this guard ignored -- every request body was
+    /// dropped. The wire's body is `body_base64`; it must arrive at the
+    /// transport byte-exact, including bytes that are not valid UTF-8, and an
+    /// empty body (`""`) must stay distinct from no body (key absent).
+    #[tokio::test]
+    async fn request_body_base64_reaches_the_transport_byte_exact() {
+        let transport = fake_transport(vec![Ok(ok_response()), Ok(ok_response())]);
+        let guard = wire_guard(&transport);
+        let body = [0x00_u8, 0xff, 0x10, b'h', b'i'];
+        guard
+            .send(
+                QS_APP,
+                &serde_json::json!({
+                    "method": "POST",
+                    "url": "https://api.example.test/hook",
+                    "headers": [{"name": "content-type", "value": "application/octet-stream"}],
+                    "body_base64": base64::engine::general_purpose::STANDARD.encode(body),
+                    "secret_refs": [],
+                }),
+            )
+            .await
+            .expect("send succeeds");
+        guard
+            .send(
+                QS_APP,
+                &serde_json::json!({
+                    "method": "POST", "url": "https://api.example.test/hook", "body_base64": "",
+                }),
+            )
+            .await
+            .expect("empty body succeeds");
+        guard
+            .send(
+                QS_APP,
+                &serde_json::json!({"method": "GET", "url": "https://api.example.test/"}),
+            )
+            .await
+            .expect("no body succeeds");
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests[0].body.as_deref(), Some(&body[..]));
+        assert_eq!(requests[1].body.as_deref(), Some(&[][..]));
+        assert_eq!(requests[2].body, None);
+    }
+
+    /// Regression (mismatch b, fail-loud half): a request carrying the old
+    /// executor-only `body` array -- or any other key this guard does not
+    /// decode -- is refused `invalid_args` before any network activity,
+    /// instead of being sent with its body silently discarded.
+    #[tokio::test]
+    async fn unknown_or_legacy_request_keys_are_rejected_not_silently_dropped() {
+        let transport = fake_transport(vec![]);
+        let guard = wire_guard(&transport);
+        for (label, args) in [
+            (
+                "legacy byte-array body",
+                serde_json::json!({
+                    "method": "POST", "url": "https://api.example.test/hook", "body": [1, 2, 3],
+                }),
+            ),
+            (
+                "unknown top-level key",
+                serde_json::json!({
+                    "method": "GET", "url": "https://api.example.test/", "bogus": true,
+                }),
+            ),
+            (
+                "unknown header key",
+                serde_json::json!({
+                    "method": "GET", "url": "https://api.example.test/",
+                    "headers": [{"name": "x", "value": "y", "extra": 1}],
+                }),
+            ),
+        ] {
+            let err = guard
+                .send(QS_APP, &args)
+                .await
+                .expect_err("must be rejected");
+            assert_eq!(err.code, "invalid_args", "{label}: {err:?}");
+        }
+        assert!(
+            transport.requests.lock().unwrap().is_empty(),
+            "a malformed request must never reach the transport"
+        );
+    }
+
+    /// Mismatch (c): the success value's shape is the contract the executor
+    /// decodes -- exactly `status`, `headers` as `{name, value}` objects
+    /// (duplicates and order preserved), `body_base64`, `truncated`.
+    #[tokio::test]
+    async fn success_result_wire_shape_is_name_value_headers_and_base64_body() {
+        let transport = fake_transport(vec![Ok(TransportResponse {
+            status: 201,
+            headers: vec![
+                ("content-type".to_string(), "application/json".to_string()),
+                ("set-cookie".to_string(), "a=1".to_string()),
+                ("set-cookie".to_string(), "b=2".to_string()),
+            ],
+            body: vec![0x00, 0xff, 0x10, b'h', b'i'],
+            truncated: true,
+        })]);
+        let guard = wire_guard(&transport);
+        let result = guard
+            .send(
+                QS_APP,
+                &serde_json::json!({"method": "GET", "url": "https://api.example.test/"}),
+            )
+            .await
+            .expect("send succeeds");
+        let mut keys: Vec<&str> = result
+            .as_object()
+            .expect("result is a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["body_base64", "headers", "status", "truncated"]);
+        assert_eq!(result["status"], 201);
+        assert_eq!(result["truncated"], true);
+        assert_eq!(result["body_base64"], "AP8QaGk=");
+        assert_eq!(
+            result["headers"],
+            serde_json::json!([
+                {"name": "content-type", "value": "application/json"},
+                {"name": "set-cookie", "value": "a=1"},
+                {"name": "set-cookie", "value": "b=2"},
+            ])
         );
     }
 

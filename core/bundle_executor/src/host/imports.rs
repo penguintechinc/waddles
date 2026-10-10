@@ -15,6 +15,7 @@ use tracing::{debug, error, warn};
 
 use crate::engine::waddle::bundle::{clock, context, db, flags, http, kv, log, relay, types};
 use crate::error::ExecutorError;
+use crate::host::http_wire;
 use crate::host::ExecState;
 
 /// `types` carries only shared records/variants (`platform-event`,
@@ -120,45 +121,40 @@ impl From<BundleContextWire> for context::BundleContext {
 }
 
 impl http::Host for ExecState {
+    /// Encodes the guest's request with [`http_wire::encode_request`], issues
+    /// the `http`/`send` host-call, and decodes the stage's result with
+    /// [`http_wire::decode_response`]. A request that cannot be encoded or a
+    /// result that does not match the wire contract is a loud
+    /// `Transport("malformed host-result: ...")` -- never a dropped body or
+    /// an empty header set.
     async fn send(&mut self, req: http::Request) -> Result<http::Response, http::Error> {
-        let args = serde_json::json!({
-            "method": req.method,
-            "url": req.url,
-            "headers": req.headers.iter().map(|h| serde_json::json!({"name": h.name, "value": h.value})).collect::<Vec<_>>(),
-            "body": req.body,
-            "secret_refs": req.secret_refs,
-        });
+        let args = http_wire::encode_request(
+            &req.method,
+            &req.url,
+            req.headers
+                .iter()
+                .map(|h| (h.name.as_str(), h.value.as_str())),
+            req.body.as_deref(),
+            &req.secret_refs,
+        )
+        .map_err(http::Error::Transport)?;
         match call(self, CapabilityKind::Http, "send", args).await {
-            Ok(value) => serde_json::from_value::<HttpResponseWire>(value)
-                .map(Into::into)
-                .map_err(|e| http::Error::Transport(format!("malformed host-result: {e}"))),
+            Ok(value) => http_wire::decode_response(value)
+                .map(|w| http::Response {
+                    status: w.status,
+                    headers: w
+                        .headers
+                        .into_iter()
+                        .map(|(name, value)| http::Header { name, value })
+                        .collect(),
+                    body: w.body,
+                    truncated: w.truncated,
+                })
+                .map_err(|e| {
+                    error!(error = %e, "http.send: malformed host-result");
+                    http::Error::Transport(format!("malformed host-result: {e}"))
+                }),
             Err(e) => Err(http_error_from(e)),
-        }
-    }
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct HttpResponseWire {
-    status: u16,
-    #[serde(default)]
-    headers: Vec<(String, String)>,
-    #[serde(default)]
-    body: Vec<u8>,
-    #[serde(default)]
-    truncated: bool,
-}
-
-impl From<HttpResponseWire> for http::Response {
-    fn from(w: HttpResponseWire) -> Self {
-        http::Response {
-            status: w.status,
-            headers: w
-                .headers
-                .into_iter()
-                .map(|(name, value)| http::Header { name, value })
-                .collect(),
-            body: w.body,
-            truncated: w.truncated,
         }
     }
 }
@@ -568,7 +564,7 @@ fn local_now_rfc3339() -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::host::HostBridge;
@@ -583,6 +579,19 @@ mod tests {
     /// genuine round trip for each -- never a fabricated return value
     /// (`rules/general.md`: "never fake a host call").
     fn one_shot_bridge(outcome: Result<serde_json::Value, HostResultError>) -> Arc<HostBridge> {
+        one_shot_bridge_capturing(outcome).0
+    }
+
+    /// [`one_shot_bridge`], additionally handing back the exact
+    /// `host-call` args JSON the stage received -- the executor-side half
+    /// of the wire contract, as it crossed the real frame codec.
+    pub(crate) fn one_shot_bridge_capturing(
+        outcome: Result<serde_json::Value, HostResultError>,
+    ) -> (
+        Arc<HostBridge>,
+        tokio::sync::oneshot::Receiver<serde_json::Value>,
+    ) {
+        let (args_tx, args_rx) = tokio::sync::oneshot::channel();
         let (exec_io, stage_io) = tokio::io::duplex(64 * 1024);
         let (exec_reader, mut exec_writer) = tokio::io::split(exec_io);
         let (writer_tx, mut writer_rx) = mpsc::unbounded_channel();
@@ -607,6 +616,9 @@ mod tests {
         tokio::spawn(async move {
             let mut io = stage_io;
             if let Ok(frame) = read_frame(&mut io).await {
+                if let Message::HostCall(call) = &frame.message {
+                    let _ = args_tx.send(call.args.clone());
+                }
                 let body = match outcome {
                     Ok(v) => penguin_bundle_host::wire::HostResultBody {
                         result: Some(v),
@@ -622,7 +634,7 @@ mod tests {
             }
         });
 
-        HostBridge::new(connection)
+        (HostBridge::new(connection), args_rx)
     }
 
     fn denied(code: &str, message: &str) -> HostResultError {
@@ -632,7 +644,7 @@ mod tests {
         }
     }
 
-    fn state_with(bridge: Arc<HostBridge>) -> ExecState {
+    pub(crate) fn state_with(bridge: Arc<HostBridge>) -> ExecState {
         ExecState::new(Some(bridge), "waddles.test.app".to_string(), 1)
     }
 
@@ -652,8 +664,15 @@ mod tests {
 
     #[tokio::test]
     async fn http_send_decodes_a_successful_response() {
+        // Exactly the shape `bundle_host_http::EgressGuard::send` returns
+        // (headers as `{name, value}` objects, body as `body_base64`) --
+        // never an invented one; the guard-side tests in that crate pin the
+        // other half against the real guard.
         let bridge = one_shot_bridge(Ok(serde_json::json!({
-            "status": 200, "headers": [["x", "y"]], "body": [1,2,3], "truncated": false
+            "status": 200,
+            "headers": [{"name": "x", "value": "y"}, {"name": "set-cookie", "value": "a=1"}],
+            "body_base64": "AQID",
+            "truncated": false
         })));
         let mut state = state_with(bridge);
         let req = http::Request {
@@ -666,6 +685,92 @@ mod tests {
         let resp = http::Host::send(&mut state, req).await.expect("send ok");
         assert_eq!(resp.status, 200);
         assert_eq!(resp.body, vec![1, 2, 3]);
+        assert_eq!(
+            resp.headers
+                .iter()
+                .map(|h| (h.name.as_str(), h.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("x", "y"), ("set-cookie", "a=1")]
+        );
+        assert!(!resp.truncated);
+    }
+
+    #[tokio::test]
+    async fn http_send_puts_the_request_body_on_the_wire_as_body_base64() {
+        // Regression: the request body was serialized as `"body": [u8]`,
+        // which the guard (reading `body_base64`) silently dropped, so a
+        // POST went out with no body at all.
+        let (bridge, args_rx) = one_shot_bridge_capturing(Ok(serde_json::json!({
+            "status": 204, "headers": [], "body_base64": "", "truncated": false
+        })));
+        let mut state = state_with(bridge);
+        let req = http::Request {
+            method: "POST".to_string(),
+            url: "https://example.test/hook".to_string(),
+            headers: vec![http::Header {
+                name: "content-type".to_string(),
+                value: "application/octet-stream".to_string(),
+            }],
+            body: Some(vec![0x00, 0xff, 0x10, b'h', b'i']),
+            secret_refs: vec![("Authorization".to_string(), "bot-token".to_string())],
+        };
+        http::Host::send(&mut state, req).await.expect("send ok");
+        let args = args_rx.await.expect("stage saw the host-call");
+        assert_eq!(args["method"], "POST");
+        assert_eq!(args["url"], "https://example.test/hook");
+        assert_eq!(args["body_base64"], "AP8QaGk=");
+        assert!(args.get("body").is_none(), "legacy `body` key sent: {args}");
+        assert_eq!(
+            args["headers"],
+            serde_json::json!([{"name": "content-type", "value": "application/octet-stream"}])
+        );
+        assert_eq!(
+            args["secret_refs"],
+            serde_json::json!([["Authorization", "bot-token"]])
+        );
+    }
+
+    #[tokio::test]
+    async fn http_send_without_a_body_omits_body_base64() {
+        let (bridge, args_rx) = one_shot_bridge_capturing(Ok(serde_json::json!({
+            "status": 200, "headers": [], "body_base64": "", "truncated": false
+        })));
+        let mut state = state_with(bridge);
+        let req = http::Request {
+            method: "GET".to_string(),
+            url: "https://example.test/".to_string(),
+            headers: vec![],
+            body: None,
+            secret_refs: vec![],
+        };
+        http::Host::send(&mut state, req).await.expect("send ok");
+        let args = args_rx.await.expect("stage saw the host-call");
+        assert!(args.get("body_base64").is_none(), "{args}");
+        assert!(args.get("body").is_none(), "{args}");
+    }
+
+    #[tokio::test]
+    async fn http_send_rejects_the_old_executor_only_response_shape() {
+        // The pre-fix executor decoded `headers: [(name, value)]` and
+        // `body: [u8]` -- a shape the guard never produced. It must now be
+        // refused loudly instead of decoding to an empty body.
+        let bridge = one_shot_bridge(Ok(serde_json::json!({
+            "status": 200, "headers": [["x", "y"]], "body": [1,2,3], "truncated": false
+        })));
+        let mut state = state_with(bridge);
+        let req = http::Request {
+            method: "GET".to_string(),
+            url: "https://example.test/".to_string(),
+            headers: vec![],
+            body: None,
+            secret_refs: vec![],
+        };
+        match http::Host::send(&mut state, req).await {
+            Err(http::Error::Transport(msg)) => {
+                assert!(msg.starts_with("malformed host-result"), "{msg}");
+            }
+            other => panic!("expected Transport(malformed host-result), got {other:?}"),
+        }
     }
 
     #[tokio::test]
