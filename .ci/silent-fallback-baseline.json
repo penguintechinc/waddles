@@ -400,67 +400,67 @@
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_action/bundles/community_announcements_action.py",
+      "path": "core/svc_action/builtin_handlers/community_announcements_action.py",
       "line": 115,
       "line_hash": "604e8aebe63af8c3"
     },
     {
       "rule_id": "python-bare-except-pass",
-      "path": "core/svc_action/bundles/discord_send_action.py",
+      "path": "core/svc_action/builtin_handlers/discord_send_action.py",
       "line": 152,
       "line_hash": "a2111f6a7fd3a737"
     },
     {
       "rule_id": "python-capability-silent-denial",
-      "path": "core/svc_action/bundles/kick_send_action.py",
+      "path": "core/svc_action/builtin_handlers/kick_send_action.py",
       "line": 69,
       "line_hash": "bf001ddb0f2fd239"
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_action/bundles/kick_send_action.py",
+      "path": "core/svc_action/builtin_handlers/kick_send_action.py",
       "line": 69,
       "line_hash": "bf001ddb0f2fd239"
     },
     {
       "rule_id": "python-bare-except-pass",
-      "path": "core/svc_action/bundles/social_music_action.py",
+      "path": "core/svc_action/builtin_handlers/social_music_action.py",
       "line": 254,
       "line_hash": "c03f9f362c55eb37"
     },
     {
       "rule_id": "python-bare-except-pass",
-      "path": "core/svc_action/bundles/social_music_action.py",
+      "path": "core/svc_action/builtin_handlers/social_music_action.py",
       "line": 489,
       "line_hash": "c03f9f362c55eb37"
     },
     {
       "rule_id": "python-bare-except-pass",
-      "path": "core/svc_action/bundles/social_music_action.py",
+      "path": "core/svc_action/builtin_handlers/social_music_action.py",
       "line": 596,
       "line_hash": "c03f9f362c55eb37"
     },
     {
       "rule_id": "python-capability-silent-denial",
-      "path": "core/svc_action/bundles/social_quote_action.py",
+      "path": "core/svc_action/builtin_handlers/social_quote_action.py",
       "line": 195,
       "line_hash": "efc5577e6c2356ed"
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_action/bundles/social_quote_action.py",
+      "path": "core/svc_action/builtin_handlers/social_quote_action.py",
       "line": 195,
       "line_hash": "efc5577e6c2356ed"
     },
     {
       "rule_id": "python-capability-silent-denial",
-      "path": "core/svc_action/bundles/youtube_send_action.py",
+      "path": "core/svc_action/builtin_handlers/youtube_send_action.py",
       "line": 112,
       "line_hash": "01cd45da75353d4d"
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_action/bundles/youtube_send_action.py",
+      "path": "core/svc_action/builtin_handlers/youtube_send_action.py",
       "line": 112,
       "line_hash": "01cd45da75353d4d"
     },
@@ -802,127 +802,127 @@
     },
     {
       "rule_id": "python-capability-silent-denial",
-      "path": "core/svc_process/bundles/bot_process.py",
+      "path": "core/svc_process/builtin_handlers/bot_process.py",
       "line": 341,
       "line_hash": "0e215b173718f20b"
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_process/bundles/bot_process.py",
+      "path": "core/svc_process/builtin_handlers/bot_process.py",
       "line": 341,
       "line_hash": "0e215b173718f20b"
     },
     {
       "rule_id": "python-capability-silent-denial",
-      "path": "core/svc_process/bundles/community_context_process.py",
+      "path": "core/svc_process/builtin_handlers/community_context_process.py",
       "line": 101,
       "line_hash": "0e215b173718f20b"
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_process/bundles/community_context_process.py",
+      "path": "core/svc_process/builtin_handlers/community_context_process.py",
       "line": 101,
       "line_hash": "0e215b173718f20b"
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_process/bundles/community_forums_process.py",
+      "path": "core/svc_process/builtin_handlers/community_forums_process.py",
       "line": 108,
       "line_hash": "587a510b1cb15c37"
     },
     {
       "rule_id": "python-capability-silent-denial",
-      "path": "core/svc_process/bundles/community_loyalty_process.py",
+      "path": "core/svc_process/builtin_handlers/community_loyalty_process.py",
       "line": 122,
       "line_hash": "0e215b173718f20b"
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_process/bundles/community_loyalty_process.py",
+      "path": "core/svc_process/builtin_handlers/community_loyalty_process.py",
       "line": 122,
       "line_hash": "0e215b173718f20b"
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_process/bundles/inventory_process.py",
+      "path": "core/svc_process/builtin_handlers/inventory_process.py",
       "line": 249,
       "line_hash": "451b427b7375e437"
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_process/bundles/social_alias_process.py",
+      "path": "core/svc_process/builtin_handlers/social_alias_process.py",
       "line": 223,
       "line_hash": "8bc8e9368f3053e2"
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_process/bundles/social_alias_process.py",
+      "path": "core/svc_process/builtin_handlers/social_alias_process.py",
       "line": 270,
       "line_hash": "9730034ce0e09595"
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_process/bundles/social_alias_process.py",
+      "path": "core/svc_process/builtin_handlers/social_alias_process.py",
       "line": 288,
       "line_hash": "b074e495bfa6f4b5"
     },
     {
       "rule_id": "python-capability-silent-denial",
-      "path": "core/svc_process/bundles/social_alias_process.py",
+      "path": "core/svc_process/builtin_handlers/social_alias_process.py",
       "line": 471,
       "line_hash": "0e215b173718f20b"
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_process/bundles/social_alias_process.py",
+      "path": "core/svc_process/builtin_handlers/social_alias_process.py",
       "line": 471,
       "line_hash": "0e215b173718f20b"
     },
     {
       "rule_id": "python-capability-silent-denial",
-      "path": "core/svc_process/bundles/social_music_process.py",
+      "path": "core/svc_process/builtin_handlers/social_music_process.py",
       "line": 255,
       "line_hash": "0e215b173718f20b"
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_process/bundles/social_music_process.py",
+      "path": "core/svc_process/builtin_handlers/social_music_process.py",
       "line": 255,
       "line_hash": "0e215b173718f20b"
     },
     {
       "rule_id": "python-capability-silent-denial",
-      "path": "core/svc_process/bundles/social_quote_process.py",
+      "path": "core/svc_process/builtin_handlers/social_quote_process.py",
       "line": 91,
       "line_hash": "a00c86b2461f6aa1"
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_process/bundles/social_quote_process.py",
+      "path": "core/svc_process/builtin_handlers/social_quote_process.py",
       "line": 91,
       "line_hash": "a00c86b2461f6aa1"
     },
     {
       "rule_id": "python-capability-silent-denial",
-      "path": "core/svc_process/bundles/social_quote_process.py",
+      "path": "core/svc_process/builtin_handlers/social_quote_process.py",
       "line": 111,
       "line_hash": "cab98f32e9cda64a"
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_process/bundles/social_quote_process.py",
+      "path": "core/svc_process/builtin_handlers/social_quote_process.py",
       "line": 111,
       "line_hash": "cab98f32e9cda64a"
     },
     {
       "rule_id": "python-capability-silent-denial",
-      "path": "core/svc_process/bundles/social_shoutout_process.py",
+      "path": "core/svc_process/builtin_handlers/social_shoutout_process.py",
       "line": 159,
       "line_hash": "0e215b173718f20b"
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "core/svc_process/bundles/social_shoutout_process.py",
+      "path": "core/svc_process/builtin_handlers/social_shoutout_process.py",
       "line": 159,
       "line_hash": "0e215b173718f20b"
     },
@@ -1301,20 +1301,20 @@
     {
       "rule_id": "python-silent-except-return-default",
       "path": "core/workflow_core_module/controllers/execution_api.py",
-      "line": 133,
-      "line_hash": "36a658ec1a0779dd"
+      "line": 135,
+      "line_hash": "982b0a218033cf7f"
     },
     {
       "rule_id": "python-silent-except-return-default",
       "path": "core/workflow_core_module/controllers/webhook_api.py",
-      "line": 195,
-      "line_hash": "be792a0d77f7e7e6"
+      "line": 197,
+      "line_hash": "503a172377a0933f"
     },
     {
       "rule_id": "python-silent-except-return-default",
       "path": "core/workflow_core_module/controllers/workflow_api.py",
-      "line": 109,
-      "line_hash": "b670d33075de173e"
+      "line": 111,
+      "line_hash": "96220889ba1143ba"
     },
     {
       "rule_id": "python-silent-except-return-default",

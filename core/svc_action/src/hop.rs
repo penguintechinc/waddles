@@ -162,9 +162,54 @@ impl KeyRing {
     }
 }
 
+/// Domain separator for the binding MAC payload (version-tagged so a future
+/// encoding change cannot be confused with this one).
+pub const BINDING_DOMAIN_SEPARATOR: &[u8] = b"waddles-binding-mac-v1";
+
+/// Appends `u32be(len(field)) || field` -- the same convention as
+/// `bundle_executor::signing::write_length_prefixed`, so no field boundary
+/// is ambiguous.
+fn write_length_prefixed(buf: &mut Vec<u8>, field: &[u8]) {
+    buf.extend_from_slice(&(field.len() as u32).to_be_bytes());
+    buf.extend_from_slice(field);
+}
+
+/// Builds the canonical, domain-separated, length-prefixed MAC input:
+/// `DOMAIN || lp(tenant) || lp(community) || lp(workstream_id) ||
+/// lp(event_id) || lp(trace_id)`. Fixes the delimiter-free concatenation
+/// that let `("12","3")` and `("1","23")` collide.
+pub fn binding_payload(
+    tenant: &str,
+    community: Option<&str>,
+    workstream_id: &str,
+    event_id: &str,
+    trace_id: Option<&str>,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(
+        BINDING_DOMAIN_SEPARATOR.len()
+            + 20
+            + tenant.len()
+            + community.map_or(TENANT_WIDE_SEGMENT.len(), str::len)
+            + workstream_id.len()
+            + event_id.len()
+            + trace_id.map_or(0, str::len),
+    );
+    buf.extend_from_slice(BINDING_DOMAIN_SEPARATOR);
+    write_length_prefixed(&mut buf, tenant.as_bytes());
+    write_length_prefixed(
+        &mut buf,
+        community.unwrap_or(TENANT_WIDE_SEGMENT).as_bytes(),
+    );
+    write_length_prefixed(&mut buf, workstream_id.as_bytes());
+    write_length_prefixed(&mut buf, event_id.as_bytes());
+    write_length_prefixed(&mut buf, trace_id.unwrap_or("").as_bytes());
+    buf
+}
+
 /// Computes `binding.mac` (spec §5.11's exact formula):
-/// `hex(HMAC-SHA256(k_binding[kid], tenant ‖ community ‖ workstream_id ‖
-/// event_id ‖ trace_id))`, where `community` renders as the literal
+/// `hex(HMAC-SHA256(k_binding[kid], binding_payload(..)))` (length-prefixed,
+/// domain-separated; see `binding_payload`) over tenant, community, workstream_id,
+/// event_id, trace_id, where `community` renders as the literal
 /// `_tenant` when absent and `trace_id` is the 32-hex trace-id segment of
 /// `traceparent` (empty string when no trace is present -- the formula has
 /// no defined behavior for a missing trace, so this stage's own inputs are
@@ -183,11 +228,13 @@ pub fn compute_mac(
         .key_for(kid)
         .ok_or_else(|| BoundaryReason::UnknownKid(kid.to_string()))?;
     let mut mac = HmacSha256::new_from_slice(key).map_err(|_| BoundaryReason::MacMismatch)?;
-    mac.update(tenant.as_bytes());
-    mac.update(community.unwrap_or(TENANT_WIDE_SEGMENT).as_bytes());
-    mac.update(workstream_id.as_bytes());
-    mac.update(event_id.as_bytes());
-    mac.update(trace_id.unwrap_or("").as_bytes());
+    mac.update(&binding_payload(
+        tenant,
+        community,
+        workstream_id,
+        event_id,
+        trace_id,
+    ));
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
@@ -327,21 +374,15 @@ mod tests {
         assert!(mac1.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    /// **Re-verification against the newly-landed `penguin_spine::binding`
-    /// module** (spine rev bump, finalization pass): this crate's fixture
-    /// (`ring()`, and `mac_for`'s tenant/community/workstream_id/event_id/
-    /// trace_id tuple) is byte-identical to `penguin_spine::binding`'s own
-    /// canonical test vectors -- so this hex literal is `penguin_spine::
-    /// binding::tests::K1_MAIN_MAC`, copied verbatim from that crate's
-    /// source at the pinned rev, not hand-computed here. A match proves
-    /// this module's independent implementation and spine's newly-landed
-    /// one agree exactly; do NOT assume it, the module doc explicitly
-    /// requires re-running this check on any future spine binding-module
-    /// pin bump.
+    /// Pinned golden MAC for the v1 length-prefixed encoding. This is the
+    /// shared cross-repo vector: `penguin_spine::binding` MUST adopt the
+    /// identical encoding and assert this exact hex, or the two sides reject
+    /// each other's envelopes. (The pre-fix delimiter-free vector was
+    /// `d94c3849...5f3f` and is intentionally no longer accepted.)
     #[test]
-    fn this_modules_mac_matches_penguin_spines_binding_module_exactly() {
+    fn mac_matches_the_shared_length_prefixed_golden_vector() {
         const K1_MAIN_MAC_FROM_PENGUIN_SPINE_BINDING: &str =
-            "d94c3849257550fe817c399410113a45e22b1c9203fbd02908f6bcc19df95f3f";
+            "f3718a57da4b1257a3ffcda53cef2db382192db67c8529b6db4935b9032501d7";
         assert_eq!(
             mac_for(&ring(), "k1"),
             K1_MAIN_MAC_FROM_PENGUIN_SPINE_BINDING
@@ -351,6 +392,40 @@ mod tests {
     #[test]
     fn different_kid_produces_a_different_mac() {
         assert_ne!(mac_for(&ring(), "k1"), mac_for(&ring(), "k2"));
+    }
+
+    #[test]
+    fn shifting_the_tenant_community_boundary_changes_the_mac() {
+        let r = ring();
+        let kid = r.keys[0].0.clone();
+        let a = compute_mac(&r, &kid, "12", Some("3"), "w", "e", Some("t")).unwrap();
+        let b = compute_mac(&r, &kid, "1", Some("23"), "w", "e", Some("t")).unwrap();
+        assert_ne!(a, b, "boundary-slide collision");
+    }
+
+    #[test]
+    fn binding_payload_golden_vector() {
+        let p = binding_payload("12", Some("3"), "w", "e", Some("t"));
+        let mut want = b"waddles-binding-mac-v1".to_vec();
+        for f in ["12", "3", "w", "e", "t"] {
+            want.extend_from_slice(&(f.len() as u32).to_be_bytes());
+            want.extend_from_slice(f.as_bytes());
+        }
+        assert_eq!(p, want);
+        assert_ne!(p, binding_payload("1", Some("23"), "w", "e", Some("t")));
+        assert_eq!(
+            hex::encode(&p[..22]),
+            "77616464 6c65732d62696e64696e672d6d61632d7631".replace(' ', "")
+        );
+    }
+
+    #[test]
+    fn compute_mac_round_trips_through_constant_time_compare() {
+        let r = ring();
+        let kid = r.keys[0].0.clone();
+        let m = compute_mac(&r, &kid, "12", Some("3"), "w", "e", None).unwrap();
+        let again = compute_mac(&r, &kid, "12", Some("3"), "w", "e", None).unwrap();
+        assert!(bool::from(m.as_bytes().ct_eq(again.as_bytes())));
     }
 
     #[test]

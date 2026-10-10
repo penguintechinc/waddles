@@ -22,7 +22,7 @@ COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 COPY core/svc_process/app.py core/svc_process/config.py core/svc_process/runner.py ./
-COPY core/svc_process/bundles ./bundles
+COPY core/svc_process/builtin_handlers ./builtin_handlers
 COPY core/svc_process/services ./services
 
 EXPOSE 8211

@@ -230,14 +230,14 @@ class TestAppCatalogCRUD:
             platform_compatibility={},
             stages={
                 "action": {
-                    "entrypoint": "bundles.discord_send_action:send_message",
+                    "entrypoint": "builtin_handlers.discord_send_action:send_message",
                     "config": {"api_base": "https://discord.com/api/v10"},
                 }
             },
         )
         db.commit()
         row = db(db.app_catalog.app_id == "waddles.bot.discord.default").select().first()
-        assert row.stages["action"]["entrypoint"] == "bundles.discord_send_action:send_message"
+        assert row.stages["action"]["entrypoint"] == "builtin_handlers.discord_send_action:send_message"
 
     def test_stages_defaults_to_empty_dict(self, db):
         db.app_catalog.insert(

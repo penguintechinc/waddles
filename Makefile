@@ -1,11 +1,11 @@
-.PHONY: dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: openapi-hubapi dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
-        seed-mock-data clean pre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
+        seed-mock-data seed-ui-mock-data screenshots cleanpre-commit run-ai-local check-docs check-bundle-dal grpc-dev-certs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
         build-superpenguin-roll-bundle test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs generate-bundle-signing-key
+        check-no-stubs check-bundle-hygiene generate-bundle-signing-key
 
 # Dev-only self-signed CA + server/client cert pair for the gRPC transport
 # TLS required by every service in docker-compose.yml (security audit A02).
@@ -26,6 +26,10 @@ docker-push:
 
 lint:
 	@bash scripts/lint.sh
+
+openapi-hubapi:
+	@python3 scripts/export-hubapi-openapi.py
+	@spectral lint openapi/v1.yaml --fail-severity=error
 
 check-docs:
 	@bash scripts/check-doc-refs.sh
@@ -63,6 +67,15 @@ check-alpha-deploy-no-wait:
 check-no-stubs:
 	@bash scripts/ci/check-no-stubs.sh
 
+# Bundle hygiene gates (.github/workflows/bundle-hygiene.yml): raw user input in
+# bundle log calls, legacy bare-string `permissions:` in hub-manifest.yaml, and
+# broad silent `except` swallows. Each prints the count it examined and exits
+# non-zero on a hit (or on zero examined). Needs PyYAML for the manifest check.
+check-bundle-hygiene:
+	@python3 scripts/ci/check-bundle-source-hygiene.py --check log-pii
+	@python3 scripts/ci/check-bundle-manifest-permissions.py
+	@python3 scripts/ci/check-bundle-source-hygiene.py --check silent-except
+
 test:
 	@$(MAKE) test-unit
 
@@ -94,7 +107,19 @@ smoke-test:
 seed-mock-data:
 	@echo "Seeding mock data..."
 	@test -f scripts/seed-admin.sh || { echo "scripts/seed-admin.sh not found" >&2; exit 1; }
-	@bash scripts/seed-admin.sh
+	@bash scripts/seed-admin.sh $(SEED_ARGS)
+	@$(MAKE) --no-print-directory seed-ui-mock-data
+
+# UI content seed (communities, members, leaderboard, overlays, chat, bundles)
+# so marketing screenshots are not empty-state. SEED_ARGS e.g. --docker.
+seed-ui-mock-data:
+	@bash scripts/seed-ui-mock-data.sh $(filter --docker,$(SEED_ARGS))
+
+# Marketing screenshots -> docs/screenshots/ (pinned Playwright, see
+# tests/screenshots). Needs a running hub-webui at BASE_URL and seeded data;
+# SCREENSHOT_EMAIL/SCREENSHOT_PASSWORD from env (never committed).
+screenshots:
+	@bash scripts/screenshots.sh
 
 clean:
 	docker-compose down -v

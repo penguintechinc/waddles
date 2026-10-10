@@ -15,7 +15,7 @@ from typing import Any
 from flask_core.app_registry import AppRegistry
 from flask_core.stream_pipeline import bundle_stream_key
 
-from bundles.twitch_gateway_manifest import register_default_bundles
+from builtin_handlers.twitch_gateway_manifest import register_default_bundles
 from eventsub import (
     DEFAULT_SUBSCRIPTION_TYPES,
     EVENTSUB_MESSAGE_ID,

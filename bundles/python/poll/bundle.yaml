@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.example.poll
 name: Community Polls Bundle (Python)
-# 1.0.0: extracted from the bot_process monolith (core/svc_process/bundles/
+# 1.0.0: extracted from the bot_process monolith (core/svc_process/builtin_handlers/
 # community_polls_process.py) onto waddle_sdk.command's standard grammar and
 # waddle_sdk.db's structured facade -- feature/bundle-poll. BUILD-ONLY: flag-gated OFF
 # (waddles.command-poll), bot_process._FEATURE_MODULES left untouched.

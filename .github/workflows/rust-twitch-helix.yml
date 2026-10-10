@@ -1,0 +1,29 @@
+name: Rust twitch-helix (lint + test)
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/twitch_helix/**'
+      - '.github/workflows/rust-twitch-helix.yml'
+      - '.github/workflows/rust-crate-ci.yml'
+  pull_request:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/twitch_helix/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint-test:
+    name: fmt + clippy + deny + coverage
+    uses: ./.github/workflows/rust-crate-ci.yml
+    with:
+      crate_name: twitch-helix
+      working_directory: core/twitch_helix
