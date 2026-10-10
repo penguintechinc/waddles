@@ -1,0 +1,57 @@
+{{- /*
+Enterprise external KMS / BYOK -- non-secret configuration for hub-api (see templates/_kms.tpl
+for the full design notes and the one-line hooks in hub-api.yaml / infrastructure/seaweedfs.yaml).
+
+Renders NOTHING while kms.enabled=false (the default): the platform-managed at-rest baseline
+needs zero KMS configuration. The validation include below runs on EVERY render, so a requested
+KMS feature that is misconfigured -- or requested without the kms.enabled master switch -- fails
+the release loudly instead of being silently ignored.
+
+This ConfigMap holds identifiers and endpoints only. Provider credentials are never templated
+here: they live in pre-created Secrets referenced by name (`existingSecret`).
+*/ -}}
+{{- include "waddlebot.kms.validate" . -}}
+{{- if or (include "waddlebot.kms.tenantKeysEnabled" .) (include "waddlebot.kms.objectStorageActive" .) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-kms
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: kms
+data:
+  {{- if include "waddlebot.kms.tenantKeysEnabled" . }}
+  {{- $t := .Values.kms.tenantKeys }}
+  # hub_api/services/envelope/providers.py: which customer-KMS providers hub-api accepts
+  # tenant keys for. Unlisted providers fail loudly with UnsupportedKmsProviderError.
+  ENVELOPE_KMS_PROVIDERS: {{ join "," $t.providers | quote }}
+  ENVELOPE_KMS_TIMEOUT_S: {{ $t.timeoutSeconds | default 10 | quote }}
+  {{- if $t.aws.platformPrincipal }}
+  ENVELOPE_AWS_PLATFORM_PRINCIPAL: {{ $t.aws.platformPrincipal | quote }}
+  {{- end }}
+  {{- if $t.gcp.platformPrincipal }}
+  ENVELOPE_GCP_PLATFORM_PRINCIPAL: {{ $t.gcp.platformPrincipal | quote }}
+  {{- end }}
+  {{- if $t.aws.kmsEndpointUrl }}
+  ENVELOPE_AWS_KMS_ENDPOINT_URL: {{ $t.aws.kmsEndpointUrl | quote }}
+  {{- end }}
+  {{- if $t.aws.stsEndpointUrl }}
+  ENVELOPE_AWS_STS_ENDPOINT_URL: {{ $t.aws.stsEndpointUrl | quote }}
+  {{- end }}
+  {{- if $t.gcp.kmsEndpoint }}
+  ENVELOPE_GCP_KMS_ENDPOINT: {{ $t.gcp.kmsEndpoint | quote }}
+  {{- end }}
+  {{- if $t.azure.authority }}
+  ENVELOPE_AZURE_AUTHORITY: {{ $t.azure.authority | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if include "waddlebot.kms.objectStorageActive" . }}
+  # hub_api/services/object_storage_kms.py: hub-api's own uploads switch from SSE-S3 (AES256)
+  # to SSE-KMS under this key -- only while the entitlement subject below holds the Enterprise
+  # compliance.external_kms entitlement (fail loud otherwise, never a silent AES256 fallback).
+  OBJECT_STORAGE_KMS_ENABLED: "true"
+  OBJECT_STORAGE_KMS_KEY_ID: {{ .Values.kms.objectStorage.keyId | quote }}
+  OBJECT_STORAGE_KMS_TENANT: {{ .Values.kms.objectStorage.entitlementTenant | default "system" | quote }}
+  {{- end }}
+{{- end }}
