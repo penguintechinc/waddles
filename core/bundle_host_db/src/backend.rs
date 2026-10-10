@@ -20,22 +20,29 @@
 //! control). Every value (row-id, column value, tenant/community) is bound
 //! as a SeaORM [`Value`], never interpolated into SQL text.
 //!
-//! **Typed columns** (`uuid` incl. `user_ref`, `timestamptz`, `jsonb`, and
-//! NULL in any type): writes bind by the *declared* column type and emit an
-//! explicit `$n::uuid`/`$n::timestamptz`/`$n::jsonb` cast, and reads project
-//! `timestamptz`/`jsonb` as text in SQL -- see `crate::typed` for why a
-//! plain `text` bind fails against real Postgres.
+//! **Typed columns** (`uuid` incl. `user_ref`, `timestamptz`, `jsonb`,
+//! `numeric(p,s)`, and NULL in any type): writes bind by the *declared*
+//! column type and emit an explicit `$n::uuid`/`$n::timestamptz`/
+//! `$n::jsonb`/`$n::numeric` cast, and reads project `timestamptz`/`jsonb`/
+//! `numeric` as text in SQL -- see `crate::typed` for why a plain `text`
+//! bind fails against real Postgres.
 //!
-//! **Known simplifications in this landing (see PR description "remaining
-//! work"):** `tenant_id`/`community_id` platform columns are bound as
-//! `text` here; this must be reconciled against whatever concrete type
-//! `hub_api/services/bundle_data_ddl.py` (PR #430) actually emits for them
-//! once that generator is merged and its DDL is inspectable. `query`
-//! (list/filter) is not implemented in this landing -- only
-//! `insert`/`get`/`update`/`delete`, per the agreed first-slice scope.
-//! Row/byte quota enforcement here is a pre-write `COUNT(*)` under the same
-//! transaction, not yet the trigger-based counter the full design (SS9)
-//! calls for at scale -- correct today, not the final mechanism.
+//! **Scope columns are integers.** `hub_api/services/bundle_data_ddl.py`
+//! provisions `tenant_id integer NOT NULL` and `community_id integer NOT
+//! NULL` on every bundle table, and its RLS policy casts the two GUCs with
+//! `::integer`. So [`DbScope`] carries the numeric `tenants.id`/
+//! `communities.id`, every predicate/insert binds them as `int4`, and the
+//! GUCs are set to their decimal text. A tenant-wide activation is
+//! `community_id = 0` ([`crate::scope::TENANT_WIDE_COMMUNITY_ID`]) -- the
+//! column cannot be `NULL` -- matched with a plain equality like any other
+//! community. (They were once bound as `text`, which fails against the real
+//! schema: `column "tenant_id" is of type integer but expression is of type
+//! text`, and `operator does not exist: integer = text` in every `WHERE`.)
+//!
+//! **Known simplification:** row/byte quota enforcement here is a pre-write
+//! `COUNT(*)` under the same transaction, not yet the trigger-based counter
+//! the full design (SS9) calls for at scale -- correct today, not the final
+//! mechanism.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -224,6 +231,17 @@ fn validate_column_value(schema: &TableSchema, name: &str, value: &DbValue) -> R
             typed::validate_timestamptz(s)
                 .map_err(|reason| DbError::InvalidValue(format!("{name:?} {reason}")))?;
         }
+        // An exact decimal is written as a decimal string or an integer --
+        // never a `Float` (binary rounding would silently corrupt it), which
+        // falls through to the declared-type mismatch below.
+        (ColumnType::Numeric { precision, scale }, DbValue::Text(s)) => {
+            typed::validate_numeric_text(s, precision, scale)
+                .map_err(|reason| DbError::InvalidValue(format!("{name:?} {reason}")))?;
+        }
+        (ColumnType::Numeric { precision, scale }, DbValue::Int(i)) => {
+            typed::validate_numeric_int(*i, precision, scale)
+                .map_err(|reason| DbError::InvalidValue(format!("{name:?} {reason}")))?;
+        }
         (ColumnType::Text, DbValue::Text(s)) => {
             if s.len() > MAX_TEXT_BYTES {
                 return Err(DbError::QuotaExceeded(format!(
@@ -302,6 +320,20 @@ fn plan_writes(
         .collect()
 }
 
+/// Decodes the platform `version` column. The provisioned DDL declares it
+/// `integer` (`hub_api/services/bundle_data_ddl.py` `_platform_columns_sql`:
+/// `version integer NOT NULL DEFAULT 1`), so it is read as `int4` -- sqlx
+/// refuses to decode an `INT4` column as `i64`. A negative value cannot come
+/// from the `DEFAULT 1` / `version + 1` the host maintains, so it is reported
+/// as a backend fault rather than wrapped.
+fn read_version(row: &sea_orm::QueryResult) -> Result<u64, DbError> {
+    let version: i32 = row
+        .try_get("", "version")
+        .map_err(|e| DbError::Backend(e.to_string()))?;
+    u64::try_from(version)
+        .map_err(|_| DbError::Backend(format!("version column out of range: {version}")))
+}
+
 /// The `SELECT` list `get`/`query` share: the platform `row_id`/`version`
 /// followed by each declared column in its read form
 /// ([`typed::select_expr`]).
@@ -318,6 +350,11 @@ fn select_list(schema: &TableSchema) -> String {
 /// uses for a role password) and the statement timeout. The explicit
 /// `tenant_id = $n` predicate itself is added separately, per statement,
 /// by each op below -- this function only establishes the RLS half.
+///
+/// The tenant/community GUCs are the ids' decimal text: the provisioned
+/// policy reads them back with `NULLIF(current_setting(..., true),
+/// '')::integer`, so a non-numeric value would raise
+/// `invalid_text_representation` on every statement.
 async fn set_local_scope(txn: &impl ConnectionTrait, scope: &DbScope) -> Result<(), DbError> {
     txn.execute_raw(Statement::from_sql_and_values(
         SeaDbBackend::Postgres,
@@ -334,8 +371,8 @@ async fn set_local_scope(txn: &impl ConnectionTrait, scope: &DbScope) -> Result<
                 set_config('waddles.app_id', $3, true)"
             .to_string(),
         [
-            Value::String(Some(scope.tenant.clone())),
-            Value::String(scope.community.clone()),
+            Value::String(Some(scope.tenant_id.to_string())),
+            Value::String(Some(scope.community_id.to_string())),
             Value::String(Some(scope.app_id.clone())),
         ],
     ))
@@ -361,9 +398,7 @@ async fn set_local_scope(txn: &impl ConnectionTrait, scope: &DbScope) -> Result<
 async fn lock_quota_scope(txn: &impl ConnectionTrait, scope: &DbScope) -> Result<(), DbError> {
     let key = format!(
         "{}:{}:{}",
-        scope.tenant,
-        scope.community.as_deref().unwrap_or(""),
-        scope.app_id
+        scope.tenant_id, scope.community_id, scope.app_id
     );
     txn.execute_raw(Statement::from_sql_and_values(
         SeaDbBackend::Postgres,
@@ -398,25 +433,22 @@ fn scope_predicate(
 /// The explicit, independent `tenant_id`/`community_id` predicate every
 /// generated statement below carries in addition to RLS (design doc
 /// SS6.2's "defense in depth" requirement) -- returns the SQL fragment and
-/// the two bound values, in bind order.
+/// the two bound values (`int4`, matching the `integer` columns), in bind
+/// order. A tenant-wide scope is the plain equality `community_id = 0`
+/// ([`crate::scope::TENANT_WIDE_COMMUNITY_ID`]): the column is `NOT NULL`,
+/// so there is no `IS NULL` form.
 fn tenant_predicate(scope: &DbScope, next_param: usize) -> (String, Vec<Value>) {
-    match &scope.community {
-        Some(community) => (
-            format!(
-                "tenant_id = ${} AND community_id = ${}",
-                next_param,
-                next_param + 1
-            ),
-            vec![
-                Value::String(Some(scope.tenant.clone())),
-                Value::String(Some(community.clone())),
-            ],
+    (
+        format!(
+            "tenant_id = ${} AND community_id = ${}",
+            next_param,
+            next_param + 1
         ),
-        None => (
-            format!("tenant_id = ${} AND community_id IS NULL", next_param),
-            vec![Value::String(Some(scope.tenant.clone()))],
-        ),
-    }
+        vec![
+            Value::Int(Some(scope.tenant_id)),
+            Value::Int(Some(scope.community_id)),
+        ],
+    )
 }
 
 /// Object-safe `db` backend trait -- mirrors `bundle_host_kv::backend::KvBackend`'s
@@ -597,15 +629,15 @@ impl PostgresBackend {
         quoted_cols.push(quote_ident("community_id"));
 
         // Declared columns first (typed bind + explicit cast per column),
-        // then the two platform scope columns, bound as text.
+        // then the two platform scope columns, bound as `int4`.
         let mut placeholders: Vec<String> = writes
             .iter()
             .enumerate()
             .map(|(i, w)| w.placeholder(i + 1))
             .collect();
         let mut bind_values: Vec<Value> = writes.into_iter().map(|w| w.value).collect();
-        bind_values.push(Value::String(Some(scope.tenant.clone())));
-        bind_values.push(Value::String(scope.community.clone()));
+        bind_values.push(Value::Int(Some(scope.tenant_id)));
+        bind_values.push(Value::Int(Some(scope.community_id)));
         placeholders.push(format!("${}", bind_values.len() - 1));
         placeholders.push(format!("${}", bind_values.len()));
 
@@ -629,9 +661,7 @@ impl PostgresBackend {
         let row_id: Uuid = result_row
             .try_get("", "row_id")
             .map_err(|e| DbError::Backend(e.to_string()))?;
-        let version: i64 = result_row
-            .try_get("", "version")
-            .map_err(|e| DbError::Backend(e.to_string()))?;
+        let version = read_version(&result_row)?;
 
         txn.commit()
             .await
@@ -639,7 +669,7 @@ impl PostgresBackend {
 
         Ok(Row {
             row_id: row_id.to_string(),
-            version: version as u64,
+            version,
             columns: column_values,
         })
     }
@@ -691,9 +721,7 @@ impl PostgresBackend {
             .await
             .map_err(|e| DbError::Backend(e.to_string()))?;
 
-        let version: i64 = result_row
-            .try_get("", "version")
-            .map_err(|e| DbError::Backend(e.to_string()))?;
+        let version = read_version(&result_row)?;
 
         let mut columns = Vec::with_capacity(schema.columns.len());
         for col in &schema.columns {
@@ -703,7 +731,7 @@ impl PostgresBackend {
 
         Ok(Row {
             row_id: row_id.to_string(),
-            version: version as u64,
+            version,
             columns,
         })
     }
@@ -801,16 +829,14 @@ impl PostgresBackend {
             });
         };
 
-        let version: i64 = updated_row
-            .try_get("", "version")
-            .map_err(|e| DbError::Backend(e.to_string()))?;
+        let version = read_version(&updated_row)?;
         txn.commit()
             .await
             .map_err(|e| DbError::Backend(e.to_string()))?;
 
         Ok(Row {
             row_id: row_id.to_string(),
-            version: version as u64,
+            version,
             columns: column_values,
         })
     }
@@ -949,16 +975,14 @@ impl PostgresBackend {
             let row_uuid: Uuid = result_row
                 .try_get("", "row_id")
                 .map_err(|e| DbError::Backend(e.to_string()))?;
-            let version: i64 = result_row
-                .try_get("", "version")
-                .map_err(|e| DbError::Backend(e.to_string()))?;
+            let version = read_version(result_row)?;
             let mut columns = Vec::with_capacity(schema.columns.len());
             for col in &schema.columns {
                 columns.push((col.name.clone(), extract_value(result_row, col)?));
             }
             out.push(Row {
                 row_id: row_uuid.to_string(),
-                version: version as u64,
+                version,
                 columns,
             });
         }
@@ -989,9 +1013,10 @@ fn extract_value(
         ColumnType::Bool => try_nullable!(bool, DbValue::Bool),
         ColumnType::Int4 => try_nullable!(i32, |v: i32| DbValue::Int(v as i64)),
         ColumnType::Int8 => try_nullable!(i64, DbValue::Int),
-        ColumnType::Text | ColumnType::Jsonb | ColumnType::Timestamptz => {
-            try_nullable!(String, DbValue::Text)
-        }
+        ColumnType::Text
+        | ColumnType::Jsonb
+        | ColumnType::Timestamptz
+        | ColumnType::Numeric { .. } => try_nullable!(String, DbValue::Text),
         ColumnType::Uuid => {
             let v: Option<Uuid> = row
                 .try_get("", &col.name)
@@ -1072,7 +1097,7 @@ pub async fn with_call_deadline<T>(
 mod tests {
     use super::*;
     use crate::schema::ColumnDef;
-    use crate::scope::AppSchema;
+    use crate::scope::{AppSchema, TENANT_WIDE_COMMUNITY_ID};
 
     fn schema_with_user_ref() -> TableSchema {
         TableSchema::validated(
@@ -1179,25 +1204,35 @@ mod tests {
     }
 
     #[test]
-    fn tenant_predicate_binds_community_when_present() {
-        let scope = DbScope::new("acme", Some("main".to_string()), "app");
+    fn tenant_predicate_binds_both_ids_as_int4() {
+        let scope = DbScope::new(7, 3, "app");
         let (sql, values) = tenant_predicate(&scope, 1);
         assert_eq!(sql, "tenant_id = $1 AND community_id = $2");
-        assert_eq!(values.len(), 2);
+        assert_eq!(values, vec![Value::Int(Some(7)), Value::Int(Some(3))]);
     }
 
     #[test]
-    fn tenant_predicate_uses_is_null_when_community_absent() {
-        let scope = DbScope::new("acme", None, "app");
+    fn tenant_predicate_numbers_its_placeholders_from_next_param() {
+        let (sql, _) = tenant_predicate(&DbScope::new(7, 3, "app"), 5);
+        assert_eq!(sql, "tenant_id = $5 AND community_id = $6");
+    }
+
+    /// The provisioned `community_id` column is `integer NOT NULL`, so a
+    /// tenant-wide scope can never be `IS NULL` -- it is the `0` sentinel,
+    /// matched by plain equality exactly like any other community.
+    #[test]
+    fn tenant_predicate_matches_a_tenant_wide_scope_on_the_zero_sentinel() {
+        let scope = DbScope::new(7, TENANT_WIDE_COMMUNITY_ID, "app");
         let (sql, values) = tenant_predicate(&scope, 1);
-        assert_eq!(sql, "tenant_id = $1 AND community_id IS NULL");
-        assert_eq!(values.len(), 1);
+        assert_eq!(sql, "tenant_id = $1 AND community_id = $2");
+        assert!(!sql.contains("NULL"));
+        assert_eq!(values, vec![Value::Int(Some(7)), Value::Int(Some(0))]);
     }
 
     #[test]
     fn scope_predicate_uses_tenant_predicate_for_an_ordinary_table() {
         let schema = schema_with_user_ref();
-        let scope = DbScope::new("acme", Some("main".to_string()), "app");
+        let scope = DbScope::new(7, 3, "app");
         let (sql, values) = scope_predicate(&schema, &scope, 1);
         assert_eq!(sql, "tenant_id = $1 AND community_id = $2");
         assert_eq!(values.len(), 2);
@@ -1206,7 +1241,7 @@ mod tests {
     #[test]
     fn scope_predicate_is_unconditional_for_a_cross_community_read_table() {
         let schema = schema_with_user_ref().with_cross_community_read();
-        let scope = DbScope::new("acme", Some("main".to_string()), "app");
+        let scope = DbScope::new(7, 3, "app");
         let (sql, values) = scope_predicate(&schema, &scope, 1);
         assert_eq!(sql, "TRUE");
         assert!(values.is_empty(), "no tenant/community value must be bound");
@@ -1327,20 +1362,20 @@ mod tests {
     }
 
     #[test]
-    fn tenant_predicate_never_lets_guest_input_influence_the_predicate_shape() {
-        // scope.tenant/community come only from the authenticated
+    fn tenant_predicate_never_splices_scope_values_into_the_sql_text() {
+        // scope.tenant_id/community_id come only from the authenticated
         // invocation (crate::scope::DbScope's own doc) -- this test just
         // pins the SQL shape so a future edit can't accidentally splice
         // scope values into the SQL string instead of the bind-value list.
-        let scope = DbScope::new(
-            "acme'; DROP TABLE x; --".to_string(),
-            None,
-            "app".to_string(),
-        );
-        let (sql, _values) = tenant_predicate(&scope, 1);
+        let scope = DbScope::new(123_456, 654_321, "app");
+        let (sql, values) = tenant_predicate(&scope, 1);
         assert!(
-            !sql.contains("DROP"),
-            "tenant value must never appear in SQL text"
+            !sql.contains("123456") && !sql.contains("654321"),
+            "scope ids must never appear in SQL text: {sql}"
+        );
+        assert_eq!(
+            values,
+            vec![Value::Int(Some(123_456)), Value::Int(Some(654_321))]
         );
     }
 
@@ -1408,12 +1443,21 @@ mod tests {
         MockDatabase::new(SeaDbBackend::Postgres)
     }
 
+    /// The tenant id every mock-backed test scope uses.
+    const TENANT_ID: i32 = 7;
+    /// The community id [`scoped`] uses.
+    const COMMUNITY_ID: i32 = 3;
+
+    fn int(v: i32) -> Value {
+        Value::Int(Some(v))
+    }
+
     fn scoped() -> DbScope {
-        DbScope::new("acme", Some("main".to_string()), "waddles.bot.a")
+        DbScope::new(TENANT_ID, COMMUNITY_ID, "waddles.bot.a")
     }
 
     fn tenant_wide() -> DbScope {
-        DbScope::new("acme", None, "waddles.bot.a")
+        DbScope::new(TENANT_ID, TENANT_WIDE_COMMUNITY_ID, "waddles.bot.a")
     }
 
     /// A backend over a scripted mock connection, plus a handle to read back
@@ -1468,8 +1512,8 @@ mod tests {
         assert_eq!(
             bound(&stmts[2]),
             vec![
-                text(&scope.tenant),
-                Value::String(scope.community.clone()),
+                text(&scope.tenant_id.to_string()),
+                text(&scope.community_id.to_string()),
                 text(&scope.app_id)
             ]
         );
@@ -1504,7 +1548,7 @@ mod tests {
     }
 
     fn wide_row(cells: Vec<(&str, Value)>) -> MockRow {
-        let mut all = vec![("row_id", uuid_cell()), ("version", big(3))];
+        let mut all = vec![("row_id", uuid_cell()), ("version", int(3))];
         all.extend(cells);
         mock_row(all)
     }
@@ -1514,7 +1558,7 @@ mod tests {
     }
 
     fn insert_returning_row() -> Vec<MockRow> {
-        vec![mock_row(vec![("row_id", uuid_cell()), ("version", big(1))])]
+        vec![mock_row(vec![("row_id", uuid_cell()), ("version", int(1))])]
     }
 
     #[tokio::test]
@@ -1552,13 +1596,13 @@ mod tests {
         );
         assert_prologue(&stmts, &scope);
         assert_eq!(stmts[3].sql, LOCK_SQL);
-        assert_eq!(bound(&stmts[3]), vec![text("acme:main:waddles.bot.a")]);
+        assert_eq!(bound(&stmts[3]), vec![text("7:3:waddles.bot.a")]);
         assert_eq!(
             stmts[4].sql,
             "SELECT COUNT(*) AS n FROM \"app_core\".\"fishing_core\" \
              WHERE tenant_id = $1 AND community_id = $2"
         );
-        assert_eq!(bound(&stmts[4]), vec![text("acme"), text("main")]);
+        assert_eq!(bound(&stmts[4]), vec![int(TENANT_ID), int(COMMUNITY_ID)]);
         assert_eq!(
             stmts[5].sql,
             "INSERT INTO \"app_core\".\"fishing_core\" \
@@ -1567,7 +1611,7 @@ mod tests {
         );
         assert_eq!(
             bound(&stmts[5]),
-            vec![big(7), text("hi"), text("acme"), text("main")]
+            vec![big(7), text("hi"), int(TENANT_ID), int(COMMUNITY_ID)]
         );
         assert_eq!(stmts[6].sql, "COMMIT");
     }
@@ -1592,17 +1636,17 @@ mod tests {
 
         let stmts = h.statements();
         assert_prologue(&stmts, &scope);
-        assert_eq!(bound(&stmts[3]), vec![text("acme::waddles.bot.a")]);
+        assert_eq!(bound(&stmts[3]), vec![text("7:0:waddles.bot.a")]);
         assert_eq!(
             stmts[4].sql,
             "SELECT COUNT(*) AS n FROM \"app_core\".\"fishing_core\" \
-             WHERE tenant_id = $1 AND community_id IS NULL"
+             WHERE tenant_id = $1 AND community_id = $2"
         );
-        assert_eq!(bound(&stmts[4]), vec![text("acme")]);
+        assert_eq!(bound(&stmts[4]), vec![int(TENANT_ID), int(0)]);
         assert_eq!(
             bound(&stmts[5]),
-            vec![big(1), text("acme"), Value::String(None)],
-            "a tenant-wide row is written with a NULL community"
+            vec![big(1), int(TENANT_ID), int(0)],
+            "a tenant-wide row is written with the 0 community sentinel, never a NULL"
         );
     }
 
@@ -1818,7 +1862,7 @@ mod tests {
                     .append_exec_results(exec_ok(3))
                     .append_query_results([
                         count_row(0),
-                        vec![mock_row(vec![("version", big(1))])],
+                        vec![mock_row(vec![("version", int(1))])],
                     ]),
             ),
             (
@@ -1917,7 +1961,7 @@ mod tests {
                 .append_exec_results(exec_ok(2))
                 .append_query_results([vec![mock_row(vec![
                     ("row_id", uuid_cell()),
-                    ("version", big(4)),
+                    ("version", int(4)),
                     ("user_ref", Value::Uuid(None)),
                     ("score", big(1)),
                     ("note", Value::String(None)),
@@ -1940,7 +1984,7 @@ mod tests {
         );
         assert_eq!(
             bound(&stmts[3]),
-            vec![uuid_cell(), text("acme"), text("main")]
+            vec![uuid_cell(), int(TENANT_ID), int(COMMUNITY_ID)]
         );
         assert_eq!(stmts[4].sql, "COMMIT");
     }
@@ -1952,7 +1996,7 @@ mod tests {
                 .append_exec_results(exec_ok(2))
                 .append_query_results([vec![mock_row(vec![
                     ("row_id", uuid_cell()),
-                    ("version", big(1)),
+                    ("version", int(1)),
                     ("user_ref", Value::Uuid(None)),
                     ("score", big(1)),
                     ("note", Value::String(None)),
@@ -2049,7 +2093,7 @@ mod tests {
         let h = Harness::new(
             mock_db()
                 .append_exec_results(exec_ok(2))
-                .append_query_results([vec![mock_row(vec![("version", big(5))])]]),
+                .append_query_results([vec![mock_row(vec![("version", int(5))])]]),
         );
         let scope = scoped();
         let cols = vec![
@@ -2088,8 +2132,8 @@ mod tests {
                 text("n"),
                 uuid_cell(),
                 big(4),
-                text("acme"),
-                text("main")
+                int(TENANT_ID),
+                int(COMMUNITY_ID)
             ]
         );
         assert_eq!(stmts[4].sql, "COMMIT");
@@ -2100,7 +2144,7 @@ mod tests {
         let h = Harness::new(
             mock_db()
                 .append_exec_results(exec_ok(2))
-                .append_query_results([vec![mock_row(vec![("version", big(2))])]]),
+                .append_query_results([vec![mock_row(vec![("version", int(2))])]]),
         );
 
         h.backend
@@ -2117,10 +2161,10 @@ mod tests {
         let stmts = h.statements();
         assert!(stmts[3]
             .sql
-            .ends_with("AND tenant_id = $4 AND community_id IS NULL RETURNING version"));
+            .ends_with("AND tenant_id = $4 AND community_id = $5 RETURNING version"));
         assert_eq!(
             bound(&stmts[3]),
-            vec![big(1), uuid_cell(), big(1), text("acme")]
+            vec![big(1), uuid_cell(), big(1), int(TENANT_ID), int(0)]
         );
     }
 
@@ -2150,7 +2194,7 @@ mod tests {
         );
         assert_eq!(
             bound(&stmts[4]),
-            vec![uuid_cell(), text("acme"), text("main")],
+            vec![uuid_cell(), int(TENANT_ID), int(COMMUNITY_ID)],
             "the existence probe is scoped too"
         );
         assert_eq!(stmts[5].sql, "COMMIT");
@@ -2296,7 +2340,7 @@ mod tests {
         );
         assert_eq!(
             bound(&stmts[3]),
-            vec![uuid_cell(), big(6), text("acme"), text("main")]
+            vec![uuid_cell(), big(6), int(TENANT_ID), int(COMMUNITY_ID)]
         );
         assert_eq!(stmts[4].sql, "COMMIT");
     }
@@ -2317,8 +2361,11 @@ mod tests {
         let stmts = h.statements();
         assert!(stmts[3]
             .sql
-            .ends_with("AND tenant_id = $3 AND community_id IS NULL"));
-        assert_eq!(bound(&stmts[3]), vec![uuid_cell(), big(1), text("acme")]);
+            .ends_with("AND tenant_id = $3 AND community_id = $4"));
+        assert_eq!(
+            bound(&stmts[3]),
+            vec![uuid_cell(), big(1), int(TENANT_ID), int(0)]
+        );
     }
 
     #[tokio::test]
@@ -2341,7 +2388,7 @@ mod tests {
         let stmts = h.statements();
         assert_eq!(
             bound(&stmts[4]),
-            vec![uuid_cell(), text("acme"), text("main")]
+            vec![uuid_cell(), int(TENANT_ID), int(COMMUNITY_ID)]
         );
         assert_eq!(stmts[5].sql, "COMMIT");
 
@@ -2416,10 +2463,10 @@ mod tests {
         }
     }
 
-    fn list_row(row_id: Value, version: i64, score: i64) -> MockRow {
+    fn list_row(row_id: Value, version: i32, score: i64) -> MockRow {
         mock_row(vec![
             ("row_id", row_id),
-            ("version", big(version)),
+            ("version", int(version)),
             ("user_ref", Value::Uuid(None)),
             ("score", big(score)),
             ("note", Value::String(None)),
@@ -2465,7 +2512,7 @@ mod tests {
         );
         assert_eq!(
             bound(&stmts[3]),
-            vec![text("acme"), text("main"), big(25), big(5)]
+            vec![int(TENANT_ID), int(COMMUNITY_ID), big(25), big(5)]
         );
         assert_eq!(stmts[4].sql, "COMMIT");
     }
@@ -2489,8 +2536,8 @@ mod tests {
         assert_eq!(
             bound(&stmts[3]),
             vec![
-                text("acme"),
-                text("main"),
+                int(TENANT_ID),
+                int(COMMUNITY_ID),
                 big(i64::from(MAX_QUERY_LIMIT)),
                 big(0)
             ]
@@ -2512,9 +2559,12 @@ mod tests {
 
         let stmts = h.statements();
         assert!(stmts[3].sql.contains(
-            "WHERE tenant_id = $1 AND community_id IS NULL ORDER BY row_id ASC LIMIT $2 OFFSET $3"
+            "WHERE tenant_id = $1 AND community_id = $2 ORDER BY row_id ASC LIMIT $3 OFFSET $4"
         ));
-        assert_eq!(bound(&stmts[3]), vec![text("acme"), big(10), big(0)]);
+        assert_eq!(
+            bound(&stmts[3]),
+            vec![int(TENANT_ID), int(0), big(10), big(0)]
+        );
     }
 
     #[tokio::test]
@@ -2621,7 +2671,7 @@ mod tests {
                 mock_db()
                     .append_exec_results(exec_ok(2))
                     .append_query_results([vec![mock_row(vec![
-                        ("version", big(1)),
+                        ("version", int(1)),
                         ("user_ref", Value::Uuid(None)),
                         ("score", big(1)),
                         ("note", Value::String(None)),
@@ -2660,7 +2710,7 @@ mod tests {
             count_row(0),
             insert_returning_row(),
             vec![list_row(uuid_cell(), 1, 1)],
-            vec![mock_row(vec![("version", big(2))])],
+            vec![mock_row(vec![("version", int(2))])],
             vec![list_row(uuid_cell(), 2, 1)],
         ]));
         let backend: &dyn DbBackend = &h.backend;
@@ -2901,8 +2951,8 @@ mod tests {
                 text("2026-01-02T03:04:05Z"),
                 text("{\"a\":1}"),
                 Value::Uuid(Some(other_uuid())),
-                text("acme"),
-                text("main"),
+                int(TENANT_ID),
+                int(COMMUNITY_ID),
             ]
         );
     }
@@ -2971,8 +3021,8 @@ mod tests {
                 Value::String(None),
                 Value::String(None),
                 Value::Uuid(None),
-                text("acme"),
-                text("main"),
+                int(TENANT_ID),
+                int(COMMUNITY_ID),
             ]
         );
     }
@@ -2982,7 +3032,7 @@ mod tests {
         let h = Harness::new(
             mock_db()
                 .append_exec_results(exec_ok(2))
-                .append_query_results([vec![mock_row(vec![("version", big(4))])]]),
+                .append_query_results([vec![mock_row(vec![("version", int(4))])]]),
         );
 
         h.backend
@@ -3022,8 +3072,8 @@ mod tests {
                 text("n"),
                 uuid_cell(),
                 big(3),
-                text("acme"),
-                text("main"),
+                int(TENANT_ID),
+                int(COMMUNITY_ID),
             ]
         );
     }
@@ -3177,5 +3227,266 @@ mod tests {
     async fn with_call_deadline_times_out_a_call_that_never_finishes() {
         let result = with_call_deadline(std::future::pending::<Result<(), DbError>>()).await;
         assert_eq!(result, Err(DbError::Timeout));
+    }
+
+    /// The provisioned `version` column is `integer`: a row whose `version`
+    /// is not an `int4` (or is negative) is a backend fault, never silently
+    /// coerced.
+    #[tokio::test]
+    async fn a_version_that_is_not_the_provisioned_int4_is_a_backend_fault() {
+        for (label, cell) in [("int8", big(1)), ("negative", int(-1))] {
+            let h = Harness::new(
+                mock_db()
+                    .append_exec_results(exec_ok(2))
+                    .append_query_results([vec![wide_row_with_version(cell)]]),
+            );
+            let err = h
+                .backend
+                .get(&schema_with_user_ref(), &scoped(), ROW_ID)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), "backend", "{label}: {err:?}");
+        }
+    }
+
+    fn wide_row_with_version(version: Value) -> MockRow {
+        mock_row(vec![
+            ("row_id", uuid_cell()),
+            ("version", version),
+            ("user_ref", Value::Uuid(None)),
+            ("score", Value::BigInt(None)),
+            ("note", Value::String(None)),
+        ])
+    }
+
+    fn money_schema() -> TableSchema {
+        let col = |name: &str, precision: u8, scale: u8| ColumnDef {
+            name: name.to_string(),
+            sql_type: ColumnType::numeric(precision, scale).expect("valid numeric"),
+            nullable: true,
+            is_user_ref: false,
+        };
+        TableSchema::validated(
+            AppSchema::Core,
+            "money_core",
+            vec![col("amount", 10, 2), col("units", 3, 0), col("ratio", 5, 5)],
+        )
+        .expect("money_schema is valid")
+    }
+
+    #[tokio::test]
+    async fn insert_casts_a_numeric_column_and_binds_each_value_shape_natively() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(3))
+                .append_query_results([count_row(0), insert_returning_row()]),
+        );
+
+        h.backend
+            .insert(
+                &money_schema(),
+                &scoped(),
+                vec![
+                    ("amount".to_string(), DbValue::Text("-12.50".to_string())),
+                    ("units".to_string(), DbValue::Int(42)),
+                    ("ratio".to_string(), DbValue::Null),
+                ],
+            )
+            .await
+            .unwrap();
+
+        let stmts = h.statements();
+        assert_eq!(
+            stmts[5].sql,
+            "INSERT INTO \"app_core\".\"money_core\" \
+             (\"amount\", \"units\", \"ratio\", \"tenant_id\", \"community_id\") \
+             VALUES ($1::numeric, $2::numeric, $3::numeric, $4, $5) RETURNING row_id, version"
+        );
+        assert_eq!(
+            bound(&stmts[5]),
+            vec![
+                text("-12.50"),
+                big(42),
+                Value::String(None),
+                int(TENANT_ID),
+                int(COMMUNITY_ID),
+            ],
+            "a decimal binds as text (exact, never a float), an integer as bigint, NULL as a \
+             text NULL that the ::numeric cast types"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_casts_numeric_set_clauses() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([vec![mock_row(vec![("version", int(2))])]]),
+        );
+
+        h.backend
+            .update(
+                &money_schema(),
+                &scoped(),
+                ROW_ID,
+                1,
+                vec![("amount".to_string(), DbValue::Text("0.01".to_string()))],
+            )
+            .await
+            .unwrap();
+
+        let stmts = h.statements();
+        assert!(
+            stmts[3]
+                .sql
+                .contains("SET \"amount\" = $1::numeric, version = version + 1"),
+            "{}",
+            stmts[3].sql
+        );
+        assert_eq!(bound(&stmts[3])[0], text("0.01"));
+    }
+
+    #[tokio::test]
+    async fn get_and_query_read_a_numeric_column_back_as_its_exact_text() {
+        let select = "SELECT \"row_id\", \"version\", \"amount\"::text AS \"amount\", \
+             \"units\"::text AS \"units\", \"ratio\"::text AS \"ratio\" \
+             FROM \"app_core\".\"money_core\"";
+        let row = || {
+            wide_row(vec![
+                ("amount", text("1234.50")),
+                ("units", Value::String(None)),
+                ("ratio", text("0.12345")),
+            ])
+        };
+        let expected = vec![
+            ("amount".to_string(), DbValue::Text("1234.50".to_string())),
+            ("units".to_string(), DbValue::Null),
+            ("ratio".to_string(), DbValue::Text("0.12345".to_string())),
+        ];
+
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([vec![row()]]),
+        );
+        let got = h
+            .backend
+            .get(&money_schema(), &scoped(), ROW_ID)
+            .await
+            .unwrap();
+        assert_eq!(
+            got.columns, expected,
+            "scale digits are preserved (1234.50)"
+        );
+        assert_eq!(
+            h.statements()[3].sql,
+            format!("{select} WHERE row_id = $1 AND tenant_id = $2 AND community_id = $3")
+        );
+
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([vec![row()]]),
+        );
+        let rows = h
+            .backend
+            .query(&money_schema(), &scoped(), 10, 0, None)
+            .await
+            .unwrap();
+        assert_eq!(rows[0].columns, expected);
+    }
+
+    #[tokio::test]
+    async fn query_orders_a_numeric_column_by_its_stored_value_not_the_text_alias() {
+        let h = Harness::new(
+            mock_db()
+                .append_exec_results(exec_ok(2))
+                .append_query_results([no_rows()]),
+        );
+        h.backend
+            .query(
+                &money_schema(),
+                &scoped(),
+                10,
+                0,
+                Some(OrderBy::Column {
+                    name: "amount".to_string(),
+                    descending: false,
+                }),
+            )
+            .await
+            .unwrap();
+        let sql = &h.statements()[3].sql;
+        assert!(
+            sql.contains("ORDER BY \"money_core\".\"amount\" ASC LIMIT"),
+            "a bare ORDER BY would sort '9' after '10' on the text alias: {sql}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_numeric_value_that_does_not_fit_or_is_not_exact_is_rejected_before_any_io() {
+        let bad: [(&str, DbValue); 12] = [
+            ("amount", DbValue::Text("1.234".to_string())),
+            ("amount", DbValue::Text("123456789".to_string())),
+            ("amount", DbValue::Text("1e3".to_string())),
+            ("amount", DbValue::Text("NaN".to_string())),
+            ("amount", DbValue::Text("".to_string())),
+            ("amount", DbValue::Int(100_000_000)),
+            ("units", DbValue::Text("1000".to_string())),
+            ("units", DbValue::Text("1.5".to_string())),
+            ("ratio", DbValue::Text("1".to_string())),
+            ("ratio", DbValue::Int(1)),
+            ("amount", DbValue::Float(1.5)),
+            ("amount", DbValue::Bool(true)),
+        ];
+        for (column, value) in bad {
+            let h = Harness::new(mock_db());
+            let err = h
+                .backend
+                .insert(
+                    &money_schema(),
+                    &scoped(),
+                    vec![(column.to_string(), value.clone())],
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), "invalid_value", "insert {column}={value:?}");
+            assert!(h.statements().is_empty(), "{column} reached the database");
+
+            let h = Harness::new(mock_db());
+            let err = h
+                .backend
+                .update(
+                    &money_schema(),
+                    &scoped(),
+                    ROW_ID,
+                    1,
+                    vec![(column.to_string(), value.clone())],
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), "invalid_value", "update {column}={value:?}");
+            assert!(h.statements().is_empty(), "{column} reached the database");
+        }
+    }
+
+    #[test]
+    fn a_numeric_value_that_fits_is_accepted() {
+        let schema = money_schema();
+        for (column, value) in [
+            ("amount", DbValue::Text("99999999.99".to_string())),
+            ("amount", DbValue::Text("-0.5".to_string())),
+            ("amount", DbValue::Text("12.500".to_string())),
+            ("amount", DbValue::Int(-99_999_999)),
+            ("amount", DbValue::Int(0)),
+            ("units", DbValue::Text("999".to_string())),
+            ("units", DbValue::Text("5.0".to_string())),
+            ("ratio", DbValue::Text("0.12345".to_string())),
+            ("ratio", DbValue::Int(0)),
+            ("ratio", DbValue::Null),
+        ] {
+            validate_column_value(&schema, column, &value)
+                .unwrap_or_else(|e| panic!("{column}={value:?} should fit: {e:?}"));
+        }
     }
 }
