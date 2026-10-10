@@ -161,6 +161,10 @@ pub struct Executor<S: ComponentSource> {
     /// `EXECUTOR_MAX_MEMORY_LIMIT_MB`: the hard ceiling no bundle's
     /// `limits.memory_mb` override may exceed (spec SS7.3).
     max_memory_limit_mb: u32,
+    /// `EXECUTOR_FUEL_LIMIT_TRANSFORM` (connector spec SS0 condition 4).
+    fuel_limit_transform: u64,
+    /// `EXECUTOR_FUEL_LIMIT_DISPATCH` (connector spec SS0 condition 4).
+    fuel_limit_dispatch: u64,
     bundles: RwLock<HashMap<String, LoadedBundle>>,
     /// Single-flight compile-in-progress tracker (gh security review item
     /// 2): concurrent `load`s for the SAME cold digest share one `OnceCell`,
@@ -187,6 +191,23 @@ pub struct Executor<S: ComponentSource> {
     /// actually fire -- without this ticker the epoch counter never moves
     /// and no call would ever time out. Aborted on `Drop` so tests don't
     /// leak tasks.
+    ///
+    /// **Heartbeat safety (connector spec SS0 condition 4's "heartbeats
+    /// scheduled on a separate host task, never blocked by guest
+    /// execution").** This ticker IS such a task: it runs as its own
+    /// `tokio::spawn`ed future, wholly independent of any in-flight
+    /// `on_invoke` call. A guest executing a tight, host-call-free loop
+    /// occupies its OS thread for real wall-clock time -- wasmtime's epoch
+    /// check is a trap point, not a cooperative yield back to the async
+    /// runtime -- so the safety property this ticker (and any future
+    /// per-connection heartbeat built the same way, e.g. a Discord gateway
+    /// heartbeat once connector bundles land) actually depends on is a
+    /// **multi-threaded** Tokio runtime (`#[tokio::main]`'s default,
+    /// `crate::main` never overrides it to `current_thread`): the ticker
+    /// and any heartbeat task run on a different OS worker thread than the
+    /// one blocked running guest code, so they are never starved by it.
+    /// `heartbeat_task_is_never_blocked_by_a_slow_guest_invocation` (below)
+    /// is the regression test for this property.
     epoch_ticker: tokio::task::JoinHandle<()>,
     /// Platform Ed25519 public key(s) `on_load` checks every fetched
     /// sidecar's signature against (spec SS5.6). Derived leniently from
@@ -217,6 +238,8 @@ impl<S: ComponentSource> Executor<S> {
             max_call_timeout_ms: cfg.executor_max_call_timeout_ms,
             default_memory_limit_mb: cfg.executor_memory_limit_mb,
             max_memory_limit_mb: cfg.executor_max_memory_limit_mb,
+            fuel_limit_transform: cfg.executor_fuel_limit_transform,
+            fuel_limit_dispatch: cfg.executor_fuel_limit_dispatch,
             bundles: RwLock::new(HashMap::new()),
             compiling: tokio::sync::Mutex::new(HashMap::new()),
             orphaned_unload_total: AtomicU64::new(0),
@@ -615,11 +638,43 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
         let exec_state = ExecState::new(Some(bridge), body.app_id.clone(), invoke_id)
             .with_memory_limit_mb(memory_limit_mb);
         let mut store = new_bounded_store(&self.engine, exec_state, deadline_ms);
+        // Connector spec SS0 condition 4: fuel per invocation, budgeted by
+        // world (`transform` vs `dispatch`, see `CliConfig`'s doc), alongside
+        // the epoch deadline armed by `new_bounded_store` above -- never a
+        // replacement for it. The engine was built with `consume_fuel(true)`
+        // (`crate::engine::build_engine`) so a `Store` starts at zero fuel
+        // and traps immediately unless armed here on every call.
+        let fuel_budget = match body.export {
+            ExportKind::Transform => self.fuel_limit_transform,
+            ExportKind::Dispatch => self.fuel_limit_dispatch,
+        };
+        store.set_fuel(fuel_budget).map_err(|e| {
+            error_body(
+                ErrorCode::WasmTrap,
+                format!("failed to arm fuel budget: {e}"),
+            )
+        })?;
 
         let start = std::time::Instant::now();
-        let stage = Stage::instantiate_async(&mut store, &component, &self.linker)
-            .await
-            .map_err(|e| error_body(ErrorCode::LoadFailed, e.to_string()))?;
+        let stage = match Stage::instantiate_async(&mut store, &component, &self.linker).await {
+            Ok(stage) => stage,
+            Err(err) => {
+                // Instantiation itself can trap (a heavy/looping start
+                // function burning the fuel budget, hitting the epoch
+                // deadline, or growing memory past the cap) exactly like an
+                // export call can -- classify identically via
+                // `trap_to_error_body` rather than always bucketing an
+                // instantiate failure as `LOAD_FAILED`, which would hide a
+                // genuine guest fault from `svc_process::spine`'s DLQ-kind
+                // mapping and its per-source circuit breaker (both key off
+                // the typed `ErrorCode`, connector spec SS0 condition 5).
+                let memory_cap_hit = store.data().memory_cap_hit();
+                if memory_cap_hit || err.downcast_ref::<wasmtime::Trap>().is_some() {
+                    return Err(trap_to_error_body(err, memory_cap_hit));
+                }
+                return Err(error_body(ErrorCode::LoadFailed, err.to_string()));
+            }
+        };
 
         let result = match body.export {
             ExportKind::Transform => {
@@ -659,10 +714,20 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
         }
         .map_err(|e| error_body(ErrorCode::LoadFailed, format!("result encode failed: {e}")))?;
 
+        // Fuel is monotonically consumed, never replenished mid-call, so the
+        // budget minus what remains is exactly what this invocation spent
+        // (spec SS0 condition 4's overhead-measurement requirement).
+        // `get_fuel` only errs when fuel accounting is disabled, which never
+        // happens here (`crate::engine::build_engine` always enables it) --
+        // fall back to the full budget (fuel_used=0) rather than panicking on
+        // an invariant this store can't actually violate.
+        let fuel_remaining = store.get_fuel().unwrap_or(fuel_budget);
+        let fuel_used = fuel_budget.saturating_sub(fuel_remaining);
+
         Ok(ResultBody {
             payload: result,
             duration_ms: start.elapsed().as_millis() as u64,
-            fuel_used: 0,
+            fuel_used,
         })
     }
 
@@ -776,17 +841,31 @@ struct EnvelopeAndConfig {
 /// `AllocationTooLarge` trap this executor doesn't otherwise arm, a
 /// bridge/host-call failure that surfaced as a trap) falls through to the
 /// generic `WasmTrap` code -- never silently reclassified by content.
+///
+/// `Trap::OutOfFuel` (connector spec SS0 condition 4) is classified into the
+/// same `EXECUTOR_DEADLINE` bucket as `Trap::Interrupt`: both are "this call
+/// used more of a bounded execution resource than it was allowed", the same
+/// operational meaning `crate::invoke`'s callers (e.g.
+/// `svc_process::spine::error_code_to_dlq_kind`) already give
+/// `ExecutorDeadline` -> `DlqErrorKind::CallTimeout`, and the same signal a
+/// per-source circuit breaker should count as "this source's guest is
+/// misbehaving", indistinguishable in effect from a wall-clock timeout. The
+/// `detail` field carries `"fuel_exhausted"` so logs/metrics can tell the two
+/// apart without changing the wire `ErrorCode` the stage already understands.
 fn trap_to_error_body(err: wasmtime::Error, memory_cap_hit: bool) -> ErrorBody {
     let full_chain = format!("{err:#}");
-    let code = if memory_cap_hit {
-        ErrorCode::MemoryLimit
-    } else {
-        match err.downcast_ref::<wasmtime::Trap>() {
-            Some(wasmtime::Trap::Interrupt) => ErrorCode::ExecutorDeadline,
-            _ => ErrorCode::WasmTrap,
-        }
-    };
-    error_body(code, full_chain)
+    if memory_cap_hit {
+        return error_body(ErrorCode::MemoryLimit, full_chain);
+    }
+    match err.downcast_ref::<wasmtime::Trap>() {
+        Some(wasmtime::Trap::Interrupt) => error_body(ErrorCode::ExecutorDeadline, full_chain),
+        Some(wasmtime::Trap::OutOfFuel) => ErrorBody {
+            code: ErrorCode::ExecutorDeadline,
+            message: full_chain,
+            detail: Some("fuel_exhausted".to_string()),
+        },
+        _ => error_body(ErrorCode::WasmTrap, full_chain),
+    }
 }
 
 #[cfg(test)]
@@ -1848,6 +1927,255 @@ mod tests {
         assert!(matches!(result.code, ErrorCode::MemoryLimit));
     }
 
+    /// Positive case for connector spec SS0 condition 4's fuel
+    /// classification: a real, engine-produced `Trap::OutOfFuel` (never a
+    /// hand-built string) must classify as `EXECUTOR_DEADLINE` with
+    /// `detail = "fuel_exhausted"` -- the same DLQ bucket as an epoch
+    /// deadline (both mean "this call exceeded a bounded execution
+    /// resource"), distinguishable only via `detail` for logs/metrics.
+    #[test]
+    fn trap_to_error_body_classifies_out_of_fuel_as_deadline_with_fuel_detail() {
+        let out_of_fuel = trap_to_error_body(wasmtime::Trap::OutOfFuel.into(), false);
+        assert!(matches!(out_of_fuel.code, ErrorCode::ExecutorDeadline));
+        assert_eq!(out_of_fuel.detail.as_deref(), Some("fuel_exhausted"));
+    }
+
+    /// End-to-end fuel exhaustion test (connector spec SS0 condition 4 /
+    /// task instruction "an infinite-loop guest trips the fuel or epoch
+    /// limit"): the fixture has no unbounded loop, so this reuses
+    /// `memory-hog`'s real, bounded-but-substantial loop (64 iterations of
+    /// allocate-and-touch) under a fuel budget too small to complete even
+    /// one iteration, with a generous memory cap and epoch deadline so the
+    /// trap is unambiguously fuel, not memory or wall-clock. Also proves
+    /// trap isolation (task instruction 2): the executor process is still
+    /// alive and able to serve a subsequent, unrelated invocation
+    /// afterwards -- a guest fault never takes down the host.
+    #[tokio::test]
+    async fn on_invoke_traps_with_out_of_fuel_when_the_budget_is_too_small(
+    ) -> Result<(), ExecutorError> {
+        crate::init_test_tracing();
+        let mut cfg = test_config();
+        // Small enough to trap well within `memory-hog`'s first 1 MiB
+        // fill (a real loop over ~1M bytes costs far more than this), but
+        // large enough for instantiation plus a single trivial WASI call
+        // (the isolation check below) to comfortably succeed.
+        cfg.executor_fuel_limit_transform = 50_000;
+        let executor = Executor::new(&cfg, FixtureSource)?;
+        executor
+            .on_load(LoadBody {
+                tenant_id: 1,
+                community_id: 0,
+                app_id: "waddles.test.fuel-hog".to_string(),
+                version: "1".to_string(),
+                digest: fixture_digest(),
+                component_key: "k".to_string(),
+                sidecar_key: "s".to_string(),
+                capabilities: vec![],
+                limits: penguin_bundle_host::wire::LoadLimits {
+                    timeout_ms: 10_000,
+                    memory_mb: 128,
+                },
+            })
+            .await
+            .expect("load succeeds");
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let connection = crate::wire::Connection::new(tx);
+        let result = executor
+            .on_invoke(
+                InvokeBody {
+                    app_id: "waddles.test.fuel-hog".to_string(),
+                    digest: fixture_digest(),
+                    export: ExportKind::Transform,
+                    payload: serde_json::json!({
+                        "platform": "test",
+                        "event_type": "memory-hog",
+                        "actor": null,
+                        "payload_json": "{}",
+                        "occurred_at": "2026-09-28T00:00:00.000Z",
+                    }),
+                    deadline_ms: 10_000,
+                    trace: None,
+                },
+                1,
+                connection,
+            )
+            .await;
+        assert!(
+            matches!(
+                &result,
+                Err(ErrorBody {
+                    code: ErrorCode::ExecutorDeadline,
+                    detail: Some(d),
+                    ..
+                }) if d == "fuel_exhausted"
+            ),
+            "expected a fuel-exhausted EXECUTOR_DEADLINE, got {result:?}"
+        );
+
+        // Trap isolation: the same executor (same process, same wasmtime
+        // Engine) must still serve an unrelated call after a guest fault.
+        // `socket-probe` (not a host-call branch like `clock-read`): denied
+        // natively with no round trip to a stage, so it both avoids hanging
+        // against a connection whose reply receiver is discarded and stays
+        // cheap enough to fit this test's deliberately tiny fuel budget.
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("a fresh bundle still loads after another bundle's fuel trap");
+        let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+        let connection2 = crate::wire::Connection::new(tx2);
+        let ok = executor
+            .on_invoke(
+                InvokeBody {
+                    app_id: "waddles.test.app".to_string(),
+                    digest: fixture_digest(),
+                    export: ExportKind::Transform,
+                    payload: serde_json::json!({
+                        "platform": "test",
+                        "event_type": "socket-probe",
+                        "actor": null,
+                        "payload_json": "{}",
+                        "occurred_at": "2026-09-28T00:00:00.000Z",
+                    }),
+                    deadline_ms: 1000,
+                    trace: None,
+                },
+                2,
+                connection2,
+            )
+            .await;
+        assert!(
+            ok.is_ok(),
+            "the executor must keep serving other invocations after a guest's fuel trap: {ok:?}"
+        );
+        Ok(())
+    }
+
+    /// Positive case: a call that completes well within its fuel budget
+    /// reports a non-zero `fuel_used` (connector spec SS0 condition 4's
+    /// overhead-measurement requirement) strictly less than the budget.
+    #[tokio::test]
+    async fn on_invoke_reports_nonzero_fuel_used_on_success() -> Result<(), ExecutorError> {
+        crate::init_test_tracing();
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body("waddles.test.app"))
+            .await
+            .expect("load succeeds");
+
+        // `socket-probe` (not `clock-read`/`get-context`/etc.): it is denied
+        // natively by wasmtime-wasi's own TCP-socket-creation refusal with
+        // no round trip to a stage at all, so a `Connection` whose reply
+        // receiver is discarded (as below, same as this module's other
+        // no-host-call tests) never blocks waiting for an answer that would
+        // never come -- a host-call branch would hang forever here instead.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let connection = crate::wire::Connection::new(tx);
+        let result = executor
+            .on_invoke(
+                InvokeBody {
+                    app_id: "waddles.test.app".to_string(),
+                    digest: fixture_digest(),
+                    export: ExportKind::Transform,
+                    payload: serde_json::json!({
+                        "platform": "test",
+                        "event_type": "socket-probe",
+                        "actor": null,
+                        "payload_json": "{}",
+                        "occurred_at": "2026-09-28T00:00:00.000Z",
+                    }),
+                    deadline_ms: 1000,
+                    trace: None,
+                },
+                1,
+                connection,
+            )
+            .await
+            .expect("socket-probe succeeds (denied natively, no trap)");
+        assert!(result.fuel_used > 0, "expected non-zero fuel consumption");
+        assert!(
+            result.fuel_used < test_config().executor_fuel_limit_transform,
+            "a trivial call must not consume the entire default budget"
+        );
+        Ok(())
+    }
+
+    /// Task instruction 3 (heartbeat safety) regression test: a background
+    /// "heartbeat" task (standing in for the real epoch ticker and, once
+    /// connector bundles land, a connection's platform heartbeat) must keep
+    /// ticking on schedule while a slow, host-call-free guest loop
+    /// (`memory-hog`, generous fuel/deadline so it runs for real wall-clock
+    /// time rather than tripping immediately) occupies a worker thread.
+    /// This only holds on a **multi-threaded** runtime -- see
+    /// `Executor::epoch_ticker`'s doc for why -- so this test deliberately
+    /// uses `flavor = "multi_thread"` with more than one worker, matching
+    /// `crate::main`'s real `#[tokio::main]` default.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn heartbeat_task_is_never_blocked_by_a_slow_guest_invocation(
+    ) -> Result<(), ExecutorError> {
+        crate::init_test_tracing();
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(LoadBody {
+                // Comfortably above `memory-hog`'s 64 MiB allocation plus
+                // runtime overhead (same headroom `crate::bucket`'s own
+                // end-to-end test uses) -- this test's point is elapsed
+                // wall-clock time for the heartbeat to tick during, not the
+                // memory cap.
+                limits: penguin_bundle_host::wire::LoadLimits {
+                    timeout_ms: 5000,
+                    memory_mb: 256,
+                },
+                ..fixture_load_body("waddles.test.app")
+            })
+            .await
+            .expect("load succeeds");
+
+        let ticks = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let heartbeat_ticks = Arc::clone(&ticks);
+        let heartbeat = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                heartbeat_ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let connection = crate::wire::Connection::new(tx);
+        // Generous deadline/fuel: the point is real elapsed wall-clock time
+        // for the heartbeat to tick during, not a trap.
+        executor
+            .on_invoke(
+                InvokeBody {
+                    app_id: "waddles.test.app".to_string(),
+                    digest: fixture_digest(),
+                    export: ExportKind::Transform,
+                    payload: serde_json::json!({
+                        "platform": "test",
+                        "event_type": "memory-hog",
+                        "actor": null,
+                        "payload_json": "{}",
+                        "occurred_at": "2026-09-28T00:00:00.000Z",
+                    }),
+                    deadline_ms: 5000,
+                    trace: None,
+                },
+                1,
+                connection,
+            )
+            .await
+            .expect("memory-hog succeeds within its generous budget");
+
+        heartbeat.abort();
+        assert!(
+            ticks.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "the heartbeat task must have ticked at least once while the guest call ran, \
+             proving it was never blocked by guest execution"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn on_shutdown_logs_and_returns() -> Result<(), ExecutorError> {
         crate::init_test_tracing();
@@ -2117,6 +2445,58 @@ mod tests {
                 ..
             })
         ));
+        Ok(())
+    }
+
+    /// Ad-hoc fuel-metering overhead measurement (connector spec SS0
+    /// condition 4's "measure the overhead" requirement) -- not a
+    /// correctness assertion (wall-clock timing in CI is noisy), so this is
+    /// `#[ignore]`d and run manually:
+    /// `cargo test --lib measure_fuel_overhead -- --ignored --nocapture`.
+    /// Average per-call latency for a cheap, no-host-call transform
+    /// (`socket-probe`, denied natively with no stage round trip) over many
+    /// calls against the same loaded bundle, with fuel metering enabled
+    /// exactly as `crate::engine::build_engine` always configures it today.
+    #[ignore]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn measure_fuel_overhead() -> Result<(), ExecutorError> {
+        let executor = Executor::new(&test_config(), FixtureSource)?;
+        executor
+            .on_load(fixture_load_body("waddles.bench.app"))
+            .await
+            .expect("load succeeds");
+        const N: u32 = 2000;
+        let start = std::time::Instant::now();
+        for i in 0..N {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let connection = crate::wire::Connection::new(tx);
+            executor
+                .on_invoke(
+                    InvokeBody {
+                        app_id: "waddles.bench.app".to_string(),
+                        digest: fixture_digest(),
+                        export: ExportKind::Transform,
+                        payload: serde_json::json!({
+                            "platform": "test",
+                            "event_type": "socket-probe",
+                            "actor": null,
+                            "payload_json": "{}",
+                            "occurred_at": "2026-09-28T00:00:00.000Z",
+                        }),
+                        deadline_ms: 1000,
+                        trace: None,
+                    },
+                    u64::from(i),
+                    connection,
+                )
+                .await
+                .expect("socket-probe succeeds");
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "fuel_overhead: {N} calls in {elapsed:?} ({:.4} ms/call)",
+            elapsed.as_secs_f64() * 1000.0 / f64::from(N)
+        );
         Ok(())
     }
 }

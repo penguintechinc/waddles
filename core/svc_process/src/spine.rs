@@ -37,6 +37,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use circuit_breaker::CircuitBreaker;
 use penguin_bundle_host::wire::{
     ErrorCode, ExportKind, InvokeBody, LoadBody, LoadLimits, LoadedBody, Message, TraceContext,
     UnloadBody, UnloadedBody,
@@ -681,6 +682,18 @@ pub struct ProcessDeps<S: SpineOps> {
     /// for the distinct, louder behavior when the password *was* configured
     /// but the connection itself failed.
     pub db_wiring: Option<crate::capabilities::DbWiring>,
+    /// Per-source circuit breaker for guest faults (connector spec SS0
+    /// condition 5, `circuit_breaker` crate module doc): a bundle-executor
+    /// trap/deadline(incl. fuel exhaustion, bucketed as `CallTimeout`)/
+    /// memory-cap hit records a failure against `d.stream` (the closest
+    /// thing this loop has to a source identity); `FAILURE_THRESHOLD`
+    /// faults in `FAILURE_WINDOW` opens the breaker for `OPEN_BACKOFF`,
+    /// dead-lettered (retryable) as `DlqErrorKind::BundleDisabled` rather
+    /// than invoked at all -- one shared instance per pod (process-local,
+    /// not cross-pod: this pod's fixed source shard is the complete
+    /// blast-radius containment, see that crate's module doc), cloned into
+    /// both the legacy and multi-tenant startup paths.
+    pub breaker: Arc<CircuitBreaker>,
 }
 
 /// Handles exactly one delivered entry end to end: hop-verify, invoke
@@ -729,6 +742,30 @@ async fn handle_delivered<S: SpineOps>(
             kind: DlqErrorKind::TenantBoundary,
             code: "TENANT_BOUNDARY".to_string(),
             message: reason.to_string(),
+            detail: None,
+            artifact_digest: deps.digest_source.current(),
+            consumer_id: deps.consumer_id.clone(),
+        };
+        return deps.spine.dead_letter(d, &err).await;
+    }
+
+    // Connector spec SS0 condition 5: a source the breaker has tripped
+    // open (repeated guest faults, see `ProcessDeps::breaker`'s doc) is
+    // never invoked at all -- fail fast, before the PII-tokenization RPC
+    // below, rather than spending a hub-api round trip on a known-bad
+    // source. Retryable (`BundleDisabled.never_retry()` is `false`): the
+    // entry is redelivered and succeeds once the breaker's backoff elapses
+    // or another consumer owns this source's shard.
+    if !deps.breaker.allow(&d.stream) {
+        tracing::warn!(
+            app_id = %d.env.app_id,
+            stream = %d.stream,
+            "circuit breaker open for this source, dead-lettering without invoking (retryable)"
+        );
+        let err = DlqError {
+            kind: DlqErrorKind::BundleDisabled,
+            code: "CIRCUIT_OPEN".to_string(),
+            message: "source disabled by circuit breaker after repeated guest faults".to_string(),
             detail: None,
             artifact_digest: deps.digest_source.current(),
             consumer_id: deps.consumer_id.clone(),
@@ -980,6 +1017,19 @@ async fn handle_delivered<S: SpineOps>(
     let event_out = match outcome {
         Err(InvokeError::ExecutorError { code, message }) => {
             let kind = error_code_to_dlq_kind(code);
+            // Connector spec SS0 condition 5: only an actual GUEST fault
+            // (trap, epoch deadline -- fuel exhaustion is bucketed here
+            // too, see `bundle_executor::invoke::on_invoke`'s doc -- or a
+            // memory-cap hit) counts against this source's breaker; a
+            // broken bundle registration (`BundleError`) or a denied/failed
+            // host call is a manifest/permissions problem, not evidence
+            // this source's guest code is misbehaving.
+            if matches!(
+                kind,
+                DlqErrorKind::BundleTrap | DlqErrorKind::CallTimeout | DlqErrorKind::MemoryLimit
+            ) {
+                deps.breaker.record_failure(&d.stream);
+            }
             // Diagnosability fix (regression: multi_tenant path sent
             // bare-hex digest to Invoke, UnknownBundle despite loaded
             // bundle (alpha 2026-10-03)): `message` IS the digest the
@@ -1026,10 +1076,14 @@ async fn handle_delivered<S: SpineOps>(
             return deps.spine.dead_letter(d, &err).await;
         }
         Ok(TransformOutcome::NoReply) => {
+            deps.breaker.record_success(&d.stream);
             tracing::info!(app_id = %deps.app_id, "transform returned no reply");
             return deps.spine.ack(d, &deps.app_id).await;
         }
-        Ok(TransformOutcome::Reply(event)) => *event,
+        Ok(TransformOutcome::Reply(event)) => {
+            deps.breaker.record_success(&d.stream);
+            *event
+        }
     };
 
     let mut event_out = event_out;
@@ -1845,6 +1899,11 @@ mod tests {
             // every `db` host-call a fixture invokes sees `not_implemented`,
             // exercised directly by `capabilities`'s own test suite instead.
             db_wiring: None,
+            // A fresh, never-tripped breaker per test -- `circuit_breaker`'s
+            // own crate has its own unit test suite for trip/reset/
+            // isolation behavior; this only needs to satisfy the field so
+            // `handle_delivered`'s `allow` check passes by default.
+            breaker: Arc::new(CircuitBreaker::new(Arc::new(()))),
         };
         (deps, metrics)
     }

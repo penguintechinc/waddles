@@ -35,6 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use circuit_breaker::CircuitBreaker;
 use penguin_spine::{Grant, Scope, SpineClient, SpineConfig, SpineError, SpineMetrics};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -178,6 +179,11 @@ pub struct SupervisorDeps {
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::db_wiring`'s doc.
     pub db_wiring: Option<crate::capabilities::DbWiring>,
+    /// ONE shared instance across every binding this supervisor runs
+    /// (never one per binding) -- cloned into every spawned binding
+    /// consumer's own `ProcessDeps`, see `crate::spine::ProcessDeps::
+    /// breaker`'s doc for why pod-wide sharing is the correct scope.
+    pub breaker: Arc<CircuitBreaker>,
 }
 
 /// A running per-binding consumer: a shutdown signal plus the
@@ -327,6 +333,7 @@ async fn run_binding_consumer(
             pii_gate: Arc::clone(&deps.pii_gate),
             pii_minter: deps.pii_minter.clone(),
             db_wiring: deps.db_wiring.clone(),
+            breaker: Arc::clone(&deps.breaker),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();

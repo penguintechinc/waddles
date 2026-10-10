@@ -321,6 +321,12 @@ where
     // `crate::flags` before any bundle invoke can reach
     // `StageCapabilities::handle_flags`.
     flags::set_flags_metric(telemetry::register_flags_metrics(&prom_registry));
+    // Connector spec SS0 condition 5: registered here, same "before
+    // `prom_registry` moves" constraint as the metrics above, then threaded
+    // into whichever of `try_start_dispatch`/`try_start_changelog_consumer`
+    // actually starts.
+    let circuit_breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics> =
+        Arc::new(telemetry::register_circuit_breaker_metrics(&prom_registry));
 
     // Outbound PII-detokenization's hub_client startup wiring (closes the
     // TODO seam `capabilities::StageCapabilities::with_detokenize` used to
@@ -428,6 +434,7 @@ where
                 Arc::clone(&usage),
                 changelog_consumer_ready,
                 app_version_snapshot.clone(),
+                Arc::clone(&circuit_breaker_metrics),
             );
         }
         PathDecision::NoDbConfig | PathDecision::KillSwitchOn => {
@@ -454,6 +461,7 @@ where
                 app_version_snapshot.clone(),
                 drain_loop_metrics,
                 consumer_loop_ready,
+                circuit_breaker_metrics,
             );
         }
     }
@@ -1112,6 +1120,7 @@ fn try_start_changelog_consumer(
     // `app_versions.id`. See `dispatch::DispatchDeps::app_version_snapshot`'s
     // doc.
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
 ) {
     let Some(password) = config.db_reader_password.as_ref() else {
         tracing::info!(
@@ -1260,6 +1269,12 @@ fn try_start_changelog_consumer(
                                 active_digests: Arc::clone(&active_digests),
                                 loaded_sessions: Arc::clone(&loaded_sessions),
                                 app_version_snapshot: app_version_snapshot.clone(),
+                                // ONE shared instance for this supervisor
+                                // (`dispatch_supervisor::SupervisorDeps::
+                                // breaker`'s doc) -- built here (no I/O).
+                                breaker: Arc::new(circuit_breaker::CircuitBreaker::new(
+                                    Arc::clone(&breaker_metrics),
+                                )),
                             });
                             Some(Arc::new(dispatch_supervisor::SpineConsumerSupervisor {
                                 deps,
@@ -1330,6 +1345,7 @@ fn try_start_changelog_consumer(
 /// `ACTION_BUNDLE_*` env bundle *loader* ([`try_start_env_bundle_loader`])
 /// is a separate, non-consumer mechanism and still runs regardless of this
 /// decision.
+#[allow(clippy::too_many_arguments)]
 fn try_start_dispatch(
     config: &config::Config,
     connections: Arc<host_api::ConnectionRegistry>,
@@ -1343,6 +1359,7 @@ fn try_start_dispatch(
     app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
     drain_loop_metrics: telemetry::DrainLoopMetrics,
     consumer_loop_ready: Arc<std::sync::atomic::AtomicBool>,
+    breaker_metrics: Arc<dyn circuit_breaker::CircuitBreakerMetrics>,
 ) {
     if config.cli.action_app_id.is_empty() {
         tracing::info!("ACTION_APP_ID not set; dispatch loop not started (no bundle assigned)");
@@ -1440,6 +1457,10 @@ fn try_start_dispatch(
         // 2026-10-02)
         const BACKOFF_MAX: Duration = Duration::from_secs(30);
         let mut attempt: u32 = 0;
+        // Built ONCE for this loop's lifetime, never per reconnect attempt
+        // -- see `core/svc_process::try_start_process_loop`'s identical
+        // breaker placement/rationale.
+        let breaker = Arc::new(circuit_breaker::CircuitBreaker::new(breaker_metrics));
         loop {
             attempt += 1;
             drain_loop_metrics
@@ -1511,6 +1532,7 @@ fn try_start_dispatch(
                 spine,
                 metrics: metrics.clone(),
                 app_version_snapshot: app_version_snapshot.clone(),
+                breaker: Arc::clone(&breaker),
             };
 
             let (inner_tx, inner_rx) = tokio::sync::oneshot::channel();
@@ -2057,6 +2079,7 @@ mod tests {
             bundle_active_set::ActiveVersionSnapshot::new(),
             telemetry::register_drain_loop_metrics(&prometheus::Registry::new()),
             Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            Arc::new(()),
         );
     }
 
@@ -2100,6 +2123,7 @@ mod tests {
             usage,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             bundle_active_set::ActiveVersionSnapshot::new(),
+            Arc::new(()),
         );
     }
 

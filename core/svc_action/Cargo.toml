@@ -146,6 +146,12 @@ bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0" }
 # (`docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
 # SS5, `src/capabilities.rs`).
 bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0" }
+# Per-source circuit breaker for guest faults (connector spec SS0 condition
+# 5) -- a same-repo `path` dependency (NOT `penguin-libs`: purely generic,
+# no dependency on this repo's schema/wire protocol). `core/svc_process`
+# declares the identical dependency so the breaker logic is written and
+# tested exactly once. See `core/circuit_breaker/Cargo.toml`.
+circuit-breaker = { path = "../circuit_breaker", version = "=0.1.0" }
 # `db` bundle host capability (`src/capabilities.rs::handle_db`) -- same
 # same-repo path dependency as `core/svc_process`'s identical line: this
 # crate's identifier-safety/tenant-isolation rules are owned by this

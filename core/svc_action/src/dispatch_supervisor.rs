@@ -41,6 +41,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use circuit_breaker::CircuitBreaker;
 use penguin_spine::{Grant, Scope, SpineClient, SpineConfig, SpineMetrics};
 use sea_orm::DatabaseConnection;
 use tokio::sync::oneshot;
@@ -153,6 +154,10 @@ pub struct SupervisorDeps {
     /// resolves grants against the live `app_versions.id`, never a value
     /// captured once at spawn time (spec SS4/SS5.1).
     pub app_version_snapshot: bundle_active_set::ActiveVersionSnapshot,
+    /// ONE shared instance across every app this supervisor runs (never one
+    /// per app) -- cloned into every spawned consumer's own `DispatchDeps`,
+    /// see `crate::dispatch::DispatchDeps::breaker`'s doc.
+    pub breaker: Arc<CircuitBreaker>,
 }
 
 /// A running per-app dispatch consumer: a shutdown signal plus the
@@ -284,6 +289,7 @@ async fn run_app_consumer(
             spine: spine_client,
             metrics: deps.metrics.clone(),
             app_version_snapshot: deps.app_version_snapshot.clone(),
+            breaker: Arc::clone(&deps.breaker),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();

@@ -93,6 +93,11 @@ async fn core_connector_with_grants_links_and_instantiates() {
     let component = Component::new(&engine, CONNECTOR_FIXTURE_WASM).expect("component compiles");
     let mut store = Store::new(&engine, ExecState::new(None, "test-app".to_string(), 1));
     store.set_epoch_deadline(1_000_000);
+    // build_engine enables fuel accounting unconditionally: arm a generous
+    // budget so these linking tests don't trip the out-of-fuel trap.
+    store
+        .set_fuel(10_000_000)
+        .expect("fuel accounting is enabled");
     let result = linker.instantiate_async(&mut store, &component).await;
     assert!(
         result.is_ok(),
@@ -114,6 +119,11 @@ async fn core_connector_without_grant_fails_to_instantiate() {
     let component = Component::new(&engine, CONNECTOR_FIXTURE_WASM).expect("component compiles");
     let mut store = Store::new(&engine, ExecState::new(None, "test-app".to_string(), 1));
     store.set_epoch_deadline(1_000_000);
+    // build_engine enables fuel accounting unconditionally: arm a generous
+    // budget so these linking tests don't trip the out-of-fuel trap.
+    store
+        .set_fuel(10_000_000)
+        .expect("fuel accounting is enabled");
     let result = linker.instantiate_async(&mut store, &component).await;
     assert!(
         result.is_err(),
@@ -134,6 +144,11 @@ async fn vendor_component_importing_identity_lookup_fails_to_instantiate() {
     let component = Component::new(&engine, CONNECTOR_FIXTURE_WASM).expect("component compiles");
     let mut store = Store::new(&engine, ExecState::new(None, "test-app".to_string(), 1));
     store.set_epoch_deadline(1_000_000);
+    // build_engine enables fuel accounting unconditionally: arm a generous
+    // budget so these linking tests don't trip the out-of-fuel trap.
+    store
+        .set_fuel(10_000_000)
+        .expect("fuel accounting is enabled");
     let result = linker.instantiate_async(&mut store, &component).await;
     assert!(
         result.is_err(),
@@ -156,6 +171,11 @@ async fn stage_component_cannot_link_against_a_connector_linker() {
     let component = Component::new(&engine, STAGE_FIXTURE_WASM).expect("component compiles");
     let mut store = Store::new(&engine, ExecState::new(None, "test-app".to_string(), 1));
     store.set_epoch_deadline(1_000_000);
+    // build_engine enables fuel accounting unconditionally: arm a generous
+    // budget so these linking tests don't trip the out-of-fuel trap.
+    store
+        .set_fuel(10_000_000)
+        .expect("fuel accounting is enabled");
     let result = linker.instantiate_async(&mut store, &component).await;
     assert!(
         result.is_err(),
@@ -210,6 +230,11 @@ async fn stage_manifest_still_links_the_stage_world() {
     let component = Component::new(&engine, STAGE_FIXTURE_WASM).expect("component compiles");
     let mut store = Store::new(&engine, ExecState::new(None, "test-app".to_string(), 1));
     store.set_epoch_deadline(1_000_000);
+    // build_engine enables fuel accounting unconditionally: arm a generous
+    // budget so these linking tests don't trip the out-of-fuel trap.
+    store
+        .set_fuel(10_000_000)
+        .expect("fuel accounting is enabled");
     let result = linker.instantiate_async(&mut store, &component).await;
     assert!(
         result.is_ok(),
