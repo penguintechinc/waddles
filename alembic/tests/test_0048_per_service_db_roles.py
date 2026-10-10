@@ -69,7 +69,12 @@ PRIOR_REVISION = "0047_builtin_handler_paths"
 def _connect(db: PgTestDatabase, user: str, password: str) -> Any:
     """Autocommit connection (so one denied statement never poisons the next)."""
     conn = psycopg2.connect(
-        host=db.host, port=db.port, user=user, password=password, dbname=db.dbname, connect_timeout=10
+        host=db.host,
+        port=db.port,
+        user=user,
+        password=password,
+        dbname=db.dbname,
+        connect_timeout=10,
     )
     conn.autocommit = True
     return conn
@@ -147,7 +152,7 @@ def _expected_direct(spec: Any, tables: list[str], views: list[str]) -> set[tupl
         if spec.exclude_matrix_tables:
             denied |= CATALOG.matrix_tables
         if spec.is_legacy:
-            denied |= CATALOG.legacy_deny_tables
+            denied |= CATALOG.legacy_deny_tables - spec.allow_tables
         for table in present - denied:
             for priv in PRIVS:
                 if table in CATALOG.read_only_tables and priv != "SELECT":
@@ -206,7 +211,9 @@ def test_each_role_authenticates_with_its_own_distinct_password(pg_db: PgTestDat
     assert len(set(pg_db.service_role_passwords.values())) == len(CATALOG.names)
     for name in CATALOG.names:
         with _as_role(pg_db, name) as conn, conn.cursor() as cur:
-            cur.execute("SELECT current_user, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)")
+            cur.execute(
+                "SELECT current_user, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)"
+            )
             user, is_super = cur.fetchone()
             assert user == name and is_super is False
     # a role's password does NOT open another role
@@ -272,6 +279,12 @@ def test_a_role_cannot_reach_another_services_tables(pg_db: PgTestDatabase) -> N
         ("waddles_legacy_core_data", "SELECT 1 FROM connector_pii_identities"),
         ("waddles_hub_api", "SELECT 1 FROM connector_pii_members"),
         ("waddles_legacy_core_data", "SELECT 1 FROM platform_integrations"),
+        ("waddles_legacy_core_data", "SELECT password_hash FROM hub_users"),
+        ("waddles_legacy_router", "SELECT 1 FROM ephemeral_pseudonyms"),
+        ("waddles_legacy_interactive_social", "SELECT 1 FROM hub_sessions"),
+        ("waddles_legacy_hub", "SELECT 1 FROM ephemeral_pseudonyms"),
+        ("waddles_hub_api", "SELECT provision_module_db_account('x','custom','custom','y')"),
+        ("waddles_legacy_router", "SELECT resolve_identity_uuid(1,'discord','x',NULL,NULL)"),
         ("waddles_legacy_router", "INSERT INTO app_versions DEFAULT VALUES"),
     ]
     examined = 0
@@ -348,7 +361,10 @@ def test_hub_admin_escalation_chain_is_closed(pg_db: PgTestDatabase) -> None:
         assert len(signatures) == len(roles_mod.PRIVILEGED_FUNCTIONS)
         for signature in signatures:
             for role in ["hub_admin", "waddles_hub_api", *CATALOG.names]:
-                cur.execute("SELECT has_function_privilege(%s, %s::regprocedure, 'EXECUTE')", (role, signature))
+                cur.execute(
+                    "SELECT has_function_privilege(%s, %s::regprocedure, 'EXECUTE')",
+                    (role, signature),
+                )
                 assert cur.fetchone()[0] is False, f"{role} may execute {signature}"
         # defaults that auto-granted every future table to hub_admin are gone too
         cur.execute(
@@ -356,6 +372,159 @@ def test_hub_admin_escalation_chain_is_closed(pg_db: PgTestDatabase) -> None:
             "WHERE pg_get_userbyid(a.grantee) = 'hub_admin'"
         )
         assert cur.fetchone()[0] == 0
+
+
+def _seed_world(cur: Any) -> dict[str, int]:
+    """Owner-seeded tenant / community / hub user / streaming config the role paths act on."""
+    cur.execute(
+        "INSERT INTO tenants (slug, display_name) VALUES ('fn-test', 'Functional Test') RETURNING id"
+    )
+    tenant = cur.fetchone()[0]
+    cur.execute(
+        "INSERT INTO communities (name, tenant_id) VALUES ('fn-community', %s) RETURNING id",
+        (tenant,),
+    )
+    community = cur.fetchone()[0]
+    cur.execute("INSERT INTO hub_users (username) VALUES ('fn-user') RETURNING id")
+    user = cur.fetchone()[0]
+    cur.execute(
+        "INSERT INTO streaming_configs (community_id, source_url) VALUES (%s, 'rtmp://x/y') RETURNING id",
+        (community,),
+    )
+    return {"tenant": tenant, "community": community, "user": user, "config": cur.fetchone()[0]}
+
+
+@requires_docker
+def test_strict_roles_can_perform_their_real_write_paths(pg_db: PgTestDatabase) -> None:
+    """Privilege-matrix equality cannot see invoker-rights trigger side effects: run the paths.
+
+    # regression: reputation INSERT INTO community_members fires 0045's
+    # community_members_set_user_uuid, which reads hub_users / hub_user_identities and mints
+    # ephemeral_pseudonyms as the INVOKER -- the reputation role has none of that, so it must run
+    # as SECURITY DEFINER (reconcile hardens it) or every first-seen member insert fails.
+    """
+    with _admin_cursor(pg_db) as cur:
+        world = _seed_world(cur)
+    community, tenant, user, config = (
+        world["community"],
+        world["tenant"],
+        world["user"],
+        world["config"],
+    )
+
+    with _as_role(pg_db, "waddles_reputation") as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO community_members (community_id, user_id, platform, platform_user_id, "
+            "reputation, role) VALUES (%s, NULL, 'discord', 'fn-plat-1', 600, 'member') RETURNING user_uuid",
+            (community,),
+        )
+        assert cur.fetchone()[0] is not None, "trigger must mint a pseudonym uuid"
+        cur.execute(
+            "UPDATE community_members SET reputation = 650 WHERE community_id = %s", (community,)
+        )
+        cur.execute(
+            "INSERT INTO reputation_events (community_id, platform, platform_user_id, event_type, "
+            "score_before, score_after) VALUES (%s, 'discord', 'fn-plat-1', 'msg', 600, 650)",
+            (community,),
+        )
+        cur.execute(
+            "INSERT INTO reputation_tenant (tenant_id, hub_user_id) VALUES (%s, %s)", (tenant, user)
+        )
+        cur.execute(
+            "SELECT hu.username, hu.avatar_url FROM reputation_tenant rt "
+            "JOIN hub_users hu ON hu.id = rt.hub_user_id WHERE rt.tenant_id = %s",
+            (tenant,),
+        )
+        assert cur.fetchone()[0] == "fn-user"
+        # ... and the trigger fix did NOT widen its reach into the identity tables
+        for sql in (
+            "SELECT 1 FROM hub_user_identities",
+            "SELECT 1 FROM ephemeral_pseudonyms",
+            "SELECT uuid FROM hub_users",
+        ):
+            assert _denied(conn, sql), sql
+
+    with _as_role(pg_db, "waddles_svc_streaming") as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM tenants")
+        cur.execute("SELECT count(*) FROM communities")
+        cur.execute("SELECT count(*) FROM community_servers")
+        cur.execute(
+            "INSERT INTO streaming_targets (config_id, platform, forward_url) VALUES (%s, 'twitch', 'u') "
+            "RETURNING id",
+            (config,),
+        )
+        target = cur.fetchone()[0]
+        cur.execute("UPDATE streaming_targets SET enabled = FALSE WHERE id = %s", (target,))
+        cur.execute("UPDATE streaming_configs SET enabled = TRUE WHERE id = %s", (config,))
+        cur.execute("DELETE FROM streaming_targets WHERE id = %s", (target,))
+
+    with _as_role(pg_db, "waddles_svc_presentation") as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO caption_events (community_id, platform, original_message) "
+            "VALUES (%s, 'twitch', 'hi') RETURNING id",
+            (community,),
+        )
+        event = cur.fetchone()[0]
+        cur.execute("SELECT count(*) FROM caption_events WHERE community_id = %s", (community,))
+        cur.execute("DELETE FROM caption_events WHERE id = %s", (event,))
+        cur.execute(
+            "INSERT INTO overlay_images (community_id, asset_id, object_key, content_type, "
+            "size_bytes, sha256) VALUES (%s, gen_random_uuid(), 'k', 'image/png', 1, 'ab') RETURNING id",
+            (community,),
+        )
+        cur.execute("SELECT count(*) FROM overlay_images")
+        cur.execute("SELECT count(*) FROM overlay_view_credentials")
+        cur.execute("SELECT count(*) FROM overlay_surfaces")
+        cur.execute("SELECT count(*) FROM presentation_config")
+
+    with _as_role(pg_db, "waddles_hub_api") as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO community_members (community_id, platform, platform_user_id, role) "
+            "VALUES (%s, 'discord', 'fn-plat-hub', 'member') RETURNING user_uuid",
+            (community,),
+        )
+        assert cur.fetchone()[0] is not None
+        cur.execute("UPDATE communities SET name = 'fn-community-2' WHERE id = %s", (community,))
+        cur.execute("SELECT count(*) FROM marketplace_catalog")
+        cur.execute("SELECT count(*) FROM tenant_platform_credentials")
+        cur.execute("SELECT version_num FROM alembic_version")
+        assert cur.fetchone()[0]
+
+    with _as_role(pg_db, "waddles_hub_api") as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT resolve_identity_uuid(%s, 'discord', 'fn-plat-ident', NULL, NULL)", (tenant,)
+        )
+        assert cur.fetchone()[0] is not None
+        cur.execute("SELECT count(*) FROM ephemeral_pseudonyms")
+
+    with _as_role(pg_db, "waddles_legacy_hub") as conn, conn.cursor() as cur:
+        for table in ("hub_users", "hub_sessions", "hub_admins", "hub_user_identities"):
+            cur.execute(f"SELECT count(*) FROM {table}")  # noqa: S608 -- fixed names
+    with _as_role(pg_db, "waddles_legacy_core_identity") as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM hub_users")  # designed mod_core_identity grant
+
+    with _as_role(pg_db, "waddles_legacy_core_community") as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO community_members (community_id, platform, platform_user_id, role) "
+            "VALUES (%s, 'discord', 'fn-plat-legacy', 'member') RETURNING user_uuid",
+            (community,),
+        )
+        assert cur.fetchone()[0] is not None
+
+
+@requires_docker
+def test_identity_trigger_function_is_hardened_and_not_directly_callable(
+    pg_db: PgTestDatabase,
+) -> None:
+    with _admin_cursor(pg_db) as cur:
+        cur.execute(
+            "SELECT prosecdef, proconfig FROM pg_proc WHERE proname = 'community_members_set_user_uuid'"
+        )
+        secdef, config = cur.fetchone()
+    assert secdef is True and any("search_path=pg_catalog" in c for c in config)
+    with _as_role(pg_db, "waddles_legacy_router") as conn, conn.cursor() as cur:
+        with pytest.raises(psycopg2.Error, match="trigger"):
+            cur.execute("SELECT community_members_set_user_uuid()")
 
 
 @requires_docker
@@ -380,7 +549,12 @@ def test_credential_rows_flow_only_through_designed_membership(pg_db: PgTestData
     assert visible("waddles_legacy_interactive_media") == {"spotify"}
     assert visible("waddles_legacy_router") == {"twitch", "discord", "spotify"}
     assert visible("waddles_legacy_hub") == {"twitch", "discord", "spotify"}
-    for role in ("waddles_hub_api", "waddles_legacy_core_data", "waddles_svc_streaming", "waddles_svc_action"):
+    for role in (
+        "waddles_hub_api",
+        "waddles_legacy_core_data",
+        "waddles_svc_streaming",
+        "waddles_svc_action",
+    ):
         assert visible(role) is None, f"{role} must not reach platform_integrations at all"
 
 
@@ -397,7 +571,12 @@ def test_reconcile_rotates_passwords_and_is_idempotent(pg_db: PgTestDatabase) ->
         before = {r: _effective(cur, r) for r in CATALOG.names}
     for _ in range(2):  # twice: idempotent
         result = subprocess.run(  # noqa: S603 -- fixed argv, no shell, test-only
-            [sys.executable, str(REPO_ROOT / "scripts" / "db" / "service_roles.py"), "reconcile", "--strict"],
+            [
+                sys.executable,
+                str(REPO_ROOT / "scripts" / "db" / "service_roles.py"),
+                "reconcile",
+                "--strict",
+            ],
             env=env,
             capture_output=True,
             text=True,
@@ -416,7 +595,12 @@ def test_reconcile_rotates_passwords_and_is_idempotent(pg_db: PgTestDatabase) ->
     # restore the module-wide credentials for later tests
     env[PASSWORDS_ENV] = json.dumps(old)
     subprocess.run(  # noqa: S603 -- fixed argv, no shell, test-only
-        [sys.executable, str(REPO_ROOT / "scripts" / "db" / "service_roles.py"), "reconcile", "--strict"],
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "db" / "service_roles.py"),
+            "reconcile",
+            "--strict",
+        ],
         env=env,
         capture_output=True,
         text=True,
@@ -441,7 +625,9 @@ def test_reconcile_repairs_out_of_band_grant_drift(pg_db: PgTestDatabase) -> Non
 
 
 @requires_docker
-def test_strict_reconcile_fails_loud_on_catalog_drift(pg_db: PgTestDatabase, tmp_path: Path) -> None:
+def test_strict_reconcile_fails_loud_on_catalog_drift(
+    pg_db: PgTestDatabase, tmp_path: Path
+) -> None:
     drift = tmp_path / "service-roles.yaml"
     drift.write_text(
         (REPO_ROOT / "config" / "postgres" / "service-roles.yaml").read_text(encoding="utf-8")
@@ -487,11 +673,15 @@ def test_missing_service_role_passwords_fail_the_migration_loudly() -> None:
         with pytest.raises(RuntimeError, match="missing a password"):
             alembic_cli("upgrade", "head", dsn=db.dsn, env_overrides={PASSWORDS_ENV: ""})
         with _admin_cursor(db) as cur:
-            cur.execute("SELECT count(*) FROM pg_roles WHERE rolname = ANY(%s)", (list(CATALOG.names),))
+            cur.execute(
+                "SELECT count(*) FROM pg_roles WHERE rolname = ANY(%s)", (list(CATALOG.names),)
+            )
             assert cur.fetchone()[0] == 0
         weak = {**throwaway_service_role_passwords(), "waddles_hub_api": "changeme-changeme-12345"}
         with pytest.raises(RuntimeError, match="placeholder"):
-            alembic_cli("upgrade", "head", dsn=db.dsn, env_overrides={PASSWORDS_ENV: json.dumps(weak)})
+            alembic_cli(
+                "upgrade", "head", dsn=db.dsn, env_overrides={PASSWORDS_ENV: json.dumps(weak)}
+            )
 
 
 @requires_docker
@@ -502,9 +692,17 @@ def test_dev_opt_in_is_local_only() -> None:
         for tier in ("alpha", "beta", "gamma", "production"):
             with pytest.raises(RuntimeError, match="must never reach a shared database"):
                 alembic_cli(
-                    "upgrade", "head", dsn=db.dsn, env_overrides={**dev_env, "WADDLES_DEPLOYMENT_TIER": tier}
+                    "upgrade",
+                    "head",
+                    dsn=db.dsn,
+                    env_overrides={**dev_env, "WADDLES_DEPLOYMENT_TIER": tier},
                 )
-        alembic_cli("upgrade", "head", dsn=db.dsn, env_overrides={**dev_env, "WADDLES_DEPLOYMENT_TIER": "dev"})
+        alembic_cli(
+            "upgrade",
+            "head",
+            dsn=db.dsn,
+            env_overrides={**dev_env, "WADDLES_DEPLOYMENT_TIER": "dev"},
+        )
         with _session(db, "hub_admin", "hub_admin_dev_changeme") as conn:
             assert conn is not None
         with _session(db, "waddles_svc_action", "waddles_svc_action_dev_changeme") as conn:

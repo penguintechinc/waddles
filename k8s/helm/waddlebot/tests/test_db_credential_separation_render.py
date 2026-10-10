@@ -36,11 +36,19 @@ import yaml
 
 _CHART_DIR = Path(__file__).resolve().parents[1]
 _CATALOG = yaml.safe_load(
-    (_CHART_DIR.parents[2] / "config" / "postgres" / "service-roles.yaml").read_text(encoding="utf-8")
+    (_CHART_DIR.parents[2] / "config" / "postgres" / "service-roles.yaml").read_text(
+        encoding="utf-8"
+    )
 )
 _ROLES = list(_CATALOG["roles"])
 _OWNER = "waddlebot"
-_OWNER_SECRET_KEYS = {"POSTGRES_PASSWORD", "DB_PASS", "DATABASE_PASSWORD", "DATABASE_URL", "DB_PASSWORD"}
+_OWNER_SECRET_KEYS = {
+    "POSTGRES_PASSWORD",
+    "DB_PASS",
+    "DATABASE_PASSWORD",
+    "DATABASE_URL",
+    "DB_PASSWORD",
+}
 
 
 def _helm(*args: str) -> subprocess.CompletedProcess[str]:
@@ -109,9 +117,7 @@ def _env(container: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _secret_refs(container: dict[str, Any]) -> set[str]:
-    names = {
-        ef["secretRef"]["name"] for ef in container.get("envFrom") or [] if "secretRef" in ef
-    }
+    names = {ef["secretRef"]["name"] for ef in container.get("envFrom") or [] if "secretRef" in ef}
     names |= {
         e["valueFrom"]["secretKeyRef"]["name"]
         for e in _env(container)
@@ -147,9 +153,13 @@ def test_owner_credential_reaches_only_postgres_and_the_migrate_job(
         d.get("kind") == "Deployment" and d["metadata"]["name"] == "postgres" for d in docs
     )
     # values-local points at an external database, so no in-chart Postgres Deployment exists
-    assert consumers == ({"postgres"} if has_postgres else set()), f"owner Secret consumed by {consumers}"
+    assert consumers == ({"postgres"} if has_postgres else set()), (
+        f"owner Secret consumed by {consumers}"
+    )
     if env_name in ("alpha", "beta"):
-        assert has_postgres, "alpha/beta render the in-chart Postgres -- the denominator must include it"
+        assert has_postgres, (
+            "alpha/beta render the in-chart Postgres -- the denominator must include it"
+        )
     migrate = _secret(docs, "waddlebot-db-migrate-secret")
     assert owner_password in migrate["DATABASE_URL"]
     # The owner password must appear in exactly these two Secrets and nowhere else.
@@ -158,7 +168,9 @@ def test_owner_credential_reaches_only_postgres_and_the_migrate_job(
         for d in docs
         if owner_password in json.dumps(d, sort_keys=True)
     ]
-    assert sorted(holders) == ["Secret/waddlebot-db-admin", "Secret/waddlebot-db-migrate-secret"], holders
+    assert sorted(holders) == ["Secret/waddlebot-db-admin", "Secret/waddlebot-db-migrate-secret"], (
+        holders
+    )
 
 
 _EXPECTED_ALPHA = {
@@ -193,17 +205,25 @@ def test_every_db_workload_uses_its_own_non_owner_role(
         assert role != _OWNER, f"{name} connects as the database owner"
         for alias in ("DB_PASSWORD", "DB_PASS", "DATABASE_PASSWORD"):
             ref = env[alias]["valueFrom"]["secretKeyRef"]
-            assert ref == {"name": "waddlebot-db-credentials", "key": f"PW_{role.upper()}"}, (name, alias, ref)
+            assert ref == {"name": "waddlebot-db-credentials", "key": f"PW_{role.upper()}"}, (
+                name,
+                alias,
+                ref,
+            )
         url = env["DATABASE_URL"]["value"]
         assert url.startswith(f"postgresql://{role}:$(DB_PASSWORD)@"), (name, url)
         order = [e["name"] for e in _env(container)]
-        assert order.index("DB_PASSWORD") < order.index("DATABASE_URL"), "$(DB_PASSWORD) must be defined first"
+        assert order.index("DB_PASSWORD") < order.index("DATABASE_URL"), (
+            "$(DB_PASSWORD) must be defined first"
+        )
         assert len(order) == len(set(order)), f"{name}: duplicate env names"
         seen[name] = role
     assert examined >= 8, f"only {examined} DB-identity containers examined in {env_name}"
     if env_name == "alpha":
         for workload, role in _EXPECTED_ALPHA.items():
-            assert seen.get(workload) == role, f"{workload}: expected {role}, got {seen.get(workload)}"
+            assert seen.get(workload) == role, (
+                f"{workload}: expected {role}, got {seen.get(workload)}"
+            )
     if env_name in ("local", "beta"):
         assert len(set(seen.values())) >= 25, "legacy pods must each have their own role"
     # one role per workload family, never a role shared between unrelated workloads
@@ -226,9 +246,13 @@ def test_no_workload_envfroms_the_credential_secrets_wholesale(
         whole = {
             ef["secretRef"]["name"] for ef in container.get("envFrom") or [] if "secretRef" in ef
         }
-        assert not whole & {"waddlebot-db-credentials", "waddlebot-db-admin", "waddlebot-db-migrate-secret"} or (
-            doc["metadata"]["name"] == "waddlebot-db-migrate"
-        ), f"{doc['metadata']['name']} envFrom's a DB credential Secret wholesale"
+        assert not whole & {
+            "waddlebot-db-credentials",
+            "waddlebot-db-admin",
+            "waddlebot-db-migrate-secret",
+        } or (doc["metadata"]["name"] == "waddlebot-db-migrate"), (
+            f"{doc['metadata']['name']} envFrom's a DB credential Secret wholesale"
+        )
     assert examined > 10
 
 
@@ -257,10 +281,14 @@ def test_role_passwords_are_distinct_strong_and_match_the_migrate_hook(
 
 def test_production_tier_fails_closed_without_role_credentials(helm_available: None) -> None:
     result = _helm(
-        "--values", str(_CHART_DIR / "values-beta.yaml"),
-        "--set-string", f"infrastructure.postgresql.password={secrets.token_hex(12)}",
-        "--set-string", f"infrastructure.postgresql.readerPassword={secrets.token_hex(12)}",
-        "--set-string", f"infrastructure.redis.password={secrets.token_hex(12)}",
+        "--values",
+        str(_CHART_DIR / "values-beta.yaml"),
+        "--set-string",
+        f"infrastructure.postgresql.password={secrets.token_hex(12)}",
+        "--set-string",
+        f"infrastructure.postgresql.readerPassword={secrets.token_hex(12)}",
+        "--set-string",
+        f"infrastructure.redis.password={secrets.token_hex(12)}",
     )
     assert result.returncode != 0
     assert "has no value" in result.stderr and "outside alpha/local" in result.stderr
@@ -275,10 +303,14 @@ def test_production_tier_fails_closed_without_role_credentials(helm_available: N
         ("hub_admin_dev_changeme", "placeholder"),
     ],
 )
-def test_weak_explicit_role_password_is_rejected(helm_available: None, password: str, message: str) -> None:
+def test_weak_explicit_role_password_is_rejected(
+    helm_available: None, password: str, message: str
+) -> None:
     result = _helm(
-        "--values", str(_CHART_DIR / "values-alpha.yaml"),
-        "--set-string", f"infrastructure.postgresql.serviceRoles.passwords.waddles_hub_api={password}",
+        "--values",
+        str(_CHART_DIR / "values-alpha.yaml"),
+        "--set-string",
+        f"infrastructure.postgresql.serviceRoles.passwords.waddles_hub_api={password}",
     )
     assert result.returncode != 0
     assert message in result.stderr
@@ -287,17 +319,22 @@ def test_weak_explicit_role_password_is_rejected(helm_available: None, password:
 def test_explicit_strong_role_password_is_used_verbatim(helm_available: None) -> None:
     strong = secrets.token_hex(16)
     docs = _render(
-        "--values", str(_CHART_DIR / "values-alpha.yaml"),
-        "--set-string", f"infrastructure.postgresql.serviceRoles.passwords.waddles_hub_api={strong}",
+        "--values",
+        str(_CHART_DIR / "values-alpha.yaml"),
+        "--set-string",
+        f"infrastructure.postgresql.serviceRoles.passwords.waddles_hub_api={strong}",
     )
     assert _secret(docs, "waddlebot-db-credentials")["PW_WADDLES_HUB_API"] == strong
 
 
 def test_existing_secret_is_referenced_and_not_rendered(helm_available: None) -> None:
     docs = _render(
-        "--values", str(_CHART_DIR / "values-alpha.yaml"),
-        "--set", "infrastructure.postgresql.serviceRoles.existingSecret=ext-db-creds",
-        "--set", "infrastructure.postgresql.admin.existingSecret=ext-db-admin",
+        "--values",
+        str(_CHART_DIR / "values-alpha.yaml"),
+        "--set",
+        "infrastructure.postgresql.serviceRoles.existingSecret=ext-db-creds",
+        "--set",
+        "infrastructure.postgresql.admin.existingSecret=ext-db-admin",
     )
     names = {d["metadata"]["name"] for d in docs if d.get("kind") == "Secret"}
     assert "waddlebot-db-credentials" not in names and "waddlebot-db-admin" not in names
@@ -308,8 +345,10 @@ def test_existing_secret_is_referenced_and_not_rendered(helm_available: None) ->
 
 def test_unknown_role_in_a_template_fails_the_render(helm_available: None) -> None:
     result = _helm(
-        "--values", str(_CHART_DIR / "values-alpha.yaml"),
-        "--set", "infrastructure.postgresql.serviceRoles.roles={waddles_hub_api}",
+        "--values",
+        str(_CHART_DIR / "values-alpha.yaml"),
+        "--set",
+        "infrastructure.postgresql.serviceRoles.roles={waddles_hub_api}",
     )
     assert result.returncode != 0
     assert "unknown PostgreSQL service role" in result.stderr

@@ -35,6 +35,11 @@
 #                  credentials) and are NEVER covered by public_dml -- list them under
 #                  `views:` (SELECT only) or inherit them from a designed group.
 #   views          explicit {view: [SELECT]} grants.
+#   allow_tables   legacy-profile only: tables from `legacy_deny_tables` this role is
+#                  nevertheless granted full DML on (the legacy hub implements login, so it
+#                  alone keeps the authentication / session tables).
+#   functions      {function_name} the role may EXECUTE although EXECUTE was revoked from
+#                  PUBLIC (e.g. resolve_identity_uuid, hub-api's identity resolution).
 #   tables         explicit {table: [PRIVILEGES]} grants (strict roles). Sequences owned
 #                  by a table that is granted INSERT are granted USAGE/SELECT.
 #   columns        explicit {table: {PRIVILEGE: [columns]}} column-level grants.
@@ -88,6 +93,21 @@ legacy_deny_tables:
   - credential_access_log      # FORCE-style RLS audit log of credential reads
   - module_db_accounts
   - db_permission_templates
+  # Identity / authentication boundary: password hashes, session + OAuth-exchange tokens,
+  # passkeys, pseudonym handles (raw PII, 0045: "no data-plane role gets any grant"). Legacy
+  # modules reach hub_users only through the column-scoped grants of their designed mod_*
+  # group (031_scoped_database_users.sql); only the legacy hub keeps these (allow_tables).
+  - ephemeral_pseudonyms
+  - hub_users
+  - hub_user_identities
+  - hub_admins
+  - hub_sessions
+  - hub_temp_passwords
+  - hub_oauth_exchange_codes
+  - user_access_tokens
+  - user_passkeys
+  - revoked_tokens
+  - oauth_state_tokens
 
 # Always read-only for application roles: schema-state bookkeeping.
 read_only_tables:
@@ -105,6 +125,7 @@ roles:
     deny_tables: [platform_integrations, credential_access_log, module_db_accounts, db_permission_templates]
     views:
       marketplace_catalog: [SELECT]
+    functions: [resolve_identity_uuid]
 
   # ------------------------------------------------------------ data plane (strict)
   waddles_svc_ingest:
@@ -244,11 +265,22 @@ roles:
     public_dml: true
     exclude_matrix_tables: true
   waddles_legacy_hub:
-    description: legacy admin hub pod (templates/core/hub.yaml)
+    description: legacy admin hub pod (templates/core/hub.yaml) -- implements login/sessions
     workloads: [hub-api]
     member_of: [mod_credential_manager]
     public_dml: true
     exclude_matrix_tables: true
+    allow_tables:
+      - hub_users
+      - hub_user_identities
+      - hub_admins
+      - hub_sessions
+      - hub_temp_passwords
+      - hub_oauth_exchange_codes
+      - user_access_tokens
+      - user_passkeys
+      - revoked_tokens
+      - oauth_state_tokens
   waddles_legacy_marketplace:
     description: legacy marketplace pod
     workloads: [marketplace]

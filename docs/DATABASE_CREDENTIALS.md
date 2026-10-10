@@ -27,7 +27,17 @@ NOBYPASSRLS`, has no `CREATE` on any schema, and owns nothing.
 | Control plane | `waddles_hub_api` (hub-api, seeder, signing, sync Jobs) | DML on base tables + sequences; **no** DDL; `alembic_version`/`schema_migrations` read-only; `platform_integrations` & credential audit tables denied; matrix grants inherited from `hub_api` |
 | Strict data plane | `waddles_svc_action`, `_svc_presentation`, `_svc_streaming`, `_reputation` | An explicit table list (e.g. svc-action: `INSERT,SELECT action_dispatch_log`, `SELECT tenants,communities`) |
 | Zero-table | `waddles_svc_ingest`, `_svc_process`, `_svc_core` | `CONNECT` only (state is read via `waddles_bundle_reader` / hub gRPC) |
-| Legacy pods | `waddles_legacy_<pod>` (25 roles, one per legacy Deployment) | DML on base tables **minus** the RBAC-matrix tables, credential stores and views (privilege boundaries); `platform_integrations` rows only through the pod's designed `mod_*` RLS membership |
+| Legacy pods | `waddles_legacy_<pod>` (25 roles, one per legacy Deployment) | DML on base tables **minus** the RBAC-matrix tables, views (privilege boundaries), credential stores, and the identity/authentication tables (`hub_users`, sessions, tokens, passkeys, `ephemeral_pseudonyms` -- only the legacy hub, which implements login, keeps those); `platform_integrations` rows only through the pod's designed `mod_*` RLS membership; `hub_users` only via the column grants of that membership |
+
+Two details that the privilege matrix alone cannot show (both covered by functional tests):
+
+* `resolve_identity_uuid()` is `EXECUTE`-restricted to the owner; hub-api calls it directly, so
+  `waddles_hub_api` is granted it (`functions:` in the catalog) -- no other role is.
+* The `community_members` BEFORE INSERT trigger (`community_members_set_user_uuid`, 0045) is
+  invoker-rights and reads `hub_users` / `hub_user_identities` and mints `ephemeral_pseudonyms`.
+  Left as-is every `community_members` writer (e.g. reputation) would need PII-table access, so
+  `reconcile` makes that one trigger function `SECURITY DEFINER` with a pinned `search_path` (a
+  trigger function cannot be called directly) and re-asserts it on every run.
 
 Already-separate roles are unchanged: `waddles_bundle_reader` (RO active-set), `waddles_bundle_migrator`
 / `waddles_bundle_runtime` (app schemas), `waddles_connector_pii_reader` (PII views).
@@ -107,10 +117,12 @@ because the previous chart revision reads them there:
 
 ## Residual risk
 
-* **R1 -- legacy pods are broad.** Each has its own revocable credential and no DDL/superuser, but its
-  DML reach is "all base tables except hub-only boundaries". Narrowing each to an explicit `tables:`
-  list needs a per-module query audit (the legacy module stack is being replaced by the v3 pipeline).
-  `credential rows` are already scoped to the pod's designed `mod_*` RLS policies.
+* **R1 -- legacy pods are still broad.** Each has its own revocable credential and no DDL/superuser,
+  and credential rows / identity-authentication tables are already fenced off, but the rest of its DML
+  reach is "all other base tables". Narrowing each to an explicit `tables:` list needs a per-module
+  query audit (the legacy module stack is being replaced by the v3 pipeline). If a legacy pod fails with
+  `permission denied`, fix it in `service-roles.yaml` for that pod only (`allow_tables` / group
+  membership), never by widening a shared role.
 * **R2** -- `DB_READER_PASSWORD` (SELECT-only on 8 tables) and `BUNDLE_MIGRATOR/RUNTIME_PASSWORD` still
   travel in `waddlebot-secrets`; moving them is a follow-up.
 * **R3** -- `waddles_hub_api` can read/write every non-denied base table by design (it is the API
@@ -123,3 +135,4 @@ because the previous chart revision reads them there:
 * `python3 -m pytest alembic/tests/test_service_roles_catalog.py` -- catalog, password policy, no repo credential in shipped files.
 * `python3 -m pytest alembic/tests/test_0048_per_service_db_roles.py` (needs docker) -- real fresh-replay Postgres: full privilege matrix, cross-service denial, RLS, escalation chain closed, rotation, downgrade round-trip, dev opt-in.
 * `python3 -m pytest k8s/helm/waddlebot/tests/test_db_credential_separation_render.py` -- owner credential confined, one distinct role per workload.
+* `python3 -m pytest alembic/tests/test_chart_credentials_roundtrip.py` (needs docker + helm) -- provisions a fresh DB from the chart-rendered hook Secret, then authenticates as every rendered workload identity.

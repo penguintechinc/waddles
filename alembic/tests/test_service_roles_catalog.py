@@ -26,7 +26,8 @@ MIGRATION_SQL_DIR = REPO_ROOT / "config" / "postgres" / "migrations"
 ALEMBIC_VERSIONS = REPO_ROOT / "alembic" / "versions"
 
 _CREATE_TABLE = re.compile(
-    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?\"?([a-z_][a-z0-9_]*)\"?", re.IGNORECASE
+    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?\"?([a-z_][a-z0-9_]*)\"?",
+    re.IGNORECASE,
 )
 _CREATE_VIEW = re.compile(
     r"CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+(?:public\.)?\"?([a-z_][a-z0-9_]*)\"?", re.IGNORECASE
@@ -55,8 +56,11 @@ def test_catalog_is_wellformed() -> None:
         assert spec.workloads, f"{spec.name} documents no workload"
         assert spec.description
         assert set(spec.member_of) <= CATALOG.external_groups
-        assert spec.public_dml or spec.tables or spec.member_of or spec.name.endswith(
-            ("_ingest", "_process", "_core")
+        assert (
+            spec.public_dml
+            or spec.tables
+            or spec.member_of
+            or spec.name.endswith(("_ingest", "_process", "_core"))
         ), f"{spec.name} grants nothing at all"
     # nobody gets a write privilege on migration bookkeeping
     assert {"alembic_version", "schema_migrations"} <= CATALOG.read_only_tables
@@ -94,7 +98,9 @@ def test_every_documented_workload_has_exactly_one_role() -> None:
     owner: dict[str, str] = {}
     for spec in CATALOG.roles:
         for workload in spec.workloads:
-            assert workload not in owner, f"{workload} is claimed by {owner[workload]} and {spec.name}"
+            assert workload not in owner, (
+                f"{workload} is claimed by {owner[workload]} and {spec.name}"
+            )
             owner[workload] = spec.name
     assert len(owner) >= 35
 
@@ -110,7 +116,9 @@ def test_generated_passwords_satisfy_the_policy() -> None:
     passwords = _good()
     assert set(passwords) == set(CATALOG.names)
     assert len(set(passwords.values())) == len(passwords)
-    resolved = roles_mod.resolve_passwords(CATALOG, {roles_mod.PASSWORDS_ENV: json.dumps(passwords)})
+    resolved = roles_mod.resolve_passwords(
+        CATALOG, {roles_mod.PASSWORDS_ENV: json.dumps(passwords)}
+    )
     assert resolved == passwords
 
 
@@ -142,7 +150,9 @@ def test_empty_or_malformed_env_is_refused_not_defaulted() -> None:
             roles_mod.resolve_passwords(CATALOG, {roles_mod.PASSWORDS_ENV: raw})
 
 
-@pytest.mark.parametrize("tier", ["alpha", "beta", "gamma", "production", "prod", "BETA", " Production "])
+@pytest.mark.parametrize(
+    "tier", ["alpha", "beta", "gamma", "production", "prod", "BETA", " Production "]
+)
 def test_dev_suffix_is_refused_on_every_shared_tier(tier: str) -> None:
     env = {roles_mod.DEV_SUFFIX_ENV: "_dev_changeme", roles_mod.TIER_ENV: tier}
     with pytest.raises(roles_mod.ServiceRoleError, match="must never reach a shared database"):
@@ -175,7 +185,9 @@ def _scan(paths: list[Path]) -> list[str]:
     hits: list[str] = []
     for path in paths:
         if path.is_file():
-            for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
+            ):
                 if _REPO_PASSWORD.search(line):
                     hits.append(f"{path.relative_to(REPO_ROOT)}:{number}")
     return hits
@@ -194,11 +206,16 @@ def test_no_repo_known_db_password_in_migrations_chart_or_images() -> None:
             and p.suffix in {".yaml", ".yml", ".tpl", ".md", ".txt", ".py"}
             and p.relative_to(CHART).parts[0] not in {"charts", "tests", "__pycache__"}
         ]
-        + [REPO_ROOT / "alembic" / "env.py", REPO_ROOT / "config" / "postgres" / "service-roles.yaml"]
+        + [
+            REPO_ROOT / "alembic" / "env.py",
+            REPO_ROOT / "config" / "postgres" / "service-roles.yaml",
+        ]
     )
     assert len(paths) > 150, "scan root is wrong -- refusing a vacuous pass"
     hits = _scan(paths)
-    assert hits == [], f"repo-known DB password literal shipped outside docker-compose/dev files: {hits}"
+    assert hits == [], (
+        f"repo-known DB password literal shipped outside docker-compose/dev files: {hits}"
+    )
 
 
 def test_init_sql_is_only_mounted_by_docker_compose() -> None:

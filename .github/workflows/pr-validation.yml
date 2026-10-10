@@ -482,11 +482,21 @@ jobs:
       # hub_admin escalation chain, rotation, downgrade round-trip and the dev opt-in guard
       # (alembic/tests/test_0048_per_service_db_roles.py), plus the no-docker catalog/password/
       # repo-credential guards. No `|| true`: a collected-zero state exits 5 and fails the step.
+      - name: Install Helm (chart <-> database credential round trip)
+        if: steps.changes.outputs.any == 'true'
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2  # v5
+        with:
+          version: 'v3.13.0'
+
       - name: Per-service DB role isolation (real Postgres)
         if: steps.changes.outputs.any == 'true'
         run: |
           set -euo pipefail
-          python3 -m pytest alembic/tests/test_service_roles_catalog.py alembic/tests/test_0048_per_service_db_roles.py -v -p no:cacheprovider
+          python3 -m pytest \
+            alembic/tests/test_service_roles_catalog.py \
+            alembic/tests/test_0048_per_service_db_roles.py \
+            alembic/tests/test_chart_credentials_roundtrip.py \
+            -v -p no:cacheprovider
 
   marketplace-refunds:
     name: Marketplace refund authorization tests

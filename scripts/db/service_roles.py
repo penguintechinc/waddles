@@ -54,7 +54,7 @@ DEV_SUFFIX_ENV = "WADDLES_DEV_DB_ROLE_PW_SUFFIX"
 TIER_ENV = "WADDLES_DEPLOYMENT_TIER"
 #: Session GUC the dev suffix is staged into so legacy SQL (031) can read it.
 DEV_SUFFIX_GUC = "waddles.dev_db_role_pw_suffix"
-_PASSWORD_GUC = "waddles.svc_role_pw"
+_PASSWORD_GUC = "waddles.svc_role_pw"  # noqa: S105 -- GUC name, not a credential
 
 #: Tiers whose databases are shared/real: the dev-password suffix is refused here.
 SHARED_TIERS = frozenset({"alpha", "beta", "gamma", "production", "prod"})
@@ -157,6 +157,17 @@ PRIVILEGED_FUNCTIONS = (
 )
 
 
+#: Invoker-rights TRIGGER functions that read/mint rows in tables unrelated to the table they
+#: guard. Left INVOKER, every role that may write the guarded table would also need privileges
+#: on those tables -- e.g. `community_members_set_user_uuid` (0045) reads hub_users /
+#: hub_user_identities and mints ephemeral_pseudonyms, so the reputation service (a
+#: community_members writer) would need PII-table access it has no business holding. They are
+#: made SECURITY DEFINER with a pinned search_path instead. Safe because a trigger function
+#: cannot be invoked directly ("can only be called as a trigger") and its body is fixed;
+#: re-asserted on every reconcile so a later `CREATE OR REPLACE` cannot silently revert it.
+DEFINER_TRIGGER_FUNCTIONS = ("community_members_set_user_uuid",)
+
+
 class ServiceRoleError(RuntimeError):
     """Catalog / credential problem that must stop the migration (never a silent skip)."""
 
@@ -178,6 +189,8 @@ class RoleSpec:
     deny_tables: frozenset[str]
     tables: Mapping[str, frozenset[str]]
     views: Mapping[str, frozenset[str]]
+    allow_tables: frozenset[str]
+    functions: tuple[str, ...]
     optional_tables: frozenset[str]
     columns: Mapping[str, Mapping[str, tuple[str, ...]]]
 
@@ -260,7 +273,9 @@ def load_catalog(
                 raise ServiceRoleError(f"{name}: unsafe view name {view!r}")
             view_privs = frozenset(str(p).upper() for p in privs)
             if view_privs != {"SELECT"}:
-                raise ServiceRoleError(f"{name}.{view}: views are SELECT-only, got {sorted(view_privs)}")
+                raise ServiceRoleError(
+                    f"{name}.{view}: views are SELECT-only, got {sorted(view_privs)}"
+                )
             views[view] = view_privs
         columns: dict[str, dict[str, tuple[str, ...]]] = {}
         for table, by_priv in (body.get("columns") or {}).items():
@@ -275,6 +290,10 @@ def load_catalog(
         for group in member_of:
             if group not in external:
                 raise ServiceRoleError(f"{name}: member_of {group!r} not in external_groups")
+        allow_tables = frozenset(_as_tuple(body.get("allow_tables")))
+        functions = _as_tuple(body.get("functions"))
+        if not all(_IDENT.fullmatch(f) for f in functions):
+            raise ServiceRoleError(f"{name}: unsafe function name in {functions!r}")
         optional = frozenset(_as_tuple(body.get("optional_tables")))
         if not optional <= set(tables):
             raise ServiceRoleError(f"{name}: optional_tables must be a subset of tables")
@@ -294,12 +313,20 @@ def load_catalog(
                 deny_tables=frozenset(_as_tuple(body.get("deny_tables"))),
                 tables=tables,
                 views=views,
+                allow_tables=allow_tables,
+                functions=functions,
                 optional_tables=optional,
                 columns=columns,
             )
         )
     if len({s.name for s in specs}) != len(specs):
         raise ServiceRoleError(f"{path}: duplicate role names")
+    legacy_deny = frozenset(_as_tuple(raw.get("legacy_deny_tables")))
+    for spec in specs:
+        if spec.allow_tables and not (spec.is_legacy and spec.allow_tables <= legacy_deny):
+            raise ServiceRoleError(
+                f"{spec.name}: allow_tables must be a subset of legacy_deny_tables on a legacy role"
+            )
     return Catalog(
         roles=tuple(specs),
         external_groups=external,
@@ -333,15 +360,14 @@ def _validate_password(role: str, password: str) -> None:
         raise ServiceRoleError(f"password for {role} shorter than {MIN_PASSWORD_LENGTH} chars")
     if not _URL_SAFE.fullmatch(password):
         raise ServiceRoleError(
-            f"password for {role} must be URL-safe ([A-Za-z0-9._~-]) -- it is embedded in DATABASE_URL"
+            f"password for {role} must be URL-safe ([A-Za-z0-9._~-]) -- "
+            "it is embedded in DATABASE_URL"
         )
     if _BANNED_PASSWORD.search(password) or password == role:
         raise ServiceRoleError(f"password for {role} looks like a placeholder/default; refusing")
 
 
-def resolve_passwords(
-    catalog: Catalog, env: Mapping[str, str] | None = None
-) -> dict[str, str]:
+def resolve_passwords(catalog: Catalog, env: Mapping[str, str] | None = None) -> dict[str, str]:
     """Role -> password for EVERY catalog role, or raise.
 
     Precedence: the JSON env var; in dev mode ONLY, missing roles fall back to
@@ -490,13 +516,40 @@ def _diff_relation_privileges(
             revokes.setdefault((kind, frozenset(have - want)), []).append(name)
     issued = 0
     for action, batches in (("REVOKE", revokes), ("GRANT", grants)):
-        for (kind, privs), names in sorted(batches.items(), key=lambda kv: (kv[0][0], sorted(kv[0][1]))):
+        for (kind, privs), names in sorted(
+            batches.items(), key=lambda kv: (kv[0][0], sorted(kv[0][1]))
+        ):
             target = "SEQUENCE" if kind == "S" else "TABLE"
             rels = ", ".join(quote_ident(n) for n in sorted(names))
             direction = "FROM" if action == "REVOKE" else "TO"
-            conn.execute(sa.text(f"{action} {_privs(privs)} ON {target} {rels} {direction} {quoted}"))
+            conn.execute(
+                sa.text(f"{action} {_privs(privs)} ON {target} {rels} {direction} {quoted}")
+            )
             issued += 1
     return issued
+
+
+def harden_trigger_functions(conn: Connection) -> list[str]:
+    """Make `DEFINER_TRIGGER_FUNCTIONS` SECURITY DEFINER with a pinned search_path (idempotent)."""
+    hardened: list[str] = []
+    for name in DEFINER_TRIGGER_FUNCTIONS:
+        rows = conn.execute(
+            sa.text(
+                "SELECT p.oid::regprocedure::text FROM pg_proc p "
+                "WHERE p.proname = :n AND p.pronamespace = 'public'::regnamespace "
+                "AND p.prorettype = 'trigger'::regtype"
+            ),
+            {"n": name},
+        ).fetchall()
+        for (signature,) in rows:
+            conn.execute(
+                sa.text(
+                    f"ALTER FUNCTION {signature} SECURITY DEFINER "
+                    "SET search_path = pg_catalog, public"
+                )
+            )
+            hardened.append(str(signature))
+    return hardened
 
 
 def reconcile(
@@ -515,6 +568,7 @@ def reconcile(
     nothing to the catalog tables beyond the password refresh.
     """
     report = ReconcileReport()
+    harden_trigger_functions(conn)
     tables = _fetch_set(
         conn,
         "SELECT relname FROM pg_class WHERE relnamespace = 'public'::regnamespace "
@@ -563,7 +617,8 @@ def reconcile(
         sequences_of.setdefault(str(row[0]), []).append(str(row[1]))
     all_sequences = _fetch_set(
         conn,
-        "SELECT relname FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'S'",
+        "SELECT relname FROM pg_class "
+        "WHERE relnamespace = 'public'::regnamespace AND relkind = 'S'",
     )
     for spec in catalog.roles:
         _create_or_alter_login(conn, spec.name, passwords[spec.name])
@@ -595,7 +650,7 @@ def reconcile(
             if spec.exclude_matrix_tables:
                 denied |= catalog.matrix_tables
             if spec.is_legacy:
-                denied |= catalog.legacy_deny_tables
+                denied |= catalog.legacy_deny_tables - spec.allow_tables
             for table in tables - denied:
                 privs = frozenset(_TABLE_PRIVS)
                 if table in catalog.read_only_tables:
@@ -621,6 +676,20 @@ def reconcile(
             desired[("T", view)] = privs
         _diff_relation_privileges(conn, spec.name, current_rel[spec.name], desired)
 
+        for function in spec.functions:
+            # Function / role names are catalog-validated identifiers (load_catalog), never
+            # user input. Only grants when EXECUTE is missing, so a steady state writes nothing.
+            conn.execute(
+                sa.text(
+                    "DO $$ DECLARE f record; BEGIN "  # noqa: S608  # nosec B608
+                    "FOR f IN SELECT p.oid::regprocedure AS sig FROM pg_proc p "
+                    f"WHERE p.proname = '{function}' AND p.pronamespace = 'public'::regnamespace "
+                    f"AND NOT has_function_privilege('{spec.name}', p.oid, 'EXECUTE') LOOP "
+                    f"EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO {role}', f.sig); "
+                    "END LOOP; END $$"
+                )
+            )
+
         desired_cols: dict[tuple[str, str], set[str]] = {}
         for table, by_priv in sorted(spec.columns.items()):
             if table not in tables:
@@ -639,11 +708,16 @@ def reconcile(
             table, col = key
             for priv in sorted(want - have):
                 conn.execute(
-                    sa.text(f"GRANT {priv} ({quote_ident(col)}) ON TABLE {quote_ident(table)} TO {role}")
+                    sa.text(
+                        f"GRANT {priv} ({quote_ident(col)}) ON TABLE {quote_ident(table)} TO {role}"
+                    )
                 )
             for priv in sorted(have - want):
                 conn.execute(
-                    sa.text(f"REVOKE {priv} ({quote_ident(col)}) ON TABLE {quote_ident(table)} FROM {role}")
+                    sa.text(
+                        f"REVOKE {priv} ({quote_ident(col)}) "
+                        f"ON TABLE {quote_ident(table)} FROM {role}"
+                    )
                 )
         if missing:
             report.missing_tables[spec.name] = sorted(set(missing))
