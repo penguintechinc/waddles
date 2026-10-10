@@ -23,6 +23,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
+from xml.etree.ElementTree import (  # noqa: S405 -- build/serialise only; parsing is defusedxml
+    Element,
+    register_namespace,
+    tostring,
+)
 
 import httpx
 import jwt
@@ -30,13 +35,28 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from cryptography.x509.oid import NameOID
-from lxml import etree
+from defusedxml.ElementTree import fromstring as safe_fromstring
 from signxml import XMLSigner, methods
 from signxml.algorithms import CanonicalizationMethod, DigestAlgorithm, SignatureMethod
 
 NS_SAMLP = "urn:oasis:names:tc:SAML:2.0:protocol"
 NS_SAML = "urn:oasis:names:tc:SAML:2.0:assertion"
 NS_DS = "http://www.w3.org/2000/09/xmldsig#"
+NS_MD = "urn:oasis:names:tc:SAML:2.0:metadata"
+
+for _prefix, _uri in (("samlp", NS_SAMLP), ("saml", NS_SAML), ("ds", NS_DS), ("md", NS_MD)):
+    register_namespace(_prefix, _uri)
+
+
+class _WeakSigner(XMLSigner):
+    """`XMLSigner` that will produce SHA-1 signatures (signxml refuses by default).
+
+    Test-only: lets the downgrade regression test mint a *cryptographically valid* SHA-1
+    signature so that only hub-api's algorithm policy can be what rejects it.
+    """
+
+    def check_deprecated_methods(self) -> None:
+        """Allow SHA-1 -- deliberately."""
 
 
 _SHARED_KEYS: list[rsa.RSAPrivateKey] = []
@@ -340,14 +360,14 @@ class FakeSamlIdp:
         assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == self.sso_url
         params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
         xml = zlib.decompress(base64.b64decode(params["SAMLRequest"]), -15)
-        root = etree.fromstring(xml)  # noqa: S320 - test-controlled input
+        root = safe_fromstring(xml)
         assert root.tag == f"{{{NS_SAMLP}}}AuthnRequest"
         assert root.get("Version") == "2.0"
         policy = root.find(f"{{{NS_SAMLP}}}NameIDPolicy")
         return ParsedAuthnRequest(
             request_id=root.get("ID", ""),
             acs_url=root.get("AssertionConsumerServiceURL", ""),
-            issuer=(root.find(f"{{{NS_SAML}}}Issuer").text or ""),  # type: ignore[union-attr]
+            issuer=(root.find(f"{{{NS_SAML}}}Issuer").text or ""),
             destination=root.get("Destination", ""),
             relay_state=params["RelayState"],
             name_id_policy_format=policy.get("Format") if policy is not None else None,
@@ -397,6 +417,7 @@ class FakeSamlIdp:
         omit_audience: bool = False,
         not_on_or_after_raw: str | None = None,
         omit_not_on_or_after: bool = False,
+        allow_weak_algorithms: bool = False,
     ) -> bytes:
         """Return the raw XML bytes of a (by default valid) signed SAML Response."""
         now = datetime.now(UTC)
@@ -490,45 +511,62 @@ class FakeSamlIdp:
         )
         subject_xml = "" if omit_subject else f"<saml:Subject>{name_id_xml}{conf}</saml:Subject>"
         a_id_attr = "" if omit_assertion_id else f'ID="{a_id}" '
-        xml = (
-            f'<samlp:Response xmlns:samlp="{NS_SAMLP}" xmlns:saml="{NS_SAML}" ID="{r_id}" '
-            f'Version="2.0" IssueInstant="{now.strftime(fmt)}" '
-            f"{dest_attr}"
-            f'InResponseTo="{in_response_to or authn.request_id}">'
-            f"<saml:Issuer>{response_issuer or issuer or self.entity_id}</saml:Issuer>"
-            f"{sig_r}"
-            f'<samlp:Status><samlp:StatusCode Value="{status}"/></samlp:Status>'
-            f'<saml:Assertion {a_id_attr}Version="{assertion_version}" '
-            f'IssueInstant="{now.strftime(fmt)}">'
+        assertion_xml = (
+            f'<saml:Assertion xmlns:saml="{NS_SAML}" xmlns:ds="{NS_DS}" {a_id_attr}'
+            f'Version="{assertion_version}" IssueInstant="{now.strftime(fmt)}">'
             f"<saml:Issuer>{assertion_issuer or issuer or self.entity_id}</saml:Issuer>"
             f"{sig_a}"
             f"{subject_xml}"
             f"{conditions}{authn_xml}"
             f"<saml:AttributeStatement>{attr_xml}</saml:AttributeStatement>"
-            "</saml:Assertion></samlp:Response>"
+            "</saml:Assertion>"
         )
-        root = etree.fromstring(xml.encode())  # noqa: S320 - test-controlled input
+
+        def response_with(assertion: str) -> str:
+            return (
+                f'<samlp:Response xmlns:samlp="{NS_SAMLP}" xmlns:saml="{NS_SAML}" ID="{r_id}" '
+                f'Version="2.0" IssueInstant="{now.strftime(fmt)}" '
+                f"{dest_attr}"
+                f'InResponseTo="{in_response_to or authn.request_id}">'
+                f"<saml:Issuer>{response_issuer or issuer or self.entity_id}</saml:Issuer>"
+                f"{sig_r}"
+                f'<samlp:Status><samlp:StatusCode Value="{status}"/></samlp:Status>'
+                f"{assertion}</samlp:Response>"
+            )
+
         if sign == "none":
-            return etree.tostring(root)
+            return response_with(assertion_xml).encode()
 
         key = signing_key or self.key
         cert = signing_cert or self.cert
         assert cert is not None
-        signer = XMLSigner(
+        signer = (_WeakSigner if allow_weak_algorithms else XMLSigner)(
             method=methods.enveloped,
             signature_algorithm=signature_algorithm,
             digest_algorithm=digest_algorithm,
             c14n_algorithm=CanonicalizationMethod.EXCLUSIVE_XML_CANONICALIZATION_1_0,
         )
+        assertion_part = assertion_xml
         if sign in ("assertion", "both"):
-            assertion = root.find(f"{{{NS_SAML}}}Assertion")
+            # signxml's enveloped signing needs an element (it converts a stdlib Element itself) and
+            # hands back its own (lxml) element, which the signer serialises -- no lxml import here.
             signed_assertion = signer.sign(
-                assertion, key=pem_key(key), cert=pem_cert(cert), reference_uri=a_id
+                safe_fromstring(assertion_xml),
+                key=pem_key(key),
+                cert=pem_cert(cert),
+                reference_uri=a_id,
             )
-            root.replace(assertion, signed_assertion)
+            assertion_part = signer._tostring(signed_assertion).decode("utf-8")
+        response_xml = response_with(assertion_part)
         if sign in ("response", "both"):
-            root = signer.sign(root, key=pem_key(key), cert=pem_cert(cert), reference_uri=r_id)
-        return etree.tostring(root)
+            signed_response = signer.sign(
+                safe_fromstring(response_xml),
+                key=pem_key(key),
+                cert=pem_cert(cert),
+                reference_uri=r_id,
+            )
+            return bytes(signer._tostring(signed_response))
+        return response_xml.encode()
 
     @staticmethod
     def _sp_entity(authn: ParsedAuthnRequest) -> str:
@@ -545,13 +583,27 @@ def post_form(url: str, **fields: str) -> str:
     return urlencode(fields)
 
 
-def tamper(raw: bytes, mutate: Callable[[etree._Element], None]) -> bytes:
+def tamper(raw: bytes, mutate: Callable[[Element], None]) -> bytes:
     """Parse `raw`, apply `mutate` to the tree, re-serialise (breaking any signature)."""
-    root = etree.fromstring(raw)  # noqa: S320 - test-controlled input
+    root = safe_fromstring(raw)
     mutate(root)
-    return etree.tostring(root)
+    return tostring(root, encoding="utf-8")
 
 
-def deepcopy_element(element: etree._Element) -> etree._Element:
+def parent_of(root: Element, child: Element) -> Element:
+    """Return `child`'s parent within `root` (stdlib elements have no `getparent`)."""
+    for candidate in root.iter():
+        if child in list(candidate):
+            return candidate
+    raise LookupError("element is not under root")
+
+
+def remove_signatures(root: Element) -> None:
+    """Strip every `ds:Signature` from the tree."""
+    for signature in list(root.iter(f"{{{NS_DS}}}Signature")):
+        parent_of(root, signature).remove(signature)
+
+
+def deepcopy_element(element: Element) -> Element:
     """Deep copy helper for XSW constructions."""
     return copy.deepcopy(element)

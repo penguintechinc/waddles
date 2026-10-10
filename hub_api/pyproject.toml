@@ -277,8 +277,8 @@ module = ["flask_core.*", "pydal.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
 
-# boto3/botocore/webauthn/lxml (SAML XML parsing, services/sso_saml.py) ship no py.typed marker either -- same boundary
+# boto3/botocore/webauthn/defusedxml (SAML XML parsing, services/sso_saml.py) ship no py.typed marker either -- same boundary
 # override, third-party-import only, not a relaxation of hub-api's own bar.
 [[tool.mypy.overrides]]
-module = ["boto3.*", "botocore.*", "webauthn.*", "lxml.*"]
+module = ["boto3.*", "botocore.*", "webauthn.*", "defusedxml.*"]
 ignore_missing_imports = true

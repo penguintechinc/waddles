@@ -9,15 +9,16 @@ from __future__ import annotations
 import copy
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from xml.etree.ElementTree import Element  # noqa: S405 -- type annotation only
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
-from lxml import etree
+from defusedxml.ElementTree import fromstring as safe_fromstring
 
 from services import sso_saml
 from tests.conftest import TENANT_SLUG
 from tests.sso.conftest import Entitlements
-from tests.sso.idp_fakes import NS_DS, NS_SAML, FakeSamlIdp, make_cert, tamper
+from tests.sso.idp_fakes import NS_SAML, FakeSamlIdp, make_cert, remove_signatures, tamper
 from tests.sso.kit import Kit
 
 PERSISTENT = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"
@@ -102,7 +103,7 @@ class TestSpMetadataEndpoint:
         response = await kit.client.get(f"/api/v1/auth/sso/{public_id}/metadata")  # no auth header
         assert response.status_code == 200
         assert response.mimetype == "application/samlmetadata+xml"
-        root = etree.fromstring(await response.get_data())  # noqa: S320
+        root = safe_fromstring(await response.get_data())
         assert (
             root.get("entityID") == f"https://hub.example.com/api/v1/auth/sso/{public_id}/metadata"
         )
@@ -249,10 +250,9 @@ class TestForgeries:
         def build(authn: Any) -> bytes:
             raw = kit.saml.build_response(authn, sign="assertion", name_id="alice@acme.test")
 
-            def mutate(root: etree._Element) -> None:
+            def mutate(root: Element) -> None:
                 forged = copy.deepcopy(root.find(f"{{{NS_SAML}}}Assertion"))
-                for sig in forged.iter(f"{{{NS_DS}}}Signature"):
-                    sig.getparent().remove(sig)
+                remove_signatures(forged)
                 forged.set("ID", "_forged")
                 forged.find(f".//{{{NS_SAML}}}NameID").text = "admin@acme.test"
                 root.insert(0, forged)

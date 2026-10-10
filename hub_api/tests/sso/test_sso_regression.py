@@ -461,6 +461,38 @@ class TestStaticGuards:
             ), path.name
             assert "eval(" not in text and "exec(" not in text, path.name
 
+    def test_no_lxml_or_unsafe_xml_parser_imports_in_sso_code_or_tests(self) -> None:
+        """The repo guard (`tests/unit/test_no_unsafe_xml.py`) bans lxml / stdlib XML parsers.
+
+        That guard skips `.worktrees`, so enforce the same rule here where it runs everywhere:
+        untrusted XML goes through `defusedxml`; the stdlib `Element`/`SubElement`/`tostring`/
+        `register_namespace` build-only names are the only `xml.etree` imports allowed.
+        """
+        banned_prefixes = ("lxml", "xml.dom", "xml.sax", "xml.parsers", "xmlrpc")
+        parsing_names = {"fromstring", "parse", "iterparse", "XML", "XMLParser", "ElementTree"}
+        sources = [*SSO_SOURCES, *sorted((HUB_API / "tests" / "sso").glob("*.py"))]
+        assert len(sources) >= 20
+        offenders: list[str] = []
+        for path in sources:
+            for node in ast.walk(ast.parse(path.read_text())):
+                modules: list[str] = []
+                if isinstance(node, ast.Import):
+                    modules = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                    modules = [node.module]
+                    if node.module in {"xml.etree", "xml.etree.ElementTree"} and any(
+                        alias.name in parsing_names for alias in node.names
+                    ):
+                        offenders.append(
+                            f"{path.name}:{node.lineno} parsing name from {node.module}"
+                        )
+                offenders += [
+                    f"{path.name}:{node.lineno} {m}"
+                    for m in modules
+                    if m.startswith(banned_prefixes)
+                ]
+        assert offenders == []
+
     def test_every_route_function_is_async(self) -> None:
         tree = ast.parse((HUB_API / "blueprints/v1/sso.py").read_text())
         for node in ast.walk(tree):

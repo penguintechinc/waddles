@@ -45,14 +45,22 @@ import secrets
 import zlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Final
+from typing import Any, Final
 from urllib.parse import urlencode, urlparse
+from xml.etree.ElementTree import (  # noqa: S405 -- build/serialise-only names; parsing is defusedxml
+    Element,
+    ParseError,
+    SubElement,
+    register_namespace,
+    tostring,
+)
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature as CryptoInvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from lxml import etree
+from defusedxml.common import DefusedXmlException
+from defusedxml.ElementTree import fromstring as safe_fromstring
 from signxml.algorithms import DigestAlgorithm, SignatureMethod
 from signxml.exceptions import SignXMLException
 from signxml.verifier import SignatureConfiguration, XMLVerifier
@@ -76,6 +84,15 @@ NS_SAMLP: Final = "urn:oasis:names:tc:SAML:2.0:protocol"
 NS_SAML: Final = "urn:oasis:names:tc:SAML:2.0:assertion"
 NS_DS: Final = "http://www.w3.org/2000/09/xmldsig#"
 NS_MD: Final = "urn:oasis:names:tc:SAML:2.0:metadata"
+
+for _prefix, _uri in (("samlp", NS_SAMLP), ("saml", NS_SAML), ("ds", NS_DS), ("md", NS_MD)):
+    register_namespace(_prefix, _uri)
+
+#: A parsed XML node. Untrusted XML is parsed with `defusedxml` (stdlib `Element`s); the element
+#: `signxml` returns for the *signed* subtree is an lxml element. Both expose the small
+#: `find`/`findall`/`iter`/`get`/`text`/`len` surface this module uses, so it is typed `Any`
+#: rather than importing lxml (the repo forbids lxml imports: `tests/unit/test_no_unsafe_xml.py`).
+XmlNode = Any
 
 BINDING_REDIRECT: Final = "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
 BINDING_POST: Final = "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"
@@ -180,29 +197,20 @@ def _parse_instant(value: str | None, code: str) -> datetime:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-def secure_parser() -> etree.XMLParser:
-    """An lxml parser that never resolves entities, loads DTDs or touches the network."""
-    return etree.XMLParser(
-        resolve_entities=False,
-        no_network=True,
-        dtd_validation=False,
-        load_dtd=False,
-        huge_tree=False,
-        remove_comments=True,
-        remove_pis=True,
-        collect_ids=False,
-    )
+def parse_xml(data: bytes, *, what: str) -> XmlNode:
+    """Parse untrusted XML with `defusedxml`; reject DOCTYPE/ENTITY declarations outright.
 
-
-def parse_xml(data: bytes, *, what: str) -> etree._Element:
-    """Parse untrusted XML safely; reject DOCTYPE/ENTITY declarations outright."""
+    Belt and braces: a byte-level scan refuses any DOCTYPE/ENTITY before a parser sees the
+    document, and `defusedxml` additionally forbids DTDs, entity declarations and external
+    references (and the stdlib parser drops comments and processing instructions).
+    """
     if _DOCTYPE_RE.search(data):
         raise _fail("saml_doctype_rejected", f"{what} contains a DOCTYPE/ENTITY declaration")
     try:
-        # S320: false positive -- `secure_parser()` disables entity resolution, DTD loading,
-        # network access and huge trees, and DOCTYPE/ENTITY was rejected above.
-        return etree.fromstring(data, secure_parser())  # noqa: S320
-    except etree.XMLSyntaxError as exc:
+        return safe_fromstring(data, forbid_dtd=True, forbid_entities=True, forbid_external=True)
+    except DefusedXmlException as exc:
+        raise _fail("saml_doctype_rejected", f"{what} uses a forbidden XML construct") from exc
+    except ParseError as exc:
         raise _fail("saml_xml_malformed", f"{what} is not well-formed XML") from exc
 
 
@@ -210,7 +218,7 @@ def _q(ns: str, tag: str) -> str:
     return f"{{{ns}}}{tag}"
 
 
-def _text_of(element: etree._Element, *, what: str) -> str:
+def _text_of(element: XmlNode, *, what: str) -> str:
     """Return `element`'s text, refusing mixed content / comments (identity confusion)."""
     if len(element) != 0:
         raise _fail("saml_value_has_children", f"{what} must be a plain text value")
@@ -305,25 +313,23 @@ def parse_idp_metadata(xml: bytes) -> IdpMetadata:
 
 def build_sp_metadata(*, entity_id: str, acs_url: str, name_id_format: str) -> bytes:
     """Render the SP metadata document an IdP admin imports (no secrets; safe to publish)."""
-    nsmap = {"md": NS_MD}
-    root = etree.Element(_q(NS_MD, "EntityDescriptor"), nsmap=nsmap, entityID=entity_id)
-    sp = etree.SubElement(
+    root = Element(_q(NS_MD, "EntityDescriptor"), {"entityID": entity_id})
+    sp = SubElement(
         root,
         _q(NS_MD, "SPSSODescriptor"),
-        AuthnRequestsSigned="false",
-        WantAssertionsSigned="true",
-        protocolSupportEnumeration=NS_SAMLP,
+        {
+            "AuthnRequestsSigned": "false",
+            "WantAssertionsSigned": "true",
+            "protocolSupportEnumeration": NS_SAMLP,
+        },
     )
-    etree.SubElement(sp, _q(NS_MD, "NameIDFormat")).text = name_id_format
-    etree.SubElement(
+    SubElement(sp, _q(NS_MD, "NameIDFormat")).text = name_id_format
+    SubElement(
         sp,
         _q(NS_MD, "AssertionConsumerService"),
-        Binding=BINDING_POST,
-        Location=acs_url,
-        index="0",
-        isDefault="true",
+        {"Binding": BINDING_POST, "Location": acs_url, "index": "0", "isDefault": "true"},
     )
-    metadata: bytes = etree.tostring(root, xml_declaration=True, encoding="UTF-8")
+    metadata: bytes = tostring(root, encoding="utf-8", xml_declaration=True)
     return metadata
 
 
@@ -335,23 +341,26 @@ def build_authn_request(
     The caller mints `request_id` (`new_request_id`) first so it can be stored
     in the single-use login state whose token doubles as `relay_state`.
     """
-    root = etree.Element(
+    root = Element(
         _q(NS_SAMLP, "AuthnRequest"),
-        nsmap={"samlp": NS_SAMLP, "saml": NS_SAML},
-        ID=request_id,
-        Version="2.0",
-        IssueInstant=_iso(datetime.now(UTC)),
-        Destination=saml.idp_sso_url,
-        ProtocolBinding=BINDING_POST,
-        AssertionConsumerServiceURL=acs_url,
+        {
+            "ID": request_id,
+            "Version": "2.0",
+            "IssueInstant": _iso(datetime.now(UTC)),
+            "Destination": saml.idp_sso_url,
+            "ProtocolBinding": BINDING_POST,
+            "AssertionConsumerServiceURL": acs_url,
+        },
     )
     if saml.force_authn:
         root.set("ForceAuthn", "true")
-    etree.SubElement(root, _q(NS_SAML, "Issuer")).text = sp_entity_id
-    etree.SubElement(
-        root, _q(NS_SAMLP, "NameIDPolicy"), Format=saml.name_id_format, AllowCreate="true"
+    SubElement(root, _q(NS_SAML, "Issuer")).text = sp_entity_id
+    SubElement(
+        root,
+        _q(NS_SAMLP, "NameIDPolicy"),
+        {"Format": saml.name_id_format, "AllowCreate": "true"},
     )
-    xml = etree.tostring(root, xml_declaration=False, encoding="UTF-8")
+    xml = tostring(root, encoding="utf-8")
     compressor = zlib.compressobj(level=9, wbits=-15)
     deflated = compressor.compress(xml) + compressor.flush()
     params = {
@@ -364,7 +373,7 @@ def build_authn_request(
 
 def _verify_signed_element(
     raw: bytes, certs_pem: tuple[str, ...], *, location: str
-) -> etree._Element | None:
+) -> XmlNode | None:
     """Return the signed element if any pinned cert verifies a signature at `location`."""
     config = SignatureConfiguration(
         require_x509=True,
@@ -378,10 +387,14 @@ def _verify_signed_element(
             result = XMLVerifier().verify(
                 raw, x509_cert=cert_pem, expect_config=config, id_attribute="ID"
             )
-        except (SignXMLException, CryptoInvalidSignature, ValueError, etree.LxmlError):
-            continue
+        except (SignXMLException, CryptoInvalidSignature, ValueError, SyntaxError):
+            continue  # not signed by THIS pinned cert (or malformed): try the next one
+        except Exception as exc:  # signxml/lxml internals surfaced something unexpected
+            raise _fail(
+                "saml_verifier_error", "the signature verifier failed unexpectedly"
+            ) from exc
         signed = result[0].signed_xml if isinstance(result, list) else result.signed_xml
-        if isinstance(signed, etree._Element):
+        if hasattr(signed, "tag"):
             return signed
     return None
 
@@ -445,7 +458,7 @@ def _validate_response(
 
     # Trust only what signxml says was signed -- never `structure` itself.
     signed_response = _verify_signed_element(raw, saml.idp_certs_pem, location="./")
-    signed_assertion: etree._Element | None = None
+    signed_assertion: XmlNode | None = None
     if signed_response is None:
         signed_assertion = _verify_signed_element(
             raw, saml.idp_certs_pem, location=f"./{_q(NS_SAML, 'Assertion')}/"
@@ -499,7 +512,7 @@ def _validate_response(
 
 
 def _check_response_envelope(
-    response: etree._Element,
+    response: XmlNode,
     *,
     expected_request_id: str,
     acs_url: str,
@@ -526,7 +539,7 @@ def _check_response_envelope(
 
 
 def _validate_assertion(
-    assertion: etree._Element,
+    assertion: XmlNode,
     saml: SamlSettings,
     *,
     expected_request_id: str,
@@ -594,7 +607,7 @@ def _validate_assertion(
 
 
 def _validate_subject_confirmation(
-    subject: etree._Element,
+    subject: XmlNode,
     *,
     expected_request_id: str,
     acs_url: str,
@@ -628,7 +641,7 @@ def _validate_subject_confirmation(
 
 
 def _validate_conditions(
-    assertion: etree._Element, *, sp_entity_id: str, skew: timedelta, now: datetime
+    assertion: XmlNode, *, sp_entity_id: str, skew: timedelta, now: datetime
 ) -> None:
     conditions = assertion.find(_q(NS_SAML, "Conditions"))
     if conditions is None:
@@ -654,7 +667,7 @@ def _validate_conditions(
             raise _fail("saml_audience", "Assertion is not addressed to this service provider")
 
 
-def _collect_attributes(assertion: etree._Element) -> dict[str, list[str]]:
+def _collect_attributes(assertion: XmlNode) -> dict[str, list[str]]:
     collected: dict[str, list[str]] = {}
     for statement in assertion.findall(_q(NS_SAML, "AttributeStatement")):
         for attribute in statement.findall(_q(NS_SAML, "Attribute")):

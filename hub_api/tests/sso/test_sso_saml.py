@@ -15,23 +15,24 @@ import copy
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from xml.etree.ElementTree import Element, SubElement  # noqa: S405 -- build-only names
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from lxml import etree
+from defusedxml.ElementTree import fromstring as safe_fromstring
 from signxml.algorithms import DigestAlgorithm, SignatureMethod
 from signxml.verifier import SignatureConfiguration, XMLVerifier
 
 from services import sso_saml
 from services.sso_types import SamlSettings, SsoConfigError, SsoProtocolError
 from tests.sso.idp_fakes import (
-    NS_DS,
     NS_SAML,
     NS_SAMLP,
     FakeSamlIdp,
     ParsedAuthnRequest,
     make_cert,
     pem_cert,
+    remove_signatures,
     tamper,
 )
 
@@ -94,35 +95,6 @@ def _reject(
     return exc.value
 
 
-def _resign_with_sha1(raw: bytes, key: Any) -> bytes:
-    """Rewrite a Response-level signature to RSA-SHA1/SHA-1 with a *valid* signature value."""
-    import base64 as b64
-
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import padding
-
-    root = etree.fromstring(raw)  # noqa: S320
-    sig = root.find(f"{{{NS_DS}}}Signature")
-    info = sig.find(f"{{{NS_DS}}}SignedInfo")
-    info.find(f"{{{NS_DS}}}SignatureMethod").set(
-        "Algorithm", "http://www.w3.org/2000/09/xmldsig#rsa-sha1"
-    )
-    reference = info.find(f"{{{NS_DS}}}Reference")
-    reference.find(f"{{{NS_DS}}}DigestMethod").set(
-        "Algorithm", "http://www.w3.org/2000/09/xmldsig#sha1"
-    )
-    stripped = copy.deepcopy(root)
-    stripped.remove(stripped.find(f"{{{NS_DS}}}Signature"))
-    canonical = etree.tostring(stripped, method="c14n", exclusive=True, with_comments=False)
-    digest = hashes.Hash(hashes.SHA1())  # noqa: S303 - deliberately weak, for the downgrade test
-    digest.update(canonical)
-    reference.find(f"{{{NS_DS}}}DigestValue").text = b64.b64encode(digest.finalize()).decode()
-    signed_info_c14n = etree.tostring(info, method="c14n", exclusive=True, with_comments=False)
-    signature = key.sign(signed_info_c14n, padding.PKCS1v15(), hashes.SHA1())  # noqa: S303
-    sig.find(f"{{{NS_DS}}}SignatureValue").text = b64.b64encode(signature).decode()
-    return etree.tostring(root)
-
-
 @pytest.fixture
 def idp() -> FakeSamlIdp:
     return FakeSamlIdp()
@@ -177,7 +149,7 @@ class TestAuthnRequest:
 class TestSpMetadata:
     def test_metadata_describes_the_acs_and_requires_signed_assertions(self) -> None:
         xml = sso_saml.build_sp_metadata(entity_id=SP_ENTITY, acs_url=ACS, name_id_format=EMAIL_FMT)
-        root = etree.fromstring(xml)  # noqa: S320
+        root = safe_fromstring(xml)
         md = "urn:oasis:names:tc:SAML:2.0:metadata"
         assert root.get("entityID") == SP_ENTITY
         sp = root.find(f"{{{md}}}SPSSODescriptor")
@@ -440,7 +412,7 @@ class TestSignatureEnforcement:
         authn = _authn(idp)
         raw = idp.build_response(authn, sign=sign, name_id="alice@acme.test")
 
-        def mutate(root: etree._Element) -> None:
+        def mutate(root: Element) -> None:
             root.find(f".//{{{NS_SAML}}}NameID").text = "admin@acme.test"
 
         _reject(idp, tamper(raw, mutate), authn, "saml_signature_invalid")
@@ -448,11 +420,17 @@ class TestSignatureEnforcement:
     def test_sha1_signatures_are_rejected_even_when_cryptographically_valid(
         self, idp: FakeSamlIdp
     ) -> None:
-        # signxml refuses to *produce* SHA-1 signatures, so re-sign a response by hand with
-        # RSA-SHA1/SHA-1 digest. The signature is genuinely valid; only the algorithm
-        # policy can reject it (downgrade regression).
+        # signxml refuses to *produce* SHA-1 signatures by default; the fake IdP's `_WeakSigner`
+        # lifts that so the signature is genuinely valid and only the algorithm policy can reject it
+        # (downgrade regression).
         authn = _authn(idp)
-        raw = _resign_with_sha1(idp.build_response(authn, sign="response"), idp.key)
+        raw = idp.build_response(
+            authn,
+            sign="response",
+            signature_algorithm=SignatureMethod.RSA_SHA1,
+            digest_algorithm=DigestAlgorithm.SHA1,
+            allow_weak_algorithms=True,
+        )
         # Prove the premise: a permissive verifier accepts this exact document...
         permissive = SignatureConfiguration(
             signature_methods=frozenset({SignatureMethod.RSA_SHA1}),
@@ -466,15 +444,34 @@ class TestSignatureEnforcement:
         # ...so only our algorithm policy can be what rejects it.
         _reject(idp, raw, authn, "saml_signature_invalid")
 
+    @pytest.mark.parametrize(
+        ("sig", "digest"),
+        [
+            (SignatureMethod.RSA_SHA1, DigestAlgorithm.SHA256),  # weak signature, strong digest
+            (SignatureMethod.RSA_SHA256, DigestAlgorithm.SHA1),  # strong signature, weak digest
+        ],
+        ids=["sha1-signature", "sha1-digest"],
+    )
+    def test_each_weak_primitive_is_refused_on_its_own(
+        self, idp: FakeSamlIdp, sig: SignatureMethod, digest: DigestAlgorithm
+    ) -> None:
+        # The signature-method and digest allow-lists are independent layers; either weak
+        # primitive alone must sink the response (mutating just one list must not survive).
+        authn = _authn(idp)
+        raw = idp.build_response(
+            authn,
+            sign="response",
+            signature_algorithm=sig,
+            digest_algorithm=digest,
+            allow_weak_algorithms=True,
+        )
+        _reject(idp, raw, authn, "saml_signature_invalid")
+
     def test_signature_stripped_from_signed_assertion(self, idp: FakeSamlIdp) -> None:
         authn = _authn(idp)
         raw = idp.build_response(authn, sign="assertion")
 
-        def strip(root: etree._Element) -> None:
-            for sig in root.iter(f"{{{NS_DS}}}Signature"):
-                sig.getparent().remove(sig)
-
-        _reject(idp, tamper(raw, strip), authn, "saml_signature_invalid")
+        _reject(idp, tamper(raw, remove_signatures), authn, "saml_signature_invalid")
 
 
 class TestSignatureWrapping:
@@ -487,10 +484,9 @@ class TestSignatureWrapping:
         authn = _authn(idp)
         return idp.build_response(authn, sign=sign, name_id="alice@acme.test"), authn
 
-    def _forged_assertion(self, root: etree._Element) -> etree._Element:
+    def _forged_assertion(self, root: Element) -> Element:
         forged = copy.deepcopy(root.find(f"{{{NS_SAML}}}Assertion"))
-        for sig in forged.iter(f"{{{NS_DS}}}Signature"):
-            sig.getparent().remove(sig)
+        remove_signatures(forged)
         forged.set("ID", "_forged")
         forged.find(f".//{{{NS_SAML}}}NameID").text = "admin@acme.test"
         return forged
@@ -498,7 +494,7 @@ class TestSignatureWrapping:
     def test_unsigned_forged_assertion_added_before_the_signed_one(self, idp: FakeSamlIdp) -> None:
         raw, authn = self._legit(idp, "assertion")
 
-        def mutate(root: etree._Element) -> None:
+        def mutate(root: Element) -> None:
             legit = root.find(f"{{{NS_SAML}}}Assertion")
             root.insert(list(root).index(legit), self._forged_assertion(root))
 
@@ -507,7 +503,7 @@ class TestSignatureWrapping:
     def test_unsigned_forged_assertion_added_after_the_signed_one(self, idp: FakeSamlIdp) -> None:
         raw, authn = self._legit(idp, "assertion")
 
-        def mutate(root: etree._Element) -> None:
+        def mutate(root: Element) -> None:
             root.append(self._forged_assertion(root))
 
         _reject(idp, tamper(raw, mutate), authn, "saml_assertion_count")
@@ -517,11 +513,11 @@ class TestSignatureWrapping:
     ) -> None:
         raw, authn = self._legit(idp, "assertion")
 
-        def mutate(root: etree._Element) -> None:
+        def mutate(root: Element) -> None:
             legit = root.find(f"{{{NS_SAML}}}Assertion")
             forged = self._forged_assertion(root)
-            ext = etree.Element(f"{{{NS_SAMLP}}}Extensions")
-            root.replace(legit, forged)
+            ext = Element(f"{{{NS_SAMLP}}}Extensions")
+            root[list(root).index(legit)] = forged
             ext.append(legit)
             root.insert(0, ext)
 
@@ -532,11 +528,11 @@ class TestSignatureWrapping:
     ) -> None:
         raw, authn = self._legit(idp, "assertion")
 
-        def mutate(root: etree._Element) -> None:
+        def mutate(root: Element) -> None:
             legit = root.find(f"{{{NS_SAML}}}Assertion")
             forged = self._forged_assertion(root)
-            advice = etree.SubElement(forged, f"{{{NS_SAML}}}Advice")
-            root.replace(legit, forged)
+            advice = SubElement(forged, f"{{{NS_SAML}}}Advice")
+            root[list(root).index(legit)] = forged
             advice.append(legit)
 
         _reject(idp, tamper(raw, mutate), authn, "saml_assertion_count")
@@ -544,7 +540,7 @@ class TestSignatureWrapping:
     def test_signed_response_with_a_second_assertion_injected(self, idp: FakeSamlIdp) -> None:
         raw, authn = self._legit(idp, "response")
 
-        def mutate(root: etree._Element) -> None:
+        def mutate(root: Element) -> None:
             root.append(self._forged_assertion(root))
 
         _reject(idp, tamper(raw, mutate), authn, "saml_assertion_count")
@@ -552,8 +548,8 @@ class TestSignatureWrapping:
     def test_encrypted_assertion_is_refused_loudly(self, idp: FakeSamlIdp) -> None:
         raw, authn = self._legit(idp, "response")
 
-        def mutate(root: etree._Element) -> None:
-            root.append(etree.Element(f"{{{NS_SAML}}}EncryptedAssertion"))
+        def mutate(root: Element) -> None:
+            root.append(Element(f"{{{NS_SAML}}}EncryptedAssertion"))
 
         _reject(idp, tamper(raw, mutate), authn, "saml_encrypted_assertion")
 
@@ -561,11 +557,13 @@ class TestSignatureWrapping:
         self, idp: FakeSamlIdp
     ) -> None:
         # Classic NameID comment attack: user@acme.test<!---->.evil.example -- a DOM that reads
-        # only the first text node would see "user@acme.test".
+        # only the first text node would see "user@acme.test". Exclusive c14n (no comments) means
+        # a comment inserted AFTER signing leaves the signature valid, so inject it into the signed
+        # bytes of a document whose canonical NameID already reads the full value.
         authn = _authn(idp)
-        raw = idp.build_response(
-            authn, name_id_inner_xml="user@acme.test<!--x-->.evil.example", sign="response"
-        )
+        signed = idp.build_response(authn, name_id="user@acme.test.evil.example", sign="response")
+        raw = signed.replace(b"user@acme.test.evil", b"user@acme.test<!--x-->.evil")
+        assert raw != signed  # the comment really is in the document
         try:
             result = _validate(idp, raw, authn)
         except SsoProtocolError:
@@ -600,7 +598,7 @@ class TestEnvelopeAndStructure:
     def test_zero_assertions(self, idp: FakeSamlIdp) -> None:
         authn = _authn(idp)
 
-        def mutate(root: etree._Element) -> None:
+        def mutate(root: Element) -> None:
             root.remove(root.find(f"{{{NS_SAML}}}Assertion"))
 
         _reject(
@@ -755,10 +753,10 @@ class TestAssertionRules:
         authn = _authn(idp)
         raw = idp.build_response(authn, sign="none")
 
-        def no_id(root: etree._Element) -> None:
+        def no_id(root: Element) -> None:
             del root.find(f"{{{NS_SAML}}}Assertion").attrib["ID"]
 
-        def old_version(root: etree._Element) -> None:
+        def old_version(root: Element) -> None:
             root.find(f"{{{NS_SAML}}}Assertion").set("Version", "1.1")
 
         # unsigned docs fail on signature first; assert the *signed* paths via re-sign is
@@ -803,7 +801,7 @@ class TestTimeWindows:
         authn = _authn(idp)
         raw = idp.build_response(authn, sign="none")
 
-        def mutate(root: etree._Element) -> None:
+        def mutate(root: Element) -> None:
             root.find(f".//{{{NS_SAML}}}Conditions").set("NotOnOrAfter", "yesterday-ish")
 
         with pytest.raises(SsoProtocolError):
@@ -877,7 +875,7 @@ class TestSignedElementDefences:
     ) -> None:
         authn = _authn(idp)
         raw = idp.build_response(authn)
-        stray = etree.Element(f"{{{NS_SAML}}}Assertion")
+        stray = Element(f"{{{NS_SAML}}}Assertion")
         monkeypatch.setattr(sso_saml, "_verify_signed_element", lambda *a, **k: stray)
         _reject(idp, raw, authn, "saml_signed_element")
 
@@ -886,7 +884,7 @@ class TestSignedElementDefences:
     ) -> None:
         authn = _authn(idp)
         raw = idp.build_response(authn)
-        calls = iter([None, etree.Element(f"{{{NS_SAMLP}}}Response")])
+        calls = iter([None, Element(f"{{{NS_SAMLP}}}Response")])
         monkeypatch.setattr(sso_saml, "_verify_signed_element", lambda *a, **k: next(calls))
         _reject(idp, raw, authn, "saml_signed_element")
 
@@ -895,6 +893,35 @@ class TestSignedElementDefences:
     ) -> None:
         authn = _authn(idp)
         raw = idp.build_response(authn)
-        hollow = etree.Element(f"{{{NS_SAMLP}}}Response")
+        hollow = Element(f"{{{NS_SAMLP}}}Response")
         monkeypatch.setattr(sso_saml, "_verify_signed_element", lambda *a, **k: hollow)
         _reject(idp, raw, authn, "saml_assertion_count")
+
+
+class TestVerifierFailures:
+    def test_unexpected_verifier_exceptions_fail_loudly_with_a_fixed_code(
+        self, idp: FakeSamlIdp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        authn = _authn(idp)
+        raw = idp.build_response(authn)
+        marker = "driver " + "detail " + "with-pii"
+
+        def explode(*_a: Any, **_k: Any) -> Any:
+            raise RuntimeError(marker)
+
+        monkeypatch.setattr(XMLVerifier, "verify", explode)
+        err = _reject(idp, raw, authn, "saml_verifier_error")
+        assert marker not in err.message  # exception text never reaches our message
+        assert isinstance(err.__cause__, RuntimeError)  # but the cause chain is preserved for logs
+
+    def test_malformed_xml_inside_the_verifier_is_just_an_invalid_signature(
+        self, idp: FakeSamlIdp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        authn = _authn(idp)
+        raw = idp.build_response(authn)
+
+        def syntax_error(*_a: Any, **_k: Any) -> Any:
+            raise SyntaxError("not well-formed")
+
+        monkeypatch.setattr(XMLVerifier, "verify", syntax_error)
+        _reject(idp, raw, authn, "saml_signature_invalid")
