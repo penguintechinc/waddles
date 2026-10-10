@@ -75,6 +75,11 @@ convention = "google"
 # always non-None on the success path), N815 is the camelCase DTO wire
 # contract pinned to frontend/src/services/api.js's tenantApi.
 "blueprints/v1/tenant.py" = ["S101", "N815"]
+# Enterprise tenant-admin DSAR console + whitelabel branding endpoint: same
+# tenant_middleware postcondition assert and camelCase wire DTOs
+# (userIds/userId, logoUrl/primaryColor) as `blueprints/v1/tenant.py` above.
+"blueprints/v1/admin_data_privacy.py" = ["S101", "N815"]
+"blueprints/v1/branding.py" = ["N815"]
 # Support/access-token port group -- same `_tenant_ok()` postcondition
 # assert (`get_tenant_context()` always non-None after `tenant_middleware`
 # has already run) as `blueprints/v1/community_*.py` above. No N815: this
