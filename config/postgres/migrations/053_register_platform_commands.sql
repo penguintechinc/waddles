@@ -78,8 +78,8 @@ VALUES
 ('/ask',        'ai_insights', 'Ask the AI a question',            '/ask <question>',           'ai',          'everyone',   10),
 
 -- ── Reputation ────────────────────────────────────────────────────────────
-('!rep',        'reputation', 'View a user\'s reputation score',   '!rep [@user]',              'moderation',  'everyone',   5),
-('/rep',        'reputation', 'View a user\'s reputation score',   '/rep [@user]',              'moderation',  'everyone',   5),
+('!rep',        'reputation', 'View a user''s reputation score',   '!rep [@user]',              'moderation',  'everyone',   5),
+('/rep',        'reputation', 'View a user''s reputation score',   '/rep [@user]',              'moderation',  'everyone',   5),
 
 -- ── Labels ────────────────────────────────────────────────────────────────
 ('!label',      'labels', 'Add or list user labels (mod only)',    '!label add @user <label>',  'moderation',  'moderator',  5),

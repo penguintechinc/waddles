@@ -24,9 +24,10 @@
 //! migrations do, not a simplified stand-in for them.
 //!
 //! Requires Docker (via `testcontainers`) -- CI (`rust-bundle-host-db.yml`,
-//! to be added alongside `rust-bundle-host-kv.yml`) runs on `ubuntu-latest`,
-//! which ships Docker; local runs need it too. Run with:
-//! `cargo test -p bundle-host-db --features test-util --test postgres_integration`.
+//! alongside `rust-bundle-host-kv.yml`) runs on `ubuntu-latest`, which ships
+//! Docker; local runs need it too. The crate's self dev-dependency enables
+//! the `test-util` feature for this test automatically, so plain
+//! `cargo test --test postgres_integration` is enough.
 
 use std::sync::Arc;
 
