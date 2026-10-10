@@ -37,6 +37,7 @@ holds).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
@@ -53,6 +54,8 @@ from services.current_user import get_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError, bad_request, payment_required
 from services.schema import bind_admin_privacy_tables
+
+logger = logging.getLogger(__name__)
 
 admin_data_privacy_bp = Blueprint(
     "v1_tenant_admin_data_privacy", __name__, url_prefix="/api/v1/tenant"
@@ -203,6 +206,10 @@ async def _run_single(
             async_dal, dal, actor=actor, action=action, user_ids=[user_id], confirm=confirm
         )
     except ApiError as exc:
+        logger.info(
+            "dsar.request_rejected",
+            extra={"action": action.value, "status": exc.status_code, "code": exc.code},
+        )
         return _err(exc)
     result = results[0]
     status = _HTTP_STATUS_BY_RESULT[result.status]
@@ -265,6 +272,10 @@ async def bulk_dsar(data: BulkDsarRequest, tenant_slug: str) -> tuple[Any, int]:
             confirm=data.confirm,
         )
     except ApiError as exc:
+        logger.info(
+            "dsar.request_rejected",
+            extra={"action": action.value, "status": exc.status_code, "code": exc.code},
+        )
         return _err(exc)
     ok = sum(
         1 for r in results if r.status in (svc.DsarStatus.COMPLETED, svc.DsarStatus.ALREADY_DONE)

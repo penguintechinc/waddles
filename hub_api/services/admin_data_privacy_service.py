@@ -497,6 +497,10 @@ async def _process_user(
             async_dal, dal, actor, action=action, target_user_id=user_id, bulk_id=bulk_id
         )
     except ApiError as exc:
+        logger.warning(
+            "dsar.audit_unavailable",
+            extra={"action": action.value, "actor_id": actor.user_id, "code": exc.code},
+        )
         return DsarResult(user_id=user_id, status=DsarStatus.AUDIT_UNAVAILABLE, detail=exc.message)
 
     audit_extra: dict[str, Any] = {}
