@@ -30,7 +30,7 @@ from quart import Blueprint, current_app, redirect, request
 from quart_schema import validate_request, validate_response
 
 from config import HubAPIConfig
-from services import auth_service, oauth_service, passkey_service
+from services import auth_service, branding_service, oauth_service, passkey_service
 from services.current_user import get_current_user_id, get_optional_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
@@ -326,6 +326,10 @@ class TenantLoginInfoDTO:
     isGlobal: bool
     enabledPlatforms: list[str]
     config: TenantConfigDTO
+    #: True only when CUSTOM branding (logo/theme/welcome message) is being
+    #: served -- i.e. the tenant is entitled to `tenancy.whitelabel`
+    #: (Professional+) AND has configured some. See `services/branding_service.py`.
+    whitelabeled: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -665,15 +669,25 @@ async def tenant_login_info(slug: str) -> TenantLoginInfoResponse | tuple[dict[s
         info = await auth_service.get_tenant_login_info(async_dal, dal, slug=slug)
     except ApiError as exc:
         return _err(exc)
+    # Whitelabel gate (Professional, `tenancy.whitelabel`): a tenant that is
+    # not entitled is served DEFAULT branding, never its stored custom
+    # branding. Fail-closed -- see `services/branding_service.py`.
+    branding, whitelabeled = await branding_service.resolve_login_branding(
+        info.slug,
+        branding_service.LoginBranding(
+            logo_url=info.logo_url, theme=info.theme, welcome_message=info.welcome_message
+        ),
+    )
     return TenantLoginInfoResponse(
         success=True,
         tenant=TenantLoginInfoDTO(
             slug=info.slug,
             displayName=info.display_name,
-            logoUrl=info.logo_url,
+            logoUrl=branding.logo_url,
             isGlobal=info.is_global,
             enabledPlatforms=info.enabled_platforms,
-            config=TenantConfigDTO(theme=info.theme, welcomeMessage=info.welcome_message),
+            config=TenantConfigDTO(theme=branding.theme, welcomeMessage=branding.welcome_message),
+            whitelabeled=whitelabeled,
         ),
     )
 
