@@ -43,14 +43,34 @@ file sealed class FakeRelayClient : IRelayClient
     public void Push(string provider, string messageJson) => Pushes.Add((provider, messageJson));
 }
 
-file sealed class FakeHost(IKvClient kv, IRelayClient relay, bool flagsEnabled = true) : IWaddleHost
+file sealed class FailingRelayClient(RelayErrorKind kind) : IRelayClient
+{
+    public void Push(string provider, string messageJson) =>
+        throw new WaddleRelayException(kind, "relay backend unavailable");
+}
+
+file sealed class RecordingFlags : IFlagsClient
+{
+    public List<(string Key, bool DefaultValue)> Calls { get; } = [];
+
+    public bool Enabled(string key, bool defaultValue)
+    {
+        Calls.Add((key, defaultValue));
+        return defaultValue; // echo the supplied default, like a flag-server outage
+    }
+
+    public string Tier() => "free";
+}
+
+file sealed class FakeHost(
+    IKvClient kv, IRelayClient relay, bool flagsEnabled = true, IFlagsClient? flagsOverride = null) : IWaddleHost
 {
     public BundleContextInfo Context { get; } = new("tenant-1", null, "waddles.integrations.superpenguin.roll", "waddles.integrations.superpenguin", "1.0.0", "msg-1", "{}");
     public IKvClient Kv { get; } = kv;
     public IDbClient Db => throw new NotSupportedException("!roll needs no db -- see RollLogic's own doc comment");
     public IRelayClient Relay { get; } = relay;
     public IHttpClient Http => throw new NotSupportedException("!roll needs no http");
-    public IFlagsClient Flags { get; } = new NoopFlags(flagsEnabled);
+    public IFlagsClient Flags { get; } = flagsOverride ?? new NoopFlags(flagsEnabled);
     public ILogClient Log { get; } = new NoopLog();
     public IClockClient Clock { get; } = new FixedClock();
 
@@ -200,6 +220,17 @@ public class RollLogicTransformTests
     }
 
     [Fact]
+    public void the_flag_is_checked_under_its_documented_key_with_a_fail_closed_default()
+    {
+        var flags = new RecordingFlags();
+        var host = new FakeHost(new FakeKvClient(), new FakeRelayClient(), flagsOverride: flags);
+
+        Assert.Null(new RollLogic().Run(ChatEvent("!roll"), host));
+
+        Assert.Equal([("waddles.command-superpenguin-roll", false)], flags.Calls);
+    }
+
+    [Fact]
     public void a_disabled_flag_never_consumes_the_cooldown_slot()
     {
         // The flag check must run before CooldownGuard.TryAcquire -- a
@@ -251,6 +282,37 @@ public class RollDispatchTests
 
         Assert.Equal("MISSING_CHANNEL", ex.Error.Code);
         Assert.False(ex.Error.Retryable);
+    }
+
+    [Theory]
+    [InlineData(RelayErrorKind.Backend)]
+    [InlineData(RelayErrorKind.Denied)]
+    public void a_relay_push_failure_is_a_retryable_transport_error(RelayErrorKind kind)
+    {
+        // Fail-loud: a relay host failure must surface as RELAY_PUSH_FAILED (retryable) -- it
+        // must never be swallowed into a "success" result.
+        var host = new FakeHost(new FakeKvClient(), new FailingRelayClient(kind));
+
+        var ex = Assert.Throws<WaddleTransportException>(
+            () => new RollDispatch().Run(EnvelopeWithReply("discord", "alice rolls...", "42"), "{}", host));
+
+        Assert.Equal("RELAY_PUSH_FAILED", ex.Error.Code);
+        Assert.True(ex.Error.Retryable);
+    }
+
+    [Fact]
+    public void the_relayed_message_carries_only_the_channel_and_reply_text()
+    {
+        // PII-free wire contract: the actor id on the inbound event never rides the relay message.
+        var relay = new FakeRelayClient();
+        var host = new FakeHost(new FakeKvClient(), relay);
+
+        new RollDispatch().Run(EnvelopeWithReply("twitch", "alice rolls...", "42"), "{}", host);
+
+        var json = relay.Pushes[0].MessageJson;
+        Assert.Contains("\"alice rolls...\"", json);
+        Assert.Contains("42", json);
+        Assert.DoesNotContain("user-1", json);
     }
 
     [Fact]

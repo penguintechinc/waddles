@@ -7,6 +7,10 @@ hypercorn>=0.18.0
 # HTTP Client (async)
 httpx>=0.28.1
 
+# XML parsing of untrusted PubSubHubbub Atom bodies (webhook_handler):
+# XXE / entity-expansion protection. Exact pin — never parse XML with stdlib.
+defusedxml==0.7.1
+
 # Environment
 python-dotenv>=1.2.3
 

@@ -259,6 +259,58 @@ mod tests {
     }
 
     #[test]
+    fn transform_preserves_actor_timestamp_and_event_type_on_the_reply() {
+        let event = sample_event("!ping");
+        let reply = PingBundle::transform(event.clone())
+            .expect("implemented, not an error")
+            .expect("!ping matches, a reply is produced");
+
+        assert_eq!(reply.actor, event.actor);
+        assert_eq!(reply.occurred_at, event.occurred_at);
+        assert_eq!(reply.event_type, "chat.message");
+    }
+
+    #[test]
+    fn matching_is_exact_and_case_sensitive() {
+        // Documented contract: the trimmed text must equal `!ping` exactly -- no case
+        // folding, no arguments, no prefix match.
+        for text in ["!PING", "!Ping", "! ping", "!ping\nextra", "!ping!"] {
+            let result =
+                PingBundle::transform(sample_event(text)).expect("implemented, not an error");
+            assert_eq!(result, None, "unexpected reply for input {text:?}");
+        }
+    }
+
+    #[test]
+    fn non_object_or_non_string_text_payloads_are_ignored() {
+        for payload_json in ["[]", "null", "42", r#"{"text": 7}"#, r#"{"text": null}"#] {
+            let event = PlatformEvent {
+                platform: "twitch".to_string(),
+                event_type: "chat.message".to_string(),
+                actor: None,
+                payload_json: payload_json.to_string(),
+                occurred_at: "2026-09-23T00:00:00.000Z".to_string(),
+            };
+            let result = PingBundle::transform(event).expect("implemented, not an error");
+            assert_eq!(result, None, "unexpected reply for payload {payload_json}");
+        }
+    }
+
+    #[test]
+    fn relay_message_is_exactly_channel_and_text_on_the_wire() {
+        // PII-free wire contract: only `{channel, text}` cross the relay boundary -- the actor
+        // and any other event field never ride along. (`with_payload` is the SDK's own
+        // serializer, so this needs no extra dev-dependency.)
+        let envelope = sample_envelope("discord");
+        let (_provider, message) = build_relay(&envelope).expect("channel_id present");
+        let wire = PlatformEvent::with_payload("discord", "chat.message", None, "t0", &message)
+            .expect("relay message serializes to an object");
+
+        assert_eq!(wire.payload_json, r#"{"channel":"12345","text":"pong"}"#);
+        assert!(!wire.payload_json.contains("viewer-1"));
+    }
+
+    #[test]
     fn build_relay_errors_when_channel_id_is_missing() {
         let mut envelope = sample_envelope("twitch");
         envelope.event = PlatformEvent::with_payload(

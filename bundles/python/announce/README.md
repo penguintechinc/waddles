@@ -11,8 +11,8 @@ contrast `bundles/csharp/superpenguin-roll`, which *is* a line-for-line port and
 full verbatim MIT notice because it reuses original code.
 
 **Command-prefix overlap (flagged, not resolved here).** The pre-existing, DB-backed
-`core/svc_process/bundles/community_announcements_process.py` /
-`core/svc_action/bundles/community_announcements_action.py` script bundles already parse
+`core/svc_process/builtin_handlers/community_announcements_process.py` /
+`core/svc_action/builtin_handlers/community_announcements_action.py` built-in stage handlers already parse
 `!announce publish <announcement_id>` against the legacy `flask_core`/`svc_process`/
 `svc_action` runner architecture (not this repo's newer WASI-component `waddle_sdk` bundle SDK
 this bundle is built on), to broadcast a web-UI-authored `announcements` DB row. Both this

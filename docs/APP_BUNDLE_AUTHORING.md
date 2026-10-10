@@ -5,6 +5,17 @@ port v2.x waddlebot features into v3 App Bundles. Codified from the stable exemp
 the typed pipeline contract as of `release/v3.0.X` commit `c1b5f04a`. Do not deviate without
 updating this doc first.
 
+> **Terminology — read first.** Everything this guide calls a "bundle" below is a
+> **built-in stage handler**: a plain Python module under
+> `core/svc_ingest/builtin_handlers/`, `core/svc_process/builtin_handlers/` or
+> `core/svc_action/builtin_handlers/` that the stage-runner imports **in-process** (the stored
+> entrypoint is `builtin_handlers.<module>:<function>`) and that ships with that service's
+> image. These are **not installable app bundles**. Installable (WASI component) app bundles
+> live under the top-level `bundles/` tree, are authored with `sdk/waddle-sdk/AUTHORING.md`
+> (or the Rust/JS/C# SDKs), and run in the bundle executor. The package is named
+> `builtin_handlers`, not `builtins`, because a package called `builtins` can never be
+> imported (it collides with Python's own `builtins` module).
+
 Sources of truth (read these, not memory, if this doc and code ever disagree):
 - `libs/flask_core/flask_core/stream_pipeline.py` — `PlatformEvent`, `StageEnvelope`, `EnvelopeError`, `bundle_stream_key`, `BUNDLE_STAGES`
 - `libs/flask_core/flask_core/stage_runner.py` — `BundlePoller`, `BundleDistribution`, `load_entrypoint`, `EntrypointLoadError`
@@ -147,14 +158,14 @@ stage's `{entrypoint, config, spec}` triple in a single `stages JSONB` column:
 
 ```json
 {
-  "ingest":  {"entrypoint": "bundles.<mod>:<fn>", "config": {}, "spec": {}},
-  "process": {"entrypoint": "bundles.<mod>:<fn>", "config": {}, "spec": {}},
-  "action":  {"entrypoint": "bundles.<mod>:<fn>", "config": {...defaults...}, "spec": {"required_config": [...]}}
+  "ingest":  {"entrypoint": "builtin_handlers.<mod>:<fn>", "config": {}, "spec": {}},
+  "process": {"entrypoint": "builtin_handlers.<mod>:<fn>", "config": {}, "spec": {}},
+  "action":  {"entrypoint": "builtin_handlers.<mod>:<fn>", "config": {...defaults...}, "spec": {"required_config": [...]}}
 }
 ```
 
 - `entrypoint`: dotted `module:function`, resolved via `importlib` inside that stage's own
-  container image (`bundles/<file>.py` must already be installed there — never DB-stored code,
+  container image (`builtin_handlers/<file>.py` must already be installed there — never DB-stored code,
   never `exec()`).
 - `config`: the bundle's own non-secret shipped defaults only (e.g. `api_base`). Per-activation
   values (`channel_id`, `*_token_ref`) belong in `app_tenant_availability.config_defaults` /
@@ -194,7 +205,7 @@ ON CONFLICT (tenant_id, app_id) DO NOTHING;
 -- Migration 085: seed the <feature> action bundle.
 --
 -- Ported from action/pushing/<platform>_action_module (v2). Follows the
--- `bundles.<module>:<function>` entrypoint convention established by
+-- `builtin_handlers.<module>:<function>` entrypoint convention established by
 -- migration 071 (demo echo) and 082 (Discord send). Config carries only
 -- non-secret defaults; per-activation channel/token_ref supplied at
 -- activation time (migration 069's 3-tier precedence). No token is ever
@@ -217,7 +228,7 @@ INSERT INTO app_catalog (
     '{"tested_with": "release/v3.0.X", "min_version": null, "max_version": null}'::jsonb,
     'active',
     (
-        '{"action": {"entrypoint": "bundles.<platform>_send_action:send_message", ' ||
+        '{"action": {"entrypoint": "builtin_handlers.<platform>_send_action:send_message", ' ||
         '"config": {}, "spec": {"required_config": ["channel_id", "bot_token_ref"]}}}'
     )::jsonb
 )
@@ -234,7 +245,7 @@ ON CONFLICT (tenant_id, app_id) DO NOTHING;
 
 ## 4. Copy-Paste Skeletons
 
-### 4a. Minimal ingest bundle — `core/svc_ingest/bundles/<name>_ingest.py`
+### 4a. Minimal ingest handler — `core/svc_ingest/builtin_handlers/<name>_ingest.py`
 
 ```python
 """<Platform> ingest bundle -- normalizes a raw fanned-out <platform> event.
@@ -279,14 +290,14 @@ async def normalize(raw: dict[str, Any]) -> PlatformEvent:
 ```
 
 ```python
-"""Tests for `bundles.<name>_ingest.normalize`."""
+"""Tests for `builtin_handlers.<name>_ingest.normalize`."""
 
 from __future__ import annotations
 
 import pytest
 from flask_core import PlatformEvent
 
-from bundles.<name>_ingest import normalize
+from builtin_handlers.<name>_ingest import normalize
 
 
 class TestNormalize:
@@ -306,7 +317,7 @@ class TestNormalize:
             await normalize({"text": "hi"})
 ```
 
-### 4b. Process bundle (command + no-reply branch) — `core/svc_process/bundles/<name>_process.py`
+### 4b. Process handler (command + no-reply branch) — `core/svc_process/builtin_handlers/<name>_process.py`
 
 ```python
 """<Feature> process bundle -- responds to a command, drops ordinary chatter.
@@ -345,14 +356,14 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
 ```
 
 ```python
-"""Tests for `bundles.<name>_process.transform`."""
+"""Tests for `builtin_handlers.<name>_process.transform`."""
 
 from __future__ import annotations
 
 import pytest
 from flask_core import PlatformEvent
 
-from bundles.<name>_process import transform
+from builtin_handlers.<name>_process import transform
 
 
 def _event(text: str) -> PlatformEvent:
@@ -388,7 +399,7 @@ class TestTransform:
             await transform(event)
 ```
 
-### 4c. Action/send bundle — `core/svc_action/bundles/<name>_send_action.py`
+### 4c. Action/send handler — `core/svc_action/builtin_handlers/<name>_send_action.py`
 
 ```python
 """<Platform> send-message ACTION bundle -- real <Platform> API call, SSRF-guarded."""
@@ -483,7 +494,7 @@ async def send_message(
 ```
 
 ```python
-"""Tests for `bundles.<name>_send_action.send_message`."""
+"""Tests for `builtin_handlers.<name>_send_action.send_message`."""
 
 from __future__ import annotations
 
@@ -492,7 +503,7 @@ import pytest
 from flask_core import PlatformEvent, StageEnvelope
 from waddle_transports import NonRetryableTransportError, RetryableTransportError
 
-from bundles.<name>_send_action import send_message
+from builtin_handlers.<name>_send_action import send_message
 
 
 def _envelope(payload: dict | None = None) -> StageEnvelope:
@@ -610,7 +621,7 @@ CREATE TABLE IF NOT EXISTS dice_leaderboard (
 );
 ```
 
-**Bundle** (`core/svc_process/bundles/dice_leaderboard_process.py` shape):
+**Bundle** (`core/svc_process/builtin_handlers/dice_leaderboard_process.py` shape):
 
 ```python
 """Dice leaderboard PROCESS bundle -- demo/example only, not a real bundle.
@@ -673,7 +684,7 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
 manually, exactly mirroring what the real runner does around every entrypoint call:
 
 ```python
-"""Tests for `bundles.dice_leaderboard_process.transform` -- demo only."""
+"""Tests for `builtin_handlers.dice_leaderboard_process.transform` -- demo only."""
 
 from __future__ import annotations
 
@@ -687,7 +698,7 @@ from flask_core import (
     set_bundle_dal,
 )
 
-from bundles.dice_leaderboard_process import transform
+from builtin_handlers.dice_leaderboard_process import transform
 
 
 class _FakeDal:
@@ -807,7 +818,7 @@ class TestTransform:
   MUST use `guarded_request`/`resolve_secret`, not hand-rolled `httpx` + `os.environ`.
 - **`config` is a `Mapping`, read-only** — never mutate it in a bundle; build new dicts for any
   derived values.
-- **One `bundles/<name>_<stage>.py` file per stage per bundle** — do not combine ingest+process+
+- **One `builtin_handlers/<name>_<stage>.py` file per stage per bundle** — do not combine ingest+process+
   action logic into one file even when they're conceptually "the same feature"; each stage
   lives in its own service's container image and only ever imports its own stage's file.
 
@@ -853,7 +864,7 @@ uv pip install --python .venv/bin/python3 -e ../../libs/waddle_transports
 ```
 
 Proven end to end, from a from-scratch `.venv` (not a pre-existing one): `core/svc_process`'s
-`bot_process` bundle suite — `tests/test_bundles_bot_process.py` — 37 passed; `core/svc_action`'s
+`bot_process` bundle suite — `tests/test_builtin_bot_process.py` — 37 passed; `core/svc_action`'s
 `discord_send_action`/`twitch_send_action` suites — 22 passed, 1 skipped (the 1 skip is an
 opportunistic live-token check that always skips in CI/sandboxes, by design, per §6 Coverage row).
 

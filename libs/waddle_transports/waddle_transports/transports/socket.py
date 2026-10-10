@@ -18,7 +18,7 @@ object under `"data"` when it succeeds).
 or Slack Socket Mode's own application-level protocol (opcodes,
 heartbeat/ACK cycles, session resume, sequence-number tracking). A
 connector needing that owns its own protocol logic on top of this
-primitive's raw frame stream, exactly like `bundles/discord_send_action.py`
+primitive's raw frame stream, exactly like `builtin_handlers/discord_send_action.py`
 owns its Discord-specific logic instead of routing through a generic HTTP
 primitive (see that module's docstring for the same pattern applied to
 `http`/`grpc`).

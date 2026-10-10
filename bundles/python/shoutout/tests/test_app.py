@@ -45,7 +45,7 @@ def _expected_pseudonym(target: str) -> str:
 
 
 def _scoped(key: str, community: str = "comm-1") -> str:
-    """`fake_host.store` is keyed by `community_kv`'s own `c:<community>:<key>` prefix."""
+    """`fake_host.store` is keyed by `community_kv`'s own `c.<community>.<key>` prefix."""
     return _scoped_key(community, key)
 
 
@@ -505,7 +505,7 @@ def test_shoutout_rejects_invalid_target(fake_host: _FakeHost) -> None:
 def test_shoutout_with_ai_enabled_still_uses_template_and_logs_pending(
     fake_host: _FakeHost,
 ) -> None:
-    fake_host.store[_scoped("submodule:shoutout:ai")] = b"1"
+    fake_host.store[_scoped("submodule.shoutout.ai")] = b"1"
     _run(
         dispatch(
             _sample_envelope("twitch", "shoutout", arg="penguin", is_mod=True),
@@ -589,7 +589,7 @@ def test_enable_then_disable_auto(fake_host: _FakeHost) -> None:
         )
     )
     assert enable.detail == "config_enable_auto"
-    assert fake_host.store[_scoped("submodule:shoutout:auto")] == b"1"
+    assert fake_host.store[_scoped("submodule.shoutout.auto")] == b"1"
 
     disable = _run(
         dispatch(
@@ -597,7 +597,7 @@ def test_enable_then_disable_auto(fake_host: _FakeHost) -> None:
         )
     )
     assert disable.detail == "config_disable_auto"
-    assert _scoped("submodule:shoutout:auto") not in fake_host.store
+    assert _scoped("submodule.shoutout.auto") not in fake_host.store
 
 
 def test_auto_commands_require_enabled_first(fake_host: _FakeHost) -> None:
@@ -845,7 +845,7 @@ def test_enable_ai_denied_on_free_tier(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert result.detail == "config_enable_ai"
     assert "professional" in _last_reply(host)
-    assert _scoped("submodule:shoutout:ai") not in host.store
+    assert _scoped("submodule.shoutout.ai") not in host.store
 
 
 @pytest.mark.parametrize("tier", ["professional", "enterprise"])
@@ -858,7 +858,7 @@ def test_enable_ai_allowed_on_professional_or_above(
         dispatch(_sample_envelope("twitch", "config_enable_ai", is_mod=True), {}, http_client=None)
     )
     assert result.detail == "config_enable_ai"
-    assert host.store[_scoped("submodule:shoutout:ai")] == b"1"
+    assert host.store[_scoped("submodule.shoutout.ai")] == b"1"
     assert "enabled" in _last_reply(host)
 
 
@@ -875,7 +875,7 @@ def test_disable_ai_requires_no_license(monkeypatch: pytest.MonkeyPatch) -> None
         dispatch(_sample_envelope("twitch", "config_disable_ai", is_mod=True), {}, http_client=None)
     )
     assert result.detail == "config_disable_ai"
-    assert _scoped("submodule:shoutout:ai") not in host.store
+    assert _scoped("submodule.shoutout.ai") not in host.store
 
 
 def test_tier_binding_unavailable_degrades_to_free_and_denies(fake_host: _FakeHost) -> None:
@@ -893,7 +893,7 @@ def test_tier_binding_unavailable_degrades_to_free_and_denies(fake_host: _FakeHo
         )
     )
     assert "professional" in _last_reply(fake_host)
-    assert _scoped("submodule:shoutout:ai") not in fake_host.store
+    assert _scoped("submodule.shoutout.ai") not in fake_host.store
 
 
 # -- dispatch(): kv backend failures ----------------------------------------------

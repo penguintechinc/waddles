@@ -1,6 +1,6 @@
 """`!chat-history [list]` / `!channels [list]` -- community chat lookup commands.
 
-Ported from `core/svc_process/bundles/community_chat_process.py`'s two
+Ported from `core/svc_process/builtin_handlers/community_chat_process.py`'s two
 read-only commands into a WASM-component App Bundle. Command recognition
 and grammar (`!chat-history`/`!chat-history list`, `!channels`/`!channels
 list`, via the standard `waddle_sdk.command` grammar) carry over unchanged
