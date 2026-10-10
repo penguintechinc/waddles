@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-death"
-version = "1.0.0"
+version = "1.0.1"
 description = "Streamer Death Counter"
 requires-python = ">=3.13"
 dependencies = []

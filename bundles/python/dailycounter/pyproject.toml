@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-dailycounter"
-version = "1.0.0"
+version = "1.0.1"
 description = "per-community, per-day named counters (!dailycounter add/remove/list, !<name> add/sub/set/reset)"
 requires-python = ">=3.13"
 dependencies = []

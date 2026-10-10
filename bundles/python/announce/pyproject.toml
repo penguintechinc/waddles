@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-announce"
-version = "1.0.2"
+version = "1.0.3"
 description = "`!announce` -> saved per-community announcement messages (get/set/remove/list), kv-only v1. Uses the shared waddle_sdk.command grammar parser (#618) for set/remove/list, with a documented bare-key-read extension for the grammar's own 'unknown option or sub-module' case."
 requires-python = ">=3.13"
 dependencies = []

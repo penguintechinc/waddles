@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-coinflip"
-version = "1.0.2"
+version = "1.0.3"
 description = "`!coinflip`/`!flip` -> a 50/50 coinflip minigame (flip/call heads-or-tails/list/admin cooldown config), kv-only v1, no betting/currency ties. Net-new Waddles content. Uses the shared waddle_sdk.command grammar parser (#618)."
 requires-python = ">=3.13"
 dependencies = []

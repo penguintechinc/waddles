@@ -11,6 +11,10 @@ name: Bundle Hygiene
 #   3. silent-except   -- broad `except Exception: pass/return <default>`
 #                         handlers with no log call (shapes check-no-stubs'
 #                         semgrep layer does not match).
+#   4. badge-truthiness -- `bool(is_mod)` / bare truthiness over a role badge:
+#                         a string badge ("false") is truthy, so a non-mod
+#                         passes the mod gate. Static gate + a behavioural
+#                         suite over every badge-reading bundle.
 #
 # ci-gate.yml aggregates every check-run on the head SHA, so each failure here
 # is fatal to the merge queue with no ci-gate edit. No `paths:` filter on
@@ -34,7 +38,7 @@ concurrency:
 
 jobs:
   bundle-hygiene:
-    name: Bundle hygiene (log PII, manifest permissions, silent except)
+    name: Bundle hygiene (log PII, manifest permissions, silent except, badge gate)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -68,3 +72,12 @@ jobs:
 
       - name: Bundle handlers do not silently swallow broad exceptions
         run: python3 scripts/ci/check-bundle-source-hygiene.py --check silent-except
+
+      - name: Bundle role badges are read as strict booleans (mod-gate bypass)
+        run: python3 scripts/ci/check-bundle-source-hygiene.py --check badge-truthiness
+
+      # Behavioural proof on the real modules: every bundle's gate helper denies hostile
+      # non-boolean badges and admits genuine ones; every transform() forwards a string badge
+      # as a real False. Asserts its own denominators (>=30 bundles, >=20 transforms exercised).
+      - name: Mod gate is behaviourally strict across every badge-reading bundle
+        run: python3 -m pytest scripts/ci/tests/test_bundle_badge_gate.py -v -p no:cacheprovider

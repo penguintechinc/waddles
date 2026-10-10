@@ -35,6 +35,8 @@ use regex::Regex;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::identity::{MentionBinding, MentionRef};
+
 /// Every failure [`tokenize_event`] can raise -- all fail-closed (never a
 /// partial/best-effort tokenization reaches the caller).
 #[derive(Debug, thiserror::Error)]
@@ -308,7 +310,82 @@ fn validate_known_schema(payload: &serde_json::Map<String, Value>) -> Result<(),
 enum SubstTarget {
     Actor,
     JsonField(&'static str),
-    Mention { matched_text: String },
+    Mention {
+        matched_text: String,
+        /// The raw reference this mention stands for -- kept HOST-SIDE only
+        /// (it feeds [`TokenizedEvent::mentions`], never the event handed to
+        /// a bundle) so the `identity` capability can resolve it later.
+        reference: MentionRef,
+    },
+}
+
+/// One free-text mention found by [`scan_mentions`].
+pub(crate) struct ScannedMention {
+    /// The exact text as typed (`<@123>`, `@bob`) -- what gets replaced by a
+    /// `{user:<token>}` placeholder, and the lookup key when tokenization is off.
+    pub matched_text: String,
+    /// The mint key: the numeric platform id, or `handle:<lower-case>`.
+    pub mint_key: String,
+    /// The display handle handed to the mint RPC (empty for a numeric mention).
+    pub mint_handle: String,
+    /// The raw reference, for host-side identity resolution.
+    pub reference: MentionRef,
+}
+
+/// Scans free `text` for structured Discord mentions (`<@id>` / `<@!id>`)
+/// then Twitch/IRC `@handle` mentions, in that order. The single scanner both
+/// [`tokenize_event`] and the untokenized identity path
+/// (`crate::identity::InvocationIdentity::for_untokenized_event`) use, so the
+/// two can never disagree about what counts as a mention.
+pub(crate) fn scan_mentions(text: &str) -> Vec<ScannedMention> {
+    let mut out = Vec::new();
+    let mut discord_spans: Vec<(usize, usize)> = Vec::new();
+    for cap in discord_mention_regex().captures_iter(text) {
+        if let Some(whole) = cap.get(0) {
+            discord_spans.push((whole.start(), whole.end()));
+        }
+        out.push(ScannedMention {
+            matched_text: cap[0].to_string(),
+            mint_key: cap[1].to_string(),
+            mint_handle: String::new(),
+            reference: MentionRef::PlatformId(cap[1].to_string()),
+        });
+    }
+    for cap in twitch_handle_regex().captures_iter(text) {
+        // The `@123` inside a Discord `<@123>` mention is the SAME mention, not
+        // a second `@handle` one: minting a `handle:123` pseudonym for it would
+        // be a redundant (and, for hub-api's later handle resolution, polluting)
+        // second identity for a person the structured mention already names.
+        if let Some(whole) = cap.get(0) {
+            if discord_spans
+                .iter()
+                .any(|(start, end)| whole.start() >= *start && whole.end() <= *end)
+            {
+                continue;
+            }
+        }
+        let handle = cap[1].to_string();
+        out.push(ScannedMention {
+            matched_text: cap[0].to_string(),
+            mint_key: format!("handle:{}", handle.to_ascii_lowercase()),
+            mint_handle: handle.clone(),
+            reference: MentionRef::Handle(handle),
+        });
+    }
+    out
+}
+
+/// The result of a tokenization pass: the bundle-safe event plus the
+/// HOST-SIDE mention bindings (opaque token the bundle was shown -> the raw
+/// reference it stands for). `Debug` is redacted via [`MentionBinding`].
+#[derive(Debug)]
+pub struct TokenizedEvent {
+    /// The event handed to the bundle: every identity replaced by a
+    /// `{user:<token>}` placeholder.
+    pub event: PlatformEvent,
+    /// One binding per mention placeholder inserted into free text. Never
+    /// forwarded to a bundle; consumed by `crate::identity`.
+    pub mentions: Vec<MentionBinding>,
 }
 
 /// Tokenizes `event`: replaces [`PlatformEvent::actor`], every recognized
@@ -327,6 +404,21 @@ pub async fn tokenize_event(
     tenant_id: &str,
     minter: &dyn IdentityMinter,
 ) -> Result<PlatformEvent, TokenizeError> {
+    tokenize_event_with_mentions(event, tenant_id, minter)
+        .await
+        .map(|t| t.event)
+}
+
+/// [`tokenize_event`], additionally returning the host-side
+/// [`MentionBinding`]s the `identity` capability resolves later (the token a
+/// bundle was shown for each free-text mention -> the raw reference it stands
+/// for). Identical tokenization and fail-closed behavior; the bindings are an
+/// extra output, never part of the returned event.
+pub async fn tokenize_event_with_mentions(
+    event: &PlatformEvent,
+    tenant_id: &str,
+    minter: &dyn IdentityMinter,
+) -> Result<TokenizedEvent, TokenizeError> {
     // Closed-schema fail-closed gate -- runs before any other processing,
     // on the untouched input payload. regression: raw display_name leaked
     // to bundle; allowlist was fail-open (sec review 2026-10-03).
@@ -406,26 +498,13 @@ pub async fn tokenize_event(
 
     // Free-text mentions.
     if let Some(Value::String(text)) = payload.get(TEXT_FIELD) {
-        for cap in discord_mention_regex().captures_iter(text) {
-            let id = cap[1].to_string();
+        for m in scan_mentions(text) {
             push_item(
-                id,
-                String::new(),
+                m.mint_key,
+                m.mint_handle,
                 SubstTarget::Mention {
-                    matched_text: cap[0].to_string(),
-                },
-                &mut items,
-                &mut targets,
-            );
-        }
-        for cap in twitch_handle_regex().captures_iter(text) {
-            let handle = cap[1].to_string();
-            let key = format!("handle:{}", handle.to_ascii_lowercase());
-            push_item(
-                key,
-                handle,
-                SubstTarget::Mention {
-                    matched_text: cap[0].to_string(),
+                    matched_text: m.matched_text,
+                    reference: m.reference,
                 },
                 &mut items,
                 &mut targets,
@@ -440,6 +519,7 @@ pub async fn tokenize_event(
     };
 
     let mut new_actor = event.actor.clone();
+    let mut mention_bindings: Vec<MentionBinding> = Vec::new();
     let mut text_accum: Option<String> = payload
         .get(TEXT_FIELD)
         .and_then(Value::as_str)
@@ -464,10 +544,19 @@ pub async fn tokenize_event(
             SubstTarget::JsonField(field) => {
                 payload.insert(field.to_string(), Value::String(token));
             }
-            SubstTarget::Mention { matched_text } => {
+            SubstTarget::Mention {
+                matched_text,
+                reference,
+            } => {
                 if let Some(text) = &mut text_accum {
                     *text = text.replace(&matched_text, &token);
                 }
+                // The bundle sees `{user:<token_val>}`; remember what that
+                // token stands for, host-side only.
+                mention_bindings.push(MentionBinding {
+                    key: token_val.clone(),
+                    reference,
+                });
             }
         }
     }
@@ -476,13 +565,16 @@ pub async fn tokenize_event(
         payload.insert(TEXT_FIELD.to_string(), Value::String(text));
     }
 
-    Ok(PlatformEvent {
-        platform: event.platform.clone(),
-        event_type: event.event_type.clone(),
-        actor: new_actor,
-        payload,
-        occurred_at: event.occurred_at.clone(),
-        source: event.source.clone(),
+    Ok(TokenizedEvent {
+        event: PlatformEvent {
+            platform: event.platform.clone(),
+            event_type: event.event_type.clone(),
+            actor: new_actor,
+            payload,
+            occurred_at: event.occurred_at.clone(),
+            source: event.source.clone(),
+        },
+        mentions: mention_bindings,
     })
 }
 
@@ -991,5 +1083,137 @@ mod tests {
     #[test]
     fn sanitize_mint_key_passes_numeric_platform_ids_through_unchanged() {
         assert_eq!(sanitize_mint_key("12345"), "12345");
+    }
+
+    // ---- host-side mention bindings (identity capability) ----------------
+
+    #[tokio::test]
+    async fn with_mentions_returns_the_identical_event_plus_a_binding_per_mention() {
+        let ev = event(
+            Some("asker"),
+            serde_json::json!({
+                "user_id": "1",
+                "text": "!steal <@123456789012345678> and @SomeViewer",
+            }),
+        );
+        let plain = tokenize_event(&ev, "tenant-1", &FakeMinter).await.unwrap();
+        let with = tokenize_event_with_mentions(&ev, "tenant-1", &FakeMinter)
+            .await
+            .unwrap();
+        // The bundle-visible event is byte-for-byte what `tokenize_event` returns.
+        assert_eq!(with.event.payload, plain.payload);
+        assert_eq!(with.event.actor, plain.actor);
+
+        // One binding per mention: key = the token inside the placeholder the
+        // bundle was shown; reference = the raw thing it stands for.
+        assert_eq!(with.mentions.len(), 2);
+        assert_eq!(with.mentions[0].key, "tok-123456789012345678");
+        assert_eq!(
+            with.mentions[0].reference,
+            MentionRef::PlatformId("123456789012345678".to_string())
+        );
+        assert_eq!(with.mentions[1].key, "tok-handle:someviewer");
+        assert_eq!(
+            with.mentions[1].reference,
+            MentionRef::Handle("SomeViewer".to_string())
+        );
+        // Each key really is the token shown in the text.
+        let text = with
+            .event
+            .payload
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap();
+        for m in &with.mentions {
+            assert!(text.contains(&format!("{{user:{}}}", m.key)), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_mention_bindings_never_leak_into_the_bundle_visible_event() {
+        /// Mints opaque random-looking tokens that embed nothing of the
+        /// platform id, so a leak of the raw id can only come from the event.
+        struct OpaqueMinter;
+        impl IdentityMinter for OpaqueMinter {
+            fn mint_many<'a>(
+                &'a self,
+                _tenant_id: &'a str,
+                items: Vec<MintItem>,
+            ) -> MintResult<'a> {
+                Box::pin(async move {
+                    Ok(items
+                        .into_iter()
+                        .enumerate()
+                        .map(|(n, i)| {
+                            (
+                                i.platform_user_id,
+                                format!("00000000-0000-4000-8000-{n:012}"),
+                            )
+                        })
+                        .collect())
+                })
+            }
+        }
+        let ev = event(
+            Some("asker"),
+            serde_json::json!({
+                "user_id": "1",
+                "text": "hi <@987654321> and @SecretHandleName",
+            }),
+        );
+        let with = tokenize_event_with_mentions(&ev, "tenant-1", &OpaqueMinter)
+            .await
+            .unwrap();
+        let dump = serde_json::to_string(&with.event.payload).unwrap();
+        assert!(!dump.contains("987654321"), "{dump}");
+        assert!(!dump.to_lowercase().contains("secrethandlename"), "{dump}");
+        // And the Debug rendering of the bindings is redacted too.
+        let dbg = format!("{:?}", with.mentions);
+        assert!(!dbg.contains("987654321"), "{dbg}");
+        assert!(!dbg.to_lowercase().contains("secrethandlename"), "{dbg}");
+    }
+
+    #[tokio::test]
+    async fn a_message_with_no_mentions_has_no_bindings() {
+        let ev = event(
+            Some("asker"),
+            serde_json::json!({ "user_id": "1", "text": "!gamble 50" }),
+        );
+        let with = tokenize_event_with_mentions(&ev, "tenant-1", &FakeMinter)
+            .await
+            .unwrap();
+        assert!(with.mentions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_minting_failure_returns_no_bindings_either() {
+        let ev = event(
+            Some("asker"),
+            serde_json::json!({ "user_id": "1", "text": "hi <@123>" }),
+        );
+        assert!(
+            tokenize_event_with_mentions(&ev, "tenant-1", &AlwaysFailMinter)
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn scan_mentions_orders_discord_ids_before_twitch_handles_and_keeps_the_raw_text() {
+        let found = scan_mentions("a @Bob_99 b <@!42> c <@7>");
+        let texts: Vec<_> = found.iter().map(|m| m.matched_text.as_str()).collect();
+        assert_eq!(texts, ["<@!42>", "<@7>", "@Bob_99"]);
+        assert_eq!(found[0].mint_key, "42");
+        assert_eq!(found[2].mint_key, "handle:bob_99");
+        assert_eq!(found[2].mint_handle, "Bob_99");
+        // A role mention is not a user mention.
+        assert!(scan_mentions("<@&555> and <#777>").is_empty());
+        // The `@555` inside `<@555>` is the same mention, not a second
+        // `@handle` one -- but a genuine standalone `@555` elsewhere still is.
+        assert_eq!(scan_mentions("<@555>").len(), 1);
+        let both = scan_mentions("<@555> then @555");
+        assert_eq!(both.len(), 2);
+        assert_eq!(both[0].matched_text, "<@555>");
+        assert_eq!(both[1].matched_text, "@555");
     }
 }
