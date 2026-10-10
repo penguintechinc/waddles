@@ -41,6 +41,7 @@ harmless to bind twice, guarded idempotent).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -55,6 +56,8 @@ from services.current_user import get_current_user_id, get_optional_current_user
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.schema import bind_privacy_tables
+
+logger = logging.getLogger(__name__)
 
 cookie_consent_bp = Blueprint("v1_cookie_consent", __name__, url_prefix="/api/v1/cookie")
 
@@ -465,6 +468,12 @@ async def update_preferences(data: UpdatePreferencesRequest) -> tuple[Any, int]:
             async_dal, dal, user_id=user_id, preferences=preferences
         )
     except ApiError as exc:
+        # PII-free: only the static status/code, never exc.message or the subject id.
+        logger.debug(
+            "cookie_consent.update_preferences rejected: status=%s code=%s",
+            exc.status_code,
+            exc.code,
+        )
         return _err(exc)
     return jsonify_dto(
         ConsentMessageResponse(
