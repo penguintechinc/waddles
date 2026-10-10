@@ -108,6 +108,21 @@ Request timeout for Ollama API calls.
 OLLAMA_TIMEOUT=45
 ```
 
+### OLLAMA_DISABLE_THINKING
+**Type:** Boolean
+**Default:** `true`
+
+Send `think: false` so reasoning models (e.g. gemma4) answer directly instead of spending the whole
+`OLLAMA_MAX_TOKENS` budget on hidden reasoning and returning an empty reply. This module only ever asks
+for plain-text chat replies (no JSON / structured-output params are sent), so it works with text-only
+models. A blank reply is logged with its `done_reason` before the canned fallback is used.
+
+```env
+OLLAMA_DISABLE_THINKING=true
+```
+
+See `docs/testing/ollama-realpath.md` for the env-gated real-Ollama test suite.
+
 ### OLLAMA_CERT_PATH
 **Type:** String
 **Default:** Empty
