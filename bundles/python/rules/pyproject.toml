@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-rules"
-version = "1.0.2"
+version = "1.0.3"
 description = "`!rules` -> shows the community's saved rules text; `!rules set <text>` / `!rules clear` (mod/broadcaster-gated) manage it, stored in kv. Python equivalent of bundles/python/pyping, modeled on its hand-built (not bundle_compiler-routed) structure; uses the shared `waddle_sdk.command` grammar parser (see bundles/python/joke)."
 requires-python = ">=3.13"
 dependencies = []

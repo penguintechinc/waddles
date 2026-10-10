@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-alias"
-version = "1.0.0"
+version = "1.0.1"
 description = "per-community command aliases (!alias set/remove/list, then !<alias> resolves to its target command)"
 requires-python = ">=3.13"
 dependencies = []

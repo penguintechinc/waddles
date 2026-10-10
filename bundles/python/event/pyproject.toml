@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-event"
-version = "1.0.0"
+version = "1.0.1"
 description = "`!event create|list|view` + `!rsvp <id> yes|no` -> light community events and RSVPs in kv (RSVPs keyed by user UUID, never username). Separate from the beta-trio event-sync feature."
 requires-python = ">=3.13"
 dependencies = []

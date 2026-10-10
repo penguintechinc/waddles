@@ -48,6 +48,7 @@ pub mod grant_gate;
 pub mod hop;
 pub mod host_api;
 pub mod http;
+pub mod identity;
 pub mod license;
 pub mod pii_tokenize;
 pub mod source_supervisor;
@@ -72,6 +73,82 @@ pub const SERVICE_NAME: &str = "svc-process";
 /// `MintEphemeralPseudonyms` only; this service never calls
 /// `ResolveDisplayNames`/`GetStreamDek`.
 const HUB_IDENTITY_MINT_SCOPE: &str = "identity:ephemeral:mint";
+
+/// hub-api internal gRPC scope for `IdentityService.ResolveHandle`
+/// (`hub_api/grpc_internal/servicers.py::REQUIRED_SCOPES`) -- requested by the
+/// SECOND, `identity`-capability-only `hub_client::HubClient`
+/// ([`build_hub_handle_client`]); a client is single-scope, so the mint client
+/// above cannot be reused.
+const HUB_IDENTITY_RESOLVE_HANDLE_SCOPE: &str = "identity:handle:resolve";
+
+/// Builds the `hub_client::HubClient` the `identity` capability resolves
+/// free-text `@handle` mentions through (`IdentityService.ResolveHandle`).
+///
+/// **Non-fatal, unlike [`build_hub_client`].** The capability is opt-in and
+/// flag-gated, and the actor and platform-id (`<@123>`) mentions resolve
+/// without hub-api, so a missing/unreachable hub-api only makes free-text
+/// handles `unavailable` (fail-closed, an explicit error to the bundle) -- it
+/// must never stop the stage from starting. Single connect attempt at startup;
+/// a `None` here lasts for the process lifetime and is logged loudly.
+async fn build_hub_handle_client(cli: &config::CliConfig) -> Option<Arc<hub_client::HubClient>> {
+    if cli.hub_api_grpc_endpoint.is_empty() || cli.service_jwt_token_endpoint.is_empty() {
+        tracing::info!(
+            "HUB_API_GRPC_ENDPOINT/SERVICE_JWT_TOKEN_ENDPOINT unset; identity capability \
+             cannot resolve free-text @handle mentions (platform-id mentions and the actor \
+             still resolve)"
+        );
+        return None;
+    }
+    match hub_client::HubClient::connect(
+        cli.hub_api_grpc_endpoint.clone(),
+        cli.service_jwt_token_endpoint.clone(),
+        cli.service_jwt_sa_token_path.clone(),
+        HUB_IDENTITY_RESOLVE_HANDLE_SCOPE,
+        (!cli.hub_api_grpc_ca_file.is_empty()).then_some(cli.hub_api_grpc_ca_file.as_str()),
+    )
+    .await
+    {
+        Ok(client) => {
+            tracing::info!(
+                endpoint = %cli.hub_api_grpc_endpoint,
+                "hub_client (identity:handle:resolve) connected; identity capability can \
+                 resolve free-text @handle mentions"
+            );
+            Some(Arc::new(client))
+        }
+        Err(err) => {
+            tracing::warn!(
+                endpoint = %cli.hub_api_grpc_endpoint,
+                error = %err,
+                "hub_client (identity:handle:resolve) connect failed; identity capability \
+                 cannot resolve free-text @handle mentions until the stage restarts \
+                 (platform-id mentions and the actor still resolve)"
+            );
+            None
+        }
+    }
+}
+
+/// Builds the `identity` bundle host capability's production wiring
+/// (`spine::ProcessDeps::identity_wiring`) over the stage's EXISTING read-only
+/// DB reader connection (`waddles_bundle_reader`, the one the grant loader
+/// already uses -- no new role/password/privilege; it reads the PII-free
+/// `community_member_identities` view, alembic 0052), the optional hub-api
+/// handle resolver, and the `BUNDLE_IDENTITY_CAPABILITY_FLAG` gate (default OFF).
+fn build_identity_wiring(
+    reader: sea_orm::DatabaseConnection,
+    license_client: &Arc<penguin_licensing::LicenseClient>,
+    handle_client: Option<Arc<hub_client::HubClient>>,
+) -> identity::IdentityWiring {
+    identity::IdentityWiring {
+        directory: Arc::new(identity::PgMemberDirectory::new(reader)),
+        handles: handle_client
+            .map(|c| Arc::new(identity::HubHandleResolver(c)) as Arc<dyn identity::HandleResolver>),
+        flag: Arc::new(license::BundleIdentityCapabilityGate::new(Arc::clone(
+            license_client,
+        ))),
+    }
+}
 
 /// Builds and connects the shared `hub_client::HubClient` the inbound
 /// PII-tokenization pass (`crate::pii_tokenize`) needs, or `Ok(None)` when
@@ -681,6 +758,143 @@ async fn try_build_db_wiring(
     }
 }
 
+/// Builds the `reputation` bundle host capability's production wiring
+/// (issue #726, `spine::ProcessDeps::reputation_wiring`): connects to the
+/// shared `waddles` Postgres as the least-privilege
+/// `waddles_bundle_reputation` role (`bundle_host_reputation::connect`,
+/// alembic 0050), spawns the membership-snapshot refresh task that feeds the
+/// gate's production `SnapshotMembership` (the SAME `Arc` the gate was built
+/// with -- `grant_gate::build_production_gate`'s `membership` param), and
+/// gates every call on `BUNDLE_REPUTATION_CAPABILITY_FLAG` (default OFF).
+///
+/// Same two deliberately distinct outcomes as [`try_build_db_wiring`]:
+/// `password` unset is an INFO-level "never opted in" `None`; a configured
+/// password whose connection fails is an ERROR-level `None` (a real outage
+/// must never read as "not configured"). Either way every `reputation.*`
+/// call denies `not_implemented` and the membership snapshot stays empty
+/// (deny-everything) -- fail-closed at both the gate and the capability.
+async fn try_build_reputation_wiring(
+    cfg: &bundle_host_reputation::ConnectConfig,
+    password: Option<&config::Secret>,
+    license_client: &Arc<penguin_licensing::LicenseClient>,
+    membership: Arc<bundle_capability_gate::SnapshotMembership>,
+    refresh_interval: std::time::Duration,
+) -> Option<capabilities::ReputationWiring> {
+    let Some(password) = password else {
+        tracing::info!(
+            "BUNDLE_REPUTATION_PASSWORD not set; reputation capability unavailable (every \
+             reputation host-call will report not_implemented until it is provisioned)"
+        );
+        return None;
+    };
+    match bundle_host_reputation::connect(cfg, password.expose()).await {
+        Ok(conn) => {
+            tracing::info!(
+                host = %cfg.host,
+                port = cfg.port,
+                name = %cfg.name,
+                user = %cfg.user,
+                "reputation capability: connected to the bundle-reputation Postgres role"
+            );
+            tokio::spawn(bundle_host_reputation::run_membership_refresh(
+                conn.clone(),
+                None,
+                membership,
+                refresh_interval,
+            ));
+            Some(capabilities::ReputationWiring {
+                store: Arc::new(bundle_host_reputation::PostgresReputationStore::new(conn)),
+                flag: Arc::new(license::BundleReputationCapabilityGate::new(Arc::clone(
+                    license_client,
+                ))),
+            })
+        }
+        Err(err) => {
+            tracing::error!(
+                host = %cfg.host,
+                port = cfg.port,
+                name = %cfg.name,
+                user = %cfg.user,
+                error = %err,
+                "reputation capability: BUNDLE_REPUTATION_PASSWORD is configured but the \
+                 waddles_bundle_reputation connection failed -- reputation capability \
+                 unavailable (every reputation host-call will report not_implemented); this is \
+                 a misconfiguration or outage, not an intentional opt-out"
+            );
+            None
+        }
+    }
+}
+
+/// Builds the `economy` bundle host capability's production wiring (issue
+/// #714, `spine::ProcessDeps::economy_wiring`): connects to the shared
+/// `waddles` Postgres as the least-privilege `waddles_economy_runtime` role
+/// (`bundle_host_economy::connect`, alembic 0051), spawns the
+/// membership-snapshot refresh task that feeds the gate's production
+/// `SnapshotMembership` (the SAME `Arc` the gate was built with --
+/// `grant_gate::build_production_gate`'s `membership` param), and gates every
+/// call on `BUNDLE_ECONOMY_CAPABILITY_FLAG` (default OFF).
+///
+/// Same two deliberately distinct outcomes as [`try_build_reputation_wiring`]:
+/// `password` unset is an INFO-level "never opted in" `None`; a configured
+/// password whose connection fails is an ERROR-level `None` (a real outage
+/// must never read as "not configured"). Either way every `economy.*` call
+/// denies `not_implemented` and, with no refresher feeding it, the membership
+/// snapshot stays empty (deny-everything) -- fail-closed at both the gate and
+/// the capability.
+async fn try_build_economy_wiring(
+    cfg: &bundle_host_economy::ConnectConfig,
+    password: Option<&config::Secret>,
+    license_client: &Arc<penguin_licensing::LicenseClient>,
+    membership: Arc<bundle_capability_gate::SnapshotMembership>,
+    refresh_interval: std::time::Duration,
+) -> Option<capabilities::EconomyWiring> {
+    let Some(password) = password else {
+        tracing::info!(
+            "BUNDLE_ECONOMY_PASSWORD not set; economy capability unavailable (every economy \
+             host-call will report not_implemented until it is provisioned)"
+        );
+        return None;
+    };
+    match bundle_host_economy::connect(cfg, password.expose()).await {
+        Ok(conn) => {
+            tracing::info!(
+                host = %cfg.host,
+                port = cfg.port,
+                name = %cfg.name,
+                user = %cfg.user,
+                "economy capability: connected to the bundle-economy Postgres role"
+            );
+            tokio::spawn(bundle_host_economy::run_membership_refresh(
+                conn.clone(),
+                None,
+                membership,
+                refresh_interval,
+            ));
+            Some(capabilities::EconomyWiring {
+                store: Arc::new(bundle_host_economy::PostgresEconomyStore::new(conn)),
+                flag: Arc::new(license::BundleEconomyCapabilityGate::new(Arc::clone(
+                    license_client,
+                ))),
+            })
+        }
+        Err(err) => {
+            tracing::error!(
+                host = %cfg.host,
+                port = cfg.port,
+                name = %cfg.name,
+                user = %cfg.user,
+                error = %err,
+                "economy capability: BUNDLE_ECONOMY_PASSWORD is configured but the \
+                 waddles_economy_runtime connection failed -- economy capability unavailable \
+                 (every economy host-call will report not_implemented); this is a \
+                 misconfiguration or outage, not an intentional opt-out"
+            );
+            None
+        }
+    }
+}
+
 /// Builds the `http` bundle capability's shared
 /// [`bundle_host_http::egress::EgressGuard`], wired with the cluster CIDR
 /// denylist and instance-wide private-IP egress policy
@@ -893,6 +1107,22 @@ fn try_start_process_loop(
     };
     let bundle_db_password = config.bundle_db_password.clone();
     let bundle_db_license_client = Arc::clone(&license_client);
+    let bundle_reputation_cfg = bundle_host_reputation::ConnectConfig {
+        host: cli.bundle_reputation_host.clone(),
+        port: cli.bundle_reputation_port,
+        name: cli.bundle_reputation_name.clone(),
+        user: cli.bundle_reputation_user.clone(),
+    };
+    let bundle_reputation_password = config.bundle_reputation_password.clone();
+    let bundle_reputation_refresh = cli.bundle_reputation_membership_refresh();
+    let bundle_economy_cfg = bundle_host_economy::ConnectConfig {
+        host: cli.bundle_economy_host.clone(),
+        port: cli.bundle_economy_port,
+        name: cli.bundle_economy_name.clone(),
+        user: cli.bundle_economy_user.clone(),
+    };
+    let bundle_economy_password = config.bundle_economy_password.clone();
+    let bundle_economy_refresh = cli.bundle_economy_membership_refresh();
 
     tokio::spawn(async move {
         // TODO(M4+): tenant/community scope hardcoded to the tenant-wide
@@ -950,6 +1180,25 @@ fn try_start_process_loop(
             &bundle_db_license_client,
         )
         .await;
+        // One process-wide membership snapshot: the gate reads it, the
+        // reputation wiring's refresh task writes it (empty = fail-closed).
+        let membership = Arc::new(bundle_capability_gate::SnapshotMembership::new());
+        let reputation_wiring = try_build_reputation_wiring(
+            &bundle_reputation_cfg,
+            bundle_reputation_password.as_ref(),
+            &bundle_db_license_client,
+            Arc::clone(&membership),
+            bundle_reputation_refresh,
+        )
+        .await;
+        let economy_wiring = try_build_economy_wiring(
+            &bundle_economy_cfg,
+            bundle_economy_password.as_ref(),
+            &bundle_db_license_client,
+            Arc::clone(&membership),
+            bundle_economy_refresh,
+        )
+        .await;
         // Bundle-permissions-and-capability-gate wiring (spec SS12 Phase 4):
         // `PgGrantLoader` against the RO-replica reader account when
         // `DB_READER_PASSWORD` is configured (the same account the
@@ -969,6 +1218,7 @@ fn try_start_process_loop(
                         grant_gate::PgGrantLoader::new(db),
                         redis_client,
                         cli.bundle_config_poll_interval(),
+                        membership.clone(),
                     ),
                     Err(err) => {
                         tracing::warn!(error = %err, "grant-gate db-reader connection failed; every non-platform permission denies until the next connection attempt");
@@ -976,6 +1226,7 @@ fn try_start_process_loop(
                             bundle_capability_gate::InMemoryGrantLoader::new(),
                             redis_client,
                             cli.bundle_config_poll_interval(),
+                            membership.clone(),
                         )
                     }
                 }
@@ -984,6 +1235,7 @@ fn try_start_process_loop(
                 bundle_capability_gate::InMemoryGrantLoader::new(),
                 redis_client,
                 cli.bundle_config_poll_interval(),
+                membership.clone(),
             ),
         };
 
@@ -1082,6 +1334,14 @@ fn try_start_process_loop(
                 // unconditionally from here.
                 pii_minter: hub_minter.clone(),
                 db_wiring: db_wiring.clone(),
+                reputation_wiring: reputation_wiring.clone(),
+                economy_wiring: economy_wiring.clone(),
+                // The legacy single-bundle path runs at the `(0, 0)` fail-closed
+                // scope (no resolved tenant/community), where every
+                // community-scoped capability -- `identity` included -- refuses
+                // with `invalid_args`; it is wired only on the multi-tenant
+                // path, which holds the resolved scope and the DB reader.
+                identity_wiring: None,
                 // Env-only legacy mode has no `BUNDLE_SCOPE_TENANT_ID`/DB
                 // reader to resolve a real tenant from -- `(0, 0)` fails
                 // closed (denies every non-platform permission) rather than
@@ -1458,6 +1718,25 @@ fn try_start_changelog_consumer(
         user: config.cli.bundle_db_user.clone(),
     };
     let bundle_db_password = config.bundle_db_password.clone();
+    let bundle_reputation_cfg = bundle_host_reputation::ConnectConfig {
+        host: config.cli.bundle_reputation_host.clone(),
+        port: config.cli.bundle_reputation_port,
+        name: config.cli.bundle_reputation_name.clone(),
+        user: config.cli.bundle_reputation_user.clone(),
+    };
+    let bundle_reputation_password = config.bundle_reputation_password.clone();
+    let bundle_reputation_refresh = config.cli.bundle_reputation_membership_refresh();
+    let bundle_economy_cfg = bundle_host_economy::ConnectConfig {
+        host: config.cli.bundle_economy_host.clone(),
+        port: config.cli.bundle_economy_port,
+        name: config.cli.bundle_economy_name.clone(),
+        user: config.cli.bundle_economy_user.clone(),
+    };
+    let bundle_economy_password = config.bundle_economy_password.clone();
+    let bundle_economy_refresh = config.cli.bundle_economy_membership_refresh();
+    // One process-wide membership snapshot: every per-scope gate reads it,
+    // the reputation wiring's refresh task writes it (empty = fail-closed).
+    let membership = Arc::new(bundle_capability_gate::SnapshotMembership::new());
     let config = config.clone();
 
     // Fail loud, never silent (user requirement): this path is only ever
@@ -1517,6 +1796,7 @@ fn try_start_changelog_consumer(
                 // resolves this once, before either drain-loop path starts
                 // (fail-loud if tokenization is enabled and the connect failed).
                 hub_minter.clone(),
+                Arc::clone(&membership),
             )
             .await
             {
@@ -1531,6 +1811,50 @@ fn try_start_changelog_consumer(
                             try_build_db_wiring(&bundle_db_cfg, bundle_db_password.as_ref(), client)
                                 .await
                         }
+                        None => None,
+                    };
+                    // `reputation` host capability (issue #726): same
+                    // license-client dependency as `db` above.
+                    deps.reputation_wiring = match &bundle_db_license_client {
+                        Some(client) => {
+                            try_build_reputation_wiring(
+                                &bundle_reputation_cfg,
+                                bundle_reputation_password.as_ref(),
+                                client,
+                                Arc::clone(&membership),
+                                bundle_reputation_refresh,
+                            )
+                            .await
+                        }
+                        None => None,
+                    };
+                    // `economy` host capability (issue #714): same
+                    // license-client dependency as `reputation` above.
+                    deps.economy_wiring = match &bundle_db_license_client {
+                        Some(client) => {
+                            try_build_economy_wiring(
+                                &bundle_economy_cfg,
+                                bundle_economy_password.as_ref(),
+                                client,
+                                Arc::clone(&membership),
+                                bundle_economy_refresh,
+                            )
+                            .await
+                        }
+                        None => None,
+                    };
+                    // `identity` host capability: reads the stage's own
+                    // read-only DB reader (`db`, the connection the grant
+                    // loader above already shares) -- no new credential --
+                    // and resolves free-text handles through a second,
+                    // single-scope hub-api client. Same license-client
+                    // dependency as the capabilities above.
+                    deps.identity_wiring = match &bundle_db_license_client {
+                        Some(client) => Some(build_identity_wiring(
+                            db.clone(),
+                            client,
+                            build_hub_handle_client(&config.cli).await,
+                        )),
                         None => None,
                     };
                     Some(Arc::new(source_supervisor::SpineConsumerSupervisor {
@@ -1584,6 +1908,7 @@ async fn build_source_supervisor_deps(
     active_digests: Arc<active_digests::ActiveDigests>,
     pii_gate: Arc<dyn license::FeatureGate>,
     pii_minter: Option<Arc<dyn pii_tokenize::IdentityMinter>>,
+    membership: Arc<bundle_capability_gate::SnapshotMembership>,
 ) -> Option<source_supervisor::SupervisorDeps> {
     let Some(keys_raw) = config.envelope_binding_keys.as_ref() else {
         tracing::warn!(
@@ -1616,6 +1941,7 @@ async fn build_source_supervisor_deps(
         grant_gate::PgGrantLoader::new(db),
         redis_client,
         config.cli.bundle_config_poll_interval(),
+        membership,
     );
     let kv_conn = connect_kv(&spine_cfg).await;
 
@@ -1639,6 +1965,9 @@ async fn build_source_supervisor_deps(
         // synchronous/no-I/O" placement as `kv_conn` above -- see
         // `try_start_changelog_consumer`'s own spawned block.
         db_wiring: None,
+        reputation_wiring: None,
+        economy_wiring: None,
+        identity_wiring: None,
     })
 }
 
@@ -1843,6 +2172,8 @@ mod tests {
             envelope_binding_keys: Some(crate::config::Secret::new("k1:aabbcc")),
             db_reader_password: None,
             bundle_db_password: None,
+            bundle_reputation_password: None,
+            bundle_economy_password: None,
         }
     }
 
@@ -1868,6 +2199,7 @@ mod tests {
             Arc::new(active_digests::ActiveDigests::new()),
             Arc::new(license::test_support::FixedGate(true)),
             None,
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
         )
         .await
         .is_none());
@@ -1905,6 +2237,7 @@ mod tests {
             Arc::new(active_digests::ActiveDigests::new()),
             Arc::new(license::test_support::FixedGate(true)),
             None,
+            Arc::new(bundle_capability_gate::SnapshotMembership::new()),
         )
         .await;
         // SAFETY: serialized by ENV_LOCK above.
@@ -2559,6 +2892,81 @@ mod tests {
         assert!(err.to_string().contains("hub-api"));
     }
 
+    /// The identity capability's handle client is OPTIONAL (unlike the minter's):
+    /// unconfigured hub-api env is a quiet `None`, never an error -- actor and
+    /// platform-id mentions resolve without it.
+    #[tokio::test]
+    async fn build_hub_handle_client_is_none_when_hub_api_is_unconfigured() {
+        let cli = CliConfig::parse_from(["svc-process"]);
+        assert_eq!(cli.hub_api_grpc_endpoint, "");
+        assert!(build_hub_handle_client(&cli).await.is_none());
+    }
+
+    /// An unreachable hub-api degrades to `None` (logged, never fatal, never a
+    /// panic): handle mentions become `unavailable`, the stage still starts.
+    #[tokio::test]
+    async fn build_hub_handle_client_is_none_when_hub_api_is_unreachable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral port");
+        let addr = listener.local_addr().expect("local_addr");
+        drop(listener); // nothing listening now -- connection refused
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--hub-api-grpc-endpoint",
+            &format!("http://{addr}"),
+            "--service-jwt-token-endpoint",
+            &format!("http://{addr}/internal/service-token"),
+        ]);
+        assert!(build_hub_handle_client(&cli).await.is_none());
+    }
+
+    /// With a connectable hub-api the handle client is built, with the
+    /// `identity:handle:resolve` scope (a client is single-scope, so it cannot
+    /// be the minter's).
+    #[tokio::test]
+    async fn build_hub_handle_client_connects_to_a_listening_hub_api() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral port");
+        let addr = listener.local_addr().expect("local_addr");
+        tokio::spawn(async move {
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--hub-api-grpc-endpoint",
+            &format!("http://{addr}"),
+            "--service-jwt-token-endpoint",
+            &format!("http://{addr}/internal/service-token"),
+        ]);
+        assert!(build_hub_handle_client(&cli).await.is_some());
+        assert_eq!(
+            HUB_IDENTITY_RESOLVE_HANDLE_SCOPE, "identity:handle:resolve",
+            "must match hub_api/grpc_internal/servicers.py::REQUIRED_SCOPES"
+        );
+        assert_ne!(HUB_IDENTITY_RESOLVE_HANDLE_SCOPE, HUB_IDENTITY_MINT_SCOPE);
+    }
+
+    /// The wiring is built over the stage's own reader connection, with the
+    /// flag gate fail-closed (a never-seen opt-in flag is OFF) and no handle
+    /// resolver unless one was supplied.
+    #[tokio::test]
+    async fn build_identity_wiring_is_fail_closed_by_default() {
+        let reader =
+            sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection();
+        let wiring = build_identity_wiring(reader, &test_license_client(), None);
+        assert!(wiring.handles.is_none());
+        assert!(
+            !wiring.flag.enabled().await,
+            "the identity capability flag must default OFF"
+        );
+    }
+
     #[tokio::test]
     async fn run_healthcheck_succeeds_against_a_live_health_endpoint() {
         // No other test reads/writes `MODULE_PORT`, so this doesn't need
@@ -2573,6 +2981,8 @@ mod tests {
             envelope_binding_keys: None,
             db_reader_password: None,
             bundle_db_password: None,
+            bundle_reputation_password: None,
+            bundle_economy_password: None,
         };
         let state = crate::http::AppState::new(
             config,

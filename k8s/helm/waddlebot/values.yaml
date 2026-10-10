@@ -2775,6 +2775,13 @@ serviceJwt:
       tenant: system
       allowedScopes:
         - "identity:ephemeral:mint"
+        # bundle `identity` host capability (stage-next) -- svc-process resolves
+        # a free-text @handle mention through IdentityService.ResolveHandle
+        # (hub_api/grpc_internal/servicers.py REQUIRED_SCOPES) with a second,
+        # single-scope hub_client. Without this entry hub-api's token endpoint
+        # rejects the scope and handle mentions are `unavailable` (fail-closed);
+        # the actor and <@id> mentions never call hub-api.
+        - "identity:handle:resolve"
         # feature/egress-proxy-service -- required to call core/egress_proxy
         # for any bundle net.http/CONNECT egress.
         - "egress:connect"

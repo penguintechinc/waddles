@@ -18,10 +18,13 @@ use std::collections::HashSet;
 /// vendor-submitted component is never signed under a manifest declaring
 /// `wit-world: connector`"). `StageV1_1` is reserved for when
 /// `docs/wit-stage-v1-1-design.md`'s own per-component Linker isolation
-/// lands; only `Stage`/`Connector` are wired by this task.
+/// lands; `Stage`/`StageNext`/`Connector` are wired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WitWorld {
     Stage,
+    /// `world stage-next` (issue #726): `stage` plus the additive
+    /// `overlay`/`reputation` imports.
+    StageNext,
     Connector,
 }
 

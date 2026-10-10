@@ -24,11 +24,12 @@ use crate::permission::{PermissionId, Quota};
 use crate::quota::{QuotaDenial, QuotaLedger};
 use crate::resource::{
     resolve_kv_key_prefix, resolve_object_prefix, resolve_overlay, resolve_table,
-    AppScopedResource, AuthorizedCall, ResolvedResource, ResourceRef,
+    AppScopedResource, AuthorizedCall, EconomyTarget, ResolvedResource, ResourceRef, ScopeKind,
 };
 use crate::scope::{GrantScopeKey, InvokeScope};
 
 const REPUTATION_AGGREGATE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+const ECONOMY_AGGREGATE_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The gate's held state: a hot-path grant snapshot, a hot-path membership
 /// check, and a quota ledger -- all sync/zero-I/O per spec SS5.5's
@@ -131,7 +132,42 @@ impl CapabilityGate {
                 }
                 ResolvedResource::ReputationTarget(target.clone())
             }
+            ResourceRef::EconomyScoped(target) => {
+                if !family.is_economy_scoped() {
+                    return Err(self.deny(scope, &permission, Denied::ResourceScopeMismatch));
+                }
+                // Every user the call names must be a live community member
+                // (a wager's player, a transfer's sender AND recipient).
+                for user in [target.target_user, target.counterparty]
+                    .into_iter()
+                    .flatten()
+                {
+                    if !self.membership.is_member(scope, user, ScopeKind::Community) {
+                        return Err(self.deny(scope, &permission, Denied::UserNotInScope));
+                    }
+                }
+                ResolvedResource::EconomyTarget(*target)
+            }
         };
+
+        // `economy.*` (issue #714) has its own quota family, so it settles
+        // here and never falls into the reputation-delta/generic arms below.
+        if let ResourceRef::EconomyScoped(target) = &resource {
+            self.check_economy_quota(
+                scope,
+                &permission,
+                &canonical_id,
+                &key,
+                target,
+                &granted.params,
+            )?;
+            audit::record_authorized(scope, &permission);
+            return Ok(AuthorizedCall {
+                permission,
+                resource: resolved,
+                params: granted.params.clone(),
+            });
+        }
 
         // Quota/rate enforcement (spec SS1, SS7.2 steps 2-3, SS7.3). A
         // `reputation.*.write` `adjust()` call (a target with `delta:
@@ -140,7 +176,7 @@ impl CapabilityGate {
         // `Descriptive`, a plain rate limit for `CallsPerWindow`).
         let delta = match &resource {
             ResourceRef::ReputationScoped(target) => target.delta,
-            ResourceRef::AppScoped(_) => None,
+            ResourceRef::AppScoped(_) | ResourceRef::EconomyScoped(_) => None,
         };
 
         if let Some(delta) = delta {
@@ -170,7 +206,7 @@ impl CapabilityGate {
 
             let target_user = match &resource {
                 ResourceRef::ReputationScoped(t) => t.target_user,
-                ResourceRef::AppScoped(_) => {
+                ResourceRef::AppScoped(_) | ResourceRef::EconomyScoped(_) => {
                     unreachable!("delta is only Some for ReputationScoped")
                 }
             };
@@ -227,6 +263,117 @@ impl CapabilityGate {
             resource: resolved,
             params: granted.params.clone(),
         })
+    }
+}
+
+impl CapabilityGate {
+    /// The `economy.*` quota step of [`Self::authorize`] (issue #714).
+    ///
+    /// A call with no metered amount (a read, or `economy.wager`'s `max-bet`)
+    /// takes a plain rate limit and consumes none of the amount aggregates. A money-moving call is checked, in order: the amount is
+    /// positive; it is within the catalog per-call ceiling AND the
+    /// community-declared bound (`params.max_bet` for a wager,
+    /// `params.max_amount` for a transfer -- clamped to the ceiling, never
+    /// above it); the per-user daily aggregate (keyed on the acting
+    /// `target_user`, the sender for a transfer); the per-community daily
+    /// aggregate. Any breach of the first two is `amount_out_of_bounds`, of
+    /// the aggregates `quota_exceeded`. Nothing is consumed by a denied call.
+    fn check_economy_quota(
+        &self,
+        scope: &InvokeScope,
+        permission: &PermissionId,
+        canonical_id: &str,
+        key: &crate::scope::GrantScopeKey,
+        target: &EconomyTarget,
+        params: &serde_json::Value,
+    ) -> Result<(), Denied> {
+        let family = permission.family();
+        let Some(amount) = target.amount else {
+            // An amount-less call (a read, or `max-bet`, which describes the
+            // wager capability's limit without moving money) is rate limited,
+            // never metered against the daily amount aggregates: a family whose
+            // default quota is amount-shaped falls back to the read rate limit.
+            let rate_limit = match permission.default_quota() {
+                Quota::EconomyAmount { .. } => Quota::CallsPerWindow {
+                    max_calls: 20,
+                    window: Duration::from_secs(1),
+                },
+                other => other,
+            };
+            // Distinct ledger key: the quota ledger keys its windows by
+            // `(scope, permission id)` and fixes a window's shape at first use,
+            // so reusing the permission id here would let a metered wager and
+            // an amount-less `max-bet` poison each other's window (found by the
+            // real-path e2e: a `max-bet` after a wager read the stake-sum window
+            // as a call counter and was spuriously `rate_limited`).
+            let calls_key = format!("{canonical_id}#calls");
+            return match self
+                .quota
+                .check_and_consume(key, &calls_key, &rate_limit, 1)
+            {
+                Ok(()) => Ok(()),
+                Err(QuotaDenial::RateLimited) => {
+                    Err(self.deny(scope, permission, Denied::RateLimited))
+                }
+                Err(QuotaDenial::QuotaExceeded) => {
+                    Err(self.deny(scope, permission, Denied::QuotaExceeded))
+                }
+            };
+        };
+        let Quota::EconomyAmount {
+            per_call_abs_max,
+            per_user_daily_abs_max,
+            per_scope_daily_abs_max,
+        } = family.catalog_entry().default_quota
+        else {
+            // Defensive: a money-moving call against a family whose catalog
+            // quota is not EconomyAmount-shaped is a wiring bug -- deny.
+            return Err(self.deny(scope, permission, Denied::AmountOutOfBounds));
+        };
+
+        let Some(bound) = family.economy_amount_bound(params) else {
+            return Err(self.deny(scope, permission, Denied::AmountOutOfBounds));
+        };
+        if amount < 1 || amount > bound {
+            return Err(self.deny(scope, permission, Denied::AmountOutOfBounds));
+        }
+
+        // A money-moving call must name the acting user: without one there
+        // is no per-user aggregate to charge, so fail closed.
+        let Some(acting_user) = target.target_user else {
+            return Err(self.deny(scope, permission, Denied::ResourceScopeMismatch));
+        };
+        if self
+            .quota
+            .check_and_consume_per_user(
+                key,
+                canonical_id,
+                acting_user,
+                per_user_daily_abs_max,
+                ECONOMY_AGGREGATE_WINDOW,
+                amount,
+            )
+            .is_err()
+        {
+            return Err(self.deny(scope, permission, Denied::QuotaExceeded));
+        }
+        if self
+            .quota
+            .check_and_consume(
+                key,
+                canonical_id,
+                &Quota::EconomyAmount {
+                    per_call_abs_max,
+                    per_user_daily_abs_max,
+                    per_scope_daily_abs_max,
+                },
+                amount,
+            )
+            .is_err()
+        {
+            return Err(self.deny(scope, permission, Denied::QuotaExceeded));
+        }
+        Ok(())
     }
 }
 
@@ -775,6 +922,126 @@ mod tests {
         assert_eq!(err, Denied::RateLimited);
     }
 
+    /// `identity.resolve` is a plain AppScoped/None family: granted =>
+    /// authorized with no derived resource; ungranted => `not_granted`
+    /// (fail-closed, a bundle that never declared it can never resolve an
+    /// identity); a wrong resource shape => `resource_scope_mismatch`.
+    #[test]
+    fn identity_resolve_authorizes_only_when_granted_and_with_the_none_resource() {
+        let snapshot = InMemoryGrantSnapshot::new();
+        snapshot.set(
+            GrantScopeKey::from_scope(&scope()),
+            grants(&[("identity.resolve", serde_json::json!({}))]),
+        );
+        let gate = gate_with(Arc::new(snapshot));
+        let call = gate
+            .authorize(
+                &scope(),
+                PermissionId::IdentityResolve,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .expect("granted");
+        assert_eq!(call.resource, ResolvedResource::None);
+
+        let err = gate
+            .authorize(
+                &scope(),
+                PermissionId::IdentityResolve,
+                ResourceRef::AppScoped(AppScopedResource::KvState),
+            )
+            .unwrap_err();
+        assert_eq!(err, Denied::ResourceScopeMismatch);
+
+        // A reputation-shaped target is not valid for this family either.
+        let err = gate
+            .authorize(
+                &scope(),
+                PermissionId::IdentityResolve,
+                ResourceRef::ReputationScoped(ReputationTarget {
+                    target_user: Uuid::new_v4(),
+                    scope_kind: ScopeKind::Community,
+                    delta: None,
+                }),
+            )
+            .unwrap_err();
+        assert_eq!(err, Denied::ResourceScopeMismatch);
+    }
+
+    #[test]
+    fn identity_resolve_without_a_grant_is_denied_not_granted() {
+        let snapshot = InMemoryGrantSnapshot::new();
+        // Holding every OTHER capability must not imply identity.resolve.
+        snapshot.set(
+            GrantScopeKey::from_scope(&scope()),
+            grants(&[
+                ("economy.read", serde_json::json!({})),
+                ("reputation.read", serde_json::json!({})),
+            ]),
+        );
+        let gate = gate_with(Arc::new(snapshot));
+        let err = gate
+            .authorize(
+                &scope(),
+                PermissionId::IdentityResolve,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .unwrap_err();
+        assert_eq!(err, Denied::NotGranted);
+    }
+
+    #[test]
+    fn identity_resolve_is_rate_limited_to_twenty_calls_per_second() {
+        let snapshot = InMemoryGrantSnapshot::new();
+        snapshot.set(
+            GrantScopeKey::from_scope(&scope()),
+            grants(&[("identity.resolve", serde_json::json!({}))]),
+        );
+        let gate = gate_with(Arc::new(snapshot));
+        for n in 0..20 {
+            assert!(
+                gate.authorize(
+                    &scope(),
+                    PermissionId::IdentityResolve,
+                    ResourceRef::AppScoped(AppScopedResource::None),
+                )
+                .is_ok(),
+                "call {n} within the window must be allowed"
+            );
+        }
+        let err = gate
+            .authorize(
+                &scope(),
+                PermissionId::IdentityResolve,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .unwrap_err();
+        assert_eq!(err, Denied::RateLimited);
+    }
+
+    /// An instance-wide deny of the family overrides even a live grant.
+    #[test]
+    fn identity_resolve_honors_an_instance_wide_deny() {
+        let snapshot = InMemoryGrantSnapshot::new();
+        snapshot.set(
+            GrantScopeKey::from_scope(&scope()),
+            grants(&[("identity.resolve", serde_json::json!({}))]),
+        );
+        let policy = InMemoryInstancePolicySnapshot::new();
+        policy.set(
+            crate::permission::PermissionFamily::IdentityResolve,
+            InstanceAction::Deny,
+        );
+        let gate = gate_with_policy(Arc::new(snapshot), Arc::new(policy));
+        let err = gate
+            .authorize(
+                &scope(),
+                PermissionId::IdentityResolve,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .unwrap_err();
+        assert_eq!(err, Denied::InstanceDenied);
+    }
+
     /// Revoked/stale grant version test: a `GrantCache` refreshed for
     /// version 1, then `invalidate`d (simulating a push-invalidation
     /// revocation landing mid-connection, spec SS5.3), denies the very next
@@ -933,3 +1200,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "gate_economy_tests.rs"]
+mod economy_tests;

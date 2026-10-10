@@ -99,7 +99,7 @@ def _is_privileged(event: PlatformEvent) -> bool:
     if not isinstance(is_mod, bool) and not isinstance(is_broadcaster, bool):
         log.debug("vote.role_info_unavailable", platform=event.platform)
         return False
-    return bool(is_mod) or bool(is_broadcaster)
+    return is_mod is True or is_broadcaster is True
 
 
 def _standings(state: dict[str, Any]) -> str:

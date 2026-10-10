@@ -1,73 +1,96 @@
 # poll (Python)
 
-`!poll` -- chat-command community polls over the shared `community_polls` / `poll_options` /
-`poll_votes` tables (migration 028; the same tables `hub_api/blueprints/v1/community_polls.py`'s
-REST API reads and writes). First-party (`provider: builtin`, `app_id: waddles.core.example.poll`,
-`author: PenguinTech/waddles`, Apache-2.0), **original Waddles content**: a strangler extraction of
-the bot_process monolith's `core/svc_process/bundles/community_polls_process.py` -- not a
-third-party port, so no upstream attribution applies.
+`!poll` -- community polls in chat: moderators create a poll with up to 10 options, anyone votes by
+number, moderators close it and the final results are posted. First-party (`provider: builtin`,
+`app_id: waddles.core.example.poll`, `author: PenguinTech/waddles`, Apache-2.0), **original Waddles
+content**: a strangler extraction of the bot_process monolith's
+`core/svc_process/builtin_handlers/community_polls_process.py` -- not a third-party port, so no
+upstream attribution applies.
 
-> **STATUS: not buildable / not testable on `release/v3.0.X` -- needs a port to the structured
-> `db` API.** `src/app.py` still does `from waddle_sdk.db import DALError, create_dal` (line ~88),
-> but `create_dal()` / `TableProxy` / `AsyncQuerySet` were **removed** from `waddle-sdk`'s `db`
-> module when the structured `insert/get/query/update/delete` capability was wired in
-> (commit `2d404393`; design rule: "no bundle-supplied SQL, ever"). `import app` raises
-> `ImportError: cannot import name 'create_dal'`, so this bundle's own `tests/` cannot even be
-> collected, and a `componentize-py` build of it would fail at the same import. `quote` was ported
-> off the retired facade in `ad38a8f7` (gh-675 tracks `quote` + `chat`; `poll` is the same defect
-> and is **not** listed there). Because the structured `db` interface gives a bundle **exactly one
-> app-owned table** (no `table` parameter, no column-equality filter, no cross-table access), a
-> faithful port is a data-model decision -- not a mechanical swap: either one denormalized
-> app-owned table plus a `community_kv` index (the `quote`/`rank` shape), or a new host capability
-> for the shared poll tables that hub-api's REST API also uses. The behavior below is the
-> **intended** behavior the existing code implements; nothing here has been re-verified by a
-> running test on this branch.
-
-The shared command grammar (`waddle_sdk.command`) has no `create`/`vote`/`close`/`view` verb, so the
-five domain actions map onto its fixed vocabulary:
+**Status (1.0.2): working end to end.** 1.0.0/1.0.1 imported `waddle_sdk.db.create_dal`, which was
+removed when the structured `db` capability landed (gh-675 is the same defect class for `quote`),
+so the bundle could neither load nor build. 1.0.2 is a port onto the structured `db` +
+`community_kv` APIs -- see [Data model](#data-model-db--kv).
 
 ## Commands
 
-| Command | Grammar verb | Who | Behavior |
-|---|---|---|---|
-| `!poll add "title" "opt1" "opt2" ...` | `add` | broadcaster / mod | Creates a poll (title + options). |
-| `!poll set <poll_id> <option_number>` | `set` | anyone | Votes for an option (approval voting: a caller may vote for several options; re-voting for the same option just refreshes `voted_at`). |
-| `!poll remove <poll_id>` | `remove` | broadcaster / mod | **Ends** the poll (`is_active` off) -- never deletes rows. |
-| `!poll list` | `list` | anyone | Lists the community's active polls. |
-| `!poll list <poll_id>` | `list` + 1 arg | anyone | Shows one poll with its per-option tallies. |
+| Command | Who | Behavior |
+|---|---|---|
+| `!poll add "title" "opt1" "opt2" ...` | broadcaster / mod | Creates a poll: title <= 200 chars, **2-10 options** of <= 100 chars each (case-insensitively unique). Replies with the poll id and how to vote. |
+| `!poll set <poll_id> <option_number>` | anyone | Votes for an option. **Approval voting:** you may vote for several options of one poll; voting for the same option again is a no-op ("You already voted for option N on poll P."). |
+| `!poll remove <poll_id>` | broadcaster / mod | **Ends** the poll and posts the final per-option results. Idempotent: closing a closed poll just re-posts its results. Never deletes data. |
+| `!poll list` | anyone | The 10 newest active polls (looked up among the 50 newest). |
+| `!poll list <poll_id>` | anyone | One poll with live counts (or final counts once closed). |
 
-Malformed input (bad quoting, non-numeric id, missing option) replies with the usage line -- never
-silently dropped.
+The shared command grammar (`waddle_sdk.command`) has no `create`/`vote`/`close`/`view` verb, so
+the five domain actions map onto its fixed vocabulary (`add`/`set`/`remove`/`list`). Malformed
+input (bad quoting, non-numeric id, missing option) replies with a usage line -- never silently
+dropped. Poll ids and option numbers are ASCII digits only.
 
 ```text
-mod>    !poll add "Best snack?" "Tacos" "Pizza"
-bot>    (poll created -- reply text lives in src/app.py)
+mod>    !poll add "Best snack?" "Tacos" "Pizza" "Sushi"
+bot>    Poll created! ID: 5
+        Title: Best snack?
+        Options:
+          1. Tacos
+          2. Pizza
+          3. Sushi
+        Vote with: `!poll set 5 <option_number>`
 viewer> !poll set 5 2
-bot>    (vote recorded)
+bot>    Vote recorded for option 2 on poll 5!
+viewer> !poll set 5 2
+bot>    You already voted for option 2 on poll 5.
+viewer> !poll list 5
+bot>    Poll 5: Best snack? [Active]
+          1. Tacos (0 votes)
+          2. Pizza (1 vote)
+          3. Sushi (0 votes)
 mod>    !poll remove 5
-bot>    (poll ended)
+bot>    Poll 5 closed: Best snack?
+        Results:
+          1. Tacos (0 votes)
+          2. Pizza (1 vote)
+          3. Sushi (0 votes)
 ```
-
-## Data model (shared Postgres tables, via the retired DAL facade)
-
-| Table | Used for |
-|---|---|
-| `community_polls` | One row per poll. Creator identity is **never** raw: `created_by` is made nullable by migration 097 and a SHA-256 `created_by_hash` is stored instead. |
-| `poll_options` | One row per option (`sort_order` = display position). |
-| `poll_votes` | One row per `(poll, option, voter)`; the voter is the SHA-256 pseudonym in `ip_hash` (reused column). |
-
-`bundle.yaml` declares `data.tables: [community_polls, poll_options, poll_votes]` -- the non-empty
-list is what grants the `db` capability (no `storage.kv` needed; this bundle never touches `kv`).
 
 ## Permissions (V2 structured)
 
 | Id | Why |
 |---|---|
+| `storage.kv` | The poll id counter, the id -> row index, per-option vote tallies and the one-vote-per-voter markers. |
 | `flags.read` | Reads the `waddles.command-poll` PostHog feature flag via `feature_enabled` to gate the command. |
 
-No egress, no `storage.kv`. Mod gate: `add`/`remove` require a real `is_mod` or `is_broadcaster`
-`True`; **absent** badge fields (e.g. the Discord normalizer today) are **denied** (fail closed).
-`set`/`list` are open to anyone.
+The `db` capability is granted by the manifest's `data.tables: [poll_records]`. No egress.
+
+**Mod gate (fail closed):** `add`/`remove` require a real boolean `is_mod` or `is_broadcaster`
+`True`. A **string** badge such as `"false"` is not trusted (1.0.2 fixed a bypass where
+`bool("false")` let non-moderators create and close polls); badge fields that are absent
+(e.g. a normalizer that emits none) are denied. `set`/`list` are open to anyone.
+
+## Data model (`db` + `kv`)
+
+The structured `db` interface gives a bundle **exactly one app-owned table** (no `table`
+parameter, no column-equality filter), so the three legacy shared tables are replaced by:
+
+- **`poll_records`** (`db`) -- one row per poll: `poll_id` (chat-visible number), `title`,
+  `options` (JSON array), `is_active`, `created_by_hash` (SHA-256 of the creator, never a
+  username) and `results` (final counts, written at close).
+- **`kv`** (`community_kv`, all keys `.`-separated) -- `poll.seq.counter` (atomic id allocation),
+  `poll.rowid.<id>` (id -> row), `poll.tally.<id>.<n>` (atomic per-option counters) and
+  `poll.voted.<id>.<n>.<voter>` (one-vote markers claimed with an atomic `increment`, so two
+  simultaneous identical votes can never both count). Tallies and markers carry a 30-day TTL;
+  **closing a poll snapshots the final counts into `results`**, so closed-poll results are
+  permanent regardless of TTL.
+
+A two-step write that fails half-way is compensated before the error surfaces (an inserted row
+whose index write failed is deleted; a claimed vote marker whose tally increment failed is
+released), so a failure never strands an unreachable poll or a vote that was claimed but never
+counted. A vote landing in the same instant a poll is closed may be excluded from the final
+snapshot -- the snapshot is authoritative.
+
+Scoping: rows and `kv` are per-community. A tenant-wide activation (`community: null`, alpha's
+only shape today) is scoped under the `"0"` sentinel the same way `lurk` and `community_kv` do; an
+empty-string community is a caller bug and raises.
 
 ## Feature flag
 
@@ -77,34 +100,44 @@ No egress, no `storage.kv`. Mod gate: `add`/`remove` require a real `is_mod` or 
 ## Platforms
 
 `consumes` **Twitch** and **Discord** `chat.message` with `command_prefix: ["!poll"]`; replies go
-back to the event's own origin platform + channel. A `community` context is required.
+back to the event's own origin platform + channel.
 
-## Failure semantics (intended)
+## Failure semantics (fail-loud)
 
-Any `db` failure is logged at ERROR, replied to chat with a generic retry message, and re-raised
-(fail loud). **PII:** the voter/creator are only ever persisted as non-reversible SHA-256
-pseudonyms; log lines must carry only `action`/`op`/exception type, never a typed title, option or
-the actor.
+| Condition | Behavior |
+|---|---|
+| Any `kv`/`db` call fails | ERROR `poll.backend_error` (`op` + the error class **name** only), chat reply "polls are temporarily unavailable, try again shortly.", then `RuntimeError`. Exactly one relay. |
+| Corrupt row (bad `options`/`results` JSON, non-boolean `is_active`, closed poll with no snapshot), unparseable tally, non-UTF-8 index | Loud failure (`row_decode`/`tally_decode`/`index_decode`) -- never treated as "not found", never repaired. |
+| Index points at a row `db.get` can no longer find | Loud `index_stale` failure. |
+| Concurrent close | Version-gated; the loser re-reads and reports the winner's snapshot. Exhausting 5 conflict retries is a loud `db_update_retry` failure. |
+| Missing `channel_id`, empty-string community, unknown action | `ValueError`. |
+
+**Logging / PII:** log lines carry only `op`/`action`/option counts/exception class -- never a
+title, option text, argument or the actor. The creator and every voter are stored only as SHA-256
+digests (voters truncated to 64 bits inside the marker key). `tests/test_app.py::TestHygiene`
+drives every command and failure with sentinel strings and asserts their absence.
 
 ## Files
 
 | File | Role |
 |---|---|
-| `bundle.yaml` / `hub-manifest.yaml` | Manifest (+ shared data tables) / hub-api install-pipeline manifest |
-| `src/app.py` | `transform` (recognize + forward badge signal) / `dispatch` (all `db` work + relay) |
+| `bundle.yaml` / `hub-manifest.yaml` | Manifest (+ the one data table) / hub-api install-pipeline manifest |
+| `src/app.py` | `transform` (recognize + forward badge signal) / `dispatch` (all `kv`/`db` work + relay) |
 | `src/_entry_wiring.py` | Static entry wiring (see `pyping`'s) |
-| `tests/` | `test_app.py` + `fake_wit_db.py` -- written against the **retired** raw-SQL facade; stale until the port lands |
+| `tests/` | `test_app.py` + `wit_fake_db.py` (structured in-memory `db` fake; the real `waddle_sdk` runs over a fake `wit_world`) |
 
 ## Test
 
 ```bash
 cd bundles/python/poll
 python3.13 -m venv .venv && . .venv/bin/activate
-pip install pytest==8.3.3 pytest-cov==5.0.0
-pytest --cov=src --cov-branch --cov-report=term-missing
-# CURRENTLY FAILS at collection: ImportError: cannot import name 'create_dal' from 'waddle_sdk.db'
+pip install pytest==8.3.3 pytest-cov mypy==1.14.1 ruff==0.14.1
+pytest --cov=src --cov-branch --cov-report=term-missing   # 122 tests, 100% line + branch
+mypy --strict src
 ```
 
-After the port, the suite should be rebuilt on the structured fake (`wit_fake_db.py`, as `quote`
-and `rank` do) and carry the standard backfill set: mod-gate matrix, corrupt-state loudness,
-PII-free-log regression, flag fail-closed default and `_entry_wiring`.
+The suite covers: the module loads and uses only structured `db` ops (a static guard against any
+retired `waddle_sdk.db` symbol), the full create -> vote -> view -> close lifecycle through
+`transform` -> `dispatch`, the mod-gate matrix including the string-badge bypass, validation
+bounds, every failure and compensation path, tenant-wide scope, per-invocation op budgets
+(<= 64 `kv` / `db` ops), PII-free logs and kv-key charset.

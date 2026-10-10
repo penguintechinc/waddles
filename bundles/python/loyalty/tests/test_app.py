@@ -24,6 +24,7 @@ from waddle_sdk.kv import validate_key
 
 from app import (
     _KNOWN_COMMANDS,
+    _UNAVAILABLE_MSG,
     _USAGE,
     _caller_role_signal,
     _format_adjust_reply,
@@ -128,6 +129,7 @@ def _install(
         get=host.db.get,
         query=host.db.query,
         update=host.db.update,
+        delete=host.db.delete,
         ColumnValue=wit_fake_db.ColumnValue,
         OrderColumn=wit_fake_db.OrderColumn,
         OrderBy_Column=wit_fake_db.OrderBy_Column,
@@ -471,7 +473,8 @@ def test_add_accumulates_onto_an_existing_row(fake_host: _FakeHost) -> None:
     assert "New balance: 35" in _reply_text(fake_host)
 
 
-def test_sub_clamps_at_zero_for_a_first_time_target(fake_host: _FakeHost) -> None:
+def test_sub_against_a_user_with_no_row_writes_nothing(fake_host: _FakeHost) -> None:
+    """A `sub` typo must not create a junk zero-balance row (it would pollute the leaderboard)."""
     result = _run(
         dispatch(
             _sample_envelope("twitch", "sub", target="alice", amount=10, is_mod=True),
@@ -480,7 +483,9 @@ def test_sub_clamps_at_zero_for_a_first_time_target(fake_host: _FakeHost) -> Non
         )
     )
     assert result.detail == "sub"
-    assert "New balance: 0" in _reply_text(fake_host)
+    assert _reply_text(fake_host) == "alice has 0 points; nothing to remove."
+    assert fake_host.db.rows == {}
+    assert not any(op == "insert" for op, _args in fake_host.db.calls)
 
 
 def test_sub_clamps_at_zero_rather_than_going_negative(fake_host: _FakeHost) -> None:
@@ -499,7 +504,10 @@ def test_sub_clamps_at_zero_rather_than_going_negative(fake_host: _FakeHost) -> 
         )
     )
     assert result.detail == "sub"
-    assert "New balance: 0" in _reply_text(fake_host)
+    reply = _reply_text(fake_host)
+    assert "New balance: 0" in reply
+    assert "Removed 5 of 20 points" in reply, "a clamped sub must report what was really removed"
+    assert [r["balance"] for r in fake_host.db.rows.values()] == [0]
 
 
 @pytest.mark.parametrize(
@@ -867,13 +875,13 @@ def test_dispatch_never_logs_the_raw_actor_or_target(fake_host: _FakeHost) -> No
 
 def test_format_adjust_reply_add() -> None:
     assert (
-        _format_adjust_reply("add", "alice", 10, 40)
+        _format_adjust_reply("add", "alice", 10, 30, 40)
         == "Added 10 points to alice. New balance: 40."
     )
 
 
 def test_format_adjust_reply_sub() -> None:
-    text = _format_adjust_reply("sub", "alice", 10, 0)
+    text = _format_adjust_reply("sub", "alice", 10, 10, 0)
     assert text == "Removed 10 points from alice. New balance: 0."
 
 
@@ -905,6 +913,9 @@ _ALLOWED_LOG_FIELDS: dict[str, frozenset[str]] = {
     "loyalty.adjust_denied": frozenset({"command", "role_signal"}),
     "loyalty.backend_error": frozenset({"op", "error"}),
     "loyalty.missing_community": frozenset({"command"}),
+    "loyalty.adjust_amount_out_of_range": frozenset({"command"}),
+    "loyalty.row_creation_busy": frozenset({"command"}),
+    "loyalty.claim_release_failed": frozenset({"error"}),
 }
 
 
@@ -1108,9 +1119,10 @@ def test_corrupt_balance_column_raises_instead_of_rendering_garbage(
     relay_before = len(fake_host.relay_calls)
     with pytest.raises((ValueError, TypeError, RuntimeError)):
         _go(command, target="viewer-1", amount=1, role=True)
-    assert not any(
-        "points" in json.loads(m)["text"] for _p, m in fake_host.relay_calls[relay_before:]
-    )
+    # Never a rendered balance: the only chat output allowed is the generic unavailable notice.
+    assert [
+        json.loads(m)["text"] for _p, m in fake_host.relay_calls[relay_before:]
+    ] == [_UNAVAILABLE_MSG]
 
 
 def test_leaderboard_raises_on_a_corrupt_balance_row(fake_host: _FakeHost) -> None:
@@ -1120,7 +1132,9 @@ def test_leaderboard_raises_on_a_corrupt_balance_row(fake_host: _FakeHost) -> No
     relay_before = len(fake_host.relay_calls)
     with pytest.raises((ValueError, TypeError, RuntimeError)):
         _go("leaderboard")
-    assert len(fake_host.relay_calls) == relay_before
+    assert [
+        json.loads(m)["text"] for _p, m in fake_host.relay_calls[relay_before:]
+    ] == [_UNAVAILABLE_MSG]
 
 
 # -- no silent fallback ------------------------------------------------------------------
@@ -1205,7 +1219,12 @@ def test_leaderboard_is_capped_at_ten_entries(fake_host: _FakeHost) -> None:
     ("args", "expected"),
     [
         ("007 alice", ("add", "alice", 7)),
-        ("+5 alice", ("add", "alice", 5)),
+        ("+5 alice", ("usage", None, None)),
+        ("1_000 alice", ("usage", None, None)),
+        ("٣ alice", ("usage", None, None)),
+        ("1000000000 alice", ("add", "alice", 1_000_000_000)),
+        ("1000000001 alice", ("usage", None, None)),
+        ("99999999999999999999 alice", ("usage", None, None)),
         ("5.5 alice", ("usage", None, None)),
         ("1e3 alice", ("usage", None, None)),
         ("five alice", ("usage", None, None)),

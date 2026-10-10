@@ -1,24 +1,24 @@
 # Privacy & Data Handling
 
-WaddleBot's approach to user data, privacy by design, and GDPR compliance — including the reasoning behind each architectural decision.
+Waddles' approach to user data, privacy by design, and GDPR compliance — including the reasoning behind each architectural decision. This document describes what the `hub_api` implementation actually does; where it and the code disagree, the code is authoritative and this document is the bug.
 
 ---
 
 ## Privacy by Design Principles
 
-WaddleBot applies privacy as a structural property, not an afterthought:
+Waddles applies privacy as a structural property, not an afterthought:
 
 - **Pseudonymization by default** — internal systems route by opaque IDs, never by email or username
 - **Data minimization** — only the fields needed for a given operation are queried and returned
 - **Aggregate-only analytics** — analytics consumers see histograms and counts, never individual rows
-- **Fail-closed auth** — analytics and deletion endpoints require explicit role grants, not opt-out
+- **Fail-closed auth** — every analytics and data-subject endpoint is authenticated; analytics reads require an explicit OIDC scope (`analytics:read`, `community.analytics:admin`, `users:admin`), and erasure additionally re-confirms the password when the account has one
 - **Audit trails without PII** — deletion records store counts and timestamps, not field values
 
 ---
 
 ## Pseudonymous Identifiers
 
-Across most of WaddleBot's internal services, users are referenced by **UUID or integer ID**, not by email or username. This is a deliberate pseudonymization strategy:
+Across most of Waddles' internal services, users are referenced by **UUID or integer ID**, not by email or username. This is a deliberate pseudonymization strategy:
 
 - The **router module**, **analytics core**, and **AI modules** receive and log `hub_user_id` (integer) or `platform_user_id` (platform-specific opaque string like a Discord snowflake) — never an email address
 - **Rate limit keys** use the pattern `ratelimit:{community_id}:{user_id}:{limit_type}:{hour_bucket}` — no PII in Redis keyspace
@@ -36,34 +36,38 @@ This means that if a non-hub service's logs or DB were compromised in isolation,
 
 ### What We Use Cookies For
 
-WaddleBot uses cookies for:
+The backend (`hub_api`) sets exactly three first-party cookies, all `Secure`:
 
-| Cookie | Purpose | Lifetime |
-|--------|---------|---------|
-| `jwt` / auth token | Session authentication | Session / configurable expiry |
-| `XSRF-TOKEN` | CSRF protection | Session |
-| Consent cookie | Records the user's cookie preferences | 12 months |
+| Cookie | Purpose | Attributes | Lifetime |
+|--------|---------|------------|----------|
+| `wb_session` | Session JWT for the browser app (`services/session_cookie.py`) | `HttpOnly`, `SameSite=Lax` — never readable by page script | 24 hours |
+| `waddlebot_consent_id` | Opaque UUID linking the browser to its `cookie_consent` row (`services/cookie_consent_service.py`) | `SameSite=Lax`; readable by page script — it is a grouping id, not a credential | 12 months |
+| `wb_sso_bind` | Binds one SSO login attempt to the browser that started it — a login-CSRF token, not a session credential (`blueprints/v1/sso.py`) | `HttpOnly`, path-scoped to that SSO connection, `SameSite=Lax` (`None` for SAML's cross-site POST) | The sign-in attempt (`state_ttl_s`) |
 
-We do not use third-party tracking cookies, advertising cookies, or analytics cookies that send data to external services.
+There is no separate CSRF cookie: CSRF is mitigated by `SameSite=Lax` on the session cookie (a cross-site request carries neither a bearer header nor the cookie). The browser also keeps the consent choice in `localStorage` (`cookie_consent`) so the banner does not reappear.
+
+**No third-party cookies, no advertising cookies, no browser analytics.** No analytics, session-recording or advertising script is loaded by the web app or the marketing site. The vendor cookies the cookie-policy page used to list (Google Analytics, Mixpanel, Hotjar, Facebook Pixel, Google Ads, LinkedIn) were never set by Waddles and have been removed from the policy. See *Third-Party Services and Analytics* below.
 
 ### Cookie Consent Flow
 
-Users are presented with a cookie consent banner on first visit. The choice is recorded in two places:
+Users are presented with a cookie consent banner on first visit. The choice is recorded in two server-side tables (plus the browser `localStorage` copy above):
 
-- `cookie_consent` table: stores `user_id`, consent type, and timestamp
-- `cookie_audit_log` table: immutable audit record of every consent event (granted, revoked, updated)
+- `cookie_consent` table: one record per consent id — `user_id` (null until the visitor signs in), the `preferences` object (`necessary`, `functional`, `analytics`, `marketing`, `doNotSell`), `consent_version`, `consent_method`, IP address, user agent, and `consented_at` / `updated_at` / `expires_at` (a consent expires after 12 months)
+- `cookie_audit_log` table: one row per consent event — `ACCEPT` (carries the IP address and user agent), `UPDATE` (one row per changed category, with previous and new value) or `REVOKE` — each with the consent version and a timestamp. A failed audit write is raised and counted, never swallowed
 
 Both tables are **retained** by the GDPR data deletion flow (see *What Is Retained* below): the controller must be able to *demonstrate* that consent was obtained (GDPR Art. 5(2) accountability), so the consent record and its change log outlive the data subject's other data.
 
-### "Do Not Track" / Preferences
+### Preferences, Withdrawal and Global Privacy Control
 
-Users can update or withdraw cookie consent at any time from Account Settings. Withdrawing consent revokes non-essential cookies and deletes the consent record from `cookie_consent` (the audit log entry noting the withdrawal is retained for compliance).
+Users can update (`PATCH /api/v1/cookie/preferences`) or withdraw (`DELETE /api/v1/cookie`) consent at any time. **Withdrawing does not delete the consent record**: it resets `functional`, `analytics` and `marketing` to `false` in place and writes a `REVOKE` row to `cookie_audit_log`. Preference writes *merge* over the stored object, so a CCPA/CPRA `doNotSell` opt-out survives a withdrawal or an unrelated update — only an explicit `doNotSell=false` clears it.
+
+A `Sec-GPC: 1` (Global Privacy Control) request header is honoured server-side: it forces `doNotSell` on and `marketing` off regardless of the request body. A missing header is never read as consent. ("Do Not Track" is not a supported signal.)
 
 ---
 
 ## Data Deletion (GDPR Article 17 — Right to Erasure)
 
-Users can request deletion of their personal data via **Account Settings → Data & Privacy → Delete My Data**.
+Users can request deletion of their personal data from the **Your privacy rights** page (`/privacy-rights` → *Delete my data*), which calls `DELETE /api/v1/user/me/data`. An account with a password must re-confirm it; the page tells the user, before they confirm, that linked platform identities and reputation history are kept.
 
 ### What Gets Deleted
 
@@ -97,13 +101,16 @@ UPDATE hub_users SET
   display_name = NULL,
   password_hash = NULL,
   avatar_url   = NULL,
-  is_active    = FALSE
+  email_verification_token = NULL,
+  password_reset_token     = NULL,
+  is_active    = FALSE,
+  updated_at   = now()
 WHERE id = {userId}
 ```
 
 **Reason:** `hub_users.id` is a foreign key referenced by dozens of tables across the schema (community memberships, reputation events, activity records, etc.). A hard delete would require cascading deletes across the entire database or leave orphaned rows — neither is safe at scale.
 
-The retained row contains no PII: the email is a non-identifiable placeholder, and all identifying fields are nulled. This satisfies Article 17.
+The anonymized `hub_users` row contains no PII: the email and username are non-identifiable placeholders, and the display name, avatar, password hash and verification/reset tokens are nulled. Other tables that still hold personal data about the user are listed under *What Is Retained* below — each is a per-table decision recorded there, not an omission.
 
 ### What Is Retained (and Why)
 
@@ -119,8 +126,10 @@ Consent records, the consent change log, the platform audit trail and the deleti
 
 The rows linking a user's Discord ID, Twitch ID, etc. to their `hub_user_id` are kept. This serves two purposes:
 
-- **Account reclaim**: If a user returns and logs in via their platform account, the OAuth flow (`findOrCreateUserFromOAuth`) finds the existing identity link and reconnects them to their original account — including their full reputation history. See *Account Reclaim After Deletion* below.
-- **Platform identity is not WaddleBot PII**: Discord/Twitch user IDs are owned and managed by those platforms. Deleting them from our records does not erase them from the source platform.
+- **Account reclaim**: If a user returns and logs in via their platform account, the OAuth flow (`_find_or_create_user_from_oauth` in `services/oauth_service.py`) finds the existing identity link and reconnects them to their original `hub_user_id` — including their full reputation history. See *Account Reclaim After Deletion* below.
+- **Platform identity belongs to the platform**: Discord/Twitch user IDs are owned and managed by those platforms. Deleting them from our records does not erase them from the source platform.
+
+The retained row is the whole `hub_user_identities` record: `platform`, `platform_user_id`, **`platform_username`**, **`avatar_url`**, `is_primary` and the `linked_at` / `last_used` timestamps. The username and avatar are the platform's public handle and picture and are refreshed from the platform on the user's next login.
 
 The identity link is the only reclaim anchor. The copy of the platform id on `community_members` is not needed for reclaim and **is** cleared by erasure (see §3).
 
@@ -143,17 +152,21 @@ A row linked to a *different* account is never touched, even if it names the sam
 
 This is pinned in code (`COMMUNITY_MEMBER_PII_COLUMNS`) and by `hub_api/tests/test_data_privacy_erasure.py::TestCommunityMemberErasure` / `TestMemberErasureAtomicity`, plus a real-Postgres test against the production trigger (`hub_api/tests/test_dsar_member_erasure_pg_integration.py`). A schema drift that leaves one of these columns unbound fails the erasure loudly (and rolls it back) rather than reporting success with PII left behind.
 
+### Also Not Reached by Self-Service Erasure: `ephemeral_pseudonyms.handle`
+
+Unlinked platform accounts are represented by a pseudonym UUID; the raw platform handle behind it is stored in `ephemeral_pseudonyms.handle`. Self-service erasure does not reach it (there is no `hub_users` row to erase for these accounts). Wiping a handle is an operator/DSAR operation (`identity_resolution_service.erase_pseudonym_handles`, deliberately not exposed on the gRPC surface), recorded in `identity_resolution_events` without PII.
+
 ### Account Reclaim After Deletion
 
 If a user deletes their data and later returns:
 
 1. They log in via a linked platform account (Discord, Twitch, etc.)
-2. `findOrCreateUserFromOAuth()` queries `hub_user_identities` and finds the existing record
-3. The record resolves to the original `hub_user_id`
+2. `_find_or_create_user_from_oauth()` queries `hub_user_identities` by `(platform, platform_user_id)` and finds the retained record
+3. The record resolves to the original `hub_user_id`, and a new session is minted for it
 4. Their reputation score is intact, and the retained membership rows (still keyed by `user_id`) keep their reputation and role; the display name, avatar, bio, social links and platform id on those rows were erased and are **not** restored
-5. The `hub_users` row is updated with fresh profile data from the platform; `is_active` is set back to `true`
+5. The identity row's `platform_username`, `avatar_url` and `last_used` are refreshed from the platform. **The anonymized `hub_users` row is not re-populated and is not re-activated** — it keeps its `deleted_{id}` placeholders and `is_active = false` until the user sets new profile details
 
-The platform identity (Discord snowflake, Twitch ID) acts as the **permanent identity anchor** across the entire account lifecycle — including through deletion and return.
+The platform identity (Discord snowflake, Twitch ID) acts as the **permanent identity anchor** across the entire account lifecycle — including through deletion and return. A login by email never adopts an existing account: an email match with no linked identity is refused with a conflict, so the retained anonymous row cannot be claimed by e-mail.
 
 ### Deletion Audit Trail
 
@@ -203,15 +216,17 @@ Bulk requests return `200` with a per-user `status` (`completed`, `already_done`
 
 ### Who Can See What
 
-| Scenario | Route | What is returned |
-|----------|-------|-----------------|
-| Any user — own stats | `GET /analytics/me/stats` | Their own data only |
-| Any user — own reputation | `GET /analytics/me/reputation` | Their own reputation |
-| Community admin | `GET /analytics/community/:cid/members/:uid/stats` | One member's community activity |
-| Analytics consumer | `GET /analytics/platform/*` | **Aggregates only** — no user rows |
-| Superadmin | `GET /analytics/admin/users/:uid/stats` | Any user's data |
+All routes live under `/api/v1/analytics` (`blueprints/v1/analytics.py`) and go through the tenant middleware first; the OIDC scope, not a role name, decides access.
 
-The `is_analytics_consumer` role is superadmin-granted and provides access **only** to aggregate platform statistics — never to individual user data. This is enforced at the `analytics_core` service level, not just at the route level.
+| Scenario | Route | Required | What is returned |
+|----------|-------|----------|-----------------|
+| Any user — own stats | `GET /me/stats` | Authenticated (self-service, no scope) | Their own data only |
+| Any user — own reputation | `GET /me/reputation` | Authenticated (self-service) | Their own reputation |
+| Community admin | `GET /community/:cid/members/:uid/stats` | `community.analytics:admin`, the community must be in the caller's own tenant, and `:uid` must be a member of it (else `404`) | One member's community activity |
+| Analytics consumer | `GET /platform/*` | `analytics:read` | **Aggregates only** — no user rows. `community-health` additionally requires a Professional plan (flag `waddles.analytics.community_health`; `402` otherwise) |
+| Superadmin | `GET /admin/users/:uid/stats` and `/reputation` | `users:admin` | Any user's data |
+
+`is_analytics_consumer` is a superadmin-granted flag on the user; at token issuance it adds the `analytics:read` scope (the maintainer and admin scope bundles carry it too). It provides access **only** to aggregate platform statistics — never to individual user data. `analytics-core` itself trusts hub-api and performs no tenant or membership check of its own — hub-api is the authorization boundary — so the checks above are enforced in the hub-api route handlers, not "at the analytics_core service level" as an earlier revision of this document claimed.
 
 ### Data Minimization in Analytics Services
 
@@ -246,5 +261,28 @@ Internal service calls (hub → analytics-core, hub → ai-interaction) carry on
 
 ---
 
-*Last updated: 2026-02-26*
+## Data Access and Portability (GDPR Articles 15 and 20)
+
+`GET /api/v1/user/me/data` returns the authenticated user's own data as a JSON attachment (`waddles-data-{id}.json`). The subject is always the JWT's `sub` claim — there is no request parameter that can point it at another account. It is available in **every** tier.
+
+Sources: `account`, `profile`, `linked_identities`, `sessions`, `passkeys`, `message_activity`, `watch_activity`, `chat_messages`, `cookie_consent`, `deletion_requests`. Every source lists its columns explicitly (never `SELECT *`), so the export never contains a password hash, a session token, a passkey public key, or a verification/reset token. A source that fails is reported in the response's `incomplete` list rather than silently omitted — a partial export the subject can see beats a `500`.
+
+---
+
+## Third-Party Services and Analytics
+
+Waddles has **no browser-side analytics**: no analytics SDK, tag manager, session-recording or advertising pixel is bundled in the web app or the marketing site, and nothing sets a cookie for one. (Mixpanel, Google Analytics and Hotjar were listed in the cookie policy in error and are not used.) Usage analytics are computed in-house by `analytics-core` and exposed only as described under *Analytics Data Access*.
+
+The services the platform itself calls with its own credentials:
+
+| Service | Used for | What it receives |
+|---------|----------|------------------|
+| **PostHog** (self-hosted; default host `https://license.penguintech.io`, in-cluster for alpha) | Feature-flag evaluation, **server-side only** (`flask_core.entitlement`; the web app reads resolved flags from `GET /api/v1/flags`, never from PostHog) | The flag key, a `distinct_id` that is the tenant slug (or `tenant:community-id`) and a `tenant` group. No user id, e-mail, username, IP address or message content. No PostHog SDK or key is in the browser. |
+| **License server** (`license.penguintech.io`) | License-tier validation through `penguin-licensing`, as product `waddles` | The license key (as a bearer token) and the product id. No end-user data. |
+| **OAuth / OIDC providers** (Discord, Twitch, …) | Sign-in and account linking | Standard OAuth traffic (client credentials, authorization code). Waddles receives the user's platform id, username, avatar and, where the provider gives one, e-mail. |
+| **OpenTelemetry collector** (deployer-chosen via the standard `OTEL_EXPORTER_OTLP_*` variables) | Logs, metrics and traces | Operational telemetry. The destination is never hard-coded; exception text is kept out of log lines by the `exc_log_audit` CI guard because driver errors can echo row values. |
+
+---
+
+*Last updated: 2026-10-10 — cookies, consent, erasure, data access, analytics access and third-party sections reconciled against `hub_api`; the pseudonymous-identifier, rate-limit and service-to-service sections are unchanged from the earlier revision and have not been re-audited.*
 *See also: [docs/SECURITY.md](SECURITY.md)*

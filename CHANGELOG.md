@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bundle flows with required follow-on work (global uninstall cascade, tenant un-availability cascade, tenant-wide/community
   activation signing + Valkey provisioning, tenant permission restriction invalidations) finish that work before an audit
   failure is raised (`bundle_audit.DeferredAudit`), so fail-loud cannot leave the platform half-changed
+- **Mod-gate bypass in 40 app bundles:** `bool(is_mod)` / `bool(payload.get("is_mod"))` treated the string badge `"false"` as truthy, so a non-moderator whose normalizer emitted a string passed every moderator gate, and `transform()` laundered the string into a real `True` for `dispatch`. All badge reads are now strict identity checks (`is True`, fail closed on anything else); versions bumped. New CI gates: `check-bundle-source-hygiene.py --check badge-truthiness` and `scripts/ci/tests/test_bundle_badge_gate.py`
+- `poll` bundle (1.0.2) was dead (`ImportError: cannot import name 'create_dal'`, so it could neither load nor build); ported onto the structured `db` + `community_kv` APIs (one `poll_records` table, atomic kv tallies and one-vote markers), create/vote/close verified end to end. Refs #675
+- `loyalty` (1.0.3) integrity: atomic first-grant claim (no lost/duplicate rows under concurrency), bounded amounts and a balance cap, accurate clamped replies, no junk rows from `sub`, caller identity normalized like a typed target, orphan-row compensation
+- `inventory` (1.0.3) integrity: `give` no longer destroys the item when the credit fails (refund), per-user directory lock (no lost updates), item-name / distinct-item / quantity bounds, caller identity normalized, orphan-row compensation
+- `wheel` (1.0.3): the storage-failure ERROR log carried the host's free-form error text and, for a corrupt blob, text derived from user-typed options; it now logs a static `op` and the exception class name only
 
 ## [2.2.0] - 2026-04-10
 
