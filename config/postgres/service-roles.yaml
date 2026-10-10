@@ -8,7 +8,7 @@
 #
 # Rendered to SQL by scripts/db/service_roles.py, which is the ONLY place that writes
 # these GRANTs:
-#   * alembic/versions/0048_per_service_db_roles.py   -- creates the roles in the chain
+#   * alembic/versions/0049_per_service_db_roles.py   -- creates the roles in the chain
 #   * migrations/run-alembic.sh                       -- re-asserts them on EVERY migrate
 #                                                        Job run (password rotation, new
 #                                                        tables, drift repair)
@@ -98,6 +98,7 @@ legacy_deny_tables:
   # modules reach hub_users only through the column-scoped grants of their designed mod_*
   # group (031_scoped_database_users.sql); only the legacy hub keeps these (allow_tables).
   - ephemeral_pseudonyms
+  - identity_resolution_events
   - hub_users
   - hub_user_identities
   - hub_admins
@@ -125,7 +126,7 @@ roles:
     deny_tables: [platform_integrations, credential_access_log, module_db_accounts, db_permission_templates]
     views:
       marketplace_catalog: [SELECT]
-    functions: [resolve_identity_uuid]
+    functions: [resolve_identity_uuid, erase_ephemeral_pseudonym_handles]
 
   # ------------------------------------------------------------ data plane (strict)
   waddles_svc_ingest:

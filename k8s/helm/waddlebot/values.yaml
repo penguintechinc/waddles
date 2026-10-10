@@ -293,7 +293,7 @@ infrastructure:
     # rendered into <release>-db-admin (consumed ONLY by the Postgres Deployment's
     # POSTGRES_PASSWORD) and the db-migrate hook Secret -- NOT into waddlebot-secrets,
     # which ~40 pods envFrom. Every other workload connects as ITS OWN least-privilege role
-    # from config/postgres/service-roles.yaml (provisioned by alembic 0048 and re-asserted
+    # from config/postgres/service-roles.yaml (provisioned by alembic 0049 and re-asserted
     # on every db-migrate Job run); see docs/DATABASE_CREDENTIALS.md.
     admin:
       # Operator/ExternalSecret-managed Secret with a POSTGRES_PASSWORD key. Empty =>

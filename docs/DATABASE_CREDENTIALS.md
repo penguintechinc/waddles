@@ -2,19 +2,19 @@
 
 Security findings **H-1** (repo-known DB passwords) and **H-3** (one shared DB superuser).
 Owner of the design: `config/postgres/service-roles.yaml` (catalog) +
-`scripts/db/service_roles.py` (renderer/reconciler) + `alembic/versions/0048_per_service_db_roles.py`.
+`scripts/db/service_roles.py` (renderer/reconciler) + `alembic/versions/0049_per_service_db_roles.py`.
 
 ## What changed
 
 | Before | After |
 |---|---|
 | Every pod `envFrom`'d `waddlebot-secrets`, which carried the database **owner/superuser** (`waddlebot`) as `DATABASE_URL` / `DB_PASS` / `DB_PASSWORD` / `POSTGRES_PASSWORD`, and the shared ConfigMap carried `DB_USER=waddlebot` | The owner credential lives in its own Secret (`<release>-db-admin`), read **only** by the Postgres Deployment and the `db-migrate` hook Job. Every workload connects as its **own** least-privilege LOGIN role |
-| `031_scoped_database_users.sql` and `config/postgres/init.sql` created ~35 LOGIN roles with repo-public `*_dev_changeme` passwords (re-applied by `0005`), including `hub_admin` | `031` has **no passwords**; roles are created `NOLOGIN`. `0048` strips LOGIN + password from every such role on existing databases |
+| `031_scoped_database_users.sql` and `config/postgres/init.sql` created ~35 LOGIN roles with repo-public `*_dev_changeme` passwords (re-applied by `0005`), including `hub_admin` | `031` has **no passwords**; roles are created `NOLOGIN`. `0049` strips LOGIN + password from every such role on existing databases |
 | A pod compromise, or one leaked `envFrom`, was a full database takeover | A pod compromise yields one role confined to its own tables (below) |
 
 The pre-fix chain was reproduced against a real fresh replay: connect as `hub_admin` with the
 repo password, call the `SECURITY DEFINER` `provision_module_db_account(..., custom_grants =>
-ARRAY['ALTER ROLE hub_admin SUPERUSER'])`, and you are superuser. `0048` removes the login and
+ARRAY['ALTER ROLE hub_admin SUPERUSER'])`, and you are superuser. `0049` removes the login and
 revokes `EXECUTE` on the escalation functions (`test_hub_admin_escalation_chain_is_closed`).
 
 ## Role model
@@ -53,7 +53,7 @@ run grants it; `alembic/tests/test_service_roles_catalog.py` fails if the three 
 |---|---|---|
 | Database owner | `<release>-db-admin` / `POSTGRES_PASSWORD` (or `infrastructure.postgresql.admin.existingSecret`) | Postgres Deployment; copied into the `db-migrate` hook Secret `DATABASE_URL` |
 | Service role passwords | `<release>-db-credentials` / `PW_<ROLE_UPPERCASE>` (or `serviceRoles.existingSecret`) | each pod, **only its own key**, via `secretKeyRef`; never `envFrom` |
-| Same passwords, for provisioning | `db-migrate` hook Secret / `WADDLES_DB_SERVICE_ROLE_PASSWORDS` (JSON) + `WADDLES_DEPLOYMENT_TIER` | the `db-migrate` Job (0048 + the every-run reconcile) |
+| Same passwords, for provisioning | `db-migrate` hook Secret / `WADDLES_DB_SERVICE_ROLE_PASSWORDS` (JSON) + `WADDLES_DEPLOYMENT_TIER` | the `db-migrate` Job (0049 + the every-run reconcile) |
 
 Resolution (same policy as every other chart secret): explicit value > existing Secret key (kept
 across upgrades) > generated (**alpha/local only**) > **render fails** (beta/gamma/production).
@@ -82,7 +82,7 @@ Database owner: change `POSTGRES_PASSWORD` in `<release>-db-admin`, then
 ## Burned credentials
 
 The values below are in git history and public to anyone with repo read access. **Treat them as
-compromised**; they are neutralized by `0048` and must never be reused anywhere:
+compromised**; they are neutralized by `0049` and must never be reused anywhere:
 
 * every `<role>_dev_changeme` / `mod_<role>_dev_changeme` in `031_scoped_database_users.sql`, `init.sql`, `docker-compose.yml` (including `hub_admin_dev_changeme`)
 * `dev123` (`waddlebot_dev`) and `kong_db_pass_change_me` (`kong`) from `init.sql`
@@ -103,7 +103,7 @@ never sets it. `config/postgres/init.sql` is mounted only by docker-compose (gua
 
 ## Upgrading an existing cluster
 
-1. Build/deploy the new migrations image (needs `0048`, `scripts/db/service_roles.py`, the catalog).
+1. Build/deploy the new migrations image (needs `0049`, `scripts/db/service_roles.py`, the catalog).
 2. `helm upgrade`: the `pre-upgrade` migrate Job creates the roles and neutralizes the old logins
    **before** pods roll; old pods keep working on the unchanged owner password until they restart.
    The owner password is carried over from `waddlebot-secrets/POSTGRES_PASSWORD` into `<release>-db-admin`
@@ -133,6 +133,6 @@ because the previous chart revision reads them there:
 ## Verifying
 
 * `python3 -m pytest alembic/tests/test_service_roles_catalog.py` -- catalog, password policy, no repo credential in shipped files.
-* `python3 -m pytest alembic/tests/test_0048_per_service_db_roles.py` (needs docker) -- real fresh-replay Postgres: full privilege matrix, cross-service denial, RLS, escalation chain closed, rotation, downgrade round-trip, dev opt-in.
+* `python3 -m pytest alembic/tests/test_0049_per_service_db_roles.py` (needs docker) -- real fresh-replay Postgres: full privilege matrix, cross-service denial, RLS, escalation chain closed, rotation, downgrade round-trip, dev opt-in.
 * `python3 -m pytest k8s/helm/waddlebot/tests/test_db_credential_separation_render.py` -- owner credential confined, one distinct role per workload.
 * `python3 -m pytest alembic/tests/test_chart_credentials_roundtrip.py` (needs docker + helm) -- provisions a fresh DB from the chart-rendered hook Secret, then authenticates as every rendered workload identity.

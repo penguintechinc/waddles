@@ -42,8 +42,8 @@ tables added by later migrations).
 **Downgrade** drops the service roles (privileges revoked via `DROP OWNED BY`). It does
 NOT restore the repo-known passwords -- re-enabling them would re-open H-1.
 
-Revision ID: 0048_per_service_db_roles
-Revises: 0047_builtin_handler_paths
+Revision ID: 0049_per_service_db_roles
+Revises: 0048_identity_forged_uuid
 Create Date: 2026-10-10
 """
 
@@ -57,8 +57,8 @@ from types import ModuleType
 
 from alembic import op
 
-revision = "0048_per_service_db_roles"
-down_revision = "0047_builtin_handler_paths"
+revision = "0049_per_service_db_roles"
+down_revision = "0048_identity_forged_uuid"
 branch_labels = None
 depends_on = None
 
@@ -68,7 +68,7 @@ _SERVICE_ROLES_PATH = Path(__file__).resolve().parents[2] / "scripts" / "db" / "
 
 def _service_roles() -> ModuleType:
     """Import scripts/db/service_roles.py by path (alembic/ is a sibling of scripts/)."""
-    spec = importlib.util.spec_from_file_location("waddles_service_roles_0048", _SERVICE_ROLES_PATH)
+    spec = importlib.util.spec_from_file_location("waddles_service_roles_0049", _SERVICE_ROLES_PATH)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load {_SERVICE_ROLES_PATH}")
     module = importlib.util.module_from_spec(spec)
@@ -86,7 +86,7 @@ def upgrade() -> None:
 
     report = roles.reconcile(conn, catalog, passwords, strict=False)
     _LOG.info(
-        "0048: provisioned %d service roles (%d table grants; skipped groups on %d roles; "
+        "0049: provisioned %d service roles (%d table grants; skipped groups on %d roles; "
         "catalog tables absent on %d roles)",
         len(report.roles_applied),
         sum(report.granted_table_count.values()),
@@ -95,11 +95,11 @@ def upgrade() -> None:
     )
     if dev_mode:
         _LOG.warning(
-            "0048: dev mode -- repo-credential legacy roles left LOGIN-able (local/dev only)"
+            "0049: dev mode -- repo-credential legacy roles left LOGIN-able (local/dev only)"
         )
         return
     neutralized = roles.neutralize_repo_credential_roles(conn)
-    _LOG.info("0048: neutralized %d repo-credential legacy roles", len(neutralized))
+    _LOG.info("0049: neutralized %d repo-credential legacy roles", len(neutralized))
 
 
 def downgrade() -> None:

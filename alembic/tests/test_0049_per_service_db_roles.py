@@ -1,4 +1,4 @@
-"""Real-Postgres tests for 0048_per_service_db_roles (security findings H-1 and H-3).
+"""Real-Postgres tests for 0049_per_service_db_roles (security findings H-1 and H-3).
 
 # regression: H-1 repo-known DB passwords (*_dev_changeme) live on a shared database
 # regression: H-3 every workload connected as the shared database superuser
@@ -63,7 +63,7 @@ roles_mod = load_service_roles_module()
 CATALOG = roles_mod.load_catalog()
 PASSWORDS_ENV = roles_mod.PASSWORDS_ENV
 PRIVS = ("SELECT", "INSERT", "UPDATE", "DELETE")
-PRIOR_REVISION = "0047_builtin_handler_paths"
+PRIOR_REVISION = "0048_identity_forged_uuid"
 
 
 def _connect(db: PgTestDatabase, user: str, password: str) -> Any:
@@ -173,7 +173,7 @@ def pg_db() -> Iterator[PgTestDatabase]:
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
     passwords = throwaway_service_role_passwords()
-    with empty_postgres("0048-roles") as db:
+    with empty_postgres("0049-roles") as db:
         alembic_cli(
             "upgrade",
             "head",
@@ -528,6 +528,27 @@ def test_identity_trigger_function_is_hardened_and_not_directly_callable(
 
 
 @requires_docker
+def test_identity_functions_are_executable_by_hub_api_only(pg_db: PgTestDatabase) -> None:
+    """hub-api calls these directly; EXECUTE is revoked from PUBLIC, so exactly one role has it."""
+    names = ["resolve_identity_uuid", "erase_ephemeral_pseudonym_handles"]
+    with _admin_cursor(pg_db) as cur:
+        cur.execute(
+            "SELECT p.proname, p.oid::regprocedure::text FROM pg_proc p "
+            "WHERE p.proname = ANY(%s) AND p.pronamespace = 'public'::regnamespace",
+            (names,),
+        )
+        found = cur.fetchall()
+        assert {name for name, _ in found} == set(names)
+        for _, signature in found:
+            for role in CATALOG.names:
+                cur.execute(
+                    "SELECT has_function_privilege(%s, %s::regprocedure, 'EXECUTE')",
+                    (role, signature),
+                )
+                assert cur.fetchone()[0] is (role == "waddles_hub_api"), (role, signature)
+
+
+@requires_docker
 def test_credential_rows_flow_only_through_designed_membership(pg_db: PgTestDatabase) -> None:
     """platform_integrations is FORCE-RLS: a legacy pod sees only its designed platforms' rows."""
     with _admin_cursor(pg_db) as cur:
@@ -667,9 +688,9 @@ def test_downgrade_then_upgrade_round_trips(pg_db: PgTestDatabase) -> None:
 
 @requires_docker
 def test_missing_service_role_passwords_fail_the_migration_loudly() -> None:
-    """No password JSON and no dev opt-in => 0048 raises; nothing half-provisioned."""
-    with empty_postgres("0048-nopw") as db:
-        bootstrap_minimal_schema("0048-nopw", db)
+    """No password JSON and no dev opt-in => 0049 raises; nothing half-provisioned."""
+    with empty_postgres("0049-nopw") as db:
+        bootstrap_minimal_schema("0049-nopw", db)
         with pytest.raises(RuntimeError, match="missing a password"):
             alembic_cli("upgrade", "head", dsn=db.dsn, env_overrides={PASSWORDS_ENV: ""})
         with _admin_cursor(db) as cur:
@@ -687,7 +708,7 @@ def test_missing_service_role_passwords_fail_the_migration_loudly() -> None:
 @requires_docker
 def test_dev_opt_in_is_local_only() -> None:
     """The docker-compose opt-in keeps dev logins working and is refused on a shared tier."""
-    with empty_postgres("0048-dev") as db:
+    with empty_postgres("0049-dev") as db:
         dev_env = {PASSWORDS_ENV: "", "WADDLES_DEV_DB_ROLE_PW_SUFFIX": "_dev_changeme"}
         for tier in ("alpha", "beta", "gamma", "production"):
             with pytest.raises(RuntimeError, match="must never reach a shared database"):

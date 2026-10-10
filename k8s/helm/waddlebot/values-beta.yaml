@@ -28,7 +28,7 @@ infrastructure:
     #             kubectl -n waddlebot create secret generic waddlebot-db-credentials \
     #               --from-literal=PW_WADDLES_HUB_API="$(openssl rand -hex 24)" ...   (33 keys)
     # (or point serviceRoles.existingSecret / admin.existingSecret at your own Secret names).
-    # The old repo-public *_dev_changeme passwords are burned and neutralized by alembic 0048.
+    # The old repo-public *_dev_changeme passwords are burned and neutralized by alembic 0049.
     image: postgres:16-bookworm@sha256:a0fd72825431f4b7fd3f9d5def9f370b9c22012f1a9e37ece1a5749b95333fb7
     replicas: 1
     persistence:

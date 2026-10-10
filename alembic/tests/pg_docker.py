@@ -58,7 +58,7 @@ _SERVICE_ROLES_PATH = REPO_ROOT / "scripts" / "db" / "service_roles.py"
 
 
 def load_service_roles_module():  # type: ignore[no-untyped-def]
-    """Import `scripts/db/service_roles.py` by path (shared with 0048 and run-alembic.sh)."""
+    """Import `scripts/db/service_roles.py` by path (shared with 0049 and run-alembic.sh)."""
     spec = importlib.util.spec_from_file_location("waddles_service_roles_tests", _SERVICE_ROLES_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -242,7 +242,7 @@ def migrated_postgres(name_suffix: str) -> Iterator[PgTestDatabase]:
         # `os.environ` beforehand) override it, same as every other env var.
         migration_env = {**os.environ, "DATABASE_URL": db.dsn}
         migration_env.setdefault("DB_READER_PASSWORD", "pg-docker-harness-default-reader-pw")
-        # 0048_per_service_db_roles refuses to provision service roles without
+        # 0049_per_service_db_roles refuses to provision service roles without
         # credentials (fail loud) -- supply a disposable per-role set.
         migration_env.setdefault(
             "WADDLES_DB_SERVICE_ROLE_PASSWORDS", json.dumps(service_role_passwords)
@@ -336,7 +336,7 @@ def alembic_cli(
     Same `DB_READER_PASSWORD` default as `migrated_postgres` above -- an
     `upgrade`/`downgrade` round-trip that crosses 0032_bundle_reader_role.py
     re-runs its (now fail-loud-on-empty) `upgrade()`, and most callers of this
-    helper don't stage their own value. `WADDLES_DB_SERVICE_ROLE_PASSWORDS` (0048)
+    helper don't stage their own value. `WADDLES_DB_SERVICE_ROLE_PASSWORDS` (0049)
     is defaulted the same way; pass `env_overrides` to stage specific values.
     """
     env = {**os.environ, "DATABASE_URL": dsn, **(env_overrides or {})}

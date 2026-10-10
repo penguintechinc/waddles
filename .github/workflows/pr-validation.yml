@@ -341,7 +341,7 @@ jobs:
       # waddles_bundle_reader with no usable password). This generic chain
       # smoke test has no chart/Secret involved, so it needs its own throwaway
       # value -- never a real credential, this DB is destroyed at job end.
-      # H-1/H-3 -- 0048_per_service_db_roles refuses to provision the per-service LOGIN roles
+      # H-1/H-3 -- 0049_per_service_db_roles refuses to provision the per-service LOGIN roles
       # without credentials (fail loud, never a silent skip). This generic chain smoke test has
       # no chart/Secret, so it mints throwaway per-role passwords for this disposable DB.
       - name: alembic upgrade head from empty baseline
@@ -441,7 +441,7 @@ jobs:
           DB_READER_PASSWORD: ci-smoke-test-reader-pw
         run: |
           set -euo pipefail
-          # 0048 re-runs on the second upgrade (and its downgrade drops the roles) -- see the
+          # 0049 re-runs on the second upgrade (and its downgrade drops the roles) -- see the
           # "empty baseline" step above for why the passwords are minted here.
           WADDLES_DB_SERVICE_ROLE_PASSWORDS="$(python3 - <<'PY'
           import json, secrets, string
@@ -500,7 +500,7 @@ jobs:
       # `alembic upgrade head` replay in throwaway containers (docker is preinstalled on
       # ubuntu-latest), then the full privilege matrix, cross-service denial, RLS, the closed
       # hub_admin escalation chain, rotation, downgrade round-trip and the dev opt-in guard
-      # (alembic/tests/test_0048_per_service_db_roles.py), plus the no-docker catalog/password/
+      # (alembic/tests/test_0049_per_service_db_roles.py), plus the no-docker catalog/password/
       # repo-credential guards. No `|| true`: a collected-zero state exits 5 and fails the step.
       - name: Install Helm (chart <-> database credential round trip)
         if: steps.changes.outputs.any == 'true'
@@ -514,7 +514,7 @@ jobs:
           set -euo pipefail
           python3 -m pytest \
             alembic/tests/test_service_roles_catalog.py \
-            alembic/tests/test_0048_per_service_db_roles.py \
+            alembic/tests/test_0049_per_service_db_roles.py \
             alembic/tests/test_chart_credentials_roundtrip.py \
             -v -p no:cacheprovider
 

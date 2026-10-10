@@ -151,7 +151,7 @@ PY
 # ── Reconcile per-service LOGIN roles (H-1 / H-3) ────────────────────────────
 # config/postgres/service-roles.yaml is the single catalog of the least-privilege
 # role each chart workload connects as (never the database owner/superuser this
-# Job runs as). 0048_per_service_db_roles creates them once; this step re-asserts
+# Job runs as). 0049_per_service_db_roles creates them once; this step re-asserts
 # the EXACT catalog on every migrate Job run so (a) a rotated password in the
 # Secret reaches Postgres, (b) tables added by later migrations are granted to the
 # roles that need them, and (c) out-of-band grant drift is repaired. --strict makes

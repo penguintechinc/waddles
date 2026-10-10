@@ -6,7 +6,7 @@
 No database or docker needed -- these run anywhere `pytest` + PyYAML do, and every check
 states its denominator so scanning the wrong directory fails instead of passing vacuously.
 Real-database behaviour (grants, RLS, escalation) lives in
-`test_0048_per_service_db_roles.py`.
+`test_0049_per_service_db_roles.py`.
 """
 
 from __future__ import annotations
