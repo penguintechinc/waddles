@@ -22,14 +22,38 @@
 //! is adopted; it's isolated behind the same client type so callers
 //! (`svc_process`, `svc_action`) don't change either.
 
+pub mod jwt_hardening;
+
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
+use serde_json::{Map, Value};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
+
+use crate::jwt_hardening::{
+    inspect_header, report_outcome, JwtMetrics, JwtRejection, KidPolicy, ALG_LABEL_ABSENT,
+    OUTCOME_OK, REASON_ALG_MISMATCH, REASON_BAD_AUDIENCE, REASON_BAD_ISSUER, REASON_BAD_SIGNATURE,
+    REASON_EXPIRED, REASON_IMMATURE, REASON_INVALID, REASON_INVALID_CLAIM, REASON_MALFORMED,
+    REASON_MISSING_CLAIM, REASON_SCOPE_DENIED, REASON_UNKNOWN_KID, VERIFIER_SERVICE_EDDSA,
+};
+
+/// The ONE algorithm the machine-JWT verifier accepts (RFC 8725
+/// one-alg-per-verifier). Ed25519 per RFC 8037; mirrors
+/// `libs/flask_core/flask_core/service_jwt.py::SERVICE_JWT_ALGORITHM`.
+pub const SERVICE_JWT_ALGORITHM: &str = "EdDSA";
+
+/// Claims every machine JWT must carry -- mirrors the Python verifier's
+/// `require` list. `tenant` is deliberately absent: hub-api only stamps it
+/// for identities bound to a tenant, and non-tenant-aware scopes such as
+/// `egress:connect` are minted without one. When present it must still be a
+/// non-empty string (see [`parse_claims`]).
+const REQUIRED_SERVICE_CLAIMS: [&str; 8] =
+    ["exp", "iat", "nbf", "iss", "aud", "sub", "scope", "jti"];
 
 /// Clock skew tolerance applied to `exp`/`iat`, mirrored from
 /// `libs/flask_core/flask_core/service_jwt.py::CLOCK_SKEW_SECONDS`.
@@ -84,11 +108,22 @@ pub trait TrustBundle: Send + Sync {
     async fn public_key(&self, kid: &str) -> Option<DecodingKey>;
 }
 
-/// Verify a machine JWT's signature, `iss`, `aud`, `exp` (with clock skew)
-/// and `scope` against `trust_bundle`. Returns [`ServiceAuthError::UnknownKeyId`]
-/// for an unrecognized `kid` and [`ServiceAuthError::InvalidToken`] for
-/// every other validation failure -- callers should treat both
-/// identically (401/403), never surface which check failed.
+/// Verify a machine JWT's header, signature, `iss`, `aud`, `exp`/`nbf`/`iat`
+/// (with clock skew), required claims and `scope` against `trust_bundle`.
+/// Returns [`ServiceAuthError::UnknownKeyId`] for an absent or unrecognized
+/// `kid` and [`ServiceAuthError::InvalidToken`] for every other validation
+/// failure -- callers should treat both identically (401/403), never surface
+/// which check failed.
+///
+/// H-2 Phase 0 (RFC 8725), mirroring `ServiceJwtVerifier.verify` in
+/// `libs/flask_core/flask_core/service_jwt.py`: the header is vetted before
+/// any key lookup -- `alg` must be exactly [`SERVICE_JWT_ALGORITHM`] (so
+/// `alg: none`, an HMAC token "signed" with the public key, or any other
+/// algorithm is refused outright), `jku`/`jwk`/`x5u`/`x5c`/`crit` are
+/// refused, and a `kid` outside the pinned charset never reaches the trust
+/// bundle. An empty expected audience or issuer is a misconfiguration and
+/// fails closed. Every call emits `waddles_jwt_verifications_total` with
+/// `verifier=service_eddsa`; nothing logged ever contains token material.
 pub async fn verify(
     token: &str,
     trust_bundle: &dyn TrustBundle,
@@ -96,14 +131,108 @@ pub async fn verify(
     trusted_issuers: &[&str],
     required_scope: &str,
 ) -> Result<ServiceClaims, ServiceAuthError> {
-    let header = jsonwebtoken::decode_header(token)
-        .map_err(|e| ServiceAuthError::InvalidToken(format!("malformed header: {e}")))?;
-    let kid = header.kid.clone();
-    let Some(kid_value) = kid.as_deref() else {
-        return Err(ServiceAuthError::UnknownKeyId(None));
+    verify_with_metrics(
+        JwtMetrics::global(),
+        token,
+        trust_bundle,
+        expected_audience,
+        trusted_issuers,
+        required_scope,
+    )
+    .await
+}
+
+/// [`verify`] against an explicit [`JwtMetrics`] (tests inject an in-memory
+/// meter provider; production goes through the global one).
+pub(crate) async fn verify_with_metrics(
+    metrics: &JwtMetrics,
+    token: &str,
+    trust_bundle: &dyn TrustBundle,
+    expected_audience: &str,
+    trusted_issuers: &[&str],
+    required_scope: &str,
+) -> Result<ServiceClaims, ServiceAuthError> {
+    let started = Instant::now();
+    let mut alg = ALG_LABEL_ABSENT;
+    let result = verify_checked(
+        token,
+        trust_bundle,
+        expected_audience,
+        trusted_issuers,
+        required_scope,
+        &mut alg,
+    )
+    .await;
+    let outcome = match &result {
+        Ok(_) => OUTCOME_OK,
+        Err(failure) => failure.rejection.reason,
     };
-    let Some(key) = trust_bundle.public_key(kid_value).await else {
-        return Err(ServiceAuthError::UnknownKeyId(kid));
+    report_outcome(metrics, VERIFIER_SERVICE_EDDSA, started, alg, outcome);
+    result.map_err(Failure::into_error)
+}
+
+/// A failed verification: the closed-vocabulary rejection plus, for an
+/// unknown `kid`, the (charset-vetted) value to echo in the error.
+struct Failure {
+    rejection: JwtRejection,
+    kid: Option<String>,
+}
+
+impl Failure {
+    fn new(rejection: JwtRejection) -> Self {
+        Self {
+            rejection,
+            kid: None,
+        }
+    }
+
+    fn reason(reason: &'static str, alg: &'static str) -> Self {
+        Self::new(JwtRejection::new(reason, alg))
+    }
+
+    fn into_error(self) -> ServiceAuthError {
+        if self.rejection.reason == REASON_UNKNOWN_KID {
+            ServiceAuthError::UnknownKeyId(self.kid)
+        } else {
+            ServiceAuthError::InvalidToken(format!("rejected ({})", self.rejection.reason))
+        }
+    }
+}
+
+/// Every check of [`verify`], in order, raising the first [`Failure`]. Kept
+/// free of metrics/logging so the policy reads as one sequence; `alg` is
+/// updated as soon as the header yields a label-safe value so even a later
+/// rejection is counted under the right algorithm.
+async fn verify_checked(
+    token: &str,
+    trust_bundle: &dyn TrustBundle,
+    expected_audience: &str,
+    trusted_issuers: &[&str],
+    required_scope: &str,
+    alg: &mut &'static str,
+) -> Result<ServiceClaims, Failure> {
+    // A verifier with nothing to compare against would accept anything that
+    // happens to carry the empty string -- fail closed instead.
+    if expected_audience.is_empty() {
+        return Err(Failure::reason(REASON_BAD_AUDIENCE, ALG_LABEL_ABSENT));
+    }
+    if trusted_issuers.is_empty() || trusted_issuers.iter().any(|issuer| issuer.is_empty()) {
+        return Err(Failure::reason(REASON_BAD_ISSUER, ALG_LABEL_ABSENT));
+    }
+
+    let header = inspect_header(token, &[SERVICE_JWT_ALGORITHM], KidPolicy::Vet).map_err(|r| {
+        *alg = r.alg;
+        Failure::new(r)
+    })?;
+    *alg = "eddsa";
+    let Some(kid) = header.kid else {
+        return Err(Failure::reason(REASON_UNKNOWN_KID, "eddsa"));
+    };
+    let Some(key) = trust_bundle.public_key(&kid).await else {
+        return Err(Failure {
+            rejection: JwtRejection::new(REASON_UNKNOWN_KID, "eddsa"),
+            kid: Some(kid),
+        });
     };
 
     let mut validation = Validation::new(Algorithm::EdDSA);
@@ -115,18 +244,100 @@ pub async fn verify(
     // explicitly; `leeway` above bounds it against issuer/verifier clock
     // skew the same way it already bounds `exp`.
     validation.validate_nbf = true;
-    validation.set_required_spec_claims(&["exp", "iat", "nbf", "iss", "aud", "sub"]);
+    validation.set_required_spec_claims(&["exp", "nbf", "iss", "aud", "sub"]);
 
-    let data = jsonwebtoken::decode::<ServiceClaims>(token, &key, &validation)
-        .map_err(|e| ServiceAuthError::InvalidToken(e.to_string()))?;
+    let data = jsonwebtoken::decode::<Value>(token, &key, &validation)
+        .map_err(|e| Failure::reason(classify_decode_error(e.kind()), "eddsa"))?;
+    let claims = parse_claims(&data.claims, expected_audience, now_secs())
+        .map_err(|reason| Failure::reason(reason, "eddsa"))?;
 
-    if data.claims.scope != required_scope {
-        return Err(ServiceAuthError::InvalidToken(format!(
-            "scope {:?} != required {required_scope:?}",
-            data.claims.scope
-        )));
+    if claims.scope != required_scope {
+        return Err(Failure::reason(REASON_SCOPE_DENIED, "eddsa"));
     }
-    Ok(data.claims)
+    Ok(claims)
+}
+
+/// Map a `jsonwebtoken` failure to a closed `REASON_*` -- never its text.
+fn classify_decode_error(kind: &ErrorKind) -> &'static str {
+    match kind {
+        ErrorKind::ExpiredSignature => REASON_EXPIRED,
+        ErrorKind::ImmatureSignature => REASON_IMMATURE,
+        ErrorKind::InvalidSignature => REASON_BAD_SIGNATURE,
+        ErrorKind::InvalidIssuer => REASON_BAD_ISSUER,
+        ErrorKind::InvalidAudience => REASON_BAD_AUDIENCE,
+        ErrorKind::MissingRequiredClaim(_) => REASON_MISSING_CLAIM,
+        ErrorKind::InvalidClaimFormat(_) | ErrorKind::Json(_) => REASON_INVALID_CLAIM,
+        ErrorKind::InvalidAlgorithm
+        | ErrorKind::InvalidAlgorithmName
+        | ErrorKind::MissingAlgorithm => REASON_ALG_MISMATCH,
+        ErrorKind::InvalidToken | ErrorKind::Base64(_) | ErrorKind::Utf8(_) => REASON_MALFORMED,
+        _ => REASON_INVALID,
+    }
+}
+
+/// Shape-check a signature-verified payload and build [`ServiceClaims`].
+///
+/// `jsonwebtoken` already proved `exp`/`nbf`/`iss`/`aud`/`sub` are present
+/// and valid; this adds what it does not look at: `iat`, `scope`, `jti` and
+/// `tenant`, and that identity-bearing strings are non-empty (an empty `sub`
+/// is "missing" by another name). `aud` may be a string or a list containing
+/// the expected audience -- the library already proved membership.
+fn parse_claims(
+    payload: &Value,
+    expected_audience: &str,
+    now: u64,
+) -> Result<ServiceClaims, &'static str> {
+    let Some(object) = payload.as_object() else {
+        return Err(REASON_INVALID_CLAIM);
+    };
+    for name in REQUIRED_SERVICE_CLAIMS {
+        if object.get(name).is_none_or(Value::is_null) {
+            return Err(REASON_MISSING_CLAIM);
+        }
+    }
+    let iat = unsigned_claim(object, "iat")?;
+    if iat > now.saturating_add(CLOCK_SKEW_SECONDS) {
+        return Err(REASON_IMMATURE);
+    }
+    // `tenant` is optional (see REQUIRED_SERVICE_CLAIMS) but never empty.
+    if object.get("tenant").is_some_and(|tenant| !tenant.is_null()) {
+        non_empty_string_claim(object, "tenant")?;
+    }
+    Ok(ServiceClaims {
+        iss: non_empty_string_claim(object, "iss")?,
+        aud: expected_audience.to_string(),
+        sub: non_empty_string_claim(object, "sub")?,
+        scope: string_claim(object, "scope")?,
+        iat,
+        nbf: unsigned_claim(object, "nbf")?,
+        exp: unsigned_claim(object, "exp")?,
+        jti: non_empty_string_claim(object, "jti")?,
+    })
+}
+
+/// A claim that must be a string (possibly empty, e.g. `scope`).
+fn string_claim(object: &Map<String, Value>, name: &str) -> Result<String, &'static str> {
+    match object.get(name) {
+        Some(Value::String(value)) => Ok(value.clone()),
+        _ => Err(REASON_INVALID_CLAIM),
+    }
+}
+
+/// A claim that must be a string with at least one non-whitespace character.
+fn non_empty_string_claim(object: &Map<String, Value>, name: &str) -> Result<String, &'static str> {
+    let value = string_claim(object, name)?;
+    if value.trim().is_empty() {
+        return Err(REASON_INVALID_CLAIM);
+    }
+    Ok(value)
+}
+
+/// A claim that must be a non-negative JSON integer (NumericDate).
+fn unsigned_claim(object: &Map<String, Value>, name: &str) -> Result<u64, &'static str> {
+    object
+        .get(name)
+        .and_then(Value::as_u64)
+        .ok_or(REASON_INVALID_CLAIM)
 }
 
 /// [`TrustBundle`] backed by hub-api's own JWKS endpoint, refreshed on a
@@ -162,6 +373,14 @@ impl JwksTrustBundle {
         let mut cache = self.cache.write().await;
         cache.clear();
         for entry in jwks.keys {
+            // An empty `x` can never be a real Ed25519 key -- fail the whole
+            // refresh closed rather than cache a key that "verifies" nothing.
+            if entry.x.is_empty() {
+                return Err(ServiceAuthError::InvalidToken(format!(
+                    "bad JWKS entry {}: empty key",
+                    entry.kid
+                )));
+            }
             let key = DecodingKey::from_ed_components(&entry.x).map_err(|e| {
                 ServiceAuthError::InvalidToken(format!("bad JWKS entry {}: {e}", entry.kid))
             })?;
@@ -275,6 +494,8 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
     use jsonwebtoken::{EncodingKey, Header};
     use std::sync::Mutex;
 
@@ -580,7 +801,7 @@ mod tests {
         let err = verify("not-a-jwt", &bundle, "a", &["hub-api"], "s")
             .await
             .unwrap_err();
-        assert!(matches!(err, ServiceAuthError::InvalidToken(m) if m.contains("malformed header")));
+        assert!(matches!(err, ServiceAuthError::InvalidToken(m) if m == "rejected (malformed)"));
     }
 
     #[tokio::test]
@@ -800,5 +1021,685 @@ mod tests {
             ServiceAuthError::Http(_)
         ));
         let _ = std::fs::remove_file(sa);
+    }
+
+    // ---- Phase-0 hardening (RFC 8725) ------------------------------------
+
+    use crate::jwt_hardening::test_support::Capture;
+    use crate::jwt_hardening::{
+        FORBIDDEN_HEADER_PARAMS, REASON_ALG_MISMATCH, REASON_ALG_NONE, REASON_BAD_KID,
+        REASON_FORBIDDEN_HEADER, REASON_NO_KEY,
+    };
+    use serde_json::json;
+
+    const AUD: &str = "waddlebot-internal";
+    const SCOPE: &str = "identity:ephemeral:mint";
+
+    fn b64_json(value: &Value) -> String {
+        URL_SAFE_NO_PAD.encode(value.to_string())
+    }
+
+    /// Sign arbitrary header + claims JSON with key A, so a test controls
+    /// exactly which property of an otherwise validly-signed token is hostile.
+    fn raw_token(header: &Value, claims: &Value) -> String {
+        let message = format!("{}.{}", b64_json(header), b64_json(claims));
+        let signature = jsonwebtoken::crypto::sign(
+            message.as_bytes(),
+            &EncodingKey::from_ed_der(KEY_A_PRIV_DER),
+            Algorithm::EdDSA,
+        )
+        .expect("sign");
+        format!("{message}.{signature}")
+    }
+
+    fn good_header() -> Value {
+        json!({"alg": "EdDSA", "typ": "JWT", "kid": "k1"})
+    }
+
+    fn good_claims() -> Value {
+        let now = now_secs();
+        json!({
+            "iss": "hub-api", "aud": AUD,
+            "sub": "spiffe://penguintech.io/alpha/svc-process",
+            "scope": SCOPE, "iat": now, "nbf": now, "exp": now + 900, "jti": "jti-1",
+        })
+    }
+
+    fn claims_without(name: &str) -> Value {
+        let mut claims = good_claims();
+        claims.as_object_mut().expect("object").remove(name);
+        claims
+    }
+
+    fn claims_with(name: &str, value: Value) -> Value {
+        let mut claims = good_claims();
+        claims[name] = value;
+        claims
+    }
+
+    /// Trust bundle that counts lookups, to prove a hostile header never
+    /// reaches key resolution.
+    struct CountingBundle {
+        inner: StaticTrustBundle,
+        lookups: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl TrustBundle for CountingBundle {
+        async fn public_key(&self, kid: &str) -> Option<DecodingKey> {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            self.inner.public_key(kid).await
+        }
+    }
+
+    fn counting_bundle() -> CountingBundle {
+        let (_enc, dec) = ed25519_keypair();
+        CountingBundle {
+            inner: StaticTrustBundle(Mutex::new(HashMap::from([("k1".to_string(), dec)]))),
+            lookups: AtomicUsize::new(0),
+        }
+    }
+
+    /// Run the real verifier against a capturing meter provider.
+    async fn run(
+        token: &str,
+        bundle: &dyn TrustBundle,
+    ) -> (Result<ServiceClaims, ServiceAuthError>, Capture) {
+        let capture = Capture::new();
+        let result =
+            verify_with_metrics(&capture.metrics, token, bundle, AUD, &["hub-api"], SCOPE).await;
+        (result, capture)
+    }
+
+    /// Assert `token` is refused with exactly `reason`, counted once under
+    /// `alg` / `service_eddsa`, and never reached the trust bundle iff
+    /// `before_lookup`.
+    async fn assert_refused(token: &str, reason: &str, alg: &str, before_lookup: bool) {
+        let bundle = counting_bundle();
+        let (result, capture) = run(token, &bundle).await;
+        let err = result.expect_err(&format!("{reason} must be refused"));
+        match reason {
+            "unknown_kid" => assert!(matches!(err, ServiceAuthError::UnknownKeyId(_)), "{reason}"),
+            _ => assert!(
+                matches!(&err, ServiceAuthError::InvalidToken(m) if *m == format!("rejected ({reason})")),
+                "{reason}: got {err:?}"
+            ),
+        }
+        assert_eq!(
+            capture.count("service_eddsa", alg, reason),
+            1,
+            "{reason}/{alg}"
+        );
+        assert_eq!(capture.total(), 1, "exactly one verification recorded");
+        if before_lookup {
+            assert_eq!(
+                bundle.lookups.load(Ordering::SeqCst),
+                0,
+                "{reason} reached the trust bundle"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_valid_token_is_counted_ok_with_the_eddsa_label() {
+        let bundle = counting_bundle();
+        let (result, capture) = run(&raw_token(&good_header(), &good_claims()), &bundle).await;
+        let claims = result.expect("valid token verifies");
+        assert_eq!(claims.sub, "spiffe://penguintech.io/alpha/svc-process");
+        assert_eq!(claims.aud, AUD);
+        assert_eq!(claims.jti, "jti-1");
+        assert_eq!(capture.count("service_eddsa", "eddsa", "ok"), 1);
+        assert_eq!(capture.total(), 1);
+        let latency = capture.points("waddles_jwt_verification_seconds");
+        assert_eq!(latency.len(), 1);
+        assert_eq!(latency[0].value, 1);
+    }
+
+    #[tokio::test]
+    async fn alg_none_is_rejected_in_every_letter_case_before_key_lookup() {
+        for alg in ["none", "None", "NONE", "nOnE"] {
+            let header = json!({"alg": alg, "typ": "JWT", "kid": "k1"});
+            // Unsigned token: empty signature segment.
+            let token = format!("{}.{}.", b64_json(&header), b64_json(&good_claims()));
+            assert_refused(&token, REASON_ALG_NONE, "none", true).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn alg_none_with_a_real_signature_attached_is_still_rejected() {
+        let header = json!({"alg": "none", "kid": "k1"});
+        assert_refused(
+            &raw_token(&header, &good_claims()),
+            REASON_ALG_NONE,
+            "none",
+            true,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn alg_confusion_hmac_signed_with_the_public_key_is_rejected() {
+        // Classic RS/ES -> HS confusion: the attacker HMACs with the (public)
+        // verification key bytes and relabels the header HS*.
+        for (alg, label) in [
+            (Algorithm::HS256, "hs256"),
+            (Algorithm::HS384, "hs384"),
+            (Algorithm::HS512, "hs512"),
+        ] {
+            let mut header = Header::new(alg);
+            header.kid = Some("k1".into());
+            let token = jsonwebtoken::encode(
+                &header,
+                &base_claims(now_secs()),
+                &EncodingKey::from_secret(KEY_A_PUB_RAW),
+            )
+            .expect("encode");
+            assert_refused(&token, REASON_ALG_MISMATCH, label, true).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn other_asymmetric_algorithms_and_odd_alg_values_are_a_mismatch() {
+        for (alg_json, label) in [
+            (json!("RS256"), "rs256"),
+            (json!("ES256"), "es256"),
+            (json!("PS512"), "ps512"),
+            (json!("eddsa"), "eddsa"),
+            (json!("Ed25519"), "other"),
+            (json!(7), "other"),
+            (json!(["EdDSA"]), "other"),
+            (Value::Null, "absent"),
+        ] {
+            let header = json!({"alg": alg_json, "kid": "k1"});
+            assert_refused(
+                &raw_token(&header, &good_claims()),
+                REASON_ALG_MISMATCH,
+                label,
+                true,
+            )
+            .await;
+        }
+        let header = json!({"kid": "k1"});
+        assert_refused(
+            &raw_token(&header, &good_claims()),
+            REASON_ALG_MISMATCH,
+            "absent",
+            true,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn key_material_headers_are_rejected_even_with_a_valid_signature() {
+        for param in FORBIDDEN_HEADER_PARAMS {
+            let mut header = good_header();
+            header[param] = json!("https://attacker.example/keys");
+            let token = raw_token(&header, &good_claims());
+            assert_refused(&token, REASON_FORBIDDEN_HEADER, "eddsa", true).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn crit_header_is_rejected_whatever_it_names() {
+        let mut header = good_header();
+        header["crit"] = json!(["exp"]);
+        assert_refused(
+            &raw_token(&header, &good_claims()),
+            REASON_FORBIDDEN_HEADER,
+            "eddsa",
+            true,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hostile_kids_never_reach_the_trust_bundle() {
+        for kid in [
+            json!("k1; DROP TABLE"),
+            json!("../../etc/passwd"),
+            json!("k1\nX"),
+            json!(5),
+            json!("k".repeat(65)),
+        ] {
+            let mut header = good_header();
+            header["kid"] = kid;
+            assert_refused(
+                &raw_token(&header, &good_claims()),
+                REASON_BAD_KID,
+                "eddsa",
+                true,
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn absent_and_unknown_kid_are_unknown_kid_and_do_not_leak_a_value() {
+        let bundle = counting_bundle();
+        let header = json!({"alg": "EdDSA"});
+        let (result, capture) = run(&raw_token(&header, &good_claims()), &bundle).await;
+        assert!(matches!(result, Err(ServiceAuthError::UnknownKeyId(None))));
+        assert_eq!(capture.count("service_eddsa", "eddsa", "unknown_kid"), 1);
+        assert_eq!(
+            bundle.lookups.load(Ordering::SeqCst),
+            0,
+            "no kid, no lookup"
+        );
+
+        let header = json!({"alg": "EdDSA", "kid": "rotated-away"});
+        let (result, capture) = run(&raw_token(&header, &good_claims()), &bundle).await;
+        assert!(
+            matches!(&result, Err(ServiceAuthError::UnknownKeyId(Some(k))) if k == "rotated-away")
+        );
+        assert_eq!(capture.count("service_eddsa", "eddsa", "unknown_kid"), 1);
+        assert_eq!(bundle.lookups.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn structurally_broken_tokens_are_malformed_with_no_lookup() {
+        let ok = b64_json(&good_header());
+        let payload = b64_json(&good_claims());
+        for token in [
+            String::new(),
+            "a.b".to_string(),
+            format!("{ok}.{payload}"),
+            format!("{ok}.{payload}.sig.extra"),
+            format!("%%%.{payload}.sig"),
+            format!("{}.{payload}.sig", URL_SAFE_NO_PAD.encode("[1]")),
+        ] {
+            assert_refused(&token, REASON_MALFORMED, "absent", true).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn every_required_claim_missing_is_missing_claim() {
+        for name in REQUIRED_SERVICE_CLAIMS {
+            let token = raw_token(&good_header(), &claims_without(name));
+            assert_refused(&token, REASON_MISSING_CLAIM, "eddsa", false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn null_required_claims_count_as_missing() {
+        for name in ["iat", "scope", "jti", "sub"] {
+            let token = raw_token(&good_header(), &claims_with(name, Value::Null));
+            let bundle = counting_bundle();
+            let (result, capture) = run(&token, &bundle).await;
+            assert!(result.is_err(), "{name}=null must not verify");
+            assert_eq!(capture.total(), 1);
+            assert_eq!(capture.count("service_eddsa", "eddsa", "ok"), 0, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_or_mistyped_identity_claims_are_invalid() {
+        for (name, value) in [
+            ("sub", json!("")),
+            ("sub", json!("   ")),
+            ("sub", json!(12)),
+            ("jti", json!("")),
+            ("scope", json!(["a"])),
+            ("scope", json!(1)),
+            ("iat", json!("now")),
+            ("iat", json!(1.5)),
+            ("iat", json!(-1)),
+        ] {
+            let token = raw_token(&good_header(), &claims_with(name, value.clone()));
+            let bundle = counting_bundle();
+            let (result, capture) = run(&token, &bundle).await;
+            assert!(result.is_err(), "{name}={value} must not verify");
+            assert_eq!(capture.total(), 1);
+            assert_eq!(
+                capture.count("service_eddsa", "eddsa", "ok"),
+                0,
+                "{name}={value}"
+            );
+        }
+        assert_refused(
+            &raw_token(&good_header(), &claims_with("sub", json!(""))),
+            REASON_INVALID_CLAIM,
+            "eddsa",
+            false,
+        )
+        .await;
+        assert_refused(
+            &raw_token(&good_header(), &claims_with("scope", json!(1))),
+            REASON_INVALID_CLAIM,
+            "eddsa",
+            false,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn tenant_is_optional_but_never_empty() {
+        let bundle = counting_bundle();
+        let (absent, _) = run(&raw_token(&good_header(), &good_claims()), &bundle).await;
+        absent.expect("machine tokens without a tenant (egress:connect) still verify");
+
+        let (null, _) = run(
+            &raw_token(&good_header(), &claims_with("tenant", Value::Null)),
+            &bundle,
+        )
+        .await;
+        null.expect("a null tenant is the same as absent");
+
+        let (set, _) = run(
+            &raw_token(&good_header(), &claims_with("tenant", json!("system"))),
+            &bundle,
+        )
+        .await;
+        set.expect("a real tenant verifies");
+
+        for bad in [
+            json!(""),
+            json!("  "),
+            json!(0),
+            json!(["system"]),
+            json!({"slug": "x"}),
+        ] {
+            let token = raw_token(&good_header(), &claims_with("tenant", bad.clone()));
+            assert_refused(&token, REASON_INVALID_CLAIM, "eddsa", false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn issuer_and_audience_are_enforced_not_optional() {
+        assert_refused(
+            &raw_token(&good_header(), &claims_without("iss")),
+            REASON_MISSING_CLAIM,
+            "eddsa",
+            false,
+        )
+        .await;
+        assert_refused(
+            &raw_token(&good_header(), &claims_without("aud")),
+            REASON_MISSING_CLAIM,
+            "eddsa",
+            false,
+        )
+        .await;
+        assert_refused(
+            &raw_token(&good_header(), &claims_with("iss", json!("evil"))),
+            REASON_BAD_ISSUER,
+            "eddsa",
+            false,
+        )
+        .await;
+        assert_refused(
+            &raw_token(&good_header(), &claims_with("aud", json!("other"))),
+            REASON_BAD_AUDIENCE,
+            "eddsa",
+            false,
+        )
+        .await;
+        assert_refused(
+            &raw_token(&good_header(), &claims_with("aud", json!(["a", "b"]))),
+            REASON_BAD_AUDIENCE,
+            "eddsa",
+            false,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_audience_list_containing_the_expected_audience_is_accepted() {
+        let bundle = counting_bundle();
+        let token = raw_token(&good_header(), &claims_with("aud", json!(["other", AUD])));
+        let (result, _) = run(&token, &bundle).await;
+        assert_eq!(
+            result.expect("list aud containing the expected value").aud,
+            AUD
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_expected_audience_or_issuer_fails_closed() {
+        let bundle = counting_bundle();
+        let capture = Capture::new();
+        // A token that would match an empty expectation exactly.
+        let token = raw_token(&good_header(), &claims_with("aud", json!("")));
+        let err = verify_with_metrics(&capture.metrics, &token, &bundle, "", &["hub-api"], SCOPE)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ServiceAuthError::InvalidToken(m) if m == "rejected (bad_audience)"));
+        assert_eq!(capture.count("service_eddsa", "absent", "bad_audience"), 1);
+
+        let token = raw_token(&good_header(), &claims_with("iss", json!("")));
+        for issuers in [&[""][..], &[][..], &["hub-api", ""][..]] {
+            let err = verify_with_metrics(&capture.metrics, &token, &bundle, AUD, issuers, SCOPE)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, ServiceAuthError::InvalidToken(m) if m == "rejected (bad_issuer)")
+            );
+        }
+        assert_eq!(capture.count("service_eddsa", "absent", "bad_issuer"), 3);
+        assert_eq!(bundle.lookups.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn time_claims_are_enforced_with_a_bounded_skew() {
+        let now = now_secs();
+        assert_refused(
+            &raw_token(&good_header(), &claims_with("exp", json!(now - 3600))),
+            REASON_EXPIRED,
+            "eddsa",
+            false,
+        )
+        .await;
+        assert_refused(
+            &raw_token(
+                &good_header(),
+                &claims_with("nbf", json!(now + CLOCK_SKEW_SECONDS + 300)),
+            ),
+            REASON_IMMATURE,
+            "eddsa",
+            false,
+        )
+        .await;
+        // `iat` in the future beyond the skew is immature even when nbf/exp pass.
+        assert_refused(
+            &raw_token(
+                &good_header(),
+                &claims_with("iat", json!(now + CLOCK_SKEW_SECONDS + 300)),
+            ),
+            REASON_IMMATURE,
+            "eddsa",
+            false,
+        )
+        .await;
+        let bundle = counting_bundle();
+        let token = raw_token(
+            &good_header(),
+            &claims_with("iat", json!(now + CLOCK_SKEW_SECONDS - 5)),
+        );
+        run(&token, &bundle)
+            .await
+            .0
+            .expect("iat within skew verifies");
+    }
+
+    #[tokio::test]
+    async fn bad_signature_and_wrong_scope_have_their_own_outcomes() {
+        let forged = EncodingKey::from_ed_der(KEY_B_PRIV_DER);
+        let message = format!("{}.{}", b64_json(&good_header()), b64_json(&good_claims()));
+        let sig = jsonwebtoken::crypto::sign(message.as_bytes(), &forged, Algorithm::EdDSA)
+            .expect("sign");
+        assert_refused(
+            &format!("{message}.{sig}"),
+            REASON_BAD_SIGNATURE,
+            "eddsa",
+            false,
+        )
+        .await;
+
+        assert_refused(
+            &raw_token(
+                &good_header(),
+                &claims_with("scope", json!("some:other:scope")),
+            ),
+            REASON_SCOPE_DENIED,
+            "eddsa",
+            false,
+        )
+        .await;
+    }
+
+    #[test]
+    fn decode_errors_map_to_closed_reasons() {
+        for (kind, reason) in [
+            (ErrorKind::ExpiredSignature, REASON_EXPIRED),
+            (ErrorKind::ImmatureSignature, REASON_IMMATURE),
+            (ErrorKind::InvalidSignature, REASON_BAD_SIGNATURE),
+            (ErrorKind::InvalidIssuer, REASON_BAD_ISSUER),
+            (ErrorKind::InvalidAudience, REASON_BAD_AUDIENCE),
+            (
+                ErrorKind::MissingRequiredClaim("exp".into()),
+                REASON_MISSING_CLAIM,
+            ),
+            (
+                ErrorKind::InvalidClaimFormat("exp".into()),
+                REASON_INVALID_CLAIM,
+            ),
+            (ErrorKind::InvalidAlgorithm, REASON_ALG_MISMATCH),
+            (ErrorKind::InvalidAlgorithmName, REASON_ALG_MISMATCH),
+            (ErrorKind::MissingAlgorithm, REASON_ALG_MISMATCH),
+            (ErrorKind::InvalidToken, REASON_MALFORMED),
+            (ErrorKind::InvalidEddsaKey, REASON_INVALID),
+        ] {
+            assert_eq!(classify_decode_error(&kind), reason, "{kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_without_an_installed_meter_provider_still_decides_correctly() {
+        // The public entry point records via the global (here: no-op) provider.
+        let bundle = counting_bundle();
+        let good = raw_token(&good_header(), &good_claims());
+        verify(&good, &bundle, AUD, &["hub-api"], SCOPE)
+            .await
+            .expect("verifies");
+        let none = format!(
+            "{}.{}.",
+            b64_json(&json!({"alg": "none", "kid": "k1"})),
+            b64_json(&good_claims())
+        );
+        assert!(verify(&none, &bundle, AUD, &["hub-api"], SCOPE)
+            .await
+            .is_err());
+    }
+
+    #[derive(Clone, Default)]
+    struct LogBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+        type Writer = LogBuf;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Process-wide log capture. A *global* default (installed once) rather
+    /// than a per-test thread-local one: tracing caches per-callsite interest
+    /// globally, so a callsite first hit by a parallel test with no
+    /// subscriber would otherwise stay disabled for a scoped one.
+    fn captured_logs() -> &'static LogBuf {
+        static LOGS: std::sync::OnceLock<LogBuf> = std::sync::OnceLock::new();
+        LOGS.get_or_init(|| {
+            let buf = LogBuf::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(buf.clone())
+                .with_max_level(tracing::Level::DEBUG)
+                .with_ansi(false)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber).expect("install log capture");
+            buf
+        })
+    }
+
+    fn logged() -> String {
+        let bytes = captured_logs().0.lock().expect("log lock").clone();
+        String::from_utf8(bytes).expect("utf8")
+    }
+
+    #[tokio::test]
+    async fn rejections_log_the_closed_vocabulary_and_never_token_material() {
+        captured_logs();
+        let secret_sub = "spiffe://penguintech.io/alpha/SECRET-SUBJECT-MARKER";
+        let mut header = good_header();
+        header["jku"] = json!("https://attacker.example/SECRET-JKU-MARKER");
+        let hostile = raw_token(&header, &claims_with("sub", json!(secret_sub)));
+        let bundle = counting_bundle();
+        let capture = Capture::new();
+        verify_with_metrics(
+            &capture.metrics,
+            &hostile,
+            &bundle,
+            AUD,
+            &["hub-api"],
+            SCOPE,
+        )
+        .await
+        .unwrap_err();
+        let ok = raw_token(&good_header(), &claims_with("sub", json!(secret_sub)));
+        verify_with_metrics(&capture.metrics, &ok, &bundle, AUD, &["hub-api"], SCOPE)
+            .await
+            .expect("valid");
+
+        let logged = logged();
+        assert!(logged.contains("JWT rejected"), "{logged}");
+        assert!(logged.contains("forbidden_header"), "{logged}");
+        assert!(logged.contains("service_eddsa"), "{logged}");
+        assert!(
+            logged.contains("JWT verified"),
+            "success logged at DEBUG: {logged}"
+        );
+        for needle in [
+            "SECRET-SUBJECT-MARKER",
+            "SECRET-JKU-MARKER",
+            hostile.as_str(),
+            ok.as_str(),
+            b64_json(&good_claims()).as_str(),
+        ] {
+            assert!(!logged.contains(needle), "log leaked {needle:.30}");
+        }
+    }
+
+    #[test]
+    fn no_key_is_logged_critical() {
+        captured_logs();
+        crate::jwt_hardening::log_rejection(VERIFIER_SERVICE_EDDSA, REASON_NO_KEY, "absent");
+        let logged = logged();
+        let line = logged
+            .lines()
+            .find(|line| line.contains("verifier has no signing key configured"))
+            .expect("no_key line is logged");
+        assert!(
+            line.contains("ERROR") && line.contains("severity=\"critical\""),
+            "{line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwks_entry_with_an_empty_key_is_rejected_fail_closed() {
+        let body = serde_json::json!({"keys":[{"kid":"k1","x":""}]}).to_string();
+        let (url, _) = mock_server(vec![(200, body)]).await;
+        let bundle = JwksTrustBundle::new(url);
+        assert!(bundle.public_key("k1").await.is_none());
+        let err = bundle.refresh().await.unwrap_err();
+        assert!(matches!(err, ServiceAuthError::InvalidToken(m) if m.contains("empty key")));
     }
 }

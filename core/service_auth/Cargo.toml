@@ -41,6 +41,25 @@ jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws
 thiserror = "=2.0.20"
 tracing = "=0.1.44"
 async-trait = "=0.1.89"
+# JWT Phase-0 hardening (`src/jwt_hardening.rs`): the JOSE header is decoded
+# by hand (base64url + JSON) BEFORE `jsonwebtoken` sees the token, so a
+# hostile `alg`/`jku`/`jwk`/`x5u`/`x5c`/`crit`/`kid` is named precisely and
+# never reaches signature work or a trust-bundle lookup. `base64` is already
+# in the lockfile transitively via `jsonwebtoken` (same exact version) --
+# promoting it to a direct dependency adds no new package.
+base64 = "=0.22.1"
+# OpenTelemetry *API* only, metrics feature only (no SDK, no exporter, no
+# trace/logs): the verification counter + latency histogram are recorded
+# against whatever global meter provider the host service installed at
+# startup (`opentelemetry::global::set_meter_provider`); with none
+# installed the instruments are no-ops and verification is unaffected.
+opentelemetry = { version = "=0.32.0", default-features = false, features = ["metrics"] }
 
 [dev-dependencies]
 tokio = { version = "=1.53.1", features = ["full", "test-util"] }
+# Test-only: `InMemoryMetricExporter` proves the counter/histogram carry the
+# exact `waddles_jwt_verifications_total{verifier,alg,outcome}` label set the
+# Python verifiers emit. Never linked into a service binary.
+opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["metrics"] }
+# Test-only: captures rendered log lines to assert no token material is logged.
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "std"] }
