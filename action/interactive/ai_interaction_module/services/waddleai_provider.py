@@ -152,7 +152,17 @@ class WaddleAIProvider:
                     )
 
                     # Clean and return response
-                    return self._clean_response(content)
+                    cleaned = self._clean_response(content)
+                    if not cleaned:
+                        # Never hand the caller a blank "success": say why, so
+                        # AIService's canned fallback is a logged decision.
+                        logger.error(
+                            f"WaddleAI returned an empty completion "
+                            f"(model={actual_model}, finish_reason="
+                            f"{data['choices'][0].get('finish_reason')!r})"
+                        )
+                        return None
+                    return cleaned
 
                 elif response.status_code == 429:
                     logger.warning("WaddleAI quota exceeded")

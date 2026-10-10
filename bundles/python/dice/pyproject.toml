@@ -1,0 +1,13 @@
+[project]
+name = "waddle-bundle-dice"
+version = "1.0.0"
+description = "`!dice [NdM]` -> a bounds-validated dice roller (N<=100, M<=1000), relay only, no kv/db state. Mirrors bundles/python/roll."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

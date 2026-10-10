@@ -1,0 +1,13 @@
+[project]
+name = "waddle-bundle-bot"
+version = "1.0.0"
+description = "`!bot` -> static bot name/version/links. Stateless: relay only, no kv/db."
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+build = ["componentize-py==0.25.1"]
+dev = ["pytest==8.3.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -40,6 +40,9 @@ class OllamaProvider:
     timeout: int = field(default_factory=lambda: Config.OLLAMA_TIMEOUT)
     cert_path: str = field(default_factory=lambda: Config.OLLAMA_CERT_PATH)
     verify_ssl: bool = field(default_factory=lambda: Config.OLLAMA_VERIFY_SSL)
+    disable_thinking: bool = field(
+        default_factory=lambda: Config.OLLAMA_DISABLE_THINKING
+    )
     base_url: str = field(init=False)
     ssl_context: Optional[ssl.SSLContext] = field(init=False, default=None)
 
@@ -157,12 +160,18 @@ class OllamaProvider:
             payload = {
                 "model": self.model,
                 "messages": messages,
-                "temperature": self.temperature,
+                # temperature belongs under `options`; a top-level key is
+                # silently ignored by Ollama (the model ran at its default).
                 "options": {
+                    "temperature": self.temperature,
                     "num_predict": self.max_tokens
                 },
                 "stream": False  # Get complete response
             }
+            if self.disable_thinking:
+                # Reasoning models (e.g. gemma4) otherwise burn num_predict on
+                # hidden thinking and return an empty `content`.
+                payload["think"] = False
 
             # Make async request
             verify_param = (  # noqa: E501
@@ -181,6 +190,18 @@ class OllamaProvider:
 
                     # Clean and validate response
                     cleaned_response = self._clean_response(generated_text)
+
+                    if not cleaned_response:
+                        # Never hand the caller a blank "success": surface why,
+                        # so AIService's canned fallback is a logged decision.
+                        logger.error(
+                            f"Ollama returned an empty completion "
+                            f"(model={self.model}, "
+                            f"done_reason={data.get('done_reason')!r}, "
+                            f"thinking_present="
+                            f"{bool(data.get('message', {}).get('thinking'))})"
+                        )
+                        return None
 
                     logger.info(  # noqa: E501
                         f"Ollama generated response: {len(cleaned_response)} "

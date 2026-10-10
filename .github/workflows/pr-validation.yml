@@ -603,6 +603,17 @@ jobs:
       - name: Install check dependencies
         run: pip install --no-cache-dir pyyaml==6.0.2 pytest==9.1.1 cryptography==50.0.1
 
+      # scripts/ci/tests/test_hub_api_service_jwt_auto_provision.sh runs the REAL
+      # flask_core.service_jwt.load_issuer_from_env (what hub_api/app.py::startup
+      # calls). `import flask_core.service_jwt` executes flask_core/__init__.py, which
+      # imports pydal, penguin-dal, quart, authlib, PyJWT, posthog, opentelemetry... --
+      # none of which the three packages above provide, so the step died with
+      # `ModuleNotFoundError: No module named 'pydal'`. Install flask_core's own
+      # hash-pinned lockfile (the same file python-unit installs) rather than
+      # hand-picking a partial subset that would break again on the next import.
+      - name: Install flask_core runtime dependencies (hash-pinned)
+        run: pip install --require-hashes --disable-pip-version-check -r libs/flask_core/requirements.txt
+
       # fix/preexisting-test-failures: k8s/helm/waddlebot/tests/ (34 helm-template
       # assertion tests, incl. TestSeederPlatformConnections's
       # CORE_BUNDLES_PLATFORM_CONNECTIONS check) was never wired into any CI job --
@@ -767,6 +778,17 @@ jobs:
       # every tokenization-enabled pod crash-loops.
       - name: alpha render -- hub gRPC client env wiring regression test
         run: bash scripts/ci/tests/test_hub_grpc_env_wiring.sh
+
+      # fix/hub-api-grpc-service-jwt-issuer -- the auto-provisioned
+      # `service-jwt-signing-key` Secret's shape (unsuffixed key name, raw
+      # base64 seed instead of kid-suffixed PEM) silently never matched what
+      # `flask_core.service_jwt.load_issuer_from_env` scans for, so hub-api's
+      # internal gRPC listener (port 50204) was skipped on every alpha
+      # deploy, blocking svc-process/svc-action's HubClient and the whole
+      # PII-tokenization data path. Runs the real rendered Job script against
+      # a mocked kubectl and feeds its output through the real Python loader.
+      - name: alpha render -- hub-api service_jwt auto-provisioning regression test
+        run: bash scripts/ci/tests/test_hub_api_service_jwt_auto_provision.sh
 
       # fix/legacy-path-mutually-exclusive -- the check above hard-requires a
       # bundle-executor Deployment (alpha-only); this covers the bare render

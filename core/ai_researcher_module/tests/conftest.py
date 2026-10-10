@@ -28,3 +28,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("SECRET_KEY", "test-secret-key-for-ai-researcher-module-tests")
 
 import flask_core  # noqa: E402,F401
+
+# Env-gated real-Ollama fixtures (skip unless WADDLE_TEST_OLLAMA_URL is set).
+# Shared support lives in <repo>/tests/support -- see docs/testing/ollama-realpath.md.
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "tests", "support"
+    ),
+)
+from ollama_realpath import (  # noqa: E402,F401
+    json_model,
+    ollama_url,
+    safety_model,
+    single_flight,
+    text_model,
+)
