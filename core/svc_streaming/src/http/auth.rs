@@ -1074,4 +1074,49 @@ mod tests {
             "{line}"
         );
     }
+
+    /// A complete, fixed-time claim payload for the direct `parse_claims` tests.
+    fn fixed_payload(config: &Config, iat: i64, exp: i64) -> Value {
+        json!({
+            "sub": "user-1", "iss": config.cli.jwt_issuer, "aud": config.cli.jwt_audience,
+            "iat": iat, "exp": exp, "scope": "streaming:read", "tenant": "tenant-abc",
+        })
+    }
+
+    #[test]
+    fn iat_and_exp_boundaries_are_exact_against_a_fixed_clock() {
+        let config = test_config(Some(SECRET));
+        let aud = config.cli.jwt_audience.as_str();
+        let now = 1_000_000_i64;
+        let parse = |iat: i64, exp: i64| parse_claims(&fixed_payload(&config, iat, exp), aud, now);
+
+        // iat exactly at the skew edge verifies; one second past is immature.
+        assert!(parse(now + JWT_CLOCK_SKEW_SECONDS, now + 3600).is_ok());
+        assert_eq!(
+            parse(now + JWT_CLOCK_SKEW_SECONDS + 1, now + 3600)
+                .err()
+                .map(|f| f.rejection.reason),
+            Some(REASON_IMMATURE)
+        );
+        // exp one second ahead verifies; exp == now is already expired (strict).
+        assert!(parse(now, now + 1).is_ok());
+        assert_eq!(
+            parse(now - 10, now).err().map(|f| f.rejection.reason),
+            Some(REASON_EXPIRED)
+        );
+        assert_eq!(
+            parse(now - 10, now - 1).err().map(|f| f.rejection.reason),
+            Some(REASON_EXPIRED)
+        );
+    }
+
+    #[test]
+    fn policy_constants_match_the_python_contract() {
+        assert_eq!(JWT_CLOCK_SKEW_SECONDS, 30);
+        assert_eq!(PLATFORM_JWT_ALGORITHM, "HS256");
+        assert_eq!(
+            REQUIRED_JWT_CLAIMS,
+            ["sub", "iss", "aud", "iat", "exp", "scope", "tenant"]
+        );
+    }
 }
